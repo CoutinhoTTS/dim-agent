@@ -121,8 +121,8 @@ conflicting structural declarations valid.
 At this external configuration boundary reject a group other than `session` or `branch`, malformed identities, unsupported method modes,
 duplicate namespaces and the C1 reserved-name/namespace collisions. Tool names are checked when a
 row registers them ([Tools](#tools)). Disabled rows are not instantiated, register no tools and
-contribute no callable methods. A stored `SessionConfig.tools` that names one of their tools is not
-refused, and new model requests do not declare that tool. Enabled rows alone determine C1's known namespace list: a disabled namespace is
+contribute no callable methods. A stored mount list (`SessionConfig.tools`) that names one of their
+tools is not refused, and new model requests do not declare that tool. Enabled rows alone determine C1's known namespace list: a disabled namespace is
 `unknown_method`, not an indefinitely reloading service. A declaration changing structurally
 requires rebuilding the host assembly; business settings do not change it. Missing dependencies
 of an enabled row keep their existing Pending/reload behavior.
@@ -172,10 +172,12 @@ effect. The handler does not select a replacement generation or force an uncoope
 task to stop; the TypeScript owner still settles its work through its effects. There is no polling
 and no later declaration call.
 
-Each configured foreign tool is a registry-owned versioned set (A.5, #241). A configured tool that
-no row has registered (its row is absent, Pending or disabled, or has not applied yet) is not
-offered and produces the existing `tool.attach` diagnostic; once a row registers it, the next
-request offers it without a Session reload. A withdrawn registration's set is withdrawn, and the
+Each foreign tool a Session mounts is a registry-owned versioned set (A.5, #241). A Session without
+a mount list (`SessionConfig.tools`) mounts every registered tool, so a row's tools are declared
+once it registers them, with no configuration edit (#364); a Session with one mounts the tools it
+names. A named tool that no row has registered (its row is absent, Pending or disabled, or has not
+applied yet) is not declared and produces the `tool.attach` diagnostic; once a row registers it,
+the next request declares it without a Session reload. A withdrawn registration's set is withdrawn, and the
 row's next generation registers again under a new version. ToolBinding adopts changes through
 Prompt/BranchOpening as for other sources, and each request keeps its selected handlers. A new
 generation is not substituted into an old request.
@@ -359,8 +361,8 @@ there is no automatic retry of an operation that may have produced external side
 Restore rebuilds rows, which register their tools again, through the same code as create; history
 does not install or enable code. Structural reload can fail in-flight calls as ADR 002 permits. Runtime
 process loss is an infrastructure failure; no special runtime-crash recovery mechanism is added.
-A saved `SessionConfig.tools` entry that no row registers, because its row is disabled or removed,
-is not offered, and the Session still loads. C4 does not silently edit persisted Session
+A tool a saved mount list (`SessionConfig.tools`) names that no row registers, because its row is
+disabled or removed, is not declared, and the Session still loads. C4 does not silently edit persisted Session
 configuration or introduce a history-driven reinstallation path; package-uninstallation policy
 belongs to PluginManager.
 

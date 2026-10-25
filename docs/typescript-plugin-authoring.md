@@ -436,11 +436,16 @@ build. The App Server does not discover this export or install a plugin by itsel
 Online module metadata must match the configured row snapshot. Disabled, Pending
 and malformed rows have the outcomes in the
 [binding contract](design/session-typescript.md#host-input-and-declaration-discovery).
-ToolRegistry offers a configured tool while a row has it registered: the
-registration lasts until the row unloads, and a row that registers later, or its
-next generation after a reload, is offered from the next request without a
-Session reload. A configured tool that no row registers is not offered and does
-not fail the Session.
+ToolRegistry declares a tool the Session mounts while a row has it registered.
+`SessionConfig.tools` is the Session's optional mount list, fixed at creation: a
+Session without one mounts every registered tool, so your tool is declared with
+no configuration edit; a Session with one mounts the tools it names, and `[]`
+mounts none. The registration lasts until the row unloads, and a row that
+registers later, or its next generation after a reload, is declared from the
+next request without a Session reload. A named tool that no row registers is not
+declared and does not fail the Session. Permission (its preset, `allowedTools`
+and `disallowedTools`) decides whether a declared tool's call runs; it never
+changes the declarations the model sees, so the prompt prefix stays stable.
 
 `register(declaration, execute)` refuses a declaration whose name is not a valid
 tool name, is a host tool or is registered already, and one without a Permission
@@ -454,7 +459,8 @@ This is distinct from the native `{id, name, input}` call. Validate model-suppli
 arguments at the tool's external-input boundary. `config` is the creation-time
 Session snapshot; provider-owned nested configuration remains JSON in the SDK.
 The native serializer omits `interactive` when true, so an absent field means
-interactive and only `false` is written. It is not the latest adopted Prompt/model
+interactive and only `false` is written; it omits `tools` when the Session has no
+mount list. It is not the latest adopted Prompt/model
 configuration after a configuration command.
 
 The second `execute` argument is a cancellation Promise. It settles when the call

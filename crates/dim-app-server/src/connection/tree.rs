@@ -146,7 +146,13 @@ impl Connection {
         if params.prompt.trim().is_empty() {
             return Err(RpcError::invalid("Branch prompt must not be empty"));
         }
-        if !session.config().tools.iter().any(|name| name == "branch") {
+        // Without a mount list the Session mounts every tool, `branch` too.
+        if !session
+            .config()
+            .tools
+            .as_ref()
+            .is_none_or(|tools| tools.iter().any(|name| name == "branch"))
+        {
             return Err(RpcError::invalid("Branch tool is not enabled"));
         }
         let prefix = session

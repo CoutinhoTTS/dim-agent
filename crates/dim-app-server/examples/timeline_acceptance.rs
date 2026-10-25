@@ -233,7 +233,7 @@ async fn memory(steps: usize) -> std::result::Result<(), Error> {
     let session = agent
         .create_session(SessionConfig {
             system_prompt: "s".repeat(800_000),
-            tools: vec![],
+            tools: Some(vec![]),
             ..SessionConfig::default()
         })
         .await?;

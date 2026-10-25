@@ -49,7 +49,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | `QuestionsPlugin` | Session | `S:SessionConfig`、`S:ToolRegistry` | 把 `ask_user` 注册到 `toolRegistry`；`sessionMethods` 命名空间 `session.question`（`session.question.respond`） |
 
-安装：插件启用时就安装该部分；安装从不读取 `SessionConfig.interactive`（[session access §9.4](../contracts/session-access.md#94-按启用状态安装可选部分)），因此每个 Session 都声明 `ask_user`，fork 后工具集合和提示词前缀不变。
+安装：插件启用时就安装该部分；安装从不读取 `SessionConfig.interactive`（[session access §9.4](../contracts/session-access.md#94-按启用状态安装可选部分)），因此挂载 `ask_user` 的每个 Session 都声明它，不论 `interactive` 为何（没有挂载列表的 Session 挂载它，有列表的 Session 在列表列出它时挂载），fork 后工具集合和提示词前缀不变。
 
 依赖的合同，均已在 `main` 上实现：
 
@@ -224,7 +224,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 
 | 模型看到什么 | 形式 | 位置 |
 | --- | --- | --- |
-| `ask_user` 名称、描述、schema | 固定的工具声明 | 已采用的 `context/configured`，每个 Session |
+| `ask_user` 名称、描述、schema | 固定的工具声明 | 已采用的 `context/configured`，挂载它的每个 Session |
 | 回答或拒绝 | `ToolResult.content`（A.1） | 工具结果位置，批次所有调用结算之后 |
 | 没人能回答（非交互） | 错误 `ToolResult.content` | 同上 |
 | 取消、重载、未执行 | 错误文本（A.1） | 同上 |
@@ -491,7 +491,7 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 
 | # | 假设 | 依据 | 被否决的影响 |
 | --- | --- | --- | --- |
-| A1 | 每个 Session 都声明 `ask_user`，`interactive` 为 false 时拒答 | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-字段)（装配从不读取 `interactive`，#30） | 工具集合不同；fork 丢失提示词前缀 |
+| A1 | 挂载 `ask_user` 的每个 Session 都声明它，`interactive` 为 false 时拒答 | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-字段)（装配从不读取 `interactive`，#30） | 工具集合不同；fork 丢失提示词前缀 |
 | A2 | 缺少 `interactive` 表示交互 | Session access A.3 格式决定，已实现 | 已有 Session 不再提问 |
 | A4 | 1..=4 个问题，2..=6 个选项 | 判断；已确认（§12） | schema 限制改变 |
 | A5 | 默认允许自定义回答 | 功能清单“自定义回答” | 模型须显式开启 |

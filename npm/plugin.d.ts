@@ -171,7 +171,8 @@ export interface SessionConfig {
     metadata?: JsonObject;
   }>;
   readonly systemPrompt: string;
-  readonly tools: readonly string[];
+  /** The Session's mount list; absent: every tool the process provides is declared. */
+  readonly tools?: readonly string[];
   readonly collaborationRole: 'leader' | 'member';
   /** Native serde omits true; absence means interactive. */
   readonly interactive?: false;

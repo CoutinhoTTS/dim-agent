@@ -629,7 +629,7 @@ async fn agent_profile_supplies_session_defaults() {
 
     // The default Agent and a profile-less Agent use the process defaults.
     let defaults = ServerConfig::default().session_defaults;
-    let mut tools = defaults.tools.clone();
+    let mut tools = defaults.tools.clone().unwrap();
     tools.sort();
     let expected = (
         json!(include_str!("../../../dim-agent-capabilities/src/input-guide.txt").trim_end()),

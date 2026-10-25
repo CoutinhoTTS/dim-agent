@@ -38,7 +38,7 @@ Prompt 是 Timeline 级 rutis Plugin，依赖通过 `Deps` 声明。来源 I/O �
 
 `ConfigureUpdate.model` 只更新模型身份、参数与 metadata，保留已采用的工具与来源版本。产品的初始 `InitialPromptConfiguration` 只有 [PromptRegistry](plugins/PromptRegistry.md) 一个提供者，它从 `SessionConfig.model` 读取完整 `ModelSelection`，在分支打开时与当时注册的全部来源（按名称排序）合成同一更新，由 Prompt 在根分支 `branch/start` 时采用；组合根不重复提供该键。开发 profile 可以没有初始采用配置，继续使用 `PrepareModelHost`。
 
-配置的工具部分只由 [ToolBinding](plugins/ToolBinding.md) 经 `Prompt::adopt_tools` 写入，Prompt 不注入 ToolRegistry（否则 `ToolHost` 的重载会连带 Prompt）。首次采用模型时配置没有工具部分：Loop 经 `ToolBinding::bind_current` 声明当前固定工具；有动态来源时 ToolBinding 采用完整工具部分。模型更新与工具采用在 Prompt 的串行队列中分别只替换各自部分，互不覆盖；只更新其中一部分时 `system` 沿用已采用的值。
+配置的工具部分只由 [ToolBinding](plugins/ToolBinding.md) 经 `Prompt::adopt_tools` 写入，Prompt 不注入 ToolRegistry（否则 `ToolHost` 的重载会连带 Prompt）。首次采用模型时配置没有工具部分：Loop 经 `ToolBinding::bind_current` 声明当前挂载的宿主工具与注册工具；有动态来源时 ToolBinding 采用完整工具部分。模型更新与工具采用在 Prompt 的串行队列中分别只替换各自部分，互不覆盖；只更新其中一部分时 `system` 沿用已采用的值。
 
 来源作用域的可见性取决于当前分支与固定祖先历史，撤销不抹除祖先身份，子分支可以重新加载已撤销的继承来源。工具结果不携带提示词条目：Skill 正文只是工具结果，不登记规则；上下文注入一律经输入写入历史。
 

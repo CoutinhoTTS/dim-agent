@@ -207,7 +207,7 @@ impl Harness {
     fn config(&self) -> SessionConfig {
         SessionConfig {
             cwd: self.cwd.to_string_lossy().into_owned(),
-            tools: vec!["execute".into()],
+            tools: Some(vec!["execute".into()]),
             permission_policy: PermissionPolicy {
                 preset: PermissionPreset::FullAccess,
                 ..Default::default()

@@ -400,7 +400,7 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
         let session = agent
             .create_session(SessionConfig {
                 cwd: work.to_string_lossy().into_owned(),
-                tools: vec!["read".into()],
+                tools: Some(vec!["read".into()]),
                 permission_policy: PermissionPolicy {
                     preset,
                     ..Default::default()

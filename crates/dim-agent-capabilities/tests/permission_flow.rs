@@ -114,7 +114,7 @@ fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) -> Agent
 }
 fn config(policy: PermissionPolicy) -> SessionConfig {
     SessionConfig {
-        tools: TOOLS.iter().map(|(name, _)| name.to_string()).collect(),
+        tools: Some(TOOLS.iter().map(|(name, _)| name.to_string()).collect()),
         permission_policy: policy,
         ..SessionConfig::default()
     }

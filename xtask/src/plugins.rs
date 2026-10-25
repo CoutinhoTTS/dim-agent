@@ -174,7 +174,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     let session = agent
         .create_session(SessionConfig {
             cwd: work.canonicalize()?.to_string_lossy().into_owned(),
-            tools: TOOLS.map(String::from).to_vec(),
+            tools: Some(TOOLS.map(String::from).to_vec()),
             ..SessionConfig::default()
         })
         .await?;

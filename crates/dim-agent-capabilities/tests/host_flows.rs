@@ -109,7 +109,7 @@ async fn steer_and_append_enter_the_current_turn_at_tool_result_while_queue_wait
         let agent = builder(Arc::new(RecordingModel(requests.clone())), Arc::new(BoundaryTools {
             entered: entered.clone(), release: release.clone(),
         })).build();
-        let session = agent.create_session(SessionConfig { tools: vec!["boundary".into()], permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..Default::default() }).await.unwrap();
+        let session = agent.create_session(SessionConfig { tools: Some(vec!["boundary".into()]), permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..Default::default() }).await.unwrap();
         session.submit("tool:boundary {}".into(), InputMode::Queue, "main").await.unwrap();
         entered.notified().await;
         let queued = session.submit("next turn".into(), InputMode::Queue, "main").await.unwrap();
@@ -243,7 +243,7 @@ async fn stop_waits_for_native_cleanup_and_keeps_a_real_success() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let started = Arc::new(Notify::new()); let cleaned = Arc::new(AtomicBool::new(false));
         let agent = builder(Arc::new(EchoModel), Arc::new(DelayedTools { started: started.clone(), cleaned: cleaned.clone() })).build();
-        let session = agent.create_session(SessionConfig { tools: vec!["delayed".into()], permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..SessionConfig::default() }).await.unwrap();
+        let session = agent.create_session(SessionConfig { tools: Some(vec!["delayed".into()]), permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..SessionConfig::default() }).await.unwrap();
         session.submit("tool:delayed {}".into(), InputMode::Queue, "main").await.unwrap();
         started.notified().await;
         session.stop("main", "stop".into()).await.unwrap();
@@ -1482,7 +1482,7 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
         .build();
         let session = agent
             .create_session(SessionConfig {
-                tools: vec!["boundary".into()],
+                tools: Some(vec!["boundary".into()]),
                 permission_policy: dim_agent_runtime::PermissionPolicy {
                     preset: dim_agent_runtime::PermissionPreset::FullAccess,
                     ..Default::default()

@@ -191,7 +191,7 @@ fn session_config() -> SessionConfig {
             metadata: None,
         },
         system_prompt: "system instructions".into(),
-        tools: vec!["echo".into()],
+        tools: Some(vec!["echo".into()]),
         ..Default::default()
     }
 }

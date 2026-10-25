@@ -301,7 +301,7 @@ Workflow 自身重载或重启使运行 interrupted，不重新启动（E15）�
 | 报告 | 一个 raw 块 `<dim-workflow kind="report" run="..." status="...">`；正文：各阶段状态、最后一步结果的有界预览（A16）、获取完整结果的方式（`status`） | Steer 输入的消费位置；无 key |
 | 阶段任务（阶段 Session） | 标记 `<dim-workflow kind="stage" run="..." stage="...">`，随后是作为用户内容的渲染后提示词 | 启动的阶段 Session 的第一个输入 |
 
-报告和阶段输入无 key，压缩后只经摘要保留，子分支只继承切点前已消费内容。非交互阶段只在 profile 选中时保留 ask_user/workflow 等仅交互工具的声明，处理函数仍拒绝，防止嵌套。模型后续动作所需 run/Session id、状态、结果预览进入 ToolResult.content 或已采用报告输入；structuredContent 仅供持久化/UI，不自动把存储、日志或诊断注入上下文。
+报告和阶段输入无 key，压缩后只经摘要保留，子分支只继承切点前已消费内容。非交互阶段只在 profile 挂载时保留 ask_user/workflow 等仅交互工具的声明（没有挂载列表的 profile 挂载全部工具），处理函数仍拒绝，防止嵌套。模型后续动作所需 run/Session id、状态、结果预览进入 ToolResult.content 或已采用报告输入；structuredContent 仅供持久化/UI，不自动把存储、日志或诊断注入上下文。
 
 ## 6. 接口（摘要）
 
@@ -538,7 +538,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 7. Workflow 重载/重启：interrupted/lost，不重启，按已确认写入结算流程仅一份报告；Agents index 重载时运行/阶段保留，只复核受影响调用。
 8. 权限：首个工具阶段在 WorkspaceWrite 下准入时，全部阶段最多 WorkspaceWrite；管理默认 ReadOnly，ReadOnly 拒绝工具。另按确认的 A17 时点验证启动与首准入之间的 Permission 变更。
 9. 每个阶段（包括并行阶段）都在自己启动的非交互 Session 中运行；未声明 `agent` 的阶段使用 Agents 的默认 profile。
-10. 非交互阶段 Session 只在 profile 选中时声明 `workflow` 工具，调用它返回错误结果。未选中该工具的 profile 不因安装包而获得它。
+10. 非交互阶段 Session 只在 profile 挂载 `workflow` 时（profile 没有挂载列表，或列表列出它）声明该工具，调用它返回错误结果。挂载列表未列出该工具的 profile 不因安装包而获得它。
 11. A17：首 launch 返回后，在输入/同组启动前保存实际 policy；后续权限不超过它，起始方关闭或宿主策略变化亦然；首准入前启动方缺失则失败关闭。
 12. 保留活动运行和 pending 报告；其他终态历史上限为 100 条。仅经 sessions.delete 删除没有引用的自持阶段 Session，之后才移除最后一条所有权记录。失败/不确定删除保留记录；Session 已删除但记录未移除时重启可复核。覆盖启动/终态/报告结算触发的清理，以及无活动运行时的重试。在存储边界检查固定精度时间戳与内部版本；非法原字节不变。#126 在发布前约束已加载空闲 Session。来源读取、owner CAS、项目默认禁用使用实际绑定，不绕过文件服务。
 13. 经选定包绑定让报告运行在后台运行任务中，验证清理先 join 该任务及其记录写入，再关闭存储；仅有前台 drain 方法不证明此项。持有已准入的原生追加、使 Node 崩溃并重启固定行：Unloading 期间保留原始 sessions.input effect，替换行不能接受恢复。另须覆盖持有原生追加时仅重载固定行。释放写入后，在恢复前确认已有一份报告且 lookup 为 accepted；恢复和再次重载均不新增输入。标记开放后、input 前崩溃时，原行移除后 unknown lookup 允许关闭尝试并提交一次。完整宿主重启提供另一种已证明边界；两种证明都没有时，unknown 开放尝试仍只查询。覆盖发布后 delivered 尚未保存和回复记录替换失败时的恢复，保持只有一份报告。真实包拒绝内部 v1、未知版本及 pending 缺标记并保留原字节。rejected 转 undeliverable，ambiguous 转 delivered 并记录违约，failed 只在下次装载先 lookup 后恢复。检查起始方历史中的实际输入数量；显式停止和目标缺失按 §3.4。

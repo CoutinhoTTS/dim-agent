@@ -209,8 +209,11 @@ impl Collaboration {
                 }
             };
         }
-        if !config.tools.iter().any(|tool| tool == AGENT_TOOL) {
-            config.tools.push(AGENT_TOOL.into());
+        // A member with a mount list reaches its team through `agent`.
+        if let Some(tools) = &mut config.tools
+            && !tools.iter().any(|tool| tool == AGENT_TOOL)
+        {
+            tools.push(AGENT_TOOL.into());
         }
         // Clients of the leader's protocol view and address its members.
         let version = self

@@ -139,7 +139,7 @@ Full table in Appendix B.
 
 | The model sees | Form | Position |
 | --- | --- | --- |
-| `web_search`, `web_fetch` name, description, input schema | Tool declarations | Adopted `context/configured.tools` when listed in `SessionConfig.tools` |
+| `web_search`, `web_fetch` name, description, input schema | Tool declarations | Adopted `context/configured.tools` when the Session mounts them: always without a mount list (`SessionConfig.tools`), and those its list names with one |
 | Search results, fetched text, errors, redirect notices | `ToolResult.content` (text only) | Tool result position of the call's batch |
 
 - Compaction: declarations survive as configuration; results only through the summary.
@@ -358,7 +358,7 @@ Read at each call and used as delivered: Settings validates the document against
 
 | Step | Path |
 | --- | --- |
-| Provide | Web registers `web_search` and `web_fetch` with `toolRegistry` until its row unloads; ToolRegistry offers those listed in `SessionConfig.tools`; ToolBinding adopts them. Web writes nothing |
+| Provide | Web registers `web_search` and `web_fetch` with `toolRegistry` until its row unloads; ToolRegistry declares those the Session mounts (both without a mount list, those named with one); ToolBinding adopts them. Web writes nothing |
 | Call | ToolExecutor consumes `step/tool-call` on the Dispatcher, registers the batch task and returns; per call `step/tool-start`, admission, handler on the executor's task, `step/tool-completed`, then one `step/tool-result` per batch |
 | Dispatcher | Web has no subscription |
 | State and recheck | No `StateCell`; no consumed facts; decisions use arguments and configuration read at call start |

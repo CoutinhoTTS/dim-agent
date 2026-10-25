@@ -730,11 +730,13 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             target_home: Some(native.clone()),
             unix_path: Some(native.join("daemon.sock")),
             session_defaults: SessionConfig {
-                tools: [
-                    "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
-                ]
-                .map(String::from)
-                .to_vec(),
+                tools: Some(
+                    [
+                        "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                ),
                 permission_policy: PermissionPolicy {
                     preset: PermissionPreset::WorkspaceWrite,
                     ..Default::default()

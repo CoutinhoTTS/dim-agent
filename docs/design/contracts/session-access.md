@@ -288,7 +288,7 @@ Implemented: every method above, served by Agents' directory part (S2, [#98](htt
 ### A.3 SessionConfig fields
 
 ```text
-// SessionConfig (new field; existing: permissionPolicy, cwd, model, systemPrompt, tools, collaborationRole)
+// SessionConfig (new field; existing: permissionPolicy, cwd, model, systemPrompt, tools?, collaborationRole)
 { "interactive": true }             // false: exec, automation; absent: true
 ```
 
@@ -306,6 +306,8 @@ Implemented (C2): `session.create` sets the field, and the native store writes i
 | --- | --- | --- |
 | No `interactive` (every record before C2, interactive records after it) | Interactive | Interactive |
 | `"interactive": false` | Non-interactive | Interactive (field ignored; accepted) |
+
+`tools` is the Session's optional mount list, fixed at creation. `session.create {tools?}` sets it; without the parameter the Session takes its Agent profile's optional `tools`, and a profile without one gives none (the product default). A profile's or member's list limits what that agent sees; a Collaboration member with a list always mounts `agent`. Without a mount list the Session declares every host tool, in the host's order, and every tool a part registers with `toolRegistry`, by name. With one it declares exactly the host and registered tools the list names, in its order; `[]` declares none of them. Other sources' tools (MCP) follow in both cases and are governed by their own configuration. A named tool that nothing has registered is not declared and is reported once; it is declared once something registers it. Duplicate names fail Session creation. Permission decides whether a declared tool's call runs and never changes the declarations ([session-boundary A.5](session-boundary.md#a5-tool-contribution)). The native store writes `tools` only when the Session has a mount list.
 
 Not in this contract: `createdBy` (the Session's origin) and the `client` parameter of `session.create` are added when something decides with them. The resource node is a P3 addition (overview §6.3): an additive optional `SessionConfig` field, where a missing value means the control node.
 

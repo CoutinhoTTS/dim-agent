@@ -107,10 +107,10 @@ reuses its id.
 ## Installation
 
 `dim_agent_questions::install` records the tool name and the namespace and
-installs the Session part. A Session declares `ask_user` when its
-`SessionConfig.tools` lists it. The product and configured App Server profiles
-install it and list `ask_user` in their default Session tools; the mock
-profile does not. Installation never reads `interactive`, so interactive and
+installs the Session part. A Session declares `ask_user` when it mounts it:
+without a mount list (`SessionConfig.tools`) it does, and with one when the list
+names it. The product and configured App Server profiles install it and their
+default Sessions have no mount list; the mock profile does not install it. Installation never reads `interactive`, so interactive and
 non-interactive Sessions declare the same tools. This graph installs it as the
 product profiles do.
 

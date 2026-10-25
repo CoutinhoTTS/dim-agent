@@ -151,7 +151,7 @@ impl Fixture {
     async fn session(&self, interactive: bool) -> Session {
         self.agent
             .create_session(SessionConfig {
-                tools: vec!["ask_user".into(), "wait".into()],
+                tools: Some(vec!["ask_user".into(), "wait".into()]),
                 interactive,
                 ..SessionConfig::default()
             })

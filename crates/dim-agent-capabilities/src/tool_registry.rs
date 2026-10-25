@@ -124,16 +124,19 @@ struct Offered {
 }
 
 pub struct ToolRegistry {
-    /// Every host tool, by name; a part cannot register one of these names.
-    host: BTreeMap<String, Arc<ToolContribution>>,
-    /// `SessionConfig.tools`: the declaration order of host and registered
-    /// tools.
-    configured: Vec<String>,
+    /// Every host tool, in the host's order; a part cannot register one of
+    /// these names.
+    host: Vec<Arc<ToolContribution>>,
+    /// `SessionConfig.tools`, the Session's mount list: the host and
+    /// registered tools it declares, in this order. `None` declares every
+    /// host tool and every registered tool.
+    configured: Option<Vec<String>>,
     tools: Arc<Registrations<Arc<ToolContribution>>>,
     providers: Arc<Registrations<Arc<dyn ToolProvider>>>,
-    /// What each configured name offers now; `None` once its absence was
-    /// reported.
-    offered: Mutex<HashMap<String, Option<Offered>>>,
+    /// The set each registered tool is offered as.
+    offered: Mutex<HashMap<String, Offered>>,
+    /// Configured names nothing has registered, reported once each.
+    missing: Mutex<HashSet<String>>,
     session_id: String,
     config: Arc<SessionConfig>,
     /// Serializes refreshes from read to commit, so an earlier read never
@@ -144,15 +147,16 @@ pub struct ToolRegistry {
 }
 impl ToolRegistry {
     /// Registers `tool` under its name on behalf of the part that owns
-    /// `ctx`, until that part unloads. A configured name is offered from the
-    /// next read; the name must follow the tool name grammar, and neither a
-    /// host tool nor another registration may have it.
+    /// `ctx`, until that part unloads. It is offered from the next read when
+    /// the Session has no mount list or its list names it (#364); Permission
+    /// still admits each call. The name must follow the tool name grammar,
+    /// and neither a host tool nor another registration may have it.
     pub fn register(&self, ctx: &Ctx, tool: ToolContribution) -> Result<(), CordisError> {
         let name = tool.definition.name.clone();
         if !valid_tool_name(&name) {
             return Err(invalid(format!("invalid tool name {name}")));
         }
-        if self.host.contains_key(&name) {
+        if self.is_host(&name) {
             return Err(invalid(format!("tool {name} is a host tool")));
         }
         self.tools.register(ctx, name, Arc::new(tool)).map(|_| ())
@@ -176,30 +180,58 @@ impl ToolRegistry {
         self.providers.register(ctx, name, source).map(|_| ())
     }
     /// Every declaration, after taking in what is registered now (a
-    /// request's read, as `snapshot`): configured host and registered tools
-    /// in `SessionConfig.tools` order, then other source tools by key, in set
-    /// order.
+    /// request's read, as `snapshot`): the mounted host and registered tools
+    /// (in mount list order, or the host's tools then the registered ones by
+    /// name), then other source tools by key, in set order.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.snapshot().0
     }
     fn declared(&self, sources: &Sources) -> Vec<ToolDefinition> {
-        let configured = self.configured.iter().filter_map(|name| {
-            self.fixed(name).or_else(|| {
-                sources
-                    .current
-                    .get(&format!("{CONTRIBUTED}:{name}"))
-                    .and_then(|set| set.tools.first().cloned())
-            })
-        });
+        let mounted: Vec<Arc<ToolContribution>> = match &self.configured {
+            Some(names) => names
+                .iter()
+                .filter_map(|name| {
+                    self.fixed(name).or_else(|| {
+                        sources
+                            .current
+                            .get(&format!("{CONTRIBUTED}:{name}"))
+                            .and_then(|set| set.tools.first().cloned())
+                    })
+                })
+                .collect(),
+            // The registered sets' keys sort by tool name.
+            None => self
+                .host
+                .iter()
+                .cloned()
+                .chain(
+                    sources
+                        .current
+                        .values()
+                        .filter(|set| is_contributed(&set.key))
+                        .flat_map(|set| set.tools.iter().cloned()),
+                )
+                .collect(),
+        };
         let other = sources
             .current
             .values()
             .filter(|set| !is_contributed(&set.key))
             .flat_map(|set| set.tools.iter().cloned());
-        configured
+        mounted
+            .into_iter()
             .chain(other)
             .map(|tool| tool.definition.clone())
             .collect()
+    }
+    /// Whether the Session mounts `name`.
+    fn mounts(&self, name: &str) -> bool {
+        self.configured
+            .as_ref()
+            .is_none_or(|names| names.iter().any(|mounted| mounted == name))
+    }
+    fn is_host(&self, name: &str) -> bool {
+        self.host.iter().any(|tool| tool.definition.name == name)
     }
     /// Declarations and the source sets they were built from, read together,
     /// after taking in what is registered now.
@@ -209,13 +241,15 @@ impl ToolRegistry {
         let sets: Vec<_> = sources.current.values().cloned().collect();
         (self.declared(&sources), sets)
     }
-    /// The configured host tool of this name.
+    /// The mounted host tool of this name.
     pub fn fixed(&self, name: &str) -> Option<Arc<ToolContribution>> {
-        self.configured
+        if !self.mounts(name) {
+            return None;
+        }
+        self.host
             .iter()
-            .any(|configured| configured == name)
-            .then(|| self.host.get(name).cloned())
-            .flatten()
+            .find(|tool| tool.definition.name == name)
+            .cloned()
     }
     /// The current version of a registered tool.
     pub fn contributed(&self, name: &str) -> Option<Arc<ToolContribution>> {
@@ -248,44 +282,57 @@ impl ToolRegistry {
         self.state.subscribe()
     }
 
-    /// The registered tool sets offered now: one per configured name that is
-    /// not a host tool and has a registration. A configured name without one
-    /// is reported and offered once something registers it.
+    /// The registered tool sets offered now: one per mounted registration.
+    /// A name the mount list gives that is neither a host tool nor
+    /// registered is reported once, and offered once something registers it.
     fn contributed_sets(&self) -> Vec<Arc<ToolSourceSet>> {
-        let mut offered = self.offered.lock().unwrap();
-        let mut sets = Vec::new();
-        for name in &self.configured {
-            if self.host.contains_key(name) {
-                continue;
-            }
-            let Some(registration) = self.tools.get(name) else {
-                if !matches!(offered.insert(name.clone(), None), Some(None)) {
-                    tracing::info_span!(
-                        "tool.attach",
-                        session_id = %self.session_id,
-                        outcome = %format_args!("unavailable:{name}"),
-                    )
-                    .in_scope(|| tracing::debug!(tool = name, "no part has registered the tool"));
-                }
-                continue;
-            };
-            let current = offered.get(name).is_some_and(|last| {
-                last.as_ref()
-                    .is_some_and(|last| Arc::ptr_eq(&last.registration, &registration))
-            });
-            if !current {
-                let set = Arc::new(ToolSourceSet {
-                    key: format!("{CONTRIBUTED}:{name}"),
-                    version: uuid::Uuid::new_v4().to_string(),
-                    tools: vec![registration.value.clone()],
-                });
-                offered.insert(name.clone(), Some(Offered { registration, set }));
-            }
-            if let Some(Some(current)) = offered.get(name) {
-                sets.push(current.set.clone());
+        let registered: Vec<_> = self
+            .tools
+            .all()
+            .into_iter()
+            .filter(|registration| self.mounts(&registration.name))
+            .collect();
+        let mut missing = self.missing.lock().unwrap();
+        for name in self.configured.iter().flatten() {
+            let absent = !self.is_host(name)
+                && !registered
+                    .iter()
+                    .any(|registration| registration.name == *name);
+            if !absent {
+                missing.remove(name);
+            } else if missing.insert(name.clone()) {
+                tracing::info_span!(
+                    "tool.attach",
+                    session_id = %self.session_id,
+                    outcome = %format_args!("unavailable:{name}"),
+                )
+                .in_scope(|| tracing::debug!(tool = name, "no part has registered the tool"));
             }
         }
-        sets
+        let mut offered = self.offered.lock().unwrap();
+        offered.retain(|name, _| {
+            registered
+                .iter()
+                .any(|registration| registration.name == *name)
+        });
+        registered
+            .into_iter()
+            .map(|registration| {
+                let name = registration.name.clone();
+                let current = offered
+                    .get(&name)
+                    .is_some_and(|last| Arc::ptr_eq(&last.registration, &registration));
+                if !current {
+                    let set = Arc::new(ToolSourceSet {
+                        key: format!("{CONTRIBUTED}:{name}"),
+                        version: uuid::Uuid::new_v4().to_string(),
+                        tools: vec![registration.value.clone()],
+                    });
+                    offered.insert(name.clone(), Offered { registration, set });
+                }
+                offered[&name].set.clone()
+            })
+            .collect()
     }
 
     /// Applies what is registered now: each changed key is validated as a
@@ -425,8 +472,12 @@ impl ToolRegistry {
             if !names.insert(tool_name.as_str()) {
                 return Err(format!("duplicate tool {tool_name}"));
             }
-            let reserved = self.configured.contains(tool_name)
-                || self.host.contains_key(tool_name)
+            let reserved = self
+                .configured
+                .iter()
+                .flatten()
+                .any(|name| name == tool_name)
+                || self.is_host(tool_name)
                 || registered.contains(tool_name);
             if reserved && set.key != format!("{CONTRIBUTED}:{tool_name}") {
                 return Err(format!("tool {tool_name} is a fixed tool"));
@@ -658,22 +709,24 @@ impl TypedPlugin for ToolRegistryPlugin {
         (Keyed(host), Keyed(config), Keyed(identity), Keyed(lifecycle)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let host_tools: BTreeMap<_, _> = host
+            let host_tools = host
                 .0
                 .definitions()
                 .into_iter()
                 .map(|definition| {
-                    (
-                        definition.name.clone(),
-                        Arc::new(ToolContribution {
-                            definition,
-                            handler: Arc::new(HostTool(host.clone())),
-                        }),
-                    )
+                    Arc::new(ToolContribution {
+                        definition,
+                        handler: Arc::new(HostTool(host.clone())),
+                    })
                 })
                 .collect();
             let mut selected = HashSet::new();
-            if let Some(name) = config.tools.iter().find(|name| !selected.insert(*name)) {
+            if let Some(name) = config
+                .tools
+                .iter()
+                .flatten()
+                .find(|name| !selected.insert(*name))
+            {
                 return Err(AgentError::InvalidInput(format!("duplicate tool {name}")).into());
             }
             let registry = Arc::new(ToolRegistry {
@@ -682,6 +735,7 @@ impl TypedPlugin for ToolRegistryPlugin {
                 tools: Arc::default(),
                 providers: Arc::default(),
                 offered: Mutex::default(),
+                missing: Mutex::default(),
                 session_id: identity.session_id.clone(),
                 config: config.clone(),
                 refreshing: Mutex::default(),

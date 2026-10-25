@@ -183,7 +183,7 @@ async fn serve_with(setup: Setup) -> Served {
     if let Some(grace) = setup.grace {
         config.idle_unload_after = grace;
     }
-    config.session_defaults.tools = vec!["confirm".into()];
+    config.session_defaults.tools = Some(vec!["confirm".into()]);
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(

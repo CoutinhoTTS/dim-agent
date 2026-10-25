@@ -288,7 +288,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 ### A.3 SessionConfig 字段
 
 ```text
-// SessionConfig（新字段；已有：permissionPolicy, cwd, model, systemPrompt, tools, collaborationRole）
+// SessionConfig（新字段；已有：permissionPolicy, cwd, model, systemPrompt, tools?, collaborationRole）
 { "interactive": true }             // false：exec、自动化；缺省：true
 ```
 
@@ -306,6 +306,8 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | --- | --- | --- |
 | 不含 `interactive`（C2 之前的全部记录，C2 之后的交互式记录） | 交互 | 交互 |
 | `"interactive": false` | 非交互 | 交互（忽略该字段；可以接受） |
+
+`tools` 是 Session 可选的挂载列表，创建时确定。`session.create {tools?}` 设置它；不带该参数时 Session 取其 Agent profile 可选的 `tools`，profile 没有列表时 Session 也没有（产品默认如此）。profile 或成员的列表限定该 agent 能看到的工具；有列表的 Collaboration 成员总是挂载 `agent`。没有挂载列表时，Session 按宿主的顺序声明全部宿主工具，再按名称声明部件经 `toolRegistry` 注册的全部工具。有挂载列表时，Session 按列表顺序只声明其中列出的宿主工具与注册工具；`[]` 不声明其中任何一个。两种情况下其他来源（MCP）的工具都排在其后，由来源自己的配置决定。列出但没有任何部件注册的工具不声明，并报告一次；有部件注册后即声明。重复名称使 Session 创建失败。已声明工具的调用是否执行由 Permission 决定，Permission 从不改变工具声明（[session-boundary A.5](session-boundary.md#a5-工具贡献)）。原生存储只在 Session 有挂载列表时写入 `tools`。
 
 不在本合同中：`createdBy`（Session 来源）和 `session.create` 的 `client` 参数，等到有功能依据它们做决定时再加入。资源节点在 P3 加入（总览 §6.3）：一个增量的可选 `SessionConfig` 字段，缺省表示控制节点。
 

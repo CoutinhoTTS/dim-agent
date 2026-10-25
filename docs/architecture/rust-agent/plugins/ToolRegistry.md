@@ -1,23 +1,24 @@
 # ToolRegistry
 
 Owner: [tool_registry.rs](../../../../crates/dim-agent-capabilities/src/tool_registry.rs).
-Keeps the Session's tools: the configured host tools, the tools parts register
-with it and the sets of the tool sources parts register, exposing snapshots and
-a source-state watch for branch adoption and pinning.
+Keeps the Session's tools: the host tools, the tools parts register with it
+and the sets of the tool sources parts register, declaring those the Session
+mounts and exposing snapshots and a source-state watch for branch adoption and
+pinning.
 
 ## Dependencies
 
 | Service | Purpose |
 | --- | --- |
 | `S:ToolHost` | Host definitions and execution handlers. |
-| `S:SessionConfig` | Select enabled fixed tool names. |
+| `S:SessionConfig` | The mount list (`tools`): which host and registered tools are declared, and in which order. |
 | `S:SessionIdentity` | Supply the owning Session id in a foreign tool's neutral call and the `tool.attach` span. |
 | `S:SessionLifecycle` | `activated()` starts the background refresh task once the Session is published; `closing()` ends it. |
 
 ## Events and lifetime
 
-No Timeline events. The fixed table holds the configured host tools in
-configuration order. Every other tool is registered: a part calls
+No Timeline events. The fixed table holds every host tool in the host's order.
+Every other tool is registered: a part calls
 `register(ctx, ToolContribution)` for a tool and `register_source(ctx, name, provider)`
 for a dynamic source, from its own `apply`, and the registration is withdrawn
 when that part unloads ([rutis usage R6](../../../design/rutis-usage.md#r6-contributions-register-with-their-owner)).
@@ -33,13 +34,22 @@ into another runtime when the tools are read.
 
 A tool's name follows the tool name grammar and may be neither a host tool's
 nor another registration's; a declaration from another language also names its
-Permission risk. A configured tool is offered as a registry-owned versioned set
-keyed `#contributed:<tool>` (#241) while a part has it registered. A configured
-name that nothing has registered is not offered and is reported once with a
-`tool.attach` span in the process log; Session creation does not refuse it. Only
-duplicate configured names fail initialization. Source names follow the same
-grammar, so their keys (`<name>` or `<name>:<instance>`) never meet the
-registry's own `#contributed` keys.
+Permission risk. `SessionConfig.tools` is the Session's optional mount list,
+fixed at creation. Without one, the Session declares every host tool in the
+host's order and then every registered tool by name (#364). With one, it
+declares the host and registered tools the list names, in its order; `[]`
+declares none of them. Either way the other sources' tools follow. A mounted
+registered tool is offered as a registry-owned versioned set keyed
+`#contributed:<tool>` (#241) while a part has it registered. A listed name that
+nothing has registered is not declared and is reported once with a
+`tool.attach` span in the process log; Session creation does not refuse it, and
+the tool is declared once something registers it. Only duplicate names in the
+mount list fail initialization. Permission decides whether a declared tool's
+call runs and never changes what is declared, so the declarations in the prompt
+prefix stay stable while Permission changes; dynamic sources follow their own
+configuration, not the mount list. Source names follow the same grammar, so
+their keys (`<name>` or `<name>:<instance>`) never meet the registry's own
+`#contributed` keys.
 
 A set's version changes only with its registration. Each version is a new
 UUID, as MCP's are, so it is never reused, also across registry instances and
@@ -57,7 +67,7 @@ the Session's private name `tool_provider_changes(instance)`
 notification carries no data because every refresh reads every source.
 Replacing or withdrawing sets updates the source-state watch (`sources_state()`),
 which ToolBinding follows. ToolBinding owns adoption and request pins. Dynamic
-source validation reserves configured names, host tool names and every
+source validation reserves the mount list's names, host tool names and every
 registered tool's name; only a registered tool's own set may offer that name.
 Already bound requests retain their handlers. A refresh is neither a durable
 configuration save nor permission authorization; a new tool is not
@@ -91,11 +101,11 @@ needs no adoption there.
 [flows.rs](../../../../crates/dim-agent-capabilities/tests/flows.rs):
 `echo_tools_and_observable_state_follow_the_public_flow`;
 [local_product.rs](../../../../tests/integration/tests/local_product.rs)
-exercises the configured real-tool registry.
+exercises the real-tool registry with a mount list.
 [tool_binding.rs](../../../../tests/integration/tests/tool_binding.rs) covers
-immediate first requests, Pending providers, restoration, provider replacement
-and request snapshots. A live Session follows a provider's withdrawal and next
-registration without a request, nothing changes once the Session is closing, a
+immediate first requests, Pending providers, restoration, provider replacement,
+request snapshots and the declarations with and without a mount list. A live
+Session follows a provider's withdrawal and next registration without a request, nothing changes once the Session is closing, a
 restarted registry is registered with again, and a persisted contributed version
 resolves to nothing after a restore. A queued source notification whose emitter closes still
 reaches branch adoption, while another Session keeps its own source version.

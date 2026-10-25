@@ -49,7 +49,7 @@ Contracts are given in language-neutral form; the Rust form is [Appendix G](#app
 | --- | --- | --- | --- |
 | `QuestionsPlugin` | Session | `S:SessionConfig`, `S:ToolRegistry` | Registers `ask_user` with `toolRegistry`; `sessionMethods` namespace `session.question` (`session.question.respond`) |
 
-Installation: the part is installed whenever the plugin is enabled; installation never reads `SessionConfig.interactive` ([session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin)), so `ask_user` is declared in every Session and a fork keeps the same tool set and prompt prefix.
+Installation: the part is installed whenever the plugin is enabled; installation never reads `SessionConfig.interactive` ([session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin)), so every Session that mounts `ask_user` declares it whatever its `interactive` (a Session without a mount list mounts it, one with a list when the list names it), and a fork keeps the same tool set and prompt prefix.
 
 Contracts depended on, all implemented on `main`:
 
@@ -224,7 +224,7 @@ Other key rows (full table: Appendix B):
 
 | What the model sees | Form | Placement |
 | --- | --- | --- |
-| `ask_user` name, description, schema | Fixed tool declaration | Adopted `context/configured`, every Session |
+| `ask_user` name, description, schema | Fixed tool declaration | Adopted `context/configured`, every Session that mounts it |
 | Answers or decline | `ToolResult.content` (A.1) | Tool result position, after every call of the batch settles |
 | No one can answer (non-interactive) | Error `ToolResult.content` | Same position |
 | Cancellation, reload, not executed | Error text (A.1) | Same position |
@@ -491,7 +491,7 @@ Flow tests through RPC, tool calls and events:
 
 | # | Assumption | Basis | Effect if rejected |
 | --- | --- | --- | --- |
-| A1 | `ask_user` is declared in every Session and refuses when `interactive` is false | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) (assembly never reads `interactive`, #30) | Tool sets differ; a fork loses the prompt prefix |
+| A1 | `ask_user` is declared in every Session that mounts it and refuses when `interactive` is false | [Session access A.3](../contracts/session-access.md#a3-sessionconfig-fields) (assembly never reads `interactive`, #30) | Tool sets differ; a fork loses the prompt prefix |
 | A2 | `interactive` absent means interactive | Session access A.3 format decision, implemented | Existing Sessions stop asking |
 | A4 | 1..=4 questions, 2..=6 options | Judgment; confirmed (§12) | Schema limits change |
 | A5 | Custom answers allowed by default | Feature list "custom answers" | Model must opt in |

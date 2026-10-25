@@ -218,7 +218,9 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
   - 同一个名字向同一个所有者登记第二次会失败，与一个名字有第二个提供者时一样。
   - 撤下的处理函数不再被调用：经撤下的登记发出的调用被拒绝并说明没有执行，撤下时正在进行的调用报告它可能已经生效，
     与现在一样，只是不再需要令牌。
-  - 创建 Session 时不再拒绝没有任何部件登记的已配置工具；ToolRegistry 在读取工具时报告它。
+  - 没有挂载列表（`SessionConfig.tools`）的 Session 声明全部已登记的工具，因此插件的工具不需要修改配置
+    （[#364](https://github.com/arcships/dim/issues/364)）；有挂载列表的 Session 声明其中列出的工具。创建 Session
+    时不拒绝列出但没有任何部件登记的工具；ToolRegistry 在读取工具时报告它。
   - 预先注册、`toolContribution:*`、`sessionMethods:*` 和 `managementMethods:*` 这些名字、sidecar 令牌，以及
     App Server 对外来行 `provides` 的翻译都去掉。ExternalAgent 设计中的 `collaborationMembers:<kind>` 在实现时
     也同样向 Collaboration 登记。
@@ -294,11 +296,12 @@ builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
 // A process row.
 register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 
-// From a process plugin's `apply`: a Session part of every Session that enables it, withdrawn
-// when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
+// From a process plugin's `apply`: a Session part of every Session that mounts `record` (one
+// without a mount list mounts every tool), withdrawn when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
 // such a part required.
 registry.register(ctx, PartScope::Session, "Recorder", |mount| {
-    if !mount.session.tools.iter().any(|tool| tool == "record") {
+    let mounted = mount.session.tools.as_ref();
+    if !mounted.is_none_or(|tools| tools.iter().any(|tool| tool == "record")) {
         return Ok(None);
     }
     mount.names.part(Recorder).map(Some)

@@ -52,7 +52,7 @@ flowchart LR
 | --- | --- |
 | `sessionMethods` | 该 Session 未列出此命名空间时返回 `unknown_method`；已列出但提供方未激活时，提供它的部分正在启动或重载则返回 `service_reloading`，已失败或无法运行则返回 `service_unavailable`（A.1） |
 | `managementMethods` | 没有已配置的命名空间拥有该名称，或其所有者行已禁用或不存在时返回 `unknown_method`（§3.2） |
-| 工具注册 | 没有部件注册的配置工具不提供，并在诊断中报告；有部件注册后从下一个请求起提供（A.5） |
+| 工具注册 | Session 挂载列表列出但没有部件注册的工具不声明，并在诊断中报告；有部件注册后从下一个请求起声明（A.5） |
 
 本文定义的合同：这两个方法服务、工具注册、`MethodDecl`、`MethodCall`、`MethodReply`、`MethodError`、列出方法的 `session.methods`、配套服务 `callChannel`（只实现了 `progress`）、`ToolDeclaration`、`ToolCall`、`ToolResult`、各入口获得的服务范围、命名、保留名、现有管理方法的迁移以及兼容性表。使用的合同：`SessionConfig`（[session-access](session-access.md#a3-sessionconfig-字段)）、来源输入约定（[session-access A.2](session-access.md#a2-来源输入约定)）、Rpc 命令信封以及 `appError` 码。
 
@@ -359,9 +359,9 @@ reply ----------> 回复与通知额度 ----------------+
 
 ### A.5 工具贡献
 
-Session 部件把工具注册到本 Session 的 `toolRegistry` 来贡献它，任何语言都一样。注册属于发起它的部件，在该部件卸载时撤回（ADR 002 D3、D5）。ToolRegistry 不依赖注册的部件，而是它们依赖 ToolRegistry，因此 ToolRegistry 重载时，注册到它的部件随之重载并重新注册。固定表只含配置的宿主工具。每个配置的注册工具是注册表自有的带版本集合，键为 `#contributed:<tool>`（#241）：有部件注册时提供，随注册撤回而撤下，再次注册时以新版本提供。版本是新的 UUID，跨注册表实例与进程也不复用，因此 `tool_sources` 中持久化的版本只指一个代次。每次读取都纳入当时已注册的内容；Session 发布后，注册表自己的任务还在每次注册与撤回后重读，直到 Session 开始关闭。没有部件注册的配置工具不提供，并记录诊断，Session 照常启动；有部件注册之后的下一个请求起即提供，不需要重载 Session。必需依赖的等待规则不变，可选部件不阻塞 Session 就绪（#132、#207）。
+Session 部件把工具注册到本 Session 的 `toolRegistry` 来贡献它，任何语言都一样。注册属于发起它的部件，在该部件卸载时撤回（ADR 002 D3、D5）。ToolRegistry 不依赖注册的部件，而是它们依赖 ToolRegistry，因此 ToolRegistry 重载时，注册到它的部件随之重载并重新注册。`SessionConfig.tools` 是 Session 可选的挂载列表，创建时确定（[session-access A.3](session-access.md#a3-sessionconfig-字段)）。没有挂载列表时，Session 按宿主的顺序声明全部宿主工具，再按名称声明全部注册的工具，因此插件的部件注册工具后即可使用，不需要修改配置（#364）；有挂载列表时，按列表顺序声明其中列出的宿主工具与注册工具，`[]` 不声明任何宿主工具或注册工具。两种情况下其他来源的工具都排在其后，由来源自己的配置决定，不受挂载列表影响。每个挂载的注册工具是注册表自有的带版本集合，键为 `#contributed:<tool>`（#241）：有部件注册时声明，随注册撤回而撤下，再次注册时以新版本声明。版本是新的 UUID，跨注册表实例与进程也不复用，因此 `tool_sources` 中持久化的版本只指一个代次。每次读取都纳入当时已注册的内容；Session 发布后，注册表自己的任务还在每次注册与撤回后重读，直到 Session 开始关闭。挂载列表列出但没有部件注册的工具不声明，并记录诊断，Session 照常启动；有部件注册之后的下一个请求起即声明，不需要重载 Session。必需依赖的等待规则不变，可选部件不阻塞 Session 就绪（#132、#207）。
 
-ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采用，随后 Session 才接受输入。已有模型配置的分支在工具部分不匹配时使用 `Prompt::adopt_tools`；配置不含工具部分的分支在每个请求经 PrepareModelHost / `bind_current` 声明并绑定注册表当前的宿主与注册工具，因此注册的变化在这里无需采用。不新增 core 就绪阶段。来源变化，包括带工具部分的配置中的注册工具，沿既有注册表通知和 Prompt 采用路径传播（带 `tool_sources` 的 `context/configured`），请求保留其前缀选定的处理器。工具名须满足 `[A-Za-z0-9_-]{1,64}`；已被注册的名称或宿主工具名会被拒绝。通过 `SessionConfig.tools` 启用，只有重复的配置名使 Session 失败（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）。
+ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采用，随后 Session 才接受输入。已有模型配置的分支在工具部分不匹配时使用 `Prompt::adopt_tools`；配置不含工具部分的分支在每个请求经 PrepareModelHost / `bind_current` 声明并绑定注册表当前的宿主与注册工具，因此注册的变化在这里无需采用。不新增 core 就绪阶段。来源变化，包括带工具部分的配置中的注册工具，沿既有注册表通知和 Prompt 采用路径传播（带 `tool_sources` 的 `context/configured`），请求保留其前缀选定的处理器。工具名须满足 `[A-Za-z0-9_-]{1,64}`；已被注册的名称或宿主工具名会被拒绝。声明什么由挂载列表决定，只有列表中的重复名称使 Session 失败（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)）。已声明工具的调用是否执行由 Permission 决定：其预设与 `allowedTools`/`disallowedTools` 可经 `session.permission.update` 实时修改，从不改变工具声明，而声明属于提示词前缀。要在保持上下文稳定的同时阻止某个工具，就保留挂载并在 Permission 中拒绝它；要改变模型看到的工具，就用另一个挂载列表创建 Session。
 
 | 方法 | 模式 | 请求 | 回复 |
 | --- | --- | --- | --- |
@@ -421,7 +421,7 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 2. 管理方法在本地入口上可达，在 RemoteGateway 上返回 `unknown_method`，只在导出时经链接可达。`shell.*` Session 方法与所有 Session 方法一样可在 RemoteGateway 上调用。
 3. 每个迁移后的管理方法的录制记录与迁移前的记录一致，且 v3 本地 profile 的 `hello.features` 不变。
 4. 在 RemoteGateway 测试入口上，`session.permission.update` 与 `session.exec.stop` 成功。
-5. 非 Rust 插件经 `toolRegistry` 注册的工具，会像 Rust 工具一样被声明给模型，并经 ToolExecutor 执行。`SessionConfig.tools` 中没有部件注册的工具被省略并在诊断中报告，Session 照常启动；有部件注册后从下一个请求起提供。
+5. 非 Rust 插件经 `toolRegistry` 注册的工具，会像 Rust 工具一样被声明给模型，并经 ToolExecutor 执行；没有挂载列表的 Session 不需要修改配置即声明它。Session 挂载列表列出但没有部件注册的工具被省略并在诊断中报告，Session 照常启动；有部件注册后从下一个请求起声明。
 6. 进度先于响应；连接收不下的进度被丢弃，不关闭连接，也不丢失响应；断开后 `notify` 报告 `gone`。
 7. 某个已启用的管理方法提供方处于 Pending 时，`hello` 成功，其他命名空间都正常，该提供方的命名空间返回 `service_reloading`；处于 Failed 或 Unresolved 时返回 `service_unavailable`；已禁用时返回 `unknown_method`。PluginManager 提供 `plugin.set_enabled`（未实现）之后，除非该提供方就是 PluginManager 本身，否则可以用它禁用该提供方。管理方法提供方重载既不会让 Rpc 重载，也不会关闭连接。
 
@@ -445,7 +445,7 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 | --- | --- | --- | --- | --- |
 | `managementMethods[ns]` | `ManagementMethods`，进程作用域，key 为 `TypeKey::keyed_dynamic::<ManagementMethods>(ns)` | 在所有者的 `apply` 中调用 `ManagementMethods::provide(ctx, ns, Vec<MethodDecl>, Handler)`；装配把 `(ns, row)` 对加入 `Owners` | 按调用经 `Owners`：用 `Ctx::get_as` 按 key 读取，行状态来自 `loader.get(row)`；不在 Rpc 的 `Deps` 中 | 已实现（#14） |
 | `sessionMethods[ns]` | `SessionMethods`，`ManagementMethods` 的 Session 级对应物，与共享类型一起位于 dim-agent-capabilities 的 `methods`（A.1），key 为 `SessionScope::named_key::<SessionMethods>(ns)` | `AgentBuilder::session_methods(ns)`，同时记录该 Session 的已知命名空间 | 每次调用：在 `sessionId` 指定、经 `index.acquire` 获取的 Session 上调用 `Session::session_named_service::<SessionMethods>(ns)`（§9.1）；不在 Rpc 的 `Deps` 中 | 已实现（C1） |
-| 工具注册 | `ToolContribution {definition, handler}`，注册到本 Session 的 `ToolRegistry`（`Keyed<ToolRegistry>`） | 在部件的 `apply` 中调用 `tools.register(ctx, ToolContribution)`；动态来源用 `tools.register_source(ctx, name, provider)` | 每次读取纳入已注册的内容；没有注册的配置名被省略并记录诊断；每次注册是注册表自有的带版本集合（A.5，#241） | 已实现（#382） |
+| 工具注册 | `ToolContribution {definition, handler}`，注册到本 Session 的 `ToolRegistry`（`Keyed<ToolRegistry>`） | 在部件的 `apply` 中调用 `tools.register(ctx, ToolContribution)`；动态来源用 `tools.register_source(ctx, name, provider)` | 每次读取纳入已注册的内容；挂载列表中没有注册的名称被省略并记录诊断；每次注册是注册表自有的带版本集合（A.5，#241） | 已实现（#382） |
 | `callChannel` | `progress`：处理函数的 `Progress` 参数，每次调用一个 | — | Rpc 为每个已受理调用提供一个通向发起调用连接的 sink | `progress` 已实现（C1）；`notify`、`closed`、`takeFinalReply` 未实现 |
 
 ```rust

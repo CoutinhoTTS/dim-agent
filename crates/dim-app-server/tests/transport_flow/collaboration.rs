@@ -810,6 +810,7 @@ async fn leader_delegates_and_team_members_communicate() {
             .config()
             .tools
             .iter()
+            .flatten()
             .any(|tool| tool == "agent")
     );
     let delivered = agent_results(&timeline);
@@ -1710,7 +1711,11 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     // The default Agent's members can hold.
     let mut config = ServerConfig::default();
-    config.session_defaults.tools.push("hold".into());
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
     let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let lead = leader(
@@ -2062,7 +2067,7 @@ async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_th
             file_roots: vec![work.clone()],
             session_defaults: dim_agent_runtime::SessionConfig {
                 cwd: work.to_string_lossy().into_owned(),
-                tools: vec!["exec".into(), "agent".into()],
+                tools: Some(vec!["exec".into(), "agent".into()]),
                 permission_policy: dim_agent_types::PermissionPolicy {
                     preset: dim_agent_types::PermissionPreset::FullAccess,
                     ..Default::default()
@@ -3198,7 +3203,11 @@ async fn launch_holding_team_unloading(
         idle_unload_after: grace,
         ..Default::default()
     };
-    config.session_defaults.tools.push("hold".into());
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
     let (server, agent) = launch_with(Arc::new(GateTools(gate.clone())), config, extra).await;
     (server, agent, gate, directory)
 }

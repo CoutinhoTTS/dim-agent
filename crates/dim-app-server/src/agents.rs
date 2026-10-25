@@ -1172,11 +1172,12 @@ impl AgentIndex {
         };
         self.load(id.to_string(), false, profile).await
     }
-    /// A profile from outside the process lists each tool once. A tool that
-    /// no part registers is reported when the Session reads its tools.
+    /// A profile from outside the process lists each tool of its mount list
+    /// once. A tool that no part registers is reported when the Session
+    /// reads its tools.
     pub fn check_profile(&self, profile: &AgentProfile) -> Result<(), String> {
         let mut seen = BTreeSet::new();
-        for tool in &profile.tools {
+        for tool in profile.tools.iter().flatten() {
             if !seen.insert(tool) {
                 return Err(format!("tool {tool} is listed twice"));
             }

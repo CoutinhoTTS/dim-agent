@@ -15,7 +15,10 @@ pub struct AgentProfile {
     pub name: String,
     pub description: String,
     pub system_prompt: String,
-    pub tools: Vec<String>,
+    /// The mount list of the Agent's Sessions; without one they declare
+    /// every tool the process provides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

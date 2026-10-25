@@ -247,7 +247,7 @@ impl Env {
     async fn session(&self) -> Session {
         self.agent
             .create_session(SessionConfig {
-                tools: vec!["gate".into()],
+                tools: Some(vec!["gate".into()]),
                 ..SessionConfig::default()
             })
             .await
@@ -288,7 +288,14 @@ async fn adopted(session: &Session, branch: &str, sources: &[(&str, &str)]) {
                     EventKind::ContextConfigured(data) => Some(data.settings.tool_sources.clone()),
                     _ => None,
                 });
-            if current.as_ref() == Some(&expected) {
+            // The registered tools' own sets come with the source sets.
+            let sources = current.map(|sources| {
+                sources
+                    .into_iter()
+                    .filter(|source| !source.key.starts_with("#contributed:"))
+                    .collect::<Vec<_>>()
+            });
+            if sources.as_ref() == Some(&expected) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -462,7 +469,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
     let agent = builder.build_in(&root);
     let session = agent
         .create_session(SessionConfig {
-            tools: vec!["optional".into(), "absent".into(), "echo".into()],
+            tools: Some(vec!["optional".into(), "absent".into(), "echo".into()]),
             permission_policy: PermissionPolicy {
                 allowed_tools: vec!["echo".into(), "optional".into()],
                 ..PermissionPolicy::default()
@@ -631,7 +638,7 @@ async fn contributors_are_current_for_the_first_request_without_initial_configur
     let agent = build();
     let session = agent
         .create_session(SessionConfig {
-            tools: vec!["optional".into(), "echo".into()],
+            tools: Some(vec!["optional".into(), "echo".into()]),
             permission_policy: PermissionPolicy {
                 allowed_tools: vec!["echo".into(), "optional".into()],
                 ..PermissionPolicy::default()
@@ -897,6 +904,32 @@ async fn a_name_freed_in_the_same_refresh_admits_the_rejected_set() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_without_a_mount_list_declares_every_registered_tool() {
+    // BranchTool registers `branch`. A Session without a mount list declares
+    // it with the host tools; one whose list does not name it does not (#364).
+    for (tools, expected) in [
+        (None, vec!["gate", "branch", "lookup"]),
+        (Some(vec!["gate".to_owned()]), vec!["gate", "lookup"]),
+    ] {
+        let (source, log) = (TestSource::new(), Arc::new(Log::default()));
+        source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
+        let env = env(source, None);
+        let session = env
+            .agent
+            .create_session(SessionConfig {
+                tools,
+                ..SessionConfig::default()
+            })
+            .await
+            .unwrap();
+        adopted(&session, "main", &[("mcp:a", "v1")]).await;
+        env.turn(&session, "main", &[]).await;
+        assert_eq!(declared(&requests(&session).await[0]), expected);
+        env.agent.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_child_branch_binds_the_inherited_tools() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
@@ -1056,7 +1089,7 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
         let creating = tokio::spawn(async move {
             agent
                 .create_session(SessionConfig {
-                    tools: vec!["gate".into()],
+                    tools: Some(vec!["gate".into()]),
                     ..SessionConfig::default()
                 })
                 .await
@@ -1123,7 +1156,7 @@ async fn registered_sources_keep_their_names_apart_from_contributed_tools() {
     let error = invalid
         .agent
         .create_session(SessionConfig {
-            tools: vec!["gate".into()],
+            tools: Some(vec!["gate".into()]),
             ..SessionConfig::default()
         })
         .await
@@ -1177,7 +1210,7 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
     let agent = builder.build_in(&root);
     let session = agent
         .create_session(SessionConfig {
-            tools: vec!["optional".into(), "echo".into()],
+            tools: Some(vec!["optional".into(), "echo".into()]),
             ..SessionConfig::default()
         })
         .await
@@ -1334,7 +1367,7 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
         builder.build_in(&root)
     };
     let config = SessionConfig {
-        tools: vec!["optional".into(), "echo".into()],
+        tools: Some(vec!["optional".into(), "echo".into()]),
         permission_policy: PermissionPolicy {
             allowed_tools: vec!["echo".into(), "optional".into()],
             ..PermissionPolicy::default()

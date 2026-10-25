@@ -112,11 +112,13 @@ async fn node_managed_provider_recovers_credentials_and_failure_is_local() {
         }),
         session_typescript: Some(process_typescript::file_parts()),
         session_defaults: dim_agent_runtime::SessionConfig {
-            tools: [
-                "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
-            ]
-            .map(String::from)
-            .to_vec(),
+            tools: Some(
+                [
+                    "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
+                ]
+                .map(String::from)
+                .to_vec(),
+            ),
             permission_policy: dim_agent_types::PermissionPolicy {
                 preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                 ..Default::default()
