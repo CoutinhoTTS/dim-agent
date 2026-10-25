@@ -10013,8 +10013,7 @@
         "path crate::parts::PartMounter::is_module",
         "path crate::parts::PartMounter::module",
         "path crate::parts::PartRegistry",
-        "path crate::parts::PartRegistryPlugin",
-        "path crate::parts::ProfilePart"
+        "path crate::parts::PartRegistryPlugin"
       ]
     },
     {
@@ -11541,7 +11540,7 @@
       "to": "dim_app_server::ui_leaf",
       "references": [
         "mod ui_leaf",
-        "path ui_leaf::UiHostPlugin::default"
+        "path ui_leaf::UiHostPlugin"
       ]
     },
     {

@@ -776,7 +776,7 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
     .unwrap();
     // The features' plugins are this host's rows, as the App Server's are.
     let plugins = b.plugin_rows(&mut builtins).await.unwrap();
-    let mut session_row = b.install(&mut builtins, &root, []).await.unwrap();
+    let mut session_row = b.install(&mut builtins, []).await.unwrap();
     let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()

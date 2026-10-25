@@ -740,7 +740,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         names.part(CollaborationPlugin::new())
     })?);
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        names.part(ui_leaf::UiHostPlugin::default())
+        names.part(ui_leaf::UiHostPlugin)
     })?);
     {
         let config = config.clone();
@@ -799,7 +799,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }))
         .flat_map(|row| [&row["id"], &row["name"]])
         .filter_map(serde_json::Value::as_str);
-    let mut session_row = match builder.install(&mut builtins, &root, reserved_names).await {
+    let mut session_row = match builder.install(&mut builtins, reserved_names).await {
         Ok(row) => row,
         Err(error) => {
             startup.armed = false;

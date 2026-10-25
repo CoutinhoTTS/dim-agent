@@ -305,7 +305,7 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     })?;
     // The features' plugins are rows of this host, as the App Server's are.
     let plugins = builder.plugin_rows(&mut builtins).await?;
-    let mut session_row = builder.install(&mut builtins, root, []).await?;
+    let mut session_row = builder.install(&mut builtins, []).await?;
     session_row["config"]
         .as_array_mut()
         .expect("Session group config")

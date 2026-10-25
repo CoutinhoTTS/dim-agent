@@ -22,8 +22,9 @@ pub const SESSION_GROUP: &str = "session";
 /// Instanced loader group of one branch, nested in [`SESSION_GROUP`].
 pub const BRANCH_GROUP: &str = "branch";
 
-/// A Rust part of the assembly profile, whose dependencies are names ([`Names`]).
-type PartMake = crate::parts::ProfilePart;
+/// A Rust plugin whose dependencies are names ([`Names`]), built for one copy.
+type PartMake =
+    Arc<dyn Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError> + Send + Sync>;
 /// An extension capability: its plugin name and how a copy reads its value.
 /// Reads an extension's value from where its copy runs.
 type ExtensionMake = Arc<
@@ -64,8 +65,6 @@ pub(crate) struct Assembly {
     /// The names of `values`, each a Session name.
     value_names: Vec<String>,
     process_values: Vec<ProcessValue>,
-    session_parts: Vec<PartMake>,
-    branch_parts: Vec<PartMake>,
     /// The process plugins the builder adds ([`AgentBuilder::plugin`]).
     plugins: Vec<PartMake>,
     /// Where the plugin of each feature is in `plugins`, by name.
@@ -102,8 +101,6 @@ impl AgentBuilder {
                 values: vec![],
                 value_names: vec![],
                 process_values: vec![],
-                session_parts: vec![],
-                branch_parts: vec![],
                 plugins: vec![],
                 features: Default::default(),
                 parts: Arc::default(),
@@ -219,33 +216,6 @@ impl AgentBuilder {
         Arc::make_mut(&mut self.assembly.required_parts).insert(name.into());
         self
     }
-    /// Adds a Rust part to every Session's profile: `make` builds one copy
-    /// from the names its dependencies resolve to there, usually
-    /// `|names| names.part(MyPart)`, and the Session's required mounter
-    /// mounts it. It runs once more when the assembly is installed, as the
-    /// composition check: a dependency on a branch name fails there.
-    pub fn session_part(
-        &mut self,
-        make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError>
-        + Send
-        + Sync
-        + 'static,
-    ) -> &mut Self {
-        self.assembly.session_parts.push(Arc::new(make));
-        self
-    }
-    /// Adds a Rust part to every branch's profile, as [`Self::session_part`]
-    /// does to every Session; it may depend on Session and branch names.
-    pub fn branch_part(
-        &mut self,
-        make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError>
-        + Send
-        + Sync
-        + 'static,
-    ) -> &mut Self {
-        self.assembly.branch_parts.push(Arc::new(make));
-        self
-    }
     /// A Rust part of the Session extension `group`: a nested instanced
     /// group created only for Sessions that ask for it, with a value of type
     /// `V` (see [`Agent::create_session_with_extension`]). `make` builds a
@@ -345,14 +315,13 @@ impl AgentBuilder {
         agent
     }
     /// Registers the loader modules of this assembly in `builtins`: the
-    /// Session and branch scopes, every capability and every extension, and
-    /// returns the [`SESSION_GROUP`] row holding them and the nested
+    /// Session and branch scopes, their part mounters and every extension,
+    /// and returns the [`SESSION_GROUP`] row holding them and the nested
     /// [`BRANCH_GROUP`]; a host puts it inside its [`AGENT_GROUP`] row.
-    /// These registered parts are required for readiness. Additional host
-    /// rows remain owned by the group without being required to become Active.
+    /// These rows are required for readiness. Additional host rows remain
+    /// owned by the group without being required to become Active. The
+    /// builder's plugins are placed separately ([`Self::plugin_rows`]).
     ///
-    /// A fiber is shown under its module name, so each module is named after
-    /// its plugin: a plugin is built once with `ctx`'s instance to read it.
     /// Register host modules first: names already in `builtins` or used by
     /// another row get a `#n` suffix. Extension group names cannot be renamed.
     /// Pass host identities absent from `builtins` in `reserved_names`: both
@@ -362,7 +331,6 @@ impl AgentBuilder {
     pub async fn install<'a>(
         &self,
         builtins: &mut Builtins,
-        ctx: &Ctx,
         reserved_names: impl IntoIterator<Item = &'a str>,
     ) -> Result<Value> {
         AssertUnwindSafe(async {
@@ -421,12 +389,6 @@ impl AgentBuilder {
             }
             if !assembly.process_values.is_empty() {
                 register_process_values(&assembly.process_values, &catalog, builtins).await?;
-            }
-            for make in &assembly.session_parts {
-                check_part(make, &catalog, &[SESSION_GROUP], ctx)?;
-            }
-            for make in &assembly.branch_parts {
-                check_part(make, &catalog, &[BRANCH_GROUP, SESSION_GROUP], ctx)?;
             }
             let [session_parts, session_optional] = mounters(
                 crate::PartScope::Session,
@@ -624,18 +586,6 @@ impl Modules {
         name
     }
 }
-/// Checks a profile part's names where its instance is (`groups`,
-/// innermost first): the composition check of [`AgentBuilder::session_part`].
-fn check_part(
-    make: &PartMake,
-    catalog: &Arc<rutis_loader::ServiceCatalog>,
-    groups: &[&str],
-    ctx: &Ctx,
-) -> Result<()> {
-    make(&Names::check(catalog, groups, Some(ctx.instance())))
-        .map(|_| ())
-        .map_err(|error| AgentError::Build(format!("a {} part: {error}", groups[0])))
-}
 /// Registers a scope's two mounters ([`crate::parts`]) and returns their
 /// module names, the required one first.
 async fn mounters(
@@ -650,11 +600,6 @@ async fn mounters(
         let module = modules
             .name(crate::parts::PartMounter::module(scope, required), builtins)
             .await;
-        let profile = match (required, scope) {
-            (false, _) => vec![],
-            (true, crate::PartScope::Session) => assembly.session_parts.clone(),
-            (true, crate::PartScope::Branch) => assembly.branch_parts.clone(),
-        };
         let (registry, wanted, catalog) = (
             assembly.parts.clone(),
             assembly.required_parts.clone(),
@@ -685,7 +630,6 @@ async fn mounters(
             let site = Arc::new(crate::parts::MountSite {
                 scope,
                 registry: registry.clone(),
-                profile: profile.clone(),
                 required: wanted.clone(),
                 catalog: catalog.clone(),
                 build: build.clone(),
@@ -876,7 +820,7 @@ pub(crate) async fn own_placement(
             true => vec![],
             false => builder.plugin_rows(&mut builtins).await?,
         };
-        Ok::<_, AgentError>((plugins, builder.install(&mut builtins, &parent, []).await?))
+        Ok::<_, AgentError>((plugins, builder.install(&mut builtins, []).await?))
     };
     let (plugin_rows, session_row) = match installed.await {
         Ok(rows) => rows,
