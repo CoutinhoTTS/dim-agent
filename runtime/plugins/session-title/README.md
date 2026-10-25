@@ -1,9 +1,9 @@
 # SessionTitle
 
 Optional Session TypeScript package implementing the [SessionTitle contract](../../../docs/design/plugins/SessionTitle.md).
-Its row, in the `session` group, provides `sessionMethods:session.rename` and reads its Session
-through `sessionIdentity`, `sessionConfig` and `sessionLifecycle`; the existing process services own
-history, settings, model execution and title persistence.
+Its row, in the `session` group, registers `session.rename` with the Session's `sessionMethods` and
+reads its Session through `sessionIdentity`, `sessionConfig` and `sessionLifecycle`; the existing
+process services own history, settings, model execution and title persistence.
 
 ## Loading
 

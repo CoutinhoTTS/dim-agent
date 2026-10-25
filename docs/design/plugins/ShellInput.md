@@ -2,7 +2,7 @@
 
 Status: Implemented ([capability page](../../architecture/rust-agent/plugins/ShellInput.md)). Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P1. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)). Built on C1 ([#47](https://github.com/arcships/dim/issues/47), including per-call progress, [#125](https://github.com/arcships/dim/pull/125)) and S7 ([#52](https://github.com/arcships/dim/issues/52)) ([roadmap §3.3](../roadmap.md#33-插件开工顺序)).
 
-Executes `!command` and `!!command` typed by the user in the Session's working directory. The result of `!command` (the command and its bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client. ShellInput is a Session plugin with no events. It provides `shell.run`, `shell.stop` and `shell.list` as ordinary Session methods through a `sessionMethods` service (Session scope, key `shell`; [session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). At most one command runs per Session. A command ends on its own, on `shell.stop`, or when the Session part ends (Session close, ShellInput or Session reload, App Server shutdown). While it runs it holds the Session, so a host's idle unload waits for it (§3.2).
+Executes `!command` and `!!command` typed by the user in the Session's working directory. The result of `!command` (the command and its bounded output) is written as an Append input, so it enters context with the next model request; the output of `!!command` goes only to the calling client. ShellInput is a Session plugin with no events. It provides `shell.run`, `shell.stop` and `shell.list` as ordinary Session methods by registering the namespace `shell` with its Session's `sessionMethods` ([session-boundary](../contracts/session-boundary.md)); contracts are language-neutral, and the Rust form is [Appendix G](#appendix-g-rust-binding). At most one command runs per Session. A command ends on its own, on `shell.stop`, or when the Session part ends (Session close, ShellInput or Session reload, App Server shutdown). While it runs it holds the Session, so a host's idle unload waits for it (§3.2).
 
 ## 1. Structure
 
@@ -32,11 +32,11 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `ShellInputPlugin` | Session | `P:HostPlatform` (as WorkspaceTools uses it), `S:SessionConfig` (`cwd`), `S:TreeCommands`, `S:SessionLifecycle`, `S:SessionIdentity` | `sessionMethods` key `shell` |
+| `ShellInputPlugin` | Session | `P:HostPlatform` (as WorkspaceTools uses it), `S:SessionConfig` (`cwd`), `S:TreeCommands`, `S:SessionLifecycle`, `S:SessionIdentity`, `S:sessionMethods` | Registers `shell` with `sessionMethods` |
 
 Contracts depended on:
 
-- `sessionMethods` dispatch, errors and call ownership (C1, [session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). The merged contract change [#120](https://github.com/arcships/dim/pull/120) settled where the shared method types live (a `methods` module of dim-agent-capabilities) and that Rpc answers a name outside every Session namespace recorded at assembly with `unknown_method` before it reads params or `sessionId`. ShellInput depends on neither: its binding takes the shared types from where A.1 places them, and it does not depend on the order in which Rpc reports dispatch errors.
+- `sessionMethods` dispatch, errors and call ownership (C1, [session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). The merged contract change [#120](https://github.com/arcships/dim/pull/120) settled where the shared method types live (a `methods` module of dim-agent-capabilities) and that Rpc answers a name no namespace of the Session holds with `unknown_method`. ShellInput depends on neither: its binding takes the shared types from where A.1 places them, and it does not depend on the order in which Rpc reports dispatch errors.
 - Per-call progress ([session-boundary A.2](../contracts/session-boundary.md#a2-call-channel)): implemented by C1 in [#83](https://github.com/arcships/dim/pull/83) (open) as the handler's `Progress` argument, best-effort as that PR's review requires ([A.5](#a5-changes-to-other-plugins)).
 - `Branch::input` with boundary validation, and InputQueue's Append mode: an Append input is applied at once, consumed with the next model request and never starts a turn.
 - HostPlatform: `spawn(ProcessSpec)` returning a process tree with stdout, stderr, wait and terminate (implemented); the command builder and `exec`'s output rules (S7, [A.5](#a5-changes-to-other-plugins)).
@@ -177,7 +177,7 @@ No tool declaration, prompt source or key: each run is a one-time observation. A
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `shell.run` | `sessionMethods` (Session, key `shell`), progress | Run a command (`record` or `private`), stream its output, return the result |
+| `shell.run` | `sessionMethods` (Session, namespace `shell`), progress | Run a command (`record` or `private`), stream its output, return the result |
 | `shell.stop` | Same | Stop a run by `runId`; idempotent |
 | `shell.list` | Same | Running runs of the Session |
 | Marker `dim-shell-input` kind `command` | Input convention | Model-visible recorded result |
@@ -217,7 +217,7 @@ None to the runtime or rutis. The changes ShellInput needs from Rpc and HostPlat
 
 ### A.1 Methods
 
-Service `sessionMethods`, Session scope, key `shell`. `describe()` returns one `MethodDecl` per method, each with `interruption: report`, `notifications: []` and `reply: direct`; `shell.run` has `mutating: true` and `progress: true`; `shell.stop` has `mutating: true`; `shell.list` has `mutating: false`. Errors are `MethodError` data (Appendix C).
+Namespace `shell`, registered with the Session's `sessionMethods`. Its declarations hold one `MethodDecl` per method, each with `interruption: report`, `notifications: []` and `reply: direct`; `shell.run` has `mutating: true` and `progress: true`; `shell.stop` has `mutating: true`; `shell.list` has `mutating: false`. Errors are `MethodError` data (Appendix C).
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -361,7 +361,7 @@ The spawn holds the registry's std mutex, so `shell.list` never shows a run that
 
 H1 to H3 block ShellInput. The other half of S7, reading the exec shell configuration at each spawn (ADR 002 "Existing plugins"), does not: ShellInput calls the builder for every run, so it uses whatever shell the builder returns. S7 exported the decoder, `sanitize`, `truncate_preview` and the read grace. ShellInput's implementation made the rest public in `workspace_tools::exec`, without changing their behaviour or copying them: `tail_bytes` and `signal_name` as they were, `capture_preview` as a function over the preview buffer, and `pump` over an `OutputSink`, which `exec`'s output (with its file offload) also implements.
 
-**Rpc and Session facade: C1** ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83)). No requirement beyond the merged contract and #83's best-effort progress: key `shell` in `sessionMethods`, dispatch through the Session (restoring an unloaded one), `unknown_method` when the assembly did not record `shell` (every Session of an assembly lists every namespace it recorded), `service_reloading` while it is recorded and the Session's provider is not active, and call ownership with `report` interruption (session-boundary A.1). As #83 implements it, the call's cancellation token fires when the Rpc load that admitted it unloads, and the Rpc unload waits until the call settles; ShellInput's handler returns on that token (A.4 Two cancellations).
+**Rpc and Session facade: C1** ([#47](https://github.com/arcships/dim/issues/47), [#83](https://github.com/arcships/dim/pull/83)). No requirement beyond the merged contract and #83's best-effort progress: namespace `shell` in `sessionMethods`, dispatch through the Session (restoring an unloaded one), `unknown_method` when no part of the Session registered `shell`, `service_reloading` while `shell` is withdrawn and ShellInput starts or reloads, and call ownership with `report` interruption (session-boundary A.1). As #83 implements it, the call's cancellation token fires when the Rpc load that admitted it unloads, and the Rpc unload waits until the call settles; ShellInput's handler returns on that token (A.4 Two cancellations).
 
 **Agents: none.** The Session activity handle this section once requested from Agents, so that idle unload would not end a `!` run after its caller disconnects, was dropped with S3 ([#57](https://github.com/arcships/dim/issues/57)). [Idle Session unload](../appserver/idle-unload.md) ([#126](https://github.com/arcships/dim/issues/126)) answers it with the runtime activity hold (its §5 and R1 in §11.1), which every owner of detached work takes: ShellInput holds one per run (A.4 Hold; its R3 in §11.2), so the idle unload that Agents runs ([#331](https://github.com/arcships/dim/pull/331)) refuses while a run is in flight and never ends it; once the run is recorded, the Session unloads after the grace period.
 
@@ -481,8 +481,8 @@ ShellInput is implemented in Rust as the `shell_input` module of dim-agent-capab
 
 | Neutral contract | Rust binding |
 | --- | --- |
-| Plugin | `TypedPlugin` and `Capability`; `Deps = (Arc<HostPlatform>, InSession<SessionConfig>, InSession<TreeCommands>, InSession<SessionLifecycle>, InSession<SessionIdentity>)`, keys scoped to the factory's `SessionScope` |
-| `sessionMethods` key `shell` | `SessionMethods::provide(ctx, &scope, "shell", declarations, handler)` from `dim_agent_capabilities::methods` (C1, [#83](https://github.com/arcships/dim/pull/83)), called in `apply` after ShellInput's own effects, so its unload effect runs first. `declarations` holds `MethodDecl { progress: true, ..MethodDecl::new("shell.run", true, Interruption::Report) }`, `MethodDecl::new("shell.stop", true, Interruption::Report)` and `MethodDecl::new("shell.list", false, Interruption::Report)`. The assembly records the namespace with `AgentBuilder::session_methods("shell")` |
+| Plugin | `TypedPlugin`; `Deps = (Keyed<HostPlatform>, Keyed<SessionConfig>, Keyed<TreeCommands>, Keyed<SessionLifecycle>, Keyed<SessionIdentity>, Keyed<SessionMethods>)` |
+| Namespace `shell` | `methods.register(ctx, "shell", declarations, handler)` on the `Keyed<SessionMethods>` dependency (`dim_agent_capabilities::methods`), called in `apply` after ShellInput's own effects, so its unload effect runs first. `declarations` holds `MethodDecl { progress: true, ..MethodDecl::new("shell.run", true, Interruption::Report) }`, `MethodDecl::new("shell.stop", true, Interruption::Report)` and `MethodDecl::new("shell.list", false, Interruption::Report)` |
 | Handler | A `Handler`, called with the method name, the params, the call's `CancellationToken` (A.4 Two cancellations) and its `Progress`, returning a future of `Result<Value, RpcError>`. Own errors are `RpcError::app(-32000, "shell_busy", ..)` and the like, and `RpcError::invalid` for `invalid_params`; runtime facade errors convert with `?` (`From<AgentError> for RpcError`) |
 | Progress | The handler's `Progress` argument: `progress.send(json!({"text": text}))`, with `"skipped"` added when bytes were left out. The run task holds a clone; a send after the reply is dropped |
 | Command construction | `HostPlatform::build_process_spec(command, cwd).await` returns `(ProcessSpec, ExecShellRuntime)` or `ProcessSpecError { code, reason }`; it reads the current shell itself. The handler `select!`s it against the call's token |

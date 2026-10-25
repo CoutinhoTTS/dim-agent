@@ -513,11 +513,15 @@ fn supported(protocol: ModelProtocol) -> bool {
 
 pub struct ManagedProvidersPlugin;
 impl TypedPlugin for ManagedProvidersPlugin {
-    type Deps = ();
+    type Deps = (Keyed<crate::methods::ManagementMethods>,);
     fn name(&self) -> &str {
         "ManagedProviders"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (Keyed(methods),): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(ManagedProviders {
                 binding: Mutex::new(None),
@@ -531,7 +535,7 @@ impl TypedPlugin for ManagedProvidersPlugin {
                     Ok(())
                 }))
             })?;
-            management::provide(ctx, service.clone())?;
+            management::provide(ctx, &methods, service.clone())?;
             ctx.provide_as(rutis::TypeKey::of::<ManagedProviders>(), service)?;
             Ok(Effect::Done)
         })

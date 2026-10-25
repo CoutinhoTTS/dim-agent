@@ -1491,7 +1491,7 @@ async fn node_session_permissions_reads_live_policy_and_survives_index_reload() 
     let mut parts = super::session_typescript::fixture();
     parts.rows = vec![json!({
         "id":"permission-reader", "name":parts.anchor.parent().unwrap().join("fixtures/session-permissions.ts"),
-        "provides":{"managementMethods:permissions":{"describe":"async","call":"async"}},
+        "provides":{},
         "config":{},
     })];
     let rules = HeldRules {
@@ -1519,10 +1519,7 @@ async fn node_session_permissions_reads_live_policy_and_survives_index_reload() 
             if reply.get("result").is_some() {
                 break reply["result"].clone();
             }
-            assert_eq!(
-                reply["error"]["data"]["appError"], "service_reloading",
-                "{reply}"
-            );
+            assert!(super::session_typescript::waiting(&reply), "{reply}");
             tokio::task::yield_now().await;
         }
     })
@@ -1600,9 +1597,9 @@ async fn node_session_permissions_reads_live_policy_and_survives_index_reload() 
             .context
             .get()
             .unwrap()
-            .get_as::<ManagementMethods>(rutis::TypeKey::keyed_dynamic::<ManagementMethods>(
-                "permissions",
-            ))
+            .get_as::<ManagementMethods>(rutis::TypeKey::of::<ManagementMethods>())
+            .unwrap()
+            .provider("permissions.branch")
             .unwrap();
         let call = owner
             .accept(
@@ -1651,7 +1648,7 @@ fn settlement_parts() -> dim_app_server::session_typescript::SessionTypeScriptCo
     let mut parts = super::session_typescript::fixture();
     parts.rows = vec![json!({
         "id":"settlement-owner", "name":parts.anchor.parent().unwrap().join("fixtures/input-settlement.ts"),
-        "provides":{"managementMethods:settlement":{"describe":"async","call":"async"}},"config":{},
+        "provides":{},"config":{},
     })];
     parts
 }
@@ -1662,10 +1659,7 @@ async fn settlement_status(client: &mut Client) -> Value {
             if let Some(value) = reply.get("result") {
                 break serde_json::from_str(value.as_str().unwrap()).unwrap();
             }
-            assert_eq!(
-                reply["error"]["data"]["appError"], "service_reloading",
-                "{reply}"
-            );
+            assert!(super::session_typescript::waiting(&reply), "{reply}");
             tokio::task::yield_now().await;
         }
     })

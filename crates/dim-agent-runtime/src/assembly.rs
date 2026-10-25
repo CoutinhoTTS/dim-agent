@@ -74,7 +74,6 @@ pub(crate) struct Assembly {
     required_parts: Arc<HashSet<String>>,
     /// Nested instanced groups created per Session on request.
     extensions: Vec<(String, Vec<(String, ExtensionMake)>)>,
-    session_methods: Vec<String>,
 }
 #[derive(Clone)]
 pub struct AgentBuilder {
@@ -103,7 +102,6 @@ impl AgentBuilder {
                 parts: Arc::default(),
                 required_parts: Arc::default(),
                 extensions: vec![],
-                session_methods: vec![],
             },
         }
     }
@@ -128,20 +126,6 @@ impl AgentBuilder {
             .session
             .push(Arc::new(move |scope| typed(factory(scope))));
         self
-    }
-    /// Records a `sessionMethods` namespace that a Session capability
-    /// provides: the Session's known namespaces (methods contract A.1), which
-    /// the host reads with [`Self::session_method_namespaces`].
-    pub fn session_methods(&mut self, namespace: impl Into<String>) -> &mut Self {
-        let namespace = namespace.into();
-        if !self.assembly.session_methods.contains(&namespace) {
-            self.assembly.session_methods.push(namespace);
-        }
-        self
-    }
-    /// The namespaces recorded with [`Self::session_methods`].
-    pub fn session_method_namespaces(&self) -> &[String] {
-        &self.assembly.session_methods
     }
     /// The assembly's service names: hosts register theirs before adding
     /// parts that depend on them, and their loader uses this catalog.

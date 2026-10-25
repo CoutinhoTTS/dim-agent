@@ -3,8 +3,9 @@
 Owner: [workspace_tools/mod.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/mod.rs),
 [files.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/files.rs),
 [exec.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs).
-Provides ToolHost for read, write, edit, glob, grep and exec, and the C1 leaf
-`session.exec.output` for the active command's bounded tail preview.
+Provides ToolHost for read, write, edit, glob, grep and exec, and registers the
+leaf namespace `session.exec.output` with `sessionMethods` for the active
+command's bounded tail preview.
 
 ## Dependencies
 
@@ -15,6 +16,7 @@ Provides ToolHost for read, write, edit, glob, grep and exec, and the C1 leaf
 | `P:FileWriteCoordinator` | Shared write/edit admission across Sessions. |
 | `S:SessionConfig` | cwd and collaboration role. |
 | `S:SessionIdentity` | Session-specific output directory. |
+| `S:SessionMethods` | Register the `session.exec.output` namespace, until this part unloads. |
 
 ## Events and lifetime
 
@@ -101,7 +103,7 @@ empty live preview and unavailable historical captures.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:FileWriteCoordinator`、`P:HostPlatform`、`S:SessionConfig`、`S:SessionIdentity`、`S:TreeCommands` |
-| 提供 | `S:SessionMethods#session.exec.output`、`S:ToolHost` |
+| 注入 | `P:FileWriteCoordinator`、`P:HostPlatform`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionMethods`、`S:TreeCommands` |
+| 提供 | `S:ToolHost` |
 | 被注入于 | `ToolRegistry` |
 <!-- /generated -->

@@ -1,8 +1,6 @@
-import { createConnection } from 'node:net'
-import { once } from 'node:events'
 import { definePlugin } from '@arcships/rutis'
 import provides from './session-part.json' with { type: 'json' }
-import type { ToolRegistry } from '../../npm/plugin.js'
+import type { SessionMethods, ToolRegistry } from '../../npm/plugin.js'
 
 type Call = {
   sessionId: string; branchId: string; turnId: string; callId: string
@@ -12,9 +10,9 @@ type MethodCall = { callId: string; method: string; params: { sessionId: string 
 
 export default definePlugin({
   name: 'SessionTypeScriptFixture',
-  inject: ['toolRegistry'],
+  inject: ['toolRegistry', 'sessionMethods'],
   provides,
-  async apply(ctx, config: { badDeclaration?: boolean; badMethods?: boolean | 'unsupported'; processOwner?: boolean; hangDescribe?: { host: string; port: number } }) {
+  async apply(ctx, config: { badDeclaration?: boolean; badMethods?: boolean | 'unsupported'; processOwner?: boolean; namespace?: string }) {
     const generation = crypto.randomUUID()
     const owner = config.processOwner ? ctx.use<{ status(): { generation: number } }>('exampleProcess') : undefined
     let stopped = false
@@ -46,23 +44,20 @@ export default definePlugin({
         return { content: JSON.stringify({ ...call, generation, calls, processGeneration: owner?.status().generation }) }
       },
     ).catch((error: Error) => { refused = error.message })
-    ctx.provide('sessionMethods:session.typescript', {
-      async describe() {
-        alive()
-        if (config.hangDescribe) {
-          const socket = createConnection(config.hangDescribe)
-          ctx.effect(() => { socket.destroy() })
-          await once(socket, 'connect')
-          await new Promise(() => {})
-        }
-        if (config.badMethods === 'unsupported') return [{ name: 'session.typescript.bad', mutating: false, interruption: 'report', progress: false, notifications: [] }]
-        if (config.badMethods) return [{ name: 'session.typescript.bad', mutating: false }]
-        return ['status', 'wait_fast', 'wait_tool', 'error', 'malformed', 'undefined', 'extra_value', 'extra_error', 'handed_off', 'report', 'drain'].map(name => ({
-          name: `session.typescript.${name}`, mutating: false,
+    // Invalid declarations, or a namespace the row may not take, are refused,
+    // which fails the row.
+    const namespace = config.namespace ?? 'session.typescript'
+    const declarations = config.badMethods === 'unsupported'
+      ? [{ name: 'session.typescript.bad', mutating: false, interruption: 'report', progress: false, notifications: [] }]
+      : config.badMethods
+        ? [{ name: 'session.typescript.bad', mutating: false }]
+        : ['status', 'wait_fast', 'wait_tool', 'error', 'malformed', 'undefined', 'extra_value', 'extra_error', 'handed_off', 'report', 'drain'].map(name => ({
+          name: `${namespace}.${name}`, mutating: false,
           interruption: name === 'drain' ? 'drain' : 'report', progress: true,
         }))
-      },
-      async call(call: MethodCall, cancelled: Promise<void>, progress: (data: unknown) => void) {
+    await ctx.use<SessionMethods>('sessionMethods').register(
+      namespace, declarations,
+      async (call: MethodCall, cancelled: Promise<void>, progress: (data: unknown) => void) => {
         alive()
         if (call.method.endsWith('.error')) return { code: `owned_${generation}`, message: 'fixture error' }
         if (call.method.endsWith('.undefined')) return { kind: 'value', value: undefined }
@@ -79,6 +74,6 @@ export default definePlugin({
         progress({ phase: 'settled', generation })
         return { kind: 'value', value: { sessionId: call.params.sessionId, generation, pid: process.pid, calls, cancelled: hold, alive: !stopped, refused } }
       },
-    })
+    )
   },
 })

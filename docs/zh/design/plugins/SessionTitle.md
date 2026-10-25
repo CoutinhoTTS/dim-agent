@@ -2,7 +2,7 @@
 
 状态：已实现为可选 TypeScript 包。总体设计：[overview](../overview.md)（SessionTitle）。阶段：P1。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
-SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，经 Provider `AuxiliaryModel`、用它自己设置中的模型生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（已交付的 C6 通知记录见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它经 key 为 `session.rename` 的 Session 级 `sessionMethods` 服务提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
+SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，经 Provider `AuxiliaryModel`、用它自己设置中的模型生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（已交付的 C6 通知记录见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它把命名空间 `session.rename` 注册到本 Session 的 `sessionMethods`，以此提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
 ## 0. 实施边界
 
@@ -37,11 +37,11 @@ Core API。保留 T，后续用 through=T 和上一页最后 sequence 作为 aft
 atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目录每次读取索引，
 索引重载不会重载消费方。
 
-沿用 [C4 绑定合同](../../../design/session-typescript.md)：该行属于 `session` 组，在它的 provides 中
-声明 `sessionMethods:session.rename` 的异步 describe/call。`apply` 读取 Session 标识和创建配置，
+沿用 [C4 绑定合同](../../../design/session-typescript.md)：该行属于 `session` 组，注入
+`sessionMethods`，并在 `apply` 中把 `session.rename` 注册到它；它的 provides 为空。`apply` 读取 Session 标识和创建配置，
 登记观察/清理，不启动异步初始化任务；创建配置不可变。同一行在 `inject` 声明全部依赖：进程服务
 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`，以及 Session 服务 `sessionIdentity`、
-`sessionConfig` 和 `sessionLifecycle`。包为可选安装，沿用 Web 的 `ServerConfig.session_typescript.rows` 入口；
+`sessionConfig`、`sessionLifecycle` 和 `sessionMethods`。包为可选安装，沿用 Web 的 `ServerConfig.session_typescript.rows` 入口；
 不加入默认产品配置，也不增加 SessionTitle 专用 App Server 接线。
 
 固定快照止于返回的 T，不承诺恰好止于 N。第一条被采用的操作者输入提供文本；model=null
@@ -83,7 +83,7 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | Session 服务 `sessionIdentity`、`sessionConfig` 和 `sessionLifecycle`；进程 sessions 历史、Settings、标题元数据 `sessionMetadata`（S5b）和必需的 `auxiliaryModel`（提供者缺失使整行 Pending） | provides 声明 sessionMethods key session.rename；Settings 来源 session-title |
+| `SessionTitle` | Session | Session 服务 `sessionIdentity`、`sessionConfig`、`sessionLifecycle` 和 `sessionMethods`；进程 sessions 历史、Settings、标题元数据 `sessionMetadata`（S5b）和必需的 `auxiliaryModel`（提供者缺失使整行 Pending） | 把 session.rename 注册到 sessionMethods；Settings 来源 session-title |
 
 依赖位于 Session 或外层进程。C4/S2/Settings 已提供观察、前缀读取和配置；S5b 提供标题元数据，C6 提供通知；Provider 提供具名辅助模型操作。包在普通行的 settings 成员中声明来源，与 provides 并列。真实提供者重载会取消该行工作（ADR 002 D3），S2 索引重载不会。业务数据更新不重载包（D4）。
 
@@ -200,7 +200,7 @@ revision 检查就是复检：手动标题总是胜出。
 
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
-| `session.rename {sessionId, title \| null}` | `sessionMethods` key `session.rename` | 设置或清除手动标题 |
+| `session.rename {sessionId, title \| null}` | `sessionMethods` 命名空间 `session.rename` | 设置或清除手动标题 |
 | `session-title` 来源：`enabled`、`maxLength`、`model` | 业务配置（Settings 来源） | 关闭生成；标题长度；生成标题用的模型（未设置：Session 的模型） |
 | v3 `session.list`/`session.summaries` 中的 `title`、`titleSource`、`titleRevision` | 从 SessionStore 读取的 Rpc 协议字段（[S5b §8](../appserver/session-title-metadata.md#8-session-列表)） | 展示；修订号用于给列表和通知排序 |
 | 标题通知，`data: {title, titleSource, titleRevision}` | SessionStore 发出的 Session 广播通知（C6 记录，§9；[S5b §7](../appserver/session-title-metadata.md#7-标题通知)） | 已订阅的客户端实时更新标题 |
@@ -252,7 +252,7 @@ SessionTitle 使用这些已交付合同。
 
 ### A.1 `session.rename`
 
-经 `sessionMethods`（Session，key `session.rename`）提供：`describe(): async -> MethodDecl[]` 返回一个声明 `{name: "session.rename", mutating: true, interruption: "report", progress: false}`；`call(MethodCall): async -> MethodReply` 处理它。被丢弃的调用在 `setTitle` 之前被取消，或在其之后原子地完成。
+注册到 `sessionMethods`（Session，命名空间 `session.rename`），带一个声明 `{name: "session.rename", mutating: true, interruption: "report", progress: false}`；其 `call(MethodCall, cancelled, progress): async -> MethodReply` 处理它。被丢弃的调用在 `setTitle` 之前被取消，或在其之后原子地完成。
 
 | 参数 | 结果 | 错误 |
 | --- | --- | --- |
@@ -377,7 +377,7 @@ A1–A12 是首版实现采用的策略。
 
 | 语言中立 | Rust |
 | --- | --- |
-| `sessionMethods` key `session.rename` | C4 从 sessionMethods:session.rename 推导 session.rename，在原行使用 SessionMethods::provide_foreign；Rust 提供者使用 SessionMethods::provide 和完整 MethodDecl |
+| 注册到 `sessionMethods` 的命名空间 `session.rename` | TypeScript 行调用 `ctx.use('sessionMethods').register('session.rename', declarations, call)`，注册属于该行；Rust 提供者在 `Keyed<SessionMethods>` 依赖上调用 `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` |
 | Session 广播监听器 | `session_channel(session_id)` 上针对 `Event` 记录的监听器，由 `ctx.effect` 移除 |
 | 生成任务 | 在 `ctx.effect` 下派生 |
 

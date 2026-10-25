@@ -105,10 +105,7 @@ async fn create(client: &mut Client, home: &std::path::Path, interactive: bool) 
             if reply["error"]["data"]["appError"] == "invalid_params" {
                 break;
             }
-            assert_eq!(
-                reply["error"]["data"]["appError"], "service_reloading",
-                "{reply}"
-            );
+            assert!(super::session_typescript::waiting(&reply), "{reply}");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })

@@ -11,8 +11,12 @@ use dim_agent_capabilities::methods::{Interruption, MethodDecl, params, reply};
 use rutis::{CordisError, Ctx};
 use std::sync::Arc;
 
-pub(super) fn provide(ctx: &Ctx, oauth: Arc<GrokOAuthService>) -> Result<(), CordisError> {
-    ManagementMethods::provide(
+pub(super) fn provide(
+    ctx: &Ctx,
+    methods: &ManagementMethods,
+    oauth: Arc<GrokOAuthService>,
+) -> Result<(), CordisError> {
+    methods.register(
         ctx,
         "account.grok",
         [

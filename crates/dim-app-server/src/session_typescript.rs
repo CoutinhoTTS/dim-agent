@@ -6,15 +6,12 @@ use crate::{
     methods::ManagementMethods,
     settings::{SourceDeclaration, WorkflowPackages},
 };
-use dim_agent_capabilities::{
-    methods::{SessionMethods, within},
-    tool_registry::ToolRegistry,
-};
-use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, SESSION_GROUP, SessionScope};
+use dim_agent_capabilities::{methods::SessionMethods, tool_registry::ToolRegistry};
+use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, SESSION_GROUP, names::name_of};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory, TypeKey};
 use rutis_bridge::{
     runtime::{LocalRuntime, Stdio},
-    session::{HostDispatch, host_key, host_key_in},
+    session::host_key,
 };
 use rutis_loader::{Build, LoaderError, Resolved, Resolver, RuntimeResolver};
 use serde_json::{Map, Value};
@@ -95,18 +92,12 @@ pub(crate) struct Parts {
     pub session_rows: Vec<Value>,
     pub branch_rows: Vec<Value>,
     pub process_rows: Vec<Value>,
-    pub management: Vec<(String, String)>,
-    /// Each Session namespace an enabled row provides, with that row's id:
-    /// Rpc reads the row's copy in a Session where the namespace has no
-    /// active provider.
-    pub namespaces: Vec<(String, String)>,
 }
 
 impl Parts {
     pub fn new(
         config: &SessionTypeScriptConfig,
         builder: &mut AgentBuilder,
-        management: &[(String, String)],
         file_roots: &[PathBuf],
     ) -> Result<Self> {
         let invalid = |message: &str| ServerError::Configuration(message.into());
@@ -124,20 +115,17 @@ impl Parts {
         }
         let mut ids = HashSet::new();
         let mut snapshots = HashMap::new();
-        let mut namespaces = Vec::new();
-        let mut process_namespaces = Vec::new();
         let (mut session_rows, mut branch_rows, mut process_rows) =
             (Vec::new(), Vec::new(), Vec::new());
         // Before the rows register their names and the resolvers take the
-        // catalog. A part of any language registers its tools with
-        // `toolRegistry`, which provides its own dispatcher in each Session.
+        // catalog. A part of any language registers its tools and method
+        // namespaces with their owners, which provide their own dispatchers.
         builder
             .catalog_mut()
             .export_all(exports::all())
-            .register_shared_instance(
-                dim_agent_runtime::names::name_of::<ToolRegistry>(),
-                SESSION_GROUP,
-            );
+            .register_shared_instance(name_of::<ToolRegistry>(), SESSION_GROUP)
+            .register_shared_instance(name_of::<SessionMethods>(), SESSION_GROUP)
+            .register_shared(name_of::<ManagementMethods>());
         for row in &config.rows {
             let id = row
                 .get("id")
@@ -155,11 +143,9 @@ impl Parts {
             if name.starts_with("py:") && config.python.is_none() {
                 return Err(invalid("a py: row needs the Python runtime"));
             }
-            let disabled = match row.get("disabled") {
-                None => false,
-                Some(Value::Bool(disabled)) => *disabled,
-                Some(_) => return Err(invalid("row disabled must be boolean")),
-            };
+            if !matches!(row.get("disabled"), None | Some(Value::Bool(_))) {
+                return Err(invalid("row disabled must be boolean"));
+            }
             let group = match row.get("group") {
                 None => None,
                 Some(Value::String(group)) if [SESSION_GROUP, BRANCH_GROUP].contains(&&**group) => {
@@ -183,7 +169,7 @@ impl Parts {
                     "rows of one module must share the same provides snapshot",
                 ));
             }
-            for (service, methods) in provides {
+            for service in provides.keys() {
                 // A name the catalog does not hold yet belongs to this row's
                 // group, so each instance has its own (rutis usage §3.5).
                 if let Err(LoaderError::UnknownService(_)) =
@@ -195,58 +181,6 @@ impl Parts {
                             .catalog_mut()
                             .register_shared_instance(service, group),
                     };
-                }
-                // Host-side registration of the families Rpc and
-                // ToolRegistry read, until they find providers by name.
-                if group.is_none()
-                    && let Some(namespace) = service.strip_prefix("managementMethods:")
-                {
-                    ManagementMethods::check_namespace(namespace)
-                        .map_err(|error| ServerError::Configuration(error.to_string()))?;
-                    if management
-                        .iter()
-                        .any(|(owner, _)| within(namespace, owner) || within(owner, namespace))
-                    {
-                        return Err(invalid(
-                            "TypeScript management namespace overlaps a native owner",
-                        ));
-                    }
-                    if methods != &serde_json::json!({"describe":"async", "call":"async"})
-                        || process_namespaces
-                            .iter()
-                            .any(|(owner, _)| owner == namespace)
-                    {
-                        return Err(invalid("invalid or duplicate management namespace"));
-                    }
-                    for existing in builder.session_method_namespaces() {
-                        crate::methods::SessionNamespaces::check(
-                            &[(namespace.to_owned(), id.to_owned())],
-                            existing,
-                        )
-                        .map_err(|error| ServerError::Configuration(error.to_string()))?;
-                    }
-                    process_namespaces.push((namespace.to_owned(), id.to_owned()));
-                }
-                if group != Some(SESSION_GROUP) {
-                    continue;
-                }
-                if let Some(namespace) = service.strip_prefix("sessionMethods:") {
-                    if methods != &serde_json::json!({"describe":"async", "call":"async"})
-                        || builder
-                            .session_method_namespaces()
-                            .iter()
-                            .any(|existing| existing == namespace)
-                    {
-                        return Err(invalid("invalid or duplicate Session method namespace"));
-                    }
-                    crate::methods::SessionNamespaces::check(management, namespace)
-                        .map_err(|error| ServerError::Configuration(error.to_string()))?;
-                    crate::methods::SessionNamespaces::check(&process_namespaces, namespace)
-                        .map_err(|error| ServerError::Configuration(error.to_string()))?;
-                    if !disabled {
-                        builder.session_methods(namespace);
-                        namespaces.push((namespace.to_owned(), id.to_owned()));
-                    }
                 }
             }
             snapshots.insert(name.to_owned(), provides.clone());
@@ -286,8 +220,6 @@ impl Parts {
             session_rows,
             branch_rows,
             process_rows,
-            management: process_namespaces,
-            namespaces,
         })
     }
     /// The runtimes the rows run in: Node, then Python if configured.
@@ -353,20 +285,9 @@ impl Resolver for SessionResolver {
                     });
                 }
             }
-            let names = |prefix: &str| -> Arc<[String]> {
-                snapshot
-                    .keys()
-                    .filter_map(|name| name.strip_prefix(prefix).map(str::to_owned))
-                    .collect()
-            };
-            let families = Families {
-                session_methods: names("sessionMethods:"),
-                management: names("managementMethods:"),
-            };
             let mut resolved = Resolved::new(Arc::new(BoundFactory {
                 inner: original.factory.clone(),
-                place: Place::Process,
-                families: families.clone(),
+                process: true,
                 file_roots: self.file_roots.clone(),
             }))
             .with_schema(original.schema.clone())
@@ -386,18 +307,10 @@ impl Resolver for SessionResolver {
                 })?;
             let file_roots = self.file_roots.clone();
             resolved = resolved.with_scoped(Arc::new(move |build| {
-                // Where the row is placed: its innermost instance.
-                let place = match build.instances().next() {
-                    None => Place::Process,
-                    Some((group, instance)) if group == SESSION_GROUP => {
-                        Place::Session(SessionScope { instance })
-                    }
-                    Some(_) => Place::Branch,
-                };
                 Ok(Arc::new(BoundFactory {
                     inner: scoped(build)?,
-                    place,
-                    families: families.clone(),
+                    // Where the row is placed: its innermost instance.
+                    process: build.instances().next().is_none(),
                     file_roots: file_roots.clone(),
                 }))
             }));
@@ -406,25 +319,11 @@ impl Resolver for SessionResolver {
     }
 }
 
-/// The provided names of the families the host binds: Session methods in a
-/// Session, management methods at the process.
-#[derive(Clone)]
-struct Families {
-    session_methods: Arc<[String]>,
-    management: Arc<[String]>,
-}
-
-#[derive(Clone, Copy)]
-enum Place {
-    Process,
-    Session(SessionScope),
-    Branch,
-}
-
+/// A row of another language: a process row that uses `workflowFiles` is
+/// handed its own Workflow packages.
 struct BoundFactory {
     inner: Arc<dyn PluginFactory<Value>>,
-    place: Place,
-    families: Families,
+    process: bool,
     file_roots: Arc<[PathBuf]>,
 }
 impl PluginFactory<Value> for BoundFactory {
@@ -438,21 +337,14 @@ impl PluginFactory<Value> for BoundFactory {
         self.inner.validate_config(config)
     }
     fn build(&self, config: &Value) -> std::result::Result<Box<dyn Plugin>, CordisError> {
-        let packages = match self.place {
-            Place::Process if self.injects().contains(&host_key("workflowFiles")) => Some(
-                Arc::new(WorkflowPackages::from_config(config, &self.file_roots)?),
-            ),
+        let packages = match self.process {
+            true if self.injects().contains(&host_key("workflowFiles")) => Some(Arc::new(
+                WorkflowPackages::from_config(config, &self.file_roots)?,
+            )),
             _ => None,
-        };
-        let namespaces = match self.place {
-            Place::Process => self.families.management.clone(),
-            Place::Session(_) => self.families.session_methods.clone(),
-            Place::Branch => Arc::default(),
         };
         Ok(Box::new(BoundRow {
             inner: self.inner.build(config)?,
-            place: self.place,
-            namespaces,
             packages,
         }))
     }
@@ -460,28 +352,7 @@ impl PluginFactory<Value> for BoundFactory {
 
 struct BoundRow {
     inner: Box<dyn Plugin>,
-    place: Place,
-    namespaces: Arc<[String]>,
     packages: Option<Arc<WorkflowPackages>>,
-}
-struct ProjectedServices {
-    keys: Arc<[TypeKey]>,
-    changed: Arc<tokio::sync::Notify>,
-}
-impl rutis::Listener<rutis::ServiceChanged> for ProjectedServices {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        event: &'a rutis::ServiceChanged,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            if self.keys.contains(&event.key) {
-                self.changed.notify_one();
-            }
-            Ok(None)
-        })
-    }
 }
 impl Plugin for BoundRow {
     fn name(&self) -> &str {
@@ -504,64 +375,7 @@ impl Plugin for BoundRow {
                     packages.clone(),
                 )?;
             }
-            let session = match self.place {
-                Place::Session(scope) => Some(scope),
-                Place::Process | Place::Branch => None,
-            };
-            let keys: Arc<[TypeKey]> = self
-                .namespaces
-                .iter()
-                .map(|namespace| match session {
-                    Some(scope) => {
-                        host_key_in(&format!("sessionMethods:{namespace}"), scope.instance)
-                    }
-                    None => host_key(&format!("managementMethods:{namespace}")),
-                })
-                .collect();
-            let changed = Arc::new(tokio::sync::Notify::new());
-            // rows.load may reply before its service notification is projected.
-            // Subscribe before loading, then read only this row's own services.
-            let listener = if keys.is_empty() {
-                None
-            } else {
-                Some(ctx.events().on(
-                    ctx,
-                    &rutis::EventKey::of(),
-                    ProjectedServices {
-                        keys: keys.clone(),
-                        changed: changed.clone(),
-                    },
-                )?)
-            };
-            let cleanup = self.inner.apply(ctx).await?;
-            ctx.effect(move || cleanup)?;
-            let cancelled = ctx.cancellation_token();
-            for (namespace, key) in self.namespaces.iter().zip(keys.iter()) {
-                let service = loop {
-                    if let Some(service) = ctx.get_as::<dyn HostDispatch>(key.clone()) {
-                        break service;
-                    }
-                    tokio::select! {
-                        _ = changed.notified() => {},
-                        _ = cancelled.cancelled() => return Err(CordisError::PluginFailed("TypeScript row binding cancelled".into())),
-                    }
-                };
-                match session {
-                    Some(scope) => {
-                        SessionMethods::provide_foreign(ctx, &scope, namespace, service).await?;
-                    }
-                    None => {
-                        ManagementMethods::provide_foreign(ctx, namespace, service).await?;
-                    }
-                }
-            }
-            if let Some(listener) = listener {
-                listener
-                    .dispose()
-                    .await
-                    .map_err(|error| CordisError::PluginFailed(error.to_string().into()))?;
-            }
-            Ok(Effect::Done)
+            self.inner.apply(ctx).await
         })
     }
 }

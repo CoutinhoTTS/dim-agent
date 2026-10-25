@@ -16,7 +16,7 @@ Scheduler keeps scheduled jobs, which are user-written configuration, in its Set
 flowchart LR
   subgraph PROC["Process (control node)"]
     Sched["Scheduler: timer, run tracker, job store"]
-    MM["managementMethods key schedule"]
+    MM["managementMethods: namespace schedule"]
     Agents["Agents: sessions"]
     Rpc["Rpc method table"]
     Store["Process storage: pluginFiles, run history"]
@@ -32,14 +32,14 @@ flowchart LR
   Sched --> Agents
   Sched --> Store
   Sched --> Set
-  Sched --> MM
-  Rpc -->|"collects managementMethods by name"| MM
+  Sched -->|"registers schedule"| MM
+  Rpc -->|"reads per call"| MM
   Agents -->|"sessions calls"| TL
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   class Sched,MM,Tool new
 ```
 
-Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); offering a tool to a Session is the Session part's job (D2). The process part declares the existing `sessions`, `sessionPermissions`, `settings` and `pluginFiles` services. Agents' stable directory provides `sessions` and finds the current index on each call: index reload fails calls with `reloading`, without reloading Scheduler or any Session ([S2 D1](../appserver/sessions-service.md#3-decisions), [#35](https://github.com/arcships/dim/issues/35)). The Session tool declares its `scheduleJobs` dependency through the accepted binding (§1.1); undeclared `ctx.use` is not a generic optional native lookup. C3 keeps core tool consumers independent of optional rows. No dependency from ToolRegistry, Loop or Session readiness to Scheduler is introduced. Job edits use Settings' owner write and change events, never structural reload.
+Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); offering a tool to a Session is the Session part's job (D2). The process part declares the existing `sessions`, `sessionPermissions`, `settings`, `pluginFiles` and `managementMethods` services. Agents' stable directory provides `sessions` and finds the current index on each call: index reload fails calls with `reloading`, without reloading Scheduler or any Session ([S2 D1](../appserver/sessions-service.md#3-decisions), [#35](https://github.com/arcships/dim/issues/35)). The Session tool declares its `scheduleJobs` dependency through the accepted binding (§1.1); undeclared `ctx.use` is not a generic optional native lookup. C3 keeps core tool consumers independent of optional rows. No dependency from ToolRegistry, Loop or Session readiness to Scheduler is introduced. Job edits use Settings' owner write and change events, never structural reload.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
@@ -70,7 +70,7 @@ text. The stable process dependency boundary still applies. This settles the
 | --- | --- |
 | Session tool | An ordinary C4 row injects `toolRegistry` and registers `schedule` from its apply with its declaration and asynchronous `execute`. Registration does no I/O. Registration and provider-generation changes follow the current C4 binding (§1.1). |
 | Process package / `scheduleJobs` | A row without a group in `ServerConfig.session_typescript.rows` installs an ordinary process owner in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1); the concrete package remains unimplemented. |
-| Management namespace | A process row declares `managementMethods:schedule`; its original row binds it to native `ManagementMethods`, with per-call admission and `report`/`drain`. Scheduler still has to implement the methods. |
+| Management namespace | The process row injects `managementMethods` and registers `schedule` from its apply; the registration uses native per-call admission and `report`/`drain`. Scheduler still has to implement the methods. |
 | Settings | Owner `settings.read/update` and `settings.changed` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
 | Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
@@ -95,8 +95,8 @@ CLI installation or PluginManager implementation is included.
 | `id` | `scheduler` | `scheduler-session` |
 | `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
 | `config` | `{}` | `{}` |
-| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles` | `scheduleJobs`, `toolRegistry` |
-| `provides` | `scheduleJobs: {call:"async"}`; `managementMethods:schedule: {describe:"async",call:"async"}` | `{}`; apply registers `schedule` with `toolRegistry` |
+| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles`, `managementMethods` | `scheduleJobs`, `toolRegistry` |
+| `provides` | `scheduleJobs: {call:"async"}`; apply registers `schedule` with `managementMethods` | `{}`; apply registers `schedule` with `toolRegistry` |
 | `settings` | The complete `schedule` source in §7.1, including its schema | Absent |
 
 **Loader limitation.** Until a pinned rutis release fixes
@@ -136,7 +136,7 @@ handlers follow the current unavailable-provider and retry contract in the
 Scheduler does not hard-code that binding's error text or assume a particular
 provider reattachment path.
 
-The process row's `describe` returns A.3's six literal methods. `list` and
+The declarations the process row registers are A.3's six literal methods. `list` and
 `history` are non-mutating, `interruption:"report"`; the other four are
 mutating, `interruption:"drain"`. All use `progress:false`. Their JSON values
 and errors use existing `MethodReply`; the tool maps A.2's reply into
@@ -384,7 +384,7 @@ Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and t
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `schedule` | Tool registered with `toolRegistry` (Session), risk `persistent_configuration` | Model manages jobs |
-| `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods` (process, key `schedule`) | Operators manage jobs |
+| `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods` (process, namespace `schedule`) | Operators manage jobs |
 | Run outcome delivery | One Steer attempt to the saving branch; no resend (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
 | CLI entry | Separate client work after method binding | No CLI command implementation is claimed here |
 | `sessions` | Depended on (process) | Non-interactive run Session with node, model and starter-capped `policy`; input, history, lookup, stop, withdraw, delete |
@@ -431,7 +431,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.9 Only facts later decisions use enter the Timeline | No Scheduler Timeline event; jobs stay in Settings, runs in process storage. |
 | §1 Capability and App Server boundary | The process plugin owns jobs and runs; the Session Capability offers its tool. Storage uses `pluginFiles`; no App Server business module. |
 | ADR 002 D1 | Jobs span Sessions (process part); the tool belongs to a Session (Session part). |
-| ADR 002 D2 | Existing Rpc and ToolRegistry consume feature-owned methods/tools; no wiring plugin or notification bus. #234 supplies the original-row management projection; Scheduler's methods remain unimplemented. |
+| ADR 002 D2 | Existing Rpc and ToolRegistry consume feature-owned methods/tools; no wiring plugin or notification bus. The process row registers its namespace with `managementMethods`; Scheduler's methods remain unimplemented. |
 | ADR 002 D3 | Stable `sessions` isolates index reload; C3 keeps core independent of optional rows. The optional tool row declares its owner dependency under §1.1's availability constraints. |
 | ADR 002 D4 | Jobs and the run limit are business data in the Settings business source `schedule`, read at use time; nothing structural changes. |
 | ADR 002 D5 | Existing service names/envelopes are used directly; specified feature contracts and binding limits are distinguished (§1.1, Appendix G). |
@@ -497,7 +497,7 @@ Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, 
 
 ### A.3 Management methods
 
-`managementMethods` key `schedule`: `describe(): async -> MethodDecl[]` lists the methods below (`mutating` for all but `list` and `history`); `call(MethodCall): async -> MethodReply` dispatches them. Parameters and results are JSON objects; errors are codes from Appendix C.
+Namespace `schedule`, registered with `managementMethods`: its declarations list the methods below (`mutating` for all but `list` and `history`); its `call(MethodCall, cancelled, progress): async -> MethodReply` dispatches them. Parameters and results are JSON objects; errors are codes from Appendix C.
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -508,7 +508,7 @@ Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, 
 | `schedule.run_now` | `{job_id}` | `run_id` or the skip reason |
 | `schedule.history` | `{job_id, limit?}` | Runs, newest first |
 
-The process row's `managementMethods:schedule` (§1.3) uses existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent. These are existing Rpc rules, not an implemented TypeScript `schedule` namespace.
+The process row's `schedule` namespace (§1.3) uses existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent. These are existing Rpc rules, not an implemented TypeScript `schedule` namespace.
 
 ### A.4 Schedule formats
 
@@ -808,7 +808,7 @@ services and tasks; their package implementation remains required.
 | Neutral | Rust |
 | --- | --- |
 | Tool `schedule` registered with `toolRegistry` | `SchedulerSession` calls `tools.register(ctx, ToolContribution {definition, handler})` through `Keyed<ToolRegistry>` in its `apply`; `execute(ToolCall, cancel)` |
-| `managementMethods` key `schedule` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
+| Namespace `schedule` registered with `managementMethods` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named service through `host_key("sessions")`; native request types and `AgentIndex::acquire` are private implementation details, not an external crate API |
 | `scheduleJobs` | Specified process service owned by Scheduler; declared dependency binding in §1.1, package unimplemented |
 | Process storage | Existing `pluginFiles.open` scope, with immediate effect cleanup; use A.7's agreed inner v1 format |
