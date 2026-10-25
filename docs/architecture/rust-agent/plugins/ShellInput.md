@@ -3,7 +3,8 @@
 Owner: [shell_input.rs](../../../../crates/dim-agent-capabilities/src/shell_input.rs).
 Runs the commands a user types as `!command` and `!!command` in the Session's
 working directory, through the Session methods `shell.run`, `shell.stop` and
-`shell.list` (`sessionMethods` key `shell`). Design:
+`shell.list` (namespace `shell`, registered with the Session's
+`sessionMethods`). Design:
 [ShellInput](../../../design/plugins/ShellInput.md).
 
 ## Dependencies
@@ -15,13 +16,15 @@ working directory, through the Session methods `shell.run`, `shell.stop` and
 | `S:TreeCommands` | Check `branchId` at start; write a recorded run's input on that branch. |
 | `S:SessionLifecycle` | `closing()` ends a run without writing; `hold()` keeps the Session from an idle unload while a run is registered. |
 | `S:SessionIdentity` | Session id of the `shell.run` span, one per started run. |
+| `S:SessionMethods` | Register the `shell` namespace from `apply`, until this generation unloads. |
 
 ## Methods
 
-`defaults::install_local_execution` installs the plugin and records the
-namespace. A process that did not install it answers `shell.*` with
-`unknown_method`; Rpc answers `service_reloading` while a Session's ShellInput
-generation is not active.
+`defaults::install_local_execution` installs the plugin, which registers
+`shell` from its `apply`. In a process that did not install it no namespace
+holds `shell.*`, so those names answer `unknown_method`; once a Session's
+ShellInput registered `shell`, Rpc answers `service_reloading` while that
+generation is replaced.
 
 | Method | Result |
 | --- | --- |
@@ -76,8 +79,8 @@ so no run starts after the tracker closed. The spawn holds that std mutex, which
 no await holds, so `shell.list` and `shell.stop` wait at most for one fork and
 exec. The write's ending check is followed by no await: a run the Session part
 ended never writes, and the branch refuses a write once its own close has
-started. `SessionMethods::provide` is called after the disposer is registered,
-so the provider's unload, which settles the calls, runs first.
+started. `sessionMethods.register` is called after the disposer is registered,
+so the registration's unload, which settles the calls, runs first.
 
 Output follows `exec`'s rules through the helpers `workspace_tools::exec`
 exports: one `pump` and decoder per pipe with the 100 ms read grace after the
@@ -97,7 +100,8 @@ branch ids, the `runId` and the outcome (`completed:<exit>`, `stopped`,
 ## Rule check
 
 - §1 and ADR 002 D1–D3: one Session capability in its own module; Rpc reaches
-  it through `sessionMethods` by namespace and names no ShellInput type; no core
+  it through the Session's `sessionMethods` table, where it registered `shell`,
+  and names no ShellInput type; no core
   part depends on it.
 - §4 rules 1, 2 and 4: ShellInput changes no other module's state. Its only
   Timeline effect is an ordinary Append input, written once and then owned by
@@ -142,7 +146,7 @@ for the race flows; production builds have no hook.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:HostPlatform`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:TreeCommands` |
-| 提供 | `S:SessionMethods#shell` |
+| 注入 | `P:HostPlatform`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:SessionMethods`、`S:TreeCommands` |
+| 提供 | — |
 | 被注入于 | — |
 <!-- /generated -->

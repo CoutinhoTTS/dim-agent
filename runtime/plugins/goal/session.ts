@@ -1,7 +1,7 @@
 import { definePlugin } from '@arcships/rutis'
 import provides from './session.json' with { type: 'json' }
 import { type InputMessage, changes } from './goal.ts'
-import type { ToolRegistry } from '../../../npm/plugin.js'
+import type { SessionMethods, ToolRegistry } from '../../../npm/plugin.js'
 
 type TreeCommands = { input(id: string, input: InputMessage): Promise<{ sequence: number | bigint }> }
 type Call = { branchId: string; arguments: { status?: unknown; summary?: unknown } }
@@ -21,7 +21,7 @@ const text = (value: unknown, limit: number) =>
 export default definePlugin({
   name: 'GoalSession',
   provides,
-  inject: ['treeCommands', 'toolRegistry'],
+  inject: ['treeCommands', 'toolRegistry', 'sessionMethods'],
   async apply(ctx) {
     const tree = ctx.use<TreeCommands>('treeCommands')
     await ctx.use<ToolRegistry>('toolRegistry').register(
@@ -50,13 +50,12 @@ export default definePlugin({
         return { content: `goal_update recorded: ${status}.` }
       },
     )
-    ctx.provide('sessionMethods:session.goal', {
-      async describe() {
-        return ['set', 'edit', 'pause', 'resume', 'clear'].map(name => ({
-          name: `session.goal.${name}`, mutating: true, interruption: 'report', progress: false,
-        }))
-      },
-      async call(call: MethodCall): Promise<Reply> {
+    await ctx.use<SessionMethods>('sessionMethods').register(
+      'session.goal',
+      ['set', 'edit', 'pause', 'resume', 'clear'].map(name => ({
+        name: `session.goal.${name}`, mutating: true, interruption: 'report', progress: false,
+      })),
+      async (call: MethodCall): Promise<Reply> => {
         const { branchId = 'main' } = call.params
         if (typeof branchId !== 'string' || branchId === '') return invalid('branchId must be a non-empty string')
         const op = call.method.slice('session.goal.'.length)
@@ -74,6 +73,6 @@ export default definePlugin({
         const event = await tree.input(branchId, input)
         return { kind: 'value', value: { sequence: event.sequence } }
       },
-    })
+    )
   },
 })

@@ -15,18 +15,25 @@ async fn owner_contributions_survive_reload_and_keep_entry_boundaries() {
         },
     )
     .await;
-    // Methods contract §3.2: Rpc reaches no management owner through its
-    // dependencies, directly or through Agents, so no owner can keep Rpc
-    // from loading or reload it.
+    // Methods contract §3.2: Rpc depends on the management table but
+    // reaches no management owner (a part that registers with the table)
+    // through its dependencies, directly or through Agents, so no owner can
+    // keep Rpc from loading or reload it.
     let snapshot = server.diagnostics();
+    let rpc = snapshot.plugins.iter().find(|p| p.name == "Rpc").unwrap();
     let owners: std::collections::BTreeSet<_> = snapshot
-        .bindings
+        .plugins
         .iter()
-        .filter(|binding| binding.key.describe().contains("ManagementMethods"))
-        .map(|binding| binding.provider)
+        .filter(|plugin| {
+            plugin.id != rpc.id
+                && plugin
+                    .resolved_dependencies
+                    .iter()
+                    .any(|dependency| dependency.key.describe().contains("ManagementMethods"))
+        })
+        .map(|plugin| plugin.id)
         .collect();
     assert!(owners.len() >= 5, "management owners: {owners:?}");
-    let rpc = snapshot.plugins.iter().find(|p| p.name == "Rpc").unwrap();
     let mut pending = vec![rpc.id];
     let mut reached = std::collections::BTreeSet::new();
     while let Some(id) = pending.pop() {
@@ -80,6 +87,16 @@ async fn owner_contributions_survive_reload_and_keep_entry_boundaries() {
         client.rpc("account.codex.unknown", json!({})).await["error"]["code"],
         -32601
     );
+    // A name a management namespace holds is management's even when its
+    // params name a Session: Rpc never acquires one for it (which would
+    // answer `session_closed` for this id).
+    let reply = client
+        .rpc(
+            "mcp.extra.echo",
+            json!({"sessionId": uuid::Uuid::new_v4().to_string()}),
+        )
+        .await;
+    assert_eq!(reply["error"]["data"]["appError"], "unknown_method", "{reply}");
     // A management provider reload neither reloads Rpc nor closes the
     // connection: the same client keeps every namespace once Mcp is active.
     server.restart("Mcp").await.unwrap();

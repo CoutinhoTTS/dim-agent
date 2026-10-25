@@ -1,8 +1,8 @@
 # Questions
 
 Owner: [dim-agent-questions](../../../../crates/dim-agent-questions/src/lib.rs).
-Registers the `ask_user` tool with ToolRegistry and provides the Session
-method `session.question.respond` (`sessionMethods["session.question"]`). The
+Registers the `ask_user` tool with ToolRegistry and the Session method
+namespace `session.question` (`session.question.respond`) with `sessionMethods`. The
 model asks the user 1 to 4 multiple-choice questions and waits; a client
 answers or declines. The question is the pending tool call and the answer is
 its `ToolResult`, so Questions writes no events. Design:
@@ -14,6 +14,7 @@ its `ToolResult`, so Questions writes no events. Design:
 | --- | --- |
 | `S:SessionConfig` | `interactive`, read on each call: a non-interactive Session gets an error result at once. |
 | `S:ToolRegistry` | Register `ask_user`, until this part unloads. |
+| `S:SessionMethods` | Register the `session.question` namespace, until this part unloads. |
 
 ## Tool
 
@@ -163,7 +164,7 @@ Rules: [principles](../principles.md) §1 and §4,
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:SessionConfig`、`S:ToolRegistry` |
-| 提供 | `S:SessionMethods#session.question` |
+| 注入 | `S:SessionConfig`、`S:SessionMethods`、`S:ToolRegistry` |
+| 提供 | — |
 | 被注入于 | — |
 <!-- /generated -->

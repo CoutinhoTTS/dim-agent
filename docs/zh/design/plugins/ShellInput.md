@@ -2,7 +2,7 @@
 
 状态：Implemented（[能力页](../../../architecture/rust-agent/plugins/ShellInput.md)）。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。基于 C1（[#47](https://github.com/arcships/dim/issues/47)，含逐次调用的进度，[#125](https://github.com/arcships/dim/pull/125)）和 S7（[#52](https://github.com/arcships/dim/issues/52)）（[roadmap §3.3](../../../design/roadmap.md#33-插件开工顺序)）。
 
-在 Session 的工作目录中执行用户输入的 `!command` 和 `!!command`。`!command` 的结果（命令及有界输出）作为 Append 输入写入，因此随下一次模型请求进入上下文；`!!command` 的输出只发给调用方客户端。ShellInput 是一个没有事件的 Session 插件。它通过 `sessionMethods` 服务（Session 作用域，key `shell`；[session-boundary](../contracts/session-boundary.md)）以普通 Session 方法提供 `shell.run`、`shell.stop` 和 `shell.list`；契约以语言中立形式给出，Rust 形式见[附录 G](#附录-g-rust-绑定)。每个 Session 最多同时运行一个命令。命令自行结束、收到 `shell.stop`，或在 Session 部分结束时（Session 关闭、ShellInput 或 Session 重载、App Server 关闭）结束。命令运行期间持有 Session，因此宿主的空闲卸载会等它结束（§3.2）。
+在 Session 的工作目录中执行用户输入的 `!command` 和 `!!command`。`!command` 的结果（命令及有界输出）作为 Append 输入写入，因此随下一次模型请求进入上下文；`!!command` 的输出只发给调用方客户端。ShellInput 是一个没有事件的 Session 插件。它把命名空间 `shell` 注册到本 Session 的 `sessionMethods`（[session-boundary](../contracts/session-boundary.md)），以普通 Session 方法提供 `shell.run`、`shell.stop` 和 `shell.list`；契约以语言中立形式给出，Rust 形式见[附录 G](#附录-g-rust-绑定)。每个 Session 最多同时运行一个命令。命令自行结束、收到 `shell.stop`，或在 Session 部分结束时（Session 关闭、ShellInput 或 Session 重载、App Server 关闭）结束。命令运行期间持有 Session，因此宿主的空闲卸载会等它结束（§3.2）。
 
 ## 1. 结构
 
@@ -32,11 +32,11 @@ flowchart LR
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `ShellInputPlugin` | Session | `P:HostPlatform`（与 WorkspaceTools 的用法相同）、`S:SessionConfig`（`cwd`）、`S:TreeCommands`、`S:SessionLifecycle`、`S:SessionIdentity` | `sessionMethods` key `shell` |
+| `ShellInputPlugin` | Session | `P:HostPlatform`（与 WorkspaceTools 的用法相同）、`S:SessionConfig`（`cwd`）、`S:TreeCommands`、`S:SessionLifecycle`、`S:SessionIdentity`、`S:sessionMethods` | 把 `shell` 注册到 `sessionMethods` |
 
 依赖的契约：
 
-- `sessionMethods` 的分发、错误与调用归属（C1，[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。已合入的契约修改 [#120](https://github.com/arcships/dim/pull/120) 确定了共享方法类型的位置（dim-agent-capabilities 的 `methods` 模块），并规定 Rpc 对不在任何装配时记录的 Session 命名空间内的名称，在读取 params 或 `sessionId` 之前就回复 `unknown_method`。ShellInput 不依赖其中任何一项：它的绑定从 A.1 放置共享类型的位置取用它们，也不依赖 Rpc 报告分发错误的顺序。
+- `sessionMethods` 的分发、错误与调用归属（C1，[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。已合入的契约修改 [#120](https://github.com/arcships/dim/pull/120) 确定了共享方法类型的位置（dim-agent-capabilities 的 `methods` 模块），并规定 Rpc 对该 Session 没有任何命名空间拥有的名称回复 `unknown_method`。ShellInput 不依赖其中任何一项：它的绑定从 A.1 放置共享类型的位置取用它们，也不依赖 Rpc 报告分发错误的顺序。
 - 逐次调用的进度（[session-boundary A.2](../contracts/session-boundary.md#a2-调用通道)）：C1 已在 [#83](https://github.com/arcships/dim/pull/83)（未合入）中实现为处理函数的 `Progress` 参数，并按该 PR 评审的要求改为尽力送达（[A.5](#a5-对其他插件的改动)）。
 - 带边界校验的 `Branch::input`，以及 InputQueue 的 Append 模式：Append 输入立即应用，随下一次模型请求被消费，从不开启轮次。
 - HostPlatform：`spawn(ProcessSpec)` 返回带 stdout、stderr、wait 和 terminate 的进程树（已实现）；命令构造器与 `exec` 的输出规则（S7，[A.5](#a5-对其他插件的改动)）。
@@ -177,7 +177,7 @@ sequenceDiagram
 
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
-| `shell.run` | `sessionMethods`（Session，key `shell`），带进度 | 运行命令（`record` 或 `private`），流式输出，返回结果 |
+| `shell.run` | `sessionMethods`（Session，命名空间 `shell`），带进度 | 运行命令（`record` 或 `private`），流式输出，返回结果 |
 | `shell.stop` | 同上 | 按 `runId` 停止运行；幂等 |
 | `shell.list` | 同上 | Session 中正在运行的运行 |
 | 标记 `dim-shell-input` kind `command` | 输入约定 | 模型可见的记录结果 |
@@ -217,7 +217,7 @@ sequenceDiagram
 
 ### A.1 方法
 
-服务 `sessionMethods`，Session 作用域，key `shell`。`describe()` 为每个方法返回一个 `MethodDecl`，均为 `interruption: report`、`notifications: []`、`reply: direct`；`shell.run` 为 `mutating: true`、`progress: true`；`shell.stop` 为 `mutating: true`；`shell.list` 为 `mutating: false`。错误为 `MethodError` 数据（附录 C）。
+命名空间 `shell`，注册到本 Session 的 `sessionMethods`。其声明为每个方法给出一个 `MethodDecl`，均为 `interruption: report`、`notifications: []`、`reply: direct`；`shell.run` 为 `mutating: true`、`progress: true`；`shell.stop` 为 `mutating: true`；`shell.list` 为 `mutating: false`。错误为 `MethodError` 数据（附录 C）。
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
@@ -361,7 +361,7 @@ shell.stop   reaches the runId before the lock: remembered; the second admission
 
 H1 到 H3 阻塞 ShellInput。S7 的另一半，即每次 spawn 时读取 exec shell 配置（ADR 002"现有插件"），不阻塞它：ShellInput 每次运行都调用构造器，因此总是使用构造器返回的 shell。S7 导出了解码器、`sanitize`、`truncate_preview` 和读取宽限。其余辅助函数由 ShellInput 的实现在 `workspace_tools::exec` 中公开，不改行为，也不复制：`tail_bytes` 和 `signal_name` 原样公开，`capture_preview` 改为作用于预览缓冲区的函数，`pump` 改为写入 `OutputSink`，`exec` 的输出（含文件转存）也实现它。
 
-**Rpc 与 Session 门面：C1**（[#47](https://github.com/arcships/dim/issues/47)、[#83](https://github.com/arcships/dim/pull/83)）。除已合入的契约和 #83 的尽力送达进度外没有需求：`sessionMethods` 中的 key `shell`、经 Session 分发（恢复已卸载的 Session）、装配未登记 `shell` 时 `unknown_method`（同一装配的每个 Session 都列出该装配登记的每个命名空间）、已登记但该 Session 的提供方未激活时 `service_reloading`，以及带 `report` 中断的调用归属（session-boundary A.1）。按 #83 的实现，接纳调用的 Rpc 装载卸载时调用的取消令牌触发，Rpc 卸载会等到调用了结；ShellInput 的处理函数在该令牌触发时返回（A.4 两种取消）。
+**Rpc 与 Session 门面：C1**（[#47](https://github.com/arcships/dim/issues/47)、[#83](https://github.com/arcships/dim/pull/83)）。除已合入的契约和 #83 的尽力送达进度外没有需求：`sessionMethods` 中的命名空间 `shell`、经 Session 分发（恢复已卸载的 Session）、该 Session 没有部分注册 `shell` 时 `unknown_method`、`shell` 已撤回且 ShellInput 正在启动或重载时 `service_reloading`，以及带 `report` 中断的调用归属（session-boundary A.1）。按 #83 的实现，接纳调用的 Rpc 装载卸载时调用的取消令牌触发，Rpc 卸载会等到调用了结；ShellInput 的处理函数在该令牌触发时返回（A.4 两种取消）。
 
 **Agents：无。** 本节原先向 Agents 请求的 Session 活动句柄（避免调用方断开后，空闲卸载结束 `!` 运行）已随 S3 放弃（[#57](https://github.com/arcships/dim/issues/57)）。[空闲 Session 卸载](../appserver/idle-unload.md)（[#126](https://github.com/arcships/dim/issues/126)）以运行时活动持有回答了这个问题（其 §5 与 §11.1 的 R1），每个脱离工作的所有者都取得它：ShellInput 每次运行持有一个（A.4 持有；其 §11.2 的 R3），因此运行在途时 Agents 执行的空闲卸载（[#331](https://github.com/arcships/dim/pull/331)）被拒绝，永远不会结束运行；运行记录完成后，Session 在宽限期后卸载。
 
@@ -481,8 +481,8 @@ ShellInput 用 Rust 实现，为 dim-agent-capabilities 的 `shell_input` 模块
 
 | 中立契约 | Rust 绑定 |
 | --- | --- |
-| 插件 | `TypedPlugin` 与 `Capability`；`Deps = (Arc<HostPlatform>, InSession<SessionConfig>, InSession<TreeCommands>, InSession<SessionLifecycle>, InSession<SessionIdentity>)`，key 按工厂的 `SessionScope` 限定 |
-| `sessionMethods` key `shell` | `dim_agent_capabilities::methods` 的 `SessionMethods::provide(ctx, &scope, "shell", declarations, handler)`（C1，[#83](https://github.com/arcships/dim/pull/83)），在 `apply` 中于 ShellInput 自己的 effect 之后调用，因此它的卸载 effect 先运行。`declarations` 为 `MethodDecl { progress: true, ..MethodDecl::new("shell.run", true, Interruption::Report) }`、`MethodDecl::new("shell.stop", true, Interruption::Report)` 和 `MethodDecl::new("shell.list", false, Interruption::Report)`。装配用 `AgentBuilder::session_methods("shell")` 登记命名空间 |
+| 插件 | `TypedPlugin`；`Deps = (Keyed<HostPlatform>, Keyed<SessionConfig>, Keyed<TreeCommands>, Keyed<SessionLifecycle>, Keyed<SessionIdentity>, Keyed<SessionMethods>)` |
+| 命名空间 `shell` | 在 `Keyed<SessionMethods>` 依赖（`dim_agent_capabilities::methods`）上调用 `methods.register(ctx, "shell", declarations, handler)`，在 `apply` 中于 ShellInput 自己的 effect 之后调用，因此它的卸载 effect 先运行。`declarations` 为 `MethodDecl { progress: true, ..MethodDecl::new("shell.run", true, Interruption::Report) }`、`MethodDecl::new("shell.stop", true, Interruption::Report)` 和 `MethodDecl::new("shell.list", false, Interruption::Report)` |
 | 处理函数 | 一个 `Handler`，以方法名、参数、调用的 `CancellationToken`（A.4 两种取消）和它的 `Progress` 调用，返回 `Result<Value, RpcError>` 的 future。自己的错误用 `RpcError::app(-32000, "shell_busy", ..)` 等，`invalid_params` 用 `RpcError::invalid`；运行时门面的错误用 `?` 转换（`From<AgentError> for RpcError`） |
 | 进度 | 处理函数的 `Progress` 参数：`progress.send(json!({"text": text}))`，有略去的字节时加上 `"skipped"`。运行任务持有它的克隆；回复之后的发送被丢弃 |
 | 命令构造 | `HostPlatform::build_process_spec(command, cwd).await` 返回 `(ProcessSpec, ExecShellRuntime)` 或 `ProcessSpecError { code, reason }`；内部读取当前 shell。处理函数用 `select!` 让它与调用的取消令牌竞争 |

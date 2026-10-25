@@ -253,6 +253,11 @@ async fn codex(
     base: &str,
 ) -> (Ctx, FiberView, FiberView, Arc<OpenAICodexOAuthService>) {
     let root = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.to_owned(),
     ])));
@@ -623,6 +628,11 @@ async fn minimal_ts_legacy_records_recover_only_from_fixed_plugin_config() {
         write(&home, &minimal);
         let before = fs::read(home.join("auth.json")).unwrap();
         let root = Ctx::root().unwrap();
+        // The management table the process providers register with.
+        root.plugin(
+            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+                .unwrap(),
+        );
         let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ])));
@@ -804,6 +814,11 @@ async fn browser_cancellation_and_external_record_changes_do_not_commit_stale_id
 async fn grok_device_flow_observes_slowdown_expiry_cancellation_and_uri_trust() {
     let (f, server, home) = fixture().await;
     let root = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));

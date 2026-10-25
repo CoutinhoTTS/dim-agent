@@ -4,7 +4,7 @@ Status: Ready (redesign, [#144](https://github.com/arcships/dim/issues/144)); th
 
 The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer, or a decline. **The question is the pending tool call, and the answer is its tool result.** A client sees the question as the committed `step/tool-call` of `ask_user` that has no `step/tool-result` yet, answers it with the Session method `session.question.respond`, and the waiting handler returns the answer as its `ToolResult`; ToolExecutor publishes it in the batch's `step/tool-result` like any other tool output. The model learns the user's choice only from `ToolResult.content`.
 
-Questions defines **no Timeline events** and has **one part**, a Session Capability. It registers the `ask_user` tool with the Session's `toolRegistry` and provides the method `session.question.respond` (`sessionMethods`, namespace `session.question`) ([session-boundary](../contracts/session-boundary.md)), and holds, in memory, the waiters of the Session's running `ask_user` calls, as a running tool holds its I/O. Interrupt, close, reload, restart and fork are settled by the existing tool-call lifecycle of [ToolExecutor](../../architecture/rust-agent/plugins/ToolExecutor.md).
+Questions defines **no Timeline events** and has **one part**, a Session Capability. It registers the `ask_user` tool with the Session's `toolRegistry` and provides the method `session.question.respond` by registering the namespace `session.question` with `sessionMethods` ([session-boundary](../contracts/session-boundary.md)), and holds, in memory, the waiters of the Session's running `ask_user` calls, as a running tool holds its I/O. Interrupt, close, reload, restart and fork are settled by the existing tool-call lifecycle of [ToolExecutor](../../architecture/rust-agent/plugins/ToolExecutor.md).
 
 Changes from the merged redesign ([#178](https://github.com/arcships/dim/pull/178)), all from checking it against current `main` and the ablation review (§11):
 
@@ -47,7 +47,7 @@ Contracts are given in language-neutral form; the Rust form is [Appendix G](#app
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `QuestionsPlugin` | Session | `S:SessionConfig`, `S:ToolRegistry` | Registers `ask_user` with `toolRegistry`; `sessionMethods` namespace `session.question` (`session.question.respond`) |
+| `QuestionsPlugin` | Session | `S:SessionConfig`, `S:ToolRegistry`, `S:SessionMethods` | Registers `ask_user` with `toolRegistry` and `session.question` (`session.question.respond`) with `sessionMethods` |
 
 Installation: the part is installed whenever the plugin is enabled; installation never reads `SessionConfig.interactive` ([session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin)), so every Session that mounts `ask_user` declares it whatever its `interactive` (a Session without a mount list mounts it, one with a list when the list names it), and a fork keeps the same tool set and prompt prefix.
 
@@ -260,7 +260,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.9 Only facts later decisions use | No event is added; every omitted fact is justified in §2. Display before the batch settles would use a Session broadcast notice, not the Timeline (F1). |
 | §1 Capability and App Server boundary | The part is a Capability in its own crate; Rpc and the CLI hold no Questions logic beyond the client contract. |
 | ADR 002 D1 Scope | Tool, method and waiters are Session services; a waiter is the `ask_user` handler's own call, which the Session-scoped registered tool runs, so it has the same owner. Branch lifecycle reaches it through ToolExecutor's cancel token. |
-| ADR 002 D2 No wiring modules | ToolRegistry and Rpc collect the services by name; there is no adapter part. |
+| ADR 002 D2 No wiring modules | Questions registers its tool with ToolRegistry and its namespace with `sessionMethods`; there is no adapter part. |
 | ADR 002 D3 Scope dependencies | The part depends only on the Session's `SessionConfig`; nothing core depends on Questions; a reload settles waiting calls, which is accepted. |
 | ADR 002 D4 Configuration | Not applicable: Questions has no configuration. `interactive` is Session creation data read at call time, not configuration of Questions. |
 | ADR 002 D5 Language-neutral contracts | Tool and method are given in neutral form (Appendix A); Appendix G is one binding. |
@@ -371,7 +371,7 @@ Private to the part. `(branchId, requestId, callId) → {questions: Question[], 
 
 ### A.3 Session method `session.question.respond`
 
-Service `sessionMethods`, Session scope, namespace `session.question`. Declaration `{name: "session.question.respond", mutating: true, interruption: "report", progress: false}`.
+Namespace `session.question`, registered with the Session's `sessionMethods`. Declaration `{name: "session.question.respond", mutating: true, interruption: "report", progress: false}`.
 
 `params`: `{sessionId, branchId, requestId, callId, answers?: [{questionId, selected: [label], custom?}], declined?: false}` → `{}`. `requestId` is the `request_id` of the `step/tool-call` that holds the call; `branchId`, `requestId` and `callId` are required and together name the waiting call. Either `declined` is `true` and `answers` is absent, or `answers` has exactly one entry per question. Errors are `MethodError` data:
 
@@ -515,7 +515,7 @@ Flow tests through RPC, tool calls and events:
 | Neutral contract | Rust binding |
 | --- | --- |
 | Tool `ask_user` registered with `toolRegistry` | `Keyed<ToolRegistry>`; `tools.register(ctx, ToolContribution {definition, handler})` in `apply`, as Wait does; `ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`; cancelled = `HostError::Cancelled(reason)` |
-| `sessionMethods` namespace `session.question` | `AgentBuilder::session_methods("session.question")`; `SessionMethods::provide(ctx, &scope, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)`, as ShellInput does |
+| `sessionMethods` namespace `session.question` | `Keyed<SessionMethods>`; `methods.register(ctx, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)` in `apply`, as ShellInput does |
 | `S:SessionConfig` | `InSession<SessionConfig>`, field `interactive` read per call |
 
 ```rust

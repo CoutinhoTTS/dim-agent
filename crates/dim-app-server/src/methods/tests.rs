@@ -1,11 +1,11 @@
 //! Per-call lookup, provider-owned calls and namespace ownership contracts.
 use super::*;
-use dim_agent_capabilities::methods::Interruption;
+use dim_agent_capabilities::methods::{Handler, Interruption};
 use dim_agent_runtime::{
     names::{NamedDeps, register},
     register_part, wait_active,
 };
-use rutis::{BoxFuture, Effect, KeyedGate, TypedPlugin};
+use rutis::{Keyed, KeyedGate, TypeKey};
 use rutis_loader::{Builtins, Layer, LoaderPlugin, Patch};
 use serde_json::json;
 use std::{
@@ -35,13 +35,17 @@ impl Owner {
     }
 }
 impl TypedPlugin for Owner {
-    type Deps = ();
+    type Deps = (Keyed<ManagementMethods>,);
     fn name(&self) -> &str {
         self.name
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (Keyed(methods),): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            ManagementMethods::provide(
+            methods.register(
                 ctx,
                 self.namespace,
                 self.declarations.clone(),
@@ -56,17 +60,17 @@ impl TypedPlugin for Owner {
 struct Missing;
 struct Waiting;
 impl TypedPlugin for Waiting {
-    type Deps = KeyedGate<Missing>;
+    type Deps = (KeyedGate<Missing>, Keyed<ManagementMethods>);
     fn name(&self) -> &str {
         "Waiting"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        _: Self::Deps,
+        (_, Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            ManagementMethods::provide(
+            methods.register(
                 ctx,
                 "pending",
                 vec![decl("pending.read", Interruption::Drain)],
@@ -77,7 +81,7 @@ impl TypedPlugin for Waiting {
     }
 }
 
-/// A provider whose apply fails before it provides `broken`.
+/// A provider whose apply fails before it registers `broken`.
 struct Broken;
 impl TypedPlugin for Broken {
     type Deps = ();
@@ -95,9 +99,13 @@ where
     P: TypedPlugin,
     P::Deps: NamedDeps,
 {
+    register_part(builtins, &catalog(), move |names| names.part(make())).unwrap()
+}
+fn catalog() -> dim_agent_runtime::names::ServiceCatalog {
     let mut catalog = dim_agent_runtime::names::catalog();
     register::<Missing>(&mut catalog, None);
-    register_part(builtins, &catalog, move |names| names.part(make())).unwrap()
+    register::<ManagementMethods>(&mut catalog, None);
+    catalog
 }
 fn decl(name: &str, interruption: Interruption) -> MethodDecl {
     MethodDecl::new(name, false, interruption)
@@ -107,21 +115,25 @@ fn rejected(result: Result<Accepted, RpcError>) -> String {
 }
 
 /// Owner rows in a real loader, as the process assembles them, and the
-/// namespace table Rpc receives.
+/// management table they register with.
 struct Assembly {
     root: Ctx,
     loader: Loader,
-    owners: Owners,
+    table: Arc<ManagementMethods>,
 }
 impl Assembly {
-    /// `rows` registers each row and returns its loader rows.
-    async fn new(
-        rows: impl FnOnce(&mut Builtins) -> Vec<Value>,
-        namespaces: &[(&str, &str)],
-    ) -> Self {
+    /// `rows` registers each row and returns its loader rows; the table's
+    /// row comes first.
+    async fn new(rows: impl FnOnce(&mut Builtins) -> Vec<Value>) -> Self {
         let root = Ctx::root().unwrap();
         let mut builtins = Builtins::new();
-        let rows = rows(&mut builtins);
+        let table = register_part(&mut builtins, &catalog(), |names| {
+            names.part(ManagementMethodsPlugin::new(names)?)
+        })
+        .unwrap();
+        let rows = std::iter::once(row(table))
+            .chain(rows(&mut builtins))
+            .collect();
         let plugin = LoaderPlugin::new(builtins, Default::default());
         let loader = plugin.handle();
         let view = root.plugin(plugin);
@@ -141,20 +153,31 @@ impl Assembly {
             }],
         );
         loader.reconcile(vec![assembly], None).await.unwrap();
-        let namespaces: Vec<_> = namespaces
-            .iter()
-            .map(|(namespace, row)| (namespace.to_string(), row.to_string()))
-            .collect();
-        let owners = Owners::new(loader.clone(), &namespaces);
+        let table = root
+            .get_as::<ManagementMethods>(TypeKey::of::<ManagementMethods>())
+            .expect("the management table is active");
         Self {
             root,
             loader,
-            owners,
+            table,
         }
     }
     fn dispatch(&self, method: &str, entry: &CancellationToken) -> Result<Accepted, RpcError> {
-        self.owners
-            .dispatch(&self.root, method.into(), json!({}), entry.clone(), |_| {})
+        dispatch(
+            &self.table,
+            &self.loader,
+            method.into(),
+            json!({}),
+            entry.clone(),
+            |_| {},
+        )
+    }
+    fn listed(&self) -> Vec<String> {
+        self.table
+            .listed()
+            .into_iter()
+            .map(|decl| decl.name)
+            .collect()
     }
     async fn state(&self, row: &str, state: FiberState) {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -184,21 +207,30 @@ struct State {
     release: tokio::sync::Notify,
     cancelled: tokio::sync::Notify,
     cancelled_count: AtomicUsize,
+    /// Its next generations fail before registering.
+    fail_again: std::sync::atomic::AtomicBool,
 }
 /// `fixture.*` with a blocking Drain write, a Report wait and a Drain read
 /// that returns the provider generation.
 #[derive(Clone)]
 struct Fixture(Arc<State>);
 impl TypedPlugin for Fixture {
-    type Deps = ();
+    type Deps = (Keyed<ManagementMethods>,);
     fn name(&self) -> &str {
         "Fixture"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (Keyed(methods),): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let state = self.0.clone();
             let generation = state.generation.fetch_add(1, Ordering::SeqCst);
-            ManagementMethods::provide(
+            if generation > 0 && state.fail_again.load(Ordering::SeqCst) {
+                return Err(CordisError::PluginFailed("fixture fails again".into()));
+            }
+            methods.register(
                 ctx,
                 "fixture",
                 vec![
@@ -235,11 +267,8 @@ async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let state = Arc::new(State::default());
         let fixture = Fixture(state.clone());
-        let assembly = Assembly::new(
-            |builtins| vec![row(part(builtins, move || fixture.clone()))],
-            &[("fixture", "Fixture")],
-        )
-        .await;
+        let assembly =
+            Assembly::new(|builtins| vec![row(part(builtins, move || fixture.clone()))]).await;
         // The calling load never unloads here: only the provider reloads.
         let entry = CancellationToken::new();
         let write = assembly.dispatch("fixture.write", &entry).unwrap();
@@ -288,32 +317,22 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
     let state = Arc::new(State::default());
     let fixture = Fixture(state.clone());
     let off = Owner::new("Off", "off", &["off.read"]);
-    let unlisted = Owner::new("Unlisted", "unlisted", &["unlisted.read"]);
-    let assembly = Assembly::new(
-        |builtins| {
-            vec![
-                row(part(builtins, move || fixture.clone())),
-                row(part(builtins, || Waiting)),
-                row(part(builtins, || Broken)),
-                disabled(part(builtins, move || off.clone())),
-                row(part(builtins, move || unlisted.clone())),
-                // Names a module the loader cannot resolve.
-                json!({"id": "Unresolvable", "name": "unregistered"}),
-            ]
-        },
-        &[
-            ("fixture", "Fixture"),
-            ("pending", "Waiting"),
-            ("broken", "Broken"),
-            ("unresolvable", "Unresolvable"),
-            ("off", "Off"),
-            ("absent", "Absent"),
-        ],
-    )
+    let other = Owner::new("Other", "other", &["other.read"]);
+    let assembly = Assembly::new(|builtins| {
+        vec![
+            row(part(builtins, move || fixture.clone())),
+            row(part(builtins, || Waiting)),
+            row(part(builtins, || Broken)),
+            disabled(part(builtins, move || off.clone())),
+            row(part(builtins, move || other.clone())),
+            // Names a module the loader cannot resolve.
+            json!({"id": "Unresolvable", "name": "unregistered"}),
+        ]
+    })
     .await;
     assembly.state("Waiting", FiberState::Pending).await;
     assembly.state("Broken", FiberState::Failed).await;
-    assembly.state("Unlisted", FiberState::Active).await;
+    assembly.state("Other", FiberState::Active).await;
     assert!(matches!(
         assembly
             .loader
@@ -322,34 +341,38 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
         Some(EntryStatus::Unresolved(_))
     ));
     let entry = CancellationToken::new();
-    // An enabled owner that is not active affects only its own namespace. A
-    // Pending one is retryable; a Failed or Unresolved one fails the same way
-    // until it is fixed or restarted, so clients must not retry it.
-    assert_eq!(
-        rejected(assembly.dispatch("pending.read", &entry)),
-        "service_reloading"
-    );
-    for method in ["broken.read", "unresolvable.read"] {
-        let error = assembly.dispatch(method, &entry).err().unwrap();
-        assert_eq!(error.code, -32000, "{method}");
-        assert_eq!(
-            error.data.unwrap().app_error,
-            "service_unavailable",
-            "{method}"
-        );
-    }
-    // A disabled owner, a row assembly does not have, and a provider whose
-    // namespace assembly does not configure serve nothing.
-    for method in ["off.read", "absent.read", "unlisted.read", "other.read"] {
+    // A namespace nothing has registered is unknown: an owner that has not
+    // applied yet, one that failed before registering, one that cannot be
+    // resolved or is disabled, and a name no plugin serves.
+    for method in [
+        "pending.read",
+        "broken.read",
+        "unresolvable.read",
+        "off.read",
+        "absent.read",
+    ] {
         assert_eq!(
             rejected(assembly.dispatch(method, &entry)),
             "unknown_method",
             "{method}"
         );
     }
+    // A plugin's registration is its opt-in.
+    assembly
+        .dispatch("other.read", &entry)
+        .unwrap()
+        .reply
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
-        assembly.owners.listed(&assembly.root),
-        ["fixture.read", "fixture.wait", "fixture.write"]
+        assembly.listed(),
+        [
+            "fixture.read",
+            "fixture.wait",
+            "fixture.write",
+            "other.read"
+        ]
     );
     // The calling load's unload interrupts a Report call; the provider stays.
     let entry = CancellationToken::new();
@@ -370,13 +393,28 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
     // for the settle signal never observes it still running.
     let _ = wait.settled.await;
     assert_eq!(state.cancelled_count.load(Ordering::SeqCst), 1);
-    assembly.state("Fixture", FiberState::Active).await;
+    // A registered owner whose next generation fails answers from its row:
+    // it cannot run again until it is fixed or restarted, so clients must
+    // not retry.
+    state.fail_again.store(true, Ordering::SeqCst);
+    let _ = assembly.loader.restart("Fixture").await;
+    assembly.state("Fixture", FiberState::Failed).await;
+    let error = assembly.dispatch("fixture.read", &entry).err().unwrap();
+    assert_eq!(error.code, -32000);
+    assert_eq!(error.data.unwrap().app_error, "service_unavailable");
     assembly.root.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_namespace() {
     let root = Ctx::root().unwrap();
+    let table = root.plugin(rutis::Typed::new(ManagementMethodsPlugin {
+        table: DepKey::of(),
+    }));
+    let cancellation = CancellationToken::new();
+    wait_active(&root, &[table], Duration::from_secs(5), &cancellation)
+        .await
+        .unwrap();
     for namespace in [
         "hello.nested",
         "daemon.extra",
@@ -389,12 +427,10 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
         "session.create.extra",
     ] {
         let read = format!("{namespace}.read");
-        let invalid = root.plugin(rutis::Typed::new(Owner::new(
-            "Owner",
-            namespace,
-            &[read.as_str()],
-        )));
-        let cancellation = CancellationToken::new();
+        let invalid = root.plugin(rutis::Typed::with_keys(
+            Owner::new("Owner", namespace, &[read.as_str()]),
+            (DepKey::of(),),
+        ));
         assert!(
             wait_active(&root, &[invalid], Duration::from_secs(5), &cancellation)
                 .await
@@ -413,29 +449,19 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
     let entry = CancellationToken::new();
     for child_enabled in [true, false] {
         let (parent, child) = (parent.clone(), child.clone());
-        let assembly = Assembly::new(
-            |builtins| {
-                let child = part(builtins, move || child.clone());
-                vec![
-                    row(part(builtins, move || parent.clone())),
-                    if child_enabled {
-                        row(child)
-                    } else {
-                        disabled(child)
-                    },
-                ]
-            },
-            &[("fixture", "Parent"), ("fixture.nested", "Child")],
-        )
+        let assembly = Assembly::new(|builtins| {
+            let child = part(builtins, move || child.clone());
+            vec![
+                row(part(builtins, move || parent.clone())),
+                if child_enabled {
+                    row(child)
+                } else {
+                    disabled(child)
+                },
+            ]
+        })
         .await;
         assembly.state("Parent", FiberState::Active).await;
-        // A child namespace is the child's whether or not it is enabled: the
-        // parent's method inside it is neither dispatched nor listed, and the
-        // parent keeps its other methods.
-        assert_eq!(
-            rejected(assembly.dispatch("fixture.nested.read", &entry)),
-            "unknown_method"
-        );
         assembly
             .dispatch("fixture.read", &entry)
             .unwrap()
@@ -444,7 +470,14 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
             .unwrap()
             .unwrap();
         if child_enabled {
+            // A registered child namespace is the child's: the parent's
+            // method inside it is neither dispatched nor listed, and the
+            // parent keeps its other methods.
             assembly.state("Child", FiberState::Active).await;
+            assert_eq!(
+                rejected(assembly.dispatch("fixture.nested.read", &entry)),
+                "unknown_method"
+            );
             assembly
                 .dispatch("fixture.nested.other", &entry)
                 .unwrap()
@@ -452,16 +485,22 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(
-                assembly.owners.listed(&assembly.root),
-                ["fixture.nested.other", "fixture.read"]
-            );
+            assert_eq!(assembly.listed(), ["fixture.nested.other", "fixture.read"]);
         } else {
+            // A child that never registered holds nothing: the parent serves
+            // and lists the method.
+            assembly
+                .dispatch("fixture.nested.read", &entry)
+                .unwrap()
+                .reply
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(assembly.listed(), ["fixture.nested.read", "fixture.read"]);
             assert_eq!(
                 rejected(assembly.dispatch("fixture.nested.other", &entry)),
                 "unknown_method"
             );
-            assert_eq!(assembly.owners.listed(&assembly.root), ["fixture.read"]);
         }
         // A name outside the declaration grammar is unknown without a lookup.
         let long = format!("fixture.{}read", "a.".repeat(1 << 17));

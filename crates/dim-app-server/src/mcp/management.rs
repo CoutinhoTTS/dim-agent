@@ -190,11 +190,12 @@ async fn target(
 
 pub(super) fn provide(
     ctx: &Ctx,
+    methods: &ManagementMethods,
     directory: Arc<McpService>,
     settings: Arc<SettingsService>,
     auth: Arc<McpAuth>,
 ) -> Result<(), CordisError> {
-    ManagementMethods::provide(
+    methods.register(
         ctx,
         "mcp",
         [

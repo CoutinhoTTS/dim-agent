@@ -126,17 +126,17 @@ fn error(error: SettingsError) -> RpcError {
 /// Process owner of the `permission` source and its management methods.
 pub struct PermissionRulesPlugin;
 impl TypedPlugin for PermissionRulesPlugin {
-    type Deps = (Keyed<SettingsService>,);
+    type Deps = (Keyed<SettingsService>, Keyed<ManagementMethods>);
     fn name(&self) -> &str {
         "PermissionRules"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(settings),): Self::Deps,
+        (Keyed(settings), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            ManagementMethods::provide(
+            methods.register(
                 ctx,
                 "permission",
                 ["permission.rules", "permission.set_rules"]

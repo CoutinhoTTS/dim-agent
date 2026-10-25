@@ -1,7 +1,7 @@
 import { definePlugin, type Plugin } from '@arcships/rutis'
 import type {
   AgentEvent, AuxiliaryModel, ModelId, Services, SessionBroadcast, SessionMetadata,
-  SessionMethodsContribution, SessionMethodReply, Sessions, Settings, SettingsResult,
+  SessionMethods, SessionMethodReply, Sessions, Settings, SettingsResult,
 } from '../../../npm/plugin.d.ts'
 import type { UserInput } from '../../../npm/branch-services.d.ts'
 import row from './session-title.json' with { type: 'json' }
@@ -134,11 +134,10 @@ export default definePlugin({
       })
     }
 
-    const methods: SessionMethodsContribution = {
-      async describe() {
-        return [{ name: 'session.rename', mutating: true, interruption: 'report', progress: false }]
-      },
-      async call(call, cancelled) {
+    await ctx.use<SessionMethods>('sessionMethods').register(
+      'session.rename',
+      [{ name: 'session.rename', mutating: true, interruption: 'report', progress: false }],
+      async (call, cancelled) => {
         if (closed) return reloading()
         const value = call.params.title
         if (call.method !== 'session.rename' || (value !== null && typeof value !== 'string')) {
@@ -168,7 +167,6 @@ export default definePlugin({
         }
         return failure('service_reloading', 'Title changed during rename')
       },
-    }
-    ctx.provide('sessionMethods:session.rename', methods)
+    )
   },
 })
