@@ -1829,7 +1829,9 @@
       "file": "crates/dim-app-server/src/session_typescript.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "panic",
+        "vec"
       ]
     },
     {
@@ -15974,6 +15976,16 @@
       "to": "dim_app_server::agents::sessions",
       "references": [
         "path crate::agents::SessionPermissions"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript::tests",
+      "to": "dim_app_server::session_typescript",
+      "references": [
+        "path Parts::new",
+        "path SessionTypeScriptConfig",
+        "use super::Parts",
+        "use super::SessionTypeScriptConfig"
       ]
     },
     {

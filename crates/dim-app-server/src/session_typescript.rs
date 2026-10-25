@@ -170,6 +170,21 @@ impl Parts {
                 ));
             }
             for service in provides.keys() {
+                // R6 registers contributions through their owner, not through
+                // a host-side name. A row still naming an old family would
+                // load with its contributions silently missing.
+                if let Some((family, owner)) = [
+                    ("toolContribution:", "toolRegistry"),
+                    ("sessionMethods:", "sessionMethods"),
+                    ("managementMethods:", "managementMethods"),
+                ]
+                .into_iter()
+                .find(|(family, _)| service.starts_with(family))
+                {
+                    return Err(invalid(&format!(
+                        "TypeScript row provides the removed {family} name {service}; register through {owner} instead"
+                    )));
+                }
                 // A name the catalog does not hold yet belongs to this row's
                 // group, so each instance has its own (rutis usage §3.5).
                 if let Err(LoaderError::UnknownService(_)) =
@@ -382,7 +397,7 @@ impl Plugin for BoundRow {
 
 #[cfg(test)]
 mod tests {
-    use super::exports;
+    use super::{Parts, SessionTypeScriptConfig, exports};
     use dim_agent_runtime::{AgentBuilder, AgentConfig, names::name_of};
     use rutis_loader::{Build, LoaderError};
 
@@ -427,5 +442,33 @@ mod tests {
             assert!(builder.catalog().is_shared(&name), "{name}");
             assert!(builder.catalog().key(&name).is_some(), "{name}");
         }
+    }
+
+    /// R6 replaced the host-side contribution names. A row that still
+    /// provides one must fail at configuration instead of losing the
+    /// contribution silently.
+    #[test]
+    fn a_row_providing_a_removed_contribution_family_is_refused() {
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        let config = SessionTypeScriptConfig {
+            node: "/nonexistent/node".into(),
+            js_runtime: "/nonexistent/runtime.js".into(),
+            anchor: "/nonexistent/package.json".into(),
+            python: None,
+            rows: vec![serde_json::json!({
+                "id": "legacy",
+                "name": "/nonexistent/legacy.js",
+                "group": "session",
+                "provides": {"toolContribution:ask_user": {}},
+            })],
+        };
+        let error = match Parts::new(&config, &mut builder, &[]) {
+            Ok(_) => panic!("a removed contribution family must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("removed toolContribution:"),
+            "{error}"
+        );
     }
 }
