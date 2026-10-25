@@ -4449,13 +4449,6 @@
     },
     {
       "from": "dim_agent_capabilities",
-      "to": "dim_agent_capabilities::skills::content",
-      "references": [
-        "path skills::content::SkillContributions"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::skills::session",
       "references": [
         "path skills::SessionSkills",
@@ -7571,7 +7564,6 @@
         "mod content",
         "path content::ContentConfig",
         "path content::ContentPlugin",
-        "path content::ContributionsPlugin::new",
         "path content::GROUP"
       ]
     },
@@ -7724,14 +7716,6 @@
     },
     {
       "from": "dim_agent_capabilities::skills::content",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::skills::content",
       "to": "dim_agent_runtime::scope",
       "references": [
         "path SessionLoader",
@@ -7818,8 +7802,7 @@
       "from": "dim_agent_capabilities::skills::session",
       "to": "dim_agent_capabilities::skills::content",
       "references": [
-        "path super::content::Contents::new",
-        "path super::content::SkillContributions"
+        "path super::content::Contents::new"
       ]
     },
     {

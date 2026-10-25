@@ -255,7 +255,7 @@ The gateway never calls client `fs/*` or `terminal/*`: dim works on its own reso
 
 | Step | Path |
 | --- | --- |
-| Prompt write | `session.submit` asks the Session's `submitCheck` services first ([Hooks A.6.2](Hooks.md#a62-submit-check-at-the-operator-input-entries)), which may refuse it with `input_blocked` before anything is written or return context that is appended after the user content; then `Session::input` (the gateway's user content): `validate`, then `input/message` appended; the reply carries the committed event |
+| Prompt write | `session.submit` first calls the checks registered with the Session's `submitChecks` ([Hooks A.6.2](Hooks.md#a62-submit-check-at-the-operator-input-entries)), which may refuse it with `input_blocked` before anything is written or return context that is appended after the user content; then `Session::input` (the gateway's user content): `validate`, then `input/message` appended; the reply carries the committed event |
 | Adoption | InputQueue (Dispatcher) appends `input/applied`; Loop appends `turn/start`, `input/consumed` and runs the turn |
 | Withdraw | `session.input.withdraw` (InputQueue's `sessionMethods`) writes `input/withdraw`; InputQueue consumes it in order and writes `input/deleted` if it still holds the input unapplied, else nothing (`notHeld`) |
 | Stop | `session.stop` writes turn-scoped `stop/interrupt` through the Session facade and waits for settlement |

@@ -23,7 +23,7 @@ plugin with the same name.
 
 | Plugin | Process | Session parts | Branch parts |
 | --- | --- | --- | --- |
-| [Skills](Skills.md) | SkillsCatalog | SkillContributions, Skills, SkillContent (SkillContentInstances) | SkillsBranch |
+| [Skills](Skills.md) | SkillsCatalog | Skills, SkillContent (SkillContentInstances) | SkillsBranch |
 | [PromptSources](PromptSources.md) | — | PromptRegistry, PromptSources | PromptSourcesBranch |
 | [WorkspaceTools](WorkspaceTools.md) | — | WorkspaceTools | FileReads, BackgroundExec |
 | [Wait](Wait.md) | — | Wait | WaitBranch |

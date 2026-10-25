@@ -20,7 +20,7 @@ use std::{
 };
 
 /// The parts the Skills plugin registers.
-const PARTS: [&str; 3] = ["SkillContributions", "Skills", "SkillsBranch"];
+const PARTS: [&str; 2] = ["Skills", "SkillsBranch"];
 
 /// Requires the Session and branch parts in the profile and adds the
 /// per-content extension. The Skills plugin (`SkillsCatalogPlugin`, or a
@@ -40,15 +40,9 @@ pub fn install(builder: &mut AgentBuilder) {
 /// that owns `ctx`, which holds the catalog they read.
 pub fn register_parts(ctx: &Ctx, parts: &std::sync::Arc<PartRegistry>) -> Result<(), CordisError> {
     parts.register(ctx, PartScope::Session, PARTS[0], |mount| {
-        mount
-            .names
-            .part(content::ContributionsPlugin::new(mount.names)?)
-            .map(Some)
-    })?;
-    parts.register(ctx, PartScope::Session, PARTS[1], |mount| {
         mount.names.part(SkillsPlugin::new(mount.names)?).map(Some)
     })?;
-    parts.register(ctx, PartScope::Branch, PARTS[2], |mount| {
+    parts.register(ctx, PartScope::Branch, PARTS[1], |mount| {
         mount
             .names
             .part(SkillsBranchPlugin::new(mount.names)?)

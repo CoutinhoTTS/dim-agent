@@ -66,7 +66,6 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `sessionLoader` | session | SessionScope | Rust-only | — |
 | `sessionMethods` | session | SessionMethods | yes | `register` async |
 | `sessionSkills` | session | Skills | Rust-only | — |
-| `skillContributions` | session | SkillContributions | Rust-only | — |
 | `timelineFactory` | session | SessionScope | Rust-only | — |
 | `timelineStore` | session | SessionScope | Rust-only | — |
 | `timelineTree` | session | TimelineTree | Rust-only | — |
