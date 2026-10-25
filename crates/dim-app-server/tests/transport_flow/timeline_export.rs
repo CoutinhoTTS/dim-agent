@@ -360,8 +360,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         // A newer marker and a changed schema are rejected unchanged.
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 19));
-                INSERT INTO agent_store_format VALUES (19);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 20));
+                INSERT INTO agent_store_format VALUES (20);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);
