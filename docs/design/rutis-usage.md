@@ -248,14 +248,15 @@ These requirements concern how Dim uses rutis. They follow
 
 ### R6. Contributions register with their owner
 
-- **Blocked:** [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
-  ("Registration: declared by the plugin … not by host-side `AgentBuilder` calls"). The host
-  pre-registers contribution names (`session_tool`, `session_methods`, `session_prompt_source`,
-  `session_tool_source`, `host_tools`) and translates a foreign row's `provides` into the same calls.
-  A native tool contribution and a foreign one have different keys, so ToolRegistry reads both and
-  detects a retiring foreign generation through a sidecar token found by the same string
-  (`tool_registry.rs:486-509`); Rpc keeps the same split for method namespaces. Prompt and tool
-  sources are closed to foreign parts.
+- **Before R6:** [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
+  ("Registration: declared by the plugin … not by host-side `AgentBuilder` calls") was blocked: the
+  host pre-registered contribution names (`session_tool`, `session_methods`,
+  `session_prompt_source`, `session_tool_source`, `host_tools`) and translated a foreign row's
+  `provides` into the same calls. A native tool contribution and a foreign one had different keys,
+  so ToolRegistry read both and detected a retiring foreign generation through a sidecar token
+  found by the same string (`tool_registry.rs:486-509`); Rpc kept the same split for method
+  namespaces. Prompt and tool sources were closed to foreign parts. The `Needed` and `Owner`
+  bullets below describe what replaced it.
 - **Existing mechanisms considered:**
   - Finding contributions by name in the instance, from `rutis/service` events or a catalog listing.
     Rejected: the owner would learn from framework internals (which rows provide which names) what

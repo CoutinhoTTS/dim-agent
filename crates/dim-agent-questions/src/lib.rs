@@ -432,8 +432,8 @@ fn ask_user_definition() -> ToolDefinition {
     definition
 }
 
-/// The Questions Session part: `toolContribution` `ask_user` and
-/// `sessionMethods` `session.question`.
+/// The Questions Session part: `ask_user` registered with ToolRegistry and
+/// `session.question` registered with the Session method table.
 pub struct QuestionsPlugin;
 impl TypedPlugin for QuestionsPlugin {
     type Deps = (
