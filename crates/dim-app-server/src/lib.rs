@@ -339,11 +339,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     if config.product_home.is_some() {
         config.daemon_profile = protocol::DaemonProfile::Product;
     }
-    builder.require_feature(
-        dim_agent_runtime::Feature::new("AgentsSession").session("AgentsSession", |names| {
-            names.part(agents::AgentsSessionPlugin)
-        }),
-    );
+    // Agents registers it.
+    builder.require_part("AgentsSession");
     #[cfg(not(unix))]
     if config.unix_path.is_some() {
         return Err(ServerError::Configuration(
