@@ -2,9 +2,11 @@
 
 The Rust CLI uses this server over a private Unix socket (NDJSON) or Windows named pipe. The server owns Agent v4 execution, approvals, model/provider selection and native storage. Product and configured profiles require protected local transports for execution and management; their WebSocket endpoint supports only `hello` and `ping`. The explicit mock profile permits WebSocket execution for protocol testing.
 
-The local web entry for the [Web workspace](../../docs/design/web-workspace.md) is opened at runtime with `web.open` from a local connection. It binds loopback only, serves the frontend from the directory given with `--web-assets DIR` (the separate `dimcode-web` artifact, which the CLI finds; a directory whose `dimcode-web.json` names another protocol version is refused with `web_assets_incompatible`) or, in a build with the `embedded-web` feature, the one `build.rs` built from `web/` and embedded, and admits browsers that exchanged the bootstrap token from `web.open`'s URL for a cookie. Its connections speak protocol v3 and get Session methods (including execution Session methods) plus read-only `provider.list`, `provider.catalog` and `provider.selection`; other management methods and `daemon.shutdown` are `unknown_method`. The local connection that called `web.open` holds the entry; when the last holder disconnects, every token is revoked and web connections detach.
+The local web entry for the [Web workspace](../../docs/design/web-workspace.md) is opened at runtime by `web.open` (a holder) or `web.toggle` (the daemon-owned switch); `dimcode web --off` calls `web.disable`. It binds loopback only, serves the frontend from the directory given with `--web-assets DIR` (the separate `dimcode-web` artifact, which the CLI finds; a directory whose `dimcode-web.json` names another protocol version is refused with `web_assets_incompatible`) or, in a build with the `embedded-web` feature, the one `build.rs` built from `web/` and embedded, and admits browsers that exchanged the bootstrap token from the returned URL for a cookie. Its connections speak protocol v3 and get Session methods (including execution Session methods) plus read-only `provider.list`, `provider.catalog` and `provider.selection`; other management methods and `daemon.shutdown` are `unknown_method`. The entry stays open while the switch is on or any holder is connected; when both are gone, every token is revoked and web connections detach.
 
-The UI registry ([Tui design §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-uihost)) is the daemon's record of the interfaces viewing its Sessions, any number per Session: a local connection attached to a Session calls `ui.attach {sessionId, kind}` and gets a `uiId`; `ui.status` lists the registrations and counts web entry connections; `ui.shutdown {uiId, reason?}` sends the `ui.shutdown` notification on that interface's connection, which the terminal UI obeys by leaving (the Session goes on); `ui.replace {uiId, sessionId, kind}` registers the caller and asks the old one to leave. A registration ends with its connection; the daemon never kills a process. The methods are local-only and advertised in `hello`.
+The UI registry ([Tui design §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-and-ui-leaves)) is the daemon's record of the interfaces viewing its Sessions, any number per Session. `UiHostPlugin` is a process `Capability` providing `UiHost`. A terminal interface is a UI leaf: the interactive `dimcode` process is a rutis node waiting on a private address, and `ui.open` makes the daemon link to it with `PeerPlugin` and host the ordinary `Tui` plugin there with `plugins.load("Tui", {uiId, token, sessionId})`, unloading it in the same row's effect. The daemon starts no process and runs no UI control protocol; a leaf lives as long as its link. The hosted `Tui` keeps the ordinary protocol v3 business connection and registers it with `ui.attach {sessionId, kind, uiId, token}`.
+
+`ui.open {sessionId, kind, peer, address, replace?, expectedGeneration?}` links to the leaf at `address` (its node id `peer` becomes the `uiId`) and returns `{uiId, generation}` once its `Tui` is loaded; a link or load failure is `ui_leaf_failed` and registers nothing. `ui.close` sends the advisory `ui.shutdown` and disposes the leaf (unload, so the leaf restores its terminal, then link close). `ui.status` is a read for management clients: a leaf is `starting` until `Tui` is loaded and attached, then `online` (or `replacing` while it replaces another); a leaf whose link stops is removed. There is no heartbeat. `ui.replace` replaces a connection registration; `ui.open {replace}` claims the observed generation before the link, closes the old interface only after the new leaf is loaded, and leaves it untouched when the start fails. Disposing `UiHostPlugin` waits for every leaf disposal. The methods are local-only and advertised in `hello`, with `ui.leaf`.
 
 Commands below run from the repository root:
 
@@ -170,8 +172,9 @@ configuration; a later acquisition can reconnect. It reports cleanup failure rat
 loader reconciliation as proof of successful cleanup.
 
 Standalone hosts using `McpPlugin::new(home_root)` register `McpPublication` and its
-`standalone_template` with their `Builtins` and include both rows in the immutable
-assembly. The publication plugin owns its coordinator worker: it starts after
+`standalone_template` with their `Builtins` and the catalog their loader uses
+(`dim_app_server::catalog()` holds the App Server's names), and include both rows in the
+immutable assembly. The publication plugin owns its coordinator worker: it starts after
 apply and is settled, with its cleanup result, when the plugin unloads. Pass an
 explicit `McpOwner::new(ctx, loader)` when acquiring connections. Agent hosts
 instead use `mcp::install` and the declared Session loader. Its typed port is a
@@ -203,15 +206,15 @@ and paired devices cannot read or write them. See
 
 The configured digest is SHA-256 of the same original bytes parsed and validated for that server launch. It excludes neither whitespace nor environment-variable reference names, and never prints file contents or resolved environment values. A client must refuse another profile or configuration rather than reuse, delete or terminate its daemon.
 
-`--home` and `--database` are mutually exclusive. The SQLite store uses native format v18. It holds user settings in the unchanged v13 settings data contract, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17) and extension event rows (v18).
+`--home` and `--database` are mutually exclusive. The SQLite store uses native format v19. It holds user settings in the unchanged v13 settings data contract, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17), extension event rows (v18) and Session configurations and Agent profiles that may omit their mount list (v19).
 
-Startup opens a store with the exact v18 schema and a single marker of 18. A store with the exact v17, v16, v15 or v13 schema and its own single marker is upgraded in place to v18 inside the startup admission transaction, before any writable PRAGMA. The transaction replaces the marker table once, then applies each step from that version on:
+Startup opens a store with the exact v19 schema and a single marker of 19. A store with the exact v18, v17, v16, v15 or v13 schema and its own single marker is upgraded in place to v19 inside the startup admission transaction, before any writable PRAGMA. The transaction replaces the marker table once, then applies each step from that version on:
 
 - v13 → v15 adds `session_files`, `session_file_owners` and the `session_file_owners_by_file` index.
 - v15 → v16 adds `session_metadata`.
-- v16 → v17 and v17 → v18 change only the marker.
+- v16 → v17, v17 → v18 and v18 → v19 change only the marker.
 
-No business row is read or rewritten. v13 settings bytes and v16 request rows stay readable as written, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v18; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. There is no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
+No business row is read or rewritten. v13 settings bytes and v16 request rows stay readable as written, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v19; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. There is no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
 
 ### Timeline export
 
@@ -231,7 +234,7 @@ The server writes `tracing` output to stderr, filtered by `RUST_LOG` (errors onl
 
 ## Optional managed provider
 
-The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.12.1:
+The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.16.0:
 
 ```sh
 dim-app-server --product-home /absolute/product-home \
@@ -241,7 +244,7 @@ dim-app-server --product-home /absolute/product-home \
   --js-runtime /absolute/runtime/node_modules/@arcships/rutis-runtime
 ```
 
-All three plugin flags are required together; `--node` and `--js-runtime` are shared with `--session-rows`. `--js-runtime` names the installed package directory, not a bootstrap script. Node is started by absolute executable path. The runtime receives no terminal stdin, stdout or stderr; business output is returned through the server protocol. The runtime and plugin are separate rutis loader rows in the existing process tree.
+All three plugin flags are required together; `--node` and `--js-runtime` are shared with `--session-rows`. `--js-runtime` names the installed package directory, not a bootstrap script. Node is started by absolute executable path. The runtime receives no terminal stdin or stdout; each line of its stderr is written to the App Server's own stderr, the process log, and business output is returned through the server protocol. The runtime and plugin are separate rutis loader rows in the existing process tree.
 
 The plugin package contains `package.json`, its ESM entry and `dim-plugin.json`:
 
@@ -259,7 +262,7 @@ The plugin package contains `package.json`, its ESM entry and `dim-plugin.json`:
 
 The host checks compatibility and confines the canonical entry path to the plugin directory. Release staging verifies download and file digests before loading or packaging code. An explicitly configured invalid or incompatible plugin fails startup. Without plugin configuration, no Node process starts.
 
-The managed-provider package contract remains `@arcships/rutis` 0.10.0: the 0.12.1 runtime accepts its plugin API 1 exports. The ESM entry is a `definePlugin` export. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
+The managed-provider package contract remains `@arcships/rutis` 0.10.0: the 0.16.0 runtime accepts its plugin API 1 exports. The ESM entry is a `definePlugin` export. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
@@ -442,18 +445,21 @@ Public API-key, provider, native subscription and transport flows do not need No
 cargo test --locked -p dim-app-server --test provider_flow --test managed_oauth_flow --test model_catalog_flow --test transport_flow
 ```
 
-The separately enabled Node flows load public SDK fixtures: plugins through the actual rutis runtime, and MCP servers built on the official MCP SDK. They cover managed-provider recovery; C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries; and stdio and legacy SSE MCP discovery, calls, cancellation and cleanup. They do not require a private account package:
+The separately enabled Node flows load public SDK fixtures: plugins through the actual rutis runtime, and MCP servers built on the official MCP SDK. They cover managed-provider recovery; C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries; Python rows and an unmodified Cordis 4 plugin in their groups; and stdio and legacy SSE MCP discovery, calls, cancellation and cleanup. They do not require a private account package. The Python rows need Python 3.10 or later with the pinned `rutis` package:
 
 ```sh
 npm ci --prefix runtime --ignore-scripts
+python3 -m venv runtime/.venv
+runtime/.venv/bin/python -m pip install --require-hashes --no-deps -r runtime/python-requirements.txt
 DIM_TEST_NODE="$(command -v node)" \
 DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime" \
 DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs" \
+DIM_TEST_PYTHON="$PWD/runtime/.venv/bin/python" \
   cargo test --locked -p dim-app-server --test transport_flow --test mcp_http_flow \
   node_ -- --ignored
 ```
 
-CI selects these flows by the `node_` prefix, so a `node_*` flow may depend only on Node and public npm packages, never on credentials or remote services. `context7_live_through_rust_plugins` calls the hosted Context7 MCP server with `CONTEXT7_API_KEY`, so it is a manual live check that CI does not run:
+CI selects these flows by the `node_` prefix, so a `node_*` flow may depend only on Node, Python and the public npm and PyPI packages the repository pins, never on credentials or remote services. `context7_live_through_rust_plugins` calls the hosted Context7 MCP server with `CONTEXT7_API_KEY`, so it is a manual live check that CI does not run:
 
 ```sh
 cargo test --locked -p dim-app-server --test mcp_http_flow \
@@ -468,19 +474,21 @@ It installs no production capability bridge or Session RPC methods.
 ## Session TypeScript embedding
 
 `ServerConfig.session_typescript` accepts `SessionTypeScriptConfig` with absolute Node executable,
-runtime package and anchor paths, plus ordinary loader rows. `rows` holds Session/branch
-parts; `process_rows` holds ordinary process owners in the same runtime. Existing Rust
-struct-literal callers must provide `process_rows: Vec::new()` when unused.
-Tool names and Session method
-namespaces come from each row's existing `RowSchema.provides` dictionary; share one declaration
-source between the host row and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md)
+runtime package and anchor paths, an optional Python runtime (`python`: an interpreter with the
+`rutis` package and the directory its `py:<module>` rows are imported from), plus ordinary loader
+rows. Each row declares its group: `"group": "session"` or `"branch"`, or none for a process owner;
+the host places it there. The runtimes' standard error reaches the process log; their standard
+output is discarded.
+A Session row registers its tools
+and Session method namespaces from its own `apply`, with the `toolRegistry` and `sessionMethods`
+services it injects; its `RowSchema.provides` lists only the services it provides by name. See the [binding contract](../../docs/design/session-typescript.md)
 and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
 
 The `dim-app-server` binary builds this configuration from `--session-rows FILE` with the
-existing `--node` and `--js-runtime` flags. `FILE` is a JSON array of ordinary Session/branch
-loader rows; it is also the anchor, so package names in the rows resolve from its location.
-Rows are validated as they are for an embedding host; nothing is installed by default and
-process rows have no flag. Optional packages such as
+existing `--node` and `--js-runtime` flags, and `--python PATH` for `py:` rows. `FILE` is a JSON
+array of ordinary loader rows, each with its group; it is also the anchor, so package names in the
+rows resolve from its location and `py:` modules are imported from its directory. Rows are
+validated as they are for an embedding host; nothing is installed by default. Optional packages such as
 [SessionTitle](../../runtime/plugins/session-title/README.md) and Goal are enabled this way:
 
 ```sh
@@ -493,9 +501,9 @@ dim-app-server --product-home /absolute/product-home --home /absolute/product-ho
 Rows that declare Settings sources need `--product-home` or `--home`. Without the flag, their
 namespaces answer `unknown_method` and are absent from `session.methods`.
 
-Process rows can provide `managementMethods:<namespace>` with asynchronous `describe`
-and `call`. Their original row projects the foreign service to native management
-admission, progress and cancellation; Rpc still looks up each provider per call.
+Process rows inject `managementMethods` and register their namespaces from their own
+`apply`, with native management admission, progress and cancellation; Rpc reads the
+management table per call.
 Process owners survive Session closure. Optional Pending/Failed rows affect only
 their own namespaces, while required host infrastructure and the shared runtime
 declaration gate retain the startup deadline. Module top levels must do no business
@@ -525,12 +533,12 @@ Rows remain optional: a row genuinely Pending on a missing dependency does not d
 Session use; its methods may report `service_reloading` and its tools stay omitted until reload
 if absent at the first registry read. Successful submit/idle replies certify native processing,
 not execution of an omitted tool; the example prints durable history to show the actual result.
-A row can declare `"sessionEvents:<part>": {"bind":"sync"}` in the same `provides`
-dictionary. Its original row receives Session identity, the creation configuration and
-a closing Promise once its projection is visible. Register `ctx.on('session.event', ...)`
-there and filter by the supplied Session id. The payload is
-`{sessionId, branchId, event}`, with the existing native AgentEvent serialization.
-NodeRows' channel workers preserve order without delaying native client notifications
+A Session row reads its Session through `sessionIdentity` (`{sessionId, restored}`),
+`sessionConfig` (the creation configuration) and `sessionLifecycle` (`activated`, `closing`,
+`hold`). It registers ``ctx.on(`session/${sessionId}`, ...)`` in its `apply` with that Session id. Its records are
+`SessionBroadcast`: `{kind: 'event', branchId, event}`, with the existing native AgentEvent
+serialization, or a `notice`, `fence` or `closed` record that an observer skips. Records of one
+Session start in emit order, and a slow listener does not delay native client notifications
 or fences. Closing and row effects own cancellation/cleanup; reload and restore never
-replay completed observations. Apply/bind only register resources; autonomous startup
-work and critical ordered branch actions remain outside this observation contract.
+replay completed observations. Apply only registers resources; background work waits for
+`activated()`, and critical ordered branch actions remain outside this observation contract.

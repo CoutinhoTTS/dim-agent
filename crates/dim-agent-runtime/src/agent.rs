@@ -576,20 +576,6 @@ impl Session {
             .get_as::<T>(loaded.scope.key::<T>())
             .ok_or_else(|| AgentError::Reloading(std::any::type_name::<T>().into()))
     }
-    /// Reads one named service of the currently loaded Session subtree, such
-    /// as the `sessionMethods` provider of a namespace. Like
-    /// [`Self::session_service`], a missing key is `Reloading`: telling an
-    /// absent name from one whose provider is not active is the caller's.
-    pub fn session_named_service<T: ?Sized + SessionService + PublicService>(
-        &self,
-        name: &str,
-    ) -> Result<Arc<T>> {
-        let loaded = self.0.owner.loaded()?;
-        loaded
-            .ctx
-            .get_as::<T>(loaded.scope.named_key::<T>(name))
-            .ok_or_else(|| AgentError::Reloading(format!("{} {name}", std::any::type_name::<T>())))
-    }
     /// The scope of the loaded Session subtree, as its plugin factories
     /// receive it, so a host can read the loader rows this Session runs.
     /// Keys under it stay readable only from inside the Session, so it opens
@@ -716,6 +702,7 @@ impl Session {
                 .as_ref()
                 .map(|loaded| loaded.children.clone())
                 .unwrap_or_default();
+            let children = crate::assembly::with_copies(&children, &this.0.owner.copies);
             if let Err(e) = shutdown_scope(&this.0.view, &children).await {
                 errors.push(e);
             }

@@ -7,10 +7,10 @@ use super::{
 };
 use crate::settings::{SettingsScope, SettingsService};
 use dim_agent_runtime::{
-    Capability, KeysOf, SessionLifecycle, SessionLoader, SessionPhase, StateCell,
-    register_capability,
+    Names, SessionLifecycle, SessionLoader, SessionPhase, StateCell, names::ServiceCatalog,
+    register_part,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
 use rutis_loader::{Builtins, InstanceResult, Loader};
 use serde::Serialize;
 use serde_json::json;
@@ -39,25 +39,28 @@ pub struct McpOwner {
 }
 impl McpOwner {
     pub fn new(ctx: Ctx, loader: Loader) -> Self {
+        let loader = Arc::new(SessionLoader::new(loader, ctx.clone()));
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             closed: ctx.cancellation_token(),
             scope: ctx.instance(),
             ctx,
-            loader: Arc::new(SessionLoader::new(loader)),
+            loader,
             session: None,
         }
     }
+    /// The owner of the Session `instance`, whose loader creates the
+    /// connection instances inside it.
     pub(super) fn in_session(
         ctx: Ctx,
         loader: Arc<SessionLoader>,
-        scope: dim_agent_runtime::SessionScope,
+        instance: rutis::InstanceId,
         session: SessionLifecycle,
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             closed: ctx.cancellation_token(),
-            scope: scope.instance,
+            scope: instance,
             ctx,
             loader,
             session: Some(session),
@@ -103,11 +106,6 @@ impl TypedPlugin for ConnectionPlugin {
                     .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
             plugin.apply(ctx, deps).await
         })
-    }
-}
-impl Capability for ConnectionPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        ((),)
     }
 }
 
@@ -212,19 +210,29 @@ struct Worker {
     settings_changed: watch::Receiver<()>,
 }
 impl McpPublication {
-    pub fn register(builtins: &mut Builtins) -> String {
-        register_capability(builtins, || Self)
+    /// Registers the process row, keyed from `catalog`, and returns its name.
+    pub fn register(
+        builtins: &mut Builtins,
+        catalog: &ServiceCatalog,
+    ) -> dim_agent_runtime::Result<String> {
+        register_part(builtins, catalog, |names| names.part(Self))
     }
     /// Explicit standalone hosts register and install this top-level template.
     /// Agents instead register the template nested in their Session assembly.
-    pub fn standalone_template(builtins: &mut Builtins) -> serde_json::Value {
-        builtins.register_with::<serde_json::Value, _, _>("StandaloneMcpServer", |build| {
+    pub fn standalone_template(
+        builtins: &mut Builtins,
+        catalog: &ServiceCatalog,
+    ) -> serde_json::Value {
+        let catalog = catalog.clone();
+        builtins.register_with::<serde_json::Value, _, _>("StandaloneMcpServer", move |build| {
             let value = build
                 .value::<ConnectionConfig>()
                 .ok_or_else(|| CordisError::PluginFailed("missing MCP instance value".into()))?;
+            let keys =
+                Names::copy(&catalog, build).keys::<<ConnectionPlugin as TypedPlugin>::Deps>()?;
             Ok(rutis::TypedFactory::with_keys(
                 InstanceFactory((*value).clone()),
-                ((),),
+                keys,
             ))
         });
         json!({"id":GROUP,"group":true,"instanced":true,"config":[{"id":"StandaloneMcpServer","name":"StandaloneMcpServer"}]})
@@ -314,14 +322,14 @@ impl rutis::TypedPluginFactory<serde_json::Value> for InstanceFactory {
     }
 }
 impl TypedPlugin for McpPublication {
-    type Deps = (Arc<SettingsService>,);
+    type Deps = (Keyed<SettingsService>,);
     fn name(&self) -> &str {
         "McpPublication"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (settings,): Self::Deps,
+        (Keyed(settings),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let (commands, receiver) = mpsc::channel(64);
@@ -357,11 +365,6 @@ impl TypedPlugin for McpPublication {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for McpPublication {
-    fn keys(&self) -> KeysOf<Self> {
-        ((),)
     }
 }
 
@@ -632,7 +635,7 @@ impl Projection {
         McpServerPlugin::new(&id, configuration.clone(), key.clone())?;
         let created = owner
             .loader
-            .create_instance(&owner.ctx, GROUP)
+            .create_instance(GROUP)
             .with(ConnectionConfig {
                 id: id.clone(),
                 configuration: configuration.clone(),
@@ -733,7 +736,7 @@ fn connection(port: &Publication, generation: &Generation) -> Arc<McpConnection>
 mod tests {
     use super::*;
     use crate::mcp::{McpChange, McpPlugin, McpService};
-    use dim_agent_runtime::{capability_plugin, wait_active};
+    use dim_agent_runtime::wait_active;
     use rutis_loader::Layer;
     use std::{
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -808,9 +811,6 @@ mod tests {
             Box::pin(async { unreachable!("the undeclared host service must remain unavailable") })
         }
     }
-    impl Capability for Waiting {
-        fn keys(&self) -> KeysOf<Self> {}
-    }
     struct Fixture {
         root: Ctx,
         loader: Loader,
@@ -836,12 +836,16 @@ mod tests {
             .unwrap();
             let root = Ctx::root().unwrap();
             let faults = Arc::new(Faults::default());
+            let catalog = crate::catalog();
             let mut builtins = Builtins::new();
-            let name = McpPublication::register(&mut builtins);
-            let mut template = McpPublication::standalone_template(&mut builtins);
+            let name = McpPublication::register(&mut builtins, &catalog).unwrap();
+            let mut template = McpPublication::standalone_template(&mut builtins, &catalog);
             if let Some(extra) = extra {
                 let name = if extra == "waiting" {
-                    register_capability(&mut builtins, || Waiting)
+                    register_part(&mut builtins, &catalog, |names| {
+                        Ok(names.part_with(Waiting, ()))
+                    })
+                    .unwrap()
                 } else {
                     "MissingPlugin".to_owned()
                 };
@@ -855,10 +859,10 @@ mod tests {
                 "StandaloneMcpServer",
                 move |build| {
                     let config = build.value::<ConnectionConfig>().unwrap();
-                    Ok(rutis::TypedFactory::with_keys(
-                        ProbeFactory((*config).clone(), fault.clone()),
-                        ((),),
-                    ))
+                    Ok(rutis::TypedFactory::new(ProbeFactory(
+                        (*config).clone(),
+                        fault.clone(),
+                    )))
                 },
             );
             let plugin = rutis_loader::LoaderPlugin::new(builtins, Default::default());
@@ -881,16 +885,18 @@ mod tests {
                 .unwrap();
             let owner = McpOwner::new(root.clone(), loader.clone());
             let views = [
-                root.plugin(capability_plugin(
+                root.plugin(rutis::Typed::new(
                     dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![
                         home.clone(),
                     ]),
                 )),
-                root.plugin(capability_plugin(crate::settings::SettingsPlugin::new(
-                    0,
-                    vec![0],
-                ))),
-                root.plugin(capability_plugin(McpPlugin::new(0))),
+                root.plugin(
+                    crate::settings::SettingsPlugin::new(0, vec![0])
+                        .typed(&catalog)
+                        .unwrap(),
+                ),
+                root.plugin(crate::methods::ManagementMethodsPlugin::typed(&catalog).unwrap()),
+                root.plugin(rutis::Typed::new(McpPlugin::new(0))),
             ];
             wait_active(&root, &views, Duration::from_secs(5), &stop)
                 .await

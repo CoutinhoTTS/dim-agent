@@ -1,4 +1,4 @@
-use dim_agent_runtime::{AgentError, Capability, KeysOf, Result};
+use dim_agent_runtime::{AgentError, Result};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{
@@ -9,11 +9,11 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 18;
+const FORMAT: u32 = 19;
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 18))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 19))",
     ),
     (
         "settings_documents",
@@ -99,7 +99,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 4] = [
+const UPGRADES: [(u32, &[&str]); 5] = [
     // S5a: Session files.
     (
         13,
@@ -117,6 +117,9 @@ const UPGRADES: [(u32, &[&str]); 4] = [
     // #2: extension event rows, which a v17 daemon cannot decode; the
     // marker only.
     (17, &[]),
+    // #364: Session configurations and Agent profiles without a mount list
+    // omit `tools`, which a v18 daemon cannot decode; the marker only.
+    (18, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -484,9 +487,6 @@ impl TypedPlugin for SqliteStoragePlugin {
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for SqliteStoragePlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 pub(super) fn error(error: impl std::fmt::Display) -> AgentError {

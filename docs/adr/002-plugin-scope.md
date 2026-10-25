@@ -2,6 +2,10 @@
 
 Decision status: Proposed. Applies to the plugin designs in `docs/design/` and to future plugins.
 
+Extended by [ADR 006](006-plugin-contract.md): D1–D4 stand. D5 is completed by the
+[plugin contract](../design/plugin-contract.md): Dim's runtime services join the named catalog, a
+part's placement is its loader row's group, and Rust is one binding of the contract.
+
 ## Context
 
 Dim assembles plugins at three scopes: the process, a Session, and a branch
@@ -91,8 +95,8 @@ language-neutral form:
 | Rust specifics | Trait signatures, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls are one binding, listed in a "Rust binding" appendix |
 
 Canonical services: `sessionMethods` (Session, per namespace), `managementMethods` (process, per
-namespace), `toolContribution` (Session, per tool name), `sessions` (process) and `modelKind`
-(process, per kind). They are defined in the [contracts](../design/contracts/session-boundary.md)
+namespace), `toolContribution` (Session, per tool name), `sessions` (process) and
+`collaborationMembers` (process, per member kind). They are defined in the [contracts](../design/contracts/session-boundary.md)
 and the owning plugin documents. The runtime's existing typed services (Timeline, Dispatcher,
 ToolHost and others) are unchanged; exposing them by name to non-Rust capability parts is the work
 of issue #4.

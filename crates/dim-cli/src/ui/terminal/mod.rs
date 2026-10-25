@@ -1,9 +1,10 @@
 //! The terminal layer of the scrollback interface (design §6.6, §6.10).
 //!
 //! Owns what must be handed back: raw mode, the negotiated keyboard protocol,
-//! bracketed paste, cursor visibility, progress. It decodes input into key and
-//! paste events and guarantees the restore sequence runs on every way out —
-//! normal return, panic, fatal signal, and a vanished terminal.
+//! bracketed paste, cursor visibility, progress, the program status record.
+//! It decodes input into key and paste events and guarantees the restore
+//! sequence runs on every way out — normal return, panic, fatal signal, and a
+//! vanished terminal.
 
 pub mod input;
 pub mod keyboard;
@@ -251,6 +252,24 @@ impl Terminal {
             modes::clear(Mode::AltScreen);
         }
         self.writer.send(bytes)
+    }
+
+    /// Writes a program status report (`ui::status`). From then on every
+    /// way out, the restore of a panic or a signal included, clears the
+    /// record; a suspend clears it too, so the next status is reported again.
+    pub fn report_status(&mut self, report: Vec<u8>) -> io::Result<()> {
+        // Marked first: a signal before the write still clears.
+        modes::mark(Mode::Status);
+        self.writer.send(report)
+    }
+
+    /// Draws or removes the progress bar (`ui::progress`). From then on
+    /// every way out, the restore of a panic or a signal included, removes
+    /// it; a suspend does too, so the next status draws it again.
+    pub fn report_progress(&mut self, bar: &[u8]) -> io::Result<()> {
+        // Marked first: a signal before the write still removes it.
+        modes::mark(Mode::Progress);
+        self.writer.send(bar.to_vec())
     }
 
     /// Mouse reporting is on.

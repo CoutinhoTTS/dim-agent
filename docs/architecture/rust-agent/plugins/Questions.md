@@ -1,8 +1,8 @@
 # Questions
 
 Owner: [dim-agent-questions](../../../../crates/dim-agent-questions/src/lib.rs).
-Provides the `ask_user` tool (`toolContribution#ask_user`) and the Session
-method `session.question.respond` (`sessionMethods["session.question"]`). The
+Registers the `ask_user` tool with ToolRegistry and the Session method
+namespace `session.question` (`session.question.respond`) with `sessionMethods`. The
 model asks the user 1 to 4 multiple-choice questions and waits; a client
 answers or declines. The question is the pending tool call and the answer is
 its `ToolResult`, so Questions writes no events. Design:
@@ -13,6 +13,8 @@ its `ToolResult`, so Questions writes no events. Design:
 | Service | Purpose |
 | --- | --- |
 | `S:SessionConfig` | `interactive`, read on each call: a non-interactive Session gets an error result at once. |
+| `S:ToolRegistry` | Register `ask_user`, until this part unloads. |
+| `S:SessionMethods` | Register the `session.question` namespace, until this part unloads. |
 
 ## Tool
 
@@ -106,10 +108,10 @@ reuses its id.
 ## Installation
 
 `dim_agent_questions::install` records the tool name and the namespace and
-installs the Session part. A Session declares `ask_user` when its
-`SessionConfig.tools` lists it. The product and configured App Server profiles
-install it and list `ask_user` in their default Session tools; the mock
-profile does not. Installation never reads `interactive`, so interactive and
+installs the Session part. A Session declares `ask_user` when it mounts it:
+without a mount list (`SessionConfig.tools`) it does, and with one when the list
+names it. The product and configured App Server profiles install it and their
+default Sessions have no mount list; the mock profile does not install it. Installation never reads `interactive`, so interactive and
 non-interactive Sessions declare the same tools. This graph installs it as the
 product profiles do.
 
@@ -162,7 +164,7 @@ Rules: [principles](../principles.md) §1 and §4,
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:SessionConfig` |
-| 提供 | `S:SessionMethods#session.question`、`S:ToolContribution#ask_user` |
+| 注入 | `S:SessionConfig`、`S:SessionMethods`、`S:ToolRegistry` |
+| 提供 | — |
 | 被注入于 | — |
 <!-- /generated -->

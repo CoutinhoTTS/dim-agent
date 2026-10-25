@@ -5,26 +5,25 @@
 //! registers each branch; `CollaborationTimeline` (branch) binds the branch's
 //! Dispatcher to the business that writes its collaboration facts. Peers are
 //! only reached through their public Session interface, on their main branch.
-//! An open request holds its leader (`SessionLifecycle::hold`) until its
+//! An open request holds its leader (`SessionLifecycle::take_hold`) until its
 //! `result` is written, so an idle unload never ends it.
 use crate::agents::{AgentIndex, AgentProfile, SessionRestored, UnloadedSessionDeleted};
 use dim_agent_capabilities::{
     context_block,
     host::{HostError, HostFuture, ToolExecutionContext},
     timeline_tree::TreeCommands,
-    tool_registry::{ToolContribution, ToolHandler, definition},
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
 use dim_agent_runtime::{
-    AgentBuilder, AgentError, BranchLifecycle, BranchScope, Capability, CollaborationRole,
-    Dispatcher, InBranch, InSession, KeysOf, Session, SessionConfig, SessionHold, SessionIdentity,
-    SessionLifecycle, SessionScope, SessionService, Timeline, TimelineIdentity, scoped,
+    AgentBuilder, AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, Session,
+    SessionConfig, SessionHold, SessionIdentity, SessionLifecycle, Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::{
     FutureExt,
     future::{BoxFuture as WorkFuture, Shared},
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Listener, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, Listener, TypeKey, TypedPlugin};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -65,10 +64,10 @@ fn member_create_failed(detail: String) -> Failure {
 
 /// Registers the Session and branch halves; `serve` provides the process half.
 pub fn install(builder: &mut AgentBuilder) {
+    crate::register_names(builder.catalog_mut());
     builder
-        .session_tool(AGENT_TOOL)
-        .session_plugin(CollaborationCapabilityPlugin::new)
-        .timeline_plugin(CollaborationTimelinePlugin::new);
+        .session_part(|names| names.part(CollaborationCapabilityPlugin::new(names)?))
+        .branch_part(|names| names.part(CollaborationTimelinePlugin));
 }
 
 // ---------------------------------------------------------------- process
@@ -109,9 +108,6 @@ impl TypedPlugin for CollaborationDirectoryPlugin {
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for CollaborationDirectoryPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 /// Member management over stable records. Calls no Session capability and
@@ -213,8 +209,11 @@ impl Collaboration {
                 }
             };
         }
-        if !config.tools.iter().any(|tool| tool == AGENT_TOOL) {
-            config.tools.push(AGENT_TOOL.into());
+        // A member with a mount list reaches its team through `agent`.
+        if let Some(tools) = &mut config.tools
+            && !tools.iter().any(|tool| tool == AGENT_TOOL)
+        {
+            tools.push(AGENT_TOOL.into());
         }
         // Clients of the leader's protocol view and address its members.
         let version = self
@@ -524,13 +523,18 @@ impl Listener<SessionRestored> for Arc<Collaboration> {
         &'a self,
         _: &'a Ctx,
         event: &'a SessionRestored,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        // The restored Session is already in its Agent's entries.
+        let Some((_, session)) = self.index.session(&event.session_id) else {
+            return Box::pin(async { Ok(None) });
+        };
         let participates = {
             let relations = self.directory.relations.lock().unwrap();
-            relations.contains_key(event.session.id())
+            relations.contains_key(&event.session_id)
                 || relations
                     .values()
-                    .any(|relation| relation.leader == event.session.id())
+                    .any(|relation| relation.leader == event.session_id)
         };
         if participates
             || self
@@ -540,7 +544,7 @@ impl Listener<SessionRestored> for Arc<Collaboration> {
                 .unwrap()
                 .contains_key(&event.agent_id)
         {
-            self.watch(&event.agent_id, event.session.clone());
+            self.watch(&event.agent_id, session);
         }
         Box::pin(async { Ok(None) })
     }
@@ -552,6 +556,7 @@ impl Listener<UnloadedSessionDeleted> for Arc<Collaboration> {
         &'a self,
         _: &'a Ctx,
         event: &'a UnloadedSessionDeleted,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         let this = self.clone();
         let (agent_id, id) = (event.agent_id.clone(), event.session_id.clone());
@@ -569,14 +574,14 @@ impl CollaborationPlugin {
     }
 }
 impl TypedPlugin for CollaborationPlugin {
-    type Deps = (Arc<AgentIndex>, Arc<CollaborationDirectory>);
+    type Deps = (Keyed<AgentIndex>, Keyed<CollaborationDirectory>);
     fn name(&self) -> &str {
         "Collaboration"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (index, directory): Self::Deps,
+        (Keyed(index), Keyed(directory)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(Collaboration {
@@ -622,11 +627,6 @@ impl TypedPlugin for CollaborationPlugin {
             ctx.provide_as(TypeKey::of::<Collaboration>(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for CollaborationPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
     }
 }
 
@@ -696,7 +696,6 @@ pub struct CollaborationCapability {
     lifecycle: Arc<SessionLifecycle>,
     state: Mutex<State>,
 }
-impl SessionService for CollaborationCapability {}
 
 fn op_turn(kind: &EventKind) -> Option<(&str, bool)> {
     match kind {
@@ -1539,7 +1538,10 @@ impl CollaborationCapability {
         };
         // The request holds the leader while it is open. Only a closing
         // leader has no hold to give: refused as a closing branch is.
-        let hold = covered.is_none().then(|| self.lifecycle.hold()).flatten();
+        let hold = covered
+            .is_none()
+            .then(|| self.lifecycle.take_hold())
+            .flatten();
         let Some(hold) = hold else {
             if new {
                 self.collaboration.remove(&member);
@@ -2292,20 +2294,23 @@ impl ToolHandler for AgentTool {
 }
 
 struct CollaborationCapabilityPlugin {
-    scope: SessionScope,
+    service: DepKey<CollaborationCapability>,
 }
 impl CollaborationCapabilityPlugin {
-    fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            service: names.key::<CollaborationCapability>()?,
+        })
     }
 }
 impl TypedPlugin for CollaborationCapabilityPlugin {
     type Deps = (
-        Arc<Collaboration>,
-        InSession<SessionIdentity>,
-        InSession<SessionConfig>,
-        InSession<TreeCommands>,
-        InSession<SessionLifecycle>,
+        Keyed<Collaboration>,
+        Keyed<SessionIdentity>,
+        Keyed<SessionConfig>,
+        Keyed<TreeCommands>,
+        Keyed<SessionLifecycle>,
+        Keyed<ToolRegistry>,
     );
     fn name(&self) -> &str {
         "CollaborationCapability"
@@ -2314,11 +2319,12 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            collaboration,
-            InSession(identity),
-            InSession(config),
-            InSession(tree),
-            InSession(lifecycle),
+            Keyed(collaboration),
+            Keyed(identity),
+            Keyed(config),
+            Keyed(tree),
+            Keyed(lifecycle),
+            Keyed(tools),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -2330,43 +2336,31 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
                 lifecycle,
                 state: Mutex::new(State::default()),
             });
-            ctx.provide_as(
-                self.scope.named_key::<ToolContribution>(AGENT_TOOL),
-                Arc::new(ToolContribution {
+            tools.register(
+                ctx,
+                ToolContribution {
                     definition: agent_definition(config.collaboration_role),
                     handler: Arc::new(AgentTool {
                         capability: service.clone(),
                         stopping: ctx.cancellation_token(),
                     }),
-                }),
+                },
             )?;
-            ctx.provide_as(self.scope.key::<CollaborationCapability>(), service)?;
+            ctx.provide_as(self.service.key().clone(), service)?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for CollaborationCapabilityPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 /// Binds one branch's collaboration events to the Session capability.
-struct CollaborationTimelinePlugin {
-    scope: BranchScope,
-}
-impl CollaborationTimelinePlugin {
-    fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+struct CollaborationTimelinePlugin;
 impl TypedPlugin for CollaborationTimelinePlugin {
     type Deps = (
-        InSession<CollaborationCapability>,
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InBranch<TimelineIdentity>,
-        InBranch<BranchLifecycle>,
+        Keyed<CollaborationCapability>,
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        Keyed<TimelineIdentity>,
+        Keyed<BranchLifecycle>,
     );
     fn name(&self) -> &str {
         "CollaborationTimeline"
@@ -2375,11 +2369,11 @@ impl TypedPlugin for CollaborationTimelinePlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InSession(service),
-            InBranch(timeline),
-            InBranch(dispatcher),
-            InBranch(identity),
-            InBranch(phase),
+            Keyed(service),
+            Keyed(timeline),
+            Keyed(dispatcher),
+            Keyed(identity),
+            Keyed(phase),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -2456,10 +2450,5 @@ impl TypedPlugin for CollaborationTimelinePlugin {
             drop(rebuilding);
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for CollaborationTimelinePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

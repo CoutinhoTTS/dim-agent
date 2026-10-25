@@ -1,30 +1,16 @@
 import { definePlugin } from '@arcships/rutis'
 import provides from './session.json' with { type: 'json' }
 import { type InputMessage, changes } from './goal.ts'
+import type { SessionMethods, ToolRegistry } from '../../../npm/plugin.js'
 
 type TreeCommands = { input(id: string, input: InputMessage): Promise<{ sequence: number | bigint }> }
 type Call = { branchId: string; arguments: { status?: unknown; summary?: unknown } }
 type MethodCall = { method: string; params: { sessionId: string; branchId?: unknown; objective?: unknown } }
-type Reply = { kind: 'value'; value: unknown } | { code: number; appError: string; message: string }
+type Reply = { kind: 'value'; value: unknown } | { code: string; message: string }
 
 const OBJECTIVE_LIMIT = 4000
 const SUMMARY_LIMIT = 2000
-const invalid = (message: string): Reply => ({ code: -32602, appError: 'invalid_params', message })
-
-/** A native write failure, as the Rust method boundary maps it. */
-function failure(error: { code?: string; message?: string }): Reply {
-  switch (error.code) {
-    case 'InvalidInput':
-    case 'UnknownBranch':
-      return { code: -32000, appError: 'session_invalid_input', message: error.message ?? 'invalid input' }
-    case 'Closed':
-      return { code: -32000, appError: 'session_closed', message: 'Session is closed or does not exist' }
-    case 'Reloading':
-      return { code: -32000, appError: 'service_reloading', message: 'Service is reloading' }
-    default:
-      throw error
-  }
-}
+const invalid = (message: string): Reply => ({ code: 'invalid_params', message })
 
 const text = (value: unknown, limit: number) =>
   typeof value === 'string' && value.trim() !== '' && [...value].length <= limit ? value : undefined
@@ -35,28 +21,26 @@ const text = (value: unknown, limit: number) =>
 export default definePlugin({
   name: 'GoalSession',
   provides,
-  inject: ['treeCommands'],
-  apply(ctx) {
+  inject: ['treeCommands', 'toolRegistry', 'sessionMethods'],
+  async apply(ctx) {
     const tree = ctx.use<TreeCommands>('treeCommands')
-    ctx.provide('toolContribution:goal_update', {
-      declaration() {
-        return {
-          name: 'goal_update',
-          description: 'Report that the current goal is completed or blocked.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              status: { type: 'string', enum: ['completed', 'blocked'] },
-              summary: { type: 'string', minLength: 1, maxLength: SUMMARY_LIMIT },
-            },
-            required: ['status', 'summary'],
-            additionalProperties: false,
+    await ctx.use<ToolRegistry>('toolRegistry').register(
+      {
+        name: 'goal_update',
+        description: 'Report that the current goal is completed or blocked.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['completed', 'blocked'] },
+            summary: { type: 'string', minLength: 1, maxLength: SUMMARY_LIMIT },
           },
-          source: 'extension',
-          risk: 'session',
-        }
+          required: ['status', 'summary'],
+          additionalProperties: false,
+        },
+        source: 'extension',
+        risk: 'session',
       },
-      async execute(call: Call) {
+      async (call: Call) => {
         const { status } = call.arguments
         const summary = text(call.arguments.summary, SUMMARY_LIMIT)
         if ((status !== 'completed' && status !== 'blocked') || !summary) {
@@ -65,14 +49,13 @@ export default definePlugin({
         await tree.input(call.branchId, changes.report(call.branchId, status, summary))
         return { content: `goal_update recorded: ${status}.` }
       },
-    })
-    ctx.provide('sessionMethods:session.goal', {
-      async describe() {
-        return ['set', 'edit', 'pause', 'resume', 'clear'].map(name => ({
-          name: `session.goal.${name}`, mutating: true, interruption: 'report', progress: false,
-        }))
-      },
-      async call(call: MethodCall): Promise<Reply> {
+    )
+    await ctx.use<SessionMethods>('sessionMethods').register(
+      'session.goal',
+      ['set', 'edit', 'pause', 'resume', 'clear'].map(name => ({
+        name: `session.goal.${name}`, mutating: true, interruption: 'report', progress: false,
+      })),
+      async (call: MethodCall): Promise<Reply> => {
         const { branchId = 'main' } = call.params
         if (typeof branchId !== 'string' || branchId === '') return invalid('branchId must be a non-empty string')
         const op = call.method.slice('session.goal.'.length)
@@ -86,13 +69,10 @@ export default definePlugin({
         } else {
           return invalid(`unknown method ${call.method}`)
         }
-        try {
-          const event = await tree.input(branchId, input)
-          return { kind: 'value', value: { sequence: event.sequence } }
-        } catch (error) {
-          return failure(error as { code?: string; message?: string })
-        }
+        // A native write failure propagates; Rpc maps it to the wire.
+        const event = await tree.input(branchId, input)
+        return { kind: 'value', value: { sequence: event.sequence } }
       },
-    })
+    )
   },
 })

@@ -15,7 +15,6 @@
 //! prefix below. A replacement writes a temporary file named after its key in
 //! that physically protected namespace, so only the key's holder touches it.
 //! Listing hides those resources; removing a directory removes them with it.
-use dim_agent_runtime::{Capability, KeysOf};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use std::{
     collections::HashMap,
@@ -1183,9 +1182,6 @@ impl TypedPlugin for FileStoragePlugin {
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for FileStoragePlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 struct PhysicalLock {

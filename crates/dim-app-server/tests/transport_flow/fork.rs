@@ -680,7 +680,7 @@ async fn a_fork_shares_session_files_and_outlives_its_source() {
 /// A configured-model daemon with the local execution tools, the mock model
 /// and its store in `store`'s directory: the daemon gives WorkspaceTools
 /// `command-output/` there, as the product does.
-async fn launch_configured(
+pub(super) async fn launch_configured(
     store: &Store,
     work: &std::path::Path,
 ) -> (RunningServer, dim_agent_runtime::Agent) {
@@ -739,7 +739,7 @@ async fn launch_configured(
                     config: None,
                     metadata: None,
                 },
-                tools: vec!["exec".into()],
+                tools: Some(vec!["exec".into()]),
                 ..Default::default()
             },
             ..Default::default()

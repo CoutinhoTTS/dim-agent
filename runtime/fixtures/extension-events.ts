@@ -1,5 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
-import type { BranchEvent, BranchServices } from '../../npm/plugin.js'
+import type { BranchEvent, Services } from '../../npm/plugin.js'
 
 // A branch part that writes events of its own domain (ADR 001, issue #2).
 // After the first live turn end it appends `fixture/turn-seen` through the
@@ -14,10 +14,10 @@ export default definePlugin({
   provides: {},
   inject: ['dispatcher', 'timeline', 'timelineIdentity', 'treeCommands'],
   async apply(ctx) {
-    const dispatcher = ctx.use<BranchServices['dispatcher']>('dispatcher')
-    const timeline = ctx.use<BranchServices['timeline']>('timeline')
-    const tree = ctx.use<BranchServices['treeCommands']>('treeCommands')
-    const { branchId } = await ctx.use<BranchServices['timelineIdentity']>('timelineIdentity').get()
+    const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
+    const timeline = ctx.use<Services['timeline']>('timeline')
+    const tree = ctx.use<Services['treeCommands']>('treeCommands')
+    const { branchId } = await ctx.use<Services['timelineIdentity']>('timelineIdentity').get()
     let appended = false
     // Set when the rebuild folded this part's own event: a restored generation.
     let restored = false

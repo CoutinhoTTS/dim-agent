@@ -25,8 +25,10 @@ async fn agent_close_during_assembly_never_activates_the_session() {
     let cwd = dirs.dir("work");
     hold.arm();
     let agent = env.agent.clone();
+    // A configuration the Session accepts: only the close ends its creation.
     let config = SessionConfig {
         cwd: cwd.to_string_lossy().into_owned(),
+        tools: Some(vec!["skill".into(), "gate".into()]),
         ..SessionConfig::default()
     };
     let creating = tokio::spawn(async move { agent.create_session(config).await });
@@ -113,8 +115,8 @@ async fn idle_release_waits_until_every_hold_is_dropped() {
     let probe = Arc::new(LifecycleProbe::default());
     let env = releasable(&dirs, &probe).await;
     let (session, lifecycle) = idle_session(&env, &dirs, &probe).await;
-    let first = lifecycle.hold().unwrap();
-    let second = lifecycle.hold().unwrap();
+    let first = lifecycle.take_hold().unwrap();
+    let second = lifecycle.take_hold().unwrap();
     // Holds veto only the release: the branch is idle as before.
     within("idle", session.idle("main")).await.unwrap();
     assert!(!session.unload_if_idle().await.unwrap());
@@ -124,7 +126,7 @@ async fn idle_release_waits_until_every_hold_is_dropped() {
     tokio::spawn(async move { drop(second) }).await.unwrap();
     assert!(session.unload_if_idle().await.unwrap());
     within("release", session.closed()).await.unwrap();
-    assert!(lifecycle.hold().is_none());
+    assert!(lifecycle.take_hold().is_none());
     assert!(env.agent.sessions().is_empty());
     env.agent.close().await.unwrap();
 }
@@ -141,7 +143,7 @@ async fn no_hold_is_taken_once_a_release_is_under_way() {
         async move { session.unload_if_idle().await }
     });
     within("release start", probe.close_held.notified()).await;
-    assert!(lifecycle.hold().is_none());
+    assert!(lifecycle.take_hold().is_none());
     assert!(!session.unload_if_idle().await.unwrap());
     probe.release_close.notify_one();
     assert!(within("release", releasing).await.unwrap().unwrap());
@@ -154,11 +156,11 @@ async fn close_ignores_holds_and_refuses_new_ones() {
     let probe = Arc::new(LifecycleProbe::default());
     let env = releasable(&dirs, &probe).await;
     let (session, lifecycle) = idle_session(&env, &dirs, &probe).await;
-    let held = lifecycle.hold().unwrap();
+    let held = lifecycle.take_hold().unwrap();
     probe.hold_next_close();
     let closing = session.close();
     within("close start", probe.close_held.notified()).await;
-    assert!(lifecycle.hold().is_none());
+    assert!(lifecycle.take_hold().is_none());
     assert!(!session.unload_if_idle().await.unwrap());
     probe.release_close.notify_one();
     // The close finishes while the hold is still held; its owner drops it as
@@ -186,7 +188,7 @@ async fn holds_racing_an_idle_release_never_overlap_it() {
                 start.wait().await;
                 // Holding across a yield lets checks land both before and
                 // inside each hold.
-                while let Some(hold) = lifecycle.hold() {
+                while let Some(hold) = lifecycle.take_hold() {
                     tokio::task::yield_now().await;
                     assert!(!session.is_unloading(), "a hold overlapped the release");
                     drop(hold);

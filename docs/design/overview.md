@@ -77,13 +77,13 @@ Green parts are new and orange-bordered parts are changed. Each new plugin part 
 | **Withdrawn (Notifications withdrawn).** Notifications | — | Observes the Session broadcast; `notify` tool | — | Triggers are the Session's events |
 | Scheduler | Triggers, run history; jobs in the Settings business source `schedule` | `schedule` tool | — | Schedules span Sessions |
 | Workflow | Runs; definitions in the Settings business source `workflow` or project files | `workflow` tool | — | A run spans Sessions |
-| ExternalAgent | Connections, ModelHost kind | — | — | External agent connections are shared |
+| ExternalAgent | Live external conversations, Collaboration member kind | — | — | External agent conversations and processes are shared host resources |
 | Modality | Tasks, realtime connections | — | — | Tasks and provider connections are shared |
 | PluginManager | Marketplaces, packages | — | — | Installation is per host |
 | RemoteGateway | Remote entry, devices | — | — | An external entry |
 | AcpGateway | CLI process | — | — | A client |
 
-Management is not a plugin. Management methods are client RPC methods about the host rather than a Session ([definition](contracts/session-boundary.md)); only process plugins provide them, as `managementMethods` services collected into Rpc's method table. Session methods have no level. Rpc serves a local connection Session and management methods, never serves management methods to a connection with a `deviceId` (a paired device), and serves an exported rutis link management methods only when exported.
+Management is not a plugin. Management methods are client RPC methods about the host rather than a Session ([definition](contracts/session-boundary.md)); only process plugins provide them, by registering their namespaces with `managementMethods`, the process's method table. Session methods have no level. Rpc serves a local connection Session and management methods, never serves management methods to a connection with a `deviceId` (a paired device), and serves an exported rutis link management methods only when exported.
 
 ## 3. Integration by existing mechanisms
 
@@ -91,14 +91,14 @@ Plugins never add wiring plugins (ADR 002 D2). Each need maps to a mechanism tha
 
 | Need | Mechanism | Used by |
 | --- | --- | --- |
-| Offer a tool to a Session | Session-scoped `toolContribution` ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)) or `SessionToolSource` ([tool contributions](../architecture/rust-agent/tool-contributions.md)) | Questions, Goal, Web, Scheduler, Workflow |
+| Offer a tool to a Session | Register it with the Session's `toolRegistry` ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)), or register a tool source for a changing set ([tool contributions](../architecture/rust-agent/tool-contributions.md)) | Questions, Goal, Web, Scheduler, Workflow |
 | Offer instructions | PromptRegistry prompt sources | Existing |
 | Observe a Session's events | The existing Session broadcast (`session/<id>` channel), from a Session-scoped plugin | SessionTitle |
 | Observe and act on a branch's events in order | The branch Dispatcher, from a branch-scoped plugin | Goal, Hooks post-tool, turn-end and Session-start |
 | Put content into the model context | Branch input (raw blocks, keyed blocks) or tool results ([session access](contracts/session-access.md#a2-source-input-conventions)) | Goal, Hooks, ShellInput, Scheduler, Workflow |
 | Act on a write before it is committed | A synchronous Timeline before callback registered by a branch-scoped plugin ([single-tree](../architecture/rust-agent/single-tree.md)): it transforms the draft inside the commit lock, never blocks the write and never waits for external work; the original draft commits on failure ([principles §4 rule 3](../architecture/rust-agent/principles.md)) | None planned |
-| Client method about a Session | `sessionMethods`, which Rpc dispatches through the Session ([A.1](contracts/session-boundary.md#a1-method-contributions)) | Questions, Goal, SessionTitle, Attachments, ShellInput, InputQueue (`session.input.withdraw`) |
-| Host management method | `managementMethods` of a process plugin, looked up by Rpc per call | Existing management methods, Settings (business configuration, `settings.read`/`settings.update`, S8b, implemented), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
+| Client method about a Session | A namespace registered with the Session's `sessionMethods`, which Rpc dispatches through the Session ([A.1](contracts/session-boundary.md#a1-method-contributions)) | Questions, Goal, SessionTitle, Attachments, ShellInput, InputQueue (`session.input.withdraw`) |
+| Host management method | A namespace a process plugin registers with `managementMethods`, looked up by Rpc per call | Existing management methods, Settings (business configuration, `settings.read`/`settings.update`, S8b, implemented), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
 | Reach other Sessions | Agents' `sessions` service (`launch`, `input`, `history`, `idle`, ...), as Collaboration does ([session access](contracts/session-access.md#a1-the-sessions-service)) | Scheduler, Workflow |
 
 ```mermaid
@@ -124,7 +124,7 @@ flowchart LR
   end
   Rpc -.->|"look up per call"| MM
   Rpc -->|"sessionMethods"| SP
-  TR -.->|"attach toolContribution at Session load"| SP
+  SP -->|"register tools"| TR
   SP -->|"listen"| BC
   BP -->|"before callback"| TL
   BP -->|"subscribe in order"| DP
@@ -133,19 +133,18 @@ flowchart LR
   SP -->|"branch services"| BP
 ```
 
-The arrows are dependency edges, and they point to the same or an enclosing scope (D3). Dependencies point from extensions to the core (D3): a core collector never depends on optional contributors. ToolRegistry follows the tools of optional plugins as their providers become active or retire, from the next request and without a Session reload ([A.5](contracts/session-boundary.md#a5-tool-contribution), #241), Rpc looks up management method owners on each call (the dotted arrow, [methods §3.2](contracts/session-boundary.md#32-management-method)), and Session assembly does not wait for optional parts, so an inactive or reloading provider affects only its own features. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
+The arrows are dependency edges, and they point to the same or an enclosing scope (D3). Dependencies point from extensions to the core (D3): a core collector never depends on optional contributors. ToolRegistry follows the tools optional plugins register and withdraw, from the next request and without a Session reload ([A.5](contracts/session-boundary.md#a5-tool-contribution), #241), Rpc looks up management method owners on each call (the dotted arrow, [methods §3.2](contracts/session-boundary.md#32-management-method)), and Session assembly does not wait for optional parts, so an inactive or reloading provider affects only its own features. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
 
 ### 3.1 Contract form
 
-Every contract the designs define or use is a named service (ADR 002 D5): service name (camelCase), scope, instance key, and methods marked `sync` or `async` whose requests, replies and errors are serializable data. Cancellation is a cancel request or the consumer dropping the call. A plugin declares what it provides in its `provides` and loader row; consumers collect by service name and scope. rutis calls such services across languages (rutis-bridge runtimes, `host_key(name)`, `TypeKey::named`), so a TypeScript or Python part satisfies a contract without a hand-written Rust binding. Rust traits, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls appear only in each document's "Rust binding" appendix.
+Every contract the designs define or use is a named service (ADR 002 D5): service name (camelCase), scope, instance key, and methods marked `sync` or `async` whose requests, replies and errors are serializable data. Cancellation is a cancel request or the consumer dropping the call. A plugin declares what it provides in its `provides` and loader row; consumers collect by service name and scope. Tools and method namespaces are registered instead: a part registers a tool with the Session's `toolRegistry` and a method namespace with the Session's `sessionMethods` or the process's `managementMethods`, and the registration lasts until the part unloads. rutis calls such services across languages (rutis-bridge runtimes, `host_key(name)`, `TypeKey::named`), so a TypeScript or Python part satisfies a contract without a hand-written Rust binding. Rust traits, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls appear only in each document's "Rust binding" appendix.
 
 | Service | Scope | Key | Methods | Defined in |
 | --- | --- | --- | --- | --- |
-| `sessionMethods` | Session | namespace | `describe(): async -> MethodDecl[]`; `call(MethodCall): async -> MethodReply` | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
-| `managementMethods` | process | namespace | same | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
-| `toolContribution` | Session | tool name | `declaration(): sync -> ToolDeclaration`; `execute(ToolCall): async -> ToolResult` | [methods A.5](contracts/session-boundary.md#a5-tool-contribution) |
+| `sessionMethods` | Session | — | `register(namespace, MethodDecl[], call): async`, where `call(MethodCall, cancelled, progress): async -> MethodReply` is the registering part's function | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
+| `managementMethods` | process | — | same | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
+| `toolRegistry` | Session | — | `register(ToolDeclaration, execute): async`, where `execute(ToolCall, cancelled): async -> ToolResult` is the registering part's function | [methods A.5](contracts/session-boundary.md#a5-tool-contribution) |
 | `sessions` | process | — | `launch`, `input`, `lookup`, `history`, `withdraw`, `stop`, `idle`, `delete` | [session access A.1](contracts/session-access.md#a1-the-sessions-service) |
-| `modelKind` | process | kind | `invoke(ModelRequest, target, ModelCallScope): async -> model stream` | [ExternalAgent](plugins/ExternalAgent.md) |
 | `scheduleJobs` (proposed) | process | — | Session-to-process job operations for the `schedule` tool | [Scheduler](plugins/Scheduler.md) |
 | `workflowRuns` (optional package) | process | — | Session-to-process run operations for the `workflow` tool | [Workflow](plugins/Workflow.md) |
 
@@ -167,7 +166,7 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 | Scheduler | Process + Session | Scheduled jobs; `schedule` tool; run-outcome report | P2 | TypeScript first | [Scheduler](plugins/Scheduler.md) |
 | Workflow | Process + Session | Multi-stage runs across Sessions; `workflow` tool | P2 | TypeScript first | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | Delivery to channels; `notify` tool | P2 | TypeScript first | [Notifications](plugins/Notifications.md) (withdrawn) |
-| ExternalAgent | Process | External agents as a ModelHost provider kind | P3 | TypeScript first | [ExternalAgent](plugins/ExternalAgent.md) |
+| ExternalAgent | Process | External agents as Collaboration sub-agents (a member kind) | P3 | TypeScript first | [ExternalAgent](plugins/ExternalAgent.md) |
 | AcpGateway | CLI process | ACP server over local RPC | P3 | TypeScript first | [AcpGateway](plugins/AcpGateway.md) |
 | RemoteGateway | Process | Remote entry, pairing, devices | P3 | Rust | [RemoteGateway](plugins/RemoteGateway.md) |
 | Modality | Process | Multimodal tasks and realtime connections | P3 | TypeScript first | [Modality](plugins/Modality.md) |
@@ -175,7 +174,7 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 
 | Contract | Owner | Defines |
 | --- | --- | --- |
-| [Methods and tool contributions](contracts/session-boundary.md) | Rpc, ToolRegistry | `sessionMethods`, `managementMethods` (and the definition of management methods), `callChannel`, what each entry is served, `unknown_method`/`service_reloading`, migration and compatibility of existing management methods, `toolContribution` |
+| [Methods and tool contributions](contracts/session-boundary.md) | Rpc, ToolRegistry | `sessionMethods`, `managementMethods` (and the definition of management methods), `callChannel`, what each entry is served, `unknown_method`/`service_reloading`, migration and compatibility of existing management methods, tool registration with `toolRegistry` |
 | [Session access](contracts/session-access.md) | Agents, InputQueue | the `sessions` service; `launch` with a capped policy, `SessionConfig.interactive`, source raw blocks, fixed-prefix read, withdrawal (`session.input.withdraw` through `sessionMethods`) |
 
 ## 5. Key flows
@@ -191,7 +190,7 @@ sequenceDiagram
   participant PM as Permission
   participant HK as Hooks toolAdvice (branch)
   participant TB as ToolBinding
-  participant W as Web toolContribution (Session)
+  participant W as Web tool (Session)
   LP->>TL: append step/tool-call [web_fetch]
   TL-->>TE: step/tool-call through the Dispatcher
   TE->>AP: admit({source, call}, risk network)
@@ -294,27 +293,27 @@ The tracker reads its own input's published history as [§3.2](plugins/Scheduler
 
 ```mermaid
 sequenceDiagram
-  participant L as Leader branch
+  participant L as Leader branch (its own model)
   participant C as Collaboration
-  participant M as Member branch (ModelProvider)
-  participant X as ExternalAgent (modelKind external-agent)
-  participant EA as External agent (bridge on its node)
-  L->>C: agent request
-  C->>M: collaboration/request, member input
-  M->>X: invoke with ModelCallScope (ModelHost looks up modelKind per call)
+  participant X as ExternalAgent (collaborationMembers:external-agent)
+  participant EA as External agent (bridge on the leader's node)
+  L->>C: agent request {agentId: external-agent:<node>:<agent>, prompt}
+  C->>X: run (member provider looked up by kind per call)
   X->>EA: prompt over ACP or CLI
+  X-->>C: started {extSessionId}
+  C->>L: collaboration/delivered; tool result "running"
   EA-->>X: permission request
-  X->>L: input/message (Steer) with the ask, through sessions
-  L->>L: leader model calls external_agent_allow or external_agent_reject (leader's Permission and Approval)
-  L->>X: decision
+  X-->>C: ask
+  C->>L: member-approval input (Steer)
+  L->>L: leader model decides with Collaboration's tool (leader's Permission and Approval)
+  C->>X: answer
   X->>EA: allow once or reject once
-  EA-->>X: output
-  X-->>M: model output (agent-produced text and thinking only)
-  M-->>C: collaboration/result
-  C-->>L: result
+  EA-->>X: final message
+  X-->>C: run resolves {outcome, text}
+  C->>L: collaboration/result, dim-agent-report input
 ```
 
-The permission request never enters the model stream ([#28](https://github.com/arcships/dim/issues/28)). ExternalAgent finds the leader through Collaboration's `leaderOf`, writes the ask as an input to the leader branch, and the leader model decides with a tool whose call passes the leader's Approval and Permission. Without a leader the user answers through a Session method; a non-interactive Session rejects. `always` options are never selected ([ExternalAgent §3.2](plugins/ExternalAgent.md#32-external-permission-request)).
+An external agent is a sub-agent, not a model ([#145](https://github.com/arcships/dim/issues/145)): the leader keeps its own model and delegates through the same `agent` tool as for dim members. ExternalAgent provides the member kind `external-agent`; Collaboration keeps owning the request, result, wake input and settlement. The agent's permission asks travel on Collaboration's member-approval route (#19) and never enter any model stream (#28). `always` options are never selected ([ExternalAgent §3.2](plugins/ExternalAgent.md#32-permission-asks)).
 
 ## 6. Common constraints
 
@@ -332,7 +331,7 @@ The table in [§3](#3-integration-by-existing-mechanisms) is exhaustive. A new p
 6. **Interrupt**: a plugin cancels in-flight work and releases resources before writing terminal facts ([interrupt](../architecture/rust-agent/interrupt.md)).
 7. **Admission**: new tools declare a risk category. No new Permission category is added: a risk Permission does not know is unclassified, which ReadOnly denies, WorkspaceWrite asks about and FullAccess allows (`permission.rs`); a tool may still declare a descriptive risk such as `persistent_configuration`. Sessions started by automation use the starter's policy as an upper bound, which Scheduler jobs and Workflow definitions may narrow. Runs started by a management method default to read-only unless declared, capped by host configuration. `workflow` uses the `agent` tool's risk category.
 8. **Dependency direction and reload cost**: core parts never depend on optional plugins; an optional plugin's reload or failure affects only its own features (D3). A reload that reaches its real dependents may fail their in-flight turns; this is accepted and documented in each plugin's conflict table, never prevented.
-9. **Management plane**: management methods (`account.*`, `provider.*`, `mcp.*`, `skills.*`, `settings.read`/`settings.update`, and the methods of new process plugins) are provided only by process plugins through `managementMethods`. Session methods have no level; `shell.*` is an ordinary Session method. Local RPC serves both kinds, RemoteGateway serves Session methods only, and a rutis link serves management methods only when explicitly exported (host administrator rights). There are no identity tiers. `hello`, `daemon.*`, `agent.*` and the existing `session.*` methods stay Rpc built-ins; `daemon.shutdown` is a built-in never served to a paired device (a connection with a `deviceId`).
+9. **Management plane**: management methods (`account.*`, `provider.*`, `mcp.*`, `skills.*`, `settings.read`/`settings.update`, and the methods of new process plugins) are registered only by process plugins with `managementMethods`. Session methods have no level; `shell.*` is an ordinary Session method. Local RPC serves both kinds, RemoteGateway serves Session methods only, and a rutis link serves management methods only when explicitly exported (host administrator rights). There are no identity tiers. `hello`, `daemon.*`, `agent.*` and the existing `session.*` methods stay Rpc built-ins; `daemon.shutdown` is a built-in never served to a paired device (a connection with a `deviceId`).
 10. **Remote Session methods**: paired devices may call every Session method, including `session.permission.update` and `shell.*` (compatibility change, [methods A.4](contracts/session-boundary.md#a4-migration-and-compatibility)).
 11. **In-flight work**: there is no shared registry. Each owner provides its own query and stop, and the CLI aggregates them.
 12. **Withdrawal**: one contract owned by InputQueue. `input/withdraw {input_id, reason?}` is a command event written by any legitimate producer: clients through `session.input.withdraw` (a Session method InputQueue provides through `sessionMethods`), and process callers through `sessions.withdraw`. InputQueue consumes it in order; only if it still holds that input unapplied (no `input/applied`) does it write the result fact `input/deleted {input_id}` and never apply the input. Otherwise (unknown, applied or already deleted) nothing is written and the caller's reply is `notHeld`. An applied input cannot be withdrawn, and Loop is unchanged. "Withdraw and re-submit as Steer" is one atomic batch. Every pending-input derivation excludes deleted inputs, which never enter model context (their keyed blocks never take effect).
@@ -348,7 +347,7 @@ rutis nodes connect through links, export and import services, run plugins on th
 | --- | --- |
 | Control node | Hosts the App Server: Timeline, Sessions, configuration sources, Providers, scheduling |
 | Resource node | Where host resources live (files, processes, shell, isolation, local CLIs). Each Session will bind one as `SessionConfig.resourceNode`, fixed at creation, an optional field added in P3 whose absence means the control node; in P1/P2 every Session uses the control node |
-| Host services | FileStorage, HostPlatform, isolation and the WorkspaceTools host side of the Session's resource node are looked up on each call by the Session's `resourceNode` (#38). Process plugins with no Session (Modality OCR, ExternalAgent bridges) name a node in their own business configuration, read at use time. ExternalAgent's agent processes live in a bridge loader row per node (`peer:<node>/external-agent-bridge` on peers), looked up on each call by node ([ExternalAgent §3.4](plugins/ExternalAgent.md#34-bridge-lifecycle)) |
+| Host services | FileStorage, HostPlatform, isolation and the WorkspaceTools host side of the Session's resource node are looked up on each call by the Session's `resourceNode` (#38). Process plugins with no Session (Modality OCR, ExternalAgent bridges) name a node in their own business configuration, read at use time. ExternalAgent's agent processes live in a bridge loader row per node (`peer:<node>/external-agent-bridge` on peers), which attaches itself to ExternalAgent for its own lifetime ([ExternalAgent §3.4](plugins/ExternalAgent.md#34-bridge-lifecycle)) |
 | Node-bound data | Isolation configuration and the external agent directory are identified by node and path |
 | Offline | A call on an offline resource node fails with `node_unavailable`; dependents do not reload or go Pending. Because node services are looked up on each call by `resourceNode`, an offline node fails only those calls with `node_unavailable`; no requirement is raised to rutis (#38). When a link drops, the resource node's own HostPlatform ends the processes it started |
 | Authentication | Reuses the rutis link token; management methods are exported only when configured |
@@ -380,7 +379,7 @@ Questions adds no events: a pending question is the `ask_user` `step/tool-call` 
 | `goal/*` | Keyed raw blocks, including terminal blocks | Goal state is input |
 | `shell/*` | `!command` result written as Append input | Not branch in-flight work |
 | `hook/*` | Tool denials as error results written by ToolExecutor, prompt blocks as an `input_blocked` reply with nothing written, context as Hooks inputs ([Hooks](plugins/Hooks.md)) | Hooks declares no event |
-| `external_agent/*` | Collaboration facts, member events, approval facts | External agents are model connections |
+| `external_agent/*` | Collaboration facts, approval facts | External agents are Collaboration members; delegation facts are Collaboration's |
 | `session/titled` | SessionStore process state written through its typed operation, plus a Session broadcast notice | Does not affect branch behaviour |
 | Workflow and scheduled run outcomes | Tool results, consumed report input and `pluginFiles` records | No plugin-owned Timeline event or process-notice requirement |
 | Queued message to Steer | `input/withdraw` + new Steer input in one batch | No separate event |
@@ -391,9 +390,9 @@ Prerequisites always land in an earlier phase than their consumers.
 
 | Phase | Content |
 | --- | --- |
-| P0 Foundation | `SessionConfig.interactive` set by `session.create`; `sessions` service with `launch`; `sessionMethods` dispatch; `managementMethods` in Rpc's table with migration of existing management methods; `toolContribution` in ToolRegistry; Settings business sources with change notification (S8a); the language-neutral `settings` service (S8b, with C4); `pluginFiles` (extended: binary, format version); Provider `AuxiliaryModel` (one model call outside any Session); SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
+| P0 Foundation | `SessionConfig.interactive` set by `session.create`; `sessions` service with `launch`; `sessionMethods` dispatch; `managementMethods` in Rpc's table with migration of existing management methods; tool registration with ToolRegistry; Settings business sources with change notification (S8a); the language-neutral `settings` service (S8b, with C4); `pluginFiles` (extended: binary, format version); Provider `AuxiliaryModel` (one model call outside any Session); SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
 | P1 Core interaction | Questions (redesigned, M2), ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; #4 named exposure of the runtime's typed services for non-Rust parts; CLI subcommands, image conversion, `/export`, `exec --json` |
-| P2 Feature extension | Goal, Web, Scheduler, Workflow; ModelProvider `ModelCallScope`; Collaboration member approvals delivered to the leader as input; Mcp OAuth; production compaction host |
+| P2 Feature extension | Goal, Web, Scheduler, Workflow; Collaboration member approvals delivered to the leader as input; Mcp OAuth; production compaction host |
 | P3 External integration | ExternalAgent, AcpGateway, RemoteGateway with Transport `EntryHost` and `ConnectionEntry {name, deviceId}`, Modality; PluginManager; resource nodes (services looked up per call by `resourceNode`) |
 
 The HostPlatform exec-shell change recorded in ADR 002 (business configuration read per spawn) is separate work and blocks no phase.
@@ -409,8 +408,8 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | Scheduled run outcome routing | Specified in [Scheduler A.6](plugins/Scheduler.md#a6-run-outcome-delivery): the run owner persists history and reports through existing Session input. Design readiness follows Scheduler's owner document; package implementation and business acceptance remain. |
 | Scheduled task liveness | Decided: the daemon must be alive ([Scheduler](plugins/Scheduler.md)) |
 | FullAccess and new categories | Decided: allowed automatically (constraint 7) |
-| External agent permissions | Proposed (#145): asked outside the model stream of the calling Session's counterpart: a Collaboration leader's model through an input and a decision tool that passes the leader's Approval and Permission, else the user through a Session method ([ExternalAgent §3.2](plugins/ExternalAgent.md#32-external-permission-request)) |
-| External conversation continuation | Proposed: records are in memory only; a lost record re-initializes from the branch history ([ExternalAgent](plugins/ExternalAgent.md)) |
+| External agent permissions | Proposed (#145): an external member's asks use Collaboration's member-approval route; the leader's model decides with a Collaboration tool under the leader's Approval and Permission ([ExternalAgent §3.2](plugins/ExternalAgent.md#32-permission-asks)) |
+| External members | Decided (D5, #254): `{leaderSessionId, agentId, extSessionId, cwd}` persisted in ExternalAgent's `pluginFiles` store and reopened with ACP `session/load` or CLI resume after a reload or restart; a failed restore keeps the record and returns `restore_failed`; a member ends only on an explicit `close`; a leader's close or deletion does not cascade ([ExternalAgent §3.5](plugins/ExternalAgent.md#35-restore-after-reload-or-restart)) |
 | Permission preset on fork | Decided: no special handling; the preset is copied with the facts, and the application sets a different one after the fork if it wants (#26) |
 | Reload propagation | Decided: accepted cost of rare structural operations ([ADR 002](../adr/002-plugin-scope.md) D3) |
 | Workflow stages run by a Collaboration member | Future feature: reuse a member's context across stages. Today every stage runs in a launched Session ([Workflow](plugins/Workflow.md)) |
@@ -487,11 +486,11 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 | InputQueue | Change | Consumes `input/withdraw {input_id, reason?}` in order (`reason`: proposed generic optional text, at most 2 KiB, written by any producer and shown by clients; InputQueue ignores it for its decision; events without it are unchanged; design rules §4 rule 9 allow descriptive fields on a required event) and writes `input/deleted {input_id}` only for an input it still holds unapplied (else nothing, `notHeld`); `session.input.withdraw` provided through `sessionMethods` (namespace `session.input`, proposed); "withdraw and re-submit as Steer" as one batch; queue state rebuilt from events ([session access A.4](contracts/session-access.md#a4-withdrawal)) | `Ctrl+S`, `/queue`; AcpGateway, Scheduler |
 | Permission, ToolExecutor, Approval | Change (proposed) | Approval passes `AdmitCall.source` to Permission's admission decision; there Permission looks up branch `toolAdvice` services (after policy and command rules, only when not Deny) and folds their `none`/`allow`/`ask`/`deny` advice (deny, then ask, then allow; advice never overrides a Deny); Approval's post-response recheck stays a plain `decide` and does not ask again; ToolExecutor is unchanged. Generic, no business meaning ([Hooks A.6.1](plugins/Hooks.md#a61-tool-advice-in-permission)) | Hooks `PreToolUse` |
 | Rpc `session.submit` and `session.branch_create`, InputQueue `InputMethods`, CLI | Change (proposed) | Before writing operator input (`session.submit`, `session.branch_create {prompt}`, `session.input.withdraw {steer}`), the entry looks up Session `submitCheck` services; a block fails the call with `input_blocked` (message `Hook <source>: <reason>`, `data.appError` only) and writes nothing, else the returned blocks are appended to the input's user content after the operator's own content, so it stays operator input (a new branch's prompt takes none). `input_blocked` joins the `session.submit` errors that guarantee nothing was committed, in the App Server README and the CLI. A caller's disconnect cancels nothing. No event or persistence change. Generic ([Hooks A.6.2](plugins/Hooks.md#a62-submit-check-at-the-operator-input-entries)) | Hooks `UserPromptSubmit` |
-| Runtime Session facade | Supplement | Lookup of `sessionMethods` by namespace (the fixed-prefix read is composed from the existing facade, #50) | Rpc; process callers |
-| ToolRegistry | Supplement | Accepts named `toolContribution` services besides existing registrations ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)) | Non-Rust Session tools |
+| **Withdrawn (existing facade).** Runtime Session facade | Supplement | Lookup of `sessionMethods` by namespace: Rpc reads the Session's one `sessionMethods` table through the existing facade, and the fixed-prefix read is composed from it (#50) | Rpc; process callers |
+| ToolRegistry | Supplement | Parts of any language register tools with `toolRegistry` ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)) | Non-Rust Session tools |
 | Agent assembly | Supplement | Collects the named services each installed plugin declares in `provides`; optional Session and branch parts installed per enabled plugin | All Session plugins |
 | Permission | Supplement | Command rules read at use time (no new risk category: unknown risks are unclassified, #45) | `/approvals` |
-| ModelProvider | Supplement | Passes `ModelCallScope` (session, branch, request and step ids, `SessionConfig`) to the model kind; when building a request, sends an image, or replaces it with a text placeholder if the model lacks image support; history is unchanged (moved out of Rpc) | ExternalAgent; Attachments |
+| ModelProvider | Supplement | When building a request, sends an image, or replaces it with a text placeholder if the model lacks image support; history is unchanged (moved out of Rpc) | Attachments |
 | Prompt, PromptSources | Supplement | Prompt's published adopted model configuration; atomic adoption of a profile's prompt and optional model, using PromptSources' existing `dim/session` System entry | `/effort`, `/fast`, `/agent` |
 | PromptSources | Supplement | Prompt language source | `/language` |
 | ContextPreparation | Supplement | Usage query; manual compaction; production compaction host implementing `ResolveContextModel` | `/usage`, `/compact` |
@@ -504,14 +503,13 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 | --- | --- | --- | --- |
 | Rpc | Change | Method table: built-ins, then `managementMethods` looked up per call without depending on their owners (replacing `When<ProductServices>` and `When<ExecutionServices>`), then the Session's `sessionMethods`; `callChannel` for providers. Management methods and `daemon.shutdown` are never served to a connection with a `deviceId`. `session.create {interactive}` (sent only when false). `session.delete` and `session.fork` built-ins (S5c, implemented: [deletion and fork](appserver/session-deletion-and-fork.md)). Session broadcast notice records forwarded unchanged to attached v3 clients as `session.notice` (C6, implemented: [notices](appserver/session-notices.md)). `title`/`titleSource`/`titleRevision` in v3 Session lists (S5b, implemented: [title metadata](appserver/session-title-metadata.md#8-session-lists)). Validation only at the external boundary (param shape, `sessionId` authorization); `session.submit` checks shape only and no longer validates images ([methods](contracts/session-boundary.md)) | All method owners; SessionTitle |
 | Transport, Connection | Change | `EntryHost` with upgrade authenticators; `ConnectionEntry {name, deviceId}` | RemoteGateway |
-| Agents | Supplement | The `sessions` service ([sessions service](appserver/sessions-service.md)); `SessionConfig.interactive`; `launch` with a policy capped by the starter, `LaunchRequest.agent` optional (absent: Agents' default profile; request `model` over the profile's model); creation from another Session's cut ([deletion and fork](appserver/session-deletion-and-fork.md#6-fork)); profiles with an external agent as model, written through Agents' typed public write operation ([session access](contracts/session-access.md)); `session.agent.update` through Agents' Session entry, resolving an exact profile ID for prompt/model adoption | Scheduler, Workflow, fork, ExternalAgent, `/agent` |
-| Collaboration | Change | Member model: the profile's model, else the default selection; a member's approval request is delivered to the leader branch as an `input/message`; the leader model answers through a Collaboration tool whose call passes the leader's Approval and Permission, and Collaboration writes the answer through Approval's public respond operation (Approval unchanged, #29); `leaderOf(sessionId)`, a public read of the leader branch of a member Session | ExternalAgent |
+| Agents | Supplement | The `sessions` service ([sessions service](appserver/sessions-service.md)); `SessionConfig.interactive`; `launch` with a policy capped by the starter, `LaunchRequest.agent` optional (absent: Agents' default profile; request `model` over the profile's model); creation from another Session's cut ([deletion and fork](appserver/session-deletion-and-fork.md#6-fork)); `session.agent.update` through Agents' Session entry, resolving an exact profile ID for prompt/model adoption | Scheduler, Workflow, fork, `/agent` |
+| Collaboration | Change | Member model: the profile's model, else the default selection; a member's approval request is delivered to the leader branch as an `input/message`; the leader model answers through a Collaboration tool whose call passes the leader's Approval and Permission, and Collaboration writes the answer through Approval's public respond operation (Approval unchanged, #29); member providers by kind (`collaborationMembers:<kind>`, looked up per call) for members that are not dim Sessions, whose asks use the same member-approval route; the `agent` tool keeps its existing risk classification ([ExternalAgent §9.2](plugins/ExternalAgent.md#92-collaboration-member-providers)) | ExternalAgent |
 | SessionStore | Supplement | Title metadata with revision checks, written only through `setTitle`, with a Session broadcast notice on change (owners of process-level state emit such notices) (S5b, implemented: the `sessionMetadata` service, [title metadata](appserver/session-title-metadata.md)); deletion and cleanup; fork (copies facts before the cut) (S5c, implemented: [deletion and fork](appserver/session-deletion-and-fork.md)); Session files on the resource node, shared on fork and deleted with the last owner (S5a, implemented: the `sessionFiles` service, [session files](appserver/session-files.md)) | SessionTitle, Attachments, fork |
 | Settings | Supplement | S8a (Rust, implemented): one or more named business sources per owner, each holding one document type; no subscription API of its own: a committed write emits the rutis event `settings.changed` `{source, scope, revision}` on `settings/<source>`, for user and project scope, without the body, and a newly authorized project emits `settings.project_authorized`; validation and defaults only at the Settings boundary; additive `user/<source>` rows under the v13 `settings_documents` contract (D4). S8b (with C4, implemented): the language-neutral `settings` service with JSON Schema, defaults, allowed scopes and user-only fields declared on C4 rows; management methods `settings.read`/`settings.update`; no credential service (§6.4) | Every plugin with business configuration, including user-written Scheduler jobs (source `schedule`) and Workflow definitions (source `workflow`) |
-| Provider | Supplement | Validation and mapping of advertised effort/tier preferences against the captured adopted model configuration; `AuxiliaryModel` service: `complete(model, request)`, one non-streaming call outside any Session, with the model passed by the caller from its own configuration ([design](appserver/auxiliary-model.md)); proposed [Desktop/CLI management supplement](appserver/provider-management.md) for safe connection edits, model lifecycle and client-only preferences; non-conversational connections per Modality category; external agent connection type; connection entries written through Provider's typed public write operation | `/effort`, `/fast`, SessionTitle, Modality, ExternalAgent |
-| Aimux / ModelHost | Supplement | Provider kinds from other plugins: for a kind it does not drive, ModelHost looks up `modelKind[<kind>]` on each call without depending on its provider; requests of a kind without a provider fail before acceptance | ExternalAgent |
-| `pluginFiles` (`PluginFilesPlugin`) | Supplement | Binary read and write and a format version ([trusted plugin storage](../../crates/dim-app-server/README.md#trusted-plugin-storage)); code location unchanged | Scheduler, Workflow, Modality, RemoteGateway, PluginManager |
-| Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth plugins | Change | Provide their existing management methods as `managementMethods` (wire-compatible); Mcp's `mcp.approve`/`mcp.revoke` are removed, servers run when enabled, and project entries start disabled until the user's local configuration enables them (§6.4 Approval scope) | Rpc migration |
+| Provider | Supplement | Validation and mapping of advertised effort/tier preferences against the captured adopted model configuration; `AuxiliaryModel` service: `complete(model, request)`, one non-streaming call outside any Session, with the model passed by the caller from its own configuration ([design](appserver/auxiliary-model.md)); proposed [Desktop/CLI management supplement](appserver/provider-management.md) for safe connection edits, model lifecycle and client-only preferences; non-conversational connections per Modality category | `/effort`, `/fast`, SessionTitle, Modality |
+| `pluginFiles` (`PluginFilesPlugin`) | Supplement | Binary read and write and a format version ([trusted plugin storage](../../crates/dim-app-server/README.md#trusted-plugin-storage)); code location unchanged | Scheduler, Workflow, Modality, RemoteGateway, PluginManager, ExternalAgent |
+| Mcp, Provider, SkillsCatalog, ManagedProviders, OAuth plugins | Change | Register their existing management namespaces with `managementMethods` (wire-compatible); Mcp's `mcp.approve`/`mcp.revoke` are removed, servers run when enabled, and project entries start disabled until the user's local configuration enables them (§6.4 Approval scope) | Rpc migration |
 | ManagedProviders | Supplement | Plan usage query | `/usage` |
 | Mcp | Supplement | HTTP/SSE OAuth ([MCP OAuth](appserver/mcp-oauth.md)); receives package MCP configuration from PluginManager through its typed operations (#36) | MCP; PluginManager |
 | SkillsCatalog | Supplement | Receives package Skill roots from PluginManager through its typed operations (#36) | PluginManager |
@@ -556,7 +554,7 @@ One row per requirement to the runtime or rutis; changes to other plugins are in
 | Named contracts for non-Rust parts | Runtime | [#4](https://github.com/arcships/dim/issues/4), partial: C4 [#63](https://github.com/arcships/dim/issues/63) and C5 [#64](https://github.com/arcships/dim/issues/64) delivered | Supported C4/C5 contract families; other bindings remain owner-specific decisions | [C4](session-typescript.md), [C5](branch-typescript.md) |
 | **Withdrawn (existing facade composes it, #50).** Fixed-prefix history read on the Session facade | Runtime | To be opened | Process callers, branch parts deciding from Timeline facts | [session access §9](contracts/session-access.md#9-requirements-raised-to-mechanism-owners) |
 | Assembly installs the supported C4/C5 parts from their declared `provides` families | Runtime | [#63](https://github.com/arcships/dim/issues/63), [#64](https://github.com/arcships/dim/issues/64): implemented | TypeScript Session and branch parts; process/package binding remains separate | [C4](session-typescript.md), [C5](branch-typescript.md) |
-| Lookup of a keyed Session service by name (`sessionMethods` by namespace) and named `toolContribution` collection | Runtime | C1 [#47](https://github.com/arcships/dim/issues/47), C3 [#46](https://github.com/arcships/dim/issues/46), C4 [#63](https://github.com/arcships/dim/issues/63): implemented | Rpc, ToolRegistry | [Methods and tools](contracts/session-boundary.md) |
+| Registration of method namespaces with `sessionMethods` and `managementMethods` and of tools with ToolRegistry, from any language | Runtime | C1 [#47](https://github.com/arcships/dim/issues/47), C3 [#46](https://github.com/arcships/dim/issues/46), C4 [#63](https://github.com/arcships/dim/issues/63), [#382](https://github.com/arcships/dim/issues/382): implemented | Rpc, ToolRegistry | [Methods and tools](contracts/session-boundary.md) |
 | **Withdrawn (rutis is an external dependency).** Unload of a Session-scoped method provider waits for its `drain` calls | rutis lifecycle | To be opened | Rpc | [session boundary §9](contracts/session-boundary.md#9-requirements-raised-to-mechanism-owners) |
 | Timeline carries event types the core does not define | Runtime | [#2](https://github.com/arcships/dim/issues/2) | No current consumer (the Questions redesign defines no events) | [Questions §9](plugins/Questions.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (rutis is an external dependency).** Services imported over a rutis link stay registered while the link is down and each call fails with `node_unavailable` (processes on the node are ended by that node's own HostPlatform) | rutis | [#5](https://github.com/arcships/dim/issues/5) | ExternalAgent, Modality, ShellInput, Hooks, Attachments, Workflow, Scheduler, PluginManager, RemoteGateway | [ExternalAgent §9](plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners) |
@@ -564,3 +562,4 @@ One row per requirement to the runtime or rutis; changes to other plugins are in
 | **Withdrawn (rutis is an external dependency).** A provider sends requests back to the caller within one call (call-scoped requests) | rutis | To be opened | RemoteGateway | [RemoteGateway §9](plugins/RemoteGateway.md#91-call-scoped-requests-from-provider-to-caller) |
 | Session broadcast notice record `{source, kind, data}` emitted by owners of process-level state after a committed change | Runtime (Session broadcast) | [#49](https://github.com/arcships/dim/issues/49) (C6, implemented: [notices](appserver/session-notices.md)) | SessionTitle | [SessionTitle §9](plugins/SessionTitle.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (rutis is an external dependency).** Typed operations on the loader editable layer | rutis-loader | [#3](https://github.com/arcships/dim/issues/3) | PluginManager | [PluginManager §9](plugins/PluginManager.md#9-requirements-raised-to-mechanism-owners) |
+| Assembly projects `collaborationMembers:<kind>` from TypeScript process rows into the native member-provider contract and passes the configured kinds to Collaboration | App Server assembly | To be opened | ExternalAgent | [ExternalAgent §9.5](plugins/ExternalAgent.md#95-native-projection-of-member-providers-assembly) |

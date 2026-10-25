@@ -1,8 +1,8 @@
-use dim_agent_runtime::{Capability, KeysOf, capability_plugin};
+use dim_agent_runtime::Names;
 use dim_app_server::managed_provider::{
     ManagedProviderBinding, ManagedProviders, ManagedProvidersPlugin,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, Keyed, Typed, TypedPlugin};
 use rutis_bridge::session::{HostDispatch, Reply, Value};
 use serde_json::json;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -100,28 +100,22 @@ impl TypedPlugin for FixturePlugin {
         })
     }
 }
-impl Capability for FixturePlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 struct Capture(Arc<OnceLock<Arc<ManagedProviders>>>);
 impl TypedPlugin for Capture {
-    type Deps = Arc<ManagedProviders>;
+    type Deps = Keyed<ManagedProviders>;
     fn name(&self) -> &str {
         "capture-managed"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        owner: Self::Deps,
+        Keyed(owner): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let _ = self.0.set(owner);
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for Capture {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 async fn active(view: &rutis::FiberView) {
     let mut watch = view.watch();
@@ -138,12 +132,19 @@ async fn active(view: &rutis::FiberView) {
 
 async fn setup() -> (Ctx, Arc<Fixture>, Arc<ManagedProviders>, rutis::FiberView) {
     let root = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     let fixture = Arc::new(Fixture::default());
     let captured = Arc::new(OnceLock::new());
-    let owner_plugin = root.plugin(capability_plugin(ManagedProvidersPlugin));
-    let fixture_plugin = root.plugin(capability_plugin(FixturePlugin(fixture.clone())));
-    let binding = root.plugin(capability_plugin(ManagedProviderBinding));
-    let capture = root.plugin(capability_plugin(Capture(captured.clone())));
+    let catalog = dim_app_server::catalog();
+    let owner_plugin = root.plugin(Typed::new(ManagedProvidersPlugin));
+    let fixture_plugin = root.plugin(Typed::new(FixturePlugin(fixture.clone())));
+    let binding = root
+        .plugin(ManagedProviderBinding::part(&Names::copy(&catalog, &Default::default())).unwrap());
+    let capture = root.plugin(Typed::new(Capture(captured.clone())));
     for view in [&owner_plugin, &fixture_plugin, &binding, &capture] {
         active(view).await;
     }

@@ -1,7 +1,7 @@
 # Branch TypeScript binding
 
 Status: implemented for [C5 / #64](https://github.com/arcships/dim/issues/64), the branch portion of
-[#4](https://github.com/arcships/dim/issues/4), on rutis 0.12.1 `build::Exports`
+[#4](https://github.com/arcships/dim/issues/4), on rutis 0.16.0 `build::Exports`
 ([arcships/rutis#440](https://github.com/arcships/rutis/issues/440)). Goal (#69) is its consumer;
 its Session part writes input by branch id and the branch owner decides (§Open).
 
@@ -11,11 +11,11 @@ A TypeScript branch part consumes its own branch's committed events through the 
 Dispatcher, rebuilds from the branch's committed history, and submits validated input through
 `Branch::input`. It uses the existing Rust services by name, as a Rust part injects them: there is
 no binding layer, branch handle, registry or setup service of Dim's own. App Server lists the
-services to export in `crates/dim-app-server/build.rs`; rutis generates their dispatch and
-TypeScript declarations from the Rust definitions.
+services to export with their group in `crates/dim-app-server/build.rs`; rutis generates their
+dispatch and TypeScript declarations from the Rust definitions.
 
 The generated declarations are published in `npm/branch-services.d.ts` and re-exported as
-`BranchServices` and the service types by `dimcode/plugin`. The SDK's `BranchEvent` reuses the
+`Services` and the service types by `dimcode/plugin`. The SDK's `BranchEvent` reuses the
 existing event envelope with native bridge sequences and owner-defined data. The
 [authoring guide](../typescript-plugin-authoring.md#ordered-branch-consumption) shows the row,
 subscription and rebuild. Regenerate with `cargo check --locked -p dim-app-server`; CI checks
@@ -107,24 +107,25 @@ fact: cancelling then only stops the caller waiting, and TimelineTree finishes t
 
 ## Placement
 
-A row that injects a branch service (`dispatcher`, `branchLifecycle`, `timeline` or `timelineIdentity`) is a
-branch part: App Server appends it to the existing nested `BRANCH_GROUP`, so it runs once in every
-branch. Its declared dependencies decide its placement; there is no scope setting or setup service.
-Other rows stay Session rows (C4).
+A row with `"group": "branch"` is a branch part: App Server appends it to the existing nested
+`BRANCH_GROUP`, so it runs once in every branch ([How Dim uses rutis §2](rutis-usage.md#2-parts-are-loader-rows)).
+Its declared group decides its placement, not the names it injects; there is no setup service. A
+row in another group that names a branch service fails at composition, naming the branch group.
 
 ```json
 {
   "id": "goal-state",
   "name": "/absolute/goal/branch.ts",
+  "group": "branch",
   "provides": {},
   "inject": ["dispatcher", "timelineIdentity", "treeCommands"],
   "config": {}
 }
 ```
 
-A branch row may provide branch services (registered in its branch instance) but not the Session
-families `toolContribution:`, `sessionMethods:` or `sessionEvents:`; that fails at the configuration
-boundary. A package with Session and branch parts uses separate entry modules. The C4 rules on ids,
+A branch row's provided names are registered in its branch instance, so each branch has its own.
+Tools and Session methods are read in the Session, so they belong to Session rows. A package with
+Session and branch parts uses separate entry modules. The C4 rules on ids,
 same-module snapshots, online metadata, disablement and Pending apply unchanged.
 
 ## Subscription, rebuild and recovery

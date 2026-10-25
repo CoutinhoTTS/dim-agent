@@ -1,8 +1,9 @@
 # SessionTitle
 
 Optional Session TypeScript package implementing the [SessionTitle contract](../../../docs/design/plugins/SessionTitle.md).
-The original C4 row provides `sessionEvents:session-title` and `sessionMethods:session.rename`;
-the existing process services own history, settings, model execution and title persistence.
+Its row, in the `session` group, registers `session.rename` with the Session's `sessionMethods` and
+reads its Session through `sessionIdentity`, `sessionConfig` and `sessionLifecycle`; the existing
+process services own history, settings, model execution and title persistence.
 
 ## Loading
 
@@ -29,17 +30,14 @@ the next adopted operator input can trigger an attempt using the first adopted i
 
 ## Behavior
 
-An interactive leader's own `main` adoption schedules owned asynchronous work and returns
-from the broadcast callback. A fixed published history prefix supplies only the first adopted
+The row listens to its Session's `session/{sessionId}` channel. An interactive leader's own
+`main` adoption schedules owned asynchronous work and returns from the listener. A fixed published history prefix supplies only the first adopted
 operator input's text, bounded to 2000 Unicode code points. Images, raw blocks, deleted inputs,
 later input text and tool/assistant/system content are excluded. An image-only first input
-produces no automatic title and is remembered for this load. External-agent Sessions skip
-repeated history reads until a later adopted model notice permits another decision.
-An explicit external-agent title model is also skipped; this exclusion is not cached across
-Settings changes, so selecting a native title model permits the next attempt.
+produces no automatic title and is remembered for this load.
 
 Each attempt first reads the validated user-only `session-title` Settings document; disabled
-generation or an explicit external-agent title model reads neither metadata nor history. Defaults are
+generation reads neither metadata nor history. Defaults are
 `enabled: true`, `maxLength: 80` (10–200 code points) and `model: null`. The native backend
 stores it in `user/session-title`; the file backend uses the user file `session-title.json`.
 Use existing `settings.read`/`settings.update` with the returned revision. Project scope is

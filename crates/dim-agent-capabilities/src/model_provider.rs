@@ -9,12 +9,12 @@ use crate::{
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, BranchScope, CAPABILITY_RELOADING, Capability, Dispatcher, InBranch, InSession,
-    KeysOf, ModelProgress, StateCell, Timeline, TimelineIdentity, When,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, ModelProgress, Names, StateCell, Timeline,
+    TimelineIdentity, When,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
@@ -264,32 +264,50 @@ impl ModelProvider {
 }
 
 pub struct ModelProviderPlugin {
-    scope: BranchScope,
-    process_model: bool,
+    provider: DepKey<ModelProvider>,
+    progress: DepKey<StateCell<ModelProgress>>,
+    /// Each request's connection comes from the process
+    /// `ProviderConnectionResolver`; otherwise it is local.
+    resolves: bool,
 }
 impl ModelProviderPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self {
-            scope: *scope,
-            process_model: false,
-        }
+    /// Requests run on the local connection.
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Self::with(names, false)
     }
-    /// The network profile reads the process request service and resolver.
-    pub fn process(scope: &BranchScope) -> Self {
-        Self {
-            scope: *scope,
-            process_model: true,
-        }
+    /// The network profile resolves each request's connection through the
+    /// process `ProviderConnectionResolver`.
+    pub fn process(names: &Names<'_>) -> Result<Self, CordisError> {
+        Self::with(names, true)
+    }
+    fn with(names: &Names<'_>, resolves: bool) -> Result<Self, CordisError> {
+        Ok(Self {
+            provider: names.key()?,
+            progress: names.state_cell()?,
+            resolves,
+        })
+    }
+    /// This part with its keys for this copy.
+    pub fn part(self, names: &Names<'_>) -> Result<Box<dyn rutis::Plugin>, CordisError> {
+        let keys = (
+            names.key()?,
+            names.key()?,
+            names.key()?,
+            names.key()?,
+            names.when::<Keyed<ProviderConnectionResolver>>(self.resolves)?,
+            names.key()?,
+        );
+        Ok(names.part_with(self, keys))
     }
 }
 impl TypedPlugin for ModelProviderPlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InBranch<ContextPreparation>,
-        When<InSession<ModelHost>>,
-        When<(Arc<ModelHost>, Arc<ProviderConnectionResolver>)>,
-        InBranch<TimelineIdentity>,
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        Keyed<ContextPreparation>,
+        Keyed<ModelHost>,
+        When<Keyed<ProviderConnectionResolver>>,
+        Keyed<TimelineIdentity>,
     );
     fn name(&self) -> &str {
         "ModelProvider"
@@ -298,20 +316,16 @@ impl TypedPlugin for ModelProviderPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InBranch(timeline),
-            InBranch(dispatcher),
-            InBranch(context),
-            When(session_model),
-            When(process_model),
-            InBranch(identity),
+            Keyed(timeline),
+            Keyed(dispatcher),
+            Keyed(context),
+            Keyed(host),
+            When(resolver),
+            Keyed(identity),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let (host, resolver) = match (session_model, process_model) {
-                (_, Some((host, resolver))) => (host, Some(resolver)),
-                (Some(InSession(host)), None) => (host, None),
-                (None, None) => unreachable!("the keys enable exactly one model host"),
-            };
+            let resolver = resolver.map(|Keyed(resolver)| resolver);
             let service = Arc::new(ModelProvider {
                 state: Mutex::new(ModelState::default()),
                 tasks: TaskTracker::new(),
@@ -462,25 +476,9 @@ impl TypedPlugin for ModelProviderPlugin {
             let events = service.timeline.local(..=through).await?;
             service.rebuild(&mut service.state.lock().unwrap(), &events)?;
             drop(rebuilding);
-            ctx.provide_as(
-                self.scope.key::<StateCell<ModelProgress>>(),
-                service.progress.clone(),
-            )?;
-            ctx.provide_as(self.scope.key::<ModelProvider>(), service)?;
+            ctx.provide_as(self.progress.key().clone(), service.progress.clone())?;
+            ctx.provide_as(self.provider.key().clone(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ModelProviderPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        let scope = self.scope;
-        (
-            scope,
-            scope,
-            scope,
-            (!self.process_model).then_some(scope.session),
-            self.process_model.then_some(((), ())),
-            scope,
-        )
     }
 }

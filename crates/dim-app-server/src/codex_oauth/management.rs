@@ -19,8 +19,12 @@ pub struct BrowserLoginComplete {
     pub callback_url: String,
 }
 
-pub(super) fn provide(ctx: &Ctx, oauth: Arc<OpenAICodexOAuthService>) -> Result<(), CordisError> {
-    ManagementMethods::provide(
+pub(super) fn provide(
+    ctx: &Ctx,
+    methods: &ManagementMethods,
+    oauth: Arc<OpenAICodexOAuthService>,
+) -> Result<(), CordisError> {
+    methods.register(
         ctx,
         "account.codex",
         [

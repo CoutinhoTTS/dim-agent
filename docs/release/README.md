@@ -34,7 +34,17 @@ Cross-built executables are inspected for their ELF, Mach-O or PE target archite
 
 ## GitHub workflows
 
-`ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. It receives no private plugin credentials.
+`ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. It receives no private plugin credentials. Pushes to `main` and manual runs do all of it; a pull request runs only the groups its changed paths need, as decided by `scripts/ci-changes.mjs` (documentation-only changes skip every group, and unrecognized paths run all of them). `ci-ok` passes when every selected job passed, so it is the check to require. CI builds without debug info (`CARGO_PROFILE_DEV_DEBUG=0`).
+
+### CI trust model
+
+Every `ci.yml` job runs on a persistent self-hosted runner, and a pull request's checks build and run that pull request's code, so a job can read and change whatever the runner keeps between jobs. CI therefore verifies only code pushed by people with write access to `arcships/dim`:
+
+- The binding boundary is the repository's GitHub settings: forking is disabled, and "Run workflows from fork pull requests" is off for this private repository. Keep both that way while CI uses self-hosted runners.
+- `ci.yml` also skips every job when a pull request's head branch is not in `arcships/dim`, and `ci-ok` then fails rather than reporting an unverified pull request as passing. This guard is defense in depth only: a pull request supplies its own workflow file, so the settings above are what keep untrusted code off the runners.
+- PR runners must hold no release credentials and stay off private networks; `ci.yml` receives no secrets, and its `GITHUB_TOKEN` can only read repository contents.
+
+Accepting contributions from forks or outside collaborators requires moving their checks to ephemeral runners first.
 
 `release.yml` runs when a `v*.*.*` tag is pushed, or when manually dispatched with an existing tag:
 
@@ -77,7 +87,7 @@ In CI, configure the `release-build` Environment with `DIM_OAUTH_PACKAGE_URL` an
 
 An accepted plugin archive contains only `package.json`, `dim-plugin.json` and `dist/index.js`. The manifest uses schema 1, host API 2 and rutis 0.10.0. Host API 2 requires `quiesce` and supports native file transactions; API 1 archives are rejected. The private SDK is bundled in `dist/index.js`; source maps, tests and account files are excluded.
 
-The bundled host runtime is rutis 0.12.1, which also accepts plugin API 1 exports from the 0.10.0 SDK. The managed-provider manifest and host API contract above are unchanged; its SDK version is distinct from the host runtime version recorded in the release inventory.
+The bundled host runtime is rutis 0.16.0, which also accepts plugin API 1 exports from the 0.10.0 SDK. The managed-provider manifest and host API contract above are unchanged; its SDK version is distinct from the host runtime version recorded in the release inventory.
 
 For the host platform `stage-runtime.mjs` copies the pinned host Node and its license; for a cross target (`DIM_BUILD_PLATFORM`) it downloads the pinned official Node distribution for the **target** OS/CPU and verifies its archive against the official `SHASUMS256.txt`. Both install the locked rutis runtime with [npm target OS/CPU overrides](https://docs.npmjs.com/cli/v11/using-npm/config/#cpu) and install scripts disabled, then copy the verified plugin. Staging never bundles the host Node into a cross-target payload. It writes the tree as `runtime.bin` (gzip over `DIMRT1\n` and, per file in path order, a u32 BE path length, the UTF-8 path, a flags byte where 1 marks an executable, a u64 BE size and the bytes) and records its digest, file digests, toolchain and plugin provenance in `runtime.json`. `build.rs` in `dim-cli` embeds the archive and its SHA-256; `stage-release.mjs --runtime` rejects an executable that does not contain that digest.
 

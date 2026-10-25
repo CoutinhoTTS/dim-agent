@@ -7,7 +7,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use futures_util::StreamExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::{
     sync::{
         Arc,
@@ -185,13 +185,13 @@ fn builder_with_context(
 ) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .session_value(Arc::new(ModelHost(model)))
+        .process_value(Arc::new(ModelHost(model)))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(history))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(context)))))
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::install(&mut builder);
     builder
 }
@@ -528,28 +528,16 @@ async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() 
     .unwrap();
 }
 
-struct RewriteBaseline {
-    scope: BranchScope,
-}
-impl RewriteBaseline {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
-    }
-}
-impl Capability for RewriteBaseline {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
+struct RewriteBaseline;
 impl TypedPlugin for RewriteBaseline {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (Keyed<Timeline>,);
     fn name(&self) -> &str {
         "test.rewrite-baseline"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (Keyed(timeline),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             timeline.before(ctx, self.name(), &["context/compaction"], |mut draft| {
@@ -663,7 +651,7 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
 
     let mut forged_builder =
         builder_with_context(Arc::new(EchoModel), HistoryRenderer::default(), context);
-    forged_builder.timeline_plugin(RewriteBaseline::new);
+    forged_builder.branch_part(|names| names.part(RewriteBaseline));
     let forged_agent = forged_builder.build();
     let forged_session = forged_agent
         .create_session(SessionConfig::default())
@@ -720,28 +708,16 @@ mod product_summary;
 #[path = "context_flow/retention.rs"]
 mod retention;
 
-struct ExpandFinal {
-    scope: BranchScope,
-}
-impl ExpandFinal {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
-    }
-}
-impl Capability for ExpandFinal {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
+struct ExpandFinal;
 impl TypedPlugin for ExpandFinal {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (Keyed<Timeline>,);
     fn name(&self) -> &str {
         "ExpandFinal"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (Keyed(timeline),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             timeline.before(ctx, "expand-final", &["model/call"], |mut draft| {
@@ -761,7 +737,7 @@ async fn before_modified_request_is_budget_checked_before_native_model_invocatio
     tokio::time::timeout(Duration::from_secs(10), async {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut builder = builder(Arc::new(BudgetFailure(calls.clone())));
-        builder.timeline_plugin(ExpandFinal::new);
+        builder.branch_part(|names| names.part(ExpandFinal));
         let agent = builder.build();
         let session = agent
             .create_session(SessionConfig::default())
@@ -1235,13 +1211,13 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
     );
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .session_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(context.clone())))))
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::install(&mut builder);
     let agent = builder.build();
     let session = agent
@@ -1330,7 +1306,7 @@ async fn a_single_long_turn_compacts_inside_itself_instead_of_skipping() {
         builder_with_context(Arc::new(EchoModel), HistoryRenderer::default(), context).build();
     let session = agent
         .create_session(SessionConfig {
-            tools: vec!["echo".into()],
+            tools: Some(vec!["echo".into()]),
             permission_policy: dim_agent_runtime::PermissionPolicy {
                 preset: dim_agent_runtime::PermissionPreset::FullAccess,
                 ..Default::default()

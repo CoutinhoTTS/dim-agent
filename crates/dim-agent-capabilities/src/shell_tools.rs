@@ -9,7 +9,7 @@ use crate::{
     shell_session::{CallContext, ShellSession},
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::{AgentBuilder, Capability, InSession, KeysOf, SessionScope, scoped};
+use dim_agent_runtime::{AgentBuilder, Names};
 use dim_agent_types::{ToolCall, ToolResult};
 use rutis::{BoxFuture, Ctx, Effect, TypedPlugin};
 use serde_json::json;
@@ -98,40 +98,34 @@ impl ToolDriver for ShellToolsDriver {
 
 /// Installs the shell tools into a Session.
 pub fn install(builder: &mut AgentBuilder) {
-    builder.host_tools(["execute".to_string()]);
-    builder.session_plugin(ShellToolsPlugin::new);
+    builder.session_part(|names| names.part(ShellToolsPlugin::new(names)?));
 }
 
 /// The plugin.
 pub struct ShellToolsPlugin {
-    scope: SessionScope,
+    host: rutis::DepKey<ToolHost>,
 }
 
 impl ShellToolsPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, rutis::CordisError> {
+        Ok(Self { host: names.key()? })
     }
 }
 
 impl TypedPlugin for ShellToolsPlugin {
-    type Deps = (Arc<HostPlatform>, InSession<TreeCommands>);
+    type Deps = (rutis::Keyed<HostPlatform>, rutis::Keyed<TreeCommands>);
     fn name(&self) -> &str {
         "ShellTools"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (platform, InSession(tree)): Self::Deps,
+        (rutis::Keyed(platform), rutis::Keyed(tree)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, rutis::CordisError>> {
         Box::pin(async move {
             let driver = Arc::new(ShellToolsDriver { platform, tree });
-            ctx.provide_as(self.scope.key::<ToolHost>(), Arc::new(ToolHost(driver)))?;
+            ctx.provide_as(self.host.key().clone(), Arc::new(ToolHost(driver)))?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ShellToolsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

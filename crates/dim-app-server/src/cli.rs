@@ -2,12 +2,12 @@
 
 use crate::{
     ServerConfig, ShutdownReason, collaboration, permission_rules, serve,
-    session_typescript::SessionTypeScriptConfig,
+    session_typescript::{PythonConfig, SessionTypeScriptConfig},
 };
-use dim_agent_aimux::{AimuxModels, ConfiguredModelPlugin, config::ModelConfigFile};
+use dim_agent_aimux::{AimuxModels, config::ModelConfigFile};
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, MockTools},
-    context_methods::{self, ContextMethodsPlugin},
+    context_methods::ContextMethodsPlugin,
     context_model::ProductContextModel,
     defaults,
     history::HistoryRenderer,
@@ -76,6 +76,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
     let mut node = None;
     let mut js_runtime = None;
     let mut session_rows = None;
+    let mut python = None;
     let mut args = argv.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -133,9 +134,14 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                     args.next().ok_or("--session-rows requires a path")?,
                 ))
             }
+            "--python" => {
+                python = Some(PathBuf::from(
+                    args.next().ok_or("--python requires a path")?,
+                ))
+            }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--web-assets PATH]\n\
+                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--plugin-dir PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
                      dim-app-server --export-timeline SESSION_ID --database PATH"
                 );
                 return Ok(());
@@ -145,6 +151,9 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
     }
     if (node.is_some() || js_runtime.is_some()) && plugin_dir.is_none() && session_rows.is_none() {
         return Err("--node and --js-runtime need --plugin-dir or --session-rows".into());
+    }
+    if python.is_some() && session_rows.is_none() {
+        return Err("--python needs --session-rows".into());
     }
     if let Some(plugin_dir) = plugin_dir {
         match (&node, &js_runtime) {
@@ -180,12 +189,17 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                 error.column()
             )
         })?;
+        // `py:` modules are imported from the file's directory.
+        let python = python.map(|interpreter| PythonConfig {
+            interpreter,
+            project: anchor.parent().expect("a file has a directory").to_owned(),
+        });
         config.session_typescript = Some(SessionTypeScriptConfig {
             node,
             js_runtime,
             anchor,
+            python,
             rows,
-            process_rows: Vec::new(),
         });
     }
     if threads == 0 {
@@ -201,12 +215,8 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
         return Err("Product home is required; use --product-home PATH, --model-config PATH or --mock-model".into());
     }
     if config.product_home.is_some() || model_config.is_some() {
-        config.session_defaults.tools = [
-            "read", "write", "edit", "glob", "grep", "exec", "wait", "skill", "branch", "agent",
-            "ask_user",
-        ]
-        .map(String::from)
-        .to_vec();
+        // Product Sessions declare every tool the process provides.
+        config.session_defaults.tools = None;
         config.session_defaults.permission_policy.preset =
             dim_agent_types::PermissionPreset::WorkspaceWrite;
     } else {
@@ -289,17 +299,16 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                 // A --models file adopts no capability snapshot: no compaction.
                 builder
                     .session_value(Arc::new(ContextModelHost(None)))
-                    .session_value(Arc::new(CompactionStrategyHost(None)))
-                    .session_plugin(ConfiguredModelPlugin::new);
+                    .session_value(Arc::new(CompactionStrategyHost(None)));
+                dim_agent_aimux::install(&mut builder);
             } else {
                 builder
                     .session_value(Arc::new(ContextModelHost(Some(Arc::new(
                         ProductContextModel,
                     )))))
-                    .session_plugin(ProductSummaryStrategyPlugin::new)
-                    .session_plugin(ContextMethodsPlugin::new)
-                    .session_methods(context_methods::NAMESPACE)
-                    .session_plugin(DefaultPrepareModelPlugin::new);
+                    .session_part(|names| names.part(ProductSummaryStrategyPlugin::new(names)?))
+                    .session_part(|names| names.part(ContextMethodsPlugin))
+                    .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
             }
             collaboration::install(&mut builder);
             dim_agent_questions::install(&mut builder);

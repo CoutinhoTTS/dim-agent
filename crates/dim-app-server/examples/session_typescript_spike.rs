@@ -1,19 +1,17 @@
 //! C4 transport probe. This example installs no product bridge or protocol.
 use dim_agent_capabilities::{defaults, session_broadcast::*};
 use dim_agent_runtime::{
-    AGENT_GROUP, AgentBuilder, AgentConfig, Capability, InSession, KeysOf, SESSION_GROUP,
-    SessionConfig, SessionIdentity, SessionScope, register_capability,
+    AGENT_GROUP, AgentBuilder, AgentConfig, SESSION_GROUP, SessionConfig, SessionIdentity,
+    register_part,
 };
 use dim_agent_types::{InputMode, ToolCall, ToolDefinition, ToolResult};
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Plugin, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, Plugin, TypedPlugin};
 use rutis_bridge::{
     runtime::{LocalRuntime, Runtime, Stdio},
     session::{HostDispatch, Reply, Value, arg, host_key_in, settle},
 };
-use rutis_loader::{
-    Builtins, Chain, Layer, LoaderOptions, LoaderPlugin, RuntimeResolver, ServiceCatalog,
-};
+use rutis_loader::{Builtins, Chain, Layer, LoaderOptions, LoaderPlugin, RuntimeResolver};
 use serde_json::{Value as Json, json};
 use std::{
     panic::AssertUnwindSafe,
@@ -37,9 +35,6 @@ impl TypedPlugin for Node {
         Plugin::apply(self.0.as_ref(), ctx)
     }
 }
-impl Capability for Node {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 struct NodeRows(Arc<RuntimeResolver>);
 impl TypedPlugin for NodeRows {
@@ -55,11 +50,6 @@ impl TypedPlugin for NodeRows {
         Box::pin(async move {
             Plugin::apply(&rutis_loader::RuntimeRowsPlugin::new(self.0.clone()), ctx).await
         })
-    }
-}
-impl Capability for NodeRows {
-    fn keys(&self) -> KeysOf<Self> {
-        (rutis::DepKey::dynamic("node"), ())
     }
 }
 
@@ -82,19 +72,15 @@ impl TypedPlugin for Anchor {
         })
     }
 }
-impl Capability for Anchor {
-    fn keys(&self) -> KeysOf<Self> {
-        (rutis::DepKey::dynamic("node"),)
-    }
-}
 
 struct Loaded {
     session_id: String,
-    scope: SessionScope,
+    session: InstanceId,
     ctx: Ctx,
     closed: Arc<AtomicUsize>,
 }
-struct SessionProbe(SessionScope, mpsc::UnboundedSender<Loaded>);
+/// The probe of one Session, built for its instance.
+struct SessionProbe(InstanceId, mpsc::UnboundedSender<Loaded>);
 struct SessionHost(String, Arc<AtomicUsize>);
 impl HostDispatch for SessionHost {
     fn invoke(&self, method: &str, _: Value) -> Reply {
@@ -113,12 +99,13 @@ impl HostDispatch for SessionHost {
         Some(json!({"identity":"sync","closed":"sync"}))
     }
 }
-struct BroadcastProbe(SessionScope);
+struct BroadcastProbe(InstanceId);
 impl rutis::Listener<SessionBroadcastEvent> for BroadcastProbe {
     fn call<'a>(
         &'a self,
         ctx: &'a Ctx,
         record: &'a SessionBroadcastEvent,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         Box::pin(async move {
             let record = match record {
@@ -134,9 +121,7 @@ impl rutis::Listener<SessionBroadcastEvent> for BroadcastProbe {
                 SessionBroadcastEvent::Closed => json!({"kind":"closed"}),
             };
             // Probe-only encoding and optional run-time lookup on the existing bus.
-            if let Some(target) =
-                ctx.get_as::<dyn HostDispatch>(host_key_in("c4Probe", self.0.instance))
-            {
+            if let Some(target) = ctx.get_as::<dyn HostDispatch>(host_key_in("c4Probe", self.0)) {
                 call(&target, "notice", vec![record.into()]).await?;
             }
             Ok(None)
@@ -145,42 +130,37 @@ impl rutis::Listener<SessionBroadcastEvent> for BroadcastProbe {
 }
 
 impl TypedPlugin for SessionProbe {
-    type Deps = (InSession<SessionIdentity>,);
+    type Deps = (Keyed<SessionIdentity>,);
     fn name(&self) -> &str {
         "C4SessionProbe"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(identity),): Self::Deps,
+        (Keyed(identity),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let closed = Arc::new(AtomicUsize::new(0));
             ctx.provide_as::<dyn HostDispatch>(
-                host_key_in("c4Session", self.0.instance),
+                host_key_in("c4Session", self.0),
                 Arc::new(SessionHost(identity.session_id.clone(), closed.clone())),
             )?;
-            let scope = self.0;
+            let session = self.0;
             ctx.events().on(
                 ctx,
                 &session_channel(&identity.session_id),
-                BroadcastProbe(scope),
+                BroadcastProbe(session),
             )?;
             self.1
                 .send(Loaded {
                     session_id: identity.session_id.clone(),
-                    scope,
+                    session,
                     ctx: ctx.clone(),
                     closed,
                 })
                 .map_err(|error| CordisError::PluginFailed(error.into()))?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for SessionProbe {
-    fn keys(&self) -> KeysOf<Self> {
-        (self.0,)
     }
 }
 
@@ -195,7 +175,7 @@ async fn call(
 fn service(loaded: &Loaded, name: &str) -> Arc<dyn HostDispatch> {
     loaded
         .ctx
-        .get_as(host_key_in(name, loaded.scope.instance))
+        .get_as(host_key_in(name, loaded.session))
         .expect("probe service Active")
 }
 async fn fence(
@@ -289,27 +269,37 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
         .stdin(Stdio::Null)
         .stdout(Stdio::Null),
     );
-    let mut catalog = ServiceCatalog::new();
-    for name in ["c4Session", "c4Tool", "c4Probe"] {
-        catalog.register_shared_instance(name, SESSION_GROUP);
-    }
-    let resolver = Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(&catalog));
-    let mut builtins = Builtins::new();
-    let node = register_capability(&mut builtins, {
-        let runtime = runtime.clone();
-        move || Node(runtime.clone())
-    });
-    let rows = register_capability(&mut builtins, {
-        let resolver = resolver.clone();
-        move || NodeRows(resolver.clone())
-    });
-    let (anchor_send, mut anchors) = mpsc::unbounded_channel();
-    let anchor = register_capability(&mut builtins, move || Anchor(anchor_send.clone()));
-    let (loaded_send, mut loaded) = mpsc::unbounded_channel();
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    for name in ["c4Session", "c4Tool", "c4Probe"] {
+        builder
+            .catalog_mut()
+            .register_shared_instance(name, SESSION_GROUP);
+    }
+    let resolver =
+        Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(builder.catalog()));
+    let (loaded_send, mut loaded) = mpsc::unbounded_channel();
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder.session_plugin(move |scope| SessionProbe(*scope, loaded_send.clone()));
+    builder.session_part(move |names| {
+        names.part(SessionProbe(
+            names.instance(SESSION_GROUP)?,
+            loaded_send.clone(),
+        ))
+    });
+    // The Node runtime and its rows are rutis's, at the runtime's own keys.
+    let mut builtins = Builtins::new();
+    let node = register_part(&mut builtins, builder.catalog(), {
+        let runtime = runtime.clone();
+        move |names| names.part(Node(runtime.clone()))
+    })?;
+    let rows = register_part(&mut builtins, builder.catalog(), {
+        let resolver = resolver.clone();
+        move |names| Ok(names.part_with(NodeRows(resolver.clone()), (DepKey::dynamic("node"), ())))
+    })?;
+    let (anchor_send, mut anchors) = mpsc::unbounded_channel();
+    let anchor = register_part(&mut builtins, builder.catalog(), move |names| {
+        Ok(names.part_with(Anchor(anchor_send.clone()), (DepKey::dynamic("node"),)))
+    })?;
     let mut session_row = builder.install(&mut builtins, root, []).await?;
     session_row["config"]
         .as_array_mut()
@@ -320,17 +310,25 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     let plugin = LoaderPlugin::new(
         Chain::new().with(builtins).with_shared(resolver),
         LoaderOptions {
-            catalog,
+            catalog: builder.catalog().clone(),
             ..Default::default()
         },
     );
     let loader = plugin.handle();
     (&root.plugin(plugin)).await?;
     let started = Instant::now();
-    let report = loader.reconcile(vec![Layer::new("spike", serde_json::from_value(json!([{"insert":[
-        {"id":node,"name":node}, {"id":rows,"name":rows},
-        {"id":AGENT_GROUP,"group":true,"instanced":true,"config":[{"id":anchor,"name":anchor},session_row]}
-    ]}]))?)], None).await?;
+    let agent_row = builder.agent_row([json!({"id":anchor,"name":anchor}), session_row]);
+    let report = loader
+        .reconcile(
+            vec![Layer::new(
+                "spike",
+                serde_json::from_value(json!([{"insert":[
+                    {"id":node,"name":node}, {"id":rows,"name":rows}, agent_row
+                ]}]))?,
+            )],
+            None,
+        )
+        .await?;
     assert!(
         report.failures.is_empty() && report.issues.is_empty(),
         "{report:?}"

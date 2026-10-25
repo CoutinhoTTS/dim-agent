@@ -11,15 +11,12 @@ use crate::{
     host::HostError,
     permission::{Decision, Permission},
 };
-use dim_agent_runtime::{
-    AgentError, BranchScope, CAPABILITY_RELOADING, Capability, Dispatcher, InBranch, KeysOf,
-    Timeline, scoped,
-};
+use dim_agent_runtime::{AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline};
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData,
     ApprovalRespondData, BranchSource, EventKind,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -303,26 +300,24 @@ fn take(inner: &mut Inner, approval_id: &str) -> Option<Pending> {
 }
 
 pub struct ApprovalPlugin {
-    scope: BranchScope,
+    approval: DepKey<Approval>,
 }
 impl ApprovalPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            approval: names.key()?,
+        })
     }
 }
 impl TypedPlugin for ApprovalPlugin {
-    type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InBranch<Permission>,
-    );
+    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>, Keyed<Permission>);
     fn name(&self) -> &str {
         "Approval"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher), InBranch(permission)): Self::Deps,
+        (Keyed(timeline), Keyed(dispatcher), Keyed(permission)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(Approval {
@@ -377,13 +372,8 @@ impl TypedPlugin for ApprovalPlugin {
             }
             service.inner.lock().unwrap().rebuilt = events.last().map_or(0, |event| event.sequence);
             drop(rebuilding);
-            ctx.provide_as(self.scope.key::<Approval>(), service)?;
+            ctx.provide_as(self.approval.key().clone(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ApprovalPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

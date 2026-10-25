@@ -1,6 +1,6 @@
 import { definePlugin, type Plugin } from '@arcships/rutis'
 import { validateHeaderValue, STATUS_CODES } from 'node:http'
-import type { JsonObject, Settings, ToolCall, ToolContribution, ToolDefinition, ToolResult } from '../../../npm/plugin.d.ts'
+import type { JsonObject, Settings, ToolCall, ToolDefinition, ToolRegistry, ToolResult } from '../../../npm/plugin.d.ts'
 import row from './web.json' with { type: 'json' }
 import { convert, plainText, redact } from './content.ts'
 import { DOWNLOAD_LIMIT, WebError, domain, get, hostname, parseUrl, proxyUrl, type Diagnostic, type NetworkConfig } from './network.ts'
@@ -70,7 +70,7 @@ function brave(value: unknown, key: string): Hit[] {
 
 export default definePlugin({
   name: 'Web', inject: row.inject, provides: row.provides as Plugin['provides'],
-  apply(ctx) {
+  async apply(ctx) {
     const settings = ctx.use<Settings>('settings')
     const cache = new Map<string, Page>()
     const inflight = new Map<AbortController, Promise<ToolResult>>()
@@ -229,12 +229,12 @@ export default definePlugin({
       inflight.set(controller, task)
       return task
     }
+    const tools = ctx.use<ToolRegistry>('toolRegistry')
     for (const name of ['web_search', 'web_fetch']) {
-      const contribution: ToolContribution = {
-        declaration: () => ({ name, description: name === 'web_search' ? 'Search the web. Returns numbered titles, URLs and snippets.' : 'Read a public web page as text. Use start_char to continue at the returned final URL.', inputSchema: name === 'web_search' ? SEARCH_SCHEMA : FETCH_SCHEMA, source: 'extension', risk: 'network' }),
-        execute: (call, cancelled) => execute(name, call, cancelled),
-      }
-      ctx.provide(`toolContribution:${name}`, contribution)
+      await tools.register(
+        { name, description: name === 'web_search' ? 'Search the web. Returns numbered titles, URLs and snippets.' : 'Read a public web page as text. Use start_char to continue at the returned final URL.', inputSchema: name === 'web_search' ? SEARCH_SCHEMA : FETCH_SCHEMA, source: 'extension', risk: 'network' },
+        (call, cancelled) => execute(name, call, cancelled),
+      )
     }
   },
 })

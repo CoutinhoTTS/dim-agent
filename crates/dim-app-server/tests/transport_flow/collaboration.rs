@@ -4,17 +4,16 @@ use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
     InputMessageData, MessageContent, ToolContent,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed};
 use std::ops::RangeInclusive;
 use std::sync::OnceLock;
 
 struct CaptureToolRegistry {
-    scope: dim_agent_runtime::SessionScope,
     registry: Arc<OnceLock<Arc<dim_agent_capabilities::tool_registry::ToolRegistry>>>,
 }
 
 impl TypedPlugin for CaptureToolRegistry {
-    type Deps = InSession<dim_agent_capabilities::tool_registry::ToolRegistry>;
+    type Deps = Keyed<dim_agent_capabilities::tool_registry::ToolRegistry>;
 
     fn name(&self) -> &str {
         "collaboration-test.capture-tool-registry"
@@ -23,17 +22,12 @@ impl TypedPlugin for CaptureToolRegistry {
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        InSession(registry): Self::Deps,
+        Keyed(registry): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let _ = self.registry.set(registry);
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for CaptureToolRegistry {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -138,28 +132,22 @@ async fn launch_team() -> (RunningServer, Agent) {
 }
 
 struct CaptureMemberConfig {
-    scope: dim_agent_runtime::SessionScope,
     configs: Arc<std::sync::Mutex<Vec<Arc<dim_agent_runtime::SessionConfig>>>>,
 }
 impl TypedPlugin for CaptureMemberConfig {
-    type Deps = InSession<dim_agent_runtime::SessionConfig>;
+    type Deps = Keyed<dim_agent_runtime::SessionConfig>;
     fn name(&self) -> &str {
         "capture-member-config"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        InSession(config): Self::Deps,
+        Keyed(config): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             self.configs.lock().unwrap().push(config);
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for CaptureMemberConfig {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -175,7 +163,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             target_home: Some(home.join("rust")),
             ..Default::default()
         }, move |builder| {
-            builder.session_plugin(move |scope| CaptureMemberConfig { scope: *scope, configs: observed.clone() });
+            builder.session_part(move |names| names.part(CaptureMemberConfig { configs: observed.clone() }));
         }).await;
         let mut client = Client::new_version(&server, false, 3).await;
         let capabilities = dim_agent_types::ModelCapabilities {
@@ -265,19 +253,20 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
         defaults::install(&mut builder);
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_value(Arc::new(ModelHost(Arc::new(LargeReportModel))))
+            .process_value(Arc::new(ModelHost(Arc::new(LargeReportModel))))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_app_server::collaboration::install(&mut builder);
         let captured_registry = Arc::new(OnceLock::new());
-        builder.session_plugin({
+        builder.session_part({
             let captured_registry = captured_registry.clone();
-            move |scope| CaptureToolRegistry {
-                scope: *scope,
-                registry: captured_registry.clone(),
+            move |names| {
+                names.part(CaptureToolRegistry {
+                    registry: captured_registry.clone(),
+                })
             }
         });
         let server = serve(
@@ -821,6 +810,7 @@ async fn leader_delegates_and_team_members_communicate() {
             .config()
             .tools
             .iter()
+            .flatten()
             .any(|tool| tool == "agent")
     );
     let delivered = agent_results(&timeline);
@@ -902,7 +892,7 @@ async fn leader_delegates_and_team_members_communicate() {
         &lead,
         tool(
             json!({"action": "request", "prompt": "x", "profile": {"name": "bad",
-            "description": "", "systemPrompt": "", "tools": ["nope"]}}),
+            "description": "", "systemPrompt": "", "tools": ["echo", "echo"]}}),
         ),
         "queue",
     )
@@ -938,7 +928,7 @@ async fn leader_delegates_and_team_members_communicate() {
         .rfind(|(error, _)| *error)
         .unwrap();
     assert!(
-        profile_refusal.contains("tool nope is not provided by the process"),
+        profile_refusal.contains("tool echo is listed twice"),
         "{profile_refusal}"
     );
     assert!(!timeline.iter().any(|event| matches!(&event.kind,
@@ -1721,7 +1711,11 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     // The default Agent's members can hold.
     let mut config = ServerConfig::default();
-    config.session_defaults.tools.push("hold".into());
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
     let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let lead = leader(
@@ -1730,6 +1724,11 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     )
     .await;
     let lead_session = agent.get_session(&lead).unwrap();
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":lead}))
+            .await,
+    );
     let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
         .as_str()
         .unwrap()
@@ -1764,9 +1763,85 @@ async fn member_work_absorbs_messages_and_spans_turns() {
         (holds(&member_session).await == 1).then_some(())
     })
     .await;
+    // A read-only member observation shares the leader connection and owns only its attachment.
+    let registered = client
+        .rpc("ui.attach", json!({"sessionId":lead,"kind":"tui"}))
+        .await;
+    assert_ok(&registered);
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":member}))
+            .await,
+    );
+    let mut attached = std::collections::HashSet::new();
+    while attached.len() != 2 {
+        let notice = client.notice("session.state").await;
+        let params = &notice["params"];
+        if params["branchId"] == "main"
+            && (params["sessionId"] == lead || params["sessionId"] == member)
+        {
+            attached.insert(params["sessionId"].as_str().unwrap().to_owned());
+        }
+    }
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":member,"branchId":"main","after":0,"limit":256}),
+        )
+        .await;
+    assert_ok(&history);
+    assert!(
+        history["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["type"] == "input"
+                    && event["name"] == "message"
+                    && event["data"]["blocks"].as_array().is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block["text"].as_str().is_some_and(|text| {
+                                text.contains("dim-agent-message") && text.contains("tool:hold {}")
+                            })
+                        })
+                    })
+            })
+    );
+    assert_ok(
+        &client
+            .rpc("session.detach", json!({"sessionId":member}))
+            .await,
+    );
+    let interfaces = client.rpc("ui.status", json!({})).await;
+    assert_ok(&interfaces);
+    assert_eq!(
+        interfaces["result"]["instances"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        interfaces["result"]["instances"][0]["uiId"],
+        registered["result"]["uiId"]
+    );
+    assert_eq!(interfaces["result"]["instances"][0]["sessionId"], lead);
+    running(&mut client, &member).await;
     // A steer joins the running turn after the held tool returns.
     let steer = "tool:hold {\"text\":\"steered\"}";
-    say(&mut client, &lead, message(steer, "steer"), "queue").await;
+    let steering = message(steer, "steer");
+    say(&mut client, &lead, steering.clone(), "queue").await;
+    loop {
+        let notice = client.notice("session.event").await;
+        let params = &notice["params"];
+        if params["sessionId"] == lead
+            && params["branchId"] == "main"
+            && params["event"]["type"] == "input"
+            && params["event"]["name"] == "message"
+            && params["event"]["data"]["user"]["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|block| block["text"] == steering))
+        {
+            break;
+        }
+    }
     idle(&mut client, &lead).await;
     assert_eq!(last_ok(&events(&lead_session).await)["mode"], "steer");
     gate.add_permits(1);
@@ -1958,6 +2033,228 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     server.join().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_the_request() {
+    use dim_agent_capabilities::{
+        model_provider::ModelProviderPlugin, workspace_tools::WorkspaceToolsConfig,
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = super::deletion::Store(
+        std::path::PathBuf::from("/tmp").join(format!("dim-member-stop-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir_all(&home.0).unwrap();
+    std::fs::set_permissions(&home.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let work = home.0.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install_local_execution(
+        &mut builder,
+        ModelProviderPlugin::new,
+        WorkspaceToolsConfig {
+            output_root: home.0.join("command-output"),
+        },
+    );
+    defaults::mock_model_hosts(&mut builder);
+    dim_app_server::permission_rules::install(&mut builder);
+    dim_app_server::collaboration::install(&mut builder);
+    let server = serve(
+        builder,
+        ServerConfig {
+            product_home: Some(home.0.clone()),
+            database_path: Some(home.0.join("native.sqlite")),
+            unix_path: Some(home.0.join("server.sock")),
+            file_roots: vec![work.clone()],
+            session_defaults: dim_agent_runtime::SessionConfig {
+                cwd: work.to_string_lossy().into_owned(),
+                tools: Some(vec!["exec".into(), "agent".into()]),
+                permission_policy: dim_agent_types::PermissionPolicy {
+                    preset: dim_agent_types::PermissionPreset::FullAccess,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let agent = server.agent().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":work,"tools":["exec","agent"],
+        "permissionPolicy":{"preset":"full-access"}}),
+        )
+        .await;
+    assert_ok(&created);
+    let lead = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let leader = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await;
+    assert_ok(&holder);
+    let holder = holder["result"][0]["agentId"].as_str().unwrap().to_owned();
+    let command = format!(
+        "tool:exec {}",
+        json!({
+        "command":"printf started > foreground-started; sleep 60",
+        "runInBackground":true,"timeoutMs":-1})
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"request","agentId":holder,"prompt":command})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&leader, 0).await;
+    let worker = agent.get_session(&member).unwrap();
+    idle(&mut client, &lead).await;
+    poll(
+        "the real member foreground command has started",
+        async || work.join("foreground-started").exists().then_some(()),
+    )
+    .await;
+    let running = events(&worker).await;
+    assert!(
+        !running
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ExecStarted(_))),
+        "the built-in member executor stays foreground even with runInBackground"
+    );
+    let requests = events(&leader).await;
+    let operation = requests
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::CollaborationRequest(_)))
+        .unwrap()
+        .id
+        .clone();
+    let leader_turns = requests
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .count();
+    assert_ok(
+        &client
+            .rpc(
+                "session.stop",
+                json!({"sessionId":member,"branchId":"main",
+        "reason":"stopped by the user"}),
+            )
+            .await,
+    );
+    returned(&mut client, &lead, &leader, 1).await;
+    idle(&mut client, &member).await;
+    let stopped = events(&worker).await;
+    let reported = events(&leader).await;
+    let cancelled = reported
+        .iter()
+        .find(|event| {
+            matches!(&event.kind,
+        EventKind::CollaborationResult(data) if data.request_event_id == operation
+            && matches!(data.outcome, CollaborationOutcome::Cancelled { .. }))
+        })
+        .unwrap();
+    let report_input = reported
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data) if report(data) == Some(cancelled.id.as_str()) => {
+                Some(data)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(report_input.mode, Some(dim_agent_types::InputMode::Steer));
+    assert!(
+        agent_results(&reported)
+            .last()
+            .unwrap()
+            .contains("Status: cancelled.")
+    );
+    assert!(
+        reported
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .count()
+            > leader_turns,
+        "the unsuppressed cancellation report can start a leader turn after the stop batch"
+    );
+    assert!(
+        !reported
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ExecStarted(_)))
+    );
+    let member_turns = stopped
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+        .count();
+    let wakeup = format!(
+        "tool:exec {}",
+        json!({"command":"printf resumed > member-resumed","timeoutMs":1000})
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"message","agentId":holder,
+        "sessionId":member,"content":wakeup,"mode":"steer"})),
+        "queue",
+    )
+    .await;
+    poll(
+        "a later Steer message starts real member work",
+        async || work.join("member-resumed").exists().then_some(()),
+    )
+    .await;
+    idle(&mut client, &member).await;
+    idle(&mut client, &lead).await;
+    let finished = events(&worker).await;
+    let wake = finished
+        .iter()
+        .find(|event| {
+            matches!(&event.kind,
+        EventKind::InputMessage(data) if data.mode == Some(dim_agent_types::InputMode::Steer)
+            && agent_message(data).is_some_and(|text| text.contains("member-resumed")))
+        })
+        .unwrap();
+    assert!(finished.iter().any(|event| matches!(&event.kind,
+        EventKind::InputConsumed(data) if data.input_id == wake.id)));
+    assert!(
+        finished
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .count()
+            > member_turns
+    );
+    let after = events(&leader).await;
+    assert_eq!(
+        after
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::CollaborationRequest(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        after
+            .iter()
+            .filter(|event| matches!(&event.kind,
+        EventKind::CollaborationResult(data) if data.request_event_id == operation))
+            .count(),
+        1
+    );
+    assert!(after.iter().any(|event| matches!(&event.kind,
+        EventKind::CollaborationResult(data) if data.request_event_id == operation
+            && matches!(data.outcome, CollaborationOutcome::Cancelled { .. }))));
+    assert_eq!(
+        result_of(&after, &member).len(),
+        1,
+        "a later turn does not reopen the cancelled delegation"
+    );
+    assert_pairing(&after);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// Echoes like the mock host, except that a request whose last message asks
 /// for `partial-call` starts an `echo` call and streams nothing more until it
 /// is cancelled, leaving a call that only started.
@@ -2044,11 +2341,11 @@ async fn undispatched_results_name_calls_from_their_starts() {
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(PartialCallModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(PartialCallModel))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     dim_agent_capabilities::defaults::tool_host(
         &mut builder,
         Arc::new(dim_agent_capabilities::adapters::MockTools),
@@ -2417,14 +2714,13 @@ impl DispatchGate {
     }
 }
 struct DispatchGatePlugin {
-    scope: dim_agent_runtime::BranchScope,
     gate: Arc<DispatchGate>,
 }
 impl TypedPlugin for DispatchGatePlugin {
     type Deps = (
-        InBranch<dim_agent_runtime::Dispatcher>,
-        InBranch<dim_agent_runtime::Timeline>,
-        InSession<dim_agent_runtime::SessionIdentity>,
+        Keyed<dim_agent_runtime::Dispatcher>,
+        Keyed<dim_agent_runtime::Timeline>,
+        Keyed<dim_agent_runtime::SessionIdentity>,
     );
     fn name(&self) -> &str {
         "collaboration-test.dispatch-gate"
@@ -2432,7 +2728,7 @@ impl TypedPlugin for DispatchGatePlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher), InBranch(timeline), InSession(identity)): Self::Deps,
+        (Keyed(dispatcher), Keyed(timeline), Keyed(identity)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let session = identity.session_id.clone();
@@ -2454,11 +2750,6 @@ impl TypedPlugin for DispatchGatePlugin {
         })
     }
 }
-impl Capability for DispatchGatePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 /// `launch_team` with the gate's listener ahead of Collaboration's.
 async fn launch_gated(gate: Arc<DispatchGate>, config: ServerConfig) -> (RunningServer, Agent) {
@@ -2475,18 +2766,17 @@ struct MemberHold {
     release: tokio::sync::Notify,
 }
 struct MemberHoldPlugin {
-    scope: dim_agent_runtime::SessionScope,
     hold: Arc<MemberHold>,
 }
 impl TypedPlugin for MemberHoldPlugin {
-    type Deps = InSession<dim_agent_runtime::SessionIdentity>;
+    type Deps = Keyed<dim_agent_runtime::SessionIdentity>;
     fn name(&self) -> &str {
         "collaboration-test.member-hold"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        InSession(identity): Self::Deps,
+        Keyed(identity): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let session = identity.session_id.clone();
@@ -2504,11 +2794,6 @@ impl TypedPlugin for MemberHoldPlugin {
         })
     }
 }
-impl Capability for MemberHoldPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 async fn launch_gated_with(
     gate: Arc<DispatchGate>,
@@ -2524,10 +2809,7 @@ async fn launch_gated_with(
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.timeline_plugin(move |scope| DispatchGatePlugin {
-        scope: *scope,
-        gate: gate.clone(),
-    });
+    builder.branch_part(move |names| names.part(DispatchGatePlugin { gate: gate.clone() }));
     dim_app_server::collaboration::install(&mut builder);
     extra(&mut builder);
     let server = serve(builder, config).await.unwrap();
@@ -2845,10 +3127,7 @@ async fn a_request_covered_before_its_member_input_is_refused() {
     let (server, agent) = launch_gated_with(gate.clone(), ServerConfig::default(), {
         let hold = hold.clone();
         move |builder| {
-            builder.session_plugin(move |scope| MemberHoldPlugin {
-                scope: *scope,
-                hold: hold.clone(),
-            });
+            builder.session_part(move |names| names.part(MemberHoldPlugin { hold: hold.clone() }));
         }
     })
     .await;
@@ -2924,7 +3203,11 @@ async fn launch_holding_team_unloading(
         idle_unload_after: grace,
         ..Default::default()
     };
-    config.session_defaults.tools.push("hold".into());
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
     let (server, agent) = launch_with(Arc::new(GateTools(gate.clone())), config, extra).await;
     (server, agent, gate, directory)
 }
@@ -3494,10 +3777,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
     let (server, agent) = launch_gated_with(gate.clone(), ServerConfig::default(), {
         let hold = hold.clone();
         move |builder| {
-            builder.session_plugin(move |scope| MemberHoldPlugin {
-                scope: *scope,
-                hold: hold.clone(),
-            });
+            builder.session_part(move |names| names.part(MemberHoldPlugin { hold: hold.clone() }));
         }
     })
     .await;

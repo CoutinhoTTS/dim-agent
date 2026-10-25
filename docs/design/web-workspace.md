@@ -2,13 +2,13 @@
 
 Status: Accepted for phase 1. Related: [RemoteGateway](plugins/RemoteGateway.md) (the target design), [overview §6.3 multiple nodes](overview.md#63-multiple-nodes), [App Server README](../../crates/dim-app-server/README.md).
 
-The Web workspace is a browser frontend for the App Server, started by `dimcode web` or `/web`. It replaces the TypeScript `dim web` host (Bun server, RCP v2) with the existing App Server protocol v3. Phase 1 ships a **local web entry**: a loopback-only subset of RemoteGateway that does not wait for its prerequisites (PluginManager #3, rutis call-scoped requests #5, extended `pluginFiles`, Settings business sources). When RemoteGateway lands it absorbs this entry; the browser side does not change because it speaks the same Session methods either way.
+The Web workspace is a browser frontend for the App Server, started by `dimcode web` or toggled from `/web` in the TUI. It replaces the TypeScript `dim web` host (Bun server, RCP v2) with the existing App Server protocol v3. Phase 1 ships a **local web entry**: a loopback-only subset of RemoteGateway that does not wait for its prerequisites (PluginManager #3, rutis call-scoped requests #5, extended `pluginFiles`, Settings business sources). When RemoteGateway lands it absorbs this entry; the browser side does not change because it speaks the same Session methods either way.
 
 ## 1. Structure
 
 ```mermaid
 flowchart LR
-  CLI["dimcode web, /web"] -->|"local socket: web.open"| WE
+  CLI["dimcode web, /web"] -->|"local socket: web.open/toggle"| WE
   subgraph P["App Server process"]
     WE["WebEntry<br/>loopback listener, bootstrap token,<br/>cookies, static assets"]:::new
     CONN["Connection<br/>entry: web"]
@@ -23,7 +23,8 @@ flowchart LR
 | --- | --- | --- |
 | `WebEntry` | `crates/dim-app-server/src/web_entry.rs`, process scope | Owns the loopback listener, the bootstrap and access tokens (memory only), static assets and the `web.*` management methods |
 | `Connection` change | `connection.rs` | A connection accepted by WebEntry carries `entry: Web`; Rpc serves it Session methods (including the execution Session methods, decision E3 of RemoteGateway) and never management methods or `daemon.shutdown` |
-| `dimcode web`, `/web` | `crates/dim-cli` | Thin client: calls `web.open` over the local socket and opens the browser; no HTTP stack in the CLI |
+| `dimcode web` | `crates/dim-cli` | Holder client: calls `web.open` over the local socket and keeps the connection; no HTTP stack in the CLI |
+| TUI `/web` | `crates/dim-cli` | Calls `web.toggle`; the daemon owns the on/off state, so the TUI stays open |
 | Frontend | `web/` at the repository root | Vue 3 + Vite app ported from the TypeScript `packages/cli-web`, with its transport rewritten for protocol v3 |
 
 ## 2. Local web entry
@@ -32,12 +33,21 @@ flowchart LR
 
 The daemon is shared and normally spawned with `--no-ws`, so the entry is opened at runtime by a management method on the local socket rather than by a daemon flag.
 
+The entry has two independent reasons to stay open:
+
+- the daemon-owned `enabled` switch, toggled by the TUI;
+- connected holders, such as a foreground `dimcode web`.
+
+It is open while either reason exists and closes only when both are gone. The switch is memory-only and starts off after a daemon restart. `dimcode web` remains a holder: its exit releases that holder, while the TUI switch survives.
+
 | Method | Params | Result |
 | --- | --- | --- |
-| `web.open` | `{port?}` | `{url, address}`; idempotent: an open entry returns its existing address. `url` is `http://127.0.0.1:<port>/#bootstrap=<token>` |
-| `web.status` | `{}` | `{open, address?, connections}` |
+| `web.open` | `{port?}` | `{url, address}`; adds the calling connection as a holder and is idempotent. `url` is `http://127.0.0.1:<port>/#bootstrap=<token>` |
+| `web.toggle` | `{port?}` | `{enabled, open, url?, address?}`; flips the daemon switch. Enabling starts the entry; disabling leaves it open if a holder remains. `url` is present while open |
+| `web.disable` | `{}` | `{enabled, open, address?, connections}`; used by `dimcode web --off`; it clears the switch but does not disconnect holders |
+| `web.status` | `{}` | `{enabled, open, address?, connections}` |
 
-Both are management methods (local transport only, protocol v3). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. A local connection that calls `web.open` holds the entry; it stays open while any holder is connected and closes when the last one disconnects: the listener stops, every token is dropped and web connections detach. There is no close method: ending the holder process, however it ends (Ctrl+C, a closed terminal, a crash), is the close. Nothing is persisted, so after a daemon restart the user runs `dimcode web` again. `web.open` fails with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
+All are management methods (local transport only, protocol v3). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. A local connection that calls `web.open` holds the entry; the TUI switch does not need a holder. When the last reason disappears the listener stops, every token is dropped and web connections detach. Nothing is persisted, so after a daemon restart the entry is off; `dimcode web` opens it again or `/web` enables it. `web.open`/`web.toggle` fail with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
 
 ### 2.2 Authentication
 
@@ -50,7 +60,7 @@ Both are management methods (local transport only, protocol v3). Without `port` 
 | Origin and Host | Every `POST` and the `/ws` upgrade require `Origin` equal to `http://<Host>`, and `Host` must be the bound address (`127.0.0.1:<port>` or `localhost:<port>`), which blocks DNS rebinding |
 | Bind | Loopback only in phase 1. No `Secure` cookie flag because the entry is plaintext loopback |
 
-Tokens never appear in logs, diagnostics, the Timeline or protocol replies other than `web.open`'s `url`.
+Tokens never appear in logs, diagnostics, the Timeline or protocol replies other than the `url` returned while opening or toggling the entry.
 
 ### 2.3 HTTP surface
 
@@ -98,16 +108,16 @@ Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` onl
 | RemoteGateway | Phase 1 web entry |
 | --- | --- |
 | `entryHost` on Transport, call-scoped `authenticate`/`handle` | WebEntry owns its own listener and authenticates in process |
-| Pairing codes, per-device tokens in `remote-devices.json`, rotation, revocation | One bootstrap token per open entry, access tokens in memory; the last holder's exit revokes everything |
+| Pairing codes, per-device tokens in `remote-devices.json`, rotation, revocation | One bootstrap token per open entry, access tokens in memory; closing the entry revokes everything |
 | `plugin.set_enabled` and Settings source `remote` `web.open`, held by the calling connection; no persisted state |
 | Loopback by default, TLS or explicit plaintext for other addresses | Loopback only |
 | `ConnectionEntry {name, deviceId}` | `entry: Web` on the connection |
 
 ## 3. CLI
 
-`dimcode web [--port N] [--no-open]` connects to (or spawns) the daemon, calls `web.open`, prints where the workspace is in the welcome panel's box and opens the sign-in URL with `browser::open`. With `--no-open`, `DIMCODE_OAUTH_MANUAL=1` or no browser, it prints the full sign-in URL under the box instead; it is the local user's own terminal. It then stays in the foreground holding the entry, as the TypeScript `dim web` did, until Ctrl+C or SIGTERM; its exit closes the entry (§2.1). If the daemon stops first, it reports that and exits. Piped output is plain lines.
+`dimcode web [--port N] [--no-open]` connects to (or spawns) the daemon, calls `web.open`, prints where the workspace is in the welcome panel's box and opens the sign-in URL with `browser::open`. With `--no-open`, `DIMCODE_OAUTH_MANUAL=1` or no browser, it prints the full sign-in URL under the box instead; it is the local user's own terminal. It then stays in the foreground holding the entry until Ctrl+C or SIGTERM; its exit removes that holder and closes the entry only when the daemon switch is also off (§2.1). If the daemon stops first, it reports that and exits. Piped output is plain lines. `dimcode web --off` clears the daemon switch and exits; it does not disconnect a foreground holder.
 
-`/web` in the TUI hands the Session to the browser the same way: the interface closes (a detach, so a running turn keeps going in the App Server), then the same process opens the entry at `/chat/<sessionId>`, prints the panel in place of the goodbye panel and holds the entry until Ctrl+C.
+`/web` in the TUI toggles the daemon switch and stays in the terminal. While the entry is open it opens the browser and reports that it is on; when no browser took the sign-in link, it prints that link instead. The Session keeps running. `/web` again turns the switch off, leaving the entry open if `dimcode web` is still holding it. This works in the daemon-owned leaf because the TUI is not the holder and does not hand the terminal to another process.
 
 ```
 ╭──────────────────────────────────────────────────────────────╮

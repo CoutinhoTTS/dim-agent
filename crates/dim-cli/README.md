@@ -504,6 +504,46 @@ question's branch, and the turn while it runs, as `Ctrl+C` does for a turn. With
 input, as in `exec`, the CLI prints `Interactive answer required; stopping. Rerun in a terminal
 to answer it`, stops the question's branch and the running turn, and exits 3.
 
+### Questions in the terminal UI
+
+Both terminal UI modes use the same Questions client types and response contract.
+The existing prompt takes the composer's place; its draft stays intact. Questions
+from every branch are recovered through the existing fixed-watermark branch-history
+reader and merged with live events. A child question shows its originating branch.
+
+```text
+ [ Database ] [ Features ] [ Confirm ]
+ Question on branch reviewer
+ Which features ship first?
+   [x] Auth
+   [ ] Billing
+   [x] Search
+       Type your own answer: audit log
+ Space toggle · Enter next · Tab switch · Esc decline
+```
+
+Number keys select choices, Space toggles a multi-select choice, and Tab/Shift+Tab
+or Left/Right changes question tabs. Enter on Confirm sends one answer per question;
+offered labels and custom text remain separate. The custom row exists only when
+`allowCustom` is true. Esc declines the whole call. An existing approval or question
+keeps its prompt until handled; leader prompts preempt a read-only member detail.
+Member questions never open a response control in the leader UI.
+
+Submission retains the prompt and disables duplicate submissions until its reply.
+Success closes this client's prompt; a committed tool result also closes it,
+including when it arrives before the reply. Invalid, not-pending and failed replies
+retain the answers and show a diagnostic; Enter on Confirm explicitly retries.
+Esc can retry a declined response.
+Branch/request/call identity and the original Session address travel with the
+response, so a late reply cannot change a later question reusing the call ID.
+Control characters in displayed headers, labels and diagnostics are sanitized;
+responses retain the original labels. Narrow screens use the existing prompt window.
+
+Ctrl+C follows the terminal UI's existing interrupt/exit rules. When it interrupts
+an open question, it stops that question's branch and the leader turn if running,
+before any separate shell run. It does not introduce a question timeout or withdraw
+an already accepted answer. The line-mode and `exec` policies above remain unchanged.
+
 ## Scrollback and session recovery
 
 This section describes the `--no-tui` line client; the terminal UI's
@@ -616,6 +656,52 @@ The palette lists what the interface runs, as Amp's does: each row reads categor
 
 Notifications reach a user who switched windows when the run finishes or waits on a permission or a question (each request once): iTerm2 gets `OSC 9`, kitty `OSC 99`, Ghostty, WezTerm and foot `OSC 777`; tmux and any other terminal get a bell, which tmux forwards and terminals turn into a Dock bounce, a taskbar flash or a tab badge.
 
+The terminal UI also tells the terminal what the run is doing now, with the [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status) (`OSC 7501`), so tab indicators, session pickers and agent inboxes can show it without reading the screen. Scrollback and fullscreen report the same way. Every report goes to the terminal's root record with `app=dim` and ends with `ESC \`:
+
+| What dim is doing | Report |
+| --- | --- |
+| At the prompt, no run | `state=idle` |
+| A run in progress | `state=working` |
+| A permission request is pending | `state=blocked:kind=permission`, with `msg` naming the tool (`Permission needed: exec`) |
+| A question is pending | `state=blocked:kind=question` |
+| A run this interface watched has finished | `state=done` |
+| A run this interface watched has failed, or the App Server connection was lost | `state=error` |
+| A run was interrupted | `state=idle` |
+
+```text
+ in dim                          the terminal's record
+ start, at the prompt       ->   idle            (the first report is always written)
+ send a message             ->   working
+ exec asks for permission   ->   blocked  permission  "Permission needed: exec"
+ allow                      ->   working
+ the turn completes         ->   done
+ /exit, /suspend, a signal  ->   (cleared)
+```
+
+A pending request outranks the run it holds up. `done` and `error` come only from a turn that ended while this interface was attached: resuming or switching to a Session whose last run ended earlier reports `idle`. A report is written only when the status changes, between frames. `msg` is one line of the interface's own text, with control characters removed, at most 2048 bytes and base64-encoded; it never carries prompts or tool arguments. Once a report was written, leaving clears the record with `state=clear`, also from the restore after a panic or a fatal signal and on `/suspend` (the next status is reported again when the job continues); nothing is cleared when nothing was reported. The protocol has no clear for the root record alone: `state=clear` without an id removes every record on the terminal, so records other programs left under their own ids, before dim started or while it was suspended, go too. None of dim's own processes report meanwhile: the App Server and the tools it runs have no terminal.
+
+Reporting is on by default and independent of `tuiNotifyOnComplete`, because a status report does not interrupt anyone. `DIM_TERMINAL_STATUS=off` turns it off, for example in the profile of a terminal that prints unknown escape sequences instead of ignoring them. Only the terminal UI reports: `dimcode exec`, `-p`, redirected stdin and `--no-tui` never write a report, so `--json` output and redirected output stay clean. Inside tmux the reports stop at tmux, which keeps an `OSC` it does not know to itself; they are not wrapped for passthrough as `OSC 52` is, because the outer terminal would keep one record for all of the tmux client's panes, and a pane killed mid-run would leave its `working` behind.
+
+Terminals that draw a progress bar for `OSC 9;4` (ConEmu's sequence, which Windows Terminal also shows on the taskbar button) get one from the same status, in both modes:
+
+| Status | Bar |
+| --- | --- |
+| `working` | indeterminate, `OSC 9;4;3` |
+| `blocked` (a permission or a question) | paused at full width in the terminal's warning colour, `OSC 9;4;4;100` |
+| `idle`, `done`, `error` | none, `OSC 9;4;0` |
+
+```text
+ the terminal's record        the bar
+ idle                    ->   (none)
+ working                 ->   [~~~~~~~~~~~~]  animated by the terminal
+ blocked  permission     ->   [############]  paused, in the warning colour
+ working                 ->   [~~~~~~~~~~~~]
+ done                    ->   (removed)
+ /exit, /suspend, signal ->   (removed)
+```
+
+A bar means a run is under way or held up, so a finished or failed run removes it; the result stays in the record. `OSC 9;4` shares its number with iTerm2's notification, and a terminal that knows only the notification shows every update as one, so the bar is drawn only where it is known to work: Windows Terminal (`WT_SESSION`), ConEmu (`ConEmuANSI=ON`), Ghostty (`TERM_PROGRAM=ghostty` or `TERM=xterm-ghostty`), WezTerm, and iTerm2 from 3.6.6. Inside tmux, GNU screen or herdr there is no bar: tmux and screen keep the sequence, the outer terminal's variables leak into the pane, and passed through, the outer terminal would show one bar for all panes and keep a killed pane's. `DIM_TERMINAL_PROGRESS=off` turns the bar off and `on` draws it in any terminal, for one this list does not recognise; it is independent of `DIM_TERMINAL_STATUS`. Ghostty drops a bar it has not seen for about 15 seconds, so a bar that shows is drawn again every second. Once a bar was drawn, leaving removes it, also from the restore after a panic or a fatal signal and on `/suspend` (it is drawn again when the job continues). As with the reports, only the terminal UI draws it.
+
 `/keys` writes the interface's keys into the transcript; in scrollback it adds how the terminal that owns the history scrolls, searches and copies (tmux copy mode, iTerm2 and Apple Terminal `Cmd` keys, `Shift+PageUp` in Ghostty, WezTerm, kitty and Alacritty, Windows Terminal).
 
 `/language` (`/lang`, `/locale`) picks the interface language: the system default (`LC_ALL`, `LC_MESSAGES`, `LANG`) or one of English, 简体中文, 日本語, 한국어, 繁體中文, Bahasa Indonesia, Deutsch, Français, Español, Português (Brasil) and Português (Portugal). Moving previews, `Enter` saves it as `locale` in `config.json`, `Esc` restores. As in the TS build, English and Simplified Chinese are translated; the other languages read as English for now. Rows already in the transcript keep their language.
@@ -640,6 +726,99 @@ dimcode --scrollback default    # save the default mode and exit
 ```
 
 The default is saved as `tuiMode` in `<home>/config.json`.
+
+## Background task inventory
+
+`/tasks` (alias `/background`) shows commands and delegated member work in the
+attached Session, including when main has no messages. The worker reads each
+discovered branch's local history through a fixed watermark, then applies its
+buffered live events. State notices discover restored children and nested
+branches. Reopening keeps this projection; it retries only failed pages, from
+their last validated cursor. Loading or failed history disables stop-all while
+known individual targets remain usable. A failure reading main history is a visible
+connection failure: submission is disabled and the unsent draft stays in the current UI.
+Recovery requires exiting and resuming the Session.
+Resuming waits for main's complete initial history before drawing the latest
+100 messages and its boundary. Earlier messages remain available through
+`/history`; a draft typed during paging stays editable and survives completion.
+
+```text
+> paged-message-051
+...
+> paged-message-150
+--- resumed paged · 100 messages · earlier history: /history ---
+[ draft typed while history was loading                         ]
+```
+
+Child-branch failures remain local to the task history and release buffered
+events. Reopening completes the retained fixed window, then reads a fresh
+catch-up window to recover facts received while the branch read was failed.
+Live events remain buffered while a history request is pending.
+History pages are adopted as a whole; an invalid event leaves the validated
+cursor unchanged. Switching away and back to the same Session creates a fresh
+projection. An already-issued old page settles before another is sent, while
+its rows and queued retries are discarded.
+
+The same collection keeps all unfinished work and the latest 50 terminal facts,
+ordered by the terminal event timestamp and then branch/start-event identity.
+Only actual command ends, delivery failures and delegation results finish rows.
+The status strip counts unfinished work. Enter shows a command's live output or
+its recorded final result, or opens a delivered member's read-only conversation.
+Finished delivery results remain available even without a member Session.
+
+```text
++-- Background tasks --------------------------------------------+
+| > cargo build           command   Running      12s             |
+|   Survey the crates     agent     Starting                     |
+|   cargo test            command   Failed        4s  exit 101   |
+| Enter details · x stop selected · Ctrl+X stop all              |
++----------------------------------------------------------------+
+```
+
+Ctrl+X captures the displayed attachment's known unfinished targets once and
+sends the existing addressed stops serially. Repeated delegations to one member
+produce one interrupt. Replies and errors advance the batch; terminal facts
+update rows independently. Closing the panel or switching Sessions does not
+retarget an admitted batch. Feedback reports attempted requests, errors and
+starting members without a target; each stop error names its command branch/task
+or member Session. New work, later Steer/report effects and, when a member profile
+supplies them, members' background commands can continue; stop-all does not stop
+the leader.
+
+The implementation follows the [task-inventory contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-list.md)
+and the [member-conversation contract](../../docs/design/member-conversation.md).
+Workflow presentation remains separate package integration.
+
+Native App Server flows verify restored child/nested branch discovery, local
+command histories, addressed stops and continued leader input. Built-in member
+executors keep commands in the foreground even when `runInBackground` is
+requested. A member interruption reports its cancelled delegation through Steer;
+a later Steer message can start another member turn without reopening that
+delegation. The conditional wake check applies only to a profile that supplies
+member background commands; no such profile is exercised here.
+
+Member details show the delivered Session ID, its own main conversation and the
+delegation's actual result as separate content. The leader's draft, model and
+permission display stay in place. Typing or pressing Enter in the detail never
+submits input; `x` explicitly interrupts an unfinished member's current turn.
+Esc returns to the list and detaches only the member observation. A pending
+attach/page settles before cleanup or a subsequent selection. Errors keep the
+read prefix visible and discard buffered notices; reopening starts a fresh observation.
+A rejected member detach produces a local notice and ends that observation
+without closing the leader's connection or claiming server cleanup succeeded.
+A member close marks
+only its detail closed and leaves the leader usable. Viewing does not run the
+editable resume path or apply `--permission` to the member.
+
+```text
++-- Inspect member code - read-only -----------------------------+
+| Member Session: <delivered Session ID>                         |
+| Observing conversation                                        |
+| user       Inspect the imports                                |
+| assistant  Reading the crate boundaries                       |
+| x interrupt member · Esc back                                 |
++----------------------------------------------------------------+
+```
 
 ## Terminal UI commands and input
 
@@ -727,9 +906,9 @@ dimcode --home /path/to/plugin-home daemon stop
 
 ## Web workspace
 
-`dimcode web` and `/web` open the daemon's local web entry and serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
+`dimcode web` holds the daemon's local web entry open, `/web` toggles the daemon-owned switch, and both serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. `dimcode web --off` clears the switch without disconnecting a foreground holder. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
 
-When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session.
+When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session. When the daemon offers `ui.leaf`, interactive `dimcode` is itself a UI leaf (`crate::leaf`): it creates or resumes the Session, mounts a rutis node in its client tree (a socket `ui-<8 hex>` in the private native home, as long as `daemon.sock`, that accepts one connection, and `PeerPlugin` with `host { Tui }`) and calls the internal `ui.open`; the daemon links to it and hosts `Tui` there with this invocation's options. The process ends when the `Tui` leaves (its exit code, or a restart) or when the daemon closes the link (exit 0). An older daemon without `ui.leaf` keeps the direct TUI.
 
 ## Home, transport and output
 

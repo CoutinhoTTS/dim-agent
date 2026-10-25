@@ -9,7 +9,7 @@
 - **记录。** `SessionBroadcastEvent::Notice` 携带 `{source, kind, data}`。广播和 Rpc 都不读取这些字段。
 - **发出方。** `session_broadcast::notify(ctx, sessionId, notice)` 在既有频道上发出后立即返回。没有监听方的通知被丢弃。
 - **线上形式。** 协议 v3 的 `session.notice {sessionId, source, kind, data}`。
-- **不新增。** 不新增 Timeline 事件、序号、存储、重放、插件、生命周期钩子、客户端方法或协议版本。C4 叶子部件收不到通知。
+- **不新增。** 不新增 Timeline 事件、序号、存储、重放、插件、生命周期钩子、客户端方法或协议版本。观察事件的 C4 叶子部件跳过通知（§6）。
 
 ## 2. 流程
 
@@ -30,7 +30,7 @@
                                   |                                  其他 -------------------> session.notice
                                   |                                                              {sessionId, source,
                                   |                                                               kind, data}
-                                  +------------------------------> C4 SessionNodeRows：忽略 Notice
+                                  +------------------------------> C4 叶子行：跳过 Notice
 ```
 
 ## 3. 通知记录
@@ -74,7 +74,7 @@ pub fn notify(ctx: &Ctx, session_id: &str, notice: SessionNotice);
 | 依赖 | 无。`notify` 是共享总线上的函数：所有者不必声明对 SessionBroadcast、Rpc、Agents 或任何可选插件的依赖，也不需要生命周期钩子；无论它们存在、缺失还是在重载，行为都一样（[ADR 002](../../adr/002-plugin-scope.md) D3）。 |
 | 顺序 | 每个 Session 只有一条频道，所以每个监听方都按发出顺序收到通知和 `Event` 记录。所有者若是对经广播观察到的事件作出反应，它发出的通知排在该事件的记录之后，客户端也就先看到事件、再看到通知。并发的变更按 `notify` 的调用顺序到达监听方：需要让客户端看到提交顺序的所有者，在自己的提交串行化范围内调用 `notify`，或依靠修订号。 |
 | 重载 | 所有者卸载或重载期间不发出任何通知，恢复后也不重放。Session 能力的重载不影响 `notify`，它不经过 SessionBroadcast 插件。 |
-| 非 Rust 所有者 | 没有绑定。SessionTitle 需要的发出方 SessionStore 是 Rust。ExternalAgent 重设计草稿（[#145](https://github.com/arcships/dim/issues/145)，P3，TypeScript 优先）计划由 TypeScript Session 部件发出 `externalAgent.*` 通知；该部件需要按 [#4](https://github.com/arcships/dim/issues/4) 的具名服务规则另做绑定，由 ExternalAgent 在细化到 Ready 时提出（[路线图 §2](../../../design/roadmap.md#2-排期原则) 第 5 条）。 |
+| 非 Rust 所有者 | 没有绑定。SessionTitle 需要的发出方 SessionStore 是 Rust。ExternalAgent（[#145](https://github.com/arcships/dim/issues/145)，P3，TypeScript 优先）由其 TypeScript 进程行（外部成员活动的所有者）发出 `externalAgent.activity` 通知；所需绑定已在 [ExternalAgent §9.1](../plugins/ExternalAgent.md#91-session-通知的-typescript-绑定) 提出，尚未被接受。 |
 
 例如 SessionStore 的 `setTitle`（S5b）提交新的修订号后，在它对标题写入的串行化之内调用
 `notify(&ctx, session_id, SessionNotice { source: "SessionStore".into(), kind: "title".into(), data })`，其中 `data` 是 `{title, titleSource, titleRevision}`（[S5b §5、§7](session-title-metadata.md#7-标题通知)）。
@@ -91,14 +91,14 @@ pub fn notify(ctx: &Ctx, session_id: &str, notice: SessionNotice);
 
 ## 6. C4 叶子观察方
 
-C4 叶子部件收不到通知。`SessionNodeRows` 只把 `Event` 记录转发为 `session.event {sessionId, branchId, event}`，像忽略 `Fence` 一样忽略 `Notice` 记录，[C4 广播合同](../../../design/session-typescript.md#native-session-broadcast)（#174）因此不变。通知报告的是进程状态，其所有者已提供查询，而且没有 TypeScript Session 部件需要通知：SessionTitle 观察 `input/applied`，从 SessionStore 读取标题元数据。将来有使用方时，另行增加它自己的叶子合同。
+监听 `session/{sessionId}` 的 C4 叶子行会收到该通道的每条记录。通知以 `{kind: 'notice', notice: {source, kind, data}}` 到达，观察方像跳过 `fence` 和 `closed` 一样跳过它（[C4 广播合同](../../../design/session-typescript.md#native-session-broadcast)）。通知报告的是进程状态，其所有者已提供查询，而且没有 TypeScript Session 部件需要通知：SessionTitle 观察 `input/applied`，从 SessionStore 读取标题元数据。将来有使用方时，另行增加它自己的叶子合同。
 
 ## 7. 时序与冲突
 
 | 场景 | 结果 |
 | --- | --- |
 | Session 未加载 | 没有监听方：丢弃。下一次 attach 读取当前状态 |
-| Session 已加载，没有客户端附加 | 丢弃；配置了 C4 模式监听器时，它忽略通知 |
+| Session 已加载，没有客户端附加 | 丢弃；监听该通道的 C4 叶子行跳过它 |
 | attach 之前发出的通知 | 不重放 |
 | detach，或替换订阅的 attach | 旧订阅的监听器已移除；新订阅只收到之后的通知 |
 | Session 正在关闭 | `Closed` 之前转发，之后丢弃 |
@@ -147,5 +147,5 @@ C4 叶子部件收不到通知。`SessionNodeRows` 只把 `Event` 记录转发�
 | D5 | 只发协议 v3，不升版本 | v1、v2 已冻结；这条通知是增量的，与 v3 新增的事件种类相同 |
 | D6 | 可靠送达：慢客户端被断开 | 与事件一致；无声丢弃通知会让客户端落后且没有任何信号 |
 | D7 | `Closed` 之后的通知被丢弃 | `session.closed` 仍是订阅的最后一条 Session 通知；空档由所有者的查询覆盖 |
-| D8 | C4 叶子部件收不到通知 | 保持 #174 合同；没有 TypeScript 使用方需要 |
+| D8 | C4 叶子部件跳过通知 | 监听该通道的行会收到通知；没有 TypeScript 使用方需要 |
 | D9 | 正文经 `Arc` 共享 | 与 `Event` 正文相同，不为每个监听方复制 |

@@ -43,15 +43,15 @@
 - 现有交互启动、退出用例通过
 - 新用例：让 `Terminal::new` 失败（例如 stdout 不是 tty 时走 Tui 路径），断言终端已恢复、错误已打印、退出码非零
 
-## T5. WebHold 插件与 /web 交接
+## T5. WebHold 插件与 /web 开关
 
-- [x] `struct WebHold { port, open_browser, handoff }`，`Deps = (Arc<Client>,)`
-- [x] `apply`：调 `web.open`，打印面板（复用 `open_web` 的逻辑），等 Ctrl+C / SIGTERM 的任务放在 `apply` 里 spawn，不阻塞 `apply`
-- [x] `run_cli`：`Leave::Web(handoff)` 时先卸载 `Tui`（终端已恢复），再装 `WebHold`，等信号，dispose
-- [x] `dimcode web` 子命令同样装 `WebHold`，不装 `Tui`
-- [x] 删除 `open_web` 里不再需要的部分
+- [x] `struct WebHold { port, open_browser }`，`Deps = (Arc<Client>,)`；`dimcode web` 用它持有 entry
+- [x] `apply`：调 `web.open`，打印面板，等 Ctrl+C / SIGTERM 的任务放在 `apply` 里 spawn，不阻塞 `apply`
+- [x] TUI `/web` 只发 `web.toggle`，不卸载 `Tui`、不打印 handoff 面板
+- [x] `dimcode web --off` 调 `web.disable` 后退出，不装 `WebHold`
+- [x] 删除 `Leave::Web`/`WebHandoff` 和 `open_web` 里不再需要的部分
 
-验收：`web` 相关用例通过；手工确认 `/web` 打印面板前终端已回到正常模式。
+验收：`web` 相关用例通过；`/web` 后 TUI 仍在运行，开关关闭时 entry 按 holder/开关规则处理。
 
 ## T6. 断线不触发驱逐（设计 §4 的决定）
 

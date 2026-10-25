@@ -4,6 +4,8 @@
 mod permission;
 #[path = "cli_flow/question.rs"]
 mod question;
+#[path = "cli_flow/tasks.rs"]
+mod tasks;
 
 use serde_json::{Value, json};
 use std::{
@@ -26,6 +28,9 @@ impl Home {
         let path = PathBuf::from("/tmp").join(format!("dim-cli-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(path.join("rust")).unwrap();
         fs::set_permissions(path.join("rust"), fs::Permissions::from_mode(0o700)).unwrap();
+        // The flows read the terminal UI's English text. A saved language
+        // outranks the machine's locale; a localization test saves its own.
+        fs::write(path.join("config.json"), r#"{"locale":"en"}"#).unwrap();
         Self(path)
     }
     fn daemon(&self, flow: impl FnOnce(&mut Wire) + Send + 'static) -> thread::JoinHandle<()> {
@@ -34,6 +39,8 @@ impl Home {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
+            // Some flows end when the CLI stops sending, so this bound is
+            // part of their run time, not a success bound.
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
@@ -54,6 +61,11 @@ impl Drop for Home {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+
+/// How long a step that should succeed may take before the test fails. CI
+/// shares one machine between jobs, and a debug CLI starting under that load
+/// can take several seconds; a passing step never waits this long.
+const PATIENCE: Duration = Duration::from_secs(30);
 
 struct Wire(BufReader<UnixStream>);
 impl Wire {
@@ -129,7 +141,7 @@ impl Wire {
 }
 
 fn wait(mut child: Child) -> Output {
-    let deadline = Instant::now() + Duration::from_secs(12);
+    let deadline = Instant::now() + PATIENCE;
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             child.kill().unwrap();
@@ -821,7 +833,7 @@ fn exec_json_interrupt_drains_the_stop_barrier_without_human_stdout() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    wait_entered.recv_timeout(PATIENCE).unwrap();
     assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
     let output = wait(child);
     daemon.join().unwrap();
@@ -968,7 +980,7 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
             let history = wire.read("session.history");
             if index == 0 {
                 entered.send(()).unwrap();
-                wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
+                wait_release.recv_timeout(PATIENCE).unwrap();
             }
             wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         }
@@ -989,7 +1001,7 @@ fn interactive_exports_keep_literal_paths_and_errors_out_of_model_input() {
     terminal.until("Export format must be markdown or json");
     terminal.until("\n> ");
     terminal.write(b"/export json ~/Session notes.json\n");
-    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    wait_entered.recv_timeout(PATIENCE).unwrap();
     for _ in 0..2 {
         terminal.signal(libc::SIGINT);
         terminal.until("Waiting for export result");
@@ -1221,7 +1233,7 @@ impl Terminal {
         assert_eq!(unsafe { libc::kill(self.child.id() as i32, signal) }, 0);
     }
     fn wait(&mut self) -> ExitStatus {
-        let deadline = Instant::now() + Duration::from_secs(12);
+        let deadline = Instant::now() + PATIENCE;
         loop {
             assert!(Instant::now() < deadline, "CLI did not settle");
             // The CLI can still be flushing output while it exits.
@@ -1246,7 +1258,7 @@ impl Terminal {
         }
     }
     fn until(&mut self, expected: &str) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         loop {
             if let Some(index) = self.transcript[self.consumed..].find(expected) {
                 self.consumed += index + expected.len();
@@ -1289,7 +1301,7 @@ impl Terminal {
         );
     }
     fn raw(&mut self, mut bytes: &[u8]) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         while !bytes.is_empty() {
             assert!(Instant::now() < deadline, "Terminal did not accept input");
             match self.master.as_mut().unwrap().write(bytes) {
@@ -1400,7 +1412,7 @@ fn clipboard_cancellation_keeps_raw_terminal_input_responsive_and_reaps_the_read
     terminal.editor();
     terminal.write(b"kept\x16");
     terminal.until("Reading clipboard");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     while !pid_file.exists() {
         assert!(
             Instant::now() < deadline,
@@ -1418,7 +1430,7 @@ fn clipboard_cancellation_keeps_raw_terminal_input_responsive_and_reaps_the_read
     terminal.until("Wait for clipboard insertion");
     terminal.raw(b"\x03");
     terminal.until("Ctrl+C: clear");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     while unsafe { libc::kill(pid, 0) } == 0 {
         assert!(
             Instant::now() < deadline,
@@ -2023,7 +2035,7 @@ fn interactive_paste_cancellation_drains_the_put_and_reuses_its_confirmed_path()
         let put = wire.read("attachment.put");
         assert_eq!(put["params"]["text"], expected);
         accepted.send(()).unwrap();
-        drain.recv_timeout(Duration::from_secs(10)).unwrap();
+        drain.recv_timeout(PATIENCE).unwrap();
         wire.reply(
             &put,
             json!({"attachmentId":"drained","path":"/files/drained.txt","bytes":expected.len()}),
@@ -2043,7 +2055,7 @@ fn interactive_paste_cancellation_drains_the_put_and_reuses_its_confirmed_path()
     terminal.paste(&text);
     terminal.until("[Paste 1: 1100 lines]");
     terminal.write(b"\n");
-    admitted.recv_timeout(Duration::from_secs(10)).unwrap();
+    admitted.recv_timeout(PATIENCE).unwrap();
     terminal.signal(libc::SIGINT);
     terminal.until("Waiting for the text attachment to settle");
     terminal.signal(libc::SIGINT);
@@ -2499,7 +2511,7 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
         let effort = wire.read("session.model.update");
         assert_eq!(effort["params"], json!({"sessionId":"session","branchId":"main","modelPreferences":{"reasoningEffort":"high"}}));
         entered.send(()).unwrap();
-        wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
+        wait_release.recv_timeout(PATIENCE).unwrap();
         wire.reply(&effort, json!({"outcome":"adopted","model":{"providerId":"test","modelId":"model"}}));
         history(wire);
         history(wire);
@@ -2527,7 +2539,7 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     terminal.until("Reasoning effort choices: high, low");
     terminal.until("\n> ");
     terminal.write(b"/reasoning high\n");
-    wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    wait_entered.recv_timeout(PATIENCE).unwrap();
     terminal.signal(libc::SIGINT);
     terminal.until("Waiting for configuration result");
     terminal.signal(libc::SIGINT);
@@ -2646,7 +2658,7 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         assert_eq!((&params["command"], &params["mode"]), (&json!("echo recorded"), &json!("record")));
         let run_id = params["runId"].clone();
         wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":"live-out\u{1b}]52;c;blocked-clipboard\u{7}"}}));
-        wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
+        wait_release.recv_timeout(PATIENCE).unwrap();
         // The recorded run is the session's own event, written before the reply.
         let marker = "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"0\" truncated=\"false\">\n$ echo recorded\nrecorded-out\u{1b}]0;blocked-title\u{7}\u{1b}]8;;file:///tmp/blocked-link\u{7}hidden\u{1b}]8;;\u{7}\n\n</dim-shell-input>";
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"shell","sequence":9,"create_at":1,"type":"input","name":"message","data":{"blocks":[{"type":"raw","text":marker}],"mode":"append"}}}));
@@ -3275,7 +3287,7 @@ fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
         }
         let mut daemon = command.spawn().unwrap();
         let owned = OwnedDaemon(socket.clone());
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + PATIENCE;
         while !socket.exists() {
             assert!(daemon.try_wait().unwrap().is_none(), "Daemon did not start");
             assert!(Instant::now() < deadline, "Daemon did not become ready");
@@ -3351,7 +3363,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     let address = listener.local_addr().unwrap();
     let model = thread::spawn(move || {
         for phase in 0..7 {
-            let deadline = Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + PATIENCE;
             let stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -3366,9 +3378,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                 }
             };
             stream.set_nonblocking(false).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            stream.set_read_timeout(Some(PATIENCE)).unwrap();
             let mut stream = BufReader::new(stream);
             let mut length = 0;
             let mut authorization = false;
@@ -3847,7 +3857,7 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
         assert_eq!(callback["params"]["attemptId"],"fixture-attempt");
         assert_eq!(callback["params"]["callbackUrl"],"http://localhost:1456/callback?code=private-code&state=right-state");
         accepted.send(()).unwrap();
-        finish.recv_timeout(Duration::from_secs(10)).unwrap();
+        finish.recv_timeout(PATIENCE).unwrap();
         wire.reply(&callback,json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
@@ -3880,7 +3890,7 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
     terminal.until("try again");
     terminal.until("Callback URL: ");
     terminal.write(b"http://localhost:1456/callback?code=private-code&state=right-state\n");
-    admitted.recv_timeout(Duration::from_secs(10)).unwrap();
+    admitted.recv_timeout(PATIENCE).unwrap();
     terminal.signal(libc::SIGINT);
     terminal.until("Waiting for the MCP operation to settle");
     release.send(()).unwrap();
@@ -3918,19 +3928,32 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
     assert!(!terminal.transcript.contains("private-code"));
 }
 
+/// A loopback port free on both families, for the CLI to bind. It is taken
+/// below the ephemeral range: an ephemeral port released for the CLI can be
+/// taken meanwhile by an outgoing connection elsewhere on the machine.
+fn loopback_port() -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let base = (std::process::id() % 8_000) as u16;
+    (0..8_000)
+        .map(|_| 20_000 + (base + NEXT.fetch_add(1, Ordering::Relaxed)) % 8_000)
+        .find(|&port| {
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
+                && std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).is_ok()
+        })
+        .expect("a free loopback port")
+}
+
 #[test]
 fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidden_input() {
     for mode in ["ipv4", "ipv6", "busy", "paste", "noise", "cancel", "expiry"] {
         let home = Home::new();
-        let reserve = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = reserve.local_addr().unwrap().port();
-        let check = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).unwrap();
-        drop(check);
+        let port = loopback_port();
+        // The busy mode holds the port, so the CLI falls back to hidden input.
+        let _reserve = (mode == "busy")
+            .then(|| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap());
         let redirect = format!("http://localhost:{port}/callback");
         let expected = format!("{redirect}?code=private-callback&state=fixture");
-        if mode != "busy" {
-            drop(reserve);
-        }
         let daemon = home.daemon(move |wire| {
             mcp_hello(wire);
             let catalog = wire.read("mcp.catalog");
@@ -3992,9 +4015,7 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
             if mode == "noise" {
                 let mut wrong =
                     std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-                wrong
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
+                wrong.set_read_timeout(Some(PATIENCE)).unwrap();
                 wrong
                     .write_all(b"GET /unrelated HTTP/1.1\r\nHost: localhost\r\n\r\n")
                     .unwrap();
@@ -4003,6 +4024,8 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
                 assert!(response.contains("404 Not Found"));
                 let mut oversized =
                     std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
+                // Read until the server closes it or this short bound ends;
+                // either is fine, so this is not a step that must succeed.
                 oversized
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -4011,7 +4034,7 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
                 let _ = oversized.read_to_end(&mut response);
                 let mut idle =
                     std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-                idle.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                idle.set_read_timeout(Some(PATIENCE)).unwrap();
                 assert_eq!(idle.read(&mut [0]).unwrap(), 0);
             }
             let mut browser = if mode == "ipv6" {
@@ -4019,9 +4042,7 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
             } else {
                 std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap()
             };
-            browser
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
+            browser.set_read_timeout(Some(PATIENCE)).unwrap();
             write!(browser,"GET /callback?code=private-callback&state=fixture HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n").unwrap();
             let mut page = String::new();
             browser.read_to_string(&mut page).unwrap();
@@ -4081,7 +4102,7 @@ fn mcp_submitted_success_stays_successful_after_interrupt_or_expiry() {
             let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
             wire.reply(&start,json!({"attemptId":"held","authorizationUrl":"https://issuer.example/authorize","redirectUri":"http://localhost:1456/callback","resource":"https://resource.example/mcp","issuer":"https://issuer.example","expiresAt":now+if expires {1200} else {60_000}}));
             let callback=wire.read("mcp.auth.complete"); admitted.send(()).unwrap();
-            wait_release.recv_timeout(Duration::from_secs(10)).unwrap();
+            wait_release.recv_timeout(PATIENCE).unwrap();
             wire.reply(&callback,json!({}));
         });
         let mut command = home.command();
@@ -4089,7 +4110,7 @@ fn mcp_submitted_success_stays_successful_after_interrupt_or_expiry() {
         let mut terminal = Terminal::launch(command);
         terminal.until("Callback URL: ");
         terminal.write(b"http://localhost:1456/callback?code=held-secret&state=held\n");
-        accepted.recv_timeout(Duration::from_secs(10)).unwrap();
+        accepted.recv_timeout(PATIENCE).unwrap();
         if expires {
             terminal.until("Sign-in expired; waiting for the submitted operation");
         } else {
@@ -4139,7 +4160,7 @@ fn daemon_start_waits_for_private_permissions_without_trusting_existing_public_s
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PATIENCE;
     while !started.exists() {
         assert!(child.try_wait().unwrap().is_none());
         assert!(Instant::now() < deadline, "server was not started");
@@ -4169,9 +4190,7 @@ fn daemon_start_waits_for_private_permissions_without_trusting_existing_public_s
         }
     };
     stream.set_nonblocking(false).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
     let mut wire = Wire(BufReader::new(stream));
     let hello = wire.read("hello");
     wire.reply(&hello, json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
@@ -4231,7 +4250,7 @@ fn interrupted_shell_reply_retains_its_run_for_explicit_stop_and_settlement_feed
             if malformed { wire.reply(&run, json!({"runId":"wrong","status":"completed","output":"","truncated":false})); }
             else { wire.send(json!({"jsonrpc":"2.0","id":run["id"],"error":{"code":-32000,"message":"Reloaded","data":{"appError":"operation_interrupted"}}})); }
             let stop = wire.read("shell.stop"); assert_eq!(stop["params"]["runId"], run["params"]["runId"]);
-            if !malformed { finish.recv_timeout(Duration::from_secs(10)).unwrap(); }
+            if !malformed { finish.recv_timeout(PATIENCE).unwrap(); }
             if !malformed {
                 wire.send(json!({"jsonrpc":"2.0","id":stop["id"],"error":{"code":-32000,"message":"Reloaded","data":{"appError":"operation_interrupted"}}}));
                 let retry=wire.read("shell.stop"); assert_ne!(retry["id"], stop["id"]); assert_eq!(retry["params"]["runId"], run["params"]["runId"]);
@@ -4275,7 +4294,7 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
         wire.notice("approval.request",json!({"sessionId":"session","branchId":"main","requestId":"approval","call":{"name":"exec","input":{"command":"inspect"}},"reason":"review"}));
         wire.reply(&run,json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":"deferred output","truncated":false}));
         let stop=wire.read("session.stop");
-        finish.recv_timeout(Duration::from_secs(10)).unwrap();
+        finish.recv_timeout(PATIENCE).unwrap();
         wire.notice("approval.cancelled",json!({"sessionId":"session","requestId":"approval"}));
         wire.reply(&idle,json!({"sequence":40})); wire.reply(&stop,json!({"sequence":40}));
         let next = wire.read("session.submit");
@@ -4356,21 +4375,35 @@ fn web_prints_the_entry_and_holds_it_until_interrupted() {
 }
 
 #[test]
-fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
+fn web_off_clears_the_daemon_switch() {
     let home = Home::new();
-    // Two connections: the interface's, which the hand-off closes, then the
-    // holder's.
-    let path = home.0.join("rust/daemon.sock");
-    let listener = UnixListener::bind(&path).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-    let daemon = thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let mut wire = Wire(BufReader::new(stream));
+    let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.disable"]}));
+        let disable = wire.read("web.disable");
+        assert_eq!(disable["params"], json!({}));
+        wire.reply(&disable, json!({"enabled":false,"open":false,"connections":0}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let output = home.command().args(["web", "--off"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Web switch off.\n");
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_web_toggles_the_daemon_switch_without_leaving() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.toggle"]}));
         let create = wire.read("session.create");
         wire.reply(&create,json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let attach = wire.read("session.attach");
@@ -4382,51 +4415,29 @@ fn tui_web_restores_the_terminal_before_the_panel_and_holds_the_entry() {
         );
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            line.clear();
-        }
-        let (stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .unwrap();
-        let mut wire = Wire(BufReader::new(stream));
-        let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
-        let open = wire.read("web.open");
-        assert_eq!(open["params"], json!({}));
+        let toggle = wire.read("web.toggle");
+        assert_eq!(toggle["params"], json!({}));
         wire.reply(
-            &open,
-            json!({"url":"http://127.0.0.1:4567/#token=fixture-token","address":"127.0.0.1:4567"}),
+            &toggle,
+            json!({"enabled":true,"open":true,"url":"http://127.0.0.1:4567/#token=fixture-token"}),
         );
+        let toggle = wire.read("web.toggle");
+        wire.reply(&toggle, json!({"enabled":false,"open":false}));
+        let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
         }
     });
     let mut command = home.command();
-    // The sign-in link is printed instead of opening a browser.
     command.env("DIMCODE_OAUTH_MANUAL", "1");
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     terminal.write(b"/web\r");
-    // Raw mode and bracketed paste are released before the panel is printed.
-    terminal.until("\x1b[?2004l");
-    terminal.until("DIM Web is ready");
-    terminal.until("http://127.0.0.1:4567/chat/session");
-    terminal.until("Press Ctrl+C to stop the Web workspace.");
-    let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
-    assert_eq!(
-        unsafe {
-            libc::tcgetattr(
-                terminal.master.as_ref().unwrap().as_raw_fd(),
-                attributes.as_mut_ptr(),
-            )
-        },
-        0
-    );
-    assert_ne!(unsafe { attributes.assume_init() }.c_lflag & libc::ECHO, 0);
-    terminal.signal(libc::SIGINT);
-    terminal.until("Web workspace stopped.");
+    terminal.until("Web interface on: http://127.0.0.1:4567/chat/session#token=fixture-token");
+    // The interface is still the same terminal client.
+    terminal.write(b"/web\r");
+    terminal.until("Web interface off");
+    terminal.write(b"/exit\r");
     let status = terminal.wait();
     daemon.join().unwrap();
     assert!(status.success());
@@ -4447,7 +4458,7 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        wait_release.recv_timeout(Duration::from_secs(5)).unwrap();
+        wait_release.recv_timeout(PATIENCE).unwrap();
         // The daemon goes away: the connection closes under the interface.
     });
     let mut terminal = Terminal::launch_tui(home.command());
@@ -4617,9 +4628,10 @@ fn tui_adds_a_custom_provider_and_tests_it() {
     terminal.write(b"cus\r");
     terminal.until("Name:");
     terminal.write(b"My LLM\rhttp://localhost:8080/v1\rsk-test\r\r");
-    terminal.until("Added My LLM");
+    // One frame draws the provider's connect form, top to bottom.
     terminal.until("Connect custom-my-llm");
     terminal.until("Disconnect");
+    terminal.until("Added My LLM");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
@@ -4632,7 +4644,14 @@ fn tui_adds_a_custom_provider_and_tests_it() {
 fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        wire.hello(&["ui.attach", "ui.status", "ui.shutdown", "ui.replace"]);
+        wire.hello(&[
+            "ui.open",
+            "ui.close",
+            "ui.attach",
+            "ui.status",
+            "ui.shutdown",
+            "ui.replace",
+        ]);
         wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, json!({}));
@@ -4715,7 +4734,15 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         wire.reply(&first, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
-        wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+        // A child finishing must not make main idle or leak its model progress.
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":false}));
+        wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"child","requestId":"child-request","textOffset":0,"text":"child-only answer","thinkingOffset":0,"thinking":"child-only reasoning"}));
+        let child_history = wire.read("session.history");
+        assert_eq!(child_history["params"]["sessionId"], "session");
+        assert_eq!(child_history["params"]["branchId"], "child");
+        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         // A notice the server appends for the model is applied at once: it
         // never shows as a queued message.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"note-1","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"background task finished"}]},"mode":"append"}}}));
@@ -4765,6 +4792,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         terminal.transcript
     );
     terminal.until("› second");
+    terminal.until("working…");
+    assert!(
+        !terminal.transcript.contains("┃ second"),
+        "{}",
+        terminal.transcript
+    );
     terminal.write(b"\x13");
     // Applied as Steer: the strip empties (it keeps its height while the
     // turn runs) once the message entered the transcript.
@@ -4790,7 +4823,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
                     .skip(1)
                     .find(|(_, c)| c.is_ascii_alphabetic())
                     .map_or(tail.len(), |(i, c)| i + c.len_utf8()),
-                Some(']') => tail.find('\u{7}').map_or(tail.len(), |i| i + 1),
+                // An OSC ends with BEL or ST (`ESC \\`).
+                Some(']') => [("\u{7}", 1), ("\u{1b}\\", 2)]
+                    .iter()
+                    .filter_map(|(end, len)| tail.find(end).map(|i| i + len))
+                    .min()
+                    .unwrap_or(tail.len()),
                 Some(c) => c.len_utf8(),
                 None => 0,
             };
@@ -4802,6 +4840,13 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     assert!(plain.contains("┃ first"), "{plain}");
     assert!(plain.contains("┃ second"), "{plain}");
     assert!(!plain.contains("┃ third"), "{plain}");
+    assert!(
+        !plain.contains("child-only answer")
+            && !plain.contains("child-only reasoning")
+            && !plain.contains("Thinking…")
+            && !plain.contains("thinking…"),
+        "{plain}"
+    );
     assert!(
         !plain.contains("already left the queue") && !plain.contains("not available"),
         "{plain}"
@@ -4831,6 +4876,9 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-adopted","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"output-input"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-start","sequence":1,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"child-call","task_id":"child-task","description":"cargo cx build","output_path":"/daemon/private/output"}}}));
+        let child_history = wire.read("session.history");
+        assert_eq!(child_history["params"]["branchId"], "child");
+        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         let expected = json!({"sessionId":"session","branchId":"child","taskId":"child-task"});
         let first = wire.read("session.exec.output");
         assert_eq!(first["params"], expected);
@@ -4842,7 +4890,7 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         // Longer than the refresh interval: the admitted read must be the only one.
         wire.quiet(Duration::from_millis(1200));
         ready.send(()).unwrap();
-        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        control.recv_timeout(PATIENCE).unwrap();
         wire.reply(&held, json!({"text":"late reply after close"}));
         wire.quiet(Duration::from_millis(1200));
         ready.send(()).unwrap();
@@ -4856,13 +4904,13 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         wire.reply(&stop, json!({"task_id":"child-task","status":"completed","result":{"content":"final child result"}}));
         wire.quiet(Duration::from_millis(1200));
         ready.send(()).unwrap();
-        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        control.recv_timeout(PATIENCE).unwrap();
         wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-end","sequence":2,"create_at":1,"type":"exec","name":"ended","data":{"task_id":"child-task","status":"completed","result":{"content":"final child result"}}}}));
         let continued = wire.read("session.submit");
         assert_eq!(continued["params"]["text"], "continue after output");
         wire.reply(&continued, json!({"event":{}}));
         wire.event(11, "text", json!({"turn_id":"t","request_id":"r","delta":"main remains usable"}));
-        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        control.recv_timeout(PATIENCE).unwrap();
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
@@ -4876,11 +4924,11 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.write(b"\r");
     terminal.until("No output yet");
     terminal.until("first live preview");
-    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    readiness.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"\x1b[27u");
     terminal.until("Background tasks");
     proceed.send(()).unwrap();
-    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    readiness.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"\r");
     terminal.until("retained preview");
     terminal.until("Live output unavailable");
@@ -4903,7 +4951,7 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.until("Live output unavailable");
     terminal.until("retained tail");
     terminal.write(b"x");
-    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    readiness.recv_timeout(PATIENCE).unwrap();
     assert!(
         !terminal.transcript.contains("Completed"),
         "unknown capture or stop reply fabricated an end"
@@ -4912,10 +4960,13 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.until("Completed");
     terminal.until("final child result");
     terminal.write(b"\x1b[27u");
-    terminal.until("No matching tasks.");
+    terminal.until("Background tasks");
+    terminal.write(b"\r");
+    terminal.until("final child result");
     terminal.write(b"\x1b[27u");
-    terminal.until("Nothing runs in the background.");
-    terminal.write(b"\x1b[27ucontinue after output\r");
+    terminal.until("Background tasks");
+    // Clear the retained filter, then close; the narrow status may omit the model.
+    terminal.write(b"\x1b[27u\x1b[27ucontinue after output\r");
     terminal.until("main remains usable");
     assert!(!terminal.transcript.contains("must-not-copy"));
     proceed.send(()).unwrap();
@@ -4963,7 +5014,7 @@ fn tui_command_output_errors_stop_refresh_and_reopening_retries() {
         terminal.write(b"\r");
         terminal.until("last known preview");
         terminal.until(expected);
-        readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+        readiness.recv_timeout(PATIENCE).unwrap();
         terminal.write(b"\x1b[27u");
         terminal.until("Background tasks");
         terminal.write(b"\r");
@@ -4992,7 +5043,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         let submit = wire.read("session.submit");
         wire.reply(&submit, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
-        wire.notice("session.state", json!({"sessionId":"session","running":true}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
         // A command the exec tool moved to the background.
         wire.event(10, "tool-use", json!({"turn_id":"t","request_id":"r","call":{"id":"call-1","name":"exec","input":{"command":"sleep 100","runInBackground":true}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-1","sequence":11,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"call-1","task_id":"task-1","description":"sleep 100","output_path":"/tmp/out"}}}));
@@ -5007,7 +5058,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         wire.reply(&stop, json!({}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-2","sequence":16,"create_at":1,"type":"exec","name":"ended","data":{"task_id":"task-1","status":"cancelled","result":{"content":"stopped by the user"}}}}));
         // The UI cannot stop a request before its actual member is known.
-        delivery.recv_timeout(Duration::from_secs(10)).unwrap();
+        delivery.recv_timeout(PATIENCE).unwrap();
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-1","sequence":17,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-1","status":"ok","agent_id":"reviewer","session_id":"member","input_event_id":"member-input"}}}));
         // A rejected request must not leave an uninterruptible placeholder.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-failed","sequence":18,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r3","call_id":"call-3","target":{"kind":"agent","agent_id":"missing"},"prompt":"Unavailable delegate"}}}));
@@ -5039,18 +5090,20 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("sleep 100");
     terminal.until("Survey the crates");
     terminal.write(b"x");
-    terminal.until("agent (starting)");
-    terminal.write(b"\x1b[B\r");
+    terminal.until("Cancelled");
+    terminal.write(b"\x1b[27u/tasks\r");
+    terminal.until("Survey the crates");
+    terminal.write(b"\r");
     terminal.until("Agent is starting; no member Session to stop yet");
     deliver.send(()).unwrap();
     terminal.until("Check the docs");
-    terminal.write(b"\r");
+    terminal.write(b"x");
     terminal.until("agent cancelled: stopped by the user");
     // An explicit Escape report cannot combine with the text as an Alt key.
     terminal.write(b"\x1b[27ucontinue the leader\r");
     terminal.until("agent result: Other agent completed normally.");
     terminal.write(b"/tasks\r");
-    terminal.until("Nothing runs in the background.");
+    terminal.until("Check the docs");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
@@ -5164,6 +5217,190 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("full access");
     terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The terminal's program status (OSC 7501) follows a run through a
+/// permission request and a question to its result, and the record is
+/// cleared on `/exit`, in both interface modes. So does the progress bar (OSC 9;4) where it is
+/// drawn, which is repeated while it shows and removed on `/exit`.
+#[test]
+fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
+    let report = |pairs: &str| format!("\x1b]7501;{pairs}\x1b\\");
+    let (busy, paused, removed) = ("\x1b]9;4;3\x07", "\x1b]9;4;4;100\x07", "\x1b]9;4;0\x07");
+    for (fullscreen, drawn) in [(false, true), (true, true), (false, false)] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "inspect");
+            wire.reply(&submit, json!({"event":{}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"inspect"}]},"mode":"queue"}}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+            // The request comes once the terminal was told the run works.
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"approval","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"ls"}},"reason":"shell command"}));
+            let respond = wire.read("approval.respond");
+            assert_eq!(respond["params"]["decision"], "allow");
+            wire.reply(&respond, json!({}));
+            // The model asks the user, which holds the run up again until
+            // the call's result arrives.
+            wire.event(11, "tool-call", json!({"turn_id":"turn","request_id":"ask","calls":[{"id":"c1","name":"ask_user","input":{"questions":[{"question":"Where to deploy?","options":[{"label":"production"},{"label":"staging"}]}]}}]}));
+            let answer = wire.read("session.question.respond");
+            assert_eq!(answer["params"], json!({"sessionId":"session","branchId":"main","requestId":"ask","callId":"c1","answers":[{"questionId":"1","selected":["production"]}]}));
+            wire.reply(&answer, json!({}));
+            wire.event(12, "tool-result", json!({"turn_id":"turn","request_id":"ask","call_event_id":"event-11","results":[{"call_id":"c1","result":{"content":"production"}}]}));
+            wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        // Whatever terminal runs the test: the bar's switch decides.
+        command.env("DIM_TERMINAL_PROGRESS", if drawn { "on" } else { "off" });
+        let mut terminal = Terminal::launch_tui(command);
+        // The first report is written although it says idle.
+        terminal.until(&report("state=idle:app=dim"));
+        terminal.until("test / model");
+        terminal.write(b"inspect\r");
+        terminal.until(&report("state=working:app=dim"));
+        if drawn {
+            terminal.until(busy);
+        }
+        shown.send(()).unwrap();
+        // msg: "Permission needed: exec"
+        terminal.until(&report(
+            "state=blocked:kind=permission:app=dim:msg=UGVybWlzc2lvbiBuZWVkZWQ6IGV4ZWM=",
+        ));
+        if drawn {
+            terminal.until(paused);
+        }
+        terminal.until("Permission required");
+        if drawn {
+            // The waiting bar is drawn again, so the terminal keeps it.
+            terminal.until(paused);
+        }
+        terminal.write(b"y");
+        terminal.until(&report("state=blocked:kind=question:app=dim"));
+        terminal.until("Where to deploy?");
+        terminal.write(b"1\r");
+        terminal.until(&report("state=done:app=dim"));
+        if drawn {
+            terminal.until(removed);
+        }
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        if drawn {
+            terminal.until(removed);
+        }
+        terminal.until(&report("state=clear"));
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+        // Each status is told once, and the clear is the last word.
+        let transcript = &terminal.transcript;
+        assert_eq!(transcript.contains("\x1b[?1049h"), fullscreen);
+        for pairs in ["state=idle:app=dim", "state=done:app=dim", "state=clear"] {
+            assert_eq!(
+                transcript.matches(&report(pairs)).count(),
+                1,
+                "{fullscreen} {pairs}: {transcript}"
+            );
+        }
+        assert_eq!(
+            transcript.rfind("\x1b]7501;"),
+            transcript.rfind(&report("state=clear")),
+            "{fullscreen}: {transcript}"
+        );
+        // The bar is removed when the run ends and on the way out, and
+        // nothing draws it after that; switched off, there is none.
+        if drawn {
+            assert_eq!(
+                transcript.matches(removed).count(),
+                2,
+                "{fullscreen}: {transcript}"
+            );
+            assert_eq!(
+                transcript.rfind("\x1b]9;4;"),
+                transcript.rfind(removed),
+                "{fullscreen}: {transcript}"
+            );
+        } else {
+            assert!(!transcript.contains("\x1b]9;4;"), "{transcript}");
+        }
+    }
+
+    // Switched off, nothing is reported, so nothing is cleared.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.env("DIM_TERMINAL_STATUS", "off");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+    assert!(
+        !terminal.transcript.contains("\x1b]7501;"),
+        "{}",
+        terminal.transcript
+    );
+
+    // A fatal signal takes the restore path, which clears the record too.
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until(&report("state=idle:app=dim"));
+    terminal.until("test / model");
+    terminal.signal(libc::SIGTERM);
+    terminal.until(&report("state=clear"));
     terminal.wait();
     daemon.join().unwrap();
 }

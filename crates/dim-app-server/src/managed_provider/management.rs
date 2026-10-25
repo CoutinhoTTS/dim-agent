@@ -167,8 +167,12 @@ pub enum LoginState {
     Expired,
 }
 
-pub(super) fn provide(ctx: &Ctx, oauth: Arc<ManagedProviders>) -> Result<(), CordisError> {
-    ManagementMethods::provide(
+pub(super) fn provide(
+    ctx: &Ctx,
+    methods: &ManagementMethods,
+    oauth: Arc<ManagedProviders>,
+) -> Result<(), CordisError> {
+    methods.register(
         ctx,
         "account",
         [

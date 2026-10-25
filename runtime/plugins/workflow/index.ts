@@ -1,6 +1,6 @@
 import { definePlugin } from '@arcships/rutis'
 import { z } from 'zod'
-import type { ManagementMethodsContribution, MethodReply, PluginFiles, Sessions, Settings, WorkflowFiles } from '../../../npm/plugin.js'
+import type { ManagementMethods, MethodReply, PluginFiles, Sessions, Settings, WorkflowFiles } from '../../../npm/plugin.js'
 import { Catalog, type DefinitionEntry } from './catalog.ts'
 import { WorkflowError } from './definition.ts'
 import { Workflow } from './engine.ts'
@@ -8,7 +8,7 @@ import { management, unloadingAfterCall, type RunReply, type RunRequest, type Wo
 import { bounded, RunStore, type Run } from './store.ts'
 
 const options = z.strictObject({ packages: z.array(z.strictObject({ id: z.string().min(1), root: z.string().min(1) })) })
-const provides = { workflowRuns: { call: 'async' }, 'managementMethods:workflow': { describe: 'async', call: 'async' } } as const
+const provides = { workflowRuns: { call: 'async' } } as const
 
 function visible(entries: DefinitionEntry[]) {
   return entries.map(entry => ({ name: entry.name, source: entry.source, enabled: entry.enabled,
@@ -21,7 +21,7 @@ function visible(entries: DefinitionEntry[]) {
 export default definePlugin({
   name: 'Workflow',
   config: z.toJSONSchema(options),
-  inject: ['sessions', 'settings', 'pluginFiles', 'workflowFiles'],
+  inject: ['sessions', 'settings', 'pluginFiles', 'workflowFiles', 'managementMethods'],
   provides,
   async apply(ctx, config: z.infer<typeof options>) {
     const catalog = new Catalog(ctx.use<Settings>('settings'), ctx.use<WorkflowFiles>('workflowFiles'), config.packages)
@@ -68,14 +68,13 @@ export default definePlugin({
     }
     ctx.provide('workflowRuns', owner)
 
-    const methods: ManagementMethodsContribution = {
-      async describe() {
-        return ['list', 'save', 'start', 'status', 'stop'].map(name => ({
-          name: `workflow.${name}`, mutating: !['list', 'status'].includes(name),
-          interruption: name === 'list' || name === 'status' ? 'report' : 'drain', progress: false,
-        }))
-      },
-      async call(call, cancellation) {
+    await ctx.use<ManagementMethods>('managementMethods').register(
+      'workflow',
+      ['list', 'save', 'start', 'status', 'stop'].map(name => ({
+        name: `workflow.${name}`, mutating: !['list', 'status'].includes(name),
+        interruption: name === 'list' || name === 'status' ? 'report' : 'drain', progress: false,
+      })),
+      async (call, cancellation) => {
         let cancelled = false
         void cancellation.then(() => { cancelled = true }, () => { cancelled = true })
         try {
@@ -98,12 +97,11 @@ export default definePlugin({
             throw new WorkflowError('invalid_params', 'Unknown Workflow method')
           })
         } catch (error) {
-          if (error instanceof z.ZodError) return { code: -32602, appError: 'invalid_params', message: bounded(error.message, 4 * 1024) }
-          if (error instanceof WorkflowError) return { code: -32000, appError: error.code, message: bounded(error.message, 4 * 1024) }
+          if (error instanceof z.ZodError) return { code: 'invalid_params', message: bounded(error.message, 4 * 1024) }
+          if (error instanceof WorkflowError) return { code: error.code, message: bounded(error.message, 4 * 1024) }
           throw error
         }
       },
-    }
-    ctx.provide('managementMethods:workflow', methods)
+    )
   },
 })

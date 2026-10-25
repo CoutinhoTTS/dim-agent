@@ -107,7 +107,7 @@ App Server 或 Settings。没有可选依赖：每个装载 Permission 的配置
 `CommandRule = {command: string, match: "exact" | "prefix", decision: "allow" | "deny"}`。错误为
 数据：`unavailable`（来源无法读取，包括持久化文件无效）、`cancelled`（调用方放弃调用或提供方正在卸载）。
 
-**管理方法**，命名空间 `permission`，由进程部分经 `managementMethods` 提供（总体设计 §6.2 第 9 条；
+**管理方法**，命名空间 `permission`，由进程部分注册到 `managementMethods`（总体设计 §6.2 第 9 条；
 从不提供给配对设备）。
 
 | 方法 | 请求 | 回复 | 错误 |

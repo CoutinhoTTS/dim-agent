@@ -2,7 +2,7 @@
 
 Status: Implemented as an optional TypeScript package. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
-SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the delivered C6 notice record is described in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
+SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the delivered C6 notice record is described in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` by registering the namespace `session.rename` with its Session's `sessionMethods` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 0. Implementation boundary
 
@@ -18,11 +18,11 @@ The SDK flows cover fixed-prefix paging, input exclusions, Unicode bounds, overl
 failure limits, rename conflict retries, cancellation and timeout settlement. The Node flow covers
 Settings defaults/validation, RPC, HTTP auxiliary execution, a controlled live turn, title notices,
 manual-over-auto conflict through store admission, idle restore, fork and caller close. Diagnostics
-contain only outcome and duration on runtime stderr; the current C4 host discards that stream.
+contain only outcome and duration on runtime stderr, which the host writes to its process log.
 
 | Boundary | Current contract and Ready decision |
 | --- | --- |
-| Observation | Use C4's original-row sessionEvents bind, creation configuration and closing, then its own session.event records. C4 broadcast #180 is delivered; #63/#168 are closed. |
+| Observation | Read the Session id from `sessionIdentity`, the creation configuration from `sessionConfig` and closing from `sessionLifecycle` ([plugin contract](../plugin-contract.md#9-requirements-raised-to-mechanism-owners) R2), then the records on its Session's `session/{sessionId}` channel. C4 broadcast #180 is delivered; #63/#168 are closed. |
 | History | Use the implemented process sessions.history service, not private TimelineTree reads or branch (C5) bindings. |
 | Configuration | Existing named Settings and row source declaration, user scope only (A.3/A12). Read settings.read({source:"session-title",scope:"user"}) at each decision and use its validated/defaulted document directly. |
 | Metadata/notice | S5b #60/#96 defines the process service `sessionMetadata` (`read` and `setTitle`, both async), its errors `conflict`/`not_found`/`storage`, the handover and the v3 list fields `title`/`titleSource`/`titleRevision` ([title metadata](../appserver/session-title-metadata.md)); A.2 restates that contract. After each commit SessionStore calls `session_broadcast::notify`, and Rpc forwards the record to attached v3 clients as `session.notice {sessionId, source, kind, data}` (C6 #49/#85, [Session broadcast notices](../appserver/session-notices.md)). Names, modes, handover and errors follow S5b. |
@@ -33,7 +33,7 @@ C7 #50 is already unnecessary (#86). S4 owns its own credential/connection resol
 required providers keep the whole row Pending under existing rules, including rename; native
 Session use continues. No optional lookup or alternate rename path.
 
-The C4 leaf callback filters its own Session/main adoption, registers an owned task and returns;
+The C4 leaf callback filters `main` adoption on its own Session's channel, registers an owned task and returns;
 it does not await Settings/history/model work. Native EventReader delivers only published events,
 and SessionBroadcast forwards that Dispatcher stream. Thus the existing history({atLeast:N}) read
 can capture published T >= N while the branch exists: no extra publication wait, polling or Core
@@ -41,12 +41,13 @@ API. Retain T and page with through=T and after=the last returned sequence; neve
 through together. Use native HistoryPage/AgentEvent data. S2's stable directory reads the index per
 call, so index reload does not reload this consumer.
 
-Use the [C4 binding contract](../session-typescript.md): declare
-`sessionMethods:session.rename` with async describe/call and `sessionEvents:session-title` with
-sync bind in one provides dictionary. Bind registers observation/cleanup and returns JSON null;
+Use the [C4 binding contract](../session-typescript.md): the row is in the `session` group, injects
+`sessionMethods` and registers `session.rename` with it from `apply`; its provides dictionary is empty.
+`apply` reads the Session identity and creation configuration and registers observation/cleanup;
 it does not start an asynchronous initialization job. Its creation configuration is immutable.
-The same row declares all process dependencies in `inject`: `sessions`, `settings`,
-`sessionMetadata` and `auxiliaryModel`. The package is optional and is installed through the
+The same row declares all its dependencies in `inject`: the process services `sessions`,
+`settings`, `sessionMetadata` and `auxiliaryModel`, and the Session services `sessionIdentity`,
+`sessionConfig`, `sessionLifecycle` and `sessionMethods`. The package is optional and is installed through the
 existing `ServerConfig.session_typescript.rows` input, as Web is; it adds no default-profile
 installation or plugin-specific App Server wiring.
 
@@ -92,7 +93,7 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | C4 Session observation/configuration binding; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and required `auxiliaryModel` (absent providers keep the row Pending) | sessionMethods key session.rename and sessionEvents bind from one provides dictionary; Settings source session-title |
+| `SessionTitle` | Session | Session services `sessionIdentity`, `sessionConfig`, `sessionLifecycle` and `sessionMethods`; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and required `auxiliaryModel` (absent providers keep the row Pending) | Registers session.rename with sessionMethods; Settings source session-title |
 
 Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; S5b supplies title metadata and C6 the notices; Provider supplies the named auxiliary operation. The package declares its source in the ordinary row's settings member, alongside provides. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the package (D4).
 
@@ -118,7 +119,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-SessionStore owns the title: it keeps the text, source and revision counter and accepts changes only through its typed `setTitle` operation, which SessionTitle alone calls. After each committed change SessionStore emits a title notice on the Session broadcast (A11); the title never enters the Timeline. Each decision reads Settings first and skips disabled generation or an explicit external-agent title model before metadata or history; otherwise it reads metadata and the fixed prefix. An image-only first input is remembered for the loaded generation. An external-agent prefix is skipped until a later `context/configured` notice exceeds its fixed T; adopting a native model permits another decision. In-memory state is lost on reload or Session unload, which only allows another attempt.
+SessionStore owns the title: it keeps the text, source and revision counter and accepts changes only through its typed `setTitle` operation, which SessionTitle alone calls. After each committed change SessionStore emits a title notice on the Session broadcast (A11); the title never enters the Timeline. Each decision reads Settings first and skips disabled generation before metadata or history; otherwise it reads metadata and the fixed prefix. An image-only first input is remembered for the loaded generation. In-memory state is lost on reload or Session unload, which only allows another attempt.
 
 ## 3. Flows
 
@@ -209,14 +210,14 @@ Never sent: images, raw input blocks, deleted inputs, later inputs, assistant ou
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `session.rename {sessionId, title \| null}` | `sessionMethods` key `session.rename` | Set or clear a manual title |
+| `session.rename {sessionId, title \| null}` | `sessionMethods` namespace `session.rename` | Set or clear a manual title |
 | `session-title` source: `enabled`, `maxLength`, `model` | Business configuration (Settings source) | Turn generation off; title length; model for titles (unset: the Session's model) |
 | `title`, `titleSource`, `titleRevision` in v3 `session.list`/`session.summaries` | Rpc protocol fields read from SessionStore ([S5b §8](../appserver/session-title-metadata.md#8-session-lists)) | Display; the revision orders a list against notices |
 | Title notice, `data: {title, titleSource, titleRevision}` | Session broadcast notice emitted by SessionStore (C6 record, §9; [S5b §7](../appserver/session-title-metadata.md#7-the-title-notice)) | Live title update for subscribed clients |
 
 ## 7. Security
 
-The first input's text is sent to the model in the `session-title` source; unset, that is the Session's model. If either the Session model or the selected title model is an `external-agent:*` entry, automatic titling is skipped, so a title request never goes to an external agent bridge. A configured title-model exclusion is read at each decision before metadata/history, without caching it across Settings changes. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated by SessionTitle's method (A.1).
+The first input's text is sent to the model in the `session-title` source; unset, that is the Session's model. Titles may contain user content and are returned to every client that can list Sessions. No credentials, host settings or tool output enter the request. Rename input is validated by SessionTitle's method (A.1).
 
 ## 8. Rule check
 
@@ -229,7 +230,7 @@ The first input's text is sent to the model in the `session-title` source; unset
 | Principles §4 rule 5 (batch) | The trigger acts on `input/applied` when it is consumed, in sequence order. |
 | Principles §4 rule 6 (context from handed-over events) | SessionTitle adds nothing to model context; the auxiliary request contains only adopted input text. |
 | Principles §4 rule 7 (public events and services only) | It uses the Session broadcast, fixed-prefix read, SessionStore `setTitle`, `AuxiliaryModel` and Settings, all public. |
-| Principles §4 rule 8 (requirements to mechanism owners) | C6 and S5b deliver the notice and metadata contracts in §9. None for #4: SessionTitle uses the C4 Session event binding and named process services, without a runtime typed-service dependency. Requirements to other plugins (SessionStore title metadata and notice emission, Rpc forwarding of notices) are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
+| Principles §4 rule 8 (requirements to mechanism owners) | C6 and S5b deliver the notice and metadata contracts in §9. None for #4: SessionTitle uses the Session services, the Session channel and named process services, without a runtime typed-service dependency. Requirements to other plugins (SessionStore title metadata and notice emission, Rpc forwarding of notices) are listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
 | Principles §4 rule 9 (only facts later decisions use) | The title is process-level SessionStore state: it never enters the Timeline, changes through `setTitle` and reaches UIs as a Session broadcast notice. |
 | Principles §1 (Capability and App Server boundary) | SessionTitle is a Session Capability in its own plugin package; Rpc only dispatches `session.rename` and reads title fields from SessionStore. |
 | ADR 002 D1 (scope follows state) | Session scope: the title belongs to the Session; the stored title is SessionStore's. |
@@ -253,7 +254,7 @@ post-commit title notices. SessionTitle consumes these delivered contracts.
 | Effect on sequence, batch, interrupt, reload | No sequence number and no batch; not replayed: a client that resubscribes reads current state through the owner's query (`session.list`); interrupts do not apply; a reload of the emitter only stops notices. |
 | Owner and issue | Runtime C6 [#49](https://github.com/arcships/dim/issues/49), implemented in [#85](https://github.com/arcships/dim/pull/85): the record, `session_broadcast::notify` and Rpc's `session.notice` ([Session broadcast notices](../appserver/session-notices.md)). SessionStore emits the title notice ([S5b](../appserver/session-title-metadata.md), the supplement in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). |
 
-**#4: None.** Observation uses C4 `sessionEvents`; history, Settings, `sessionMetadata` and the auxiliary model are process services. SessionTitle injects no branch service.
+**#4: None.** Observation uses the Session services and the Session channel; history, Settings, `sessionMetadata` and the auxiliary model are process services. SessionTitle injects no branch service.
 
 **Provider (S4): the named `auxiliaryModel` binding — delivered.** Provider binds its existing `AuxiliaryModelHost` operation for C4 injection ([S4 §4.3](../appserver/auxiliary-model.md#43-named-binding)). An absent Provider keeps SessionTitle's row Pending through its ordinary required dependency. No core mechanism is needed.
 
@@ -261,7 +262,7 @@ post-commit title notices. SessionTitle consumes these delivered contracts.
 
 ### A.1 `session.rename`
 
-Served through `sessionMethods` (Session, key `session.rename`): `describe(): async -> MethodDecl[]` returns one declaration `{name: "session.rename", mutating: true, interruption: "report", progress: false}`; `call(MethodCall): async -> MethodReply` handles it. A dropped call is cancelled before `setTitle` or completes atomically after it.
+Registered with `sessionMethods` (Session, namespace `session.rename`) with one declaration `{name: "session.rename", mutating: true, interruption: "report", progress: false}`; its `call(MethodCall, cancelled, progress): async -> MethodReply` handles it. A dropped call is cancelled before `setTitle` or completes atomically after it.
 
 | Params | Result | Errors |
 | --- | --- | --- |
@@ -298,7 +299,7 @@ omits `maxOutputTokens`, using S4's existing model limit; the 30 s budget remain
 
 | Step | Path |
 | --- | --- |
-| Listen | Original C4 row declares `sessionEvents:<part>` `bind(sync)`, subscribes its own session.event, filters main input/applied, registers an owned task and returns; closing/row cleanup ends owned work |
+| Listen | The Session row listens to its Session's `session/{sessionId}` from `apply`, filters main input/applied, registers an owned task and returns; `sessionLifecycle.closing()` or row cleanup ends owned work |
 | Eligibility | C4 creation snapshot: `interactive !== false && collaborationRole === "leader"`; native omission means true |
 | Trigger | On `input/applied` at `N`: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `sessionMetadata.read({sessionId})`: skip if any title exists; keep revision `r` |
@@ -354,7 +355,7 @@ Flow tests through configured optional C4 rows, `session.create`/`session.submit
 4. Rename during generation (fake model held): manual kept, automatic discarded.
 5. A titled Session is never regenerated; clearing allows regeneration at the next adopted input, still from the first adopted input's text.
 6. Rename of an unloaded Session loads it through Rpc and succeeds.
-7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title and later inputs do not scan history again. External-agent inputs also skip repeated scans until a later adopted model notice; switching to a native model can title from the original first input. An explicit external-agent title model reads neither metadata nor history and never invokes AuxiliaryModel; changing only that setting to a native model permits generation on the next adopted input.
+7. Child-branch inputs and inputs without `user` content never trigger; image-only first input yields no title and later inputs do not scan history again.
 8. Reload before store handover cancels generation without writing; the next adopted input may trigger. Reload after admission leaves settlement to SessionStore; reread metadata after a lost reply without repeating the write. Three failures stop attempts.
 9. Invalid rename method/type, empty text and control characters return `invalid_params` even when Settings cannot be read; the length check uses the validated Settings document.
 10. A first input withdrawn before it is applied (`session.input.withdraw`) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.
@@ -388,7 +389,7 @@ auxiliary binding use the owner contracts in §0. No shared contract or Core cha
 
 | Neutral | Rust |
 | --- | --- |
-| `sessionMethods` key `session.rename` | C4 infers session.rename from sessionMethods:session.rename and uses SessionMethods::provide_foreign on the original row; Rust providers use SessionMethods::provide with complete MethodDecl values |
+| Namespace `session.rename` registered with `sessionMethods` | The TypeScript row calls `ctx.use('sessionMethods').register('session.rename', declarations, call)`, and the registration belongs to the row; a Rust provider calls `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` on a `Keyed<SessionMethods>` dependency |
 | Session broadcast listener | Listener on `session_channel(session_id)` for `Event` records, removed by `ctx.effect` |
 | Generation task | Spawned under `ctx.effect` |
 

@@ -4,13 +4,12 @@ use std::path::{Path, PathBuf};
 
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut config = session_typescript::fixture();
-    config.process_rows = vec![
+    // The process row first: tests address it as `rows[0]`.
+    config.rows = vec![
         serde_json::from_str(include_str!(
             "../../../../runtime/plugins/workflow/process.json"
         ))
         .unwrap(),
-    ];
-    config.rows = vec![
         serde_json::from_str(include_str!(
             "../../../../runtime/plugins/workflow/session.json"
         ))
@@ -88,15 +87,13 @@ async fn report_count(session: &dim_agent_runtime::Session, run: &str) -> usize 
 
 fn probe_rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut parts = rows();
-    parts.process_rows[0]["name"] = json!(
+    parts.rows[0]["name"] = json!(
         parts
             .anchor
             .parent()
             .unwrap()
             .join("fixtures/workflow-package.ts")
     );
-    parts.process_rows[0]["provides"]["managementMethods:workflowprobe"] =
-        json!({"describe":"async","call":"async"});
     parts
 }
 
@@ -112,10 +109,11 @@ async fn report_restart(kill_runtime: bool) {
         session_typescript: Some(probe_rows()),
         ..Default::default()
     };
-    config.session_defaults.tools = vec!["echo".into(), "workflow".into()];
+    config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -258,10 +256,11 @@ async fn report_crash(phase: &str, fault: ReportFault) {
         session_typescript: Some(probe_rows()),
         ..Default::default()
     };
-    config.session_defaults.tools = vec!["echo".into(), "workflow".into()];
+    config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -483,7 +482,7 @@ async fn node_workflow_reports_recover_after_complete_host_restart() {
             session_typescript: Some(probe_rows()),
             ..Default::default()
         };
-        config.session_defaults.tools = vec!["echo".into(), "workflow".into()];
+        config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
         let server = launch_with_agent(Arc::new(MockTools), config).await.0;
         println!("\n{}", json!({"socket":server.unix_path}));
         server.join().await.unwrap();
@@ -590,9 +589,13 @@ async fn node_workflow_sources_stages_policy_and_report_use_the_real_package() {
             session_typescript: Some(rows()),
             ..Default::default()
         };
-        config.session_defaults.tools = vec!["echo".into(), "wait".into()];
+        config.session_defaults.tools = Some(vec!["echo".into(), "wait".into()]);
         if include_workflow {
-            config.session_defaults.tools.push("workflow".into());
+            config
+                .session_defaults
+                .tools
+                .get_or_insert_default()
+                .push("workflow".into());
         }
         let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
         let mut client = Client::new_version(&server, false, 3).await;
@@ -641,7 +644,12 @@ async fn node_workflow_sources_stages_policy_and_report_use_the_real_package() {
                 .unwrap();
             assert!(!session.config().interactive);
             assert_eq!(
-                session.config().tools.iter().any(|name| name == "workflow"),
+                session
+                    .config()
+                    .tools
+                    .iter()
+                    .flatten()
+                    .any(|name| name == "workflow"),
                 include_workflow
             );
             assert_eq!(session.config().model.provider_id, "process-fixture");
@@ -757,7 +765,7 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
     )
     .unwrap();
     let mut parts = probe_rows();
-    parts.process_rows[0]["config"]["packages"] = json!([
+    parts.rows[0]["config"]["packages"] = json!([
         {"id":"a","root":package_a},{"id":"b","root":package_b}
     ]);
     let mut config = ServerConfig {
@@ -767,7 +775,7 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
         file_roots: vec![package_a, package_b],
         ..Default::default()
     };
-    config.session_defaults.tools = vec!["echo".into(), "workflow".into()];
+    config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     process_typescript::select_model(&mut client).await;
@@ -1161,12 +1169,14 @@ async fn node_workflow_rejects_invalid_inner_records_without_changing_bytes() {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let reply = client.rpc("workflow.status", json!({})).await;
-                let code = &reply["error"]["data"]["appError"];
-                if code == "service_reloading" {
+                if session_typescript::waiting(&reply) {
                     tokio::task::yield_now().await;
                     continue;
                 }
-                assert_eq!(code, "invalid_data", "{reply}");
+                assert_eq!(
+                    reply["error"]["data"]["appError"], "invalid_data",
+                    "{reply}"
+                );
                 break;
             }
         })
@@ -1196,12 +1206,13 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
         session_typescript: Some(probe_rows()),
         ..Default::default()
     };
-    config.session_defaults.tools = vec!["echo".into(), "workflow".into()];
+    config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     config.session_defaults.permission_policy =
         serde_json::from_value(json!({"preset":"full-access"})).unwrap();
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -1366,7 +1377,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
         session_typescript: Some(probe_rows()),
         ..Default::default()
     };
-    config.session_defaults.tools = vec!["confirm".into(), "workflow".into()];
+    config.session_defaults.tools = Some(vec!["confirm".into(), "workflow".into()]);
     config.session_defaults.permission_policy =
         serde_json::from_value(json!({"preset":"workspace-write"})).unwrap();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
@@ -1377,8 +1388,8 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
         }),
         config,
         |builder| {
-            builder.session_plugin(move |scope| {
-                session_typescript::ControlledGate(*scope, send.clone())
+            builder.session_part(move |names| {
+                session_typescript::ControlledGate::part(names, send.clone())
             });
         },
     )
@@ -1721,17 +1732,17 @@ async fn node_workflow_report_wakes_wait_and_is_adopted_after_its_start_batch() 
         session_typescript: Some(probe_rows()),
         ..Default::default()
     };
-    config.session_defaults.tools = vec!["workflow".into(), "wait".into()];
+    config.session_defaults.tools = Some(vec!["workflow".into(), "wait".into()]);
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     dim_agent_capabilities::wait::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(BatchModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(BatchModel))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::tool_host(
         &mut builder,
         Arc::new(ConfirmTool {
@@ -1906,10 +1917,11 @@ async fn native_retention(fault: &str) {
         session_typescript: Some(probe_rows()),
         ..Default::default()
     };
-    config.session_defaults.tools = vec!["echo".into(), "workflow".into()];
+    config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder
-            .session_plugin(move |scope| session_typescript::ControlledGate(*scope, send.clone()));
+        builder.session_part(move |names| {
+            session_typescript::ControlledGate::part(names, send.clone())
+        });
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;

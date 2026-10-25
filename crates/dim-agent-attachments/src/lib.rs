@@ -6,10 +6,8 @@ use dim_agent_capabilities::{
     host::{SessionFileError, SessionFileErrorCode, SessionFilesHost},
     methods::{self, Interruption, MethodDecl, RpcError, SessionMethods},
 };
-use dim_agent_runtime::{
-    AgentBuilder, Capability, InSession, KeysOf, SessionIdentity, SessionScope, scoped,
-};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use dim_agent_runtime::{AgentBuilder, SessionIdentity};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::{path::PathBuf, sync::Arc};
 
 /// The `sessionMethods` namespace Attachments provides.
@@ -21,9 +19,7 @@ const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 /// only where SessionStore provides `sessionFiles` and the model has `read`,
 /// before Rpc reads the recorded namespaces.
 pub fn install(builder: &mut AgentBuilder) {
-    builder
-        .session_methods(NAMESPACE)
-        .session_plugin(AttachmentsPlugin::new);
+    builder.session_part(|names| names.part(AttachmentsPlugin));
 }
 
 #[derive(serde::Deserialize)]
@@ -59,31 +55,27 @@ fn put_error(error: SessionFileError) -> RpcError {
     RpcError::app(-32000, code, error.message)
 }
 
-pub struct AttachmentsPlugin {
-    scope: SessionScope,
-}
-impl AttachmentsPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+pub struct AttachmentsPlugin;
 impl TypedPlugin for AttachmentsPlugin {
-    type Deps = (InSession<SessionIdentity>, Arc<SessionFilesHost>);
+    type Deps = (
+        Keyed<SessionIdentity>,
+        Keyed<SessionFilesHost>,
+        Keyed<SessionMethods>,
+    );
     fn name(&self) -> &str {
         "Attachments"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(identity), files): Self::Deps,
+        (Keyed(identity), Keyed(files), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let session_id = identity.session_id.clone();
             // `drain`: an unload waits for the put either way, and the client
             // gets the path or `service_reloading` with nothing stored.
-            SessionMethods::provide(
+            methods.register(
                 ctx,
-                &self.scope,
                 NAMESPACE,
                 vec![MethodDecl::new("attachment.put", true, Interruption::Drain)],
                 Arc::new(move |_, value, cancel, _| {
@@ -124,10 +116,5 @@ impl TypedPlugin for AttachmentsPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for AttachmentsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

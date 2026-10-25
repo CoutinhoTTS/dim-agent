@@ -1,5 +1,6 @@
 import { definePlugin } from '@arcships/rutis'
 import provides from './tree-create.json' with { type: 'json' }
+import type { SessionMethods } from '../../npm/plugin.js'
 
 type TreeCommands = {
   create(parent: string, at: number | bigint, options: unknown, cancelled: () => Promise<void>): Promise<string>
@@ -12,14 +13,13 @@ type MethodCall = { method: string; params: { sessionId: string; at: number; can
 export default definePlugin({
   name: 'TreeCreateFixture',
   provides,
-  inject: ['treeCommands'],
-  apply(ctx) {
+  inject: ['treeCommands', 'sessionMethods'],
+  async apply(ctx) {
     const tree = ctx.use<TreeCommands>('treeCommands')
-    ctx.provide('sessionMethods:session.treeprobe', {
-      async describe() {
-        return [{ name: 'session.treeprobe.create', mutating: true, interruption: 'report', progress: false }]
-      },
-      async call(call: MethodCall) {
+    await ctx.use<SessionMethods>('sessionMethods').register(
+      'session.treeprobe',
+      [{ name: 'session.treeprobe.create', mutating: true, interruption: 'report', progress: false }],
+      async (call: MethodCall) => {
         const { at, cancel } = call.params
         const options = { prompt: 'probe child', source: { kind: 'host', operation_id: crypto.randomUUID() } }
         const cancelled = () => (cancel ? Promise.resolve() : new Promise<void>(() => {}))
@@ -29,6 +29,6 @@ export default definePlugin({
           return { kind: 'value', value: { error: (error as { code?: string }).code ?? String(error) } }
         }
       },
-    })
+    )
   },
 })

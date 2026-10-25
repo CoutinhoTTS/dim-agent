@@ -1,9 +1,8 @@
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, BranchGate, BranchScope, Capability, Dispatcher, InBranch, KeysOf,
-    SessionConfig, Timeline, scoped,
+    AgentBuilder, AgentConfig, BRANCH_GROUP, Dispatcher, SessionConfig, Timeline, names,
 };
 use dim_agent_types::{ContentBlock, EventKind, InputMode};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, KeyedGate, TypedPlugin};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -43,23 +42,22 @@ async fn interrupt_commits_before_later_input_without_waiting_for_dispatch() {
 }
 
 struct Registered;
-impl dim_agent_runtime::BranchService for Registered {}
 #[derive(Clone)]
 struct ExternalWork {
     entered: Arc<Notify>,
     cancelling: Arc<Notify>,
     release: Arc<Notify>,
 }
-struct ExternalWorkPlugin(ExternalWork, BranchScope);
+struct ExternalWorkPlugin(ExternalWork, DepKey<Registered>);
 impl TypedPlugin for ExternalWorkPlugin {
-    type Deps = (InBranch<Dispatcher>,);
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str {
         "ExternalWork"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher),): Self::Deps,
+        (Keyed(dispatcher),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let tasks = TaskTracker::new();
@@ -104,26 +102,21 @@ impl TypedPlugin for ExternalWorkPlugin {
                     Box::pin(async { Ok(()) })
                 },
             )?;
-            ctx.provide_as(self.1.key::<Registered>(), Arc::new(Registered))?;
+            ctx.provide_as(self.1.key().clone(), Arc::new(Registered))?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for ExternalWorkPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
-}
-struct LaterSubscriber(watch::Sender<Option<u64>>, BranchScope);
+struct LaterSubscriber(watch::Sender<Option<u64>>);
 impl TypedPlugin for LaterSubscriber {
-    type Deps = (InBranch<Dispatcher>, BranchGate<Registered>);
+    type Deps = (Keyed<Dispatcher>, KeyedGate<Registered>);
     fn name(&self) -> &str {
         "LaterSubscriber"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher), _): Self::Deps,
+        (Keyed(dispatcher), _): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let seen = self.0.clone();
@@ -133,11 +126,6 @@ impl TypedPlugin for LaterSubscriber {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for LaterSubscriber {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
     }
 }
 
@@ -152,10 +140,11 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
+    names::register::<Registered>(builder.catalog_mut(), Some(BRANCH_GROUP));
     let factory = probe.clone();
     builder
-        .timeline_plugin(move |scope| ExternalWorkPlugin(factory.clone(), *scope))
-        .timeline_plugin(move |scope| LaterSubscriber(send.clone(), *scope));
+        .branch_part(move |names| names.part(ExternalWorkPlugin(factory.clone(), names.key()?)))
+        .branch_part(move |names| names.part(LaterSubscriber(send.clone())));
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())
@@ -213,16 +202,16 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
     agent.close().await.unwrap();
 }
 
-struct OversizedInterrupt(Arc<AtomicBool>, BranchScope);
+struct OversizedInterrupt(Arc<AtomicBool>);
 impl TypedPlugin for OversizedInterrupt {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (Keyed<Timeline>,);
     fn name(&self) -> &str {
         "OversizedInterrupt"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (Keyed(timeline),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let cleaned = self.0.clone();
@@ -245,11 +234,6 @@ impl TypedPlugin for OversizedInterrupt {
         })
     }
 }
-impl Capability for OversizedInterrupt {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_large_interrupt_and_later_input_need_no_byte_budget() {
@@ -258,7 +242,7 @@ async fn a_large_interrupt_and_later_input_need_no_byte_budget() {
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
     let disposed = cleaned.clone();
-    builder.timeline_plugin(move |scope| OversizedInterrupt(disposed.clone(), *scope));
+    builder.branch_part(move |names| names.part(OversizedInterrupt(disposed.clone())));
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())

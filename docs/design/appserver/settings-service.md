@@ -200,7 +200,7 @@ Process scope, no instance key, provided by Settings.
 - `update` is an owner write. It fails with `user_only_field` when the stored document and the new
   one differ at any `userOnly` pointer (a value changed, added or removed). The comparison uses
   the documents after defaults.
-- `projects` is what an owner reads first. Afterwards it follows `settings.project_authorized`.
+- `projects` is what an owner reads first. Afterwards it follows `settings/projects` (§4.4).
 - Cancellation: the caller drops the call. A write that has already committed stays committed,
   as in S8a.
 - Errors (§6): `unknown_source`, `invalid_scope`, `invalid_document`, `user_only_field`,
@@ -212,8 +212,8 @@ and only that package is written against it. This is the trust model of in-proce
 
 ### 4.3 Management methods `settings.*` (client path)
 
-Namespace `settings`, provided through `managementMethods` by `SettingsMethods`, a process part
-that depends on Settings (§4.5). They are never served to paired devices (overview §6.2 rule 9).
+Namespace `settings`, which `SettingsMethods`, a process part that depends on Settings, registers
+with `managementMethods` (§4.5). They are never served to paired devices (overview §6.2 rule 9).
 
 | Method | Request | Reply | Errors |
 | --- | --- | --- | --- |
@@ -238,28 +238,19 @@ A declared source emits `settings.changed` exactly as a Rust source does, after 
 both write paths. The payload never carries the document. A consumer reads once, then follows the
 events.
 
-A TypeScript part of the Session runtime receives both events with rutis 0.11 leaf events:
-`ctx.on('settings.changed', (payload) => …)` and `ctx.on('settings.project_authorized', …)`, the
-payload being the JSON above as the one argument. The Session runtime declares the two names
-(`LocalRuntime::emits`), and its existing rows part, `SessionNodeRows`, forwards them (§10
-question 2):
+A part in any runtime listens to these channels on the bus (§10 question 2). A TypeScript part
+registers `ctx.on('settings/<source>', (payload) => …)` for each source it uses and
+`ctx.on('settings/projects', …)`, the payload being the JSON above as the one argument.
 
-```
- Settings emit (settings/<source>, settings/projects)
-   -> SessionNodeRows listeners: queue {name, payload}, return   (other listeners never wait for Node)
-   -> one task, commit order: Process::emit(name, [payload])
-   -> each loaded part's ctx.on listener
-```
-
-- Every source's changes are forwarded, Rust sources included; a part filters on `source`. The
-  payload never carries a document, so this exposes nothing a part could not read.
+- A part listens to the sources it uses, Rust sources included. The payload never carries a
+  document, so this exposes nothing a part could not read.
+- Events of one channel start in commit order. A slow part delays neither the next event nor
+  Settings' other listeners.
 - No replay: a part reads once when it starts, then follows the events, as a Rust consumer does.
   An event emitted before a part's row loaded (for example its own Session's project
   authorization during creation) is not delivered to it.
-- A failed delivery (a throwing listener) is logged and does not stop later events. The queue
-  and task end with `SessionNodeRows`.
-- The listeners only queue, so a slow part cannot delay Settings' other listeners. The queue has
-  no bound; Settings writes are rare, unlike Session broadcast records (#174).
+- A failed delivery (a throwing listener) goes to the rutis error sink and does not stop later
+  events.
 
 Reading at use time remains valid for owners that do not need to react to changes (F2's
 Permission does).
@@ -408,7 +399,7 @@ than drop them.
 | Permission rules (F2) | Unchanged; see §8.1 |
 | Provider | Unchanged. Its inline credentials and its own optional `ProviderSecretHost` stay (§1.2) |
 | ADR 004 D4 | It says Settings publishes no management methods until S8b. S8b adds the `settings` namespace, limited to declared sources. ADR 004 is updated with the implementation |
-| C4 (TypeScript bridge) | Its rows are the structural input; S8b adds their `settings` member next to `provides` (§3.1). Its Session runtime declares the two Settings event names and `SessionNodeRows` forwards them (§4.4) |
+| C4 (TypeScript bridge) | Its rows are the structural input; S8b adds their `settings` member next to `provides` (§3.1). Its rows listen to the Settings channels themselves (§4.4) |
 | PluginManager (P3) | When it produces C4 rows from its package boundary, it produces their `settings` member too |
 | Rpc | Unchanged; it dispatches the new namespace like any owner's |
 | Timeline, Dispatcher, rutis, loader | Unchanged |
@@ -433,7 +424,7 @@ F2 left open whether to fold its methods into `settings.read/update`. They stay:
 
 | Rule | Answer |
 | --- | --- |
-| Principles §1 (one event bus) | Notification stays on the rutis event bus with S8a's events. No `subscribe`, no watch channel, no second bus. TypeScript delivery uses C4's binding of the same events |
+| Principles §1 (one event bus) | Notification stays on the rutis event bus with S8a's events. No `subscribe`, no watch channel, no second bus. TypeScript parts listen to the same events on the same bus |
 | Principles §3 (dependency direction) | Settings depends on no plugin. Owners depend on Settings. No core part depends on an optional plugin |
 | §4 rule 1 (command events) | Not used. Settings is process configuration written through its owner's typed write (overview §6.2 rule 2) |
 | §4 rule 2 (handover) | Not applicable; no handover between modules |
@@ -450,18 +441,16 @@ F2 left open whether to fold its methods into `settings.read/update`. They stay:
 | ADR 002 D4 (configuration) | Business configuration in the owner's named source, read at use time, changed with notification, no reload |
 | ADR 002 D5 (language-neutral) | §4.1–§4.4 are the contract; §4.5 is the Rust binding |
 
-Requirements raised to mechanism owners: none. S8b uses C4's TypeScript binding when it lands
-(§10 question 2); that is a dependency on C4's planned work, not a new requirement on dim runtime
-or rutis.
+Requirements raised to mechanism owners: none. TypeScript parts listen on the rutis bus (§10
+question 2); that is no new requirement on dim runtime or rutis.
 
 ## 10. Open questions
 
 1. ~~**Which manifest carries the `settings` entry.**~~ Settled with C4's loading path: C4 adds no
    package manifest, and its rows carry the package's structural declarations. The entry is the
    row's `settings` member, next to `provides` (§3.1).
-2. ~~**How a TypeScript part listens to rutis events.**~~ Settled with rutis 0.11 leaf events
-   (#173): the Session runtime declares the two event names and `SessionNodeRows` forwards them
-   (§4.4). The Session broadcast binding (#168, #174) is separate and does not carry them.
+2. ~~**How a TypeScript part listens to rutis events.**~~ Settled: a part listens to the Settings
+   channels on rutis's one bus (§4.4). The Session broadcast does not carry them.
 3. **Packages installed while running.** Declarations are Settings factory configuration, so a
    runtime install (PluginManager, P3) would reload Settings and its dependents (MCP, Skills).
    ADR 002 D3 accepts reloads after structural operations, but whether this one is acceptable is
@@ -532,7 +521,7 @@ owner calling the `settings` service through its `HostDispatch`: items 1–5 and
   (item 5: a Rust source name, a second declaration by another package, a malformed entry) run in
   the same file. These are `node_` flows, run by CI's Node step.
 
-**Part 3 (S8b-3).** `settings.changed` / `settings.project_authorized` reach TypeScript parts
+**Part 3 (S8b-3).** TypeScript parts listen to `settings/<source>` and `settings/projects`
 (§4.4, §10 question 2). `transport_flow/settings_methods.rs` checks that the owner fixture's
 `ctx.on` listeners receive the three `example` changes of item 3 in commit order, and the
 authorization of a project created after the part loaded.

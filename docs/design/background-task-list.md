@@ -1,9 +1,9 @@
 # Commands and members in the background-task list
 
-Status: Proposed; not implemented. Scope: command/member inventory, finished
+Implementation in progress: [#324](https://github.com/arcships/dim/pull/324). Scope: command/member inventory, finished
 rows and stop-all in [#264](https://github.com/arcships/dim/issues/264), also used
-by [#263](https://github.com/arcships/dim/issues/263). After acceptance, implement
-on #299's task-panel parent chain. Member conversation uses the
+by [#263](https://github.com/arcships/dim/issues/263), on main including #299 and
+#312. Member conversation uses the
 [member conversation contract](member-conversation.md). Workflow presentation
 follows its package's delivered run/control contract; this document defines no
 Workflow API or placeholder rows.
@@ -88,7 +88,9 @@ projection can apply a page or queue its next one. Queued panel controls carry
 the same originating projection identity; no server generation field is needed.
 No polling timer, persisted index or generic observation framework is added.
 
-Loading or failed branch reads are visible. Individual known targets remain
+A failed main-history read reports a connection failure and disables submission;
+the unsent draft remains in the current UI, and recovery requires exit/resume. The following local-error rules
+apply to child branches. Loading or failed branch reads are visible. Individual known targets remain
 usable, but stop-all is disabled while a discovered branch's initial history is
 unread or failed, because the list cannot yet describe its tasks. A reply releases
 the global request slot. A failed page in the current projection keeps its last
@@ -101,6 +103,16 @@ and is discarded if that projection is invalid before send; an already-sent
 retry uses the same stale-reply and slot-lifetime rules above. State notices and
 live facts do not automatically retry a failed read; an unseen branch still
 queues its first read. There is no retry timer or automatic retry loop.
+On a child read failure, discard buffered event payloads and stop accumulating
+live payloads for that failed read. After an explicit reopen finishes the
+retained fixed window, enqueue one catch-up read from its validated `nextAfter`
+with a fresh watermark, then fold buffered live facts. A failure before the
+first successful page needs no extra catch-up: its reopened read already takes
+a fresh watermark. The same single outstanding-page limit applies throughout.
+This recovers facts received during the failed interval without retaining them
+indefinitely or skipping the original window's unread facts. An outstanding
+page still buffers live events until its reply; this is not a timeout or a hard
+memory limit for a stalled read.
 This is a client loading state, not a Session/assembly gate. No Pending provider
 is skipped and no runtime readiness rule changes.
 
@@ -195,7 +207,7 @@ delegation rows. No other Session is selected.
 | Captured target | Existing request |
 | --- | --- |
 | Command | `session.exec.stop {sessionId: <captured leader>, branchId: <originating branch>, taskId: <task>}` |
-| Delivered member | `session.stop {sessionId: <delivered member>, branchId: "main", reason: "stopped by the user"}` |
+| Delivered member | `session.stop {sessionId: <delivered member>, branchId: "main", reason: "stopped by the user"}`; not for a provider member (an `agentId` of the form `<kind>:<rest>`, such as an [external agent](plugins/ExternalAgent.md#6-interfaces-summary)), whose `extSessionId` is not a Session and which has no stop row |
 
 The member request interrupts that member's current main turn independently of
 the leader; it does not stop the leader or infer a member branch from the

@@ -7,14 +7,14 @@ use crate::{
 };
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
-    AGENT_GROUP, Agent, AgentBuilder, AgentError, Capability, KeysOf, NoConfig, Session,
-    SessionConfig, TimelineKey, When, capability_plugin,
+    AGENT_GROUP, Agent, AgentBuilder, AgentError, Names, NoConfig, Session, SessionConfig,
+    TimelineKey, When,
 };
 pub use dim_agent_types::AgentProfile;
 use dim_agent_types::{ContentBlock, EventKind};
 use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, Event, EventKey, FiberState, FiberView, TypeKey,
-    TypedFactory, TypedPlugin, TypedPluginFactory,
+    BoxFuture, CordisError, Ctx, Effect, Event, EventKey, FiberState, FiberView, Keyed, Plugin,
+    TypeKey, TypedFactory, TypedPlugin, TypedPluginFactory,
 };
 use rutis_bridge::session::{HostDispatch, host_key};
 use rutis_loader::{Builtins, InstanceResult, Loader};
@@ -77,9 +77,12 @@ pub struct AgentHost {
 }
 
 /// A new loaded incarnation of a stored Session, before its caller receives it.
+/// Listeners resolve the Session through [`AgentIndex::session`]; an event
+/// carries ids, never a handle.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct SessionRestored {
     pub agent_id: String,
-    pub session: Session,
+    pub session_id: String,
 }
 impl Event for SessionRestored {
     const NAME: &'static str = "agent/session-restored";
@@ -89,6 +92,7 @@ impl Event for SessionRestored {
 /// not loaded, so no close announced it. A loaded Session ends through its
 /// close instead. Emitted on the process root: a delete can outlive its
 /// index generation.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct UnloadedSessionDeleted {
     pub agent_id: String,
     pub session_id: String,
@@ -111,6 +115,14 @@ pub enum AgentOpError {
     Unload(Arc<CordisError>),
 }
 
+/// A Session's admission state ([idle unload §6.4](../../../docs/design/appserver/idle-unload.md#64-admission-slots)).
+/// Every holder took its reference from the index map, under the index
+/// lock, or cloned one it held. With a native store a slot leaves the map
+/// only under that lock once nothing else holds it ([`Inner::sweep`]),
+/// so the slot a holder has is the one in the map: callers of one Session
+/// wait on one gate, and the pass sees every lease. Without one, nothing
+/// restores a Session and no pass runs; `remove_version` and
+/// `retain_versions` drop slots as Sessions end.
 #[derive(Default)]
 struct SessionSlot {
     gate: tokio::sync::Mutex<()>,
@@ -118,7 +130,12 @@ struct SessionSlot {
     /// Incremented by every `acquire`: while it stays unchanged and `uses`
     /// stays 0, no lease has held the Session (idle unload §6.1).
     acquired: AtomicU64,
+    /// Set by `session.close` and by a delete's close: the Session does not
+    /// load again in this process (S5c D5).
     closed: AtomicBool,
+    /// Set with `closed` by a delete that leaves no rows of the Session: no
+    /// close of it must outlive the slot.
+    deleted: AtomicBool,
 }
 /// An accepted request or subscription pins one loaded instance.
 pub(crate) struct SessionUse {
@@ -165,16 +182,51 @@ struct Inner {
 }
 
 impl Inner {
-    /// Drops `id`'s admission slot while it is still `slot`: an id with
-    /// nothing loaded or stored keeps no admission state.
-    fn drop_slot(&mut self, id: &str, slot: &Arc<SessionSlot>) {
-        if self
-            .sessions
+    /// Whether Session `id` was closed or deleted in this process. A lookup:
+    /// reading the fact creates no slot.
+    fn closed(&self, id: &str) -> bool {
+        self.sessions
             .get(id)
-            .is_some_and(|current| Arc::ptr_eq(current, slot))
-        {
-            self.sessions.remove(id);
+            .is_some_and(|slot| slot.closed.load(Ordering::Acquire))
+    }
+    /// The Agent owning Session `id`: its recorded owner, live or closing,
+    /// or the live Agent that has it loaded.
+    fn owner(&self, id: &str) -> Option<Arc<AgentHost>> {
+        if let Some((agent, _)) = self.versions.get(id) {
+            if let Some(entry) = self.agents.get(agent) {
+                return Some(entry.host.clone());
+            }
+            if let Some(host) = self.closing.get(agent) {
+                return Some(host.clone());
+            }
         }
+        self.agents
+            .values()
+            .find(|entry| entry.host.agent.get_session(id).is_some())
+            .map(|entry| entry.host.clone())
+    }
+    /// Removes every slot nothing needs: nothing but the map holds it,
+    /// neither a caller, a lease nor an idle unload mark; its Session is not
+    /// loaded; and it records no close the process must keep, so its Session
+    /// is open, or deleted with its rows. A closed Session whose rows remain
+    /// keeps its slot (S5c D5). The count is read under the index lock,
+    /// where every new reference is taken, so it cannot rise meanwhile.
+    fn sweep(&mut self) {
+        let Inner {
+            sessions,
+            agents,
+            closing,
+            ..
+        } = self;
+        sessions.retain(|id, slot| {
+            Arc::strong_count(slot) > 1
+                || (slot.closed.load(Ordering::Acquire) && !slot.deleted.load(Ordering::Acquire))
+                || agents
+                    .values()
+                    .map(|entry| &entry.host)
+                    .chain(closing.values())
+                    .any(|host| host.agent.get_session(id).is_some())
+        });
     }
 }
 
@@ -251,9 +303,6 @@ impl TypedPlugin for AgentDirectoryPlugin {
         })
     }
 }
-impl Capability for AgentDirectoryPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// Directory logic and Agent management over the [`AgentDirectory`]:
 /// lookups, Session admission and creating and closing Agents through the
@@ -266,8 +315,6 @@ pub struct AgentIndex {
     session_defaults: SessionConfig,
     /// Protected profiles resolve Session models through a `ModelSelectionHost`.
     selects_models: bool,
-    /// Tools the process assembly provides: host tools and contributions.
-    tools: BTreeSet<String>,
     /// Loading context of `AgentsPlugin`.
     ctx: OnceLock<Ctx>,
     /// The process loader Agents are instances of, and the root they are
@@ -363,20 +410,11 @@ impl AgentIndex {
     /// The Agent owning a Session, also after the Session itself closed and
     /// while its Agent is closing; its archives may still be finishing.
     pub fn host_by_session(&self, session_id: &str) -> Option<Arc<AgentHost>> {
-        let inner = self.directory.inner.lock().expect("agent index");
-        if let Some((agent, _)) = inner.versions.get(session_id) {
-            if let Some(entry) = inner.agents.get(agent) {
-                return Some(entry.host.clone());
-            }
-            if let Some(host) = inner.closing.get(agent) {
-                return Some(host.clone());
-            }
-        }
-        inner
-            .agents
-            .values()
-            .find(|entry| entry.host.agent.get_session(session_id).is_some())
-            .map(|entry| entry.host.clone())
+        self.directory
+            .inner
+            .lock()
+            .expect("agent index")
+            .owner(session_id)
     }
     pub fn version_of(&self, session_id: &str) -> Option<u32> {
         self.directory
@@ -396,17 +434,19 @@ impl AgentIndex {
             .insert(session_id.to_owned(), (agent_id.to_owned(), version));
     }
     pub fn remove_version(&self, session_id: &str) {
-        // Only a Session this index knows keeps a closed slot: closing an
-        // unknown id leaves no admission state.
-        if self.session_store.is_some() && self.host_by_session(session_id).is_none() {
+        if self.session_store.is_some() {
+            // A Session closed with its rows kept keeps a closed slot (S5c
+            // D5). Only a Session this index knows does: closing an unknown
+            // or deleted id leaves no admission state.
+            if let Some((_, slot)) = self.owned_slot(session_id) {
+                slot.closed.store(true, Ordering::Release);
+            }
             return;
         }
         self.slot(session_id).closed.store(true, Ordering::Release);
-        if self.session_store.is_none() {
-            let mut inner = self.directory.inner.lock().unwrap();
-            inner.versions.remove(session_id);
-            inner.sessions.remove(session_id);
-        }
+        let mut inner = self.directory.inner.lock().unwrap();
+        inner.versions.remove(session_id);
+        inner.sessions.remove(session_id);
     }
     /// Sessions can also close through the runtime fault supervisor.
     /// Versions of a closing Agent stay until its settlement forgets them.
@@ -524,8 +564,12 @@ impl AgentIndex {
             .instances
             .contains_key(agent_id)
     }
+    /// See [`Inner::closed`].
+    fn closed(&self, id: &str) -> bool {
+        self.directory.inner.lock().expect("agent index").closed(id)
+    }
     pub(crate) fn session_available(&self, id: &str) -> bool {
-        self.host_by_session(id).is_some() && !self.slot(id).closed.load(Ordering::Acquire)
+        self.host_by_session(id).is_some() && !self.closed(id)
     }
     /// The unloaded Sessions of Agent `agent_id`: stored, not loaded, and
     /// neither closed nor deleted in this process, so the next `acquire`
@@ -542,12 +586,7 @@ impl AgentIndex {
             .versions
             .iter()
             .filter(|(id, (owner, _))| {
-                owner == agent_id
-                    && entry.host.agent.get_session(id).is_none()
-                    && !inner
-                        .sessions
-                        .get(*id)
-                        .is_some_and(|slot| slot.closed.load(Ordering::Acquire))
+                owner == agent_id && entry.host.agent.get_session(id).is_none() && !inner.closed(id)
             })
             .map(|(id, _)| id.clone())
             .collect()
@@ -643,12 +682,21 @@ impl AgentIndex {
             .or_default()
             .clone()
     }
+    /// Session `id`'s owner and its slot, created if needed, in one step
+    /// under the index lock. A delete forgets the owner and drops the slot
+    /// under that lock too, so a deleted Session never gets a new, open
+    /// slot: it stays `session_closed` rather than being restored.
+    fn owned_slot(&self, id: &str) -> Option<(Arc<AgentHost>, Arc<SessionSlot>)> {
+        let mut inner = self.directory.inner.lock().expect("agent index");
+        let host = inner.owner(id)?;
+        let slot = inner.sessions.entry(id.to_owned()).or_default().clone();
+        Some((host, slot))
+    }
     pub(crate) async fn acquire(&self, id: &str) -> dim_agent_runtime::Result<SessionUse> {
         if let Some(reason) = self.unavailable_session(id) {
             return Err(AgentError::Storage(reason));
         }
-        let host = self.host_by_session(id);
-        let Some(host) = host else {
+        let Some((host, slot)) = self.owned_slot(id) else {
             if let Some(store) = &self.session_store
                 && store.has_records(id).await?
             {
@@ -658,7 +706,6 @@ impl AgentIndex {
             }
             return Err(AgentError::Closed(id.into()));
         };
-        let slot = self.slot(id);
         let _gate = slot.gate.lock().await;
         if slot.closed.load(Ordering::Acquire) || self.stopping.is_cancelled() {
             return Err(AgentError::Closed(id.into()));
@@ -690,7 +737,7 @@ impl AgentIndex {
                         &self.session_restored,
                         Arc::new(SessionRestored {
                             agent_id: host.agent_id.clone(),
-                            session: session.clone(),
+                            session_id: id.to_owned(),
                         }),
                     )
                     .await?;
@@ -707,11 +754,12 @@ impl AgentIndex {
         })
     }
     /// One pass of idle unload ([§6.1](../../../docs/design/appserver/idle-unload.md#61-the-pass)).
-    /// `marks` holds the acquire count of each Session the previous pass
-    /// found lease-free. One still lease-free with that count has been for at
-    /// least the grace period, and is released under its admission gate,
-    /// which the pass never waits for.
-    async fn unload_idle(&self, marks: &mut HashMap<String, u64>) {
+    /// `marks` holds the slot and acquire count of each Session the previous
+    /// pass found lease-free. One still lease-free with that count has been
+    /// for at least the grace period, and is released under its admission
+    /// gate, which the pass never waits for. The pass then drops the slots
+    /// that nothing holds any more.
+    async fn unload_idle(&self, marks: &mut HashMap<String, (Arc<SessionSlot>, u64)>) {
         let mut next = HashMap::new();
         for host in self.hosts() {
             for session in host.agent.sessions() {
@@ -719,10 +767,10 @@ impl AgentIndex {
                     return;
                 }
                 let id = session.id();
-                // A lookup: the pass keeps no admission state of its own. A
-                // loaded Session of a native store has its slot, since its
-                // creation is admitted under the gate and its restore runs
-                // in `acquire`.
+                // A lookup: the pass creates no slot. A loaded Session of a
+                // native store has its slot, since its creation is admitted
+                // under the gate, its restore runs in `acquire`, and a slot
+                // goes only once its Session is not loaded.
                 let Some(slot) = self
                     .directory
                     .inner
@@ -741,7 +789,7 @@ impl AgentIndex {
                 if slot.closed.load(Ordering::Acquire) || slot.uses.load(Ordering::Acquire) > 0 {
                     continue;
                 }
-                if marks.get(id) == Some(&acquired)
+                if marks.get(id).is_some_and(|(_, marked)| *marked == acquired)
                     && let Ok(_gate) = slot.gate.try_lock()
                     // No `acquire` runs under the gate, so an unchanged count
                     // means no lease since the previous pass, nor now.
@@ -763,10 +811,16 @@ impl AgentIndex {
                         }
                     }
                 }
-                next.insert(id.to_owned(), acquired);
+                // The mark holds the slot, so the slot stays until the next
+                // pass compares this count with its own: a slot made anew in
+                // between would restart the count.
+                next.insert(id.to_owned(), (slot, acquired));
             }
         }
         *marks = next;
+        // Slots of the Sessions this pass unloaded, and of those that ended
+        // or were released otherwise, once nothing holds them.
+        self.directory.inner.lock().expect("agent index").sweep();
     }
     pub(crate) async fn session_directory(
         &self,
@@ -778,7 +832,7 @@ impl AgentIndex {
         };
         let mut records = store.directory(agent, version).await?;
         records.retain(|record| {
-            !self.slot(&record.session_id).closed.load(Ordering::Acquire)
+            !self.closed(&record.session_id)
                 && record
                     .agent_id
                     .as_deref()
@@ -956,7 +1010,7 @@ impl AgentIndex {
     /// the rows, which `session.list` then shows, until the Session is
     /// published and its protocol version recorded. A delete of the id waits
     /// for the build and closes what it published. A failed creation keeps
-    /// no slot.
+    /// no slot once nothing else holds it.
     pub(crate) async fn admit(
         &self,
         id: &str,
@@ -965,29 +1019,30 @@ impl AgentIndex {
         creation: impl Future<Output = dim_agent_runtime::Result<Session>>,
     ) -> dim_agent_runtime::Result<Session> {
         let slot = self.slot(id);
-        let _gate = slot.gate.lock().await;
+        let gate = slot.gate.lock().await;
         let created = creation.await;
         match &created {
             Ok(_) => self.insert_version(id, agent_id, version),
-            Err(_) => self
-                .directory
-                .inner
-                .lock()
-                .expect("agent index")
-                .drop_slot(id, &slot),
+            // A delete waiting for the gate holds the slot, and drops it
+            // when it ends.
+            Err(_) => {
+                drop(gate);
+                drop(slot);
+                self.directory.inner.lock().expect("agent index").sweep();
+            }
         }
         created
     }
     /// `session.delete` ([S5c §3.2](../../../docs/design/appserver/session-deletion-and-fork.md#32-sequence)):
     /// holds S's admission gate, so nothing loads or builds S meanwhile,
     /// closes S if it is loaded, has SessionStore remove what it stores of
-    /// S, then forgets S and keeps its slot closed. A stored S that was
-    /// neither loaded nor closed ends without a close, so the delete
-    /// announces it with [`UnloadedSessionDeleted`]. An unknown id has
-    /// nothing to remove and keeps no slot. A delete that fails before the
-    /// rows go leaves a Session it closed as `session.close` does, closed in
-    /// this process with its rows kept (D5); one it did not close loads
-    /// again on its next use.
+    /// S, then forgets S and drops its slot, which stays closed until
+    /// nothing else holds it. A stored S that was neither loaded nor closed
+    /// ends without a close, so the delete announces it with
+    /// [`UnloadedSessionDeleted`]. An unknown id has nothing to remove and
+    /// keeps no slot. A delete that fails before the rows go leaves a
+    /// Session it closed as `session.close` does, closed in this process with
+    /// its rows kept (D5); one it did not close loads again on its next use.
     pub(crate) async fn delete(&self, id: &str) -> dim_agent_runtime::Result<()> {
         // The id names `command-output/<id>`, so only a single path component
         // can be a Session's (D3); refused before any admission state exists.
@@ -998,7 +1053,7 @@ impl AgentIndex {
         }
         let slot = self.slot(id);
         // A creation of S holds the gate until S is published (`admit`).
-        let _gate = slot.gate.lock().await;
+        let gate = slot.gate.lock().await;
         // A business close, as `session.close`: capabilities settle accepted
         // work and release processes, leases and member requests. Owners of
         // process state, such as Collaboration's relations, treat it as the
@@ -1024,10 +1079,11 @@ impl AgentIndex {
             let mut inner = self.directory.inner.lock().expect("agent index");
             let owner = inner.versions.remove(id);
             inner.unavailable_sessions.remove(id);
-            if loaded.is_some() || stored {
+            // S's rows are gone, or it had none: no close of it must outlive
+            // the slot. Callers waiting at the gate find S closed.
+            if stored || slot.closed.load(Ordering::Acquire) {
                 slot.closed.store(true, Ordering::Release);
-            } else {
-                inner.drop_slot(id, &slot);
+                slot.deleted.store(true, Ordering::Release);
             }
             owner
         };
@@ -1055,6 +1111,11 @@ impl AgentIndex {
                 tracing::warn!(%error, session_id = id, "Deletion of an unloaded Session was not announced");
             }
         }
+        // A slot a caller still holds, such as a lease taken before the
+        // delete, goes by the first pass after it is released.
+        drop(gate);
+        drop(slot);
+        self.directory.inner.lock().expect("agent index").sweep();
         Ok(())
     }
     /// `session.fork` ([S5c §6](../../../docs/design/appserver/session-deletion-and-fork.md#6-fork)):
@@ -1111,14 +1172,12 @@ impl AgentIndex {
         };
         self.load(id.to_string(), false, profile).await
     }
-    /// A profile from outside the process may only select provided tools,
-    /// each once.
+    /// A profile from outside the process lists each tool of its mount list
+    /// once. A tool that no part registers is reported when the Session
+    /// reads its tools.
     pub fn check_profile(&self, profile: &AgentProfile) -> Result<(), String> {
         let mut seen = BTreeSet::new();
-        for tool in &profile.tools {
-            if !self.tools.contains(tool) {
-                return Err(format!("tool {tool} is not provided by the process"));
-            }
+        for tool in profile.tools.iter().flatten() {
             if !seen.insert(tool) {
                 return Err(format!("tool {tool} is listed twice"));
             }
@@ -1422,13 +1481,26 @@ impl AgentsPlugin {
             root,
         }
     }
+    /// This part with its keys: native storage only with a database, and
+    /// settings only with local execution.
+    pub fn part(self, names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
+        let keys = (
+            names.when::<(Keyed<SessionStore>, Keyed<SqliteStorage>)>(
+                self.config.database_path.is_some(),
+            )?,
+            names.when::<Keyed<SettingsService>>(self.config.local_execution())?,
+            names.key::<Loader>()?,
+            names.key::<AgentDirectory>()?,
+        );
+        Ok(names.part_with(self, keys))
+    }
 }
 impl TypedPlugin for AgentsPlugin {
     type Deps = (
-        When<(Arc<SessionStore>, Arc<SqliteStorage>)>,
-        When<Arc<SettingsService>>,
-        Arc<Loader>,
-        Arc<AgentDirectory>,
+        When<(Keyed<SessionStore>, Keyed<SqliteStorage>)>,
+        When<Keyed<SettingsService>>,
+        Keyed<Loader>,
+        Keyed<AgentDirectory>,
     );
     fn name(&self) -> &str {
         "Agents"
@@ -1436,12 +1508,13 @@ impl TypedPlugin for AgentsPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (When(stored), When(settings), loader, directory): Self::Deps,
+        (When(stored), When(settings), Keyed(loader), Keyed(directory)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
+            let settings = settings.map(|Keyed(settings)| settings);
             let mut builder = self.builder.clone();
             let (records, session_store) = match stored {
-                Some((store, storage)) => {
+                Some((Keyed(store), Keyed(storage))) => {
                     builder.timeline_store(store.timeline_store());
                     (Some(Arc::new(AgentRecords(storage))), Some(store))
                 }
@@ -1463,9 +1536,8 @@ impl TypedPlugin for AgentsPlugin {
             let _ = directory.default_agent_id.set(default_id);
             let index = AgentIndex {
                 directory,
-                session_restored: EventKey::of().instance(self.root.instance()),
-                unloaded_session_deleted: EventKey::of().instance(self.root.instance()),
-                tools: builder.provided_tools().map(str::to_owned).collect(),
+                session_restored: EventKey::of(),
+                unloaded_session_deleted: EventKey::of(),
                 builder,
                 session_defaults: self.config.session_defaults.clone(),
                 ctx: OnceLock::from(ctx.clone()),
@@ -1537,26 +1609,17 @@ impl TypedPlugin for AgentsPlugin {
         })
     }
 }
-impl Capability for AgentsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        (
-            self.config.database_path.is_some().then_some(((), ())),
-            self.config.local_execution().then_some(()),
-            (),
-            (),
-        )
-    }
-}
 
 /// The loader row of the Agent group: each Agent is its plugin and its
-/// Sessions (`session_row`).
-pub(crate) fn group_row(session_row: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "id": AGENT_GROUP,
-        "group": true,
-        "instanced": true,
-        "config": [{ "id": "AgentScope", "name": "AgentScope" }, session_row],
-    })
+/// Sessions (`session_row`), with the builder's process values.
+pub(crate) fn group_row(
+    builder: &AgentBuilder,
+    session_row: serde_json::Value,
+) -> serde_json::Value {
+    builder.agent_row([
+        serde_json::json!({ "id": "AgentScope", "name": "AgentScope" }),
+        session_row,
+    ])
 }
 
 /// What an Agent instance is created with.
@@ -1607,7 +1670,7 @@ impl TypedPlugin for AgentScopePlugin {
         Box::pin(async move {
             let spec = &self.0;
             let slot = Arc::new(Mutex::new(None));
-            let sessions = ctx.plugin(capability_plugin(Sessions(slot.clone())));
+            let sessions = ctx.plugin(rutis::Typed::new(Sessions(slot.clone())));
             (&sessions).await.map_err(|error| {
                 CordisError::PluginFailed(format!("Session host failed: {error}").into())
             })?;
@@ -1662,9 +1725,6 @@ impl TypedPlugin for Sessions {
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for Sessions {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 #[cfg(test)]

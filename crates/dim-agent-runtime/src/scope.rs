@@ -52,17 +52,21 @@ pub trait PublicService: Send + Sync + 'static {}
 
 /// The loader that owns this Session's subtree. Not publicly accessible.
 /// Only lock-free instance creation is exposed to Session capabilities.
-pub struct SessionLoader(rutis_loader::Loader);
+pub struct SessionLoader {
+    loader: rutis_loader::Loader,
+    /// A running loader row of the instance new instances go in: the loader
+    /// places an instance from a row's context, and a mounted part is not a
+    /// row ([`crate::PartRegistry`]).
+    anchor: Ctx,
+}
 impl SessionLoader {
-    pub fn new(loader: rutis_loader::Loader) -> Self {
-        Self(loader)
+    pub fn new(loader: rutis_loader::Loader, anchor: Ctx) -> Self {
+        Self { loader, anchor }
     }
-    pub fn create_instance<'a>(
-        &'a self,
-        ctx: &Ctx,
-        group: &str,
-    ) -> rutis_loader::CreateInstance<'a> {
-        self.0.create_instance(ctx, group)
+    /// Creates an instance of `group` where the configuration tree puts it
+    /// inside this loader's instance.
+    pub fn create_instance(&self, group: &str) -> rutis_loader::CreateInstance<'_> {
+        self.loader.create_instance(&self.anchor, group)
     }
 }
 impl SessionService for SessionLoader {}

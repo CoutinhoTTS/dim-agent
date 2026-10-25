@@ -11,8 +11,10 @@ aggregates their contributions into the skill tool and instructions/list prompt 
 | `P:SkillsCatalog` | Query user/project skills; its `skills.catalog_changed` events drive replacement. |
 | `S:SessionConfig` | Select the Session working directory. |
 | `S:SessionLoader` | Lock-free creation of Session-owned content instances. |
-| `S:Contributions` | Private ready content services, registered and withdrawn by content leaves. |
+| `S:SkillContributions` | Private ready content services, registered and withdrawn by content leaves. |
 | `S:SessionLifecycle` | Start catalog-driven replacement only after the Session is published. |
+| `S:PromptRegistry` | Register the list and instructions sources, until this part unloads. |
+| `S:ToolRegistry` | Register the `skill` tool, until this part unloads. |
 
 ## Content instances
 
@@ -81,7 +83,7 @@ loading uses the current view rather than an old model-visible list.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:SkillsCatalog`、`S:Contributions`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader` |
-| 提供 | `S:PromptSource#dim/skills/instructions`、`S:PromptSource#dim/skills/list`、`S:SessionSkills`、`S:ToolContribution#skill` |
-| 被注入于 | `PromptRegistry`、`SkillsBranch` |
+| 注入 | `P:SkillsCatalog`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:SkillContributions`、`S:ToolRegistry` |
+| 提供 | `S:SessionSkills` |
+| 被注入于 | `SkillsBranch` |
 <!-- /generated -->

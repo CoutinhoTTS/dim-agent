@@ -2,6 +2,9 @@
 
 决策状态：Proposed。适用于 `docs/design/` 中的插件设计及未来的插件。
 
+由 [ADR 006](006-plugin-contract.md) 扩展：D1–D4 不变。D5 由[插件契约](../design/plugin-contract.md)补全：
+Dim 的运行时服务进入命名目录，部件的位置就是它所在 loader 行的组，Rust 是契约的一种绑定。
+
 ## 背景
 
 Dim 在三个作用域装配插件：进程、Session 和分支
@@ -81,7 +84,7 @@ rutis 按名称跨语言调用插件与服务（rutis-bridge 运行时、配合 
 | Rust 细节 | trait 签名、`TypeKey`、`Contributions<T>` 与 `AgentBuilder` 调用属于一种绑定，列在“Rust 绑定”附录中 |
 
 规范服务：`sessionMethods`（Session，按命名空间）、`managementMethods`（进程，按命名空间）、
-`toolContribution`（Session，按工具名）、`sessions`（进程）和 `modelKind`（进程，按种类）。它们
+`toolContribution`（Session，按工具名）、`sessions`（进程）和 `collaborationMembers`（进程，按成员类型）。它们
 定义在[合同](../design/contracts/session-boundary.md)和所属插件文档中。运行时现有的类型化服务
 （Timeline、Dispatcher、ToolHost 等）保持不变；把它们按名称暴露给非 Rust 的 Capability 部分是
 issue #4 的工作。

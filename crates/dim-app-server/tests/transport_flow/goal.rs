@@ -14,7 +14,7 @@ fn repository() -> PathBuf {
 fn goal_rows() -> SessionTypeScriptConfig {
     let goal = repository().join("runtime/plugins/goal");
     SessionTypeScriptConfig {
-        process_rows: Vec::new(),
+        python: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),
@@ -26,13 +26,15 @@ fn goal_rows() -> SessionTypeScriptConfig {
             json!({
                 "id": "goal-session",
                 "name": goal.join("session.ts"),
+                "group": "session",
                 "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/plugins/goal/session.json")).unwrap(),
-                "inject": ["treeCommands"],
+                "inject": ["treeCommands", "toolRegistry", "sessionMethods"],
                 "config": {},
             }),
             json!({
                 "id": "goal-branch",
                 "name": goal.join("branch.ts"),
+                "group": "branch",
                 "provides": {},
                 "inject": ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"],
                 "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/plugins/goal/settings.json")).unwrap(),

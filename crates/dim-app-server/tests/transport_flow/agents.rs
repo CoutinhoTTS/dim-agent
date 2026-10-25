@@ -251,14 +251,16 @@ async fn agents_reload_keeps_every_agent() {
     server.join().await.unwrap();
 }
 
-async fn launch_with_plugin<P: Capability>(
-    new: impl Fn() -> P + Send + Sync + 'static,
-) -> RunningServer {
+async fn launch_with_plugin<P>(new: impl Fn() -> P + Send + Sync + 'static) -> RunningServer
+where
+    P: TypedPlugin,
+    P::Deps: dim_agent_runtime::NamedDeps,
+{
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.session_plugin(move |_| new());
+    builder.session_part(move |names| names.part(new()));
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
             "dim-agent-agents-test-{}/server.sock",
@@ -407,9 +409,6 @@ impl TypedPlugin for GatedCleanup {
         Box::pin(async move { result.map(|_| rutis::Effect::Done) })
     }
 }
-impl Capability for GatedCleanup {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// A session.close inside the closing window reports the settlement failure
 /// with the same fixed message as the direct close path.
@@ -529,11 +528,11 @@ async fn agent_profile_supplies_session_defaults() {
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(model.clone())))
+        .process_value(Arc::new(ModelHost(model.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
@@ -630,7 +629,7 @@ async fn agent_profile_supplies_session_defaults() {
 
     // The default Agent and a profile-less Agent use the process defaults.
     let defaults = ServerConfig::default().session_defaults;
-    let mut tools = defaults.tools.clone();
+    let mut tools = defaults.tools.clone().unwrap();
     tools.sort();
     let expected = (
         json!(include_str!("../../../dim-agent-capabilities/src/input-guide.txt").trim_end()),
@@ -648,14 +647,15 @@ async fn agent_profile_supplies_session_defaults() {
     .await;
     assert_eq!(model.last(), expected);
 
-    // Profile tools must be provided by the process: host or contribution.
-    let rejected = client
+    // A profile may name a tool nothing registers yet: its Sessions offer it
+    // once a part registers it.
+    let pending = client
         .rpc(
             "agent.create",
-            json!({"profile":{"name":"broken","description":"","systemPrompt":"","tools":["branch","missing"]}}),
+            json!({"profile":{"name":"pending","description":"","systemPrompt":"","tools":["branch","missing"]}}),
         )
         .await;
-    assert_eq!(rejected["error"]["data"]["appError"], "agent_build_failed");
+    assert_ok(&pending);
     let duplicated = client
         .rpc(
             "agent.create",
@@ -667,7 +667,7 @@ async fn agent_profile_supplies_session_defaults() {
         "agent_build_failed"
     );
     let listed = client.rpc("agent.list", json!({})).await;
-    assert_eq!(listed["result"].as_array().unwrap().len(), 3);
+    assert_eq!(listed["result"].as_array().unwrap().len(), 4);
 
     server.shutdown();
     server.join().await.unwrap();
