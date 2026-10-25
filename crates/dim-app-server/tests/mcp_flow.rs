@@ -78,6 +78,11 @@ impl Fixture {
     }
     async fn open(home: PathBuf, reversed: bool) -> Self {
         let root = Ctx::root().unwrap();
+        // The management table the process providers register with.
+        root.plugin(
+            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+                .unwrap(),
+        );
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
         let plugin = root.plugin(Typed::new(McpPlugin::new(0)));

@@ -185,14 +185,18 @@ fn issue(issue: dim_agent_capabilities::skills::SkillIssue) -> SkillIssue {
 
 pub struct SkillsCatalogPlugin;
 impl TypedPlugin for SkillsCatalogPlugin {
-    type Deps = (Keyed<HostPlatform>, Keyed<SettingsService>);
+    type Deps = (
+        Keyed<HostPlatform>,
+        Keyed<SettingsService>,
+        Keyed<ManagementMethods>,
+    );
     fn name(&self) -> &str {
         "SkillsCatalog"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (platform, Keyed(settings)): Self::Deps,
+        (platform, Keyed(settings), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage { settings })));
@@ -202,7 +206,7 @@ impl TypedPlugin for SkillsCatalogPlugin {
             )
             .await?;
             ctx.provide_as(rutis::TypeKey::of::<SkillsCatalog>(), catalog.clone())?;
-            ManagementMethods::provide(
+            methods.register(
                 ctx,
                 "skills",
                 ["skills.catalog", "skills.set_enabled", "skills.refresh"]

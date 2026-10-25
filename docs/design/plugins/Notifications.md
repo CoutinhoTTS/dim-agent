@@ -4,7 +4,7 @@ Status: Withdrawn. Overall design: [overview](../overview.md) (Notifications). P
 
 > **Withdrawn.** This plugin has no responsibility of its own; each of its duties belongs to an existing owner. Alerts for a Session the user is working in (task ended, approval or question pending) belong to the client, which already receives those events. Notifying a scheduled run's outcome belongs to Scheduler. Talking to an external channel (Slack, Feishu and others) belongs to a per-platform plugin with its own tools; there is no generic channel and no `notify` tool. This document is kept for reference only.
 
-Notifications is a Session plugin. It delivers messages to configured external channels (Slack, Feishu) when a task on its interactive leader Session completes or fails, an approval is pending or a question awaits an answer; it reports a scheduled run that ended in its Session from Scheduler's run-outcome event notice; it offers the model the `notify` tool, which it registers with the Session's `toolRegistry`; and it serves `notifications.test` through the Session-scoped `sessionMethods` service keyed `notifications` ([session-boundary](../contracts/session-boundary.md)). It observes its Session only through the existing Session broadcast, confirms each trigger against the fixed prefix of the branch, and writes nothing to any Timeline. In-terminal reminders (bell, focus) belong to the CLI. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
+Notifications is a Session plugin. It delivers messages to configured external channels (Slack, Feishu) when a task on its interactive leader Session completes or fails, an approval is pending or a question awaits an answer; it reports a scheduled run that ended in its Session from Scheduler's run-outcome event notice; it offers the model the `notify` tool, which it registers with the Session's `toolRegistry`; and it serves `notifications.test` by registering the namespace `notifications` with the Session's `sessionMethods` ([session-boundary](../contracts/session-boundary.md)). It observes its Session only through the existing Session broadcast, confirms each trigger against the fixed prefix of the branch, and writes nothing to any Timeline. In-terminal reminders (bell, focus) belong to the CLI. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 1. Structure
 
@@ -36,9 +36,9 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Notifications` | Session (installed only when enabled) | Session broadcast of its Session, TimelineTree, `SessionConfig`; process services Settings business source and SessionStore title metadata; listens (no dependency) to Scheduler's `scheduled_run_outcomes` event Registers `notify` (risk `outbound_message`) with `toolRegistry`; `sessionMethods` key `notifications` (`notifications.test`), declared in its `provides`; trigger names `turn.completed`, `turn.failed`, `approval.pending`, `question.pending`, `schedule.ended`; business document `notifications` |
+| `Notifications` | Session (installed only when enabled) | Session broadcast of its Session, TimelineTree, `SessionConfig`; process services Settings business source and SessionStore title metadata; listens (no dependency) to Scheduler's `scheduled_run_outcomes` event; Session service `sessionMethods` | Registers `notify` (risk `outbound_message`) with `toolRegistry`; registers `notifications` (`notifications.test`) with `sessionMethods`; trigger names `turn.completed`, `turn.failed`, `approval.pending`, `question.pending`, `schedule.ended`; business document `notifications` |
 
-The Session broadcast, TimelineTree and `SessionConfig` are existing typed services; the Settings business source and SessionStore title metadata are supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing these services by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); listening to Scheduler's event by name across languages is a rutis requirement stated in [Scheduler §9](Scheduler.md#9-requirements-raised-to-mechanism-owners). Run outcomes arrive as an event notice, not a dependency ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-no-wiring-modules)): without Scheduler the `schedule.ended` trigger is inert. A reload of Settings or SessionStore reloads Notifications and, through `notify`, ToolRegistry and its dependents; this is accepted ([D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-rare-restarts-are-accepted)). The `notifications` document is business configuration ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)): read at use time, never a reload.
+The Session broadcast, TimelineTree and `SessionConfig` are existing typed services; the Settings business source and SessionStore title metadata are supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). Exposing these services by name to the TypeScript implementation is issue [#4](https://github.com/arcships/dim/issues/4)'s work, stated in [session-access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); listening to Scheduler's event by name across languages is a rutis requirement stated in [Scheduler §9](Scheduler.md#9-requirements-raised-to-mechanism-owners). Run outcomes arrive as an event notice, not a dependency ([ADR 002 D2](../../adr/002-plugin-scope.md#d2-no-wiring-modules)): without Scheduler the `schedule.ended` trigger is inert. A reload of Settings or SessionStore reloads Notifications and, through `notify`, ToolRegistry and its dependents; this is accepted ([D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)). The `notifications` document is business configuration ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)): read at use time, never a reload.
 
 ## 2. Data and state
 
@@ -174,7 +174,7 @@ Event-triggered notifications have no model-visible effect.
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `notify {message, channel?}` | Tool registered with `toolRegistry` (Session), risk `outbound_message` | Model-initiated message to a configured channel |
-| `notifications.test {sessionId, channel?}` | `sessionMethods` (Session, key `notifications`) | Send a fixed test message to a configured channel |
+| `notifications.test {sessionId, channel?}` | `sessionMethods` (Session, namespace `notifications`) | Send a fixed test message to a configured channel |
 | `scheduled_run_outcomes` | Process event listened to (Scheduler's contract; no dependency) | `schedule.ended` trigger |
 | `notifications` document | Business configuration, Settings user scope, read at use | Channels, triggers, delays |
 
@@ -269,7 +269,7 @@ Templates (to channels only): `[dim <label>] Task completed.`, `[dim <label>] Ta
 
 ### A.5 `notifications.test`
 
-Served through `sessionMethods` (Session, key `notifications`): `describe()` returns one declaration `{name: "notifications.test", mutating: true}`; `call(MethodCall)` handles it.
+Registered with `sessionMethods` (Session, namespace `notifications`): its declarations are one `{name: "notifications.test", mutating: true}`; the part's `call(MethodCall, cancelled, progress)` handles it.
 
 | Params | Result | Errors |
 | --- | --- | --- |
@@ -366,7 +366,7 @@ Flow tests with fake HTTP endpoints and a fake model:
 | Neutral | Rust |
 | --- | --- |
 | Tool `notify` registered with `toolRegistry` | Session `ToolContribution` registered with `tools.register(ctx, ..)` through `Keyed<ToolRegistry>` in the part's `apply`; cancellation through `CancellationToken` |
-| `sessionMethods` key `notifications` | `SessionMethodContribution(Arc<dyn MethodProvider>)` at `SessionScope::named_key::<SessionMethodContribution>("notifications")` |
+| Namespace `notifications` registered with `sessionMethods` | `Keyed<SessionMethods>`; `methods.register(ctx, "notifications", declarations, handler)` |
 | Session broadcast listener | Listener on `session_channel(session_id)`, removed by `ctx.effect` |
 | `scheduled_run_outcomes` | `on(host_ctx, &scheduled_run_outcomes(), listener)` with `EventKey<RunOutcome>` ([Scheduler](Scheduler.md)) |
 | Delayed checks, deliveries | Tasks under `ctx.effect` |

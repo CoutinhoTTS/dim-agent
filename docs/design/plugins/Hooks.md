@@ -237,7 +237,7 @@ The model never sees hook configuration, commands, exit codes, diagnostics or a 
 | `submitCheck` key `hooks` | Session service provided by `HooksSession`, looked up by the operator-input entries (A.6.2) | `UserPromptSubmit` decision |
 | `Approval.respond` | Existing branch service | `PermissionRequest` outcome |
 | `input_blocked` | Rpc app error of `session.submit`, `session.branch_create` and `session.input.withdraw`; message `Hook <source>: <reason>` | A blocked submission |
-| `hooks.catalog`, `hooks.save`, `hooks.set_enabled` | App Server management methods (key `hooks`), like `mcp.*` | Effective hooks, user document writes, project enablement (A.7) |
+| `hooks.catalog`, `hooks.save`, `hooks.set_enabled` | App Server management methods (namespace `hooks`), like `mcp.*` | Effective hooks, user document writes, project enablement (A.7) |
 | `HookSources` | Session port bound by App Server | Effective sources for a `cwd` (A.2) |
 | `hooks` (user scope), `hooks-projects` | Settings sources (`BusinessDocument`) | The user's hook document; user-local project enablement (A.1, A.2) |
 | `.dimcode/hooks.json` | Project file read by `HooksSettings` through FileStorage | The project's hook document (A.1, A.2) |
@@ -429,7 +429,7 @@ Context and reasons are each at most 16 KiB per hook. Fields Dim does not suppor
 
 ### A.7 Management methods
 
-Provided by `HooksSettings` through App Server `ManagementMethods` under key `hooks`, like `mcp.*`; never served to paired remote devices.
+`HooksSettings` registers the namespace `hooks` with App Server's `managementMethods`, like `mcp.*`; never served to paired remote devices.
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -592,5 +592,5 @@ Codex `apply_patch` has no alias: its input is a patch, while Dim's `write` and 
 | `HookSources` | Session port `HookSourcesHost(Arc<dyn ReadHookSources>)`, bound by App Server as `CommandRulesHost` and `SkillSettingsHost` are |
 | `hooks`, `hooks-projects` | `BusinessDocument` types in App Server (`hooks`: `USER_FILE` `hooks.json`, no `PROJECT_FILE`; `hooks-projects`: `USER_FILE` `hooks-projects.json`) |
 | `.dimcode/hooks.json` | Read by `HooksSettings` through `FileStorage::path(root, ".dimcode/hooks.json")` and `read_limited`, `root` from `SettingsService::project_root(cwd)`, parsed into the `hooks` document type |
-| `hooks.*` | `ManagementMethods::provide(ctx, "hooks", …)` |
+| `hooks.*` | `Keyed<ManagementMethods>`; `methods.register(ctx, "hooks", …)` |
 | Runner | Session service `HooksRuntime`, private to Hooks; processes from `HostPlatform::build_process_spec` and `spawn`, owned by `ctx.effect` |

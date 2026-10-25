@@ -19,8 +19,7 @@ use crate::{
     },
 };
 use dim_agent_runtime::{
-    AgentBuilder, Names, SessionConfig, SessionHold, SessionIdentity, SessionLifecycle,
-    SessionPhase,
+    AgentBuilder, SessionConfig, SessionHold, SessionIdentity, SessionLifecycle, SessionPhase,
 };
 use dim_agent_types::{InputMessageData, InputMode};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
@@ -49,9 +48,7 @@ const PROGRESS_MAX_BYTES: usize = 64 * 1024;
 
 /// Installs ShellInput in every Session and records its namespace.
 pub fn install(builder: &mut AgentBuilder) {
-    builder
-        .session_part(|names| names.part(ShellInputPlugin::new(names)?))
-        .session_methods(SHELL_METHODS);
+    builder.session_part(|names| names.part(ShellInputPlugin));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,16 +552,7 @@ impl RunOutput {
 }
 
 /// Session plugin providing `sessionMethods` key `shell`.
-pub struct ShellInputPlugin {
-    methods: rutis::DepKey<SessionMethods>,
-}
-impl ShellInputPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, rutis::CordisError> {
-        Ok(Self {
-            methods: SessionMethods::key(names, SHELL_METHODS)?,
-        })
-    }
-}
+pub struct ShellInputPlugin;
 impl TypedPlugin for ShellInputPlugin {
     type Deps = (
         Keyed<HostPlatform>,
@@ -572,6 +560,7 @@ impl TypedPlugin for ShellInputPlugin {
         Keyed<TreeCommands>,
         Keyed<SessionLifecycle>,
         Keyed<SessionIdentity>,
+        Keyed<SessionMethods>,
     );
     fn name(&self) -> &str {
         "ShellInput"
@@ -585,6 +574,7 @@ impl TypedPlugin for ShellInputPlugin {
             Keyed(tree),
             Keyed(lifecycle),
             Keyed(identity),
+            Keyed(methods),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -614,9 +604,8 @@ impl TypedPlugin for ShellInputPlugin {
             })?;
             // After the effect above, so the provider's unload, which settles
             // the calls, runs before the runs are awaited.
-            SessionMethods::provide_at(
+            methods.register(
                 ctx,
-                &self.methods,
                 SHELL_METHODS,
                 vec![
                     MethodDecl {

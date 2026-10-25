@@ -73,7 +73,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 *现状：*部件登记处和挂载器已经实现（附录 A），所有 Rust 部件都已按名称依赖（#391、#392、#396–#398、#400）。
 - 各功能仍通过 `AgentBuilder::session_part`/`branch_part` 添加部件，App Server 通过 `register_part` 添加进程行。
   每个功能变成一个插件、`AgentBuilder::plugin` 和 `partRegistry` 这个名字属于 [#402](https://github.com/arcships/dim/issues/402)。
-- 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记。Rpc 仍读取预先注册的方法命名空间，直到它们改为向 Rpc 登记（R6，[#382](https://github.com/arcships/dim/issues/382)）。
+- 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5（[#403](https://github.com/arcships/dim/issues/403)）。
 
 ## 3. 按名字的服务
@@ -228,7 +228,9 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
     也同样向 Collaboration 登记。
 - **影响：**对 Timeline 没有影响。工具采样保持 ToolBinding 现有的逐 turn 规则。
 - **所有者：**Dim 运行时（ToolRegistry、PromptRegistry）和 App Server（Rpc），[#382](https://github.com/arcships/dim/issues/382)。
-  它在阶段 3 落地。
+  已实现：工具、工具来源和提示词来源向 ToolRegistry 和 PromptRegistry 登记，方法命名空间向 Rpc 每次调用时读取的两张
+  方法表登记，即 Session 服务 `sessionMethods` 和进程服务 `managementMethods`。每张表在命名空间登记时检查它，并记住
+  已撤下命名空间的行，因此调用按该行的状态作答（[方法合同 A.1](contracts/session-boundary.md#a1-方法贡献)）。
 
 ### R7. 每个运行时的生成器都能是一个函数
 
@@ -258,7 +260,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 | `When<D>` | `When<D>`，key 来自 `Names::when`：工厂构建副本时决定是否包含该名称。不是 rutis `Option<..>`，后者读取但不门控 |
 | `SessionService`、`BranchService` 标记 | 注册在服务目录中的组（`names::register`） |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`：`session` 或 `branch` 组中的行；进程行用 `register_part` |
-| `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools` | 所有者的 `register`，由提供贡献的部件调用（R6） |
+| `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`（已删除） | 所有者的 `register`，由提供贡献的部件调用：`toolRegistry`、`promptRegistry`、`sessionMethods`、`managementMethods`（R6） |
 | `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`；`Exports` 用于源码无法修改的类型，以及按 Session 或分支提供的服务（§3.4） |
 | `PublicService` | 不变（门面规则） |
 

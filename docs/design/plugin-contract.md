@@ -130,12 +130,12 @@ get names and scopes in phase 2. They stay Rust-only unless a foreign part needs
 `PublicService`), which are keyed by Rust type. A foreign part exposes its state through a service.
 
 Tools, tool sources, prompt sources and method namespaces are not names. A part registers each with
-its owner, `register` on ToolRegistry, PromptRegistry or Rpc, and the registration ends when the
-part unloads ([rutis usage R6](rutis-usage.md#r6-contributions-register-with-their-owner)). Tools and
-method namespaces register from any language; prompt and tool sources stay Rust-only until a
-foreign part needs one. Tools, tool sources and prompt sources register today. Until the rest of R6
-lands, method namespaces are the names `sessionMethods:<namespace>` (`session`) and
-`managementMethods:<namespace>` (process, protected-local v3 only).
+its owner, and the registration ends when the part unloads
+([rutis usage R6](rutis-usage.md#r6-contributions-register-with-their-owner)): `register` on
+ToolRegistry or PromptRegistry, or on the method table of its scope, `sessionMethods` (`session`) or
+`managementMethods` (process, served to protected-local v3 only), which Rpc reads per call. Tools
+and method namespaces register from any language; prompt and tool sources stay Rust-only until a
+foreign part needs one. All four register today.
 
 Two mechanism contracts tie the facades to core parts: a branch is published only with a `LoopState`
 provider, and a Session only with a `TimelineTreeControl` provider. Loop and TimelineTree are therefore

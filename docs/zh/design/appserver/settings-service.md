@@ -191,7 +191,7 @@ Settings 在内存中保存编译后的声明，由其工厂配置构建。此�
 
 ### 4.3 管理方法 `settings.*`（客户端路径）
 
-命名空间 `settings`，由依赖 Settings 的进程部分 `SettingsMethods` 经 `managementMethods` 提供
+命名空间 `settings`，由依赖 Settings 的进程部分 `SettingsMethods` 注册到 `managementMethods`
 （§4.5）。从不向已配对设备提供（总体设计 §6.2 第 9 条）。
 
 | 方法 | 请求 | 回复 | 错误 |

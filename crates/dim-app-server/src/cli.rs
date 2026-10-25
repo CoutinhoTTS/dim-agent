@@ -7,7 +7,7 @@ use crate::{
 use dim_agent_aimux::{AimuxModels, config::ModelConfigFile};
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, MockTools},
-    context_methods::{self, ContextMethodsPlugin},
+    context_methods::ContextMethodsPlugin,
     context_model::ProductContextModel,
     defaults,
     history::HistoryRenderer,
@@ -307,8 +307,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                         ProductContextModel,
                     )))))
                     .session_part(|names| names.part(ProductSummaryStrategyPlugin::new(names)?))
-                    .session_part(|names| names.part(ContextMethodsPlugin::new(names)?))
-                    .session_methods(context_methods::NAMESPACE)
+                    .session_part(|names| names.part(ContextMethodsPlugin))
                     .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
             }
             collaboration::install(&mut builder);

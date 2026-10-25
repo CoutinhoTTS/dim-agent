@@ -132,6 +132,11 @@ async fn active(view: &rutis::FiberView) {
 
 async fn setup() -> (Ctx, Arc<Fixture>, Arc<ManagedProviders>, rutis::FiberView) {
     let root = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     let fixture = Arc::new(Fixture::default());
     let captured = Arc::new(OnceLock::new());
     let catalog = dim_app_server::catalog();

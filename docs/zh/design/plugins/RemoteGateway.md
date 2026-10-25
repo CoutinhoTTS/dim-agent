@@ -4,7 +4,7 @@
 
 > **P3：按 rutis 现有能力重新设计。** rutis 是外部依赖，本文向 rutis 提出的需求已撤回（[原则 §4 第 8 条](../../../architecture/rust-agent/principles.md)）。
 
-RemoteGateway 在 Transport 的 WebSocket 上为手机和 Web 工作区开设一个经认证的入口：通过二维码或配对码配对，每设备令牌及其轮换与吊销，以及 Web 工作区的静态资源。已配对设备使用现有的 App Server 协议；该入口只提供[方法](../contracts/session-boundary.md)契约中的 Session 方法（Rpc 的 Session 内置方法和每个 `sessionMethods` 服务），因此设备可以调用每个 Session 方法，包括 `session.permission.update` 和 `shell.*`（决策 E3），但从不能调用管理方法：`managementMethods` 与 Rpc 的管理类内置方法从不提供给已配对的远程设备。该入口是产品 UI 面，从不承载节点之间的 rutis 链路面。
+RemoteGateway 在 Transport 的 WebSocket 上为手机和 Web 工作区开设一个经认证的入口：通过二维码或配对码配对，每设备令牌及其轮换与吊销，以及 Web 工作区的静态资源。已配对设备使用现有的 App Server 协议；该入口只提供[方法](../contracts/session-boundary.md)契约中的 Session 方法（Rpc 的 Session 内置方法和注册到 `sessionMethods` 的每个命名空间），因此设备可以调用每个 Session 方法，包括 `session.permission.update` 和 `shell.*`（决策 E3），但从不能调用管理方法：`managementMethods` 与 Rpc 的管理类内置方法从不提供给已配对的远程设备。该入口是产品 UI 面，从不承载节点之间的 rutis 链路面。
 
 ## 1. 结构
 
@@ -15,7 +15,7 @@ flowchart LR
     EH["entryHost<br/>Transport 契约"]:::contract
     TR["Transport"]
     CONN["Connection<br/>ConnectionEntry 记录"]
-    RPC["Rpc<br/>内置方法、sessionMethods 服务、<br/>managementMethods 方法表"]
+    RPC["Rpc<br/>内置方法、sessionMethods、<br/>managementMethods"]
     SET["Settings<br/>remote 业务来源"]
     LDR["rutis Loader<br/>enabled 行字段（x-volatile），<br/>只由 PluginManager 写入"]
     PST["pluginFiles（扩展）<br/>remote-devices.json"]:::contract
@@ -26,7 +26,7 @@ flowchart LR
   TR -->|"提供"| EH
   EH --> CONN
   CONN --> RPC
-  RPC -->|"将 remote.* 作为 managementMethods 收集"| RG
+  RPC -->|"分发 remote.*（managementMethods）"| RG
   RG --> SET
   LDR -->|"VolatileUpdate"| RG
   RG --> PST
@@ -34,15 +34,15 @@ flowchart LR
   classDef contract stroke-dasharray:4 3
 ```
 
-RemoteGateway 只认证升级请求，并在连接上记录设备；此后的每次调用都是由其所有者提供的普通 Session 方法。它自己的 `remote.*` 方法是一个 `managementMethods` 进程服务（key `remote`），由 Rpc 按名称查找；与每个管理方法一样，可从本地入口访问，从不能从已配对设备访问。Rpc 按调用查找该服务，不依赖它，因此 RemoteGateway 重载不会重载 Rpc（[方法 §3.2](../contracts/session-boundary.md#32-管理方法)）。
+RemoteGateway 只认证升级请求，并在连接上记录设备；此后的每次调用都是由其所有者提供的普通 Session 方法。它自己的 `remote.*` 方法是它注册到 `managementMethods` 的命名空间 `remote`；与每个管理方法一样，可从本地入口访问，从不能从已配对设备访问。Rpc 按调用查找该命名空间的提供方，不依赖它，因此 RemoteGateway 重载不会重载 Rpc（[方法 §3.2](../contracts/session-boundary.md#32-管理方法)）。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `RemoteGatewayPlugin` | 进程，控制节点 | `entryHost`（Transport）、`pluginFiles`（扩展）、Settings 业务来源 `remote`、它自己的 loader 行（`VolatileUpdate`） | `managementMethods` key `remote`（`remote.*`），由 Rpc 收集；回答其打开的入口在调用内发来的 `authenticate` 与 `handle` 请求 |
+| `RemoteGatewayPlugin` | 进程，控制节点 | `entryHost`（Transport）、`pluginFiles`（扩展）、Settings 业务来源 `remote`、它自己的 loader 行（`VolatileUpdate`） | 把 `remote`（`remote.*`）注册到 `managementMethods`；回答其打开的入口在调用内发来的 `authenticate` 与 `handle` 请求 |
 | `TransportPlugin`（变更） | 进程 | 现有；不依赖 RemoteGateway 的任何内容 | 现有 `ListenAddresses`；新增 `entryHost` |
 | `ConnectionPlugin` / `RpcPlugin`（变更） | 进程 | 现有 | `ConnectionEntry {name, deviceId}`；Rpc 从不向带 `deviceId` 的连接提供管理方法 |
 
-此处定义的契约：设备记录与令牌、配对与轮换 HTTP 端点、`remote.*` 方法、`remote-devices.json` 格式。依赖的契约：Transport 的 `entryHost` 服务及其调用内的 `authenticate` 与 `handle` 请求（拟议的 Transport 变更，[语言中立](../../adr/002-plugin-scope.md)形式见 A.1，Rust 绑定见附录 G；依赖是单向的，RemoteGateway 依赖 Transport）、Connection 的入口记录、[方法](../contracts/session-boundary.md)契约（收集进 Rpc 方法表的 `managementMethods`，从不提供给已配对设备）、`pluginFiles`（扩展）（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）、它自己 loader 行上的结构性 `enabled` 字段（`x-volatile`），只由 PluginManager 写入（[PluginManager](PluginManager.md)，[#3](https://github.com/arcships/dim/issues/3) 的 loader 类型化操作），以 rutis-loader 0.10 的 `VolatileUpdate` 送达 RemoteGateway，以及对业务来源 `remote` 的 Settings 类型化操作，用于监听设置，其 schema 由 RemoteGateway 声明（ADR 002 D4）。RemoteGateway 不了解任何 Session 方法的含义，也不了解任何其他插件。
+此处定义的契约：设备记录与令牌、配对与轮换 HTTP 端点、`remote.*` 方法、`remote-devices.json` 格式。依赖的契约：Transport 的 `entryHost` 服务及其调用内的 `authenticate` 与 `handle` 请求（拟议的 Transport 变更，[语言中立](../../adr/002-plugin-scope.md)形式见 A.1，Rust 绑定见附录 G；依赖是单向的，RemoteGateway 依赖 Transport）、Connection 的入口记录、[方法](../contracts/session-boundary.md)契约（注册到 `managementMethods` 的命名空间，从不提供给已配对设备）、`pluginFiles`（扩展）（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）、它自己 loader 行上的结构性 `enabled` 字段（`x-volatile`），只由 PluginManager 写入（[PluginManager](PluginManager.md)，[#3](https://github.com/arcships/dim/issues/3) 的 loader 类型化操作），以 rutis-loader 0.10 的 `VolatileUpdate` 送达 RemoteGateway，以及对业务来源 `remote` 的 Settings 类型化操作，用于监听设置，其 schema 由 RemoteGateway 声明（ADR 002 D4）。RemoteGateway 不了解任何 Session 方法的含义，也不了解任何其他插件。
 
 ## 2. 数据与状态
 
@@ -201,12 +201,12 @@ sequenceDiagram
 | §4.4 核心机制不带业务含义 | `entryHost` 与 `ConnectionEntry` 是通用的传输记录；Rpc 只对设备连接拒绝管理方法。 |
 | §4.5 决定前读完整个批次 | 不适用：RemoteGateway 不依据 Timeline 事件做决定；远程调用由所有者按自己已消费的事实决定。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 远程内容只作为被消费的普通 Session 输入进入模型。 |
-| §4.7 插件之间只通过公开事件和服务交互 | RemoteGateway 不了解任何 Session 方法的含义，只使用 Transport、Settings、`pluginFiles` 与 Rpc 的方法收集。 |
+| §4.7 插件之间只通过公开事件和服务交互 | RemoteGateway 不了解任何 Session 方法的含义，只使用 Transport、Settings、`pluginFiles` 与 Rpc 的方法表。 |
 | §4.8 向机制所有者提通用需求 | 中立服务协议中提供方在调用内向调用方发请求的需求见 §9.1；loader 类型化操作（#3）见 PluginManager §9.1；Transport 与 Connection 变更列在 overview 附录 B.2。 |
 | §4.9 只有后续决定要用的事实才进 Timeline | RemoteGateway 不写 Timeline 事件；设备记录、邀约和连接留在 `pluginFiles` 和内存中，远程调用只写所有者自己的事实，不含设备归属。 |
 | §1 Capability 与 App Server 边界 | RemoteGateway 是位于自己 crate 的进程插件，不是 Capability；Transport、Connection 与 Rpc 只做通用的入口变更。 |
 | ADR 002 D1 作用域跟随状态所有者 | 设备与监听器按宿主存在，因此 RemoteGateway 是进程作用域。 |
-| ADR 002 D2 不设接线模块 | Rpc 按名字收集 `managementMethods`；没有接线模块。 |
+| ADR 002 D2 不设接线模块 | RemoteGateway 把 `remote` 注册到 `managementMethods`，由 Rpc 读取；没有接线模块。 |
 | ADR 002 D3 依赖跟随作用域 | RemoteGateway 单向依赖 Transport 的 `entryHost`；Rpc 不依赖 RemoteGateway，它的重载不会重载 Rpc。 |
 | ADR 002 D4 结构性配置与业务配置分离 | 只有 `enabled` 是结构性的，且只由 PluginManager 写入；`bind`、`tls`、`plaintext` 是来源 `remote` 中的业务配置，变更时重新绑定监听器而不重载。 |
 | ADR 002 D5 合同语言中立 | `entryHost`、HTTP 接口与各方法以中立形式给出；附录 G 只是绑定。 |
@@ -267,7 +267,7 @@ sequenceDiagram
 | 项目 | 规则 |
 | --- | --- |
 | 版本 | 仅 `hello` v3；v1/v2 以 `protocol_version` 拒绝（A11） |
-| 方法 | Rpc Session 内置方法和每个 `sessionMethods` 服务，作用于宿主上的每个 Session（E3、A12）；管理方法（`managementMethods` 与 Rpc 的管理类内置方法）以及 Rpc 内置方法 `daemon.shutdown` → `-32601 unknown_method` |
+| 方法 | Rpc Session 内置方法和注册到 `sessionMethods` 的每个命名空间，作用于宿主上的每个 Session（E3、A12）；管理方法（`managementMethods` 与 Rpc 的管理类内置方法）以及 Rpc 内置方法 `daemon.shutdown` → `-32601 unknown_method` |
 | `hello.features` | 仅 Session 功能 |
 | 身份 | `ConnectionEntry.deviceId` 用于诊断与吊销；不授予超出入口方法集的任何权限 |
 | 反向请求 | 无：客户端发请求，服务端发通知（[#5](https://github.com/arcships/dim/issues/5)） |
@@ -280,7 +280,7 @@ sequenceDiagram
 | v3 裸 WebSocket，受保护 profile，无 RemoteGateway | 除 `hello`/`daemon.ping` 外均为 `local_transport_required` | 不变 |
 | 远程入口上的 v1、v2 | 不存在 | `protocol_version`（A11） |
 
-### A.4 方法（`managementMethods`，key `remote`）
+### A.4 方法（`managementMethods`，命名空间 `remote`）
 
 | 方法 | 参数 | 结果 | 中断 |
 | --- | --- | --- | --- |

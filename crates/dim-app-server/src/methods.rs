@@ -1,15 +1,19 @@
-//! Named management contributions. Rpc looks up a namespace's provider on
-//! each call and does not depend on it, so an inactive or reloading provider
+//! The management method table and Rpc's lookups through the method tables
+//! (methods contract A.1, §3.2). A part registers a namespace with the table
+//! of its scope until it unloads; Rpc reads the table on each call and
+//! depends on no provider, so a provider that is reloading, Pending or Failed
 //! affects only its own namespace. Accepted calls belong to their provider.
 use dim_agent_capabilities::methods::{
-    Accepted, Handler, MethodDecl, MethodProvider, RpcError, SessionMethods, valid_name, within,
+    Accepted, Check, ForeignMethods, MethodDecl, MethodProvider, MethodTable, Owner, RpcError,
+    SessionMethods, valid_name, within,
 };
-use dim_agent_runtime::{AgentError, Session};
-use rutis::{CordisError, Ctx, FiberState, Snapshot, TypeKey};
+use dim_agent_runtime::Session;
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, FiberState, Snapshot, TypedPlugin};
+use rutis_bridge::session::{HostDispatch, host_key};
 use rutis_loader::{EntryStatus, Loader};
 use serde::Deserialize;
 use serde_json::Value;
-use std::{collections::HashMap, ops::Deref, sync::Arc};
+use std::{ops::Deref, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Default, Deserialize)]
@@ -19,27 +23,20 @@ pub struct SelectionScope {
     pub cwd: Option<String>,
 }
 
-/// A process owner's wire methods, provided under its namespace with the
-/// shared call admission (`MethodProvider`): the owner's generation owns its
-/// accepted calls.
-pub struct ManagementMethods(Arc<MethodProvider>);
+/// The process's management methods: the namespaces process plugins
+/// register, which Rpc serves to protected local connections.
+pub struct ManagementMethods(pub Arc<MethodTable>);
 impl Deref for ManagementMethods {
-    type Target = MethodProvider;
-    fn deref(&self) -> &MethodProvider {
+    type Target = MethodTable;
+    fn deref(&self) -> &MethodTable {
         &self.0
     }
 }
 
 impl ManagementMethods {
-    pub async fn provide_foreign(
-        ctx: &Ctx,
-        namespace: &str,
-        service: Arc<dyn rutis_bridge::session::HostDispatch>,
-    ) -> Result<Arc<Self>, CordisError> {
-        let (declarations, handler) = MethodProvider::foreign(ctx, service).await?;
-        Self::provide(ctx, namespace, declarations, handler)
-    }
-
+    /// Management methods are about the host, never a Session. The `session`
+    /// root belongs to built-ins and Session-scoped methods, so contributed
+    /// methods cannot impersonate Session traffic.
     pub(crate) fn check_namespace(namespace: &str) -> Result<(), CordisError> {
         if !valid_name(namespace)
             || ["hello", "daemon", "agent", "approval", "session"]
@@ -63,33 +60,78 @@ impl ManagementMethods {
         Ok(())
     }
 
-    pub fn provide(
-        ctx: &Ctx,
-        namespace: &str,
-        declarations: Vec<MethodDecl>,
-        handler: Handler,
-    ) -> Result<Arc<Self>, CordisError> {
-        // Management methods are about the host, never a Session. The `session`
-        // root belongs to built-ins and Session-scoped methods, so contributed
-        // methods cannot impersonate Session traffic.
-        Self::check_namespace(namespace)?;
-        if declarations
-            .iter()
-            .any(|decl| crate::protocol::is_builtin_method(&decl.name))
+    fn check() -> Check {
+        Arc::new(|namespace, declarations| {
+            Self::check_namespace(namespace)?;
+            if declarations
+                .iter()
+                .any(|decl| crate::protocol::is_builtin_method(&decl.name))
+            {
+                return Err(CordisError::PluginFailed(
+                    "Invalid management contribution".into(),
+                ));
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Process part: the management method table, at its native key and, for
+/// other languages, at its dispatcher key.
+pub struct ManagementMethodsPlugin {
+    table: DepKey<ManagementMethods>,
+}
+impl ManagementMethodsPlugin {
+    pub fn new(names: &dim_agent_runtime::Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self {
+            table: names.key()?,
+        })
+    }
+    /// This part keyed from `catalog`, to mount it directly.
+    pub fn typed(
+        catalog: &dim_agent_runtime::names::ServiceCatalog,
+    ) -> Result<rutis::Typed<Self>, CordisError> {
+        let build = Default::default();
+        let plugin = Self::new(&dim_agent_runtime::Names::copy(catalog, &build))?;
+        Ok(rutis::Typed::new(plugin))
+    }
+}
+impl TypedPlugin for ManagementMethodsPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "ManagementMethods"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            let table = Arc::new(MethodTable::new(ManagementMethods::check()));
+            ctx.provide_as::<dyn HostDispatch>(
+                host_key(&dim_agent_runtime::names::name_of::<ManagementMethods>()),
+                Arc::new(ForeignMethods(table.clone())),
+            )?;
+            ctx.provide_as(self.table.key().clone(), Arc::new(ManagementMethods(table)))?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The names a Session namespace may not take: the protocol's roots and
+/// built-ins (methods contract A.1). A Session namespace may lie under
+/// `session`, but never equals, contains or lies inside an exact built-in.
+pub(crate) fn reserved_for_sessions() -> Check {
+    Arc::new(|namespace, _| {
+        let overlaps = |other: &str| within(namespace, other) || within(other, namespace);
+        if !valid_name(namespace)
+            || ["hello", "daemon", "agent", "approval"]
+                .iter()
+                .any(|root| within(namespace, root))
+            || crate::protocol::builtin_methods().any(overlaps)
         {
             return Err(CordisError::PluginFailed(
-                "Invalid management contribution".into(),
+                format!("invalid Session namespace {namespace}").into(),
             ));
         }
-        let service = Arc::new(Self(MethodProvider::new(
-            ctx,
-            namespace,
-            declarations,
-            handler,
-        )?));
-        ctx.provide_as(TypeKey::keyed_dynamic::<Self>(namespace), service.clone())?;
-        Ok(service)
-    }
+        Ok(())
+    })
 }
 
 /// Unlike `service_reloading`, a retry fails the same way until the owner is
@@ -134,232 +176,89 @@ fn not_active(status: EntryStatus) -> Result<(), RpcError> {
     }
 }
 
-/// The management namespaces assembly configures, each with the loader row
-/// of the owner that provides it. Rpc reaches a namespace's provider by key on
-/// each call and reads that row's status only when none is active, to tell a
-/// reloading owner from a failed one and from one that serves nothing, so it
-/// depends on no owner (methods contract §3.2). Adding an owner adds its pair
-/// where its row is registered.
-pub(crate) struct Owners {
-    loader: Loader,
-    /// Longest first: a name belongs to the longest namespace containing it.
-    namespaces: Vec<(String, String)>,
-}
-impl Owners {
-    pub(crate) fn new(loader: Loader, namespaces: &[(String, String)]) -> Self {
-        let mut namespaces = namespaces.to_vec();
-        namespaces.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
-        Self { loader, namespaces }
-    }
-
-    /// The configured namespace that owns `name`, and its row. A name inside
-    /// a child namespace belongs to the child even while the child serves
-    /// nothing; its parent never answers it.
-    fn owner(&self, name: &str) -> Option<&(String, String)> {
-        self.namespaces
-            .iter()
-            .find(|(namespace, _)| within(name, namespace))
-    }
-
-    /// Called under ConnectionHub's Rpc admission lock, with the process root
-    /// as `ctx`. The reply is tracked by the caller; the operation by its
-    /// provider. A name outside the declaration grammar is unknown without
-    /// any lookup.
-    pub(crate) fn dispatch(
-        &self,
-        ctx: &Ctx,
-        method: String,
-        params: Value,
-        entry_stopping: CancellationToken,
-        progress: impl Fn(Value) + Send + Sync + 'static,
-    ) -> Result<Accepted, RpcError> {
-        if !valid_name(&method) {
-            return Err(RpcError::unknown_method());
-        }
-        let (namespace, row) = self.owner(&method).ok_or_else(RpcError::unknown_method)?;
-        let provider = match provider(ctx, namespace) {
-            Some(provider) => provider,
-            // No active provider: the owner row's state answers. `get` reads
-            // the row itself, so it never reports Stopped. Two owners answer
-            // `service_reloading` although they cannot come back without a
-            // fix (#124): one Pending on a failed dependency, and one that
-            // disposed itself, whose row the process loader cannot disable,
-            // so it reads Inactive.
-            None => {
-                // An absent row provides nothing.
-                let row = self.loader.get(row).ok_or_else(RpcError::unknown_method)?;
-                not_active(row.status)?;
-                provider(ctx, namespace).ok_or_else(RpcError::unknown_method)?
+/// The provider that serves management method `method`, read on each call.
+/// A namespace that was registered and is withdrawn now answers from the
+/// status of the row that registered it: `service_reloading` while it
+/// starts or reloads, `service_unavailable` once it cannot run. A name no
+/// namespace ever held, or a disabled or absent row, is `unknown_method`.
+pub(crate) fn management_provider(
+    table: &ManagementMethods,
+    loader: &Loader,
+    method: &str,
+) -> Result<Arc<MethodProvider>, RpcError> {
+    match table.owner(method) {
+        Owner::Active(provider) => Ok(provider),
+        Owner::Left { row } => {
+            let row = row
+                .and_then(|row| loader.get(&row))
+                .ok_or_else(RpcError::unknown_method)?;
+            not_active(row.status)?;
+            // Active between the lookup and the status read.
+            match table.owner(method) {
+                Owner::Active(provider) => Ok(provider),
+                _ => Err(RpcError::unknown_method()),
             }
-        };
-        provider.accept(method, params, entry_stopping, progress)
-    }
-
-    /// The methods `hello.features` lists: those of the configured namespaces'
-    /// providers that are active now, each under the namespace that owns it.
-    pub(crate) fn listed(&self, ctx: &Ctx) -> Vec<String> {
-        let mut names: Vec<_> = self
-            .namespaces
-            .iter()
-            .filter_map(|(namespace, _)| Some((namespace, provider(ctx, namespace)?)))
-            .flat_map(|(namespace, provider)| {
-                provider
-                    .declarations()
-                    .iter()
-                    .filter(|decl| {
-                        self.owner(&decl.name)
-                            .is_some_and(|(owner, _)| owner == namespace)
-                    })
-                    .map(|decl| decl.name.clone())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        names.sort();
-        names
+        }
+        Owner::None => Err(RpcError::unknown_method()),
     }
 }
 
-/// The `sessionMethods` namespaces assembly recorded with
-/// `AgentBuilder::session_methods`, the counterpart of `Owners` (methods
-/// contract A.1, "Known namespaces"). Every Agent of the process is built from
-/// one assembly, so every Session lists all of them. They decide whether a
-/// name is a Session method candidate before any Session is read. A recorded
-/// namespace whose provider is not active in a Session is not absent: the row
-/// that provides it answers, from its copy in that Session, as an owner row
-/// does (contract §3.2).
-pub(crate) struct SessionNamespaces {
-    loader: Loader,
-    /// Longest first: a name belongs to the longest namespace containing it.
-    namespaces: Vec<String>,
-    /// The Session row that provides a namespace, where assembly knows it: a
-    /// TypeScript Session part declares its namespaces in `RowSchema.provides`.
-    /// The Rust Session parts the builder registers are not here; each must be
-    /// active before its Session is published.
-    rows: HashMap<String, String>,
+/// Admits a management call through its provider (§3.2).
+pub(crate) fn dispatch(
+    table: &ManagementMethods,
+    loader: &Loader,
+    method: String,
+    params: Value,
+    entry_stopping: CancellationToken,
+    progress: impl Fn(Value) + Send + Sync + 'static,
+) -> Result<Accepted, RpcError> {
+    let provider = management_provider(table, loader, &method)?;
+    provider.accept(method, params, entry_stopping, progress)
 }
-impl SessionNamespaces {
-    pub(crate) fn new(
-        loader: Loader,
-        management: &[(String, String)],
-        recorded: &[String],
-        rows: &[(String, String)],
-    ) -> Result<Self, CordisError> {
-        for namespace in recorded {
-            Self::check(management, namespace)?;
-        }
-        let mut namespaces = recorded.to_vec();
-        namespaces.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-        Ok(Self {
-            loader,
-            namespaces,
-            rows: rows.iter().cloned().collect(),
-        })
-    }
 
-    /// Fails assembly for a recorded namespace that could shadow a built-in
-    /// or share a name with a configured management namespace, so no name has
-    /// two owners. A Session namespace may lie under `session`, but never
-    /// equals, contains or lies inside an exact built-in, and never lies under
-    /// another reserved root.
-    pub(crate) fn check(
-        management: &[(String, String)],
-        namespace: &str,
-    ) -> Result<(), CordisError> {
-        let overlaps = |other: &str| within(namespace, other) || within(other, namespace);
-        if !valid_name(namespace)
-            || ["hello", "daemon", "agent", "approval"]
-                .iter()
-                .any(|root| within(namespace, root))
-            || crate::protocol::builtin_methods().any(overlaps)
-        {
-            return Err(CordisError::PluginFailed(
-                format!("invalid Session namespace {namespace}").into(),
-            ));
+/// The provider that serves Session method `method` in `session`. A
+/// namespace withdrawn in this Session answers from the row that registered
+/// it: its copy in this Session, if it is a row of the `session` group, or a
+/// part between generations, which is `service_reloading`. A name no
+/// namespace of this Session ever held is `unknown_method`.
+pub(crate) fn session_provider(
+    loader: &Loader,
+    session: &Session,
+    method: &str,
+) -> Result<Arc<MethodProvider>, RpcError> {
+    let table = session.session_service::<SessionMethods>()?;
+    match table.owner(method) {
+        Owner::Active(provider) => Ok(provider),
+        Owner::Left { row } => {
+            let instance = session.scope()?.instance;
+            // A row inside the Session group runs one copy per Session; its
+            // innermost instance is the Session's.
+            let copy = row.and_then(|row| {
+                loader.entries().into_iter().find(|entry| {
+                    entry.id == row
+                        && entry
+                            .instance
+                            .as_ref()
+                            .and_then(|copy| copy.chain.first())
+                            .is_some_and(|(_, id)| *id == instance)
+                })
+            });
+            if let Some(copy) = copy {
+                not_active(copy.status)?;
+            }
+            match table.owner(method) {
+                Owner::Active(provider) => Ok(provider),
+                _ => Err(RpcError::reloading()),
+            }
         }
-        if let Some((owner, _)) = management.iter().find(|(owner, _)| overlaps(owner)) {
-            return Err(CordisError::PluginFailed(
-                format!("Session namespace {namespace} overlaps management namespace {owner}")
-                    .into(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// The provider of `namespace` in `session`, read by key on each call.
-    /// With none active, the copy in this Session of the row that provides the
-    /// namespace answers (`not_active`). A namespace whose row assembly does
-    /// not know, or whose copy left with the Session's instance, keeps the
-    /// facade's `Reloading`.
-    pub(crate) fn provider(
-        &self,
-        session: &Session,
-        namespace: &str,
-    ) -> Result<Arc<SessionMethods>, RpcError> {
-        let reloading = match session.session_named_service::<SessionMethods>(namespace) {
-            Ok(provider) => return Ok(provider),
-            Err(error @ AgentError::Reloading(_)) => error,
-            Err(error) => return Err(error.into()),
-        };
-        let Some(row) = self.rows.get(namespace) else {
-            return Err(reloading.into());
-        };
-        let instance = session.scope()?.instance;
-        // A row inside the Session group runs one copy per Session; its
-        // innermost instance is the Session's.
-        let copy = self.loader.entries().into_iter().find(|entry| {
-            entry.id == *row
-                && entry
-                    .instance
-                    .as_ref()
-                    .and_then(|copy| copy.chain.first())
-                    .is_some_and(|(_, id)| *id == instance)
-        });
-        let Some(copy) = copy else {
-            return Err(reloading.into());
-        };
-        not_active(copy.status)?;
-        Ok(session.session_named_service::<SessionMethods>(namespace)?)
-    }
-
-    /// The recorded namespace that owns `name`, if it is a Session method
-    /// candidate. A name outside the declaration grammar owns none, without
-    /// any lookup.
-    pub(crate) fn owner(&self, name: &str) -> Option<&str> {
-        if !valid_name(name) {
-            return None;
-        }
-        self.namespaces
-            .iter()
-            .find(|namespace| within(name, namespace))
-            .map(String::as_str)
-    }
-
-    /// The methods `session.methods` lists: those of the namespaces whose
-    /// providers are active in this Session, each under the namespace that
-    /// owns it.
-    pub(crate) fn listed(&self, session: &Session) -> Result<Vec<MethodDecl>, RpcError> {
-        let mut methods = vec![];
-        for namespace in &self.namespaces {
-            let provider = match session.session_named_service::<SessionMethods>(namespace) {
-                Ok(provider) => provider,
-                Err(AgentError::Reloading(_)) => continue,
-                Err(error) => return Err(error.into()),
-            };
-            methods.extend(
-                provider
-                    .declarations()
-                    .iter()
-                    .filter(|decl| self.owner(&decl.name) == Some(namespace))
-                    .cloned(),
-            );
-        }
-        methods.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(methods)
+        Owner::None => Err(RpcError::unknown_method()),
     }
 }
 
-fn provider(ctx: &Ctx, namespace: &str) -> Option<Arc<ManagementMethods>> {
-    ctx.get_as::<ManagementMethods>(TypeKey::keyed_dynamic::<ManagementMethods>(namespace))
+/// The methods `session.methods` lists: those of the namespaces registered
+/// in this Session now.
+pub(crate) fn session_listed(session: &Session) -> Result<Vec<MethodDecl>, RpcError> {
+    Ok(session.session_service::<SessionMethods>()?.listed())
 }
 
 #[cfg(test)]

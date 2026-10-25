@@ -103,8 +103,8 @@ settings contract, not a schema change; older binaries ignore its row.
 
 ## Management and installation boundaries
 
-Process owners provide named Rust `ManagementMethods` contributions that Rpc
-looks up per call, without a dependency on any owner
+Process owners register their namespaces with the process's `managementMethods`
+table, which Rpc reads per call, without a dependency on any owner
 ([methods contract §3.2](../design/contracts/session-boundary.md#32-management-method)).
 Owners retain declarations, wire validation, business calls and the calls they
 accept: an owner's unload interrupts its `Report` calls and waits for its
@@ -112,13 +112,13 @@ accept: an owner's unload interrupts its `Report` calls and waits for its
 Methods/Management plugin, registration port or adapter row. MCP and Skills
 publish their existing management methods; Settings publishes none: S8b's
 `settings.read`/`settings.update` belong to SettingsMethods, which depends on Settings (see D4). Local v3
-hello lists the methods of the active owners. A namespace whose owner row is
-not running and has not failed (Pending, not started yet, or between
-generations) returns the retryable `service_reloading`, as before
+hello lists the methods of the registered namespaces. A withdrawn namespace whose
+owner row is not running and has not failed (Pending, not started yet, or
+between generations) returns the retryable `service_reloading`, as before
 contributions; one whose owner row cannot run again until it is fixed or
 restarted (Failed, Unresolved or Disposed) returns the non-retryable
-`service_unavailable`; one with no enabled owner, and non-serving
-entries, return `unknown_method`. Rpc
+`service_unavailable`; a name no namespace ever held, one with no enabled
+owner, and non-serving entries return `unknown_method`. Rpc
 tells them apart from the loader's row status, with no requirement raised to
 rutis. An owner that is inactive or reloading affects only its namespace;
 business edits do not reload plugins. See

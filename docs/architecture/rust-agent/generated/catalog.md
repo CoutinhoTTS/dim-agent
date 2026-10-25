@@ -24,6 +24,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `listenAddresses` | process | Transport | Rust-only | — |
 | `loader` | process | rutis-loader | Rust-only | — |
 | `managedProviders` | process | ManagedProviders | Rust-only | — |
+| `managementMethods` | process | ManagementMethods | yes | `register` async |
 | `mcpAuth` | process | Mcp | Rust-only | — |
 | `mcpService` | process | Mcp | Rust-only | — |
 | `modelHost` | process | Aimux | Rust-only | — |
@@ -33,6 +34,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `providerConnectionResolver` | process | Provider | Rust-only | — |
 | `providerService` | process | Provider | Rust-only | — |
 | `publication` | process | McpPublication | Rust-only | — |
+| `reservedMethods` | process | — | Rust-only | — |
 | `serverControl` | process | ServerControl | Rust-only | — |
 | `sessionFilesHost` | process | SessionStore | Rust-only | — |
 | `sessionMetadata` | process | SessionStore | yes | `read` async, `setTitle` async |
@@ -62,6 +64,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `sessionIdentity` | session | SessionScope | yes | `get` async |
 | `sessionLifecycle` | session | SessionScope | yes | `activated` async, `closing` async, `hold` async, `release` async |
 | `sessionLoader` | session | SessionScope | Rust-only | — |
+| `sessionMethods` | session | SessionMethods | yes | `register` async |
 | `sessionSkills` | session | Skills | Rust-only | — |
 | `skillContributions` | session | SkillContributions | Rust-only | — |
 | `timelineFactory` | session | SessionScope | Rust-only | — |

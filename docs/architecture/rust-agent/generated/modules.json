@@ -416,6 +416,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "matches",
         "tokio::pin",
         "tokio::select",
         "tracing::warn",
@@ -1031,6 +1032,7 @@
         "assert_eq",
         "format",
         "macro_rules",
+        "matches",
         "named_tuple",
         "panic",
         "vec"
@@ -1385,7 +1387,6 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/connection.rs",
       "unexpandedMacros": [
-        "format",
         "matches",
         "tokio::select",
         "tracing::error",
@@ -1627,8 +1628,7 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/methods.rs",
       "unexpandedMacros": [
-        "format",
-        "vec"
+        "format"
       ]
     },
     {
@@ -1818,9 +1818,8 @@
       "file": "crates/dim-app-server/src/session_typescript.rs",
       "unexpandedMacros": [
         "format",
-        "rutis_bridge::include_exports",
-        "serde_json::json",
-        "tokio::select"
+        "matches",
+        "rutis_bridge::include_exports"
       ]
     },
     {
@@ -4183,8 +4182,7 @@
         "path RpcError::closed",
         "path RpcError::reloading",
         "path SessionMethods",
-        "path SessionMethods::key",
-        "path SessionMethods::provide_at",
+        "path methods",
         "path methods::params",
         "path methods::reply",
         "use dim_agent_capabilities::methods",
@@ -4208,14 +4206,6 @@
       "references": [
         "path SessionIdentity",
         "use dim_agent_runtime::SessionIdentity"
-      ]
-    },
-    {
-      "from": "dim_agent_attachments",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -5078,8 +5068,6 @@
         "path RpcError",
         "path RpcError::app",
         "path SessionMethods",
-        "path SessionMethods::key",
-        "path SessionMethods::provide_at",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
@@ -5104,14 +5092,6 @@
       "references": [
         "path Branch",
         "use dim_agent_runtime::Branch"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::context_methods",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -5516,9 +5496,15 @@
       "to": "dim_agent_capabilities::input_queue",
       "references": [
         "path InputQueuePlugin::new",
-        "path crate::input_queue::INPUT_METHODS",
-        "path crate::input_queue::InputMethodsPlugin::new",
+        "path crate::input_queue::InputMethodsPlugin",
         "use crate::input_queue::InputQueuePlugin"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path crate::methods::SessionMethodsPlugin::part"
       ]
     },
     {
@@ -6161,8 +6147,6 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path SessionMethods",
-        "path SessionMethods::key",
-        "path SessionMethods::provide_at",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
@@ -6266,6 +6250,14 @@
     },
     {
       "from": "dim_agent_capabilities::methods",
+      "to": "dim_agent_runtime::capability",
+      "references": [
+        "path When",
+        "use dim_agent_runtime::When"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::methods",
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
@@ -6281,15 +6273,17 @@
       "from": "dim_agent_capabilities::methods",
       "to": "dim_agent_runtime::names",
       "references": [
-        "path dim_agent_runtime::Names"
+        "path Names",
+        "path dim_agent_runtime::names::name_of",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
       "from": "dim_agent_capabilities::methods",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::registrations",
       "references": [
-        "path SessionScope",
-        "use dim_agent_runtime::SessionScope"
+        "path Registrations",
+        "use dim_agent_runtime::Registrations"
       ]
     },
     {
@@ -7222,8 +7216,6 @@
         "path RpcError::invalid",
         "path RpcError::reloading",
         "path SessionMethods",
-        "path SessionMethods::key",
-        "path SessionMethods::provide_at",
         "path params",
         "path reply",
         "use crate::methods::Interruption",
@@ -7300,14 +7292,6 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path dim_agent_runtime::Result"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::shell_input",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -8603,8 +8587,6 @@
         "path RpcError::invalid",
         "path RpcError::reloading",
         "path SessionMethods",
-        "path SessionMethods::key",
-        "path SessionMethods::provide_at",
         "path params",
         "use crate::methods::Interruption",
         "use crate::methods::MethodDecl",
@@ -9479,8 +9461,6 @@
         "path RpcError::app",
         "path RpcError::invalid",
         "path SessionMethods",
-        "path SessionMethods::key",
-        "path SessionMethods::provide_at",
         "path params",
         "use dim_agent_capabilities::methods::Interruption",
         "use dim_agent_capabilities::methods::MethodDecl",
@@ -9525,14 +9505,6 @@
       "references": [
         "path CAPABILITY_RELOADING",
         "use dim_agent_runtime::CAPABILITY_RELOADING"
-      ]
-    },
-    {
-      "from": "dim_agent_questions",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -11199,6 +11171,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path dim_agent_capabilities::methods::ReservedMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
         "path dim_agent_capabilities::session_broadcast::SessionNotice",
@@ -11266,6 +11245,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::names::register"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::agent_records",
       "references": [
         "mod agent_records"
@@ -11280,7 +11266,6 @@
         "path AgentsPlugin::new",
         "path agents::AgentDirectory",
         "path agents::AgentDirectoryPlugin",
-        "path agents::SESSION_NAMESPACE",
         "path agents::group_row",
         "path agents::register",
         "use agents::AgentIndex",
@@ -11291,7 +11276,7 @@
       "from": "dim_app_server",
       "to": "dim_app_server::agents::configuration",
       "references": [
-        "path agents::AgentsSessionPlugin::new"
+        "path agents::AgentsSessionPlugin"
       ]
     },
     {
@@ -11427,7 +11412,9 @@
       "to": "dim_app_server::methods",
       "references": [
         "mod methods",
-        "path methods"
+        "path methods::ManagementMethods",
+        "path methods::ManagementMethodsPlugin::new",
+        "path methods::reserved_for_sessions"
       ]
     },
     {
@@ -11843,8 +11830,6 @@
         "path RpcError::invalid",
         "path RpcError::reloading",
         "path SessionMethods",
-        "path SessionMethods::key",
-        "path SessionMethods::provide_at",
         "path params",
         "use dim_agent_capabilities::methods::Interruption",
         "use dim_agent_capabilities::methods::MethodDecl",
@@ -11885,14 +11870,6 @@
       "references": [
         "path PromptSourceTarget",
         "use dim_agent_runtime::PromptSourceTarget"
-      ]
-    },
-    {
-      "from": "dim_app_server::agents::configuration",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -12401,9 +12378,7 @@
       "from": "dim_app_server::cli",
       "to": "dim_agent_capabilities::context_methods",
       "references": [
-        "path ContextMethodsPlugin::new",
-        "path context_methods::NAMESPACE",
-        "use dim_agent_capabilities::context_methods",
+        "path ContextMethodsPlugin",
         "use dim_agent_capabilities::context_methods::ContextMethodsPlugin"
       ]
     },
@@ -12623,6 +12598,13 @@
       ]
     },
     {
+      "from": "dim_app_server::codex_oauth",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path crate::methods::ManagementMethods"
+      ]
+    },
+    {
       "from": "dim_app_server::codex_oauth::management",
       "to": "dim_agent_capabilities::methods",
       "references": [
@@ -12666,7 +12648,7 @@
       "from": "dim_app_server::codex_oauth::management",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods::provide",
+        "path ManagementMethods",
         "use crate::methods::ManagementMethods"
       ]
     },
@@ -12944,6 +12926,7 @@
         "path RpcError::invalid",
         "path RpcError::reloading",
         "path RpcError::wire",
+        "path dim_agent_capabilities::methods::valid_name",
         "path params",
         "use dim_agent_capabilities::methods::Accepted",
         "use dim_agent_capabilities::methods::RpcError"
@@ -13154,10 +13137,10 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::methods",
       "references": [
-        "path crate::methods::Owners",
-        "path crate::methods::Owners::new",
-        "path crate::methods::SessionNamespaces",
-        "path crate::methods::SessionNamespaces::new"
+        "path crate::methods::ManagementMethods",
+        "path crate::methods::dispatch",
+        "path crate::methods::session_listed",
+        "path crate::methods::session_provider"
       ]
     },
     {
@@ -13663,6 +13646,13 @@
       ]
     },
     {
+      "from": "dim_app_server::grok_oauth",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path crate::methods::ManagementMethods"
+      ]
+    },
+    {
       "from": "dim_app_server::grok_oauth::management",
       "to": "dim_agent_capabilities::methods",
       "references": [
@@ -13704,7 +13694,7 @@
       "from": "dim_app_server::grok_oauth::management",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods::provide",
+        "path ManagementMethods",
         "use crate::methods::ManagementMethods"
       ]
     },
@@ -13752,6 +13742,13 @@
       "references": [
         "mod management",
         "path management::provide"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path crate::methods::ManagementMethods"
       ]
     },
     {
@@ -13806,7 +13803,7 @@
       "from": "dim_app_server::managed_provider::management",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods::provide",
+        "path ManagementMethods",
         "use crate::methods::ManagementMethods"
       ]
     },
@@ -13944,6 +13941,13 @@
         "use session::McpSessionState",
         "use session::McpSourceState",
         "use session::install"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path crate::methods::ManagementMethods"
       ]
     },
     {
@@ -14229,7 +14233,7 @@
       "from": "dim_app_server::mcp::management",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods::provide",
+        "path ManagementMethods",
         "path SelectionScope",
         "use crate::methods::ManagementMethods",
         "use crate::methods::SelectionScope"
@@ -14454,6 +14458,13 @@
       "to": "dim_app_server::mcp::server",
       "references": [
         "path McpServerError::Cleanup"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path crate::methods::ManagementMethodsPlugin::typed"
       ]
     },
     {
@@ -14768,11 +14779,15 @@
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path Accepted",
-        "path Handler",
+        "path Check",
+        "path ForeignMethods",
         "path MethodDecl",
         "path MethodProvider",
-        "path MethodProvider::foreign",
-        "path MethodProvider::new",
+        "path MethodTable",
+        "path MethodTable::new",
+        "path Owner::Active",
+        "path Owner::Left",
+        "path Owner::None",
         "path RpcError",
         "path RpcError::app",
         "path RpcError::reloading",
@@ -14781,9 +14796,12 @@
         "path valid_name",
         "path within",
         "use dim_agent_capabilities::methods::Accepted",
-        "use dim_agent_capabilities::methods::Handler",
+        "use dim_agent_capabilities::methods::Check",
+        "use dim_agent_capabilities::methods::ForeignMethods",
         "use dim_agent_capabilities::methods::MethodDecl",
         "use dim_agent_capabilities::methods::MethodProvider",
+        "use dim_agent_capabilities::methods::MethodTable",
+        "use dim_agent_capabilities::methods::Owner",
         "use dim_agent_capabilities::methods::RpcError",
         "use dim_agent_capabilities::methods::SessionMethods",
         "use dim_agent_capabilities::methods::valid_name",
@@ -14800,10 +14818,11 @@
     },
     {
       "from": "dim_app_server::methods",
-      "to": "dim_agent_runtime::error",
+      "to": "dim_agent_runtime::names",
       "references": [
-        "path AgentError::Reloading",
-        "use dim_agent_runtime::AgentError"
+        "path dim_agent_runtime::Names",
+        "path dim_agent_runtime::Names::copy",
+        "path dim_agent_runtime::names::name_of"
       ]
     },
     {
@@ -14832,6 +14851,7 @@
         "path MethodDecl",
         "path MethodDecl::new",
         "path RpcError",
+        "use dim_agent_capabilities::methods::Handler",
         "use dim_agent_capabilities::methods::Interruption"
       ]
     },
@@ -14860,9 +14880,10 @@
       "from": "dim_app_server::methods::tests",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods::provide",
-        "path Owners",
-        "path Owners::new"
+        "path ManagementMethods",
+        "path ManagementMethodsPlugin",
+        "path ManagementMethodsPlugin::new",
+        "path dispatch"
       ]
     },
     {
@@ -14980,7 +15001,7 @@
       "from": "dim_app_server::permission_rules",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods::provide",
+        "path ManagementMethods",
         "use crate::methods::ManagementMethods"
       ]
     },
@@ -15282,6 +15303,13 @@
         "use crate::managed_provider::CredentialLease",
         "use crate::managed_provider::ManagedModel",
         "use crate::managed_provider::ManagedProviders"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path crate::methods::ManagementMethods"
       ]
     },
     {
@@ -15604,7 +15632,7 @@
       "from": "dim_app_server::provider::management",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods::provide",
+        "path ManagementMethods",
         "path SelectionScope",
         "use crate::methods::ManagementMethods",
         "use crate::methods::SelectionScope"
@@ -15810,10 +15838,8 @@
       "from": "dim_app_server::session_typescript",
       "to": "dim_agent_capabilities::methods",
       "references": [
-        "path SessionMethods::provide_foreign",
-        "path within",
-        "use dim_agent_capabilities::methods::SessionMethods",
-        "use dim_agent_capabilities::methods::within"
+        "path SessionMethods",
+        "use dim_agent_capabilities::methods::SessionMethods"
       ]
     },
     {
@@ -15840,15 +15866,8 @@
       "from": "dim_app_server::session_typescript",
       "to": "dim_agent_runtime::names",
       "references": [
-        "path dim_agent_runtime::names::name_of"
-      ]
-    },
-    {
-      "from": "dim_app_server::session_typescript",
-      "to": "dim_agent_runtime::scope",
-      "references": [
-        "path SessionScope",
-        "use dim_agent_runtime::SessionScope"
+        "path name_of",
+        "use dim_agent_runtime::names::name_of"
       ]
     },
     {
@@ -15865,9 +15884,7 @@
       "from": "dim_app_server::session_typescript",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods::check_namespace",
-        "path ManagementMethods::provide_foreign",
-        "path crate::methods::SessionNamespaces::check",
+        "path ManagementMethods",
         "use crate::methods::ManagementMethods"
       ]
     },
@@ -16186,7 +16203,7 @@
       "from": "dim_app_server::settings_methods",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods::provide",
+        "path ManagementMethods",
         "use crate::methods::ManagementMethods"
       ]
     },
@@ -16308,7 +16325,7 @@
       "from": "dim_app_server::skills_management",
       "to": "dim_app_server::methods",
       "references": [
-        "path ManagementMethods::provide",
+        "path ManagementMethods",
         "path SelectionScope",
         "use crate::methods::ManagementMethods",
         "use crate::methods::SelectionScope"

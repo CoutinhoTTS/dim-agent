@@ -141,23 +141,18 @@ impl Connection {
             let this = self.clone();
             let Request { id, call } = request;
             if let Call::Contributed { method, params } = call {
-                // Session namespaces never overlap management namespaces
-                // (assembly fails otherwise), so routing a candidate first
-                // keeps the contract's order: built-in, management, Session.
-                if self.protocol_version() >= 3
-                    && let Some(namespace) = rpc.sessions.owner(&method)
-                {
+                // The contract's order: built-in, management, Session. A name
+                // no management namespace holds that names a Session is a
+                // Session method candidate.
+                if self.protocol_version() >= 3 && session_candidate(rpc, &method, &params) {
                     // An unloading load admits no new call; the next load serves it.
                     if rpc.stopping.is_cancelled() {
                         return Err(RpcError::reloading());
                     }
-                    let (rpc, namespace) = (rpc.clone(), namespace.to_owned());
+                    let rpc = rpc.clone();
                     let progress = this.progress(&id, &method);
                     rpc.commands.clone().spawn(async move {
-                        match this
-                            .session_method(&rpc, &namespace, method, params, progress)
-                            .await
-                        {
+                        match this.session_method(&rpc, method, params, progress).await {
                             Ok((accepted, usage)) => {
                                 this.answer(id, guard, accepted).await;
                                 drop(usage);
@@ -180,8 +175,9 @@ impl Connection {
                     return Err(RpcError::reloading());
                 }
                 let progress = this.progress(&id, &method);
-                let accepted = rpc.owners.dispatch(
-                    &rpc.ctx,
+                let accepted = crate::methods::dispatch(
+                    &rpc.management,
+                    &rpc.loader,
                     method,
                     params,
                     rpc.unloading.clone(),
@@ -246,12 +242,11 @@ impl Connection {
     /// Admits a Session method call (methods contract A.1): reads `sessionId`
     /// from the raw params, authorizes it like a built-in, acquires the
     /// Session (restoring an unloaded one) and hands the call to the provider
-    /// the Session serves under `namespace`. The returned use holds the
+    /// the Session's method table holds for it. The returned use holds the
     /// Session for the duration of the call; `sessionId` stays in the params.
     async fn session_method(
         &self,
         rpc: &RpcService,
-        namespace: &str,
         method: String,
         params: Value,
         progress: impl Fn(Value) + Send + Sync + 'static,
@@ -266,10 +261,10 @@ impl Connection {
         }
         self.authorize(rpc, &session_id)?;
         let usage = rpc.index.acquire(&session_id).await?;
-        // A recorded namespace whose provider is not active answers from the
-        // row that provides it in this Session: `service_reloading` while it
-        // starts or reloads, `service_unavailable` once it cannot run.
-        let provider = rpc.sessions.provider(&usage.session, namespace)?;
+        // A namespace withdrawn in this Session answers from the row that
+        // registered it: `service_reloading` while it starts or reloads,
+        // `service_unavailable` once it cannot run.
+        let provider = crate::methods::session_provider(&rpc.loader, &usage.session, &method)?;
         if rpc.stopping.is_cancelled() {
             return Err(RpcError::reloading());
         }
@@ -289,7 +284,7 @@ impl Connection {
                     // Session methods contributed by plugins, and the
                     // management reads the web entry is served.
                     Call::Contributed { method, .. } => {
-                        rpc.sessions.owner(method).is_some()
+                        !rpc.management.holds(method)
                             || WEB_READABLE_METHODS.contains(&method.as_str())
                     }
                     call => !call.is_web_entry(),
@@ -907,10 +902,10 @@ impl Connection {
                 })
             }
             Call::BranchCreate(params) => self.create_branch(rpc, params).await,
-            Call::SessionMethods(_) => rpc
-                .sessions
-                .listed(&usage.expect("session.methods pins its Session").session)
-                .map(|methods| Reply::SessionMethods(SessionMethodsResult { methods })),
+            Call::SessionMethods(_) => crate::methods::session_listed(
+                &usage.expect("session.methods pins its Session").session,
+            )
+            .map(|methods| Reply::SessionMethods(SessionMethodsResult { methods })),
             Call::AgentCreate(params) => rpc
                 .index
                 .create(uuid::Uuid::new_v4(), params.profile)
@@ -1459,11 +1454,11 @@ pub(crate) struct RpcService {
     /// This load's own context sees no provider once it starts unloading,
     /// before `stopping` is cancelled.
     pub ctx: Ctx,
-    /// This profile's management namespaces and their owner rows.
-    pub owners: crate::methods::Owners,
-    /// The `sessionMethods` namespaces every Session lists, and the rows
-    /// known to provide them.
-    pub sessions: crate::methods::SessionNamespaces,
+    /// The process's management method table.
+    pub management: Arc<crate::methods::ManagementMethods>,
+    /// Reads the status of the rows that registered a namespace; the loader
+    /// never reloads.
+    pub loader: rutis_loader::Loader,
     /// Cancelled when this load starts unloading, before its handler is
     /// removed; it then admits no management call or `hello`.
     pub stopping: CancellationToken,
@@ -1516,29 +1511,11 @@ impl RpcService {
 
 pub(crate) struct RpcPlugin {
     config: Arc<ServerConfig>,
-    /// Management namespace and the loader row of its owner.
-    methods: Arc<[(String, String)]>,
-    /// The `sessionMethods` namespaces assembly recorded for every Session.
-    sessions: Arc<[String]>,
-    /// Session namespace and the id of the TypeScript Session row providing it.
-    session_rows: Arc<[(String, String)]>,
     root: Ctx,
 }
 impl RpcPlugin {
-    pub fn new(
-        config: Arc<ServerConfig>,
-        methods: Arc<[(String, String)]>,
-        sessions: Arc<[String]>,
-        session_rows: Arc<[(String, String)]>,
-        root: Ctx,
-    ) -> Self {
-        Self {
-            config,
-            methods,
-            sessions,
-            session_rows,
-            root,
-        }
+    pub fn new(config: Arc<ServerConfig>, root: Ctx) -> Self {
+        Self { config, root }
     }
 }
 impl TypedPlugin for RpcPlugin {
@@ -1548,9 +1525,10 @@ impl TypedPlugin for RpcPlugin {
         KeyedGate<crate::collaboration::Collaboration>,
         Keyed<ConnectionHub>,
         Keyed<ServerControl>,
-        // Reads the status of the rows that provide method namespaces; the
-        // loader never reloads.
+        // Reads the status of the rows that registered method namespaces;
+        // the loader never reloads.
         Keyed<rutis_loader::Loader>,
+        Keyed<crate::methods::ManagementMethods>,
     );
     fn name(&self) -> &str {
         "Rpc"
@@ -1558,31 +1536,14 @@ impl TypedPlugin for RpcPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(index), _, Keyed(hub), Keyed(control), Keyed(loader)): Self::Deps,
+        (Keyed(index), _, Keyed(hub), Keyed(control), Keyed(loader), Keyed(management)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            // Every configured owner names an assembly row; one that names no
-            // row would answer a reloading owner as absent.
-            if let Some((namespace, row)) = self
-                .methods
-                .iter()
-                .find(|(_, row)| loader.get(row).is_none())
-            {
-                return Err(CordisError::PluginFailed(
-                    format!("management namespace {namespace} names unknown row {row}").into(),
-                ));
-            }
-            let sessions = crate::methods::SessionNamespaces::new(
-                (*loader).clone(),
-                &self.methods,
-                &self.sessions,
-                &self.session_rows,
-            )?;
             let service = Arc::new(RpcService {
                 index,
                 ctx: self.root.clone(),
-                owners: crate::methods::Owners::new((*loader).clone(), &self.methods),
-                sessions,
+                management,
+                loader: (*loader).clone(),
                 stopping: ctx.cancellation_token(),
                 control,
                 config: self.config.clone(),
@@ -1616,4 +1577,13 @@ impl TypedPlugin for RpcPlugin {
             Ok(Effect::Done)
         })
     }
+}
+
+/// Whether `method` is a Session method candidate (methods contract A.1):
+/// no management namespace holds it, it follows the declaration grammar, and
+/// its params name a Session.
+fn session_candidate(rpc: &RpcService, method: &str, params: &Value) -> bool {
+    dim_agent_capabilities::methods::valid_name(method)
+        && !rpc.management.holds(method)
+        && params.get("sessionId").is_some()
 }

@@ -1,16 +1,16 @@
 import { appendFileSync } from 'node:fs'
 import { definePlugin } from '@arcships/rutis'
-import type { Services } from '../../npm/plugin.js'
+import type { Services, SessionMethods } from '../../npm/plugin.js'
 import provides from './session-observer.json' with { type: 'json' }
 
 // A Session row that observes its own Session: it reads the Session's
 // identity, creation configuration and lifecycle by name and listens to
-// the Session's channel from `apply` on.
-export function observer(declaration: Record<string, Record<string, string>>) {
+// the Session's channel from `apply` on. Its methods are `namespace`'s.
+export function observer(namespace: string, declaration: Record<string, Record<string, string>>) {
   return definePlugin({
     name: 'SessionObserverFixture',
     provides: declaration,
-    inject: ['sessionIdentity', 'sessionConfig', 'sessionLifecycle'],
+    inject: ['sessionIdentity', 'sessionConfig', 'sessionLifecycle', 'sessionMethods'],
     async apply(ctx, options: { lifecycleFile?: string }) {
       const generation = crypto.randomUUID()
       const records: any[] = []
@@ -33,8 +33,6 @@ export function observer(declaration: Record<string, Record<string, string>>) {
           changed.add(wake)
         })
       }
-      const methods = Object.keys(declaration).find(name => name.startsWith('sessionMethods:'))!
-      const namespace = methods.slice('sessionMethods:'.length)
       // Accepted work ends when the Session closes or this row unloads.
       let end!: () => void
       const ended = new Promise<void>(resolve => { end = resolve })
@@ -62,13 +60,12 @@ export function observer(declaration: Record<string, Record<string, string>>) {
         }
         if (throwing) { throwing = false; throw new Error('fixture listener failure') }
       })
-      ctx.provide(methods, {
-        async describe() {
-          return ['status', 'through', 'arm', 'entered', 'release', 'throw', 'activated', 'hold_session', 'release_session'].map(name => ({
-            name: `${namespace}.${name}`, mutating: false, interruption: 'report', progress: false,
-          }))
-        },
-        async call(call: { method: string; params: { sequence?: number; after?: number; branchId?: string; id?: number } }) {
+      await ctx.use<SessionMethods>('sessionMethods').register(
+        namespace,
+        ['status', 'through', 'arm', 'entered', 'release', 'throw', 'activated', 'hold_session', 'release_session'].map(name => ({
+          name: `${namespace}.${name}`, mutating: false, interruption: 'report', progress: false,
+        })),
+        async (call: { method: string; params: { sequence?: number; after?: number; branchId?: string; id?: number } }) => {
           const action = call.method.slice(namespace.length + 1)
           if (action === 'arm') { hold = true; entered = false }
           if (action === 'entered') await until(() => entered || closed)
@@ -85,9 +82,9 @@ export function observer(declaration: Record<string, Record<string, string>>) {
             records: records.filter(record => record.event.sequence > (call.params.after ?? 0)),
           } }
         },
-      })
+      )
     },
   })
 }
 
-export default observer(provides)
+export default observer('session.observer', provides)

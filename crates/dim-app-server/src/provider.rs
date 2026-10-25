@@ -2174,6 +2174,7 @@ impl ProviderPlugin {
             names.key()?,
             names.when::<Keyed<ProviderSecretHost>>(self.secret_host)?,
             names.key()?,
+            names.key()?,
         ))
     }
 }
@@ -2185,6 +2186,7 @@ impl TypedPlugin for ProviderPlugin {
         Keyed<GrokOAuthService>,
         When<Keyed<ProviderSecretHost>>,
         Keyed<ModelHost>,
+        Keyed<crate::methods::ManagementMethods>,
     );
     fn name(&self) -> &str {
         "Provider"
@@ -2199,6 +2201,7 @@ impl TypedPlugin for ProviderPlugin {
             Keyed(grok),
             When(secret_host),
             Keyed(host),
+            Keyed(methods),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -2248,7 +2251,7 @@ impl TypedPlugin for ProviderPlugin {
                 rutis_bridge::session::host_key("auxiliaryModel"),
                 auxiliary,
             )?;
-            management::provide(ctx, service.clone())?;
+            management::provide(ctx, &methods, service.clone())?;
             ctx.provide_as(TypeKey::of::<ProviderService>(), service)?;
             Ok(Effect::Done)
         })

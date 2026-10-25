@@ -2,7 +2,7 @@
 //! records its process plugins in `generated/app-server/`.
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
-    context_methods::{self, ContextMethodsPlugin},
+    context_methods::ContextMethodsPlugin,
     context_model::ProductContextModel,
     defaults,
     history::HistoryRenderer,
@@ -60,8 +60,7 @@ pub async fn serve_product(
             ProductContextModel,
         )))))
         .session_part(|names| names.part(ProductSummaryStrategyPlugin::new(names)?))
-        .session_part(|names| names.part(ContextMethodsPlugin::new(names)?))
-        .session_methods(context_methods::NAMESPACE)
+        .session_part(|names| names.part(ContextMethodsPlugin))
         .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     dim_app_server::collaboration::install(&mut builder);
     dim_agent_questions::install(&mut builder);
