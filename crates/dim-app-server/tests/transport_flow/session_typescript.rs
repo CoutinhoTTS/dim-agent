@@ -1015,6 +1015,17 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             "{:?}",
             entry.status
         );
+        // The row records only what it sees after it starts listening, and a
+        // Session is published without waiting for its optional rows: wait
+        // until it serves before the input it is asked about.
+        assert_ok(
+            &when_served(
+                &mut client,
+                "session.second.status",
+                json!({"sessionId":id}),
+            )
+            .await,
+        );
         submit(&mut client, &id, "native continues after a misplaced row").await;
         assert!(requests.recv().await.unwrap().contains(&"echo".into()));
         let sequence = server
@@ -1024,14 +1035,35 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             .unwrap()
             .sequence("main")
             .unwrap();
-        assert_ok(
-            &when_served(
-                &mut client,
-                "session.second.through",
-                json!({"sessionId":id,"sequence":sequence}),
-            )
-            .await,
-        );
+        // Retries only `service_reloading`, as `when_served` does, and names
+        // the Session's rows and their states if the row never serves.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let reply = loop {
+            let reply = client
+                .rpc(
+                    "session.second.through",
+                    json!({"sessionId":id,"sequence":sequence}),
+                )
+                .await;
+            if reply["error"]["data"]["appError"] != "service_reloading" {
+                break reply;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let rows: Vec<_> = loader
+                    .entries()
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.instance.as_ref().is_some_and(|instance| {
+                            instance.chain.iter().any(|(_, id)| *id == scope.instance)
+                        })
+                    })
+                    .map(|entry| format!("{} {:?}", entry.id, entry.status))
+                    .collect();
+                panic!("session.second.through is not served; rows: {rows:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_ok(&reply);
         server.shutdown();
         server.join().await.unwrap();
     }
