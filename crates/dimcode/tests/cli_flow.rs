@@ -5243,12 +5243,13 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.until("Completed");
     terminal.until("final child result");
     terminal.write(b"\x1b[27u");
-    terminal.until("cargo cx build");
+    terminal.until("Background tasks");
     terminal.write(b"\r");
     terminal.until("final child result");
-    terminal.write(b"\x1b[27u\x1b[27u");
-    terminal.until("test / model");
-    terminal.write(b"\x1b[27ucontinue after output\r");
+    terminal.write(b"\x1b[27u");
+    terminal.until("Background tasks");
+    // Clear the retained filter, then close; the narrow status may omit the model.
+    terminal.write(b"\x1b[27u\x1b[27ucontinue after output\r");
     terminal.until("main remains usable");
     assert!(!terminal.transcript.contains("must-not-copy"));
     proceed.send(()).unwrap();
