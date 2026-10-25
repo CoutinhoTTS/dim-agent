@@ -127,8 +127,10 @@ PrepareModelHost and the others in the [generated services](../architecture/rust
 get names and scopes in phase 2. They stay Rust-only unless a foreign part needs them.
 
 Tools, tool sources, prompt sources and method namespaces are not names. A part registers each with
-its owner, `register` on ToolRegistry, PromptRegistry or Rpc, from any language, and the
-registration ends when the part unloads ([rutis usage R6](rutis-usage.md#r6-contributions-register-with-their-owner)).
+its owner, `register` on ToolRegistry, PromptRegistry or Rpc, and the registration ends when the
+part unloads ([rutis usage R6](rutis-usage.md#r6-contributions-register-with-their-owner)). Tools and
+method namespaces register from any language; prompt and tool sources stay Rust-only until a
+foreign part needs one.
 Until R6 lands, they are the names `toolContribution:<tool>`, `sessionMethods:<namespace>` (both
 `session`) and `managementMethods:<namespace>` (process, protected-local v3 only), and prompt and
 tool sources are pre-registered by the host and Rust-only. So do

@@ -265,6 +265,8 @@ These requirements concern how Dim uses rutis. They follow
     another language as a callable reference (`RemoteFunction`).
 - **Needed:** each owner exposes `register` for its contributions: ToolRegistry for tools and tool
   sources, PromptRegistry for prompt sources, Rpc for Session and management method namespaces.
+  Tools and method namespaces register from any language; prompt and tool sources stay Rust-only
+  until a foreign part needs one.
   - A registration belongs to its caller. In Rust the caller passes its ctx; from another language
     the bridge ties the registration to the calling row, and the handler is the caller's function,
     called back through the bridge. It is withdrawn when the caller unloads.
