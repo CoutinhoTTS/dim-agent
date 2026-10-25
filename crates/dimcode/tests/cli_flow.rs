@@ -4791,16 +4791,45 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         retained["result"]["providers"][0]["preferences"]["fixture-model"]["reasoningEffort"],
         "high"
     );
+    terminal.write(b"/models\r");
+    terminal.until("Provider flow /");
+    terminal.write(b"Provider flow");
     assert!(
         rpc(
             &mut wire,
-            "provider.preferences.update",
+            "provider.update",
             json!({"providerId":id,"expectedVersion":6,
-        "modelId":"fixture-model","patch":{"reasoningEffort":{"action":"clear"}}})
+        "patch":{"network":{"timeoutMs":{"action":"set","value":10000}}}})
         )
         .get("result")
         .is_some()
     );
+    terminal.write(b"\x18");
+    terminal.until("Provider version changed");
+    assert_eq!(
+        rpc(&mut wire, "provider.management", json!({"providerId":id}))["result"]["providers"][0]["preferences"]
+            ["fixture-model"]["reasoningEffort"],
+        "high"
+    );
+    terminal.write(b"\x18");
+    terminal.until("Saved model preferences cleared");
+    assert_eq!(
+        rpc(&mut wire, "provider.management", json!({"providerId":id}))["result"]["providers"][0]["preferences"],
+        json!({})
+    );
+    terminal.write(b"\r");
+    terminal.until("Ask anything...");
+    let output = home
+        .command()
+        .args(["models", &id, "--clear-preferences", "fixture-model"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Saved model preferences cleared"));
     terminal.write(b"/connect\r");
     terminal.until("disabled");
     terminal.write(b"Provider flow\r");
@@ -4813,12 +4842,12 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     let provider = &disconnected["result"]["providers"][0];
     assert_eq!(provider["enabled"], false);
     assert_eq!(provider["connection"]["credentialConfigured"], false);
-    assert_eq!(provider["version"], 8);
+    assert_eq!(provider["version"], 10);
     assert!(
         rpc(
             &mut wire,
             "provider.delete",
-            json!({"providerId":id,"expectedVersion":8})
+            json!({"providerId":id,"expectedVersion":10})
         )
         .get("result")
         .is_some()
@@ -5787,4 +5816,69 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
     assert!(!before.is_empty());
     assert_eq!(after[..before.len()], before[..]);
     assert!(!socket.exists());
+}
+
+#[test]
+fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
+    let home = Home::new();
+    let (release, wait_release) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":"0.1","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.management","provider.create","provider.update","provider.probe"]}));
+        let create = wire.read("session.create");
+        wire.reply(&create, json!({"sessionId":"session","sequence":0,"model":{"providerId":"test","modelId":"model"}}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+        let accounts = wire.read("account.providers");
+        wire.reply(&accounts, json!([]));
+        for _ in 0..2 {
+            let listed = wire.read("provider.management");
+            wire.reply(&listed, json!({"providers":[],"errors":[]}));
+        }
+        let probe = wire.read("provider.probe");
+        wire.reply(&probe, json!({"models":[]}));
+        let create = wire.read("provider.create");
+        let id = create["params"]["providerId"].clone();
+        let mut entry = json!({"providerId":id,"source":"custom","displayName":"Recovered provider","enabled":true,"version":1,"preferences":{},"connection":{"driverKind":"openai-compatible","auth":{"type":"bearer"},"baseUrl":"https://first.example/v1","credentialConfigured":true}});
+        wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"Create reply lost"}}));
+        let listed = wire.read("provider.management");
+        wire.send(json!({"jsonrpc":"2.0","id":listed["id"],"error":{"code":-32000,"message":"Snapshot unavailable"}}));
+        for _ in 0..2 {
+            let listed = wire.read("provider.management");
+            wire.reply(&listed, json!({"providers":[entry],"errors":[]}));
+        }
+        let probe = wire.read("provider.probe");
+        assert_eq!(probe["params"]["providerId"], id);
+        assert_eq!(probe["params"]["connection"], json!({"baseUrl":"https://second.example/v1","credential":{"action":"set","value":"second-key"}}));
+        wire.reply(&probe, json!({"models":[]}));
+        let update = wire.read("provider.update");
+        assert_eq!(update["params"]["providerId"], id);
+        assert_eq!(update["params"]["expectedVersion"], 1);
+        assert_eq!(update["params"]["patch"], probe["params"]["connection"]);
+        entry["version"] = json!(2);
+        entry["connection"]["baseUrl"] = json!("https://second.example/v1");
+        wire.reply(&update, entry.clone());
+        let listed = wire.read("provider.management");
+        wire.reply(&listed, json!({"providers":[entry],"errors":[]}));
+        wait_release.recv_timeout(PATIENCE).unwrap();
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("Ask anything...");
+    terminal.write(b"/connect\r");
+    terminal.until("Add custom provider");
+    terminal.write(b"\rRecovered provider\rhttps://first.example/v1\rfirst-key\r\r");
+    terminal.until("Snapshot unavailable");
+    terminal.write(b"\x1b[A\x15second-key\x1b[A\x15https://second.example/v1\x1b[B\x1b[B\r");
+    terminal.until("Provider changed; review the retained draft");
+    terminal.write(b"\r");
+    terminal.until("Connected Recovered provider");
+    terminal.write(b"\x1b\x1b");
+    terminal.until("Ask anything...");
+    terminal.write(b"/exit\r");
+    let status = terminal.wait();
+    release.send(()).unwrap();
+    daemon.join().unwrap();
+    assert!(status.success());
 }

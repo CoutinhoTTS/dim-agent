@@ -172,6 +172,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "退出应用",
 
         // composer/palette.rs
+        "Enter select · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 选择 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
+        }
         "Enter select · Esc clear/close" => "Enter 选择 · Esc 清除/关闭",
         "esc close" => "Esc 关闭",
         "Suggestions" => "建议",

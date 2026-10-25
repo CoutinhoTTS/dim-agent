@@ -140,7 +140,9 @@ impl ProvidersPanel {
                 if !failed && !edited {
                     form.base_url = LineInput::new(&form.original_base_url);
                 }
-                form.name = None;
+                if form.name.take().is_some() {
+                    form.active = 2; // Apply the retained URL/key draft.
+                }
                 form.api_key_preview = entry.api_key_preview.clone();
                 form.busy = false;
             }

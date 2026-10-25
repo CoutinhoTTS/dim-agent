@@ -191,7 +191,11 @@ fn builder_with_context(
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(context)))))
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::install(&mut builder);
     builder
 }
@@ -651,7 +655,10 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
 
     let mut forged_builder =
         builder_with_context(Arc::new(EchoModel), HistoryRenderer::default(), context);
-    forged_builder.branch_part(|names| names.part(RewriteBaseline));
+    forged_builder.require_feature(
+        Feature::new("test.rewrite-baseline")
+            .branch("test.rewrite-baseline", |names| names.part(RewriteBaseline)),
+    );
     let forged_agent = forged_builder.build();
     let forged_session = forged_agent
         .create_session(SessionConfig::default())
@@ -737,7 +744,9 @@ async fn before_modified_request_is_budget_checked_before_native_model_invocatio
     tokio::time::timeout(Duration::from_secs(10), async {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut builder = builder(Arc::new(BudgetFailure(calls.clone())));
-        builder.branch_part(|names| names.part(ExpandFinal));
+        builder.require_feature(
+            Feature::new("ExpandFinal").branch("ExpandFinal", |names| names.part(ExpandFinal)),
+        );
         let agent = builder.build();
         let session = agent
             .create_session(SessionConfig::default())
@@ -1217,7 +1226,11 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(context.clone())))))
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::install(&mut builder);
     let agent = builder.build();
     let session = agent

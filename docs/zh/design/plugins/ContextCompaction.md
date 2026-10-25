@@ -279,8 +279,8 @@ impl PublicService for ContextPreparation {}
 
 // dim-agent-capabilities：context_model.rs、summary_strategy.rs、context_methods.rs（新）
 pub struct ProductContextModel;                    // ResolveContextModel，无依赖
-pub struct ProductSummaryStrategyPlugin { scope: SessionScope }
-//   Deps = (Arc<ModelHost>, Arc<ProviderConnectionResolver>)；提供 CompactionStrategyHost
+pub struct ProductSummaryStrategyPlugin { host: DepKey<CompactionStrategyHost> }   // new(names)
+//   Deps = (Keyed<ModelHost>, Keyed<ProviderConnectionResolver>)；提供 CompactionStrategyHost
 pub struct ContextMethodsPlugin;
 //   Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>)；methods.register(ctx, "session.context", ..)
 

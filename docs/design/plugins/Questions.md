@@ -516,7 +516,7 @@ Flow tests through RPC, tool calls and events:
 | --- | --- |
 | Tool `ask_user` registered with `toolRegistry` | `Keyed<ToolRegistry>`; `tools.register(ctx, ToolContribution {definition, handler})` in `apply`, as Wait does; `ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`; cancelled = `HostError::Cancelled(reason)` |
 | `sessionMethods` namespace `session.question` | `Keyed<SessionMethods>`; `methods.register(ctx, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)` in `apply`, as ShellInput does |
-| `S:SessionConfig` | `InSession<SessionConfig>`, field `interactive` read per call |
+| `S:SessionConfig` | `Keyed<SessionConfig>`, field `interactive` read per call |
 
 ```rust
 pub struct Question { pub id: String, pub header: Option<String>, pub question: String,

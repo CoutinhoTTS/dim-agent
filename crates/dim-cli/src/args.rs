@@ -18,7 +18,7 @@ Commands:\n\
   login PROVIDER [--directory URL] [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
-  models PROVIDER [--refresh]       List model IDs and availability\n\
+  models PROVIDER [--refresh | --clear-preferences MODEL]\n\
   mcp list                         List MCP servers and their enablement\n\
   mcp login ID [--no-browser] [--client-secret]\n\
                                    Sign in; secrets use hidden terminal input\n\
@@ -39,8 +39,6 @@ Options:\n\
   --fullscreen | --scrollback      Terminal UI mode; append 'default' to save it\n\
   --server PATH                    App Server binary (default: this executable)\n\
   --model-config PATH              Explicit API-key model configuration\n\
-  --plugin-dir PATH                Managed account plugin package\n\
-  --node PATH --js-runtime PATH    Fixed plugin runtime locations\n\
   --provider ID --model ID         Model selection for a new session\n\
   --permission PRESET              read-only, workspace-write or full-access for a\n\
                                    new session, or for the resumed main branch\n\
@@ -128,9 +126,6 @@ pub struct Options {
     pub cwd: PathBuf,
     pub server: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
-    pub plugin_dir: Option<PathBuf>,
-    pub node: Option<PathBuf>,
-    pub js_runtime: Option<PathBuf>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub permission: Option<PermissionPreset>,
@@ -143,6 +138,7 @@ pub struct Options {
     /// Terminal UI mode for this run; `None` uses the saved default.
     pub fullscreen: Option<bool>,
     pub refresh: bool,
+    pub clear_preferences: Option<String>,
     pub redirect_uri: String,
     pub no_browser: bool,
     pub client_secret: bool,
@@ -160,9 +156,6 @@ impl Options {
             cwd: std::env::current_dir()?,
             server: None,
             model_config: None,
-            plugin_dir: None,
-            node: None,
-            js_runtime: None,
             provider: None,
             model: None,
             permission: None,
@@ -172,6 +165,7 @@ impl Options {
             no_tui: false,
             fullscreen: None,
             refresh: false,
+            clear_preferences: None,
             // The redirect address registered for Dim account sign-in.
             redirect_uri: "http://localhost:54321/auth/callback".into(),
             no_browser: false,
@@ -237,9 +231,6 @@ impl Options {
                 "--cwd" => options.cwd = PathBuf::from(value(&mut args)?),
                 "--server" => options.server = Some(PathBuf::from(value(&mut args)?)),
                 "--model-config" => options.model_config = Some(PathBuf::from(value(&mut args)?)),
-                "--plugin-dir" => options.plugin_dir = Some(PathBuf::from(value(&mut args)?)),
-                "--node" => options.node = Some(PathBuf::from(value(&mut args)?)),
-                "--js-runtime" => options.js_runtime = Some(PathBuf::from(value(&mut args)?)),
                 "--provider" => options.provider = Some(value(&mut args)?),
                 "--model" => options.model = Some(value(&mut args)?),
                 "--permission" => {
@@ -262,6 +253,15 @@ impl Options {
                     }
                 }
                 "--refresh" => options.refresh = true,
+                "--clear-preferences" => {
+                    if options
+                        .clear_preferences
+                        .replace(value(&mut args)?)
+                        .is_some()
+                    {
+                        return Err("Supply the model to clear only once".into());
+                    }
+                }
                 "--no-browser" => options.no_browser = true,
                 "--client-secret" => options.client_secret = true,
                 value if value.starts_with("--client-secret=") => {
@@ -393,15 +393,6 @@ impl Options {
         if options.provider.is_some() != options.model.is_some() {
             return Err("Use --provider and --model together".into());
         }
-        let plugin_options = [&options.plugin_dir, &options.node, &options.js_runtime];
-        if plugin_options.iter().any(|value| value.is_some())
-            && plugin_options.iter().any(|value| value.is_none())
-        {
-            return Err("Use --plugin-dir, --node and --js-runtime together".into());
-        }
-        if options.model_config.is_some() && options.plugin_dir.is_some() {
-            return Err("--model-config cannot be combined with account plugin options".into());
-        }
         if options.resume.is_some() && options.model.is_some() {
             return Err("A resumed session retains its model; omit --provider and --model".into());
         }
@@ -427,6 +418,11 @@ impl Options {
         }
         if matches!(options.action, Action::Export { .. }) && !export_format {
             return Err("session export requires --format markdown|json".into());
+        }
+        if options.clear_preferences.is_some()
+            && (!matches!(options.action, Action::Models(_)) || options.refresh)
+        {
+            return Err("--clear-preferences requires models PROVIDER and cannot be combined with --refresh".into());
         }
         if options.refresh && !matches!(options.action, Action::Models(_)) {
             return Err("--refresh requires the models command".into());
@@ -457,16 +453,6 @@ impl Options {
             if !path.is_file() {
                 return Err("--server and --model-config must name regular files".into());
             }
-        }
-        for path in [
-            &mut options.plugin_dir,
-            &mut options.node,
-            &mut options.js_runtime,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            *path = std::fs::canonicalize(&*path)?;
         }
         Ok(options)
     }

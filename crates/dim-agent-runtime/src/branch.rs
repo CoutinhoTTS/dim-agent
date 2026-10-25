@@ -91,8 +91,8 @@ impl Branch {
         self.0.state_cell::<S>().map(|s| s.subscribe())
     }
     /// Reads the current capability service, including after a reload.
-    pub fn service<T: ?Sized + BranchService + PublicService>(&self) -> Result<Arc<T>> {
-        self.0.port::<T>(std::any::type_name::<T>())
+    pub fn service<T: ?Sized + PublicService>(&self) -> Result<Arc<T>> {
+        self.0.public::<T>()
     }
     /// The branch scope and the capabilities it installed.
     pub fn diagnostics(&self) -> rutis::RuntimeDiagnostics {

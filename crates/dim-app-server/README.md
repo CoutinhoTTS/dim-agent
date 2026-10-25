@@ -34,7 +34,7 @@ explicit database). The product profile uses product-home for these files. User 
 settings are imported independently on each source's first successful read; original files
 remain intact but cease to be authority after import. Invalid files or failed imports leave
 that source unimported for repair and retry, without an empty fallback. Shell preferences remain files.
-Workspace `.mcp.json` files remain independent sources. A missing account plugin does not disable
+Workspace `.mcp.json` files remain independent sources. A missing managed provider does not disable
 these public capabilities. Protocol v3 advertises their management methods on local connections.
 Configured model changes validate against the supplied catalog and adopt that model's generation
 settings; model preferences requiring capability declarations are rejected rather than guessed.
@@ -89,7 +89,7 @@ User models survive refresh separately from defaults; descriptor resets and New 
 endpoint overrides have independent effects. Clients pass saved preferences with
 their exact model target when adopting it; the server never applies them implicitly.
 The [Provider contract](../../docs/design/appserver/provider-management.md) defines
-the methods, typed errors, account ownership and accepted v18 downgrade loss.
+the methods, typed errors, account ownership and accepted old-v19 rewrite loss. v18 binaries reject the v19 database.
 
 ### MCP configuration management
 
@@ -250,57 +250,28 @@ The requesting connection hands only its final-response writer to the existing p
 
 The server writes `tracing` output to stderr, filtered by `RUST_LOG` (errors only by default); a daemon started by the CLI writes it to the private `daemon.log` in its native home. The runtime operations `prompt.load`, `context.prepare`, `model.invoke`, `tool.attach`, `tool.execute`, `shell.run`, `timeline.close` and `session.close` are spans carrying the Session and branch ids and the operation's own ids. Closing one logs its duration as `time.busy` plus `time.idle`, so `RUST_LOG=info` shows operation timing. Span names and fields are log output, not a compatibility contract. Committed facts are read from the Timeline, not from logs ([ADR 005](../../docs/adr/005-observability.md)).
 
-## Optional managed provider
+## Managed provider plugins
 
-The public server runs without account plugins. API-key and supported native subscription providers do not require Node. An explicitly supplied plugin adds managed providers through rutis 0.16.0:
+The public server runs without a managed provider. API-key and supported native subscription providers need none, and no Node process is started for one. A managed provider is a Rust rutis plugin built outside this repository that provides `Arc<dyn ManagedProvider>` (the [contract](#managed-provider-contract) below). Its own executable installs it, mirroring the public [`dimcode` entry](../dimcode/src/main.rs):
 
-```sh
-dim-app-server --product-home /absolute/product-home \
-  --home /absolute/product-home/rust --unix /absolute/product-home/rust/daemon.sock --no-ws \
-  --plugin-dir /absolute/plugin-package \
-  --node /absolute/node-executable \
-  --js-runtime /absolute/runtime/node_modules/@arcships/rutis-runtime
+```rust
+// `dimcode app-server …`, run by the CLI as its daemon from this same executable.
+dim_app_server::cli::run_with(args, Some(ManagedProviderRow(Arc::new(|builtins, root| {
+    dim_agent_runtime::register_part(builtins, &dim_app_server::catalog(), move |names| {
+        names.part(MyProviderPlugin::new(root))
+    }).expect("managed provider dependencies")
+}))))
 ```
 
-All three plugin flags are required together; `--node` and `--js-runtime` are shared with `--session-rows`. `--js-runtime` names the installed package directory, not a bootstrap script. Node is started by absolute executable path. The runtime receives no terminal stdin or stdout; each line of its stderr is written to the App Server's own stderr, the process log, and business output is returned through the server protocol. The runtime and plugin are separate rutis loader rows in the existing process tree.
+`ManagedProviderRow` registers the plugin's process row given the product root's FileStorage index and returns the row name; `ServerConfig.managed_provider` carries it for embedders. It is installed only with a product home, beside `ManagedProviderBinding`, which hands the provider to `ManagedProviders`. The plugin owns its account schema, authentication, token refresh and catalog normalization; the host does not interpret supplier-specific responses. Files it keeps under the product root go through FileStorage; `auth.json` is plain JSON shared with the native subscription providers, each owning its own root fields.
 
-The plugin package contains `package.json`, its ESM entry and `dim-plugin.json`:
-
-```json
-{
-  "schemaVersion": 1,
-  "id": "my-managed-provider",
-  "version": "1.0.0",
-  "hostApiVersion": 2,
-  "rutisVersion": "0.10.0",
-  "entry": "dist/index.js",
-  "files": {"dist/index.js": "<sha256>"}
-}
-```
-
-The host checks compatibility and confines the canonical entry path to the plugin directory. Release staging verifies download and file digests before loading or packaging code. An explicitly configured invalid or incompatible plugin fails startup. Without plugin configuration, no Node process starts.
-
-The managed-provider package contract remains `@arcships/rutis` 0.10.0: the 0.16.0 runtime accepts its plugin API 1 exports. The ESM entry is a `definePlugin` export. It declares `managedProvider` in `provides`, with every method `async`, and receives `{home: absoluteProductHome}` as its configuration. Bundle its SDK/business runtime dependencies or supply them inside its own package. Plugin module resolution must not rely on this repository's development installation.
-
-```ts
-import { definePlugin } from '@arcships/rutis'
-export default definePlugin({
-  name: 'ManagedProvider',
-  provides: { managedProvider: { providers: 'async', status: 'async' } },
-  apply(ctx, config) {
-    ctx.provide('managedProvider', accountService)
-    ctx.effect(() => accountService.close())
-  },
-})
-```
-
-This fragment shows declaration and ownership; a usable account plugin implements the full service contract below. It owns account schema, authentication, token refresh and catalog normalization. The Rust provider host does not interpret supplier-specific responses. Host API 2 requires `quiesce` and offers native file transactions; API 1 packages are rejected rather than silently losing shutdown guarantees.
+The Dim account (`dimcode-api-oauth`) is such a plugin, maintained in the private `dim-oauth-plugin-rust` repository; an account build is that repository's `dimcode`. See the [development contract](../../docs/architecture/development.md#managed-provider-boundary) and [release packaging](../../docs/release/README.md#local-packaging).
 
 ### Trusted plugin storage
 
 The native provider is installed once whenever the host supplies an authorized
-product root. Public process, Session and branch rows use the same provider as
-managed plugins; a Session-only configuration needs no process row. Without
+product root. Public process, Session and branch rows use the same provider; a
+Session-only configuration needs no process row. Without
 that root, no provider or working-directory fallback is supplied. See the
 [public binding](../../docs/design/process-typescript.md#52-public-pluginfiles-binding).
 The embedding host must provision each consumer's parent directories before
@@ -321,7 +292,7 @@ Use a fresh suffix for each backup attempt, such as `before-reset-<UUID>`. An `e
 
 Quiesce rejects new transactions and cancels acquisition, but permits an acquired transaction to persist before close joins it. The optional Promise cancels acquisition when it settles; Node must settle it on ordinary completion too so a pending exported Promise cannot hold runtime drain open. Rutis 0.10 does not encode Node AbortSignal arguments; do not pass one. Escaped file callbacks are revoked before releasing the lease. Abandoning the caller does not abandon issued I/O. Runtime loss revokes the lease after admitted native I/O settles; it cannot guarantee persistence of an external side effect whose result died with the runtime.
 
-Credential bytes, including refresh tokens, may pass through this trusted local bridge. They must never be forwarded to terminal RPC, model requests, history, diagnostics or logs. OAuth policy and payload schema remain in the private package. Startup follows current loader row identities: Rutis may replace an offline JS row when it discovers its declared injections, so a disposed provisional fiber is not itself a startup failure. A row that remains disposed consumes the remaining startup deadline before reporting its terminal state; an explicit failed state still fails immediately.
+Bytes a plugin stores pass through this trusted local bridge. They must never be forwarded to terminal RPC, model requests, history, diagnostics or logs. Startup follows current loader row identities: Rutis may replace an offline JS row when it discovers its declared injections, so a disposed provisional fiber is not itself a startup failure. A row that remains disposed consumes the remaining startup deadline before reporting its terminal state; an explicit failed state still fails immediately.
 
 #### Storage record format
 
@@ -372,22 +343,32 @@ replacement and backup primitives cover the format. Acceptance uses disposable
 plugin roots to verify round-trip text, stored version, reopen, version rejection
 with byte preservation and unchanged transaction/backup/lifecycle behavior.
 
-## Service contract
+## Managed provider contract
 
-Every call returns one JSON envelope:
+`ManagedProvider` ([`src/managed_provider.rs`](src/managed_provider.rs)) is the typed service a managed provider plugin publishes. `ManagedProviderBinding` hands it to the process-owned `ManagedProviders`, which the account RPC and the provider service use. Without a binding the process lists no managed providers. The contract is Rust-only.
+
+| Method | Input | Value |
+| --- | --- | --- |
+| `providers` | — | `ProviderDescriptor[]` (`providerId`, `displayName`, `loginMethods`) |
+| `status`, `recover`, `logout` | provider ID | `AccountSnapshot` |
+| `usage` | provider ID | `Usage` |
+| `begin_browser` | `{providerId,directory,email?,redirectUri}` | `{attemptId,authorizationUrl,expiresAt}` |
+| `begin_device` | `{providerId,directory,email?}` | `{attemptId,verificationUri,verificationUriComplete?,userCode,expiresAt}` |
+| `complete_browser` | `{providerId,attemptId,callbackUrl}` | `AccountSnapshot` |
+| `attempt_status` | `{providerId,attemptId}` | `pending`, `completed` with its account, `failed`, `cancelled` or `expired` |
+| `cancel_attempt` | `{providerId,attemptId}` | — |
+| `catalog` | provider ID | `{account, models: ManagedModel[]}` |
+| `credential` | provider ID, model ID | `CredentialLease` |
+| `recover_rejected`, `finish_rejected` | `CredentialLease` | `CredentialLease`, — |
+| `quiesce` | — | — |
 
 ```ts
-type Result<T> =
-  | { ok: true; value: T }
-  | { ok: false; error: { code: string; message: string } }
-
-type Provider = { providerId: string; displayName: string; loginMethods: Array<'browser' | 'device'> }
-type Account = {
+type AccountSnapshot = {
   credentialEpoch: string
   generation: number
   account?: { issuer: string; subject: string; email?: string; name?: string; grantedScopes: string[] }
 }
-// The plan and consumption of the signed-in account, as the plugin projects
+// The plan and consumption of the signed-in account, as the provider projects
 // its account service's usage report. Parts the service does not report are
 // absent; an unlimited bucket reports its totals as 0 with `unlimited: true`.
 type Usage = {
@@ -398,72 +379,35 @@ type Usage = {
 }
 ```
 
-`providers()` and `quiesce()` have no arguments. Every other method receives one DTO, carried as `[dto]` by rutis. `providerId` is always explicit. There is no default managed supplier.
+Account and login operations are exposed as `account.providers`, `account.status`, `account.recover`, `account.logout`, `account.usage`, `account.login.begin`, `account.login.browser.begin`, `account.login.browser.complete`, `account.login.status` and `account.login.cancel`; a failed attempt reports only `Login failed`. Existing `account.codex.*` and `account.grok.*` retain their native contracts. Attempt secrets are memory-only and cleared on completion, cancellation or expiry; a terminal attempt stays queryable until its deadline.
 
-| Service method | DTO | Successful value |
-| --- | --- | --- |
-| `providers` | None | `Provider[]` |
-| `quiesce` | None | `{}` |
-| `status`, `recover`, `logout` | `{providerId}` | `Account` |
-| `usage` | `{providerId}` | `Usage`; `account_required` when signed out |
-| `beginBrowser` | `{providerId,directory,email?,redirectUri}` | `{attemptId,authorizationUrl,expiresAt}` |
-| `beginDevice` | `{providerId,directory,email?}` | `{attemptId,verificationUri,verificationUriComplete?,userCode,expiresAt}` |
-| `completeBrowser` | `{providerId,attemptId,callbackUrl}` | `Account` |
-| `attemptStatus` | `{providerId,attemptId}` | `{status,account?,error?}` |
-| `cancelAttempt` | `{providerId,attemptId}` | `{}` |
-| `catalog` | `{providerId}` | `{account,models:CatalogModel[]}` |
-| `credential` | `{providerId,modelId}` | `CredentialLease` |
-| `recoverRejected`, `finishRejected`, `release` | `{providerId,leaseId}` | Lease, `{}`, `{}` respectively |
+`ManagedModel` is `{entry: ModelEntry, protocol, unavailableReason, zdr}`. `ModelEntry`, capabilities and metadata are defined in [`model_catalog.rs`](src/model_catalog.rs) and `dim-agent-types`. A provider supplies final public model descriptions; `BundledCatalog::fallback` offers the provider service's bundled metadata (refreshed before each release) for what its source omits. An unavailable model keeps a reason and is unselectable.
 
-Attempt statuses are `pending`, `completed`, `failed`, `cancelled` and `expired`. A completed attempt includes its non-secret account snapshot. Account and login operations are exposed as `account.providers`, `account.status`, `account.recover`, `account.logout`, `account.usage`, `account.login.begin`, `account.login.browser.begin`, `account.login.browser.complete`, `account.login.status` and `account.login.cancel`. Existing `account.codex.*` and `account.grok.*` retain their native contracts.
+`CredentialLease` carries the account snapshot, protocol, final protocol base URL (the model adapter adds its endpoint), request headers and bearer. It has no `Debug` or serialization; credential methods are internal to the model resolver and never appear in terminal RPC, history, Timeline, configuration replies or logs. Refresh tokens stay inside the provider. A lease is released when its last holder drops it, including a result whose caller went away. Leases are bound to the provider instance, account and grant revision, expire after 30 minutes and are capped at 1024. `ManagedProviders` stamps each lease with the binding that issued it: recovery and final rejection of a lease whose binding was replaced fail with `service_reloading` before any provider sees them, even when the replacement reports an equal account and reuses its lease IDs. `recover_rejected` performs one controlled recovery: it adopts a newer persisted grant or performs one serialized refresh. `finish_rejected` signs out only if the rejected grant still owns the account. Host recovery is limited to HTTP 401; unrelated failures retain the account.
 
-Internal model operations use these normalized types:
+`ManagedProviders` checks provider output once where it enters the host, and rejects it as `account_invalid_response`: provider descriptors (non-empty unique IDs, a display name, `browser`/`device` login methods; an invalid set also fails the binding), account snapshots (an epoch, a generation within the safe integer range, a non-empty issuer and subject), catalogs (a signed-in account, unique non-empty model IDs, display names, supported protocols, limits from 1 to the safe maximum) and leases (an ID, a bearer, a signed-in account, a supported protocol, an `http`/`https` base URL without user information, query or fragment, and header names and values without CR or LF). A refused lease is dropped, which releases it.
 
-```ts
-type Protocol = 'openai-compatible' | 'openai-responses' | 'anthropic'
-type CatalogModel = {
-  entry: ModelEntry
-  protocol: Protocol
-  unavailableReason: string | null
-  zdr: boolean
-}
-type CredentialLease = {
-  leaseId: string
-  account: Account
-  protocol: Protocol
-  baseUrl: string
-  headers: Record<string, string>
-  bearer: string
-}
-```
+The provider owns every accepted operation: a caller dropping its future never abandons a token rotation or a persisted login, and disposal joins that work. Before draining Agent/RPC work, the host calls the idempotent `quiesce()`; binding unload does the same. Quiesce stops admission and cancels lock waits and login attempts without awaiting them; it does not abandon a refresh that holds the account lock or revoke delivered leases.
 
-`ModelEntry`, capabilities and metadata are defined in [`model_catalog.rs`](src/model_catalog.rs) and `dim-agent-types`. A plugin supplies final public model descriptions and public diagnostics. An unavailable model keeps a reason and remains unselectable. The host validates duplicate IDs, supported protocols and safe positive model limits once at the cross-language boundary. It does not reproject normalized plugin models through bundled provider rules.
-
-`baseUrl` is the final protocol base URL; the existing model adapter adds its protocol endpoint. Headers and bearer are request-local secrets. `leaseId` is an opaque short-lived handle bound to the plugin runtime, account and credential revision. A plugin rejects expired/old handles and bounds their count and lifetime. `recoverRejected` performs one controlled recovery, and `finishRejected` settles rejection of the recovered credential. Host recovery is limited to HTTP 401; unrelated failures retain the account.
-
-Credential methods are internal to the model resolver and never appear in terminal RPC, history, Timeline, configuration replies or logs. Refresh tokens stay inside the plugin. Rust releases a lease when its last request/recovery owner drops it. A withdrawn binding rejects new calls, closes its generation's task tracker and drains already admitted promises. A caller disappearing does not drop an accepted token rotation. Runtime loss invalidates old handles and is not automatically replayed or restarted; API-key providers keep working.
-
-Before draining Agent/RPC work, the host calls the idempotent `quiesce()` on the retained provider dispatch. Binding unload does the same before waiting for its generation. Quiesce stops admission and cancels preflight/lock waiters without awaiting those callers; it must not abandon an issued refresh or revoke delivered credentials. `release` remains available until final disposal. The plugin's unload disposer then joins accepted work. Rutis consumer-first disposal cannot substitute for this pre-drain phase.
-
-Plugin error messages are not forwarded. The host maps canonical `invalid_store`, `unsupported_schema`, `identity_rejected`, `invalid_input`, `invalid_callback`, `config_error`, `attempt_not_found`, `attempt_closed`, `token_missing`, `refresh_rejected`, `account_changed`, `account_recovery_required`, `account_reset_blocked` and `service_reloading` into fixed public diagnostics. Malformed responses fail explicitly. Account corruption and unavailable plugins are not represented as a signed-out account.
+Errors are the canonical `ManagedError` kinds; the host maps them to fixed public diagnostics (`account_required`, `account_changed`, `account_invalid_store`, `account_unsupported_schema`, `account_recovery_required`, `account_reset_blocked`, `account_identity_rejected`, `account_invalid_input`, `login_attempt_unknown`, `login_attempt_closed`, `account_invalid_response`, `service_reloading`, otherwise `account_unavailable`). Account corruption and an unavailable provider are never represented as a signed-out account.
 
 ## Catalog and storage consistency
 
 The provider host stores normalized catalog caches, user model overrides, disabled model IDs and their revision in the existing `providers` table. Managed records have `kind: managed` and an account snapshot; token data is absent. Static records retain their own schema.
 
-A catalog refresh captures the current SQL record version before its plugin request. Its commit uses that version as a compare-and-swap guard, so a late request cannot overwrite a newer catalog. Account generation is checked before and after commit. An account change fails the operation rather than returning successful stale data. Cache lookup and request credential resolution require the same account epoch/generation; a previously stored snapshot can never authorize the next account.
+A catalog refresh captures the current SQL record version before its provider request. Its commit uses that version as a compare-and-swap guard, so a late request cannot overwrite a newer catalog. Account generation is checked before and after commit. An account change fails the operation rather than returning successful stale data. Cache lookup and request credential resolution require the same account epoch/generation; a previously stored snapshot can never authorize the next account.
 
-There is no atomic transaction spanning the plugin's account file and SQLite. A generation change during an admitted SQL write can leave an older, unusable cache record; the next explicit refresh replaces it. The host does not hold an account lock across IPC or retry state-changing operations implicitly.
+There is no atomic transaction spanning the account file and SQLite. A generation change during an admitted SQL write can leave an older, unusable cache record; the next explicit refresh replaces it. The host does not hold the account lock across provider calls or retry state-changing operations implicitly.
 
 ## Verification
 
-Public API-key, provider, native subscription and transport flows do not need Node:
+Public API-key, provider, native subscription, managed provider and transport flows do not need Node:
 
 ```sh
-cargo test --locked -p dim-app-server --test provider_flow --test managed_oauth_flow --test model_catalog_flow --test transport_flow
+cargo test --locked -p dim-app-server --test provider_flow --test managed_oauth_flow --test managed_provider_flow --test model_catalog_flow --test transport_flow
 ```
 
-The separately enabled Node flows load public SDK fixtures: plugins through the actual rutis runtime, and MCP servers built on the official MCP SDK. They cover managed-provider recovery; C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries; Python rows and an unmodified Cordis 4 plugin in their groups; and stdio and legacy SSE MCP discovery, calls, cancellation and cleanup. They do not require a private account package. The Python rows need Python 3.10 or later with the pinned `rutis` package:
+The separately enabled Node flows load public SDK fixtures: plugins through the actual rutis runtime, and MCP servers built on the official MCP SDK. They cover C4 Session tool/method binding, isolation, restore, cancellation and invalid boundaries; Python rows and an unmodified Cordis 4 plugin in their groups; and stdio and legacy SSE MCP discovery, calls, cancellation and cleanup. They do not require a private account package. The Python rows need Python 3.10 or later with the pinned `rutis` package:
 
 ```sh
 npm ci --prefix runtime --ignore-scripts

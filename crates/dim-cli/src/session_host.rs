@@ -815,6 +815,28 @@ impl Worker {
                 let models = self.models().await.map_err(|error| error.to_string());
                 self.send(Update::Models(models));
             }
+            Command::ClearModelPreferences {
+                provider_id,
+                model_id,
+                expected_version,
+            } => {
+                let result = clear_model_preferences(
+                    &mut self.client,
+                    &provider_id,
+                    &model_id,
+                    expected_version,
+                )
+                .await;
+                self.send(Update::Notice(match result {
+                    Ok(()) => {
+                        "Saved model preferences cleared; select the model to adopt its defaults"
+                            .into()
+                    }
+                    Err(error) => error.to_string(),
+                }));
+                let models = self.models().await.map_err(|error| error.to_string());
+                self.send(Update::Models(models));
+            }
             Command::SetApprovals(mode) => {
                 let result = match permission::parse_preset(&mode) {
                     Err(error) => Err(error.to_string()),
@@ -1605,7 +1627,7 @@ impl Worker {
         }
         let result: crate::Result<String> = async {
             if let Some(existing) = self.provider_summaries().await?.into_iter().find(|provider| provider.provider_id == provider_id) {
-                return Ok(format!("Recovered existing provider {}", existing.display_name));
+                return Err(format!("Provider {} already exists; review the retained draft and press Apply again", existing.display_name).into());
             }
             let connection = json!({"driverKind":"openai-compatible", "auth":{"type":"bearer"}, "baseUrl":base_url, "credential":{"action":"set", "value":api_key}});
             let probed: Probed = self.client.typed("provider.probe", json!({"providerId":provider_id,"connection":connection})).await?;
@@ -1719,6 +1741,7 @@ impl Worker {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Catalog {
+            version: u32,
             models: Vec<CatalogModel>,
             disabled_model_ids: Vec<String>,
         }
@@ -1774,6 +1797,7 @@ impl Worker {
                     .map(|model| ModelItem {
                         provider_id: provider_id.clone(),
                         provider_name: provider_name.clone(),
+                        provider_version: catalog.version,
                         model_id: model.id,
                         display_name: model.name,
                     }),
@@ -2436,12 +2460,43 @@ pub(crate) async fn saved_model_preferences(
     Ok(provider.preferences.get(model_id).cloned())
 }
 
+pub(crate) async fn clear_model_preferences(
+    client: &mut Client,
+    provider_id: &str,
+    model_id: &str,
+    expected_version: u32,
+) -> crate::Result<()> {
+    client.rpc("provider.preferences.update", json!({
+        "providerId": provider_id, "modelId": model_id, "expectedVersion": expected_version,
+        "patch": {"reasoningEffort": {"action": "clear"}, "serviceTier": {"action": "clear"}}
+    })).await?;
+    Ok(())
+}
+
+pub(crate) async fn clear_saved_model_preferences(
+    client: &mut Client,
+    provider_id: &str,
+    model_id: &str,
+) -> crate::Result<()> {
+    let snapshot: ProviderManagement = client
+        .typed("provider.management", json!({"providerId": provider_id}))
+        .await?;
+    let version = snapshot
+        .providers
+        .into_iter()
+        .next()
+        .ok_or("Provider management entry is missing")?
+        .version
+        .ok_or("Provider catalog must be refreshed before editing preferences")?;
+    clear_model_preferences(client, provider_id, model_id, version).await
+}
+
 pub(crate) fn model_adoption_error(
     error: crate::Error,
     preferences: Option<&serde_json::Value>,
 ) -> crate::Error {
     match preferences {
-        Some(preferences) => format!("Model adoption with saved preferences {preferences} failed: {error}. Review unsupported values with provider.preferences.update; saved preferences were kept.").into(),
+        Some(preferences) => format!("Model adoption with saved preferences {preferences} failed: {error}. Clear them with Ctrl+X in /models or dimcode models PROVIDER --clear-preferences MODEL; saved preferences were kept.").into(),
         None => error,
     }
 }

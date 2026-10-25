@@ -405,7 +405,8 @@ async fn timeline_export_carries_before_traces() {
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.branch_part(|names| names.part(TagInput));
+    builder
+        .require_feature(Feature::new("TagInput").branch("TagInput", |names| names.part(TagInput)));
     let server = serve(
         builder,
         ServerConfig {

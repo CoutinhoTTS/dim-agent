@@ -516,7 +516,7 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 | --- | --- |
 | 注册到 `toolRegistry` 的工具 `ask_user` | `Keyed<ToolRegistry>`；在 `apply` 中调用 `tools.register(ctx, ToolContribution {definition, handler})`，与 Wait 相同；`ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`；取消 = `HostError::Cancelled(reason)` |
 | `sessionMethods` 命名空间 `session.question` | `Keyed<SessionMethods>`；在 `apply` 中调用 `methods.register(ctx, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)`，与 ShellInput 相同 |
-| `S:SessionConfig` | `InSession<SessionConfig>`，每次调用读取字段 `interactive` |
+| `S:SessionConfig` | `Keyed<SessionConfig>`，每次调用读取字段 `interactive` |
 
 ```rust
 pub struct Question { pub id: String, pub header: Option<String>, pub question: String,

@@ -19,7 +19,6 @@ mod permission_command;
 mod plugins;
 mod projection;
 mod question;
-mod runtime;
 mod sanitize;
 mod session;
 mod session_host;
@@ -480,6 +479,11 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             Ok(0)
         }
         Action::Models(provider) => {
+            if let Some(model) = &options.clear_preferences {
+                session_host::clear_saved_model_preferences(&mut client, provider, model).await?;
+                println!("Saved model preferences cleared");
+                return Ok(0);
+            }
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Catalog {

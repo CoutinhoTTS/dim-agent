@@ -1,7 +1,8 @@
 # How Dim uses rutis
 
-Status: Accepted under [ADR 006](../adr/006-plugin-contract.md) (D2–D4). Not implemented as a whole;
-each section says what holds today.
+Status: Accepted under [ADR 006](../adr/006-plugin-contract.md) (D2–D4). Implemented, except
+foreign plugins as one row (R5's second form, R7), which wait for rutis#642; each section says what
+holds today.
 [中文](../zh/design/rutis-usage.md)
 
 rutis owns the plugin machinery. This document states how Dim uses it: how a part is mounted, how it
@@ -100,9 +101,7 @@ name-bound (#391, #392, #396–#398, #400).
   WorkspaceTools, which holds the file-write coordinator. ConfiguredModels and ConfiguredModel, and
   PermissionRules and CommandRules, stay two plugins: the profile chooses which part binds the
   Session's `PrepareModelHost` or `CommandRulesHost`, whether or not the process row runs. An Agent
-  placing itself starts its plugins with its first Session or `Agent::start`. Tests still add
-  profile parts with `AgentBuilder::session_part`/`branch_part`
-  ([#375](https://github.com/arcships/dim/issues/375)).
+  placing itself starts its plugins with its first Session or `Agent::start`.
 - Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry, and Session
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).
@@ -146,9 +145,10 @@ hand-written adapter layer.
 
 Each name is declared once. A service that crosses languages declares its name on its Rust type with
 `#[rutis::service]`. A Rust-only service, or a name a foreign part provides, is registered in the
-host's loader catalog. The catalog shares only those names (`share_registered_only`). `xtask` will
-generate the authoritative table from the real assembly (R4). The names Dim defines are listed in the
-[plugin contract §4](plugin-contract.md#4-dims-services).
+host's loader catalog. The catalog shares only those names (`share_registered_only`). `xtask graph`
+writes the authoritative table from the real assembly, the
+[generated catalog](../architecture/rust-agent/generated/catalog.md), and `xtask check` fails when it is
+stale (R4). What each name Dim defines is for is in the [plugin contract §4](plugin-contract.md#4-dims-services).
 
 *Today:* the process services that cross languages are marked `#[rutis::service]`. The services
 provided per Session or branch are listed with their group in the App Server's build script
@@ -231,15 +231,17 @@ These requirements concern how Dim uses rutis. They follow
 
 ### R4. The catalog is generated and Capabilities are marked automatically
 
-- **Blocked:** §3.4 here and [plugin contract §8](plugin-contract.md#8-guarantees-conventions-and-the-audit). Today the catalog is spread across `build.rs`, the authoring guide and
-  design documents, and nothing marks which parts are Capabilities.
+- **Blocked:** §3.4 here and [plugin contract §8](plugin-contract.md#8-guarantees-conventions-and-the-audit). The catalog was spread across `build.rs`, the authoring guide and
+  design documents, and nothing marked which parts are Capabilities.
 - **Existing mechanisms considered:** `xtask graph` already records injected and provided services
   from the real assembly.
 - **Needed:** `xtask graph` writes the catalog table (name, group, provider, crosses languages,
   methods) and marks which parts are Capabilities, from the names they inject (`dispatcher`,
   `timeline`).
 - **Effect:** none at runtime.
-- **Owner:** `xtask`. Issue to be opened.
+- **Owner:** `xtask`. Delivered ([#381](https://github.com/arcships/dim/issues/381)): `xtask graph`
+  writes the [generated catalog](../architecture/rust-agent/generated/catalog.md) from the App Server
+  product profile with one Session, and `xtask check` fails when it is stale.
 
 ### R5. Foreign plugins register their parts
 
@@ -322,7 +324,7 @@ These requirements concern how Dim uses rutis. They follow
 
 ### A.1 The old forms and their replacements
 
-The replacements exist since P2; the old forms remain until P3 has moved every part.
+P3 deleted the old forms ([#375](https://github.com/arcships/dim/issues/375)); this table maps each to its replacement.
 
 | Old form | Replacement |
 | --- | --- |
@@ -334,7 +336,7 @@ The replacements exist since P2; the old forms remain until P3 has moved every p
 | `Contributions<T>` | Nothing: a contribution registers with its owner (R6) |
 | `When<D>` | `When<D>` with keys from `Names::when`: the factory includes the name or not when it builds the copy. Not rutis `Option<..>`, which reads without gating |
 | `SessionService`, `BranchService` markers | The group registered in the catalog (`names::register`) |
-| `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`: rows in the `session` or `branch` group; `register_part` for a process row |
+| `AgentBuilder::session_plugin`/`timeline_plugin` | A feature registers its parts with the part registry (`Feature`, added with `AgentBuilder::feature`, or its own plugin with `AgentBuilder::plugin`; a profile uses `require_feature`); `register_part` for an App Server process row |
 | `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` (removed) | The owner's `register`, called by the contributing part: `toolRegistry`, `promptRegistry`, `sessionMethods`, `managementMethods` (R6) |
 | `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type; `Exports` for types whose source cannot change, and for services provided per Session or branch (§3.4) |
 | `PublicService` | Unchanged (a facade rule) |

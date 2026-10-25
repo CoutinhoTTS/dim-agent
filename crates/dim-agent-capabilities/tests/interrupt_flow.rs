@@ -235,10 +235,19 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
             }))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+            .require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                }),
+            );
         defaults::install(&mut builder);
         let extension_plugin = extension.clone();
-        builder.branch_part(move |names| names.part(Extension(extension_plugin.clone())));
+        builder.require_feature(
+            Feature::new("test.interrupt-extension")
+                .branch("test.interrupt-extension", move |names| {
+                    names.part(Extension(extension_plugin.clone()))
+                }),
+        );
         let agent = builder.build();
         let session = soon(agent.create_session(SessionConfig::default()))
             .await
@@ -394,9 +403,11 @@ async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder.branch_part(move |names| {
-        InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
-    });
+    builder.require_feature(
+        Feature::new("test.input-gate").branch("test.input-gate", move |names| {
+            InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
+        }),
+    );
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
@@ -471,9 +482,11 @@ fn gated() -> (Agent, Arc<Gate>) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder.branch_part(move |names| {
-        InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
-    });
+    builder.require_feature(
+        Feature::new("test.input-gate").branch("test.input-gate", move |names| {
+            InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
+        }),
+    );
     (builder.build(), gate)
 }
 fn interrupt() -> EventDraft {
@@ -572,9 +585,11 @@ async fn a_tool_call_already_committed_when_the_interrupt_arrives_is_not_execute
     let mut builder = AgentBuilder::new(AgentConfig::default());
     // Hold an earlier event, before any subscriber can receive the terminal.
     let copy = gate.clone();
-    builder.branch_part(move |names| {
-        InputGate::part(names, copy.clone(), After::Dispatcher, "step/tool-use")
-    });
+    builder.require_feature(
+        Feature::new("test.input-gate").branch("test.input-gate", move |names| {
+            InputGate::part(names, copy.clone(), After::Dispatcher, "step/tool-use")
+        }),
+    );
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
         .process_value(Arc::new(ModelHost(Arc::new(ProposesTool))))
@@ -586,7 +601,11 @@ async fn a_tool_call_already_committed_when_the_interrupt_arrives_is_not_execute
         }))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::install(&mut builder);
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
@@ -638,9 +657,11 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
     let mut builder = AgentBuilder::new(AgentConfig::default());
     // InputQueue commits input/applied before this gate holds input/message;
     // Loop cannot receive the later event until the gate is released.
-    builder.branch_part(move |names| {
-        InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
-    });
+    builder.require_feature(
+        Feature::new("test.input-gate").branch("test.input-gate", move |names| {
+            InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
+        }),
+    );
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
         .process_value(Arc::new(ModelHost(Arc::new(Model {
@@ -652,11 +673,19 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::install(&mut builder);
     let copy = end_gate.clone();
     // Loop publishes Idle before this subscriber completes turn/end dispatch.
-    builder.branch_part(move |names| InputGate::part(names, copy.clone(), After::Loop, "turn/end"));
+    builder.require_feature(
+        Feature::new("test.turn-end-gate").branch("test.turn-end-gate", move |names| {
+            InputGate::part(names, copy.clone(), After::Loop, "turn/end")
+        }),
+    );
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
@@ -798,7 +827,11 @@ fn channel_builder(model: Arc<ChannelModel>) -> AgentBuilder {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     builder
 }
@@ -1125,7 +1158,11 @@ async fn a_steer_during_preparation_ends_the_request_before_the_model_call() {
         }))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     defaults::install(&mut builder);
     let agent = builder.build();
@@ -1218,7 +1255,11 @@ async fn a_steer_consumed_after_the_first_output_waits_for_the_output_end() {
     let mut builder = channel_builder(model.clone());
     // InputQueue must subscribe first; independent plugins have no apply order.
     let copy = gate.clone();
-    builder.branch_part(move |names| names.part(AppliedGatePlugin(copy.clone())));
+    builder.require_feature(
+        Feature::new("test.applied-gate").branch("test.applied-gate", move |names| {
+            names.part(AppliedGatePlugin(copy.clone()))
+        }),
+    );
     defaults::install(&mut builder);
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
@@ -1349,9 +1390,17 @@ fn hold_terminal(builder: &mut AgentBuilder) -> (Arc<AppliedGate>, Arc<TerminalH
     let gate = Arc::new(AppliedGate::default());
     let hold = Arc::new(TerminalHold::default());
     let copy = gate.clone();
-    builder.branch_part(move |names| names.part(AppliedGatePlugin(copy.clone())));
+    builder.require_feature(
+        Feature::new("test.applied-gate").branch("test.applied-gate", move |names| {
+            names.part(AppliedGatePlugin(copy.clone()))
+        }),
+    );
     let (copy, held) = (gate.clone(), hold.clone());
-    builder.branch_part(move |names| names.part(TerminalHoldPlugin(held.clone(), copy.clone())));
+    builder.require_feature(
+        Feature::new("test.terminal-hold").branch("test.terminal-hold", move |names| {
+            names.part(TerminalHoldPlugin(held.clone(), copy.clone()))
+        }),
+    );
     (gate, hold)
 }
 /// Applies a steer whose dispatch the gate holds, and arms the hold of the
@@ -1459,7 +1508,11 @@ async fn a_steer_is_not_consumed_between_a_failed_preparation_and_its_terminal()
         .session_value(Arc::new(PrepareContextHost(prepare.clone())))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     let (gate, hold) = hold_terminal(&mut builder);
     defaults::install(&mut builder);

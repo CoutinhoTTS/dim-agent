@@ -50,10 +50,13 @@ impl Sessions {
     /// `sessions` service for the test.
     pub(super) fn install(&self, builder: &mut AgentBuilder) {
         let consumer = self.clone();
-        builder.session_part(move |names| {
-            let service = names.named::<dyn HostDispatch>("sessions")?;
-            Ok(names.part_with(SessionsConsumer(consumer.clone()), service))
-        });
+        builder.require_feature(Feature::new("sessions-consumer").session(
+            "sessions-consumer",
+            move |names| {
+                let service = names.named::<dyn HostDispatch>("sessions")?;
+                Ok(names.part_with(SessionsConsumer(consumer.clone()), service))
+            },
+        ));
     }
     /// One call with one request object; the reply envelope.
     pub(super) async fn call(&self, method: &str, request: Value) -> Value {
@@ -192,9 +195,7 @@ async fn serve_with(setup: Setup) -> Served {
             .unwrap_or_else(|| Arc::new(dim_agent_runtime::MemoryTimelineStore::default())),
     );
     if let Some(controls) = setup.controls {
-        builder.session_part(move |names| {
-            super::session_typescript::ControlledGate::part(names, controls.clone())
-        });
+        builder.require_feature(super::session_typescript::ControlledGate::feature(controls));
     }
     match setup.rules {
         None => defaults::install(&mut builder),
@@ -207,7 +208,11 @@ async fn serve_with(setup: Setup) -> Served {
             builder
                 .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
                 .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
-                .session_part(move |names| names.part(HeldRulesPart(rules.clone(), names.key()?)));
+                .require_feature(
+                    Feature::new("held-rules").session("held-rules", move |names| {
+                        names.part(HeldRulesPart(rules.clone(), names.key()?))
+                    }),
+                );
             defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
         }
     }
@@ -223,7 +228,11 @@ async fn serve_with(setup: Setup) -> Served {
                 ))))
                 .session_value(Arc::new(host::ContextModelHost(None)))
                 .session_value(Arc::new(host::CompactionStrategyHost(None)))
-                .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+                .require_feature(
+                    Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                        names.part(DefaultPrepareModelPlugin::new(names)?)
+                    }),
+                );
         }
     }
     dim_agent_capabilities::defaults::tool_host(

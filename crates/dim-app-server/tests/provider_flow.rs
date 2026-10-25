@@ -2669,6 +2669,33 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     ] {
         assert!(serde_json::from_value::<dim_app_server::provider::ProviderPatch>(patch).is_err());
     }
+    for patch in [
+        json!({}),
+        json!({"headers":[]}),
+        json!({"network":{}}),
+        json!({"headers":[],"network":{}}),
+    ] {
+        assert!(matches!(
+            provider
+                .update(
+                    managed_id.into(),
+                    1,
+                    serde_json::from_value(patch).unwrap(),
+                    &cancel
+                )
+                .await,
+            Err(ProviderError::InvalidConfig(_))
+        ));
+        assert_eq!(
+            provider
+                .management(Some(managed_id.into()), &cancel)
+                .await
+                .unwrap()
+                .providers[0]
+                .version,
+            Some(1)
+        );
+    }
     let edited = provider.update(managed_id.into(), 1, serde_json::from_value(json!({
         "displayName":"Renamed", "headers":[{"name":"x-private","action":"remove"},{"name":"X-Preserved","action":"set","value":"preserved"}],
         "network":{"timeoutMs":{"action":"clear"}}

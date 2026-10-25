@@ -253,6 +253,19 @@ CLI 同步迁移 crates/dim-cli/src/session_host.rs 的 PROVIDER_METHODS、全�
 再 refresh 测试；编辑按需 probe 草稿，然后只 update 改动字段；Disconnect 原子提交
 credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭据被拒绝的问题。
 启停用 update，账号登录/登出仍走原 owner。
+重复创建时若 UUID 已存在，转为该记录的编辑表单并保留 URL/密钥草稿，由用户再次 Apply 确认，
+不直接报告草稿已保存。只有空 headers:[] 或 network:{} 的更新拒绝，不增加记录版本。
+
+/models 对当前选中模型提供 Ctrl+X，按列表读取时的版本 CAS 清除保存的 reasoningEffort
+与 serviceTier；列表保持打开，Enter 另行显式采用默认值。冲突则刷新列表，由用户重试。
+非交互入口为 `dimcode models PROVIDER --clear-preferences MODEL`，先重读版本再同样更新。
+两者都不改当前 Session 已采用的模型；发现和采用失败不会自动删除历史偏好。
+
+```text
+Select a model
+> Provider / model
+Enter select · Ctrl+X clear saved · Esc clear/close
+```
 
 ```text
 Providers                         Provider detail

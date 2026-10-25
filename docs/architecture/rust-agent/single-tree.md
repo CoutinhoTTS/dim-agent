@@ -17,13 +17,13 @@ Product assembly preflight remains incomplete; proposals are recorded in
 descriptive contracts that assembly does not check.
 External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-app-server/README.md).
 
-本文统一按 rutis 0.16.0 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。本文描述当前 Rust 实现；目标插件契约（部件即 loader 行、按名字的服务目录）见 [ADR 006](../../adr/006-plugin-contract.md) 与[插件契约](../../design/plugin-contract.md)，迁移完成前以本文为准。
+本文统一按 rutis 0.16.0 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。本文描述当前 Rust 实现；目标插件契约（插件即一行、实例挂载为它登记的部件、按名字的服务目录）见 [ADR 006](../../adr/006-plugin-contract.md) 与[插件契约](../../design/plugin-contract.md)，迁移完成前以本文为准。
 
 ## 结构
 
 每个进程一个 rutis root。进程级服务、Session 与分支都是这棵树上的 Plugin；所有有状态服务、监听器和长期任务都由 Plugin 提供，依赖全部经 `TypedPlugin::Deps` 声明。`main` 只解析启动参数、建立 Tokio runtime、调用 `serve`、处理进程信号；纯协议解析、序列化与无状态转换是普通函数。
 
-可选的 managed provider 账号插件由外部单独提供：给出 `--plugin-dir`、`--js-runtime` 与 `--node` 时，rutis Node runtime 与该插件作为同一进程树中的独立 loader 行装载，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；插件不可用时其 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#optional-managed-provider)）。
+可选的 managed provider 是外部维护的 Rust 进程级 Plugin（Dim 账号在私有仓库 `dim-oauth-plugin-rust`）：账号版的 `dimcode` 通过 `cli::run_with` 注册它的行，它以类型化服务 `ManagedProvider` 提供，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；没有它时 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#managed-provider-plugins)）。
 
 MCP connection generations are nested `McpConnections` group instances owned by
 each Session in the same loader. `McpPublication` serializes source selection
@@ -80,23 +80,25 @@ rutis root
 与分支的挂载器（⟹）挂载为它登记的部件，作为自己的子节点；插件卸载时这些副本随之卸下（[ADR 006 D3](../../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)）。
 
 Groups annotate loader configuration rows; dependency order comes from `Deps`.
-`serve` registers process factories with `register_capability` and owns the static
+`serve` registers process plugins with `register_part` and owns the static
 assembly rows. All profiles reconcile their full assembly directly and wait for
 readiness. Native business documents import lazily per source; subsequent edits
 use Settings source-local CAS, not loader reconciliation. `RunningServer::restart`
 uses `Loader::restart(row_id)`.
 
-`AgentBuilder::install` registers scope plugins, capabilities and Session extension
-templates and returns the `session` row, nested under `agent` by App Server.
+`AgentBuilder::install` registers the scope plugins, the Session and branch mounters and
+Session extension templates and returns the `session` row, nested under `agent` by App Server.
+`AgentBuilder::plugin_rows` registers the builder's plugins and the row providing
+`partRegistry` as process rows.
 Standalone `AgentBuilder::build` owns a root and loader; `build_in(ctx)` owns an
 isolated loader key under the host; both create an `AgentAnchor` instance.
 `build_at(loader, ctx)` uses the host's existing loader.
 
-登记返回 `Result`，工厂构造和元数据读取的 panic 均返回构建错误。插件名称冲突时分配未占用的 `#n` 后缀，同时避让内置 Agent 行及所有分组 ID；扩展分组不得占用内置名称。实例创建检查 loader 的逐行失败报告，按登记生成的真实 row ID 等待 AgentBuilder 注册的部件，包括作用域根和显式请求的扩展；这些必需行即使没有 fiber，失败也不能忽略。失败则回滚整个候选实例。
+登记返回 `Result`，工厂构造和元数据读取的 panic 均返回构建错误。插件名称冲突时分配未占用的 `#n` 后缀，同时避让内置 Agent 行及所有分组 ID；扩展分组不得占用内置名称。实例创建检查 loader 的逐行失败报告，按登记生成的真实 row ID 等待必需行：作用域根、必需挂载器和显式请求的扩展；这些必需行即使没有 fiber，失败也不能忽略。必需挂载器把 profile 要求的部件（`require_feature`、`require_part`）交给实例创建，创建等它们 Active；尚无插件登记的必需部件同样让创建等待。失败则回滚整个候选实例。
 
-宿主通过现有 loader 行配置直接追加的可选部件不是 AgentBuilder 的必需注册：其 Pending、Failed 或运行时缺失保留在 loader 状态中，不阻塞必需部件和首条输入。注册路径决定等待范围，不按语言、展示名或当前状态推断，也不新增 required/optional 标记或注册 API。所有行仍由同一个作用域分组持有并一起清理；服务的 `Deps`、Pending、audit 和失效传播不变。必需部件仍会等待自己声明的全部依赖，不能通过可选行绕过。
+profile 未要求的已登记部件由可选挂载器挂载，宿主通过现有 loader 行配置直接追加的行（其他语言的部件）也是可选的：其 Pending、Failed 或运行时缺失保留在 loader 状态中，不阻塞必需部件和首条输入。profile 决定等待范围，不按语言、展示名或当前状态推断。所有行仍由同一个作用域分组持有并一起清理；服务的 `Deps`、Pending、audit 和失效传播不变。必需部件仍会等待自己声明的全部依赖，不能通过可选行绕过。
 
-因此，ShellInput、Attachments 等经 `AgentBuilder` 注册的第一方 Rust 部件也属于必需成员：它们不能 Active，Session 就不能发布。当前接受这一后果，因为这些部件的启动失败主要属于实现错误，其依赖是核心服务。若某个 Rust 功能开始依赖可能长期不可用的服务，应改由现有 loader 行安装；只有实际需求到来时才重新评估显式成员标记，现在不增加标记 API。
+因此，ShellInput、Attachments 等由安装函数要求的第一方 Rust 部件属于必需成员：它们不能 Active，Session 就不能发布。当前接受这一后果，因为这些部件的启动失败主要属于实现错误，其依赖是核心服务。依赖可能长期不可用的服务的 Rust 功能，以 `AgentBuilder::feature` 加入而不要求其部件，由可选挂载器挂载。
 
 必需部件在 `apply` 中登记的子插件仍由该部件等待；返回意味着其服务和订阅已就绪。debug 发布校验检查必需行及其子树的 Active 状态，发现未等待的子插件就拒绝发布；仅可选行及其子树不参加此 Active 校验。两者仍参加依赖读取和实例键审计。release 保留原有的作者责任与按注册行等待，不增加全进程诊断扫描。
 
@@ -112,7 +114,7 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 
 **归属树与依赖图分开。** 每个实例只有一个父节点；一个 Plugin 可以注入多个上游服务。按实际作用域与服务键解析后的依赖图必须无环，包含只为初始化顺序声明的依赖。父子关系本身不是服务依赖；父 `apply` 不等待依赖父服务的子节点 Active。事件的请求/结果往返不自动形成依赖边，只有必须存在的上游服务进入 `Deps`。
 
-依赖以类型声明：每个 Capability 实现 rutis `TypedPlugin`，`Deps` 列出全部依赖（`InSession<T>`、`InBranch<T>`、进程级 `Arc<T>`、只管顺序的 `SessionGate`/`BranchGate`/`Gate`、按配置取舍的 `When<D>`），`Capability::keys` 由作用域算出实例键，`apply` 收到已解析的依赖；声明与读取在编译期对齐，注册与依赖图从这份声明生成，不另维护手写依赖图。所提供的服务和事件订阅在 `apply` 中登记，不进入类型声明；能力写入与依赖哪些事件是描述契约，装配不检查。rutis 以 `EventKey<E>` 约束事件载荷；这些机制本身不检查产品依赖环或授权。
+依赖按名字声明：每个部件是 rutis `TypedPlugin`，`Deps` 列出全部依赖（读取的 `Keyed<T>`、只管顺序的 `KeyedGate<T>`、存在时才读且不门控的 `Option<Keyed<T>>`、按配置取舍的 `When<D>`）。每个名字属于服务目录中登记的一个组（进程、`session` 或 `branch`，`names::register`），绑定按名字和副本所在的实例从目录取得键（`Names`），指向所在实例之外的组的部件在组合时失败；`apply` 收到已解析的依赖；声明与读取在编译期对齐，注册与依赖图从这份声明生成，不另维护手写依赖图。所提供的服务和事件订阅在 `apply` 中登记，不进入类型声明；能力写入与依赖哪些事件是描述契约，装配不检查。rutis 以 `EventKey<E>` 约束事件载荷；这些机制本身不检查产品依赖环或授权。
 
 | 时机 | 必须检查与处理 |
 | --- | --- |
@@ -183,11 +185,11 @@ Session 与分支能力不向进程服务登记自己：RPC 经 `Session::servic
 
 | 对象 | 建立与释放 |
 | --- | --- |
-| `SessionScopePlugin` | `Agent` 创建 Session 时载入；`apply` 以本实例键提供身份、配置、故障报告、`TimelineFactory`、Session 生命周期 `SessionLifecycle`（Loading → Active → Closing → Closed：`Agent` 在 entries 锁内发布时 Active；关闭 token 取消即 Closing；关闭完成或装配失败时由运行时记录 Closed）与宿主值；Active 后 `Agent` 在其下载入 Session 能力；关闭 Session 即永久卸载该子树 |
-| `BranchScopePlugin` | `TimelineTree` 创建分支时在 SessionScope 下载入；`apply` 提供 Timeline、Dispatcher、分支身份与分支生命周期 `BranchLifecycle`（Loading → Active → Closing → Closed，只由 TimelineContext 推进）；Active 后在其下载入分支能力；分支结束即永久卸载该子树 |
+| `SessionScopePlugin` | `Agent` 创建 Session 时载入；`apply` 以本实例键提供身份、配置、故障报告、`TimelineFactory`、Session 生命周期 `SessionLifecycle`（Loading → Active → Closing → Closed：`Agent` 在 entries 锁内发布时 Active；关闭 token 取消即 Closing；关闭完成或装配失败时由运行时记录 Closed）与宿主值；Session 部件由同一实例的挂载器挂载，经名字依赖这些服务；关闭 Session 即永久卸载该子树 |
+| `BranchScopePlugin` | `TimelineTree` 创建分支时在 SessionScope 下载入；`apply` 提供 Timeline、Dispatcher、分支身份与分支生命周期 `BranchLifecycle`（Loading → Active → Closing → Closed，只由 TimelineContext 推进）；分支部件由分支的挂载器挂载；分支结束即永久卸载该子树 |
 | `TimelineContext` | 分支能力全部 Active 后由 `TimelineFactory::build` 建立并启动分发，`TimelineTree` 持有；关闭时先结算、再卸载 BranchScope 子树、最后关闭 Timeline。不作为分支服务提供，能力不经它取依赖 |
-| 能力 Plugin | 每个作用域实例一组；随作用域子树卸载 |
-| 宿主值 | `AgentBuilder::session_value(Arc<T>)` 由每个 SessionScope 在 `apply` 中以 Session 键提供 |
+| 部件 | 挂载器为每个实例挂载一份已登记的部件，作为自己的子节点；随实例卸载，登记它的插件卸载时撤下 |
+| 宿主值 | `AgentBuilder::session_value(Arc<T>)` 由每个 SessionScope 在 `apply` 中以 Session 名字的键提供；`AgentBuilder::process_value(Arc<T>)` 由 Agent 分组行以进程名字提供，每个 Agent 实例一份 |
 
 成对能力（TimelineTree/TreeTimeline 等）的分支半边经 `Deps` 取得 Session 服务。
 
@@ -195,7 +197,7 @@ Session 与 Timeline 在结构图中分别由 `SessionScopePlugin` 和 `BranchSc
 
 `SessionConfig.collaboration_role: Leader | Member` 是 Session 创建时确定的协作角色，缺省 `Leader`，创建后不变。只有 `CollaborationPlugin` 创建成员 Session 时写入 `Member`；`session.create` 不接受该字段。
 
-`SessionConfig.interactive: bool` 表示 Session 有可交互的对象，能回答它的提问和审批，在创建时由 `session.create` 的 `interactive` 参数确定（缺省 `true`），创建后不变。装配从不读取它；关心它的 Session 部件经 `InSession<SessionConfig>` 或 `Session::config()` 读取（[Session 访问 A.3](../../design/contracts/session-access.md#a3-sessionconfig-fields)）。
+`SessionConfig.interactive: bool` 表示 Session 有可交互的对象，能回答它的提问和审批，在创建时由 `session.create` 的 `interactive` 参数确定（缺省 `true`），创建后不变。装配从不读取它；关心它的 Session 部件经 `Keyed<SessionConfig>` 或 `Session::config()` 读取（[Session 访问 A.3](../../design/contracts/session-access.md#a3-sessionconfig-fields)）。
 
 Session 能力向 `ToolRegistry` 贡献工具的方式见[工具贡献](tool-contributions.md)。
 
@@ -211,18 +213,17 @@ TypeKey::instance::<T>(id)     作用域服务
 `dim-agent-runtime` 提供：
 
 ```text
-SessionScope { instance }
-BranchScope  { session: SessionScope, instance }
-trait SessionService / BranchService               服务类型声明所属作用域
-scope.key::<T>()                                   T: SessionService（SessionScope）或 BranchService（BranchScope）
-scope.service::<T>(ctx)                            按同一键用 require_as 严格读取服务
-session.named_key::<T>(name)                       同类型 Session 服务的限定键
-session.named_service::<T>(ctx, name)              按限定键用 require_as 严格读取服务
-session_plugin(|scope: &SessionScope| ...)
-timeline_plugin(|scope: &BranchScope| ...)
+names::register::<T>(catalog, group)               登记 T 的名字及其组：None 为进程，Some("session") 或 Some("branch")
+Names                                              一个副本所在的实例，用来取其依赖的键
+names.key::<T>()                                   T 的名字在本副本的键：组内为所在组实例的 TypeKey::instance，进程为 TypeKey::of
+names.named::<T>(name)                             按服务目录的键读取任意名字；跨语言的名字以 dyn HostDispatch 读取
+names.instance(group)                              副本所在的 group 实例
+names.part(plugin) / names.part_with(plugin, keys) 以本副本的键门控的部件
+PartRegistry::register(ctx, scope, name, generator) 插件登记 Session 或分支部件，随调用方卸载撤下
+Feature::new(name).session(..).branch(..)          不持有进程状态的插件，只登记部件
 ```
 
-插件实例在构造时按作用域生成 `Deps`。作用域服务在能力载入前已 Active，每个能力只装载一次。启动屏障覆盖作用域及经工厂载入的全部能力；能力在 `apply` 中登记的子插件由该能力负责等待。带实例的键只对该实例作用域子树内的节点可见；严格读取分别报告越界与服务不可用。祖先节点提供的服务对子树直接可见。
+部件的每个副本在构建时按名字生成 `Deps` 的键，每个实例只挂载一份。启动屏障覆盖作用域根、必需挂载器挂载的部件与请求的扩展；部件在 `apply` 中登记的子插件由该部件负责等待。带实例的键只对该实例作用域子树内的节点可见；严格读取分别报告越界与服务不可用。祖先节点提供的服务对子树直接可见。
 
 | 方向 | 方式 |
 | --- | --- |
@@ -230,7 +231,9 @@ timeline_plugin(|scope: &BranchScope| ...)
 | 向下（Session → 分支） | `TreeCommands` / `Branch` |
 | 横向（兄弟分支、其他 Session） | 不可见；经共同祖先的业务接口 |
 
-插件每次 `apply` 使用 `Ctx::require` / `require_as`，作用域的 `service` 和 `named_service` 共用严格读取。`ServiceReadError` 保留服务键、插件、实例、调用位置和原因，包括 `Undeclared`、`OutOfScope`、`Inactive`、`TypeMismatch`、`Unavailable` 及拦截失败；不统一降为“服务不存在”。该检查在 debug 与 release 都执行。
+门面（`Session::session_service::<T>()`、`Session::service::<T>(branch)`、`Branch::service::<T>()`）只读取 `PublicService` 类型，并拒绝未在对应组（`session` 或 `branch`）注册的名字。
+
+插件在 `apply` 中直接读取服务时使用 `Ctx::require` / `require_as` 的严格读取。`ServiceReadError` 保留服务键、插件、实例、调用位置和原因，包括 `Undeclared`、`OutOfScope`、`Inactive`、`TypeMismatch`、`Unavailable` 及拦截失败；不统一降为“服务不存在”。该检查在 debug 与 release 都执行。
 
 rutis 严格读取允许自身提供的服务，也允许可见范围相同的祖先声明；项目仍要求每个 Plugin 在自己的 `Deps` 列全必需外部依赖，以保证自身重载关系。插件外的门面查询和作用域发布使用 `get_as`，缺失按对应公开接口返回构建错误或 `service_reloading`；不能用它绕过插件内的依赖声明。debug 快照校验另检查插件内直接 `get_as` 的未声明外部访问、读取代次不在已解析依赖中和无实例键提供；失败时不发布 Session/分支。
 

@@ -93,6 +93,11 @@ pub enum Command {
     ListSessions,
     /// List the models that can be chosen.
     ListModels,
+    ClearModelPreferences {
+        provider_id: String,
+        model_id: String,
+        expected_version: u32,
+    },
     /// Produce the `/usage` report.
     Usage,
     /// Set the default tool-approval mode.
@@ -273,6 +278,7 @@ pub struct ProviderEntry {
 pub struct ModelItem {
     pub provider_id: String,
     pub provider_name: String,
+    pub provider_version: u32,
     pub model_id: String,
     pub display_name: String,
 }

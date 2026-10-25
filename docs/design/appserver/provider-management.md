@@ -267,6 +267,9 @@ Management-facing Provider operations return a Provider-local error enum in
 codes below. The shared `HostErrorKind` is not extended, and generic host-error
 strings are not parsed to recover business types.
 
+An update containing only empty `headers:[]` and/or `network:{}` is an empty
+patch and fails without advancing the record version.
+
 Provider business errors use JSON-RPC code `-32000`, a safe message and
 `data.appError`: `provider_not_found`, `provider_conflict`,
 `provider_invalid_config`, `provider_unsupported`, `provider_auth_required`,
@@ -322,7 +325,24 @@ of clear alone. Enable/disable use update; account login/logout retain their own
 When listing is unsupported, connection edits still save and explicitly report
 that the key could not be tested. Failed writes retain drafts; the subsequent
 reread refreshes the record version and safe status, and the user confirms before
-retrying. `Ctrl+R` rereads a form after a failed list request without discarding it.
+retrying. A repeated create whose UUID already exists opens that existing record
+with its current version and the retained draft; it requires Apply instead of
+reporting the draft as saved. `Ctrl+R` rereads a form after a failed list request
+without discarding it.
+
+The `/models` picker clears both saved preferences for its selected model with
+`Ctrl+X`, using the displayed catalog version for CAS. It keeps the picker open;
+Enter separately adopts catalog defaults. On conflict it refreshes the list and
+the user retries. The native `dimcode models PROVIDER --clear-preferences MODEL`
+command rereads the management version and performs the same partial update.
+Neither action changes an adopted Session model. Discovery and adoption errors
+keep historical preferences until this explicit user action.
+
+```text
+Select a model
+> Provider / model
+Enter select · Ctrl+X clear saved · Esc clear/close
+```
 
 ```text
 Providers                         Provider detail

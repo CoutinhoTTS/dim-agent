@@ -26,11 +26,11 @@ flowchart TB
 | --- | --- |
 | Session 子树 | 创建 Session 时载入 SessionScope；所属分支全部关闭后永久卸载 |
 | 分支子树 | 创建分支时载入 BranchScope；执行结束并释放能力后永久卸载 |
-| 能力插件 | 每个作用域载入时建立一次；随子树卸载；不随 turn 重建 |
+| 部件 | 实例的挂载器为每个已登记的部件挂载一份；随子树卸载，登记它的插件卸载时撤下；不随 turn 重建 |
 | 前台操作集合 | 各能力自己拥有；stop/interrupt 取消分发时在途的操作，分支没有暂停状态；工作结束后移除任务 |
 | 脱离工作 | 发起它的能力自己拥有；不随普通 turn 结束，branch 范围中断或所有者显式停止时结束，见[脱离工作](event-driven-flows.md#3-后台任务停止与自动唤醒) |
 | 连接任务 | App Server 管理；不拥有 Session |
-| Session 服务 | 分支能力按 Session 实例键注入；子树卸载时由提供者按依赖顺序释放 |
+| Session 服务 | 分支部件按名字依赖，键为所在 Session 实例的键；子树卸载时由提供者按依赖顺序释放 |
 
 所有受管任务都必须有可等待的结束结果。`CancellationToken` 只发出停止请求，`Drop` 不表示异步清理完成。
 
@@ -60,7 +60,7 @@ flowchart TB
 | --- | --- |
 | 受理 | Agent 或 TimelineTree 先登记构建操作；RPC 断开只停止等待，不能丢弃构建拥有权 |
 | 绑定 | 在父节点下载入 Session/分支作用域 Plugin；Session 服务按实例键注入 |
-| 装配 | 实例工厂建立插件；rutis 按依赖状态调用 apply |
+| 装配 | 挂载器用已登记的生成器为本实例建立部件；rutis 按依赖状态调用 apply |
 | 取得资源 | 在下一次可取消 await 前登记清理；部分初始化失败同样释放 |
 | 等待 | 观察插件状态、取消和统一初始化期限；不以 settle 代替 Active |
 | 发布 | 全部 Active、订阅齐全、Loop 状态端口可解析后由 `TimelineContext::start` 启动 Dispatcher；子分支还须完成 branch/start 和首输入接纳，才出现在公共分支列表与操作入口。发布时 TimelineTree 调用 `TimelineContext::activate`，分支生命周期 `BranchLifecycle` 进入 Active；能力在 apply 中派生的后台业务等它才开始，分支装配失败时它直接进入 Closed，后台业务从不开始。分支进入 Closing 时 `BranchLifecycle::closing()` 返回，后台业务随即结束，不等所属能力卸载。Session 同理：`Agent` 在 entries 锁内裁决发布与关闭准入，登记为可用时 `SessionLifecycle` 进入 Active；Session 能力在 apply 中派生的后台业务（替换 Session 自有实例、联系外部服务）等它才开始，装配失败时它直接进入 Closed，后台业务从不开始，Session 就绪检查也就不会看到装配期间被替换或关闭的实例。装配本身需要的初始实例（如 Skills 的初始内容）在 apply 内同步创建，属于装配而非后台业务。Session 的关闭 token 一被取消（`Session::close`、`Agent::close` 或装配期间），`SessionLifecycle` 即为 Closing，`closing()` 返回，后台业务随即结束；`Agent::close` 依次关闭各 Session，但它们都在关闭开始时同时看到 Closing。初始化内部可持有句柄，不等于公开发布；发布与关闭准入在树锁内裁决，不持锁运行 before 或异步构建 |

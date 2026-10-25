@@ -59,7 +59,7 @@ Use the same public Node runtime, resolver and declaration catalog for all
 rows. Keep its existing runtime name. Do not
 start another runtime for each package or reuse the private managed-provider
 slot. A process row uses its original non-instanced factory, not a fabricated
-`SessionScope`. The original row remains the owner of its foreign resources and
+Session instance. The original row remains the owner of its foreign resources and
 of the namespaces it registers.
 
 `session/{sessionId}` is not a process-row observation contract. rutis has one

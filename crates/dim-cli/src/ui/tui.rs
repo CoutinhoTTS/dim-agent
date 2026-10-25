@@ -1851,6 +1851,17 @@ impl App {
                 crate::login::open_browser(&url);
                 self.set_notice(tf("Opened {url}", &[("url", &url)]));
             }
+            Effect::ClearModelPreferences {
+                provider_id,
+                model_id,
+                expected_version,
+            } => {
+                self.host.send(Command::ClearModelPreferences {
+                    provider_id,
+                    model_id,
+                    expected_version,
+                });
+            }
             Effect::SelectModel {
                 provider_id,
                 model_id,

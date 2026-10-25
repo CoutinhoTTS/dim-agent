@@ -63,7 +63,6 @@ pub struct TextFileBinding {
 pub struct FileReads {
     bindings: Mutex<HashMap<PathBuf, TextFileBinding>>,
 }
-impl dim_agent_runtime::BranchService for FileReads {}
 impl FileReads {
     pub(crate) fn get(&self, path: &Path) -> Option<TextFileBinding> {
         self.bindings.lock().unwrap().get(path).cloned()

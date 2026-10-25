@@ -428,7 +428,7 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
         let models = Arc::new(AimuxModels::from_config(config).unwrap());
         for remove_tools in [false, true] {
             let mut builder = builder(models.clone(), Arc::new(MockTools));
-            builder.branch_part(move |names| names.part(OverrideRequest { remove_tools }));
+            builder.require_feature(Feature::new("test.final-model-request").branch("test.final-model-request", move |names| names.part(OverrideRequest { remove_tools })));
             let agent = model_agent(models.clone(), Some(builder)); let session = agent.create_session(session_config()).await.unwrap();
             session.submit("tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();

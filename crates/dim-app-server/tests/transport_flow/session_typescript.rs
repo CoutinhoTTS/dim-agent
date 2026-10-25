@@ -9,7 +9,7 @@ use dim_agent_capabilities::{
     methods::SessionMethods,
     tool_registry::definition,
 };
-use dim_agent_runtime::{Names, SESSION_GROUP};
+use dim_agent_runtime::SESSION_GROUP;
 use dim_agent_types::{MessageContent, MessagePart, ModelRequest, Role};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use rutis::{InstanceId, Keyed};
@@ -354,8 +354,13 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     let audit = home.join("observers.jsonl");
     let (mut builder, _requests, _release) = setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_part(move |names| ControlledGate::part(names, send.clone()));
-    builder.branch_part(|names| names.part(DrainLoadingBroadcast));
+    builder.require_feature(ControlledGate::feature(send));
+    builder.require_feature(
+        Feature::new("test.drain-loading-broadcast")
+            .branch("test.drain-loading-broadcast", |names| {
+                names.part(DrainLoadingBroadcast)
+            }),
+    );
     let mut parts = observers(&audit);
     parts.rows.extend(fixture().rows);
     let server = serve(
@@ -705,7 +710,7 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
     let audit = home.join("observers.jsonl");
     let (mut builder, _requests, _) = setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_part(move |names| ControlledGate::part(names, send.clone()));
+    builder.require_feature(ControlledGate::feature(send));
     let server = serve(
         builder,
         ServerConfig {
@@ -981,7 +986,7 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
         });
         let (mut builder, mut requests, _) = setup();
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-        builder.session_part(move |names| ControlledGate::part(names, send.clone()));
+        builder.require_feature(ControlledGate::feature(send));
         let server = serve(
             builder,
             ServerConfig {
@@ -1205,7 +1210,11 @@ pub(super) fn setup() -> (
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::tool_host(&mut builder, Arc::new(SlowTools(release.clone())));
     (builder, recv, release)
 }
@@ -1608,19 +1617,22 @@ pub(super) type Control = (
 );
 pub(super) struct ControlledGate(InstanceId, tokio::sync::mpsc::UnboundedSender<Control>);
 impl ControlledGate {
-    pub(super) fn part(
-        names: &Names<'_>,
-        controls: tokio::sync::mpsc::UnboundedSender<Control>,
-    ) -> Result<Box<dyn rutis::Plugin>, rutis::CordisError> {
-        // Observe the settled initial metadata, rather than a fiber replaced
-        // by RuntimeRows' offline-to-online refresh (as in the C4 spike).
-        let keys = (
-            names.key()?,
-            rutis::DepKey::dynamic("session-node"),
-            names.key()?,
-        );
-        let gate = Self(names.instance(SESSION_GROUP)?, controls);
-        Ok(names.part_with(gate, keys))
+    /// A feature whose Session part sends each Session's [`Control`].
+    pub(super) fn feature(controls: tokio::sync::mpsc::UnboundedSender<Control>) -> Feature {
+        Feature::new("ControlledTypeScriptDependency").session(
+            "ControlledTypeScriptDependency",
+            move |names| {
+                // Observe the settled initial metadata, rather than a fiber replaced
+                // by RuntimeRows' offline-to-online refresh (as in the C4 spike).
+                let keys = (
+                    names.key()?,
+                    rutis::DepKey::dynamic("session-node"),
+                    names.key()?,
+                );
+                let gate = Self(names.instance(SESSION_GROUP)?, controls.clone());
+                Ok(names.part_with(gate, keys))
+            },
+        )
     }
 }
 impl TypedPlugin for ControlledGate {
@@ -1673,7 +1685,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
     parts.rows.push(gate);
     let (mut builder, mut requests, _) = setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_part(move |names| ControlledGate::part(names, send.clone()));
+    builder.require_feature(ControlledGate::feature(send));
     let server = serve(
         builder,
         ServerConfig {
@@ -1822,7 +1834,7 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         }
         let (mut builder, mut requests, _) = setup();
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-        builder.session_part(move |names| ControlledGate::part(names, send.clone()));
+        builder.require_feature(ControlledGate::feature(send));
         let server = serve(
             builder,
             ServerConfig {
@@ -1890,7 +1902,7 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         parts.rows[0]["config"] = json!({"namespace":namespace});
         let (mut builder, _, _) = setup();
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-        builder.session_part(move |names| ControlledGate::part(names, send.clone()));
+        builder.require_feature(ControlledGate::feature(send));
         let server = serve(
             builder,
             ServerConfig {
@@ -1975,7 +1987,7 @@ async fn node_session_typescript_failed_part_namespace_stays_unknown() {
     parts.rows[0]["config"] = json!({"badMethods":true});
     let (mut builder, _requests, _) = setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_part(move |names| ControlledGate::part(names, send.clone()));
+    builder.require_feature(ControlledGate::feature(send));
     let server = serve(
         builder,
         ServerConfig {
@@ -2099,7 +2111,7 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
 async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_handlers() {
     let (mut builder, _requests, _) = setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_part(move |names| ControlledGate::part(names, send.clone()));
+    builder.require_feature(ControlledGate::feature(send));
     let server = serve(
         builder,
         ServerConfig {

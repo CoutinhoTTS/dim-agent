@@ -334,8 +334,11 @@ impl ProviderService {
             && patch.base_url.is_none()
             && patch.enabled.is_none()
             && patch.credential.is_none()
-            && patch.headers.is_none()
-            && patch.network.is_none()
+            && patch.headers.as_ref().is_none_or(Vec::is_empty)
+            && patch
+                .network
+                .as_ref()
+                .is_none_or(|network| network.proxy.is_none() && network.timeout_ms.is_none())
         {
             return Err(ProviderError::InvalidConfig(
                 "Provider patch must not be empty".into(),

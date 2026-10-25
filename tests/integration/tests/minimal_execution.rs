@@ -182,7 +182,11 @@ impl Harness {
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+            .require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                }),
+            );
         dim_agent_capabilities::defaults::install_minimal_execution(
             &mut builder,
             ModelProviderPlugin::new,

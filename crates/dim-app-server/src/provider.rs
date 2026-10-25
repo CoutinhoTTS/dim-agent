@@ -129,7 +129,7 @@ impl From<managed_oauth::OAuthError> for ProviderError {
 impl From<crate::managed_provider::ManagedProviderError> for ProviderError {
     fn from(error: crate::managed_provider::ManagedProviderError) -> Self {
         match error.code {
-            "account_required" => Self::AuthRequired,
+            "account_required" | "account_recovery_required" => Self::AuthRequired,
             "account_changed" => Self::Conflict("Managed account changed".into()),
             "account_identity_rejected" => Self::AuthFailed,
             _ => Self::Failed,

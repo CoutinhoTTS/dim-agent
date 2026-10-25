@@ -608,30 +608,6 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     } else {
         let product_home = std::fs::canonicalize(&options.home)?;
         command.arg("--product-home").arg(&product_home);
-        if let (Some(plugin), Some(node), Some(runtime)) =
-            (&options.plugin_dir, &options.node, &options.js_runtime)
-        {
-            command
-                .arg("--plugin-dir")
-                .arg(plugin)
-                .arg("--node")
-                .arg(node)
-                .arg("--js-runtime")
-                .arg(runtime);
-        } else if let Some(root) = crate::runtime::root(&product_home)? {
-            // An account build carries its runtime inside the executable.
-            command
-                .arg("--plugin-dir")
-                .arg(root.join("plugins/dim-oauth"))
-                .arg("--node")
-                .arg(root.join(if cfg!(windows) {
-                    "runtime/node/node.exe"
-                } else {
-                    "runtime/node/bin/node"
-                }))
-                .arg("--js-runtime")
-                .arg(root.join("runtime/rutis/node_modules/@arcships/rutis-runtime"));
-        }
     }
     // The Web workspace is a separate artifact the daemon serves from a
     // directory (web-workspace.md §2.4).

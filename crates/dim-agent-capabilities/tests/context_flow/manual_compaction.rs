@@ -207,17 +207,24 @@ fn builder_with_strategy(
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(
             Context::default(),
         )))))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     match reload {
         Some(reload) => {
             let views = reload.0.clone();
-            builder.session_part(move |names| {
-                names.part(StrategyOwner {
-                    key: names.key()?,
-                    strategy: strategy.clone(),
-                    views: views.clone(),
-                })
-            });
+            builder.require_feature(Feature::new("test.strategy-owner").session(
+                "test.strategy-owner",
+                move |names| {
+                    names.part(StrategyOwner {
+                        key: names.key()?,
+                        strategy: strategy.clone(),
+                        views: views.clone(),
+                    })
+                },
+            ));
         }
         None => {
             builder.session_value(Arc::new(CompactionStrategyHost(Some(strategy))));
@@ -800,13 +807,16 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     let (probe, armed) = (store.clone(), Arc::new(AtomicBool::new(false)));
     let child_reads = Arc::new(std::sync::Mutex::new(None));
     let (arm, child_probe) = (armed.clone(), child_reads.clone());
-    builder.branch_part(move |names| {
-        names.part(OpeningReads(
-            probe.clone(),
-            arm.clone(),
-            child_probe.clone(),
-        ))
-    });
+    builder.require_feature(Feature::new("test.opening-reads").branch(
+        "test.opening-reads",
+        move |names| {
+            names.part(OpeningReads(
+                probe.clone(),
+                arm.clone(),
+                child_probe.clone(),
+            ))
+        },
+    ));
     let agent = builder.build();
     // A failed read of the history `main` opens with fails the restore with
     // its storage error; the next restore reads it again. The opening's read
@@ -1258,7 +1268,11 @@ async fn a_second_command_consumed_while_one_is_outstanding_is_skipped() {
         None,
     );
     let captured = timeline.clone();
-    builder.branch_part(move |names| names.part(RawTimeline(captured.clone())));
+    builder.require_feature(
+        Feature::new("test.raw-timeline").branch("test.raw-timeline", move |names| {
+            names.part(RawTimeline(captured.clone()))
+        }),
+    );
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())

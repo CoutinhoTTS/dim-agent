@@ -69,7 +69,7 @@ flowchart TB
 | --- | --- | --- | --- | --- |
 | Questions | — | `ask_user` 工具；`session.question.*` 方法；非交互 Session 中 `ask_user` 回答当前没有可以回答的对象 | —（运行中 `ask_user` 调用的等待者在 Session 部分；没有事件，回答就是工具结果） | 等待者就是 Session 级工具处理函数自己的调用 |
 | Goal | — | `goal_update` 工具与 `session.goal.*` 方法，只写一条带 `goal:objective` 和/或 `goal:status` 块的 `input/message` | 目标状态由已消费的目标变更块按序号折叠得出；Goal 经 Dispatcher 消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时自己决定续跑 | 一个目标只属于一个分支：折叠只用该分支自己的事件，因此子分支和分叉 Session 从没有目标开始；续跑按序跟随其事件 |
-| Hooks | App Server 中的配置（Settings 来源 `hooks`、`hooks-projects`，管理方法 `hooks.*`，`HookSources` 端口） | Hook 文档（用户与项目）；执行器；供操作者输入入口询问的 `submitCheck`（`UserPromptSubmit`） | 供 Permission 使用的 `toolAdvice`（`PreToolUse`）；经 Approval 回答 `PermissionRequest`；从 Dispatcher 运行 `PostToolUse`、`PostToolUseFailure`、`Stop`、`SessionStart`、`Notification` | 规则属于 Session；执行发生在分支 |
+| Hooks | App Server 中的配置（Settings 来源 `hooks`、`hooks-projects`，管理方法 `hooks.*`，`HookSources` 端口） | Hook 文档（用户与项目）；执行器；向 Session 的 `submitChecks` 登记、由操作者输入入口调用的提交检查（`UserPromptSubmit`） | 向 Permission 登记的建议（`PreToolUse`）；经 Approval 回答 `PermissionRequest`；从 Dispatcher 运行 `PostToolUse`、`PostToolUseFailure`、`Stop`、`SessionStart`、`Notification` | 规则属于 Session；执行发生在分支 |
 | ShellInput | — | `shell.*` Session 方法；在 Session 的工作区中运行并写入其输入 | — | 命令属于 Session |
 | Attachments | — | `attachment.put`；通过 SessionStore 管理 Session 文件 | — | 附件是 Session 数据 |
 | Web | — | `web_search`、`web_fetch` 工具 | — | 没有跨 Session 共享的状态 |
@@ -137,7 +137,7 @@ flowchart LR
 
 ### 3.1 合同形式
 
-设计定义或使用的每个合同都是一个具名服务（ADR 002 D5）：服务名（camelCase）、作用域、实例 key，以及标注为 `sync` 或 `async` 的方法，其请求、回复和错误都是可序列化数据。取消是一个取消请求，或消费方丢弃该调用。插件在其 `provides` 和 loader 行中声明它提供的内容；消费方按服务名和作用域收集。工具和方法命名空间则是注册的：部件把工具注册到本 Session 的 `toolRegistry`，把方法命名空间注册到本 Session 的 `sessionMethods` 或进程的 `managementMethods`，注册持续到该部件卸载。rutis 跨语言调用此类服务（rutis-bridge 运行时、`host_key(name)`、`TypeKey::named`），因此 TypeScript 或 Python 部分无需手写 Rust 绑定即可满足合同。Rust trait、`TypeKey`、`Contributions<T>` 和 `AgentBuilder` 调用只出现在各文档的“Rust 绑定”附录中。
+设计定义或使用的每个合同都是一个具名服务（ADR 002 D5）：服务名（camelCase）、作用域、实例 key，以及标注为 `sync` 或 `async` 的方法，其请求、回复和错误都是可序列化数据。取消是一个取消请求，或消费方丢弃该调用。插件在其 `provides` 和 loader 行中声明它提供的内容；消费方按服务名和作用域收集。工具和方法命名空间则是注册的：部件把工具注册到本 Session 的 `toolRegistry`，把方法命名空间注册到本 Session 的 `sessionMethods` 或进程的 `managementMethods`，注册持续到该部件卸载。rutis 跨语言调用此类服务（rutis-bridge 运行时、`host_key(name)`、`TypeKey::named`），因此 TypeScript 或 Python 部分无需手写 Rust 绑定即可满足合同。Rust trait、`TypeKey`、`Keyed<T>` 和 `AgentBuilder` 调用只出现在各文档的“Rust 绑定”附录中。
 
 | 服务 | 作用域 | Key | 方法 | 定义于 |
 | --- | --- | --- | --- | --- |
@@ -188,7 +188,7 @@ sequenceDiagram
   participant TE as ToolExecutor
   participant AP as Approval
   participant PM as Permission
-  participant HK as Hooks toolAdvice（分支）
+  participant HK as Hooks 建议（分支）
   participant TB as ToolBinding
   participant W as Web 工具（Session）
   LP->>TL: 追加 step/tool-call [web_fetch]
@@ -484,8 +484,8 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | --- | --- | --- | --- |
 | **已撤回（#28）。** Approval | 补充 | 在模型步骤打开期间，接受宿主来源的准入（由 ModelProvider 针对 `approval_ask` 流条目发起），写入普通的 `approval/request`、`approval/respond`、`approval/cancelled` 事实；通用，不了解 model kind | ExternalAgent（首个使用方） |
 | InputQueue | 变更 | 按序消费 `input/withdraw {input_id, reason?}`（`reason`：提议的通用可选文本，最多 2 KiB，任何生产方都可写入，由客户端显示；InputQueue 做决定时忽略它；不带它的事件不变；设计规则 §4 第 9 条允许必需事件带描述性字段），只为它仍持有且未应用的输入写入 `input/deleted {input_id}`（否则不写入，`notHeld`）；经 `sessionMethods` 提供 `session.input.withdraw`（命名空间 `session.input`，提议中）；“撤回并作为 Steer 重新提交”作为一个批次；队列状态从事件重建（[Session 访问 A.4](contracts/session-access.md#a4-撤回)） | `Ctrl+S`、`/queue`；AcpGateway、Scheduler |
-| Permission, ToolExecutor, Approval | 变更（提议） | Approval 把 `AdmitCall.source` 传给 Permission 的准入决定；Permission 在其中（策略与命令规则之后、结果不是 Deny 时）查找分支 `toolAdvice` 服务并合并其 `none`/`allow`/`ask`/`deny` 建议（deny 优先，其次 ask，再次 allow；建议从不推翻 Deny）；Approval 在回应后的复核仍是普通 `decide`，不再询问；ToolExecutor 不变。通用，不带业务含义（[Hooks A.6.1](plugins/Hooks.md#a61-permission-的工具建议)） | Hooks `PreToolUse` |
-| Rpc `session.submit` 与 `session.branch_create`、InputQueue `InputMethods`、CLI | 变更（提议） | 写入操作者输入之前（`session.submit`、`session.branch_create {prompt}`、`session.input.withdraw {steer}`），入口查找 Session 级 `submitCheck` 服务；被拦下时调用以 `input_blocked`（消息 `Hook <source>: <reason>`，`data` 只有 `appError`）失败且不写入任何内容，否则把返回的块追加到该输入的用户内容中、操作者自己的内容之后，使其仍是操作者输入（新分支的提示词不带这些块）。`input_blocked` 在 App Server README 与 CLI 中加入保证未提交任何东西的 `session.submit` 错误。调用方断开不取消任何东西。不改事件与持久化格式。通用（[Hooks A.6.2](plugins/Hooks.md#a62-操作者输入入口处的提交检查)） | Hooks `UserPromptSubmit` |
+| Permission, ToolExecutor, Approval | 变更（提议） | Approval 把 `AdmitCall.source` 传给 Permission 的准入决定；Permission 在其中（策略与命令规则之后、结果不是 Deny 时）调用向它登记的建议者并合并其 `none`/`allow`/`ask`/`deny` 建议（deny 优先，其次 ask，再次 allow；建议从不推翻 Deny）；Approval 在回应后的复核仍是普通 `decide`，不再询问；ToolExecutor 不变。通用，不带业务含义（[Hooks A.6.1](plugins/Hooks.md#a61-permission-的工具建议)） | Hooks `PreToolUse` |
+| Rpc `session.submit` 与 `session.branch_create`、InputQueue `InputMethods`、CLI | 变更（提议） | 写入操作者输入之前（`session.submit`、`session.branch_create {prompt}`、`session.input.withdraw {steer}`），入口调用向 Session 的 `submitChecks` 登记的检查；被拦下时调用以 `input_blocked`（消息 `Hook <source>: <reason>`，`data` 只有 `appError`）失败且不写入任何内容，否则把返回的块追加到该输入的用户内容中、操作者自己的内容之后，使其仍是操作者输入（新分支的提示词不带这些块）。`input_blocked` 在 App Server README 与 CLI 中加入保证未提交任何东西的 `session.submit` 错误。调用方断开不取消任何东西。不改事件与持久化格式。通用（[Hooks A.6.2](plugins/Hooks.md#a62-操作者输入入口处的提交检查)） | Hooks `UserPromptSubmit` |
 | **已撤回（现有门面）。** 运行时 Session 门面 | 补充 | 按命名空间查找 `sessionMethods`：Rpc 经现有门面读取该 Session 唯一的 `sessionMethods` 表，固定前缀读取也由现有门面组合实现（#50） | Rpc；进程调用方 |
 | ToolRegistry | 补充 | 任何语言的部件向 `toolRegistry` 注册工具（[方法 A.5](contracts/session-boundary.md#a5-工具贡献)） | 非 Rust 的 Session 工具 |
 | Agent 装配 | 补充 | 收集每个已安装插件在 `provides` 中声明的具名服务；可选的 Session 与分支部分按已启用插件安装 | 所有 Session 插件 |
@@ -504,7 +504,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | Rpc | 变更 | 方法表：内建方法，然后是按调用查找、不依赖其所有者的 `managementMethods`（取代 `When<ProductServices>` 和 `When<ExecutionServices>`），然后是 Session 的 `sessionMethods`；供 provider 使用的 `callChannel`。从不向带 `deviceId` 的连接提供管理方法和 `daemon.shutdown`。`session.create {interactive}`（只在其为 false 时发送）。内建方法 `session.delete` 与 `session.fork`（S5c，已实现：[删除与分叉](appserver/session-deletion-and-fork.md)）。把 Session 广播通知记录以 `session.notice` 原样转发给已附加的 v3 客户端（C6，已实现：[通知](appserver/session-notices.md)）。v3 Session 列表中的 `title`/`titleSource`/`titleRevision`（S5b，已实现：[标题元数据](appserver/session-title-metadata.md#8-session-列表)）。只做外部边界校验（参数格式、`sessionId` 授权）；`session.submit` 只检查格式，不再校验图像（[方法](contracts/session-boundary.md)） | 所有方法所有者；SessionTitle |
 | Transport, Connection | 变更 | 带升级认证器的 `EntryHost`；`ConnectionEntry {name, deviceId}` | RemoteGateway |
 | Agents | 补充 | `sessions` 服务（[sessions 服务](appserver/sessions-service.md)）；`SessionConfig.interactive`；策略以启动方为上限的 `launch`，`LaunchRequest.agent` 可选（缺省为 Agents 的默认 profile；请求的 `model` 优先于 profile 的模型）；从另一个 Session 的切点创建（[删除与分叉](appserver/session-deletion-and-fork.md#6-分叉)）；经 Agents 的 Session 入口提供 `session.agent.update`，按精确 profile ID 解析并采纳提示词和模型 | Scheduler、Workflow、fork、`/agent` |
-| Collaboration | 变更 | 成员模型：profile 的模型，否则为默认选择；成员的审批请求作为一条 `input/message` 送到 leader 分支；leader 模型通过 Collaboration 的工具回答，这次工具调用经过 leader 的 Approval 与 Permission，Collaboration 通过 Approval 的公开 respond 操作写入回答（Approval 不变，#29）；按类型的成员提供方（`collaborationMembers:<kind>`，每次调用查找），用于不是 dim Session 的成员，其询问走同一条成员审批路径；`agent` 工具保持现有风险分类（[ExternalAgent §9.2](plugins/ExternalAgent.md#92-collaboration-成员提供方)） | ExternalAgent |
+| Collaboration | 变更 | 成员模型：当前使用 profile 的模型，否则为默认选择；[原生 Collaboration 模型策略提案](../../design/subagent-model-policy.md)尚未实现；成员的审批请求作为一条 `input/message` 送到 leader 分支；leader 模型通过 Collaboration 的工具回答，这次工具调用经过 leader 的 Approval 与 Permission，Collaboration 通过 Approval 的公开 respond 操作写入回答（Approval 不变，#29）；按类型的成员提供方（`collaborationMembers:<kind>`，每次调用查找），用于不是 dim Session 的成员，其询问走同一条成员审批路径；`agent` 工具保持现有风险分类（[ExternalAgent §9.2](plugins/ExternalAgent.md#92-collaboration-成员提供方)） | ExternalAgent |
 | SessionStore | 补充 | 带修订检查的标题元数据，只通过 `setTitle` 写入，变更时发出 Session 广播通知（进程级状态的所有者都发出这类通知）（S5b，已实现：`sessionMetadata` 服务，[标题元数据](appserver/session-title-metadata.md)）；删除与清理；fork（复制切点之前的事实）（S5c，已实现：[删除与分叉](appserver/session-deletion-and-fork.md)）；资源节点上的 Session 文件，fork 时共享，随最后一个所有者删除（S5a，已实现：`sessionFiles` 服务，[Session 文件](appserver/session-files.md)） | SessionTitle、Attachments、fork |
 | Settings | 补充 | S8a（Rust，已实现）：每个所有者一个或多个具名业务来源，每个来源一种文档类型；没有自己的订阅接口：写入提交后在 `settings/<source>` 上发出 rutis 事件 `settings.changed` `{source, scope, revision}`，覆盖用户和项目作用域，不带文档内容；新授权的项目发出 `settings.project_authorized`；校验和默认值只在 Settings 边界应用；v13 `settings_documents` 契约下增量的 `user/<source>` 行（D4）。S8b（随 C4，已实现）：语言中立的 `settings` 服务，在 C4 行上声明 JSON Schema、默认值、允许的作用域和仅限用户的字段；管理方法 `settings.read`/`settings.update`；不提供凭据服务（§6.4） | 每个有业务配置的插件，包括用户编写的 Scheduler 任务（来源 `schedule`）和 Workflow 定义（来源 `workflow`） |
 | Provider | 补充 | 基于捕获的已采纳模型配置，校验并映射已声明的 effort/tier 偏好；`AuxiliaryModel` 服务：`complete(model, request)`，在任何 Session 之外的一次非流式调用，模型由调用方从自己的配置中传入（[设计](appserver/auxiliary-model.md)）；[Desktop/CLI 管理补充提案](appserver/provider-management.md)：安全连接编辑、模型生命周期和仅供客户端采用的偏好；按 Modality 类别的非对话连接 | `/effort`、`/fast`、SessionTitle、Modality |

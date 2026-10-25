@@ -27,7 +27,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | P2 Attachments | 服务端 #102、CLI 设计 #154、headless 图片 #160、多行/大段粘贴与提交时上传 #163、原生文件/剪贴板输入 #164 | 本轮输入链路已合入；平台支持和原生交互验收范围见各 PR |
 | F6 CLI | 设计 #113、实现 #149、编码请求上限 #153 | 本轮交付完成 |
 | F3 模型参数 | 设计 #110、`/effort`、`/fast`、`/agent` 实现 #148 | 本轮交付完成 |
-| Provider 客户端完整管理 [#329](https://github.com/arcships/dim/issues/329) | 已有 Provider 基础管理、账号入口与会话级模型参数 | [完整方案](appserver/provider-management.md) 待确认、未 Ready 或实现；创建/局部更新替代 save，管理视图重读及 CAS，模型/路由与客户端显式采用的持久偏好，v18 可选字段；用量复用已交付的 account.usage，不扩 core 或公开宿主 API |
+| Provider 客户端完整管理 [#329](https://github.com/arcships/dim/issues/329) | 已有 Provider 基础管理、账号入口与会话级模型参数 | [完整方案](appserver/provider-management.md) 与实现由 PR #349 交付；创建/局部更新替代 save，管理视图重读及 CAS，模型/路由与客户端显式采用的持久偏好，v19 可选字段；用量复用已交付的 account.usage，不扩 core 或公开宿主 API |
 | F4 MCP OAuth | 服务端 #111、CLI 登录与状态 #151 | 本轮交付完成 |
 | F5 OS 隔离 | spike #112、设计 #152 | 产品实现 #189 已合入；用户 `!` / `!!` 不在隔离范围内 |
 | C4 Session 级 TS | spike #99、装配前置 #137、工具/方法设计 #141、实现 #150、rutis 0.11 升级 #173、广播设计 #174 与实现 #180 | C4/#63 已完成，#63/#168 已关闭。原生 Windows Node 验收保留已记录的限制；#156 已关闭且不采用 |
@@ -70,8 +70,8 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 4. ~~决定 Goal 还是 Pursuit（D3）~~：已决定先做 Goal（#44）。
 5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、~~S3 活动句柄~~（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
-7. Provider 的 Desktop/CLI 完整管理由 [#329](https://github.com/arcships/dim/issues/329) 跟踪，负责人 zerob13；[方案](appserver/provider-management.md) 只提交设计、未实现。复用现有调用、重读和 CAS，无机制前置；Provider JSON 以可选字段保持 v18，接受旧二进制重写时丢失未知字段。客户端读取持久模型偏好后显式采用，服务端不自动应用；用量复用已交付的 account.usage 及原有包查询合同。S4 与 F3 已有 Session 采用流程保持，持久偏好取代 F3 原有的无持久偏好范围。
-8. 插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)）归 M1。M1 对外开放插件开发，按第 2 节第 5 条，插件作者直接使用的公开契约须在开放前就位；Dim 尚未发布，所以迁移不保留兼容路径。工作项见 §3.2 的“插件契约迁移”表，阶段与验收见[插件契约 §10](../zh/design/plugin-contract.md#10-迁移)。P6 Scheduler（#70）的 loader 门槛所等的 rutis 0.16 升级（#379）已完成。对外开放前须满足 [#364](https://github.com/arcships/dim/issues/364)：第三方插件的部件注册工具后，模型就能看到这些工具，不需要写进配置。R6（#382）以可选的挂载列表 `SessionConfig.tools` 实现它：没有挂载列表的 Session（产品默认）声明全部宿主工具与部件注册的全部工具；有挂载列表的 Session 只声明其中列出的。工具调用是否执行仍由 Permission 决定，它不改变声明。
+7. Provider 的 Desktop/CLI 完整管理由 [#329](https://github.com/arcships/dim/issues/329) 跟踪，负责人 zerob13；[方案](appserver/provider-management.md) 的实现与验收由 PR #349 交付。复用现有调用、重读和 CAS，无机制前置；Provider JSON 以可选字段保持 v19，接受旧 v19 二进制重写时丢失未知字段；v18 二进制拒绝 v19 数据库。客户端读取持久模型偏好后显式采用，服务端不自动应用；用量复用已交付的 account.usage 及原有包查询合同。S4 与 F3 已有 Session 采用流程保持，持久偏好取代 F3 原有的无持久偏好范围。
+8. 插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)）归 M1。M1 对外开放插件开发，按第 2 节第 5 条，插件作者直接使用的公开契约须在开放前就位；Dim 尚未发布，所以迁移不保留兼容路径。工作项见 §3.2 的“插件契约迁移”表，阶段与验收见[插件契约 §10](../zh/design/plugin-contract.md#10-迁移)。迁移已完成，只剩 P4 中 R5 的第二种形式（外来插件作为一行）等待 rutis#642（#403、#405）。P6 Scheduler（#70）的 loader 门槛所等的 rutis 0.16 升级（#379）已完成。对外开放前须满足 [#364](https://github.com/arcships/dim/issues/364)：第三方插件的部件注册工具后，模型就能看到这些工具，不需要写进配置。R6（#382）以可选的挂载列表 `SessionConfig.tools` 实现它：没有挂载列表的 Session（产品默认）声明全部宿主工具与部件注册的全部工具；有挂载列表的 Session 只声明其中列出的。工具调用是否执行仍由 Permission 决定，它不改变声明。
 9. 对外发布前处理：[#294](https://github.com/arcships/dim/issues/294)（workspace-write 是否限制写入路径，需维护者决定）、[#296](https://github.com/arcships/dim/issues/296)（依赖漏洞与许可证扫描）、[#297](https://github.com/arcships/dim/issues/297)（发布流水线的 action 固定到提交 SHA）、[#368](https://github.com/arcships/dim/issues/368)（发布包大小门槛）。
 
 归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)：Questions（#144/#178/#251）的设计已 Ready，仍待实现；Hooks（#143/#181）、ExternalAgent（#145/#182；Draft [#254](https://github.com/arcships/dim/pull/254) 提议改为子 agent 形态，取代按模型的框架）与 Pursuit（#146/#179）的设计已合入，仍待各自 Ready 确认与实现；回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)，2026-10-21 已 Ready，待实现）、摘要提示词/思考与目标长度评估（#170）也归该里程碑。#2 动态事件不归 M2，已于 2026-10-20 移入 M1（C8）：M1 对外开放插件开发，插件写自己的事件属于公开契约。其设计已于同日收敛（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）：Timeline 只检查信封与核心保留领域，并以不透明数据承载核心未定义的事件类型，Dispatcher 订阅只做过滤，能力事件声明只是描述契约；现有 `EventKind` 事件（含 F1、S1 加入的 4 个）不迁移。F1 的研究 #165、#169 的修复 #172 和 #128 的运行时调参 #183 已合入；#170 保留独立评估范围。插件契约的 #380（R1：Dispatcher 先回放历史、再接实时事件的注册）与 #381（R4：xtask 生成服务目录并标出 Capability）也归 M2：它们只新增能力或工具，不改变插件作者的写法。用户安装与启用第三方插件（[#384](https://github.com/arcships/dim/issues/384)）、效率测量与预算门槛（#363、#365、#366、#367）也归 M2。
@@ -107,20 +107,27 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 | S11 | ModelProvider：模型不支持图片时换成文本占位 | S | 独立 | — | Attachments |
 | C8 | #2 动态事件：插件写自己领域的事件（Rust 与 TypeScript SDK），与原生事件一样持久化、恢复、可读可订阅；拒绝写入核心保留领域；作者指南（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）。存储格式变更与存储线对齐；给客户端展示的新协议不在 M1 | M | 事件类型 | — | 第三方插件作者 |
 
-插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)，归 M1，负责人待定）。编号前缀 PC 用来和本文的 P1–P7 插件项、R1 区分：
+插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)，归 M1）。编号前缀 PC 用来和本文的 P1–P7 插件项、R1 区分：
 
-| ID | Issue | 内容 | 规模 | 前置 |
-| --- | --- | --- | --- | --- |
-| PC-P1 | #379 | rutis 0.16 升级：分支机制通道改用私有事件名，去掉中继，事件载荷改为 serde | M | — |
-| PC-P2 | #371 | 服务目录，以及 Rust 按名字声明依赖 | M | PC-P1 |
-| PC-P3a | #372 | 进程与简单部件迁为按名字依赖的 loader 行；同作用域部件的合并检查 | M | PC-P2 |
-| PC-P3b | #373 | 核心分支与 Session 部件迁移；同作用域部件的合并检查 | L | PC-P3a |
-| PC-P3c | #374 | App Server 宿主部件迁移；同作用域部件的合并检查 | M | PC-P3b |
-| PC-R6 | #382 | 贡献向所有者登记：工具、工具来源、提示词来源、方法命名空间；去掉宿主侧预注册 | M | PC-P2 |
-| PC-P3d | #375 | 删除按层定型的插件 API | S | PC-P3a–c、PC-R6 |
-| PC-P4 | #376 | 跨语言补齐：R2、R3、R5，`#[rutis::service]` 导出，SDK 与作者指南一起改 | L | PC-P3d |
+| ID | Issue | 内容 | 规模 | 前置 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| PC-P1 | #379 | rutis 0.16 升级：分支机制通道改用私有事件名，去掉中继，事件载荷改为 serde | M | — | 已完成 |
+| PC-P2 | #371 | 服务目录，以及 Rust 按名字声明依赖 | M | PC-P1 | 已完成 |
+| PC-P3a | #372 | 进程与简单部件迁为按名字依赖的 loader 行；同作用域部件的合并检查 | M | PC-P2 | 已完成 |
+| PC-P3b | #373 | 核心分支与 Session 部件迁移；同作用域部件的合并检查 | L | PC-P3a | 已完成 |
+| PC-P3c | #374 | App Server 宿主部件迁移；同作用域部件的合并检查 | M | PC-P3b | 已完成 |
+| PC-R6 | #382 | 贡献向所有者登记：工具、工具来源、提示词来源、方法命名空间；去掉宿主侧预注册 | M | PC-P2 | 已完成（#407、#410） |
+| PC-P3e | #402 | 每个功能是一个进程插件，登记自己的 Session 与分支部件 | L | PC-R6 | 已完成（#411、#413） |
+| PC-P3d | #375 | 删除按层定型的插件 API | S | PC-P3a–c、PC-P3e、PC-R6 | 已完成（#412；同作用域合并检查与 P6 文档收尾 #415） |
+| PC-P4 | #376 | 跨语言补齐：R2、R3、R5，`#[rutis::service]` 导出，SDK 与作者指南一起改 | L | PC-P3d | 第一种形式已完成；R5 的第二种形式等 rutis#642（#403、#405） |
+| PC-P5 | #380 | R1：Dispatcher 登记时先回放历史再跟随实时事件 | M | PC-P2 | 已完成（#409） |
+| PC-R4 | #381 | 在 xtask 中生成服务目录并标出 Capability | S | PC-P2 | 已完成（#408） |
 
-P3 的每一批都按功能检查同一作用域里的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。目前看到的候选：Skills 在 Session 作用域的 Skills、SkillContributions、SkillContent；Settings 与 SettingsMethods；SkillsCatalog 与 App Server 里同名的管理贡献部件；PromptSources 与 PromptRegistry（需先确认不违反 ADR 002 D3）。
+P3 的每一批都按功能检查同一作用域里的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。检查结果：
+- SkillContributions 并入 Skills：内容集合由 Skills 持有，经实例值交给它创建的 SkillContent，不再是服务。SkillContent 仍是 Session 自己的内容实例。
+- SkillsCatalog 与 App Server 里同名的管理贡献部件已是同一个插件（#402）。
+- Settings 与 SettingsMethods 保持分开：合并会让核心的 Settings 依赖管理方法表，表重载时所有依赖 Settings 的部分都要跟着重载（重载隔离）。
+- PromptRegistry 与 PromptSources 保持分开：前者是提示词来源的所有者，后者和 Skills 一样是向它登记的贡献者（R6）；合并还会让核心的提示词表依赖 HostPlatform（ADR 002 D3）。
 
 ### 3.3 插件开工顺序
 

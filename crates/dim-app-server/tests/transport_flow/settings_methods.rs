@@ -113,7 +113,11 @@ async fn node_settings_typescript_owner_reads_and_writes() {
         Arc::new(MockTools),
         config(&home, rows(vec![owner_row(OWNER)])),
         move |builder| {
-            builder.session_part(move |names| names.part(Probe(probe.clone())));
+            builder.require_feature(
+                Feature::new("test.settings-probe").session("test.settings-probe", move |names| {
+                    names.part(Probe(probe.clone()))
+                }),
+            );
         },
     )
     .await;
