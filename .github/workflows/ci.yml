@@ -15,6 +15,9 @@ env:
 jobs:
   changes:
     # Pull requests run only the groups their paths need; scripts/ci-changes.mjs holds the rules.
+    # Self-hosted runners keep state between jobs, so they run only code from branches of this
+    # repository; fork pull requests skip every job and fail ci-ok. See docs/release/README.md.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 5
     outputs:
@@ -129,6 +132,7 @@ jobs:
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 5
     steps:
-      - name: Fail when a selected job failed
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+      # A skipped changes job means a fork pull request, which this workflow does not verify.
+      - name: Fail unless every selected job passed
+        if: needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
