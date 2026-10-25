@@ -95,10 +95,14 @@ name-bound (#391, #392, #396–#398, #400).
   `require_part`). The App Server places the builder's plugins as process rows and provides
   `AgentBuilder::parts()` as `partRegistry` (`AgentBuilder::plugin_rows`); an Agent placing itself
   mounts them in its own loader with a registry of its own. A required part nothing has registered
-  yet holds an instance's creation as a required row does. The process state of some features is
-  still in rows of its own, and tests still add profile parts with
-  `AgentBuilder::session_part`/`branch_part` ([#402](https://github.com/arcships/dim/issues/402),
-  [#375](https://github.com/arcships/dim/issues/375)).
+  yet holds an instance's creation as a required row does. A feature that owns process state
+  registers its parts from the row that holds it: Mcp, Collaboration, Agents, SkillsCatalog and
+  WorkspaceTools, which holds the file-write coordinator. ConfiguredModels and ConfiguredModel, and
+  PermissionRules and CommandRules, stay two plugins: the profile chooses which part binds the
+  Session's `PrepareModelHost` or `CommandRulesHost`, whether or not the process row runs. An Agent
+  placing itself starts its plugins with its first Session or `Agent::start`. Tests still add
+  profile parts with `AgentBuilder::session_part`/`branch_part`
+  ([#375](https://github.com/arcships/dim/issues/375)).
 - Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry, and Session
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).

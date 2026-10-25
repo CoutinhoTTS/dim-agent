@@ -15096,10 +15096,7 @@
       "from": "dim_app_server::permission_rules",
       "to": "dim_agent_runtime::parts",
       "references": [
-        "path PartRegistry",
-        "path PartScope::Session",
-        "use dim_agent_runtime::PartRegistry",
-        "use dim_agent_runtime::PartScope"
+        "path dim_agent_runtime::Feature::new"
       ]
     },
     {

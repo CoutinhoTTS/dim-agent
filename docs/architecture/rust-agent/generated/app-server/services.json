@@ -23,9 +23,39 @@
         "reads": []
       },
       {
-        "id": 46,
+        "id": 47,
         "parent": 2,
         "name": "Attachments",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "provider": 29,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "provider": 29,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 46,
+        "parent": 2,
+        "name": "CommandRules",
         "state": "Active",
         "generation": 1,
         "injects": [
@@ -973,11 +1003,6 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_runtime::parts::PartRegistry",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
             "service": "dim_app_server::methods::ManagementMethods",
             "scope": null,
             "status": "Ready"
@@ -989,12 +1014,6 @@
           }
         ],
         "resolved": [
-          {
-            "service": "dim_agent_runtime::parts::PartRegistry",
-            "scope": null,
-            "provider": 29,
-            "generation": 1
-          },
           {
             "service": "dim_app_server::methods::ManagementMethods",
             "scope": null,
@@ -1009,12 +1028,6 @@
           }
         ],
         "reads": [
-          {
-            "service": "dim_agent_runtime::parts::PartRegistry",
-            "provider": 29,
-            "declared": true,
-            "external": true
-          },
           {
             "service": "dim_app_server::methods::ManagementMethods",
             "provider": 8,

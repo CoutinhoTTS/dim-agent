@@ -279,7 +279,7 @@ Those measured limits are not claims about every newer ABI.
 
 ### Background lifetime
 
-The existing [BackgroundExec](../architecture/rust-agent/plugins/BackgroundExec.md) owns model
+The existing [BackgroundExec](../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec) owns model
 background tasks. `exec::hand_off` passes the same live ExecProcess to `BackgroundExec::start`;
 its existing task retains the tree until completion. Returning a ToolResult or stopping a turn
 therefore does not drop that process. There is no cross-command namespace PID handoff.

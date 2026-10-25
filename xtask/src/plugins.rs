@@ -2,9 +2,11 @@
 //!
 //! `graph` assembles the local execution profile, records its live rutis
 //! diagnostics in `generated/local/services.json`, and rewrites the generated
-//! block of every plugin document from them. `check` requires a document for
-//! every business plugin in that profile and checks its generated block and
-//! hand-written `## Dependencies` (or `## 依赖`) table against the diagnostics.
+//! blocks of every plugin document from them. A document is a plugin's page:
+//! it holds one generated block for each part or process plugin it documents,
+//! each after its own `Dependencies` (or `依赖`) table. `check` requires every
+//! business plugin and part in that profile to be documented and checks each
+//! block and table against the diagnostics.
 use dim_agent_capabilities::{
     defaults,
     file_storage::FileStoragePlugin,
@@ -241,11 +243,13 @@ pub fn write(root: &Path, graphs: &BTreeMap<&'static str, Value>) -> Result<()> 
         ),
     )?;
     let facts = Facts::new(graphs);
-    for (path, name) in documents(root)? {
-        let text = std::fs::read_to_string(&path)?;
-        let (before, _, after) = split_block(&text, &name, &path)?;
-        let block = facts.block(&name)?;
-        std::fs::write(&path, format!("{before}{block}{after}"))?;
+    for (path, names) in documents(root)? {
+        let mut text = std::fs::read_to_string(&path)?;
+        for name in names {
+            let (before, _, after) = split_block(&text, &name, &path)?;
+            text = format!("{before}{}{after}", facts.block(&name)?);
+        }
+        std::fs::write(&path, text)?;
     }
     Ok(())
 }
@@ -260,7 +264,10 @@ pub fn check(root: &Path) -> Result<()> {
         serde_json::from_str(&std::fs::read_to_string(graph_file(root))?)?;
     let facts = Facts::new(&graphs);
     let mut errors = Vec::new();
-    let documented: BTreeSet<_> = documents.iter().map(|(_, name)| name.as_str()).collect();
+    let documented: BTreeSet<_> = documents
+        .iter()
+        .flat_map(|(_, names)| names.iter().map(String::as_str))
+        .collect();
     for (_, plugin) in &facts.plugins {
         let name = plugin["name"].as_str().ok_or("plugin graph has no name")?;
         if !INFRASTRUCTURE.contains(&name) && !documented.contains(name) {
@@ -270,13 +277,20 @@ pub fn check(root: &Path) -> Result<()> {
             ));
         }
     }
-    for (path, name) in &documents {
-        let text = std::fs::read_to_string(path)?;
-        let (_, block, _) = split_block(&text, name, path)?;
+    for (path, name, section) in documents
+        .iter()
+        .map(|(path, names)| Ok((path, names, std::fs::read_to_string(path)?)))
+        .collect::<Result<Vec<_>>>()?
+        .iter()
+        .flat_map(|(path, names, text)| {
+            sections(text, names).map(move |(name, section)| (*path, name, section))
+        })
+    {
+        let (_, block, _) = split_block(section, name, path)?;
         match facts.block(name) {
             Err(error) => errors.push(error.to_string()),
             Ok(expected) if expected != block => errors.push(format!(
-                "{}: generated block is stale; run `cargo run -p xtask -- graph`",
+                "{}: `{name}`: generated block is stale; run `cargo run -p xtask -- graph`",
                 path.display()
             )),
             Ok(_) => {}
@@ -285,16 +299,16 @@ pub fn check(root: &Path) -> Result<()> {
             .plugin(name)
             .map(|plugin| facts.injects(plugin).into_iter().collect())
             .unwrap_or_default();
-        let explained = dependency_rows(&text);
+        let explained = dependency_rows(section);
         for missing in injected.difference(&explained) {
             errors.push(format!(
-                "{}: dependency table does not explain injected `{missing}`",
+                "{}: `{name}`: dependency table does not explain injected `{missing}`",
                 path.display()
             ));
         }
         for extra in explained.difference(&injected) {
             errors.push(format!(
-                "{}: dependency table explains `{extra}`, which the plugin does not inject",
+                "{}: `{name}`: dependency table explains `{extra}`, which it does not inject",
                 path.display()
             ));
         }
@@ -307,8 +321,44 @@ pub fn check(root: &Path) -> Result<()> {
     }
 }
 
-/// `(path, plugin name)` of every document; the file stem is the plugin name.
-fn documents(root: &Path) -> Result<Vec<(PathBuf, String)>> {
+/// Each part a page documents with the text that documents it: from the end
+/// of the previous part's block, or the start, to the end of its own block.
+fn sections<'a>(
+    text: &'a str,
+    names: &'a [String],
+) -> impl Iterator<Item = (&'a String, &'a str)> + 'a {
+    let mut start = 0;
+    names.iter().map(move |name| {
+        let marker = format!("{BEGIN}{name} ");
+        let end = text[start..]
+            .find(&marker)
+            .and_then(|at| {
+                text[start + at..]
+                    .find(END)
+                    .map(|end| start + at + end + END.len())
+            })
+            .unwrap_or(text.len());
+        let section = &text[start..end];
+        start = end;
+        (name, section)
+    })
+}
+
+/// The parts or process plugins a page documents: the names of its
+/// generated blocks, in order.
+fn documented(text: &str) -> Vec<String> {
+    text.match_indices(BEGIN)
+        .filter_map(|(at, _)| {
+            text[at + BEGIN.len()..]
+                .split_whitespace()
+                .next()
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// `(path, documented names)` of every page; a page documents at least one.
+fn documents(root: &Path) -> Result<Vec<(PathBuf, Vec<String>)>> {
     let dir = docs_dir(root);
     let entries = std::fs::read_dir(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     let mut documents = Vec::new();
@@ -318,7 +368,11 @@ fn documents(root: &Path) -> Result<Vec<(PathBuf, String)>> {
             continue;
         };
         if path.extension().is_some_and(|ext| ext == "md") && stem != "README" {
-            documents.push((path.clone(), stem.to_owned()));
+            let names = documented(&std::fs::read_to_string(&path)?);
+            if names.is_empty() {
+                return Err(format!("{}: no generated block", path.display()).into());
+            }
+            documents.push((path.clone(), names));
         }
     }
     documents.sort();
@@ -343,8 +397,11 @@ fn dependency_rows(text: &str) -> BTreeSet<String> {
     let mut rows = BTreeSet::new();
     let mut inside = false;
     for line in text.lines() {
-        if line.starts_with("## ") {
-            inside = matches!(line.trim(), "## Dependencies" | "## 依赖");
+        if let Some(heading) = line.strip_prefix("##") {
+            inside = matches!(
+                heading.trim_start_matches('#').trim(),
+                "Dependencies" | "依赖"
+            );
             continue;
         }
         let Some(cell) = line
@@ -490,6 +547,28 @@ mod tests {
         assert_eq!(
             code("dim_agent_capabilities::host_platform::HostPlatform"),
             "P:HostPlatform"
+        );
+    }
+
+    #[test]
+    fn a_page_documents_each_part_with_its_own_table() {
+        let text = format!(
+            "# Plugin\n\n## One\n\n### Dependencies\n\n| S | P |\n| --- | --- |\n| `B:Timeline` | x |\n\n{BEGIN}One -->\n{END}\n\n## Two\n\n### 依赖\n\n| S | P |\n| --- | --- |\n| `S:ToolRegistry` | y |\n\n{BEGIN}Two -->\n{END}\n\n## Tests\n"
+        );
+        let names = documented(&text);
+        assert_eq!(names, ["One", "Two"]);
+        let parts: Vec<_> = sections(&text, &names)
+            .map(|(name, section)| (name.clone(), dependency_rows(section)))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("One".to_owned(), BTreeSet::from(["B:Timeline".to_owned()])),
+                (
+                    "Two".to_owned(),
+                    BTreeSet::from(["S:ToolRegistry".to_owned()])
+                ),
+            ]
         );
     }
 

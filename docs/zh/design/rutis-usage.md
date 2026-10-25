@@ -76,8 +76,11 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
   安装函数就是 profile，它按名字要求自己安装的部件（`require_feature`、`require_part`）。App Server 把 builder
   的插件放成进程行，并以 `partRegistry` 提供 `AgentBuilder::parts()`（`AgentBuilder::plugin_rows`）；自己放置的
   Agent 在自己的 loader 里挂载它们，用自己的登记处。必需部件尚未有人登记时，实例的创建像等必需行一样等它。
-  部分功能的进程状态仍在单独的行里，测试仍用 `AgentBuilder::session_part`/`branch_part` 添加 profile 部件
-  （[#402](https://github.com/arcships/dim/issues/402)、[#375](https://github.com/arcships/dim/issues/375)）。
+  持有进程状态的功能从持有它的那一行登记部件：Mcp、Collaboration、Agents、SkillsCatalog，以及持有文件写协调器的
+  WorkspaceTools。ConfiguredModels 与 ConfiguredModel、PermissionRules 与 CommandRules 仍是两个插件：由 profile
+  选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。自己放置的 Agent 在
+  第一个 Session 或 `Agent::start` 时启动自己的插件。测试仍用 `AgentBuilder::session_part`/`branch_part` 添加
+  profile 部件（[#375](https://github.com/arcships/dim/issues/375)）。
 - 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5（[#403](https://github.com/arcships/dim/issues/403)）。
 
