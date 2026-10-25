@@ -137,7 +137,7 @@ flowchart LR
 
 ### 3.1 合同形式
 
-设计定义或使用的每个合同都是一个具名服务（ADR 002 D5）：服务名（camelCase）、作用域、实例 key，以及标注为 `sync` 或 `async` 的方法，其请求、回复和错误都是可序列化数据。取消是一个取消请求，或消费方丢弃该调用。插件在其 `provides` 和 loader 行中声明它提供的内容；消费方按服务名和作用域收集。工具和方法命名空间则是注册的：部件把工具注册到本 Session 的 `toolRegistry`，把方法命名空间注册到本 Session 的 `sessionMethods` 或进程的 `managementMethods`，注册持续到该部件卸载。rutis 跨语言调用此类服务（rutis-bridge 运行时、`host_key(name)`、`TypeKey::named`），因此 TypeScript 或 Python 部分无需手写 Rust 绑定即可满足合同。Rust trait、`TypeKey`、`Contributions<T>` 和 `AgentBuilder` 调用只出现在各文档的“Rust 绑定”附录中。
+设计定义或使用的每个合同都是一个具名服务（ADR 002 D5）：服务名（camelCase）、作用域、实例 key，以及标注为 `sync` 或 `async` 的方法，其请求、回复和错误都是可序列化数据。取消是一个取消请求，或消费方丢弃该调用。插件在其 `provides` 和 loader 行中声明它提供的内容；消费方按服务名和作用域收集。工具和方法命名空间则是注册的：部件把工具注册到本 Session 的 `toolRegistry`，把方法命名空间注册到本 Session 的 `sessionMethods` 或进程的 `managementMethods`，注册持续到该部件卸载。rutis 跨语言调用此类服务（rutis-bridge 运行时、`host_key(name)`、`TypeKey::named`），因此 TypeScript 或 Python 部分无需手写 Rust 绑定即可满足合同。Rust trait、`TypeKey`、`Keyed<T>` 和 `AgentBuilder` 调用只出现在各文档的“Rust 绑定”附录中。
 
 | 服务 | 作用域 | Key | 方法 | 定义于 |
 | --- | --- | --- | --- | --- |

@@ -28,7 +28,7 @@ ordered consumption.
 
 | Concern | Existing owner |
 | --- | --- |
-| Branch instance and typed keys | `BranchScope`, nested in its `SessionScope` |
+| Branch instance and typed keys | The `branch` group instance, nested in its Session's; the catalog keys each name for it (`Names`) |
 | Ordered consumption, handler failures, committed reads | Branch `Dispatcher` (over its `Timeline`) |
 | Input validation and commitment | `Branch::input`, reached by branch id through Session `TreeCommands` |
 | Event writes, including extension events | Branch `Timeline` |
@@ -108,7 +108,7 @@ fact: cancelling then only stops the caller waiting, and TimelineTree finishes t
 ## Placement
 
 A row with `"group": "branch"` is a branch part: App Server appends it to the existing nested
-`BRANCH_GROUP`, so it runs once in every branch ([How Dim uses rutis §2](rutis-usage.md#2-parts-are-loader-rows)).
+`BRANCH_GROUP`, so it runs once in every branch ([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)).
 Its declared group decides its placement, not the names it injects; there is no setup service. A
 row in another group that names a branch service fails at composition, naming the branch group.
 

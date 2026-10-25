@@ -100,9 +100,7 @@ name-bound (#391, #392, #396–#398, #400).
   WorkspaceTools, which holds the file-write coordinator. ConfiguredModels and ConfiguredModel, and
   PermissionRules and CommandRules, stay two plugins: the profile chooses which part binds the
   Session's `PrepareModelHost` or `CommandRulesHost`, whether or not the process row runs. An Agent
-  placing itself starts its plugins with its first Session or `Agent::start`. Tests still add
-  profile parts with `AgentBuilder::session_part`/`branch_part`
-  ([#375](https://github.com/arcships/dim/issues/375)).
+  placing itself starts its plugins with its first Session or `Agent::start`.
 - Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry, and Session
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).
@@ -322,7 +320,7 @@ These requirements concern how Dim uses rutis. They follow
 
 ### A.1 The old forms and their replacements
 
-The replacements exist since P2; the old forms remain until P3 has moved every part.
+P3 deleted the old forms ([#375](https://github.com/arcships/dim/issues/375)); this table maps each to its replacement.
 
 | Old form | Replacement |
 | --- | --- |
@@ -334,7 +332,7 @@ The replacements exist since P2; the old forms remain until P3 has moved every p
 | `Contributions<T>` | Nothing: a contribution registers with its owner (R6) |
 | `When<D>` | `When<D>` with keys from `Names::when`: the factory includes the name or not when it builds the copy. Not rutis `Option<..>`, which reads without gating |
 | `SessionService`, `BranchService` markers | The group registered in the catalog (`names::register`) |
-| `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`: rows in the `session` or `branch` group; `register_part` for a process row |
+| `AgentBuilder::session_plugin`/`timeline_plugin` | A feature registers its parts with the part registry (`Feature`, added with `AgentBuilder::feature`, or its own plugin with `AgentBuilder::plugin`; a profile uses `require_feature`); `register_part` for an App Server process row |
 | `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` (removed) | The owner's `register`, called by the contributing part: `toolRegistry`, `promptRegistry`, `sessionMethods`, `managementMethods` (R6) |
 | `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type; `Exports` for types whose source cannot change, and for services provided per Session or branch (§3.4) |
 | `PublicService` | Unchanged (a facade rule) |

@@ -28,7 +28,7 @@
 | `SessionStorePlugin` | SQLite 实现的 `TimelineStore` | — |
 | `MemoryTimelineStore`（runtime） | 内存实现，供独立 `AgentBuilder`、测试与开发 profile 使用；保存全部事件，追加即发布 | 持久化 |
 
-每个 Agent 装配一个 `TimelineStore`：App Server 的各 Agent 共用 `SessionStorePlugin` 提供的实例，独立 `AgentBuilder` 未传入时自建 `MemoryTimelineStore`。Session 创建时由 SessionScope 注入各分支的 Timeline。祖先链描述为 `[(branch_id, cut)]`，由 TimelineTree 在建分支时给出；子分支不持有父分支事件。本文的内存驻留约定针对 SQLite 实现。
+每个 Agent 装配一个 `TimelineStore`：App Server 的各 Agent 共用 `SessionStorePlugin` 提供的实例，独立 `AgentBuilder` 未传入时自建 `MemoryTimelineStore`。Session 创建时由 SessionScope 以 Session 名字 `timelineStore` 提供它，各分支的 Timeline 从中读写。祖先链描述为 `[(branch_id, cut)]`，由 TimelineTree 在建分支时给出；子分支不持有父分支事件。本文的内存驻留约定针对 SQLite 实现。
 
 ## 2. 存储编码
 

@@ -79,8 +79,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
   持有进程状态的功能从持有它的那一行登记部件：Mcp、Collaboration、Agents、SkillsCatalog，以及持有文件写协调器的
   WorkspaceTools。ConfiguredModels 与 ConfiguredModel、PermissionRules 与 CommandRules 仍是两个插件：由 profile
   选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。自己放置的 Agent 在
-  第一个 Session 或 `Agent::start` 时启动自己的插件。测试仍用 `AgentBuilder::session_part`/`branch_part` 添加
-  profile 部件（[#375](https://github.com/arcships/dim/issues/375)）。
+  第一个 Session 或 `Agent::start` 时启动自己的插件。
 - 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5（[#403](https://github.com/arcships/dim/issues/403)）。
 
@@ -253,7 +252,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 
 ### A.1 旧形式及其替代
 
-替代形式自 P2 起可用；旧形式保留到 P3 迁移完所有部件为止。
+P3 删除了旧形式（[#375](https://github.com/arcships/dim/issues/375)）；此表列出每个旧形式的替代。
 
 | 旧形式 | 替代 |
 | --- | --- |
@@ -265,7 +264,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 | `Contributions<T>` | 无：贡献向所有者登记（R6） |
 | `When<D>` | `When<D>`，key 来自 `Names::when`：工厂构建副本时决定是否包含该名称。不是 rutis `Option<..>`，后者读取但不门控 |
 | `SessionService`、`BranchService` 标记 | 注册在服务目录中的组（`names::register`） |
-| `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`：`session` 或 `branch` 组中的行；进程行用 `register_part` |
+| `AgentBuilder::session_plugin`/`timeline_plugin` | 功能向部件登记处登记自己的部件（`Feature` 用 `AgentBuilder::feature` 添加，自己写的插件用 `AgentBuilder::plugin` 添加；profile 用 `require_feature`）；App Server 的进程行用 `register_part` |
 | `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`（已删除） | 所有者的 `register`，由提供贡献的部件调用：`toolRegistry`、`promptRegistry`、`sessionMethods`、`managementMethods`（R6） |
 | `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`；`Exports` 用于源码无法修改的类型，以及按 Session 或分支提供的服务（§3.4） |
 | `PublicService` | 不变（门面规则） |
