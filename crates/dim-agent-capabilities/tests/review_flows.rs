@@ -119,7 +119,7 @@ async fn one_tool_panic_does_not_abandon_other_native_cleanup_or_reorder_actual_
     )
     .build();
     let session = soon(agent.create_session(SessionConfig {
-        tools: vec!["panic".into(), "slow".into()],
+        tools: Some(vec!["panic".into(), "slow".into()]),
         permission_policy: PermissionPolicy {
             preset: PermissionPreset::FullAccess,
             ..Default::default()

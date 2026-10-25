@@ -417,7 +417,7 @@ impl Shell {
                         config: None,
                         metadata: None,
                     },
-                    tools: vec![],
+                    tools: Some(vec![]),
                     ..Default::default()
                 },
                 idle_unload_after: grace,

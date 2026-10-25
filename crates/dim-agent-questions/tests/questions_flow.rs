@@ -9,11 +9,11 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::*,
     methods::{RpcError, SessionMethods},
-    tool_registry::{ToolContribution, contribution_key},
+    tool_registry::{ToolContribution, ToolRegistry},
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -87,30 +87,29 @@ impl ModelDriver for Script {
     }
 }
 
-/// Reaches the `ask_user` contribution of the latest Session, to call the
+/// Reaches the `ask_user` registration of the latest Session, to call the
 /// tool contract directly where no model output can (a duplicate call id).
 #[derive(Clone, Default)]
-struct Probe(Arc<Mutex<Option<Reach>>>);
-/// The latest Session's context and the key of its `ask_user` contribution.
-type Reach = (Ctx, DepKey<ToolContribution>);
+struct Probe(Arc<Mutex<Option<Arc<ToolRegistry>>>>);
 impl Probe {
     fn tool(&self) -> Arc<ToolContribution> {
-        let (ctx, key) = self.0.lock().unwrap().clone().unwrap();
-        ctx.get_as::<ToolContribution>(key.key().clone()).unwrap()
+        let registry = self.0.lock().unwrap().clone().unwrap();
+        registry.snapshot();
+        registry.contributed("ask_user").unwrap()
     }
 }
-struct ProbePlugin(DepKey<ToolContribution>, Probe);
+struct ProbePlugin(Probe);
 impl TypedPlugin for ProbePlugin {
-    type Deps = ();
+    type Deps = (Keyed<ToolRegistry>,);
     fn name(&self) -> &str {
         "test.questions-probe"
     }
     fn apply<'a>(
         &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
+        _ctx: &'a Ctx,
+        (Keyed(registry),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        *self.1.0.lock().unwrap() = Some((ctx.clone(), self.0.clone()));
+        *self.0.0.lock().unwrap() = Some(registry);
         Box::pin(async { Ok(Effect::Done) })
     }
 }
@@ -140,12 +139,7 @@ impl Fixture {
         defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_agent_questions::install(&mut builder);
         let slot = probe.clone();
-        builder.session_part(move |names| {
-            names.part(ProbePlugin(
-                contribution_key(names, "ask_user")?,
-                slot.clone(),
-            ))
-        });
+        builder.session_part(move |names| names.part(ProbePlugin(slot.clone())));
         let agent = builder.build_in(&root);
         Self {
             root,
@@ -157,7 +151,7 @@ impl Fixture {
     async fn session(&self, interactive: bool) -> Session {
         self.agent
             .create_session(SessionConfig {
-                tools: vec!["ask_user".into(), "wait".into()],
+                tools: Some(vec!["ask_user".into(), "wait".into()]),
                 interactive,
                 ..SessionConfig::default()
             })

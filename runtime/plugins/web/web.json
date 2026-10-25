@@ -3,11 +3,8 @@
   "name": "@dimcode/web",
   "group": "session",
   "config": {},
-  "inject": ["settings"],
-  "provides": {
-    "toolContribution:web_search": {"declaration": "sync", "execute": "async"},
-    "toolContribution:web_fetch": {"declaration": "sync", "execute": "async"}
-  },
+  "inject": ["settings", "toolRegistry"],
+  "provides": {},
   "settings": [{
     "source": "web",
     "userFile": "web.json",

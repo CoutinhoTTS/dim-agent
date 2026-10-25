@@ -1,6 +1,6 @@
 use crate::{
     host::{HostError, HostFuture, ToolExecutionContext},
-    tool_registry::{ToolContribution, ToolHandler, contribution_key},
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
     AgentError, Branch, BranchOptions, Dispatcher, Names, Result, SessionIdentity, StoredBranch,
@@ -904,7 +904,6 @@ impl TypedPlugin for TreeTimelinePlugin {
     }
 }
 pub struct TimelineTreePlugin {
-    contribution: rutis::DepKey<ToolContribution>,
     commands: rutis::DepKey<TreeCommands>,
     tree: rutis::DepKey<TimelineTree>,
     control: rutis::DepKey<dyn TimelineTreeControl>,
@@ -912,7 +911,6 @@ pub struct TimelineTreePlugin {
 impl TimelineTreePlugin {
     pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
         Ok(Self {
-            contribution: contribution_key(names, "branch")?,
             commands: names.key()?,
             tree: names.key()?,
             control: names.key()?,
@@ -944,20 +942,36 @@ impl TypedPlugin for TimelineTreePlugin {
             let commands = Arc::new(TreeCommands {
                 tree: Arc::downgrade(&tree),
             });
-            ctx.provide_as(
-                self.contribution.key().clone(),
-                Arc::new(ToolContribution {
-                    definition: branch_definition(),
-                    handler: Arc::new(BranchTool {
-                        tree: commands.clone(),
-                    }),
-                }),
-            )?;
             ctx.provide_as(self.commands.key().clone(), commands)?;
             ctx.provide_as(self.tree.key().clone(), tree.clone())?;
             ctx.provide_as(
                 self.control.key().clone(),
                 tree as Arc<dyn TimelineTreeControl>,
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
+/// Session part: registers the `branch` tool, which forks the calling
+/// branch through the tree.
+pub struct BranchToolPlugin;
+impl TypedPlugin for BranchToolPlugin {
+    type Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>);
+    fn name(&self) -> &str {
+        "BranchTool"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (Keyed(tree), Keyed(tools)): Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            tools.register(
+                ctx,
+                ToolContribution {
+                    definition: branch_definition(),
+                    handler: Arc::new(BranchTool { tree }),
+                },
             )?;
             Ok(Effect::Done)
         })

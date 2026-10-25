@@ -276,7 +276,7 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
             unix_path: Some(native.join("daemon.sock")),
             web_assets: Some(assets),
             session_defaults: SessionConfig {
-                tools: vec!["read".into()],
+                tools: Some(vec!["read".into()]),
                 ..Default::default()
             },
             ..Default::default()

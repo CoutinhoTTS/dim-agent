@@ -91,7 +91,7 @@ Plugins never add wiring plugins (ADR 002 D2). Each need maps to a mechanism tha
 
 | Need | Mechanism | Used by |
 | --- | --- | --- |
-| Offer a tool to a Session | Session-scoped `toolContribution` ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)) or `SessionToolSource` ([tool contributions](../architecture/rust-agent/tool-contributions.md)) | Questions, Goal, Web, Scheduler, Workflow |
+| Offer a tool to a Session | Register it with the Session's `toolRegistry` ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)), or register a tool source for a changing set ([tool contributions](../architecture/rust-agent/tool-contributions.md)) | Questions, Goal, Web, Scheduler, Workflow |
 | Offer instructions | PromptRegistry prompt sources | Existing |
 | Observe a Session's events | The existing Session broadcast (`session/<id>` channel), from a Session-scoped plugin | SessionTitle |
 | Observe and act on a branch's events in order | The branch Dispatcher, from a branch-scoped plugin | Goal, Hooks post-tool, turn-end and Session-start |
@@ -124,7 +124,7 @@ flowchart LR
   end
   Rpc -.->|"look up per call"| MM
   Rpc -->|"sessionMethods"| SP
-  TR -.->|"attach toolContribution at Session load"| SP
+  SP -->|"register tools"| TR
   SP -->|"listen"| BC
   BP -->|"before callback"| TL
   BP -->|"subscribe in order"| DP
@@ -133,17 +133,17 @@ flowchart LR
   SP -->|"branch services"| BP
 ```
 
-The arrows are dependency edges, and they point to the same or an enclosing scope (D3). Dependencies point from extensions to the core (D3): a core collector never depends on optional contributors. ToolRegistry follows the tools of optional plugins as their providers become active or retire, from the next request and without a Session reload ([A.5](contracts/session-boundary.md#a5-tool-contribution), #241), Rpc looks up management method owners on each call (the dotted arrow, [methods §3.2](contracts/session-boundary.md#32-management-method)), and Session assembly does not wait for optional parts, so an inactive or reloading provider affects only its own features. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
+The arrows are dependency edges, and they point to the same or an enclosing scope (D3). Dependencies point from extensions to the core (D3): a core collector never depends on optional contributors. ToolRegistry follows the tools optional plugins register and withdraw, from the next request and without a Session reload ([A.5](contracts/session-boundary.md#a5-tool-contribution), #241), Rpc looks up management method owners on each call (the dotted arrow, [methods §3.2](contracts/session-boundary.md#32-management-method)), and Session assembly does not wait for optional parts, so an inactive or reloading provider affects only its own features. Reloads follow only rare structural operations (install, upgrade, enable, disable, crash). Their propagation, including failing in-flight turns, is an accepted and documented cost, and nothing is added to prevent it. Business configuration changes never reload (D4).
 
 ### 3.1 Contract form
 
-Every contract the designs define or use is a named service (ADR 002 D5): service name (camelCase), scope, instance key, and methods marked `sync` or `async` whose requests, replies and errors are serializable data. Cancellation is a cancel request or the consumer dropping the call. A plugin declares what it provides in its `provides` and loader row; consumers collect by service name and scope. rutis calls such services across languages (rutis-bridge runtimes, `host_key(name)`, `TypeKey::named`), so a TypeScript or Python part satisfies a contract without a hand-written Rust binding. Rust traits, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls appear only in each document's "Rust binding" appendix.
+Every contract the designs define or use is a named service (ADR 002 D5): service name (camelCase), scope, instance key, and methods marked `sync` or `async` whose requests, replies and errors are serializable data. Cancellation is a cancel request or the consumer dropping the call. A plugin declares what it provides in its `provides` and loader row; consumers collect by service name and scope. A tool is registered instead: a part registers it with the Session's `toolRegistry`, and the registration lasts until the part unloads. rutis calls such services across languages (rutis-bridge runtimes, `host_key(name)`, `TypeKey::named`), so a TypeScript or Python part satisfies a contract without a hand-written Rust binding. Rust traits, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls appear only in each document's "Rust binding" appendix.
 
 | Service | Scope | Key | Methods | Defined in |
 | --- | --- | --- | --- | --- |
 | `sessionMethods` | Session | namespace | `describe(): async -> MethodDecl[]`; `call(MethodCall): async -> MethodReply` | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
 | `managementMethods` | process | namespace | same | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
-| `toolContribution` | Session | tool name | `declaration(): sync -> ToolDeclaration`; `execute(ToolCall): async -> ToolResult` | [methods A.5](contracts/session-boundary.md#a5-tool-contribution) |
+| `toolRegistry` | Session | — | `register(ToolDeclaration, execute): async`, where `execute(ToolCall, cancelled): async -> ToolResult` is the registering part's function | [methods A.5](contracts/session-boundary.md#a5-tool-contribution) |
 | `sessions` | process | — | `launch`, `input`, `lookup`, `history`, `withdraw`, `stop`, `idle`, `delete` | [session access A.1](contracts/session-access.md#a1-the-sessions-service) |
 | `scheduleJobs` (proposed) | process | — | Session-to-process job operations for the `schedule` tool | [Scheduler](plugins/Scheduler.md) |
 | `workflowRuns` (optional package) | process | — | Session-to-process run operations for the `workflow` tool | [Workflow](plugins/Workflow.md) |
@@ -174,7 +174,7 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 
 | Contract | Owner | Defines |
 | --- | --- | --- |
-| [Methods and tool contributions](contracts/session-boundary.md) | Rpc, ToolRegistry | `sessionMethods`, `managementMethods` (and the definition of management methods), `callChannel`, what each entry is served, `unknown_method`/`service_reloading`, migration and compatibility of existing management methods, `toolContribution` |
+| [Methods and tool contributions](contracts/session-boundary.md) | Rpc, ToolRegistry | `sessionMethods`, `managementMethods` (and the definition of management methods), `callChannel`, what each entry is served, `unknown_method`/`service_reloading`, migration and compatibility of existing management methods, tool registration with `toolRegistry` |
 | [Session access](contracts/session-access.md) | Agents, InputQueue | the `sessions` service; `launch` with a capped policy, `SessionConfig.interactive`, source raw blocks, fixed-prefix read, withdrawal (`session.input.withdraw` through `sessionMethods`) |
 
 ## 5. Key flows
@@ -190,7 +190,7 @@ sequenceDiagram
   participant PM as Permission
   participant HK as Hooks toolAdvice (branch)
   participant TB as ToolBinding
-  participant W as Web toolContribution (Session)
+  participant W as Web tool (Session)
   LP->>TL: append step/tool-call [web_fetch]
   TL-->>TE: step/tool-call through the Dispatcher
   TE->>AP: admit({source, call}, risk network)
@@ -390,7 +390,7 @@ Prerequisites always land in an earlier phase than their consumers.
 
 | Phase | Content |
 | --- | --- |
-| P0 Foundation | `SessionConfig.interactive` set by `session.create`; `sessions` service with `launch`; `sessionMethods` dispatch; `managementMethods` in Rpc's table with migration of existing management methods; `toolContribution` in ToolRegistry; Settings business sources with change notification (S8a); the language-neutral `settings` service (S8b, with C4); `pluginFiles` (extended: binary, format version); Provider `AuxiliaryModel` (one model call outside any Session); SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
+| P0 Foundation | `SessionConfig.interactive` set by `session.create`; `sessions` service with `launch`; `sessionMethods` dispatch; `managementMethods` in Rpc's table with migration of existing management methods; tool registration with ToolRegistry; Settings business sources with change notification (S8a); the language-neutral `settings` service (S8b, with C4); `pluginFiles` (extended: binary, format version); Provider `AuxiliaryModel` (one model call outside any Session); SessionStore metadata and Session files; FileStorage listing and removal; HostPlatform argv helper |
 | P1 Core interaction | Questions (redesigned, M2), ShellInput, Attachments, SessionTitle; InputQueue withdrawal; Permission rules; model parameters; SessionStore deletion, cleanup and fork; HostPlatform isolation; #4 named exposure of the runtime's typed services for non-Rust parts; CLI subcommands, image conversion, `/export`, `exec --json` |
 | P2 Feature extension | Goal, Web, Scheduler, Workflow; Collaboration member approvals delivered to the leader as input; Mcp OAuth; production compaction host |
 | P3 External integration | ExternalAgent, AcpGateway, RemoteGateway with Transport `EntryHost` and `ConnectionEntry {name, deviceId}`, Modality; PluginManager; resource nodes (services looked up per call by `resourceNode`) |
@@ -487,7 +487,7 @@ A **supplement** adds services, methods or configuration. A **change** alters ex
 | Permission, ToolExecutor, Approval | Change (proposed) | Approval passes `AdmitCall.source` to Permission's admission decision; there Permission looks up branch `toolAdvice` services (after policy and command rules, only when not Deny) and folds their `none`/`allow`/`ask`/`deny` advice (deny, then ask, then allow; advice never overrides a Deny); Approval's post-response recheck stays a plain `decide` and does not ask again; ToolExecutor is unchanged. Generic, no business meaning ([Hooks A.6.1](plugins/Hooks.md#a61-tool-advice-in-permission)) | Hooks `PreToolUse` |
 | Rpc `session.submit` and `session.branch_create`, InputQueue `InputMethods`, CLI | Change (proposed) | Before writing operator input (`session.submit`, `session.branch_create {prompt}`, `session.input.withdraw {steer}`), the entry looks up Session `submitCheck` services; a block fails the call with `input_blocked` (message `Hook <source>: <reason>`, `data.appError` only) and writes nothing, else the returned blocks are appended to the input's user content after the operator's own content, so it stays operator input (a new branch's prompt takes none). `input_blocked` joins the `session.submit` errors that guarantee nothing was committed, in the App Server README and the CLI. A caller's disconnect cancels nothing. No event or persistence change. Generic ([Hooks A.6.2](plugins/Hooks.md#a62-submit-check-at-the-operator-input-entries)) | Hooks `UserPromptSubmit` |
 | Runtime Session facade | Supplement | Lookup of `sessionMethods` by namespace (the fixed-prefix read is composed from the existing facade, #50) | Rpc; process callers |
-| ToolRegistry | Supplement | Accepts named `toolContribution` services besides existing registrations ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)) | Non-Rust Session tools |
+| ToolRegistry | Supplement | Parts of any language register tools with `toolRegistry` ([methods A.5](contracts/session-boundary.md#a5-tool-contribution)) | Non-Rust Session tools |
 | Agent assembly | Supplement | Collects the named services each installed plugin declares in `provides`; optional Session and branch parts installed per enabled plugin | All Session plugins |
 | Permission | Supplement | Command rules read at use time (no new risk category: unknown risks are unclassified, #45) | `/approvals` |
 | ModelProvider | Supplement | When building a request, sends an image, or replaces it with a text placeholder if the model lacks image support; history is unchanged (moved out of Rpc) | Attachments |
@@ -554,7 +554,7 @@ One row per requirement to the runtime or rutis; changes to other plugins are in
 | Named contracts for non-Rust parts | Runtime | [#4](https://github.com/arcships/dim/issues/4), partial: C4 [#63](https://github.com/arcships/dim/issues/63) and C5 [#64](https://github.com/arcships/dim/issues/64) delivered | Supported C4/C5 contract families; other bindings remain owner-specific decisions | [C4](session-typescript.md), [C5](branch-typescript.md) |
 | **Withdrawn (existing facade composes it, #50).** Fixed-prefix history read on the Session facade | Runtime | To be opened | Process callers, branch parts deciding from Timeline facts | [session access §9](contracts/session-access.md#9-requirements-raised-to-mechanism-owners) |
 | Assembly installs the supported C4/C5 parts from their declared `provides` families | Runtime | [#63](https://github.com/arcships/dim/issues/63), [#64](https://github.com/arcships/dim/issues/64): implemented | TypeScript Session and branch parts; process/package binding remains separate | [C4](session-typescript.md), [C5](branch-typescript.md) |
-| Lookup of a keyed Session service by name (`sessionMethods` by namespace) and named `toolContribution` collection | Runtime | C1 [#47](https://github.com/arcships/dim/issues/47), C3 [#46](https://github.com/arcships/dim/issues/46), C4 [#63](https://github.com/arcships/dim/issues/63): implemented | Rpc, ToolRegistry | [Methods and tools](contracts/session-boundary.md) |
+| Lookup of a keyed Session service by name (`sessionMethods` by namespace) and tool registration with ToolRegistry from any language | Runtime | C1 [#47](https://github.com/arcships/dim/issues/47), C3 [#46](https://github.com/arcships/dim/issues/46), C4 [#63](https://github.com/arcships/dim/issues/63), [#382](https://github.com/arcships/dim/issues/382): implemented | Rpc, ToolRegistry | [Methods and tools](contracts/session-boundary.md) |
 | **Withdrawn (rutis is an external dependency).** Unload of a Session-scoped method provider waits for its `drain` calls | rutis lifecycle | To be opened | Rpc | [session boundary §9](contracts/session-boundary.md#9-requirements-raised-to-mechanism-owners) |
 | Timeline carries event types the core does not define | Runtime | [#2](https://github.com/arcships/dim/issues/2) | No current consumer (the Questions redesign defines no events) | [Questions §9](plugins/Questions.md#9-requirements-raised-to-mechanism-owners) |
 | **Withdrawn (rutis is an external dependency).** Services imported over a rutis link stay registered while the link is down and each call fails with `node_unavailable` (processes on the node are ended by that node's own HostPlatform) | rutis | [#5](https://github.com/arcships/dim/issues/5) | ExternalAgent, Modality, ShellInput, Hooks, Attachments, Workflow, Scheduler, PluginManager, RemoteGateway | [ExternalAgent §9](plugins/ExternalAgent.md#9-requirements-raised-to-mechanism-owners) |

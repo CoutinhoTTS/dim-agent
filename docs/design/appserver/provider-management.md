@@ -348,7 +348,7 @@ separate decision covering Settings too, not a prerequisite here.
 
 ## 6. Persistence, existing Sessions and migration
 
-**Format decision: v18, unchanged SQL schema.** These optional top-level
+**Format decision: v19, unchanged SQL schema.** These optional top-level
 fields carry user configuration; missing maps/lists mean no corresponding user data:
 
 | Struct / JSON field | Stored value and use |
@@ -360,7 +360,7 @@ fields carry user configuration; missing maps/lists mean no corresponding user d
 
 The [storage contract](native-storage-format.md#329-格式决定) records this
 decision and its downgrade loss. No fields are added to `ModelMetadata`,
-`ModelNetwork`, `StaticCredential` or the closed endpoint enum: old v18 readers
+`ModelNetwork`, `StaticCredential` or the closed endpoint enum: old v19 readers
 reject unknown nested fields there. `ModelPreferences` also denies unknown fields,
 and `NewApiEndpoint` stays closed. Binaries supporting these new top-level maps
 therefore reject later unknown preference fields or endpoint values inside them;
@@ -386,10 +386,10 @@ existing failure behavior. A replacement user model needs an ID distinct from
 the incoming bundled defaults; no
 automatic rename, overwrite, persistent warning or new migration service.
 
-Old v18 binaries can read these records but drop new top-level fields on rewrite,
+Old v19 binaries can read these records but drop new top-level fields on rewrite,
 including automatic `seed_bundled` rewrites when fingerprints change. That downgrade
 loss is accepted explicitly, not limited to user edits. Disposable-database
-acceptance must run an old v18 reader and its rewrite path on a new record.
+acceptance must run an old v19 reader and its rewrite path on a new record.
 No storage-owner gate, deletion history or format bump is added. Unknown database
 formats retain their existing rejection and byte-preservation rules.
 
@@ -457,14 +457,14 @@ unknown descriptor fields also reject it. Source bytes remain unchanged.
 | Preferences | Independent set/clear and restart; empty/unsupported values use typed errors while malformed patches use boundary errors; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
 | Accounts | Existing login/logout/usage; managed same-account refresh preserves preferences, descriptor overrides and disables, while a different-account refresh clears all three; actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
 | Concurrency/recovery | Two-client typed CAS conflicts on new and retained writes; lost create reply recovered by canonical UUID; noncanonical create IDs fail while existing non-UUID IDs still work with other methods; repeated create conflicts; read errors preserve healthy entries/drafts |
-| Storage/import | New record read and rewritten by old v18 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
+| Storage/import | New record read and rewritten by old v19 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
 | Client flow | Actual source-built App Server and Desktop/CLI: draft → probe → create → model/select → call → edit → call → restart → disconnect/delete; no fake-daemon-only evidence |
 
 Provider, transport, managed-account and source-built native CLI flows exercise
 these contracts with isolated homes and actual HTTP requests. The native CLI flow
 covers saved preference adoption, credential replacement, daemon restart and
 disconnect/delete; the RPC flow covers CAS and recovery after a lost create reply.
-Desktop UI acceptance remains with that client. Old-v18 read, write and automatic
+Desktop UI acceptance remains with that client. Old-v19 read, write and automatic
 reseed behavior is verified with a binary built from the accepted baseline and a
 disposable database; see [the storage contract](native-storage-format.md#329-格式决定).
 
@@ -479,7 +479,7 @@ disposable database; see [the storage contract](native-storage-format.md#329-格
 | §4.5 | Owned related selections/models/preferences/routes commit together; existing adoption remains atomic |
 | §4.6 | Management data does not enter model context; only existing adoption paths change configuration |
 | §4.7 | Accounts use public methods; other owners' references are not rewritten |
-| §4.8 | §5 raises no mechanism requirement; existing metadata and v18 top-level JSON suffice |
+| §4.8 | §5 raises no mechanism requirement; existing metadata and v19 top-level JSON suffice |
 | §4.9 | No new Timeline event or pushed process notification |
 | §1 | Extend the existing process Provider; no Capability or wiring plugin |
 | ADR 002 D1 | Process records belong to Provider; adopted branch state to its owner; drafts to clients |

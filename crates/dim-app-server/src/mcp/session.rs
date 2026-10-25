@@ -7,7 +7,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     tool_registry::{
-        SessionToolSource, ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged,
+        ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged, ToolRegistry,
         ToolSourceSet, tool_provider_changes,
     },
 };
@@ -37,7 +37,6 @@ pub fn install(builder: &mut AgentBuilder) {
             "McpServer",
             |names, value| names.part(super::publication::ConnectionPlugin::new(value)),
         )
-        .session_tool_source("mcp")
         .session_part(|names| names.part(McpSessionPlugin::new(names)?));
 }
 
@@ -173,17 +172,12 @@ impl ToolProvider for Sources {
 pub struct McpSessionPlugin {
     session: InstanceId,
     mcp: DepKey<McpSession>,
-    source: DepKey<SessionToolSource>,
 }
 impl McpSessionPlugin {
     pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
-        let session = names.instance(SESSION_GROUP)?;
         Ok(Self {
-            session,
+            session: names.instance(SESSION_GROUP)?,
             mcp: names.key()?,
-            // The `mcp` tool source, until ToolRegistry finds providers by
-            // name (R6).
-            source: DepKey::dynamic("mcp").instance(session),
         })
     }
 }
@@ -193,6 +187,7 @@ impl TypedPlugin for McpSessionPlugin {
         Keyed<SessionConfig>,
         Keyed<SessionLoader>,
         Keyed<SessionLifecycle>,
+        Keyed<ToolRegistry>,
     );
     fn name(&self) -> &str {
         "McpSession"
@@ -200,7 +195,7 @@ impl TypedPlugin for McpSessionPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(directory), Keyed(config), Keyed(loader), Keyed(session)): Self::Deps,
+        (Keyed(directory), Keyed(config), Keyed(loader), Keyed(session), Keyed(tools)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let project = directory.settings.project_root(Path::new(&config.cwd));
@@ -232,8 +227,8 @@ impl TypedPlugin for McpSessionPlugin {
                     Box::pin(async move {
                         drain.close();
                         drain.wait().await;
-                        // The registry depends on this SessionToolSource and
-                        // unloads with it; shutdown needs no change notice.
+                        // The registration is withdrawn before this runs;
+                        // shutdown needs no change notice.
                         cleanup.sets.lock().unwrap().clear();
                         cleanup.state.set(McpSessionState {
                             closed: true,
@@ -248,10 +243,7 @@ impl TypedPlugin for McpSessionPlugin {
                 }))
             })?;
             ctx.provide_as(self.mcp.key().clone(), owner.clone())?;
-            ctx.provide_as(
-                self.source.key().clone(),
-                Arc::new(SessionToolSource(Arc::new(Sources(owner.clone())))),
-            )?;
+            tools.register_source(ctx, "mcp", Arc::new(Sources(owner.clone())))?;
             // No network await in apply, and all owned resources have a disposer.
             // Discovery creates Session-owned instances and may start servers,
             // so it waits for publication; an unpublished Session never starts it,

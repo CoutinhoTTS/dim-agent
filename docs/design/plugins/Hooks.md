@@ -585,7 +585,7 @@ Codex `apply_patch` has no alias: its input is a patch, while Dim's `write` and 
 | Neutral | Rust |
 | --- | --- |
 | Admission decision | Proposed `Permission::admit_decision(call, source: &BranchSource, risk, cancel)` used by `Approval::admit`; `decide` stays for the recheck |
-| `toolAdvice` | Proposed branch-scoped `ToolAdvice(Arc<dyn AdviseTool>)` at `BranchScope::named_key::<ToolAdvice>("hooks")`, its name registered with a proposed `AgentBuilder::tool_advice(name)`; `advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`; Permission's factory receives the registered names, as ToolRegistry's receives `ToolNames`, and Permission looks each up per admission (A.6.1) |
+| `toolAdvice` | Proposed branch-scoped `ToolAdvice(Arc<dyn AdviseTool>)` at `BranchScope::named_key::<ToolAdvice>("hooks")`, its name registered with a proposed `AgentBuilder::tool_advice(name)`; `advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`; Permission's factory receives the registered names, and Permission looks each up per admission (A.6.1) |
 | `submitCheck` | Proposed Session-scoped `SubmitCheck(Arc<dyn CheckSubmission>)` at `SessionScope::named_key::<SubmitCheck>("hooks")`, its name registered with a proposed `AgentBuilder::submit_check(name)`; `check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`; looked up by `Connection::submit`, `Connection::create_branch` and `InputMethods` before `Session::input`, `Session::branch` / the steer batch (A.6.2) |
 | `input_blocked` | `RpcError::app(-32000, "input_blocked", message)`; `data` is `{appError}` only |
 | `Approval.respond` | `Approval::respond(approval_id, ApprovalDecision)` from `InBranch<Approval>` |

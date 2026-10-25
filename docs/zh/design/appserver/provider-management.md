@@ -276,7 +276,7 @@ Settings 一起另行决定，不作为本方案前置。
 
 ## 6. 持久化、已运行 Session 与迁移
 
-**格式决定：保持 v18 和现有 SQL schema。** 只增加以下可选顶层字段，缺失表示无对应用户数据：
+**格式决定：保持 v19 和现有 SQL schema。** 只增加以下可选顶层字段，缺失表示无对应用户数据：
 
 | 结构 / JSON 字段 | 值与用途 |
 | --- | --- |
@@ -287,7 +287,7 @@ Settings 一起另行决定，不作为本方案前置。
 
 [存储合同](../../../design/appserver/native-storage-format.md#329-格式决定)记录格式决定及
 降级损失。不往 ModelMetadata、ModelNetwork、StaticCredential 或闭合 endpoint enum 加字段/变体，
-旧 v18 读取会拒绝未知嵌套字段。ModelPreferences 同样拒绝未知字段，NewApiEndpoint 保持闭合；
+旧 v19 读取会拒绝未知嵌套字段。ModelPreferences 同样拒绝未知字段，NewApiEndpoint 保持闭合；
 支持这些新顶层映射的二进制会拒绝其内部后续增加的偏好字段或端点值，增加前须另作格式决定。
 来源由默认/覆盖/userModels 列表归属推导，不额外加 tag。
 有效静态目录与 driver 路由都纳入 defaults + userModels，descriptor 覆盖只作用于自有默认项，
@@ -304,8 +304,8 @@ bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。f
 默认列表中的 ID 不同；不自动
 改名/覆盖、不持久化警告，也不新增迁移服务。
 
-旧 v18 能读取新记录，但重写会丢新增顶层字段，包含 fingerprint 变化触发的自动 seed_bundled，
-不只用户主动编辑。明确接受该降级损失。一次性数据库验收须用旧 v18 代码读取并实际重写新记录。
+旧 v19 能读取新记录，但重写会丢新增顶层字段，包含 fingerprint 变化触发的自动 seed_bundled，
+不只用户主动编辑。明确接受该降级损失。一次性数据库验收须用旧 v19 代码读取并实际重写新记录。
 不增加存储 owner 门禁、删除历史或格式号；未知数据库格式仍按原规则拒绝并保留字节。
 
 | 改动 | 对已采用 Session 的影响 |
@@ -361,13 +361,13 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 | 偏好 | 独立 set/clear、重启，空 patch/不支持值为业务错误，格式错误为边界错误；参数与准确目标一起采用，不可用不回退，无目标 F3 和消费方选择不变 |
 | 账号 | 既有登录/登出/用量；托管目录同账号 refresh 保留偏好、descriptor 覆盖和禁用项，换账号则一起清空；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |
 | 并发/恢复 | 新旧写方法双客户端类型化冲突；丢 create 回复按规范 UUID 恢复；拒绝非规范 create ID，其他方法仍支持已有非 UUID ID；重复 create 冲突；坏条目/草稿保留 |
-| 存储/导入 | 旧 v18 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的 descriptor 覆盖、偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
+| 存储/导入 | 旧 v19 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的 descriptor 覆盖、偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
 | 客户端 | 实际源码 App Server 和 Desktop/CLI：草稿→probe→创建→选模型→调用→修改→调用→重启→断开/删除，不只 fake daemon |
 
 Provider、transport、托管账号与源码构建的原生 CLI 流程使用隔离 home 和真实 HTTP 请求
 验证这些合同。原生 CLI 覆盖已保存偏好的显式采用、替换凭据、daemon 重启和断开/删除；
 RPC 流程覆盖 CAS 与丢失 create 回复后的恢复。Desktop UI 验收归该客户端。
-旧 v18 的读取、写回和自动 reseed 已使用已接受基线构建的二进制与一次性数据库验证，
+旧 v19 的读取、写回和自动 reseed 已使用已接受基线构建的二进制与一次性数据库验证，
 见[存储合同](../../../design/appserver/native-storage-format.md#329-格式决定)。
 
 ## 8. 规则检查
@@ -381,7 +381,7 @@ RPC 流程覆盖 CAS 与丢失 create 回复后的恢复。Desktop UI 验收归�
 | §4.5 | 自有模型/选择/偏好/路由同事务；既有采用原子性不变 |
 | §4.6 | 管理数据不进模型上下文，配置只沿现有采用路径 |
 | §4.7 | 账号沿公开方法，不跨写其他 owner 引用 |
-| §4.8 | §5 无机制需求，复用 metadata 和 v18 顶层 JSON |
+| §4.8 | §5 无机制需求，复用 metadata 和 v19 顶层 JSON |
 | §4.9 | 不加 Timeline 事件或进程推送通知 |
 | §1 | 扩展现有进程 Provider，不增 Capability/接线插件 |
 | ADR 002 D1 | 进程记录归 Provider，已采用分支状态归原 owner，草稿归客户端 |

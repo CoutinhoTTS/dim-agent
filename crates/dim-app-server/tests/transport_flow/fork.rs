@@ -739,7 +739,7 @@ pub(super) async fn launch_configured(
                     config: None,
                     metadata: None,
                 },
-                tools: vec!["exec".into()],
+                tools: Some(vec!["exec".into()]),
                 ..Default::default()
             },
             ..Default::default()

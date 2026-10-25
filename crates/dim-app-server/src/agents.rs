@@ -315,8 +315,6 @@ pub struct AgentIndex {
     session_defaults: SessionConfig,
     /// Protected profiles resolve Session models through a `ModelSelectionHost`.
     selects_models: bool,
-    /// Tools the process assembly provides: host tools and contributions.
-    tools: BTreeSet<String>,
     /// Loading context of `AgentsPlugin`.
     ctx: OnceLock<Ctx>,
     /// The process loader Agents are instances of, and the root they are
@@ -1174,14 +1172,12 @@ impl AgentIndex {
         };
         self.load(id.to_string(), false, profile).await
     }
-    /// A profile from outside the process may only select provided tools,
-    /// each once.
+    /// A profile from outside the process lists each tool of its mount list
+    /// once. A tool that no part registers is reported when the Session
+    /// reads its tools.
     pub fn check_profile(&self, profile: &AgentProfile) -> Result<(), String> {
         let mut seen = BTreeSet::new();
-        for tool in &profile.tools {
-            if !self.tools.contains(tool) {
-                return Err(format!("tool {tool} is not provided by the process"));
-            }
+        for tool in profile.tools.iter().flatten() {
             if !seen.insert(tool) {
                 return Err(format!("tool {tool} is listed twice"));
             }
@@ -1542,7 +1538,6 @@ impl TypedPlugin for AgentsPlugin {
                 directory,
                 session_restored: EventKey::of(),
                 unloaded_session_deleted: EventKey::of(),
-                tools: builder.provided_tools().map(str::to_owned).collect(),
                 builder,
                 session_defaults: self.config.session_defaults.clone(),
                 ctx: OnceLock::from(ctx.clone()),

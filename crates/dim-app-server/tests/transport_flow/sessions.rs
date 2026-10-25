@@ -183,7 +183,7 @@ async fn serve_with(setup: Setup) -> Served {
     if let Some(grace) = setup.grace {
         config.idle_unload_after = grace;
     }
-    config.session_defaults.tools = vec!["confirm".into()];
+    config.session_defaults.tools = Some(vec!["confirm".into()]);
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(
@@ -206,7 +206,7 @@ async fn serve_with(setup: Setup) -> Served {
             };
             builder
                 .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
-                .session_value(Arc::new(InitialPromptConfiguration(None)))
+                .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
                 .session_part(move |names| names.part(HeldRulesPart(rules.clone(), names.key()?)));
             defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
         }
