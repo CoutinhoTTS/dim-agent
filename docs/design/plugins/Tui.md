@@ -186,6 +186,8 @@ says `Loading output...`; an empty active preview says `No output yet`.
 without fabricating an end. A missing method says `Live output unavailable in this
 profile`. Other errors retain the preview and show their reason. Only the real
 `exec/ended` supplies terminal status and the original final result. The finished
+task projection reaches the list and detail together, so reopening a completed
+task uses its recorded result without starting another live read. The finished
 detail stays until Esc; the running list removes the task as before. Output wraps
 within the existing overlay, shows the tail by default, and supports
 Up/Down, PageUp/PageDown and Home/End. Narrow layouts preserve the status and key
