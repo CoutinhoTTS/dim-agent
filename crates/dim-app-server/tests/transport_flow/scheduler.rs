@@ -1430,13 +1430,18 @@ async fn node_scheduler_applied_inputs_interrupted_before_consumption_expire_wit
         let release = Arc::new(tokio::sync::Notify::new());
         let for_plugin = release.clone();
         let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-            builder.branch_part(move |names| {
-                names.part(AppliedInputGate {
-                    held: held.clone(),
-                    entered: entered.clone(),
-                    release: for_plugin.clone(),
-                })
-            });
+            builder.require_feature(
+                dim_agent_runtime::Feature::new("SchedulerAppliedInputGate").branch(
+                    "test.scheduler-applied-input",
+                    move |names| {
+                        names.part(AppliedInputGate {
+                            held: held.clone(),
+                            entered: entered.clone(),
+                            release: for_plugin.clone(),
+                        })
+                    },
+                ),
+            );
         })
         .await;
         let mut client = Client::new_version(&server, false, 3).await;
@@ -1920,9 +1925,7 @@ async fn node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_i
         config.session_typescript = Some(probe_rows());
         config.session_defaults.tools = Some(vec!["write".into(), "schedule".into()]);
         let (server, agent) = launch_with(Arc::new(NamedTools(calls.clone())), config, |builder| {
-            builder.session_part(move |names| {
-                session_typescript::ControlledGate::part(names, send.clone())
-            });
+            builder.require_feature(session_typescript::ControlledGate::feature(send.clone()));
         })
         .await;
         let mut client = Client::new_version(&server, false, 3).await;
@@ -2135,9 +2138,7 @@ async fn node_scheduler_failed_reports_keep_the_outcome_and_never_retry_or_redir
         let mut config = config(&home);
         config.session_typescript = Some(probe_rows());
         let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-            builder.session_part(move |names| {
-                session_typescript::ControlledGate::part(names, send.clone())
-            });
+            builder.require_feature(session_typescript::ControlledGate::feature(send.clone()));
         })
         .await;
         let mut client = Client::new_version(&server, false, 3).await;
@@ -2260,9 +2261,7 @@ async fn node_scheduler_reports_drain_native_writers_before_row_or_runtime_clean
         let mut config = config(&home);
         config.session_typescript = Some(probe_rows());
         let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-            builder.session_part(move |names| {
-                session_typescript::ControlledGate::part(names, send.clone())
-            });
+            builder.require_feature(session_typescript::ControlledGate::feature(send.clone()));
         })
         .await;
         let mut client = Client::new_version(&server, false, 3).await;
@@ -2518,9 +2517,7 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
     config.session_typescript = Some(probe_rows());
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send.clone()));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -2627,6 +2624,13 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
     persist(&runs);
     loader.set_overlay("retention-fixture", None).await.unwrap();
     process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while stored(&home)["runs"].as_array().unwrap().len() != 101 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("background retention settles before its result is checked");
     let retained = stored(&home);
     assert_eq!(retained["runs"].as_array().unwrap().len(), 101);
     assert!(
@@ -2815,6 +2819,13 @@ async fn node_scheduler_retention_preserves_shared_receipts_forks_and_unreadable
     drop(release);
     loader.restart("SessionNodeRuntime").await.unwrap();
     process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while stored(&home)["runs"].as_array().unwrap().len() != 100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("recovered retention finishes in the background");
     let retained = stored(&home);
     assert_eq!(retained["runs"].as_array().unwrap().len(), 100);
     assert_eq!(retained["runs"][0]["run_id"], "history-002");
@@ -2853,9 +2864,7 @@ async fn node_scheduler_retention_keeps_active_runs_and_deleted_jobs_unsettled_r
     config.session_typescript = Some(probe_rows());
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send.clone()));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -3570,9 +3579,7 @@ async fn node_scheduler_owner_reload_tracks_the_existing_native_run_without_repl
     let mut settings = config(&home);
     settings.session_defaults.tools = Some(vec!["write".into(), "schedule".into()]);
     let (server, agent) = launch_with(Arc::new(NamedTools(calls.clone())), settings, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send.clone()));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;

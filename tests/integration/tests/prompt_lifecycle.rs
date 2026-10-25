@@ -388,7 +388,11 @@ fn builder_with_context(host: Arc<Prompts>, prepare: Arc<dyn PrepareContext>) ->
         .session_value(Arc::new(PrepareContextHost(prepare)))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::install_with_prompt(&mut builder, host, None);
     builder
 }
@@ -434,7 +438,11 @@ async fn configuration_publication_preserves_trusted_before_changes_atomically()
             Reply::Entry(entry("rules", "1", "trusted")),
         )]))));
         let mut builder = builder(host);
-        builder.branch_part(move |names| names.part(TamperConfiguration(tamper)));
+        builder.require_feature(
+            Feature::new("TamperConfiguration").branch("TamperConfiguration", move |names| {
+                names.part(TamperConfiguration(tamper))
+            }),
+        );
         let agent = builder.build();
         let session = agent
             .create_session(SessionConfig::default())
@@ -1197,7 +1205,9 @@ impl TypedPlugin for OpeningFailure {
 #[tokio::test]
 async fn opening_failure_is_not_hidden_by_an_earlier_pending_receipt() {
     let mut builder = builder(Arc::new(Prompts(Mutex::new(BTreeMap::new()))));
-    builder.branch_part(|names| names.part(OpeningFailure));
+    builder.require_feature(
+        Feature::new("OpeningFailure").branch("OpeningFailure", |names| names.part(OpeningFailure)),
+    );
     let agent = builder.build();
     let result = tokio::time::timeout(
         Duration::from_secs(1),
@@ -1282,9 +1292,11 @@ async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host()
                 });
                 let signal = observed.clone();
                 let cancel_signal = cancelled.clone();
-                builder.branch_part(move |names| {
-                    names.part(OpeningObserved(signal.clone(), cancel_signal.clone()))
-                });
+                builder.require_feature(
+                    Feature::new("OpeningObserved").branch("OpeningObserved", move |names| {
+                        names.part(OpeningObserved(signal.clone(), cancel_signal.clone()))
+                    }),
+                );
                 let agent = builder.build();
                 let creating = agent.clone();
                 let mut creation = tokio::spawn(async move {
@@ -1960,7 +1972,11 @@ async fn large_request_can_supersede_a_consumed_load_without_a_history_byte_budg
         Reply::Wait(release.clone(), entry("rules", "1", "valid")),
     )]))));
     let mut builder = builder(host);
-    builder.branch_part(|names| names.part(RejectSecondRequest(Arc::new(AtomicUsize::new(0)))));
+    builder.require_feature(
+        Feature::new("RejectSecondPromptRequest").branch("RejectSecondPromptRequest", |names| {
+            names.part(RejectSecondRequest(Arc::new(AtomicUsize::new(0))))
+        }),
+    );
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())
@@ -2099,7 +2115,11 @@ async fn before_retargeting_requires_matching_capabilities_without_remerging_par
                 model: Some(original.clone()),
             },
         );
-        builder.branch_part(move |names| names.part(RetargetModel { replace_snapshot }));
+        builder.require_feature(
+            Feature::new("RetargetModel").branch("RetargetModel", move |names| {
+                names.part(RetargetModel { replace_snapshot })
+            }),
+        );
         let agent = builder.build();
         let session = agent
             .create_session(SessionConfig::default())

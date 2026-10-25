@@ -1,5 +1,5 @@
 //! ToolBinding: a branch's adopted tool set and each request's tools, see
-//! `docs/architecture/rust-agent/plugins/ToolBinding.md` and
+//! `docs/architecture/rust-agent/plugins/ToolExecution.md#toolbinding` and
 //! `tool-contributions.md` §7.
 //!
 //! The branch adopts the registry's current tool set as the tool part of its

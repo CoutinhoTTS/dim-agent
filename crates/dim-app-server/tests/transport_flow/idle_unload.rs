@@ -29,7 +29,11 @@ struct LoadsState {
 impl Loads {
     pub(crate) fn install(&self, builder: &mut AgentBuilder) {
         let loads = self.clone();
-        builder.session_part(move |names| names.part(LoadsPart(loads.clone())));
+        builder.require_feature(
+            Feature::new("test.loads").session("test.loads", move |names| {
+                names.part(LoadsPart(loads.clone()))
+            }),
+        );
     }
     /// How often `id` has loaded, and whether its last load restored it.
     pub(crate) fn of(&self, id: &str) -> (usize, bool) {

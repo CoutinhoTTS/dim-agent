@@ -32,14 +32,17 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
         .map(|_| Arc::new(AtomicUsize::new(0)))
         .collect();
     let (server, agent) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
-        for (name, count) in names.into_iter().zip(&counts) {
-            let session = count.clone();
-            builder.session_part(move |names| {
-                names.part(NamedExtension(name.into(), session.clone()))
-            });
-            let branch = count.clone();
-            builder
-                .branch_part(move |names| names.part(NamedExtension(name.into(), branch.clone())));
+        for (index, (name, count)) in names.into_iter().zip(&counts).enumerate() {
+            let (session, branch) = (count.clone(), count.clone());
+            builder.require_feature(
+                Feature::new(format!("test.named-extension-{index}"))
+                    .session(format!("test.named-session-{index}"), move |names| {
+                        names.part(NamedExtension(name.into(), session.clone()))
+                    })
+                    .branch(format!("test.named-branch-{index}"), move |names| {
+                        names.part(NamedExtension(name.into(), branch.clone()))
+                    }),
+            );
         }
     })
     .await;
@@ -397,7 +400,11 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
     let server = serve(
@@ -584,11 +591,15 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
-        .session_part({
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        )
+        .require_feature(Feature::new("Probe").session("Probe", {
             let calls = Arc::new(AtomicUsize::new(0));
             move |names| names.part(ProbeContributor(calls.clone()))
-        });
+        }));
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
     let server = serve(
@@ -712,7 +723,11 @@ async fn a_stop_while_loop_reloads_waits_for_its_successor() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
     let server = serve(
@@ -819,7 +834,11 @@ async fn state_notifications_follow_a_loop_reload() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
     let server = serve(

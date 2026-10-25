@@ -2,7 +2,7 @@
 
 [English](../../design/rutis-usage.md)
 
-状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)（D2–D4）。尚未整体实现；各节说明今天已成立的部分。
+状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)（D2–D4）。已实现，只剩外来插件作为一行（R5 的第二种形式、R7）等待 rutis#642；各节说明今天已成立的部分。
 
 插件机制归 rutis。本文说明 Dim 怎样使用它：部件如何装载，如何按名字提供和查找服务，服务如何跨语言，
 以及 rutis 的生命周期和事件总线提供什么。它适用于每个部件，不论用哪种语言编写；附录是 Rust 与
@@ -71,8 +71,15 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 - 部件可以在自己的子树里创建子节点，比如 McpSession 为每个服务器各建一个。这些是部件自己的事。
 
 *现状：*部件登记处和挂载器已经实现（附录 A），所有 Rust 部件都已按名称依赖（#391、#392、#396–#398、#400）。
-- 各功能仍通过 `AgentBuilder::session_part`/`branch_part` 添加部件，App Server 通过 `register_part` 添加进程行。
-  每个功能变成一个插件、`AgentBuilder::plugin` 和 `partRegistry` 这个名字属于 [#402](https://github.com/arcships/dim/issues/402)。
+- capabilities 各 crate 的每个功能、App Server 的每个 Session 部件，都是一个登记自己部件的插件：
+  `Feature`（不持有进程状态的插件）用 `AgentBuilder::feature` 添加，自己写的插件用 `AgentBuilder::plugin` 添加。
+  安装函数就是 profile，它按名字要求自己安装的部件（`require_feature`、`require_part`）。App Server 把 builder
+  的插件放成进程行，并以 `partRegistry` 提供 `AgentBuilder::parts()`（`AgentBuilder::plugin_rows`）；自己放置的
+  Agent 在自己的 loader 里挂载它们，用自己的登记处。必需部件尚未有人登记时，实例的创建像等必需行一样等它。
+  持有进程状态的功能从持有它的那一行登记部件：Mcp、Collaboration、Agents、SkillsCatalog，以及持有文件写协调器的
+  WorkspaceTools。ConfiguredModels 与 ConfiguredModel、PermissionRules 与 CommandRules 仍是两个插件：由 profile
+  选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。自己放置的 Agent 在
+  第一个 Session 或 `Agent::start` 时启动自己的插件。
 - 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5（[#403](https://github.com/arcships/dim/issues/403)）。
 
@@ -109,7 +116,8 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 
 每个名称只声明一次。跨语言的服务在其 Rust 类型上用 `#[rutis::service]` 声明名称。仅限 Rust 的服务，
 或由外来部件提供的名称，注册在宿主的 loader 服务目录中。服务目录只共享这些名称（`share_registered_only`）。
-`xtask` 将从真实装配生成权威的表（R4）。Dim 定义的名称列在[插件契约 §4](plugin-contract.md#4-dim-的服务)。
+`xtask graph` 从真实装配写出权威的表，即[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)，
+表过期时 `xtask check` 失败（R4）。Dim 定义的每个名称的用途见[插件契约 §4](plugin-contract.md#4-dim-的服务)。
 
 *现状：*跨语言的进程服务标记了 `#[rutis::service]`。按 Session 或分支提供的服务则连同它们的组列在
 App Server 的构建脚本中（`Exports::service_in`）：rutis 0.16 中，标记过的类型在某个实例中提供时，会在那里
@@ -176,12 +184,13 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 
 ### R4. 服务目录自动生成，自动标出 Capability
 
-- **受阻：**本文 §3.4 与[插件契约 §8](plugin-contract.md#8-保证约定与审计)。今天服务目录分散在 `build.rs`、作者指南和设计文档中，也没有东西标出哪些部件是 Capability。
+- **受阻：**本文 §3.4 与[插件契约 §8](plugin-contract.md#8-保证约定与审计)。服务目录曾分散在 `build.rs`、作者指南和设计文档中，也没有东西标出哪些部件是 Capability。
 - **考虑过的现有机制：**`xtask graph` 已经从真实装配记录注入和提供的服务。
 - **所需机制：**`xtask graph` 写出服务目录表（名称、组、提供者、是否跨语言、方法），并根据部件注入的名字
   （`dispatcher`、`timeline`）标出哪些部件是 Capability。
 - **影响：**运行时没有影响。
-- **所有者：**`xtask`。issue 待开。
+- **所有者：**`xtask`。已交付（[#381](https://github.com/arcships/dim/issues/381)）：`xtask graph` 从 App Server
+  产品配置及其中的一个 Session 写出[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)，表过期时 `xtask check` 失败。
 
 ### R5. 外来插件登记自己的部件
 
@@ -245,7 +254,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 
 ### A.1 旧形式及其替代
 
-替代形式自 P2 起可用；旧形式保留到 P3 迁移完所有部件为止。
+P3 删除了旧形式（[#375](https://github.com/arcships/dim/issues/375)）；此表列出每个旧形式的替代。
 
 | 旧形式 | 替代 |
 | --- | --- |
@@ -257,7 +266,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 | `Contributions<T>` | 无：贡献向所有者登记（R6） |
 | `When<D>` | `When<D>`，key 来自 `Names::when`：工厂构建副本时决定是否包含该名称。不是 rutis `Option<..>`，后者读取但不门控 |
 | `SessionService`、`BranchService` 标记 | 注册在服务目录中的组（`names::register`） |
-| `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`：`session` 或 `branch` 组中的行；进程行用 `register_part` |
+| `AgentBuilder::session_plugin`/`timeline_plugin` | 功能向部件登记处登记自己的部件（`Feature` 用 `AgentBuilder::feature` 添加，自己写的插件用 `AgentBuilder::plugin` 添加；profile 用 `require_feature`）；App Server 的进程行用 `register_part` |
 | `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`（已删除） | 所有者的 `register`，由提供贡献的部件调用：`toolRegistry`、`promptRegistry`、`sessionMethods`、`managementMethods`（R6） |
 | `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`；`Exports` 用于源码无法修改的类型，以及按 Session 或分支提供的服务（§3.4） |
 | `PublicService` | 不变（门面规则） |
@@ -284,18 +293,22 @@ Rust 部件就是普通的 `TypedPlugin`。它的依赖是 `Keyed<T>`、`KeyedGa
 ```rust
 pub struct WaitBranch(DepKey<Wait>);
 impl TypedPlugin for WaitBranch {
-    // "dispatcher" and "timeline" are branch names; nothing here says so.
-    type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
+    // "dispatcher" is a branch name; nothing here says so.
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str { "WaitBranch" }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
+    fn apply<'a>(&'a self, ctx: &'a Ctx, (Keyed(dispatcher),): Self::Deps)
         -> BoxFuture<'a, Result<Effect, CordisError>> {
-        /* rebuild (plugin contract §7.2), then ctx.provide_as(self.0.key().clone(), wait) */
+        /* dispatcher.follow(ctx, "Wait", keys, handler).await?, the Rust form of `consume`
+           (plugin contract §5.2), then ctx.provide_as(self.0.key().clone(), wait) */
     }
 }
 
-// A part of every branch's profile; `names` gives this copy's keys, for its dependencies and for `wait`.
-builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
-// A process row.
+// A plugin that owns nothing for the process: it registers a part of every branch, and the profile
+// requires it. `names` gives each copy's keys, for its dependencies and for `wait`.
+builder.require_feature(
+    Feature::new("Wait").branch("WaitBranch", |names| names.part(WaitBranch(names.key::<Wait>()?))),
+);
+// A process row of the App Server's loader.
 register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 
 // From a process plugin's `apply`: a Session part of every Session that mounts `record` (one
@@ -310,8 +323,10 @@ registry.register(ctx, PartScope::Session, "Recorder", |mount| {
 })?;
 ```
 
-装配 profile 自己的部件（`AgentBuilder::session_part`、`branch_part`）由必需挂载器挂载，它把这些部件和必需行
-一起交给实例的发布。登记处（`PartRegistry`）服务于同一个 builder 的所有 Agent。登记是调用方 `ctx` 的一个 effect。
+必需挂载器挂载 profile 要求的部件（`AgentBuilder::require_part`），把它们和必需行一起交给实例的发布；
+必需部件尚未有人登记时，创建在自己的时限内等它登记。builder 的登记处（`AgentBuilder::parts`）服务于宿主放置的
+Agent（`build_at`），宿主以 `partRegistry` 把它提供给自己的进程插件（`AgentBuilder::plugin_rows`）；自己放置的
+Agent 为自己挂载的插件建一个自己的登记处。登记是调用方 `ctx` 的一个 effect。
 挂载器在 rutis 自己的级联清理之前先卸下自己挂的副本，所以已经失败的副本在实例关闭时不会再报一次错；
 `SessionLoader` 从所在实例的 Session scope 行创建实例，因为 loader 只能从行的上下文放置实例。
 
@@ -366,31 +381,28 @@ async def apply(ctx, config):
 ```
 
 ```ts
-// A Capability that rebuilds by hand (plugin contract §7.2, today's form).
+// A Capability that rebuilds from history, then follows live events (plugin contract §5.2).
 export default definePlugin({
   name: 'ExampleCounter',
   inject: ['dispatcher'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
-    let count = 0, through = 0n
-    let ready!: () => void
-    const rebuilt = new Promise<void>(resolve => { ready = resolve })
-    await dispatcher.listen('example-counter', ['input/message'], async event => {
-      await rebuilt
-      if (BigInt(event.sequence) > through) count++
+    let count = 0
+    const fold = (event: BranchEvent) => {
+      if (event.type === 'input' && event.name === 'message') count++
+    }
+    await dispatcher.consume('example-counter', ['input/message'], delivery => {
+      if ('live' in delivery) fold(delivery.live)
+      else delivery.replay.forEach(fold)
     })
-    const cutoff = await dispatcher.committed()
-    count = (await dispatcher.local(0, cutoff))
-      .filter(event => event.type === 'input' && event.name === 'message').length
-    through = BigInt(cutoff)
     ctx.provide('exampleCounter', { get: () => ({ count }) })
-    ready()
   },
 })
 ```
 
-有了 R1，同一个部件只注册一次，并在一个处理函数中折叠每个事件，无论是重放的还是实时的。
+手写形式仍然有效：先 `listen`，再取 `committed()`，在处理函数等待期间从 `local` 重建到该截止点，
+并跳过重建已覆盖的实时事件。
 
-仓库的 fixture 展示了两种语言：`runtime/fixtures/branch-part.ts` 和
-`runtime/fixtures/python/python_branch_part.py`。
+仓库的 fixture 展示了两种语言和两种形式：`runtime/fixtures/branch-part.ts` 手写重建，
+`runtime/fixtures/python/python_branch_part.py` 与 `runtime/plugins/goal/branch.ts` 使用 `consume`。

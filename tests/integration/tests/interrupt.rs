@@ -1,5 +1,5 @@
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, BRANCH_GROUP, Dispatcher, SessionConfig, Timeline, names,
+    AgentBuilder, AgentConfig, BRANCH_GROUP, Dispatcher, Feature, SessionConfig, Timeline, names,
 };
 use dim_agent_types::{ContentBlock, EventKind, InputMode};
 use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, KeyedGate, TypedPlugin};
@@ -143,8 +143,16 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
     names::register::<Registered>(builder.catalog_mut(), Some(BRANCH_GROUP));
     let factory = probe.clone();
     builder
-        .branch_part(move |names| names.part(ExternalWorkPlugin(factory.clone(), names.key()?)))
-        .branch_part(move |names| names.part(LaterSubscriber(send.clone())));
+        .require_feature(
+            Feature::new("ExternalWork").branch("ExternalWork", move |names| {
+                names.part(ExternalWorkPlugin(factory.clone(), names.key()?))
+            }),
+        )
+        .require_feature(
+            Feature::new("LaterSubscriber").branch("LaterSubscriber", move |names| {
+                names.part(LaterSubscriber(send.clone()))
+            }),
+        );
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())
@@ -242,7 +250,11 @@ async fn a_large_interrupt_and_later_input_need_no_byte_budget() {
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
     let disposed = cleaned.clone();
-    builder.branch_part(move |names| names.part(OversizedInterrupt(disposed.clone())));
+    builder.require_feature(
+        Feature::new("OversizedInterrupt").branch("OversizedInterrupt", move |names| {
+            names.part(OversizedInterrupt(disposed.clone()))
+        }),
+    );
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())

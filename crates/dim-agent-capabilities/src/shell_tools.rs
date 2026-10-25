@@ -98,7 +98,11 @@ impl ToolDriver for ShellToolsDriver {
 
 /// Installs the shell tools into a Session.
 pub fn install(builder: &mut AgentBuilder) {
-    builder.session_part(|names| names.part(ShellToolsPlugin::new(names)?));
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("ShellTools").session("ShellTools", |names| {
+            names.part(ShellToolsPlugin::new(names)?)
+        }),
+    );
 }
 
 /// The plugin.

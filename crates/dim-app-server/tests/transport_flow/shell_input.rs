@@ -394,14 +394,21 @@ impl Shell {
         defaults::mock_model_hosts(&mut builder);
         let probe = Probe::default();
         let slot = probe.clone();
-        builder.session_part(move |names| {
-            names.part(ProbePlugin {
-                probe: slot.clone(),
-            })
-        });
+        builder.require_feature(Feature::new("test.shell-probe").session(
+            "test.shell-probe",
+            move |names| {
+                names.part(ProbePlugin {
+                    probe: slot.clone(),
+                })
+            },
+        ));
         let close_gate = Arc::new(CloseGate::default());
         let gate = close_gate.clone();
-        builder.branch_part(move |names| names.part(CloseGatePlugin { gate: gate.clone() }));
+        builder.require_feature(
+            Feature::new("test.shell-close-gate").branch("test.shell-close-gate", move |names| {
+                names.part(CloseGatePlugin { gate: gate.clone() })
+            }),
+        );
         let model = models.default_model().clone();
         let server = serve(
             builder,

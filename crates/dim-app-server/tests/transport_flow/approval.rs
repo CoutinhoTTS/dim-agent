@@ -150,7 +150,11 @@ async fn setup_store(
             seen: Arc::new(Mutex::new(vec![])),
         }),
     );
-    builder.branch_part(move |names| names.part(ProbePlugin(probe.clone())));
+    builder.require_feature(
+        Feature::new("approval-transport-probe").branch("approval-transport-probe", move |names| {
+            names.part(ProbePlugin(probe.clone()))
+        }),
+    );
     let server = serve(
         builder,
         ServerConfig {

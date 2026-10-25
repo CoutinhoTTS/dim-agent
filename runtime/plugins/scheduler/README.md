@@ -54,12 +54,11 @@ during window evaluation so other jobs can continue.
 The timer derives due windows from the enabled anchor, current wall clock and
 durable history. It supports numeric five-field cron with IANA zones, fixed
 minute intervals and one-off instants. Missing DST wall times are skipped and
-repeated wall times run once. A gap of at least 60 seconds records one missed
-window without catch-up. The current phase uses only the control node.
-Window evaluation uses the existing Settings change event and each iteration of
-the owned one-second timer. Idle ticks also read Settings and the run store so
-poll drift cannot lose sub-minute enabled-anchor windows. Active histories keep
-their one-second cadence. A raw invalid cron is exposed
+repeated wall times run once. After a gap, only the latest window can fire within its 60-second grace;
+an older latest window becomes one missed record without catch-up. The current phase uses only the control node.
+Window evaluation uses Settings changes, minute changes, the next in-minute
+window deadline and accepted-run settlement. The one-second timer does not read
+Settings or the run store on idle ticks. Active histories keep their one-second cadence. A raw invalid cron is exposed
 as that job's `schedule_error` and does not stop other jobs.
 
 Tool list results omit prompt bodies. Other job results include a UTF-8 prompt

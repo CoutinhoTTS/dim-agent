@@ -1,8 +1,8 @@
 # Scheduler
 
-状态：设计已批准，包实现在 [#317](https://github.com/arcships/dim/pull/317) 评审中。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+状态：设计已批准，可选包实现见 [#317](https://github.com/arcships/dim/pull/317)。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-**交付边界。** 包及其公开流程验证由 [#317](https://github.com/arcships/dim/pull/317) 提供并处于评审中，按 §1.3 显式安装。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。Agents 空闲卸载 #126/#331 与首次 reuse 合同 #339 已合入。包使用统一升级的 rutis 0.16.0，并保留 §1.3 与附录 D 的失败报告检查；不扩充 core 或 rutis。
+**交付边界。** 包及其公开流程验证由 [#317](https://github.com/arcships/dim/pull/317) 提供，按 §1.3 显式安装。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。Agents 空闲卸载 #126/#331 与首次 reuse 合同 #339 已合入。包使用统一升级的 rutis 0.16.0，并保留 §1.3 与附录 D 的失败报告检查；不扩充 core 或 rutis。
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
@@ -199,7 +199,7 @@ sequenceDiagram
 
 运行在任何外部副作用之前先持久化为 `launching`，因此重启后通过查询来结算，而不是重新提交。A.5.1 在首次复用 input 前安排 A.1 的 launch 身份、origin、policy 持久化及绑定 CAS。第二次明确冲突时可保持未绑定并运行一次；写入结果未确认时不得输入。其他模式沿用此流程。
 
-窗口计算沿既有 settings/schedule 和 owner 的每次一秒定时循环。分钟缓存可能在轮询偏移越过启用锚点的分钟内偏移时漏掉窗口，因此空闲 tick 也读取 Settings 与运行存储。活动运行跟踪保持 §3.2 的一秒节奏。
+窗口计算由 `settings/schedule`、墙钟分钟变化、本分钟最早的后续窗口和已准入运行的结算触发。所属定时器每秒检查这些截止时间，空闲 tick 不读取 Settings 或运行存储；活跃运行仍按 §3.2 每秒跟踪。
 
 ### 3.2 完成与超时
 
@@ -432,7 +432,7 @@ Job schema 复用 Settings 的 draft-2020-12 条件校验能力：enabled 为 tr
 
 schedule 工具不按交互性改变注册（#30）；config.interactive === false 或成员角色时拒绝（A9），省略 interactive 表示 true。C4 交付原始创建配置，不是实时权限。构造声明不做 I/O；所有动作声明 persistent_configuration（A10）。execute(ToolCall, cancelled) 使用第二个按引用取消 Promise；函数在结算前清理，ToolExecutor 拥有工具终态事实；取消不撤销已持久化保存。
 
-本文规定的进程服务 scheduleJobs.call(JobRequest) → JobReply，JobRequest = {action, job_id?, job?, enabled?, limit?, caller:{sessionId,branchId,cwd}}；JobReply = {content:string,records:JSON} 或 {code,message}。caller 分支供既有 S2 starter 使用；依赖绑定遵循 §1.1，该插件业务服务仍须由包实现。
+本文规定的进程服务 scheduleJobs.call(JobRequest) → JobReply，JobRequest = {action, job_id?, job?, enabled?, limit?, caller:{sessionId,branchId,cwd}}；JobReply = {content:string,records:JSON} 或 {code,message}。caller 分支供既有 S2 starter 使用；依赖绑定遵循 §1.1，该插件业务服务已由包实现。
 
 | 参数 | 类型 | 规则 |
 | --- | --- | --- |
@@ -469,7 +469,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | `every` | `{every_minutes: n}` | `n` ≥ 1；窗口位于 `anchor + k·n`，anchor = `Job.enabled_at`（A.1） |
 | `at` | `{at: RFC 3339 instant}` | 一个窗口；触发或错过后任务被禁用 |
 
-粒度为一分钟（A1）。窗口只有在其时刻后 60 s 内被观察到才会触发（A2）；否则用一条 `missed` 记录合并这段时间。定时器在每次 tick 和唤醒时评估墙钟时间，因此挂起期间的时间绝不补跑。
+粒度为一分钟（A1）。间隔之后只考虑最新到期窗口：它在其时刻后 60 s 内被观察到时触发（A2），否则用一条 `missed` 记录合并这段时间；更早的窗口不补跑。定时器在每次 tick 和唤醒时评估墙钟时间，因此挂起期间的时间绝不补跑。
 
 ### A.5 Timeline 与 Capability 机制
 

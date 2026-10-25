@@ -397,15 +397,16 @@ impl PublicService for ContextPreparation {}
 
 // dim-agent-capabilities: context_model.rs, summary_strategy.rs, context_methods.rs (new)
 pub struct ProductContextModel;                    // ResolveContextModel, no dependencies
-pub struct ProductSummaryStrategyPlugin { scope: SessionScope }
-//   Deps = (Arc<ModelHost>, Arc<ProviderConnectionResolver>); provides CompactionStrategyHost
+pub struct ProductSummaryStrategyPlugin { host: DepKey<CompactionStrategyHost> }   // new(names)
+//   Deps = (Keyed<ModelHost>, Keyed<ProviderConnectionResolver>); provides CompactionStrategyHost
 pub struct ContextMethodsPlugin;
 //   Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>); methods.register(ctx, "session.context", ..)
 
 // dim-app-server/src/main.rs, product profile only (no --models file):
 builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextModel)))))
-       .session_plugin(ProductSummaryStrategyPlugin::new)
-       .session_part(|names| names.part(ContextMethodsPlugin));
+       .require_feature(Feature::new("ContextCompaction")
+           .session("ProductSummaryStrategy", |names| names.part(ProductSummaryStrategyPlugin::new(names)?))
+           .session("ContextMethods", |names| names.part(ContextMethodsPlugin)));
 // --models and mock profiles bind ContextModelHost(None) and CompactionStrategyHost(None)
 ```
 

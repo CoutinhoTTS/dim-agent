@@ -222,12 +222,19 @@ async fn memory(steps: usize) -> std::result::Result<(), Error> {
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(
             FixedSummary,
         )))))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
-        .session_part(move |names| {
-            names.part(CaptureTree {
-                captured: capture.clone(),
-            })
-        });
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        )
+        .require_feature(Feature::new("measurement.tree").session(
+            "measurement.tree",
+            move |names| {
+                names.part(CaptureTree {
+                    captured: capture.clone(),
+                })
+            },
+        ));
     defaults::install(&mut builder);
     let agent = builder.build();
     let session = agent
@@ -564,16 +571,22 @@ async fn reads() -> std::result::Result<(), Error> {
         defaults::install(&mut builder);
         builder
             .timeline_store(store.clone())
-            .session_part(move |names| {
-                names.part(CaptureTree {
-                    captured: target.clone(),
-                })
-            })
-            .branch_part(move |names| {
-                names.part(CaptureStop {
-                    observed: stop_target.clone(),
-                })
-            });
+            .require_feature(Feature::new("measurement.tree").session(
+                "measurement.tree",
+                move |names| {
+                    names.part(CaptureTree {
+                        captured: target.clone(),
+                    })
+                },
+            ))
+            .require_feature(Feature::new("measurement.stop").branch(
+                "measurement.stop",
+                move |names| {
+                    names.part(CaptureStop {
+                        observed: stop_target.clone(),
+                    })
+                },
+            ));
         let agent = builder.build();
         let session = agent.restore_session(name.into()).await?;
         session.idle("main").await?;

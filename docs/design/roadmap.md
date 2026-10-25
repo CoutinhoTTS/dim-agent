@@ -66,12 +66,12 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 
 1. ~~合入 #14、#16 并补 ADR 003 D3~~：已由 #14 完成（#16 关闭）。
 2. ~~契约定稿：C1 `sessionMethods`、C2 `SessionConfig.interactive`、S8a Settings 业务源~~：#79、#83、#84、#90 已合入。核心部件不硬依赖可选插件的约束继续适用（#34、ADR 002 D3）。
-3. ShellInput、Attachments 服务端与 CLI 输入链路已合入。Web 已确认 Ready，并实现可选 TypeScript 工具包；Scheduler、Workflow 的设计状态以各自所有者文档为准。两者的工具/方法、Settings owner 读写与事件前置已满足，具体包及业务验收仍须完成；密钥存储由各插件自行决定，不增加共享凭据存储前置。SessionTitle 的 C6/S5b、C4 广播和 Provider 具名 AuxiliaryModel 绑定已交付，可选 TypeScript 包已实现并验证自动标题、手工重命名与关闭结算；通过 C4 配置显式安装；C5 与 Goal #199 已合入，Session 不读取分支业务状态；Goal 的剩余流程验收与产品安装由 #69 跟踪。
+3. ShellInput、Attachments 服务端与 CLI 输入链路已合入。Web 已确认 Ready，并实现可选 TypeScript 工具包；Scheduler、Workflow 的设计状态以各自所有者文档为准。两者的工具/方法、Settings owner 读写与事件前置已满足，Scheduler 可选包及业务验收由 #317 实现；Workflow 交付见其所有者文档；密钥存储由各插件自行决定，不增加共享凭据存储前置。SessionTitle 的 C6/S5b、C4 广播和 Provider 具名 AuxiliaryModel 绑定已交付，可选 TypeScript 包已实现并验证自动标题、手工重命名与关闭结算；通过 C4 配置显式安装；C5 与 Goal #199 已合入，Session 不读取分支业务状态；Goal 的剩余流程验收与产品安装由 #69 跟踪。
 4. ~~决定 Goal 还是 Pursuit（D3）~~：已决定先做 Goal（#44）。
 5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、~~S3 活动句柄~~（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
 7. Provider 的 Desktop/CLI 完整管理由 [#329](https://github.com/arcships/dim/issues/329) 跟踪，负责人 zerob13；[方案](appserver/provider-management.md) 只提交设计、未实现。复用现有调用、重读和 CAS，无机制前置；Provider JSON 以可选字段保持 v18，接受旧二进制重写时丢失未知字段。客户端读取持久模型偏好后显式采用，服务端不自动应用；用量复用已交付的 account.usage 及原有包查询合同。S4 与 F3 已有 Session 采用流程保持，持久偏好取代 F3 原有的无持久偏好范围。
-8. 插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)）归 M1。M1 对外开放插件开发，按第 2 节第 5 条，插件作者直接使用的公开契约须在开放前就位；Dim 尚未发布，所以迁移不保留兼容路径。工作项见 §3.2 的“插件契约迁移”表，阶段与验收见[插件契约 §10](../zh/design/plugin-contract.md#10-迁移)。P6 Scheduler（#70）的 loader 门槛所等的 rutis 0.16 升级（#379）已完成。对外开放前须满足 [#364](https://github.com/arcships/dim/issues/364)：第三方插件的部件注册工具后，模型就能看到这些工具，不需要写进配置。R6（#382）以可选的挂载列表 `SessionConfig.tools` 实现它：没有挂载列表的 Session（产品默认）声明全部宿主工具与部件注册的全部工具；有挂载列表的 Session 只声明其中列出的。工具调用是否执行仍由 Permission 决定，它不改变声明。
+8. 插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)）归 M1。M1 对外开放插件开发，按第 2 节第 5 条，插件作者直接使用的公开契约须在开放前就位；Dim 尚未发布，所以迁移不保留兼容路径。工作项见 §3.2 的“插件契约迁移”表，阶段与验收见[插件契约 §10](../zh/design/plugin-contract.md#10-迁移)。迁移已完成，只剩 P4 中 R5 的第二种形式（外来插件作为一行）等待 rutis#642（#403、#405）。P6 Scheduler（#70）的 loader 门槛所等的 rutis 0.16 升级（#379）已完成。对外开放前须满足 [#364](https://github.com/arcships/dim/issues/364)：第三方插件的部件注册工具后，模型就能看到这些工具，不需要写进配置。R6（#382）以可选的挂载列表 `SessionConfig.tools` 实现它：没有挂载列表的 Session（产品默认）声明全部宿主工具与部件注册的全部工具；有挂载列表的 Session 只声明其中列出的。工具调用是否执行仍由 Permission 决定，它不改变声明。
 9. 对外发布前处理：[#294](https://github.com/arcships/dim/issues/294)（workspace-write 是否限制写入路径，需维护者决定）、[#296](https://github.com/arcships/dim/issues/296)（依赖漏洞与许可证扫描）、[#297](https://github.com/arcships/dim/issues/297)（发布流水线的 action 固定到提交 SHA）、[#368](https://github.com/arcships/dim/issues/368)（发布包大小门槛）。
 
 归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)：Questions（#144/#178/#251）的设计已 Ready，仍待实现；Hooks（#143/#181）、ExternalAgent（#145/#182；Draft [#254](https://github.com/arcships/dim/pull/254) 提议改为子 agent 形态，取代按模型的框架）与 Pursuit（#146/#179）的设计已合入，仍待各自 Ready 确认与实现；回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)，2026-10-21 已 Ready，待实现）、摘要提示词/思考与目标长度评估（#170）也归该里程碑。#2 动态事件不归 M2，已于 2026-10-20 移入 M1（C8）：M1 对外开放插件开发，插件写自己的事件属于公开契约。其设计已于同日收敛（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）：Timeline 只检查信封与核心保留领域，并以不透明数据承载核心未定义的事件类型，Dispatcher 订阅只做过滤，能力事件声明只是描述契约；现有 `EventKind` 事件（含 F1、S1 加入的 4 个）不迁移。F1 的研究 #165、#169 的修复 #172 和 #128 的运行时调参 #183 已合入；#170 保留独立评估范围。插件契约的 #380（R1：Dispatcher 先回放历史、再接实时事件的注册）与 #381（R4：xtask 生成服务目录并标出 Capability）也归 M2：它们只新增能力或工具，不改变插件作者的写法。用户安装与启用第三方插件（[#384](https://github.com/arcships/dim/issues/384)）、效率测量与预算门槛（#363、#365、#366、#367）也归 M2。
@@ -107,20 +107,27 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 | S11 | ModelProvider：模型不支持图片时换成文本占位 | S | 独立 | — | Attachments |
 | C8 | #2 动态事件：插件写自己领域的事件（Rust 与 TypeScript SDK），与原生事件一样持久化、恢复、可读可订阅；拒绝写入核心保留领域；作者指南（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）。存储格式变更与存储线对齐；给客户端展示的新协议不在 M1 | M | 事件类型 | — | 第三方插件作者 |
 
-插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)，归 M1，负责人待定）。编号前缀 PC 用来和本文的 P1–P7 插件项、R1 区分：
+插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)，归 M1）。编号前缀 PC 用来和本文的 P1–P7 插件项、R1 区分：
 
-| ID | Issue | 内容 | 规模 | 前置 |
-| --- | --- | --- | --- | --- |
-| PC-P1 | #379 | rutis 0.16 升级：分支机制通道改用私有事件名，去掉中继，事件载荷改为 serde | M | — |
-| PC-P2 | #371 | 服务目录，以及 Rust 按名字声明依赖 | M | PC-P1 |
-| PC-P3a | #372 | 进程与简单部件迁为按名字依赖的 loader 行；同作用域部件的合并检查 | M | PC-P2 |
-| PC-P3b | #373 | 核心分支与 Session 部件迁移；同作用域部件的合并检查 | L | PC-P3a |
-| PC-P3c | #374 | App Server 宿主部件迁移；同作用域部件的合并检查 | M | PC-P3b |
-| PC-R6 | #382 | 贡献向所有者登记：工具、工具来源、提示词来源、方法命名空间；去掉宿主侧预注册 | M | PC-P2 |
-| PC-P3d | #375 | 删除按层定型的插件 API | S | PC-P3a–c、PC-R6 |
-| PC-P4 | #376 | 跨语言补齐：R2、R3、R5，`#[rutis::service]` 导出，SDK 与作者指南一起改 | L | PC-P3d |
+| ID | Issue | 内容 | 规模 | 前置 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| PC-P1 | #379 | rutis 0.16 升级：分支机制通道改用私有事件名，去掉中继，事件载荷改为 serde | M | — | 已完成 |
+| PC-P2 | #371 | 服务目录，以及 Rust 按名字声明依赖 | M | PC-P1 | 已完成 |
+| PC-P3a | #372 | 进程与简单部件迁为按名字依赖的 loader 行；同作用域部件的合并检查 | M | PC-P2 | 已完成 |
+| PC-P3b | #373 | 核心分支与 Session 部件迁移；同作用域部件的合并检查 | L | PC-P3a | 已完成 |
+| PC-P3c | #374 | App Server 宿主部件迁移；同作用域部件的合并检查 | M | PC-P3b | 已完成 |
+| PC-R6 | #382 | 贡献向所有者登记：工具、工具来源、提示词来源、方法命名空间；去掉宿主侧预注册 | M | PC-P2 | 已完成（#407、#410） |
+| PC-P3e | #402 | 每个功能是一个进程插件，登记自己的 Session 与分支部件 | L | PC-R6 | 已完成（#411、#413） |
+| PC-P3d | #375 | 删除按层定型的插件 API | S | PC-P3a–c、PC-P3e、PC-R6 | 已完成（#412；同作用域合并检查与 P6 文档收尾 #415） |
+| PC-P4 | #376 | 跨语言补齐：R2、R3、R5，`#[rutis::service]` 导出，SDK 与作者指南一起改 | L | PC-P3d | 第一种形式已完成；R5 的第二种形式等 rutis#642（#403、#405） |
+| PC-P5 | #380 | R1：Dispatcher 登记时先回放历史再跟随实时事件 | M | PC-P2 | 已完成（#409） |
+| PC-R4 | #381 | 在 xtask 中生成服务目录并标出 Capability | S | PC-P2 | 已完成（#408） |
 
-P3 的每一批都按功能检查同一作用域里的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。目前看到的候选：Skills 在 Session 作用域的 Skills、SkillContributions、SkillContent；Settings 与 SettingsMethods；SkillsCatalog 与 App Server 里同名的管理贡献部件；PromptSources 与 PromptRegistry（需先确认不违反 ADR 002 D3）。
+P3 的每一批都按功能检查同一作用域里的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。检查结果：
+- SkillContributions 并入 Skills：内容集合由 Skills 持有，经实例值交给它创建的 SkillContent，不再是服务。SkillContent 仍是 Session 自己的内容实例。
+- SkillsCatalog 与 App Server 里同名的管理贡献部件已是同一个插件（#402）。
+- Settings 与 SettingsMethods 保持分开：合并会让核心的 Settings 依赖管理方法表，表重载时所有依赖 Settings 的部分都要跟着重载（重载隔离）。
+- PromptRegistry 与 PromptSources 保持分开：前者是提示词来源的所有者，后者和 Skills 一样是向它登记的贡献者（R6）；合并还会让核心的提示词表依赖 HostPlatform（ADR 002 D3）。
 
 ### 3.3 插件开工顺序
 
@@ -163,7 +170,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | 2 | ~~S8a Settings 源~~ #90、~~S4 AuxiliaryModel~~ #89 | ~~C1 sessionMethods~~ #83、~~C2 interactive~~ #84、~~S5a Session 文件~~ #95 | ~~装配前置~~ #137；F5 spike #112、设计 #152 已合入，产品实现 #189 已合入 |
 | 3 | ~~S1 InputQueue 撤回~~ #94、S8b #119/#166/#175/#177 已合入，共享凭据服务由 #185 撤销、~~S11 图片占位~~ #92、~~F2 权限命令规则~~ #109 | ~~C6 广播通知~~ #85、~~S5b 标题~~ #96、~~P1 ShellInput 服务端~~ #101、~~S3 活动句柄~~（不需要） | ~~C5 设计与实现~~ #100/#195/#196；~~P1 CLI~~ #155、~~F6 CLI~~ #149/#153、~~F3 模型参数~~ #148 |
 | 4 | ~~F1 压缩宿主~~ #108、~~研究与运行时调参~~ #165/#172/#183；P5 Goal 设计 #105、TypeScript 实现 #199 已合入（验收完成，#69 已关闭；产品安装归 PluginManager） | ~~S2 sessions~~ #98/#159、~~P2 Attachments 服务端~~ #102、~~S5c 删除和 fork~~ #97、~~F4 MCP OAuth 服务端~~ #111 | ~~F4 CLI~~ #151、~~CLI Attachments~~ #154/#160/#163/#164、~~作者指南~~ #167/#190；P3 Web 设计 #103 已合入且 Ready 已确认，可选 TypeScript 工具包已实现（#211），产品安装由 PluginManager 跟踪，P4 SessionTitle 合同 #228 与 Provider 绑定 #225 已合入；[可选 TypeScript 包](../../runtime/plugins/session-title/README.md) 已实现，公开流程验收通过，按 C4 配置显式安装 |
-| 5 | C8 #2 动态事件（2026-10-20 移入 M1） | #126 空闲卸载设计 #188 已合入；R1 #194、R2 #201、R3 #200、R4 #202 及关闭分支修复 #204 已合入，已有 Ready 使用者，Agents 卸载流程及其验收可以开工 | P6/P7 设计 #106/#107、跟踪 #208、存储与保留期 #212 已合入；P6 Steer 单次投递、不补发已确认；P7 报告结算见 [#214](https://github.com/arcships/dim/pull/214)，内部 v2、拒绝 v1 并保留原字节已确认，迁移后续统一处理；进程装载与管理绑定 [#234](https://github.com/arcships/dim/pull/234) 已合入；功能依赖绑定已在 #237 评审确认，设计状态见各自所有者文档；Workflow 可选包与业务验收已实现（#306），Scheduler Ready #283 已合入，可开始实施；#126 是恢复旧工具可用性与反复创建 Session 的交付前置 |
+| 5 | C8 #2 动态事件（2026-10-20 移入 M1） | #126 空闲卸载设计 #188 已合入；R1 #194、R2 #201、R3 #200、R4 #202 及关闭分支修复 #204 已合入，已有 Ready 使用者，Agents 卸载流程及其验收可以开工 | P6/P7 设计 #106/#107、跟踪 #208、存储与保留期 #212 已合入；P6 Steer 单次投递、不补发已确认；P7 报告结算见 [#214](https://github.com/arcships/dim/pull/214)，内部 v2、拒绝 v1 并保留原字节已确认，迁移后续统一处理；进程装载与管理绑定 [#234](https://github.com/arcships/dim/pull/234) 已合入；功能依赖绑定已在 #237 评审确认，设计状态见各自所有者文档；Workflow 可选包与业务验收已实现（#306），Scheduler Ready #283 已合入，可选包与业务验收由 #317 实现；#126 是恢复旧工具可用性与反复创建 Session 的交付前置 |
 
 跨人的交接（都不在同一批文件上）：
 

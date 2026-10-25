@@ -231,7 +231,7 @@ async fn controlled(
 ) {
     let (mut builder, requests, _) = setup();
     let (send, controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_part(move |names| ControlledGate::part(names, send.clone()));
+    builder.require_feature(ControlledGate::feature(send));
     let server = serve(
         builder,
         ServerConfig {

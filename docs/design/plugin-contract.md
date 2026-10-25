@@ -1,7 +1,8 @@
 # Plugin contract
 
-Status: Accepted under [ADR 006](../adr/006-plugin-contract.md). Not implemented as a whole.
-Each section says what holds today. The theory it builds on, the [time bus](../architecture/rust-agent/time-bus.md)
+Status: Accepted under [ADR 006](../adr/006-plugin-contract.md). Implemented, except R5's second
+form in P4, which waits for rutis#642 ([#403](https://github.com/arcships/dim/issues/403),
+[#405](https://github.com/arcships/dim/issues/405)). Each section says what holds today. The theory it builds on, the [time bus](../architecture/rust-agent/time-bus.md)
 and the [design rules](../architecture/rust-agent/principles.md), is unchanged and applies now.
 [中文](../zh/design/plugin-contract.md)
 
@@ -99,9 +100,10 @@ Which scope that is, is a Dim decision:
 ## 4. Dim's services
 
 The names Dim defines, each following the identity and shape rules of
-[rutis usage §3](rutis-usage.md#3-services-by-name). `xtask` will generate the authoritative table
-from the real assembly (rutis usage R4). Until then, this table, `crates/dim-app-server/build.rs` and
-the [authoring guide](../typescript-plugin-authoring.md#available-services) are the reference.
+[rutis usage §3](rutis-usage.md#3-services-by-name). The authoritative table is the
+[generated catalog](../architecture/rust-agent/generated/catalog.md): `xtask graph` writes it from the
+real assembly with each name's group, provider, methods and whether it crosses languages (rutis usage
+R4). This table says what each name Dim defines is for.
 
 | Name | Scope | Provider | Crosses languages today | Notes |
 | --- | --- | --- | --- | --- |
@@ -118,7 +120,7 @@ the [authoring guide](../typescript-plugin-authoring.md#available-services) are 
 | `sessionLifecycle` | `session` | SessionScope | yes | `activated`, `closing`, `hold`, `release`: a hold is an id the calling row owns, ended by `release(id)` or that row's unload |
 | `sessionConfig` | `session` | SessionScope | yes | `get()`: the creation-time configuration, the snapshot a tool call carries |
 | `timeline` | `branch` | BranchScope | yes, except `before` | `append` of the part's own domain; history reads |
-| `dispatcher` | `branch` | BranchScope | yes, `listen` and reads; `subscribe` is Rust-only | Ordered consumption (§5.2) |
+| `dispatcher` | `branch` | BranchScope | yes, `consume`, `listen` and reads; their Rust forms `follow` and `subscribe` are Rust-only | Ordered consumption (§5.2) |
 | `branchLifecycle` | `branch` | BranchScope | yes | `activated`, `closing` |
 | `timelineIdentity` | `branch` | BranchScope | yes | `{sessionId, branchId}` |
 
@@ -163,6 +165,12 @@ A part consumes a branch's facts by registering with its `dispatcher` and naming
 an exact `domain/name`, `domain/*` or `*`. The Dispatcher delivers them in sequence order, one fact at a
 time, to every part registered in the current generation. A new generation rebuilds as the
 [capability reload protocol](../architecture/rust-agent/single-tree.md#能力重载协议) describes.
+
+A part that rebuilds registers once for both (R1). The registration fixes the cutoff `S`, hands its
+handler the replay, the branch's own facts through `S` as `local` reads them and not filtered by the
+keys, then each matching fact after `S`, in sequence order and none twice. Live facts wait until the
+replay is handled, so the work it leaves, such as failing the operations a previous generation left
+open, is done in the replay. Registering, reading the cutoff and rebuilding by hand stays valid.
 
 ### 5.3 Bus events
 
@@ -245,7 +253,7 @@ The rules a design answers (§6) are conventions. Three things check them:
 
 | Check | What it covers |
 | --- | --- |
-| `xtask graph` / `check` | Today: crate boundaries, generated assembly graphs, and plugin pages against the code. After rutis usage R4 it also writes the catalog table and marks which parts are Capabilities (they inject `dispatcher` or `timeline`) |
+| `xtask graph` / `check` | Crate boundaries, generated assembly graphs, plugin pages against the code, and the [catalog table](../architecture/rust-agent/generated/catalog.md), which also marks which parts are Capabilities (they inject `dispatcher` or `timeline`) |
 | Review and the pull request template | The Rule check: principles §4 rules 1–9, §1, ADR 002 D1–D5 |
 | Flow tests | Observable behaviour: ordering, rebuild, reload settlement, close |
 
@@ -265,12 +273,16 @@ design is merged. R4–R7 concern how Dim uses rutis and are in
 - **Existing mechanisms considered:** `subscribe`/`listen` plus `committed`/`local` are correct but
   leave the protocol to every author. An SDK helper per language would replicate the protocol
   (ADR 006 D1).
-- **Needed:** `dispatcher.consume(name, keys, handler)`, or an option on `listen`, which
-  registers, fixes `S`, delivers `local(..=S)` with `replay: true`, then delivers live events after
-  `S`, through one handler and in sequence order. It carries no business meaning.
+- **Needed:** `dispatcher.consume(name, keys, handler)`, which registers, fixes `S`, delivers
+  `local(..=S)` once as the replay, then delivers live events after `S`, through one handler and in
+  sequence order. Live events wait until the replay is handled, as the hand-written rebuild gate
+  holds them, so the failure terminals a rebuild writes come before them. It carries no business
+  meaning.
 - **Effect on sequence, batch, interruption, reload:** none on the Timeline. The delivery order equals
   the hand-written protocol's. Reload behaviour is that of §7.2.
-- **Owner:** Dim runtime (Dispatcher). Issue to be opened.
+- **Owner:** Dim runtime (Dispatcher). Delivered in phase 5
+  ([#380](https://github.com/arcships/dim/issues/380)): `consume` in every language, `follow` in
+  Rust; the replay is one delivery of the whole slice, not one call per event.
 
 ### R2. Lifecycle and identity services in the Session and branch scopes, for every language
 

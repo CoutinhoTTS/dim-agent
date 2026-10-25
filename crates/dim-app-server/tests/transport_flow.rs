@@ -5,7 +5,7 @@ use dim_agent_capabilities::{
     defaults,
     host::{HostFuture, ToolDriver, ToolExecutionContext},
 };
-use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
 use dim_agent_types::{EventKind, ToolCall, ToolDefinition, ToolResult};
 use dim_app_server::{RunningServer, ServerConfig, ShutdownReason, serve};
 use futures_util::{SinkExt, StreamExt};
@@ -306,14 +306,17 @@ impl ToolReload {
     fn install(&self, builder: &mut AgentBuilder, tools: Arc<dyn ToolDriver>) {
         let views = self.0.clone();
         let hold = self.1.clone();
-        builder.session_part(move |names| {
-            names.part(ToolHostOwner {
-                tool_host: names.key()?,
-                tools: tools.clone(),
-                views: views.clone(),
-                hold: hold.clone(),
-            })
-        });
+        builder.require_feature(Feature::new("ToolHostOwner").session(
+            "ToolHostOwner",
+            move |names| {
+                names.part(ToolHostOwner {
+                    tool_host: names.key()?,
+                    tools: tools.clone(),
+                    views: views.clone(),
+                    hold: hold.clone(),
+                })
+            },
+        ));
     }
     /// The next restart keeps everything downstream unloaded until the
     /// returned gate is notified.
@@ -409,7 +412,11 @@ async fn session_create_rejects_trace_and_rolls_back_a_failed_main_branch() {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::install(&mut builder);
         defaults::mock_hosts(&mut builder);
-        builder.branch_part(|_| Ok(Box::new(UnreadyCapability(true).plugin())));
+        builder.require_feature(
+            Feature::new("UnreadyCapability").branch("UnreadyCapability", |_| {
+                Ok(Box::new(UnreadyCapability(true).plugin()))
+            }),
+        );
         builder.startup_timeout(Duration::from_secs(1));
         let server = serve(
             builder,
@@ -475,9 +482,11 @@ async fn session_initialization_timeout_and_missing_dependency_fail_the_creation
         let (server, agent) =
             launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
                 builder.startup_timeout(Duration::from_millis(500));
-                builder.session_part(move |_| {
-                    Ok(Box::new(UnreadyCapability(missing_dependency).plugin()))
-                });
+                builder.require_feature(
+                    Feature::new("UnreadyCapability").session("UnreadyCapability", move |_| {
+                        Ok(Box::new(UnreadyCapability(missing_dependency).plugin()))
+                    }),
+                );
             })
             .await;
         let mut client = Client::new_version(&server, false, 2).await;
@@ -489,6 +498,44 @@ async fn session_initialization_timeout_and_missing_dependency_fail_the_creation
         server.shutdown();
         server.join().await.unwrap();
     }
+}
+
+/// A Session part that reads a branch name: its plugin registers it, and the
+/// Session that mounts it cannot build it.
+struct MisplacedPart;
+impl TypedPlugin for MisplacedPart {
+    type Deps = (rutis::Keyed<dim_agent_runtime::TimelineIdentity>,);
+    fn name(&self) -> &str {
+        "MisplacedPart"
+    }
+    fn apply<'a>(
+        &'a self,
+        _: &'a rutis::Ctx,
+        _: Self::Deps,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        Box::pin(async { Ok(rutis::Effect::Done) })
+    }
+}
+
+/// A required part that cannot be built for the Session mounting it fails
+/// the creation as a build failure, as a part checked at install did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_required_part_that_cannot_be_built_fails_the_creation_as_a_build_failure() {
+    let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
+        builder.require_feature(
+            Feature::new("MisplacedPart")
+                .session("MisplacedPart", |names| names.part(MisplacedPart)),
+        );
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 2).await;
+    let failed = client.rpc("session.create", create(json!([]))).await;
+    assert_eq!(
+        failed["error"]["data"]["appError"], "session_build_failed",
+        "{failed}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
 }
 
 fn v1_events(events: &[Arc<dim_agent_types::AgentEvent>], after: u64) -> Vec<Value> {
@@ -756,7 +803,12 @@ async fn both_transports_report_stop_failure_instead_of_success() {
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.branch_part(|names| names.part(FailInterrupt));
+    builder.require_feature(
+        Feature::new("transport-test.fail-interrupt")
+            .branch("transport-test.fail-interrupt", |names| {
+                names.part(FailInterrupt)
+            }),
+    );
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
             "dim-stop-failure-{}/server.sock",
@@ -905,7 +957,10 @@ async fn daemon_shutdown_reports_completion_after_cleanup_and_preserves_failures
                 ..Default::default()
             },
             move |builder| {
-                builder.session_part(move |names| names.part(owner.clone()));
+                builder.require_feature(
+                    Feature::new("ShutdownCleanup")
+                        .session("ShutdownCleanup", move |names| names.part(owner.clone())),
+                );
             },
         )
         .await;
@@ -1322,7 +1377,11 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let socket =
         std::path::PathBuf::from("/tmp").join(format!("dim-large-{}/s", uuid::Uuid::new_v4()));

@@ -80,8 +80,16 @@ async fn product_session(
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(
             ProductContextModel,
         )))))
-        .session_part(|names| names.part(ProductSummaryStrategyPlugin::new(names)?))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("ProductSummaryStrategy").session("ProductSummaryStrategy", |names| {
+                names.part(ProductSummaryStrategyPlugin::new(names)?)
+            }),
+        )
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     let snapshot: ModelCapabilitySnapshot = serde_json::from_value(serde_json::json!({
         "target": {"providerId": "local", "modelId": "small"},
         "capabilities": {"modalities": ["text"], "toolCalling": true, "streaming": true,

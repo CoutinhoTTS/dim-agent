@@ -117,7 +117,7 @@ fn change(scope: SettingsScope, revision: &str) -> impl Fn(&SettingsChanged) -> 
 #[tokio::test]
 async fn server_reload_preserves_project_root_identity_and_settings() {
     use dim_agent_capabilities::defaults;
-    use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
+    use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature, SessionConfig};
     use dim_app_server::{ServerConfig, mcp::config::McpSettings, serve};
 
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -137,9 +137,11 @@ async fn server_reload_preserves_project_root_identity_and_settings() {
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
         // The process loader is a handle the loader provides, not a name.
-        builder.session_part(move |names| {
-            Ok(names.part_with(ProcessSettings(capture.clone()), (names.key()?, ())))
-        });
+        builder.require_feature(
+            Feature::new("test.process-settings").session("test.process-settings", move |names| {
+                Ok(names.part_with(ProcessSettings(capture.clone()), (names.key()?, ())))
+            }),
+        );
         let server = serve(
             builder,
             ServerConfig {

@@ -3,77 +3,123 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p29["Transport"]
-    p28["Rpc"]
-    p27["Connection"]
-    p26["UiHost"]
-    p25["Collaboration"]
-    p24["Agents"]
-    p23["CollaborationDirectory"]
-    p22["AgentDirectory"]
-    p21["PermissionRules"]
-    p20["SkillsCatalog"]
-    p19["HostPlatform"]
-    p18["Mcp"]
-    p17["McpPublication"]
-    p16["SettingsMethods"]
-    p15["Settings"]
-    p14["Provider"]
-    p13["GrokOAuth"]
-    p12["OpenAICodexOAuth"]
-    p11["ManagedProviders"]
-    p10["PluginFiles"]
-    p9["ManagementMethods"]
-    p8["SessionStore"]
-    p7["SqliteStorage"]
-    p6["Aimux"]
-    p5["FileWriteCoordinator"]
+    p50["Attachments"]
+    p49["Questions"]
+    p48["PrepareModelHost"]
+    p47["ContextCompaction"]
+    p46["CommandRules"]
+    p45["PromptSources"]
+    p44["ShellInput"]
+    p43["Wait"]
+    p42["WorkspaceTools"]
+    p41["BranchTool"]
+    p40["ToolExecution"]
+    p39["Permission"]
+    p38["ModelProvider"]
+    p37["Loop"]
+    p36["Prompt"]
+    p35["ContextPreparation"]
+    p34["ToolRegistry"]
+    p33["InputQueue"]
+    p32["SessionMethods"]
+    p31["TimelineTree"]
+    p30["SessionBroadcast"]
+    p29["PartRegistry"]
+    p28["Transport"]
+    p27["Rpc"]
+    p26["Connection"]
+    p25["UiHost"]
+    p24["Collaboration"]
+    p23["Agents"]
+    p22["CollaborationDirectory"]
+    p21["AgentDirectory"]
+    p20["PermissionRules"]
+    p19["SkillsCatalog"]
+    p18["HostPlatform"]
+    p17["Mcp"]
+    p16["McpPublication"]
+    p15["SettingsMethods"]
+    p14["Settings"]
+    p13["Provider"]
+    p12["GrokOAuth"]
+    p11["OpenAICodexOAuth"]
+    p10["ManagedProviders"]
+    p9["PluginFiles"]
+    p8["ManagementMethods"]
+    p7["SessionStore"]
+    p6["SqliteStorage"]
+    p5["Aimux"]
     p4["FileStorage"]
     p3["ServerControl"]
   end
-  p27 -->|"dim_app_server::connection::ConnectionHub"| p29
-  p3 -->|"dim_app_server::control::ServerControl"| p29
-  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p29
-  p24 -->|"dim_app_server::agents::AgentIndex"| p28
-  p25 -->|"dim_app_server::collaboration::Collaboration"| p28
-  p27 -->|"dim_app_server::connection::ConnectionHub"| p28
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p50
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p49
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p48
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p47
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p46
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p45
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p44
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p43
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p42
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p41
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p40
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p39
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p38
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p37
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p36
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p35
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p34
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p33
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p32
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p31
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p30
+  p26 -->|"dim_app_server::connection::ConnectionHub"| p28
   p3 -->|"dim_app_server::control::ServerControl"| p28
-  p9 -->|"dim_app_server::methods::ManagementMethods"| p28
-  p2 -->|"rutis_loader::loader::Loader"| p28
+  p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p28
+  p23 -->|"dim_app_server::agents::AgentIndex"| p27
+  p24 -->|"dim_app_server::collaboration::Collaboration"| p27
+  p26 -->|"dim_app_server::connection::ConnectionHub"| p27
   p3 -->|"dim_app_server::control::ServerControl"| p27
-  p26 -->|"dim_app_server::ui_host::UiHost"| p27
-  p24 -->|"dim_app_server::agents::AgentIndex"| p25
-  p23 -->|"dim_app_server::collaboration::CollaborationDirectory"| p25
-  p22 -->|"dim_app_server::agents::AgentDirectory"| p24
-  p15 -->|"dim_app_server::settings::SettingsService"| p24
-  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p24
-  p8 -->|"dim_app_server::storage::timeline::SessionStore"| p24
-  p2 -->|"rutis_loader::loader::Loader"| p24
-  p9 -->|"dim_app_server::methods::ManagementMethods"| p21
-  p15 -->|"dim_app_server::settings::SettingsService"| p21
-  p19 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p20
-  p9 -->|"dim_app_server::methods::ManagementMethods"| p20
-  p15 -->|"dim_app_server::settings::SettingsService"| p20
-  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p19
+  p8 -->|"dim_app_server::methods::ManagementMethods"| p27
+  p2 -->|"rutis_loader::loader::Loader"| p27
+  p3 -->|"dim_app_server::control::ServerControl"| p26
+  p25 -->|"dim_app_server::ui_host::UiHost"| p26
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p24
+  p23 -->|"dim_app_server::agents::AgentIndex"| p24
+  p22 -->|"dim_app_server::collaboration::CollaborationDirectory"| p24
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p23
+  p21 -->|"dim_app_server::agents::AgentDirectory"| p23
+  p14 -->|"dim_app_server::settings::SettingsService"| p23
+  p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p23
+  p7 -->|"dim_app_server::storage::timeline::SessionStore"| p23
+  p2 -->|"rutis_loader::loader::Loader"| p23
+  p8 -->|"dim_app_server::methods::ManagementMethods"| p20
+  p14 -->|"dim_app_server::settings::SettingsService"| p20
+  p18 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p19
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p19
+  p8 -->|"dim_app_server::methods::ManagementMethods"| p19
+  p14 -->|"dim_app_server::settings::SettingsService"| p19
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p18
-  p17 -->|"dim_app_server::mcp::publication::Publication"| p18
-  p9 -->|"dim_app_server::methods::ManagementMethods"| p18
-  p15 -->|"dim_app_server::settings::SettingsService"| p18
-  p15 -->|"dim_app_server::settings::SettingsService"| p17
-  p9 -->|"dim_app_server::methods::ManagementMethods"| p16
-  p15 -->|"dim_app_server::settings::SettingsService"| p16
-  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p15
-  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p15
-  p6 -->|"dim_agent_capabilities::host::ModelHost"| p14
-  p12 -->|"dim_app_server::codex_oauth::OpenAICodexOAuthService"| p14
-  p13 -->|"dim_app_server::grok_oauth::GrokOAuthService"| p14
-  p11 -->|"dim_app_server::managed_provider::ManagedProviders"| p14
-  p9 -->|"dim_app_server::methods::ManagementMethods"| p14
-  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p14
-  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p13
-  p9 -->|"dim_app_server::methods::ManagementMethods"| p13
+  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p17
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p17
+  p16 -->|"dim_app_server::mcp::publication::Publication"| p17
+  p8 -->|"dim_app_server::methods::ManagementMethods"| p17
+  p14 -->|"dim_app_server::settings::SettingsService"| p17
+  p14 -->|"dim_app_server::settings::SettingsService"| p16
+  p8 -->|"dim_app_server::methods::ManagementMethods"| p15
+  p14 -->|"dim_app_server::settings::SettingsService"| p15
+  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p14
+  p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p14
+  p5 -->|"dim_agent_capabilities::host::ModelHost"| p13
+  p11 -->|"dim_app_server::codex_oauth::OpenAICodexOAuthService"| p13
+  p12 -->|"dim_app_server::grok_oauth::GrokOAuthService"| p13
+  p10 -->|"dim_app_server::managed_provider::ManagedProviders"| p13
+  p8 -->|"dim_app_server::methods::ManagementMethods"| p13
+  p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p13
   p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p12
-  p9 -->|"dim_app_server::methods::ManagementMethods"| p12
-  p9 -->|"dim_app_server::methods::ManagementMethods"| p11
-  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p10
-  p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p8
+  p8 -->|"dim_app_server::methods::ManagementMethods"| p12
+  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p11
+  p8 -->|"dim_app_server::methods::ManagementMethods"| p11
+  p8 -->|"dim_app_server::methods::ManagementMethods"| p10
+  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p9
+  p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p7

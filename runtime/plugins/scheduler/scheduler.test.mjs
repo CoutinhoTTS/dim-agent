@@ -119,10 +119,15 @@ async function host(t, initial = {}) {
           if (['completed', 'failed', 'cancelled', 'running'].includes(h.mode)) h.append(request.sessionId, 'input', 'consumed', { input_id: event.id })
           if (['completed', 'failed', 'cancelled'].includes(h.mode)) h.append(request.sessionId, 'turn', 'end', { status: h.mode })
           if (h.inputGate) await h.inputGate.promise
+          if (h.inputReplyLost) { h.inputReplyLost = false; throw new Error('input reply lost after acceptance') }
         }
         return ok(receipt)
       },
-      async lookup(request) { const receipt = h.receipts.get(request.submissionId); return ok(receipt ? { status: 'accepted', ...receipt } : { status: 'unknown' }) },
+      async lookup(request) {
+        if (h.lookupFailures > 0) { h.lookupFailures--; throw new Error('lookup bridge unavailable') }
+        const receipt = h.receipts.get(request.submissionId)
+        return ok(receipt ? { status: 'accepted', ...receipt } : { status: 'unknown' })
+      },
       async history(request) {
         if (h.historyFailure) throw new Error('history bridge unavailable')
         const events = h.timelines.get(request.sessionId) ?? []
@@ -141,7 +146,9 @@ async function host(t, initial = {}) {
         return ok({ status: 'deleted', sequence: event.sequence })
       },
       async stop(request) {
-        h.stops.push(copy(request)); h.append(request.sessionId, 'stop', 'interrupt', {})
+        h.stops.push(copy(request))
+        if (h.stopReloads > 0) { h.stopReloads--; return failure('reloading') }
+        h.append(request.sessionId, 'stop', 'interrupt', {})
         const event = h.append(request.sessionId, 'turn', 'end', { status: 'cancelled' })
         return ok({ sequence: event.sequence })
       },
@@ -381,10 +388,10 @@ test('every windows preserve the enabled anchor through edits and reset it only 
 
 test('clock jumps collapse missed windows without catch-up and one-off jobs disable themselves', async t => {
   const h = await host(t)
-  const repeated = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
+  const repeated = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 2 } } })).job
   await until(() => h.runs()[0]?.state === 'completed', 'the enable anchor runs through Settings change delivery')
   const before = h.runs().length, launches = h.launches.length
-  await h.advance(10 * 60_000)
+  await h.advance(11 * 60_000)
   assert.equal(h.runs().length, before + 1)
   assert.equal(h.runs().at(-1).state, 'missed')
   assert.equal(h.launches.length, launches)
@@ -933,4 +940,52 @@ test('a selected-job edit or Settings reread failure prevents first-reuse input'
     assert.equal(h.launches.length, 1)
     assert.equal(h.document.jobs[0].session_id, change === 'bound' ? 'external' : undefined)
   })
+})
+
+test('idle scheduled jobs do not read Settings or the run store every second', async t => {
+  const h = await host(t)
+  await h.call('save', { job: seed })
+  await flush()
+  const settings = h.settingsReads, store = h.storeReads
+  for (let second = 0; second < 10; second++) await h.advance(1000)
+  assert.equal(h.settingsReads, settings)
+  assert.equal(h.storeReads, store)
+})
+
+test('a recent latest window still fires after an older outage gap', async t => {
+  const h = await host(t)
+  const job = (await h.call('save', { job: { ...seed, schedule: { every_minutes: 1 } } })).job
+  await until(() => h.runs()[0]?.state === 'completed', 'the anchor runs')
+  await h.advance(10 * 60_000 + 30_000)
+  await until(() => h.runs().length === 2 && h.runs()[1].state === 'completed', 'the recent window runs')
+  assert.equal(h.runs()[1].window, '2026-10-22T00:10:00.000Z')
+  assert.equal(h.launches.length, 2)
+  assert.ok(h.runs().every(run => run.job_id === job.id))
+})
+
+test('a deadline stop refused during reload is retried before declaring a timeout', async t => {
+  const h = await host(t, { mode: 'running', stopReloads: 1 })
+  const job = (await h.call('save', { job: { ...seed, max_run_minutes: 1 } })).job
+  await h.call('run_now', { job_id: job.id })
+  await until(() => h.runs()[0]?.state === 'running', 'the input is consumed')
+  await h.advance(60_000)
+  assert.equal(h.stops.length, 1)
+  assert.equal(h.runs()[0].state, 'running')
+  await h.advance(1000)
+  assert.equal(h.stops.length, 2)
+  await h.advance(1000)
+  await until(() => h.runs()[0].state === 'timed_out', 'the accepted stop settles')
+  assert.equal(h.stops.length, 2)
+})
+
+test('an uncertain lookup read retries without losing or resubmitting accepted input', async t => {
+  const h = await host(t, { inputReplyLost: true, lookupFailures: 1 })
+  const job = (await h.call('save', { job: seed })).job
+  await h.call('run_now', { job_id: job.id })
+  await until(() => h.lookupFailures === 0, 'the first lookup read failed')
+  assert.equal(h.runs()[0].state, 'launching')
+  await h.advance(1000)
+  await until(() => h.runs()[0].state === 'completed', 'the next lookup finds the receipt')
+  assert.equal(h.inputs.length, 1)
+  assert.equal(h.launches.length, 1)
 })

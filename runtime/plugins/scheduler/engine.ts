@@ -19,6 +19,7 @@ export class Scheduler {
   readonly work = new Map<string, Promise<unknown>>()
   private pruning = false
   private retryPruneAt: number | undefined
+  private nextWindowAt: number | undefined
   private rewake = false
 
   constructor(jobs: Jobs, sessions: Sessions, store: RunStore) {
@@ -39,15 +40,18 @@ export class Scheduler {
     for (const run of runs.filter(run => !terminal(run))) {
       this.background(run.run_id, () => this.resume(run))
     }
-    await this.prune()
+    this.requestPrune()
   }
 
   startTimer() {
     this.background('timer', async () => {
+      let minute: number | undefined
       while (!this.closing && !this.fault) {
-        try { await this.tick() }
-        catch (error) {
-          console.error('Scheduler timer', error instanceof Error ? error.message : String(error))
+        const now = Date.now(), currentMinute = Math.floor(now / 60_000)
+        if (minute !== currentMinute || this.nextWindowAt !== undefined && now >= this.nextWindowAt) {
+          minute = currentMinute
+          this.nextWindowAt = undefined
+          this.changed()
         }
         if (this.retryPruneAt !== undefined && Date.now() >= this.retryPruneAt) this.requestPrune()
         await pause(1000)
@@ -58,7 +62,7 @@ export class Scheduler {
   changed() {
     if (this.closing || this.fault) return
     if (this.work.has('wake')) this.rewake = true
-    else this.background('wake', () => this.tick())
+    else this.background('wake', async () => { this.nextWindowAt = await this.tick() })
   }
 
   private background(key: string, operation: () => Promise<unknown>) {
@@ -70,7 +74,10 @@ export class Scheduler {
         this.rewake = false
         this.changed()
       }
-      if (!['timer', 'retention', 'wake'].includes(key) && !this.closing && !this.fault) this.requestPrune()
+      if (!['timer', 'retention', 'wake'].includes(key) && !this.closing && !this.fault) {
+        this.requestPrune()
+        this.changed()
+      }
     })
   }
 
@@ -88,6 +95,7 @@ export class Scheduler {
   async tick() {
     const { document } = await this.jobs.read()
     const runs = await this.store.read()
+    let nextWindow: number | undefined
     for (const job of document.jobs.filter(job => job.enabled)) {
       if (this.closing || this.fault) break
       try {
@@ -101,14 +109,20 @@ export class Scheduler {
         const previous = windows.length ? Date.parse(windows.sort().at(-1)!)
           : 'at' in schedule ? Number.NEGATIVE_INFINITY : Date.parse(job.enabled_at!) - 1
         const next = windowAfter(job, previous)
-        if (next === undefined || next > Date.now()) continue
-        const missed = Date.now() - next >= 60_000
-        const window = new Date(missed ? latestWindow(job, Date.now()) : next).toISOString()
-        await this.accept(job.id, window, missed)
+        if (next === undefined) continue
+        if (next > Date.now()) {
+          if (next < (Math.floor(Date.now() / 60_000) + 1) * 60_000) {
+            nextWindow = Math.min(nextWindow ?? next, next)
+          }
+          continue
+        }
+        const window = Date.now() - next >= 60_000 ? latestWindow(job, Date.now()) : next
+        await this.accept(job.id, new Date(window).toISOString(), Date.now() - window >= 60_000)
       } catch (error) {
         console.error('Scheduler job', job.id, error instanceof Error ? error.message : String(error))
       }
     }
+    return nextWindow
   }
 
   async accept(jobId: string, window = 'manual', missed = false): Promise<Run> {
@@ -282,7 +296,7 @@ export class Scheduler {
     while (!this.closing) {
       let reply
       try { reply = await this.sessions.lookup({ sessionId: run.session_id!, branchId: 'main', submissionId: run.submission_id }) }
-      catch { await this.finish(run.run_id, 'lost', 'input_lookup_failed'); return }
+      catch { await pause(1000); continue }
       if (reply.ok) {
         if (reply.value.status === 'accepted') return reply.value
         await this.finish(run.run_id, 'lost', 'input_unknown')
@@ -327,7 +341,10 @@ export class Scheduler {
         } else if (history.consumed && !stopIssued) {
           stopIssued = true
           // shortcut: branch-addressed stop may reach a later turn; revisit with an agreed targeting contract.
-          try { await this.sessions.stop({ sessionId: run.session_id!, branchId: 'main', reason: 'scheduled run timed out' }) }
+          try {
+            const stopped = await this.sessions.stop({ sessionId: run.session_id!, branchId: 'main', reason: 'scheduled run timed out' })
+            if (!stopped.ok && stopped.error.code === 'reloading') stopIssued = false
+          }
           catch { /* The following history read decides what actually ended. */ }
         }
       } else if (history.consumed && run.state !== 'running') {

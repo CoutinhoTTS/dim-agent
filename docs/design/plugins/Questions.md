@@ -4,7 +4,7 @@ Status: Ready (redesign, [#144](https://github.com/arcships/dim/issues/144)); th
 
 The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer, or a decline. **The question is the pending tool call, and the answer is its tool result.** A client sees the question as the committed `step/tool-call` of `ask_user` that has no `step/tool-result` yet, answers it with the Session method `session.question.respond`, and the waiting handler returns the answer as its `ToolResult`; ToolExecutor publishes it in the batch's `step/tool-result` like any other tool output. The model learns the user's choice only from `ToolResult.content`.
 
-Questions defines **no Timeline events** and has **one part**, a Session Capability. It registers the `ask_user` tool with the Session's `toolRegistry` and provides the method `session.question.respond` by registering the namespace `session.question` with `sessionMethods` ([session-boundary](../contracts/session-boundary.md)), and holds, in memory, the waiters of the Session's running `ask_user` calls, as a running tool holds its I/O. Interrupt, close, reload, restart and fork are settled by the existing tool-call lifecycle of [ToolExecutor](../../architecture/rust-agent/plugins/ToolExecutor.md).
+Questions defines **no Timeline events** and has **one part**, a Session Capability. It registers the `ask_user` tool with the Session's `toolRegistry` and provides the method `session.question.respond` by registering the namespace `session.question` with `sessionMethods` ([session-boundary](../contracts/session-boundary.md)), and holds, in memory, the waiters of the Session's running `ask_user` calls, as a running tool holds its I/O. Interrupt, close, reload, restart and fork are settled by the existing tool-call lifecycle of [ToolExecutor](../../architecture/rust-agent/plugins/ToolExecution.md#toolexecutor).
 
 Changes from the merged redesign ([#178](https://github.com/arcships/dim/pull/178)), all from checking it against current `main` and the ablation review (§11):
 
@@ -516,7 +516,7 @@ Flow tests through RPC, tool calls and events:
 | --- | --- |
 | Tool `ask_user` registered with `toolRegistry` | `Keyed<ToolRegistry>`; `tools.register(ctx, ToolContribution {definition, handler})` in `apply`, as Wait does; `ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`; cancelled = `HostError::Cancelled(reason)` |
 | `sessionMethods` namespace `session.question` | `Keyed<SessionMethods>`; `methods.register(ctx, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)` in `apply`, as ShellInput does |
-| `S:SessionConfig` | `InSession<SessionConfig>`, field `interactive` read per call |
+| `S:SessionConfig` | `Keyed<SessionConfig>`, field `interactive` read per call |
 
 ```rust
 pub struct Question { pub id: String, pub header: Option<String>, pub question: String,

@@ -38,7 +38,7 @@ pub mod tool_registry;
 pub mod wait;
 pub mod workspace_tools;
 
-use dim_agent_runtime::{BranchService, PublicService, SessionService};
+use dim_agent_runtime::PublicService;
 /// Registers the names of this crate's Session and branch services (plugin
 /// contract §4). Every installer below applies it; registering twice does
 /// nothing.
@@ -65,7 +65,6 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<prompt::InitialPromptConfiguration>(catalog, session);
     register::<prompt_registry::PromptRegistry>(catalog, session);
     register::<skills::SessionSkills>(catalog, session);
-    register::<skills::content::SkillContributions>(catalog, session);
     register::<host::PrepareModelHost>(catalog, session);
     register::<host::PrepareContextHost>(catalog, session);
     register::<host::ContextModelHost>(catalog, session);
@@ -92,7 +91,6 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<wait::Wait>(catalog, branch);
     register::<workspace_tools::file_reads::FileReads>(catalog, branch);
     register::<host_platform::HostPlatform>(catalog, None);
-    register::<workspace_tools::files::FileWriteCoordinator>(catalog, None);
     register::<file_storage::FileStorage>(catalog, None);
     // The model service is the process's; a Session reaches it by name.
     register::<host::ModelHost>(catalog, None);
@@ -102,37 +100,6 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<skill_settings::SkillSettingsHost>(catalog, None);
     register::<skills::SkillsCatalog>(catalog, None);
 }
-
-impl SessionService for timeline_tree::TimelineTree {}
-impl SessionService for timeline_tree::TreeCommands {}
-impl SessionService for tool_registry::ToolRegistry {}
-impl SessionService for history::HistoryRenderer {}
-impl SessionService for prompt::InitialPromptConfiguration {}
-impl SessionService for skills::SessionSkills {}
-impl SessionService for host::PrepareModelHost {}
-impl SessionService for host::PrepareContextHost {}
-impl SessionService for host::ContextModelHost {}
-impl SessionService for host::CompactionStrategyHost {}
-impl SessionService for host::PromptHost {}
-impl SessionService for permission::CommandRulesHost {}
-impl SessionService for host::ToolHost {}
-impl SessionService for methods::SessionMethods {}
-impl BranchService for input_queue::InputQueue {}
-impl BranchService for agent_loop::AgentLoop {}
-impl BranchService for prompt::Prompt {}
-impl BranchService for context_preparation::ContextPreparation {}
-impl BranchService for context_preparation::ConfigurationPublisher {}
-impl BranchService for model_provider::ModelProvider {}
-impl BranchService for tool_executor::ToolExecutor {}
-impl BranchService for tool_binding::ToolBinding {}
-impl BranchService for permission::Permission {}
-impl BranchService for approval::Approval {}
-impl BranchService for skills::SkillsBranch {}
-impl BranchService for workspace_tools::background::BackgroundExec {}
-impl BranchService for shell_session::ShellSession {}
-impl BranchService for dyn exec_stop::ExecStop {}
-impl BranchService for wait::Wait {}
-
 // Business ports safe to obtain from a Session handle: RPC calls them by
 // request branch, tool handlers by call branch.
 impl PublicService for approval::Approval {}
@@ -147,6 +114,5 @@ impl PublicService for skills::SkillsBranch {}
 impl PublicService for prompt::Prompt {}
 impl PublicService for tool_registry::ToolSourcesView {}
 impl PublicService for methods::SessionMethods {}
-impl SessionService for tool_registry::ToolSourcesView {}
 impl PublicService for agent_loop::AgentLoop {}
 impl PublicService for context_preparation::ContextPreparation {}

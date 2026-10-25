@@ -2,7 +2,7 @@
 
 状态：已实现（TypeScript，`runtime/plugins/goal`，§10）。总体设计：[overview §4](../overview.md)。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md)）。作用域：Session + 分支（[ADR 002](../../adr/002-plugin-scope.md)）。依赖（[路线图](../../../design/roadmap.md) P5）：C1、C3、C4、C5、S1、S8b（[#118](https://github.com/arcships/dim/issues/118)）。
 
-需求（[功能列表](../../../feature-list.md)，BranchScope Agent 行为）：`/goal` 设置、编辑、暂停、恢复和清除目标（"切换 Goal 模式"）；Goal 续跑朝明确的目标继续工作，并记录完成或受阻。
+需求（[功能列表](../../../feature-list.md)，分支 Agent 行为）：`/goal` 设置、编辑、暂停、恢复和清除目标（"切换 Goal 模式"）；Goal 续跑朝明确的目标继续工作，并记录完成或受阻。
 
 Goal 在分支上保持一个常驻目标，并自动续跑该分支，直到模型报告目标已完成或受阻、用户暂停、清除或中断，或达到续跑上限。Goal 是分支上的事件驱动状态机。**每次变更都是分支上的一条 `input/message`**，其 raw 块带两个 key 之一：`goal:objective` 承载目标文本，由 `set` 和 `edit` 写入；`goal:status` 承载状态，由用户的 `set`、`pause`、`resume`，模型经 `goal_update` 工具报告的 `completed` 或 `blocked`，以及 Goal 自己的自动暂停写入；`clear` 退役两个 key。**一个目标只属于一个分支**：Goal 对分支 `B` 的折叠只使用写在 `B` 自身上的事件（从 `B` 的 `branch/start` 起的本地后缀），从不使用继承的前缀，因此子分支和分叉 Session 的 `main` 都从没有目标开始；若新分支继承的前缀中仍有存活的目标 key，它用自己的一次 `clear` 退役两个 key（[§3.4](#34-新分支清除继承的目标)）。续跑不带 key，也不是变更。工具和方法只写这条事件；它们不读 Goal 的状态，也不判断变更是否允许。**Goal 的状态是 Goal 已消费事件的折叠结果**，按序号顺序，用固定规则计算（[§2](#2-数据与状态)）。**分支部分**拥有这个折叠结果；它的 Dispatcher 处理器消费 `turn/end`、`stop/interrupt` 或 `input/deleted` 时，只依据已消费的状态自己决定是否续跑；决定需要写入（续跑或自动暂停）时，处理器把写入登记为自己拥有的工作，然后返回。**Session 部分**把 `goal_update` 工具注册到本 Session 的 `toolRegistry`，并把命名空间 `session.goal` 注册到本 Session 的 `sessionMethods`，以此提供 `session.goal.*` 方法（[session-boundary](../contracts/session-boundary.md)）；每次调用按分支 id 经 `treeCommands.input`（即分支的公开输入入口 `Branch::input`）向调用方分支或指定分支写一条输入。没有调用读取折叠结果：Session 部分从不向分支部分询问任何东西，Session 部分也不能依赖每个分支各一份的服务（ADR 002 D3）。Goal 不写自己类型的事件，也没有单独的"Goal 模式"：目标的存在与状态可通过分支上存活的目标块看到（§6），覆盖了功能列表中"切换 Goal 模式"的说法。本文的每个契约都是语言中立的（服务名、作用域、key、带数据形状的方法、工具注册），因此 TypeScript 实现无需手写 Rust 绑定即可满足；Rust 形式见[附录 G](#附录-g-rust-绑定)。Goal 通过按名导出的运行时服务使用它们（[分支 TypeScript 绑定](../../../design/branch-typescript.md)，C5）：Session 部分用 `treeCommands` 和 `toolRegistry`，分支部分用 `dispatcher`、`timelineIdentity` 和 `treeCommands`。
 
@@ -283,7 +283,7 @@ TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行�
 | --- | --- | --- |
 | `goal.ts` | 共享：变更与续跑输入（A.5）、标记解析、折叠（§2）与决策（A.4） | — |
 | `session.ts`、`session.json` | `GoalPlugin`：把 `goal_update` 注册到 `toolRegistry`，把 `session.goal` 注册到 `sessionMethods`；经 `treeCommands.input` 写入 | Session 行，`inject: ["treeCommands", "toolRegistry", "sessionMethods"]` |
-| `branch.ts`、`settings.json` | `GoalBranchPlugin`：用 `dispatcher.listen` 订阅，经 `dispatcher.committed()`/`local()` 重建，决策，并以自有任务写入；读取 `maxContinuations`；声明 `goal` 来源 | 分支行，`inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]`，`settings` 取自 `settings.json` |
+| `branch.ts`、`settings.json` | `GoalBranchPlugin`：用 `dispatcher.consume` 注册，折叠重放，对实时事件决策，并以自有任务写入；读取 `maxContinuations`；声明 `goal` 来源 | 分支行，`inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]`，`settings` 取自 `settings.json` |
 
 新分支检查（§3.4）用 `dispatcher.history(S)` 读取继承前缀，并排除分支的本地事件。嵌入方把这两行加入
 `ServerConfig.session_typescript` 即可安装 Goal；产品打包归 PluginManager。
@@ -392,8 +392,8 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 
 | 步骤 | 路径 |
 | --- | --- |
-| 加载 | 订阅 Dispatcher（`"Goal"`），在闸门下固定 `S = committed()`，折叠直到 `S` 的本地事件，设置 `rebuilt = S`，提供 `goal`。若最新的 `turn/end` 不是 `decided` 且目标为 active，执行其决策一次；若 `branch/start` 已消费、未 `decided` 且 `inherited_live`，执行起始 `clear` 决策一次 |
-| 消费 | Dispatcher 处理器跳过 `sequence <= rebuilt`，推进折叠结果，并对 `branch/start`、`turn/end`、`stop/interrupt` 与 `input/deleted` 决策（A.4）；需要时登记写入任务，不等待即返回 |
+| 加载 | 在 Dispatcher 上注册（`"Goal"`，`consume`），折叠重放的直到截点 `S` 的本地事件。在同一次重放中、任何实时事件之前：若最新的 `turn/end` 不是 `decided` 且目标为 active，执行其决策一次；若 `branch/start` 已消费、未 `decided` 且 `inherited_live`，执行起始 `clear` 决策一次 |
+| 消费 | 对 `S` 之后的每个实时事件，Dispatcher 处理器推进折叠结果，并对 `branch/start`、`turn/end`、`stop/interrupt` 与 `input/deleted` 决策（A.4）；需要时登记写入任务，不等待即返回 |
 | 写入 | 来源为 `goal` 的 `input/message`，`submissionId: "goal:<uuid>"`，带标记和模式，经分支的公开输入入口 `Branch::input` 写入，由它在边界校验并追加 `input/message`（[interrupt](../../../architecture/rust-agent/interrupt.md)）。Session 部分的调用以同样方式写入，从不查询折叠结果 |
 | 消费路径 | InputQueue 追加 `input/applied`；Loop 追加 `input/consumed`。Goal 从不写 Steer |
 | 复核 | turn/end 任务读取 Settings 后，基于相同决定轮次的已消费状态复核（[time-bus](../../../architecture/rust-agent/time-bus.md) §4）；之后的事实在序号上先于写入，由 InputQueue、Loop 和折叠结果处理 |

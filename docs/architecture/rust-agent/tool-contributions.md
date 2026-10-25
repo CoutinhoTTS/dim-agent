@@ -61,7 +61,7 @@ flowchart LR
   E -->|injects| A
 ```
 
-分支能力不直接读注册表：Loop 构造请求时由 ToolBinding 固定该请求的工具快照，ToolExecutor 从快照取得处理器，经 Approval 准入后执行。注入关系以各插件文档的生成表为准（[ToolBinding](plugins/ToolBinding.md)、[ToolExecutor](plugins/ToolExecutor.md)、[ToolRegistry](plugins/ToolRegistry.md)）。
+分支能力不直接读注册表：Loop 构造请求时由 ToolBinding 固定该请求的工具快照，ToolExecutor 从快照取得处理器，经 Approval 准入后执行。注入关系以各插件文档的生成表为准（[ToolBinding](plugins/ToolExecution.md#toolbinding)、[ToolExecutor](plugins/ToolExecution.md#toolexecutor)、[ToolRegistry](plugins/ToolRegistry.md)）。
 
 ```rust
 pub struct ToolContribution {
@@ -127,7 +127,7 @@ impl ToolRegistry {
 
 ## 7. 动态工具来源
 
-状态：Implemented。本节是 Tools 能力（Session 级 `ToolRegistry` 与分支级 `ToolBinding`）的当前合同；注入关系以 Plugin 文档 [ToolRegistry](plugins/ToolRegistry.md)、[ToolBinding](plugins/ToolBinding.md)、[Loop](plugins/Loop.md)、[ToolExecutor](plugins/ToolExecutor.md) 的生成表为准。
+状态：Implemented。本节是 Tools 能力（Session 级 `ToolRegistry` 与分支级 `ToolBinding`）的当前合同；注入关系以 Plugin 文档 [ToolRegistry](plugins/ToolRegistry.md)、[ToolBinding](plugins/ToolExecution.md#toolbinding)、[Loop](plugins/Loop.md)、[ToolExecutor](plugins/ToolExecution.md#toolexecutor) 的生成表为准。
 
 ### 7.1 职责
 

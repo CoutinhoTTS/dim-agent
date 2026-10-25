@@ -11,7 +11,7 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 - After each design or implementation, do an ablation review: check whether every change is necessary and prefer removing abstractions, wrappers, intermediate state and extra branches that do not serve the requirement. Where a simplification is plausible, try it and confirm the result still satisfies the requirement and interface contracts within the affected scope. For structure that is required, state its purpose; do not deliberately revert fixes or manufacture test failures to prove necessity. If nothing can be removed, say so instead of inventing experiments.
 - Process serves delivery; keep effort proportional to the complexity and risk of the change. Handle ordinary changes directly and only delegate complex work that can progress independently. Tracking issues individually does not mean a separate agent, report or full verification run per issue.
 - Development and tests use an isolated `--home` (or `DIMCODE_HOME`); never touch the product home `~/.dimcode`.
-- This is a public repository. The private account plugin, its account realm and token flows, and any credentials stay out of it; see the [managed provider boundary](docs/architecture/development.md#managed-provider-boundary).
+- This is a public repository. The private account plugin (`dim-oauth-plugin-rust`), its account realm and token flows, and any credentials stay out of it; see the [managed provider boundary](docs/architecture/development.md#managed-provider-boundary).
 - Review correctness, security, compatibility and unnecessary abstraction before committing. Commit complete, reviewable units on their declared parent, with their documentation and observable-behavior tests. Never commit secrets or scratch experiments.
 
 ## Data and interface conventions
@@ -56,11 +56,11 @@ Assembly graphs and crate dependencies are computed from the actual code by `xta
 
 | Command (workspace root) | Purpose |
 | --- | --- |
-| `cargo run --locked -p xtask -- graph` | Regenerate `docs/architecture/rust-agent/generated/`: `services.mmd` / `services.md` (service assembly), `instances.mmd` (instance keys), `modules.mmd` (module dependencies), `crates.mmd` (crate dependencies) and their `.json` snapshots |
-| `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions |
+| `cargo run --locked -p xtask -- graph` | Regenerate `docs/architecture/rust-agent/generated/`: `services.mmd` / `services.md` (service assembly), `instances.mmd` (instance keys), `modules.mmd` (module dependencies), `crates.mmd` (crate dependencies) and their `.json` snapshots, and `catalog.md` (the service catalog and the parts that are Capabilities) |
+| `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions, and that `catalog.md` matches the real assembly |
 | `cargo run --release --locked -p xtask -- measure` | Resource measurement; pass `--model-config PATH` (e.g. `crates/dim-agent-aimux/examples/offline.json`) |
 
-Run `check` after adding or removing a Capability or changing assembly or crate dependencies, and `graph` after changing assembly. `check` also validates the plugin pages under `docs/architecture/rust-agent/plugins/` against the code, so update a capability's page with it; use the `.json` snapshot diff to confirm the change is as intended. Hand-written diagrams in documentation only describe the target structure; the generated output is authoritative for the current implementation.
+Run `check` after adding or removing a Capability or changing assembly or crate dependencies, and `graph` after changing assembly. `check` also validates the plugin pages under `docs/architecture/rust-agent/plugins/` against the code, so update a capability's page with it, and fails when the generated service catalog is stale; use the `.json` snapshot diff to confirm the change is as intended. Hand-written diagrams in documentation only describe the target structure; the generated output is authoritative for the current implementation.
 
 ## Agent v4 development rules
 
@@ -91,13 +91,12 @@ Before designing or changing a plugin, capability or event, read [design rules Â
 
 ### Current Rust binding
 
-Until phase P3 of the [plugin contract](docs/design/plugin-contract.md#10-migration) replaces it, Rust parts are written this way. Do not use this spelling to state a rule in a design document.
+Rust parts are written this way; the full binding is [How Dim uses rutis, appendix A](docs/design/rutis-usage.md#appendix-a-rust-binding). Do not use this spelling to state a rule in a design document.
 
-- A new part depends on names: a plain `TypedPlugin` with `Keyed<T>` dependencies, added with `AgentBuilder::session_part`/`branch_part` or `register_part` ([How Dim uses rutis, appendix A](docs/design/rutis-usage.md#appendix-a-rust-binding)). P3 moves the parts below to it.
-
-- A part implements rutis `TypedPlugin` and the runtime `Capability` trait. `Deps` declares every dependency: `InSession<T>`, `InBranch<T>`, process `Arc<T>`, the load-order gates `SessionGate`/`BranchGate`/`Gate`, and `When<D>` for dependencies the configuration enables. `apply` obtains dependencies from `Deps` and registers cleanup with `ctx.effect`.
-- Session and branch parts are registered through `AgentBuilder::session_plugin`/`timeline_plugin` factories that capture only configuration and instance identity. Scoped services provide and inject instance keys generated from the factory's `SessionScope`/`BranchScope` ([single-tree assembly](docs/architecture/rust-agent/single-tree.md)). External crates export parts; the runtime keeps no part enum.
-- Background tasks wait for publication: branch parts inject `BranchLifecycle` (branch started and published), Session parts inject `SessionLifecycle` (Session published by its Agent), and both wait for `activated()`.
-- Owner state is published through `StateCell` and read externally through `Session::get/on`; a branch's runtime memory state lives in its TimelineContext. External input enters through `Session::input`/`Branch::input`. Ordinary callers read through `Session::history/local/trace/get/on` or `Branch`.
+- A part is a plain rutis `TypedPlugin`. `Deps` declares every dependency by name: `Keyed<T>` (read), `KeyedGate<T>` (load order only), `Option<Keyed<T>>` (read if present, without gating), `When<D>` (chosen by configuration, keys from `Names::when`), or tuples of them. Each copy's keys come from the catalog for the name and the copy's instances (`Names`: `names.part(plugin)`, `names.part_with(plugin, keys)`, and `names.key::<T>()` for a service the part provides). `apply` obtains dependencies from `Deps` and registers cleanup with `ctx.effect`.
+- A Rust name's group is the one it is registered in with `names::register::<T>(catalog, group)`: `None` for the process, `Some("session")` or `Some("branch")`. A part that names a group it is not inside fails at composition.
+- A feature is one process plugin that registers its Session and branch parts with the part registry (`partRegistry`, `PartRegistry::register`); they are withdrawn when it unloads. A plugin that owns nothing for the process is a `Feature` (`Feature::new(name).session(part, make).branch(part, make)`, or `.when(scope, part, generator)`), added with `AgentBuilder::feature`; one that owns process state is its own plugin, added with `AgentBuilder::plugin`. The install functions are the profile: `require_feature` and `require_part` make parts required. An App Server process row is `register_part`, and `AgentBuilder::plugin_rows` places the builder's plugins. External crates export parts; the runtime keeps no part enum.
+- `AgentBuilder::session_value` provides a host value under a Session name, `AgentBuilder::process_value` under a process name.
+- Background tasks wait for publication: branch parts depend on `Keyed<BranchLifecycle>` (branch started and published), Session parts on `Keyed<SessionLifecycle>` (Session published by its Agent), and both wait for `activated()`.
+- Owner state is published through `StateCell` and read externally through `Session::get/on`; a branch's runtime memory state lives in its TimelineContext. External input enters through `Session::input`/`Branch::input`. Ordinary callers read through `Session::history/local/trace/get/on` or `Branch`; the facades' service reads take only `PublicService` types registered in the matching group.
 - Host ports include `PrepareModelHost`, `ModelHost` and `ToolHost`; the [generated services](docs/architecture/rust-agent/generated/services.md) list them all.
-- The `Capability` trait is not the contract's Capability: today every Rust part implements it, including process plugins and pure providers.

@@ -30,7 +30,6 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 mod configuration;
-pub(crate) use configuration::AgentsSessionPlugin;
 pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
 
 mod sessions;
@@ -1491,6 +1490,7 @@ impl AgentsPlugin {
             names.when::<Keyed<SettingsService>>(self.config.local_execution())?,
             names.key::<Loader>()?,
             names.key::<AgentDirectory>()?,
+            names.key::<dim_agent_runtime::PartRegistry>()?,
         );
         Ok(names.part_with(self, keys))
     }
@@ -1501,6 +1501,7 @@ impl TypedPlugin for AgentsPlugin {
         When<Keyed<SettingsService>>,
         Keyed<Loader>,
         Keyed<AgentDirectory>,
+        Keyed<dim_agent_runtime::PartRegistry>,
     );
     fn name(&self) -> &str {
         "Agents"
@@ -1508,9 +1509,22 @@ impl TypedPlugin for AgentsPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (When(stored), When(settings), Keyed(loader), Keyed(directory)): Self::Deps,
+        (When(stored), When(settings), Keyed(loader), Keyed(directory), Keyed(parts)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
+            // Its Session part, which reads the index this generation
+            // provides below.
+            parts.register(
+                ctx,
+                dim_agent_runtime::PartScope::Session,
+                "AgentsSession",
+                |mount| {
+                    mount
+                        .names
+                        .part(configuration::AgentsSessionPlugin)
+                        .map(Some)
+                },
+            )?;
             let settings = settings.map(|Keyed(settings)| settings);
             let mut builder = self.builder.clone();
             let (records, session_store) = match stored {

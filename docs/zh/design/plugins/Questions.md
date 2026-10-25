@@ -4,7 +4,7 @@
 
 模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答或拒绝回答。**问题就是待完成的工具调用，回答就是它的工具结果。** 客户端把已提交、尚无 `step/tool-result` 的 `ask_user` 的 `step/tool-call` 视为问题，用 Session 方法 `session.question.respond` 回答；等待中的处理函数把回答作为自己的 `ToolResult` 返回，ToolExecutor 像发布其他工具输出一样把它写进该批次的 `step/tool-result`。模型只从 `ToolResult.content` 得知用户的选择。
 
-Questions **不定义任何 Timeline 事件**，只有**一个部分**，即一个 Session Capability。它把 `ask_user` 工具注册到本 Session 的 `toolRegistry`，并把命名空间 `session.question` 注册到 `sessionMethods`，以此提供方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)），并在内存中持有本 Session 正在运行的 `ask_user` 调用的等待者，如同运行中的工具持有自己的 I/O。中断、关闭、重载、重启和 fork 都由 [ToolExecutor](../../../architecture/rust-agent/plugins/ToolExecutor.md) 现有的工具调用生命周期结算。
+Questions **不定义任何 Timeline 事件**，只有**一个部分**，即一个 Session Capability。它把 `ask_user` 工具注册到本 Session 的 `toolRegistry`，并把命名空间 `session.question` 注册到 `sessionMethods`，以此提供方法 `session.question.respond`（[session-boundary](../contracts/session-boundary.md)），并在内存中持有本 Session 正在运行的 `ask_user` 调用的等待者，如同运行中的工具持有自己的 I/O。中断、关闭、重载、重启和 fork 都由 [ToolExecutor](../../../architecture/rust-agent/plugins/ToolExecution.md#toolexecutor) 现有的工具调用生命周期结算。
 
 相对已合入的重新设计（[#178](https://github.com/arcships/dim/pull/178)）的修改，全部来自对照当前 `main` 的核对和消融审查（§11）：
 
@@ -516,7 +516,7 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 | --- | --- |
 | 注册到 `toolRegistry` 的工具 `ask_user` | `Keyed<ToolRegistry>`；在 `apply` 中调用 `tools.register(ctx, ToolContribution {definition, handler})`，与 Wait 相同；`ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`；取消 = `HostError::Cancelled(reason)` |
 | `sessionMethods` 命名空间 `session.question` | `Keyed<SessionMethods>`；在 `apply` 中调用 `methods.register(ctx, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)`，与 ShellInput 相同 |
-| `S:SessionConfig` | `InSession<SessionConfig>`，每次调用读取字段 `interactive` |
+| `S:SessionConfig` | `Keyed<SessionConfig>`，每次调用读取字段 `interactive` |
 
 ```rust
 pub struct Question { pub id: String, pub header: Option<String>, pub question: String,

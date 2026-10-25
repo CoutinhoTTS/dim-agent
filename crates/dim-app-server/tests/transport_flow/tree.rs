@@ -48,7 +48,11 @@ async fn failed_branch_build_keeps_private_details_off_both_transports() {
         defaults::install(&mut builder);
         defaults::mock_model_hosts(&mut builder);
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-        builder.branch_part(|names| names.part(FailChildBuild(names.key()?)));
+        builder.require_feature(
+            Feature::new("test.fail-child-build").branch("test.fail-child-build", |names| {
+                names.part(FailChildBuild(names.key()?))
+            }),
+        );
         let server = serve(
             builder,
             ServerConfig {

@@ -387,5 +387,5 @@ struct RecallTool(Arc<TreeCommands>);
 impl ToolHandler for RecallTool { /* §3–§6 */ }
 
 // dim-agent-capabilities/src/defaults.rs，install_local_execution，与 wait::install 并列
-builder.session_part(|names| names.part(RecallPlugin));
+builder.require_feature(Feature::new("Recall").session("Recall", |names| names.part(RecallPlugin)));
 ```
