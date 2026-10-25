@@ -100,7 +100,7 @@ sequenceDiagram
 | TreeTimeline | 新增独立 Timeline 级 rutis 插件，订阅本分支 `branch/create`；依赖 Dispatcher、TimelineTree/TreeCommands |
 | TimelineTree | 拥有所有分支实例、分支身份预留、构建任务、就绪结果和关闭；不限制分支数量 |
 | 首条输入 | `branch` 工具创建的子分支，首条输入是 raw 块 `<dim-branch-task parent>`，写明它是从哪个分支派生、由该分支委派的任务；宿主（RPC）创建的分支，首条输入是操作者原文。上下文经输入注入，不另设注入通道 |
-| 创建准入 | 模型的 `branch` 工具与其他工具一样由 ToolExecutor 经 [Approval](plugins/Approval.md) 准入（risk `session`）；宿主 RPC `session.branch_create` 属于外部控制，不经准入 |
+| 创建准入 | 模型的 `branch` 工具与其他工具一样由 ToolExecutor 经 [Approval](plugins/Approval.md) 准入（risk `session`）；宿主 RPC `session.branch_create` 属于外部控制，不经准入，但要求 Session 挂载 `branch`（没有挂载列表即挂载全部工具），否则返回 `Branch tool is not enabled` |
 | 提交 | before 不持树锁；按最终事件登记继承位置和分支身份，检查关闭状态与身份占用，原子提交事件并预留该分支身份；失败不留创建锚点，不要求最终身份等于原草稿 |
 | 构建 | 只采用最终事件的分支 id、prompt、at 和关联信息；从事件位置取得固定前缀；登记后转入树拥有的异步任务 |
 | 成功 | 子分支就绪、`branch/start` 和初始输入提交完成后才公开并返回；列表与公共操作只接受已发布分支。初始化内部句柄不等于公开发布，调用方不重复提交初始输入；发布和关闭在树锁内裁决 |

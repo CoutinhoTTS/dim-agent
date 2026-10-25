@@ -91,8 +91,9 @@ name-bound (#391, #392, #396–#398, #400).
 - The features still add their parts with `AgentBuilder::session_part`/`branch_part`, and the App Server
   its process rows with `register_part`. Each feature becoming one plugin, `AgentBuilder::plugin` and the
   `partRegistry` name are [#402](https://github.com/arcships/dim/issues/402).
-- ToolRegistry, PromptRegistry and Rpc still read pre-registered names, until contributions register
-  with them (R6, [#382](https://github.com/arcships/dim/issues/382)).
+- Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry. Rpc still
+  reads pre-registered method namespaces until they register with it (R6,
+  [#382](https://github.com/arcships/dim/issues/382)).
 - Rows of other languages carry their group in the App Server's configuration (appendix B), one row per
   part, until R5 ([#403](https://github.com/arcships/dim/issues/403)).
 
@@ -274,8 +275,10 @@ These requirements concern how Dim uses rutis. They follow
   - A withdrawn handler is not called: a call through a withdrawn registration is refused as not
     made, and a call in flight while it is withdrawn reports that it may already have taken effect,
     as today, without the token.
-  - Session creation no longer refuses a configured tool that nothing has registered; ToolRegistry
-    reports it when the tools are read.
+  - A Session without a mount list (`SessionConfig.tools`) declares every registered tool, so a
+    plugin's tools need no configuration edit ([#364](https://github.com/arcships/dim/issues/364));
+    a Session with one declares those it names. Session creation does not refuse a named tool that
+    nothing has registered; ToolRegistry reports it when the tools are read.
   - Pre-registration, the `toolContribution:*`, `sessionMethods:*` and `managementMethods:*` names,
     the sidecar token and the App Server's translation of a foreign row's `provides` go. ExternalAgent's
     designed `collaborationMembers:<kind>` registers with Collaboration the same way when it is built.
@@ -363,11 +366,12 @@ builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
 // A process row.
 register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 
-// From a process plugin's `apply`: a Session part of every Session that enables it, withdrawn
-// when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
+// From a process plugin's `apply`: a Session part of every Session that mounts `record` (one
+// without a mount list mounts every tool), withdrawn when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
 // such a part required.
 registry.register(ctx, PartScope::Session, "Recorder", |mount| {
-    if !mount.session.tools.iter().any(|tool| tool == "record") {
+    let mounted = mount.session.tools.as_ref();
+    if !mounted.is_none_or(|tools| tools.iter().any(|tool| tool == "record")) {
         return Ok(None);
     }
     mount.names.part(Recorder).map(Some)

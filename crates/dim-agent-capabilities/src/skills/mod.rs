@@ -29,9 +29,6 @@ pub fn install(builder: &mut AgentBuilder) {
         )
         .session_part(|names| names.part(content::ContributionsPlugin::new(names)?))
         .session_part(|names| names.part(SkillsPlugin::new(names)?))
-        .session_tool("skill")
-        .session_prompt_source(session::INSTRUCTIONS_SOURCE)
-        .session_prompt_source(session::LIST)
         .branch_part(|names| names.part(SkillsBranchPlugin::new(names)?));
 }
 

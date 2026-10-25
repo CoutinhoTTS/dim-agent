@@ -525,8 +525,10 @@ impl dim_agent_capabilities::host::ModelDriver for DeclaredTools {
 }
 
 /// A Session capability outside the defaults contributing a stateful tool.
-struct ProbeContributor(rutis::DepKey<dim_agent_capabilities::tool_registry::ToolContribution>);
-struct ProbeTool(AtomicUsize);
+/// Registers `probe`; the count is the test's, so it continues across the
+/// contributor's generations.
+struct ProbeContributor(Arc<AtomicUsize>);
+struct ProbeTool(Arc<AtomicUsize>);
 impl dim_agent_capabilities::tool_registry::ToolHandler for ProbeTool {
     fn execute(
         &self,
@@ -539,23 +541,23 @@ impl dim_agent_capabilities::tool_registry::ToolHandler for ProbeTool {
     }
 }
 impl TypedPlugin for ProbeContributor {
-    type Deps = ();
+    type Deps = (rutis::Keyed<dim_agent_capabilities::tool_registry::ToolRegistry>,);
     fn name(&self) -> &str {
         "Probe"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (): Self::Deps,
+        (rutis::Keyed(tools),): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         use dim_agent_capabilities::tool_registry::{ToolContribution, definition};
         Box::pin(async move {
-            ctx.provide_as(
-                self.0.key().clone(),
-                Arc::new(ToolContribution {
+            tools.register(
+                ctx,
+                ToolContribution {
                     definition: definition("probe", "Count calls", json!({"type":"object"})),
-                    handler: Arc::new(ProbeTool(AtomicUsize::new(0))),
-                }),
+                    handler: Arc::new(ProbeTool(self.0.clone())),
+                },
             )?;
             Ok(rutis::Effect::Done)
         })
@@ -583,11 +585,9 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
-        .session_tool("probe")
-        .session_part(|names| {
-            names.part(ProbeContributor(
-                dim_agent_capabilities::tool_registry::contribution_key(names, "probe")?,
-            ))
+        .session_part({
+            let calls = Arc::new(AtomicUsize::new(0));
+            move |names| names.part(ProbeContributor(calls.clone()))
         });
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
@@ -648,11 +648,11 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
     };
     for expected in ["probe call 1", "probe call 2"] {
         if expected == "probe call 2" {
-            // ToolHost → ToolRegistry → ToolBinding → Loop reloads. Registry
+            // ToolHost → ToolRegistry → ToolBinding → Loop reloads, and the
+            // contributor with the registry it registers with. Registry
             // readiness does not imply the branch accepts input; wait for its
-            // new Loop generation. The contributor is not downstream and
-            // keeps its state.
-            let (probe, before) = (generation("Probe"), loop_generation().unwrap());
+            // new Loop generation.
+            let (probe, before) = (generation("Probe").unwrap(), loop_generation().unwrap());
             tools.restart().await;
             tokio::time::timeout(Duration::from_secs(5), async {
                 while !loop_generation().is_some_and(|current| current > before) {
@@ -661,7 +661,7 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
             })
             .await
             .expect("Loop reloaded");
-            assert_eq!(generation("Probe"), probe);
+            assert!(generation("Probe").is_some_and(|current| current > probe));
         }
         assert_ok(
             &client

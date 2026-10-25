@@ -118,9 +118,8 @@ Rust 宿主端口和注册表（ToolRegistry、PromptRegistry、ToolHost、Model
 
 工具、工具来源、提示词来源和方法命名空间不是名字。部件向它们的所有者登记（ToolRegistry、PromptRegistry 或 Rpc 上的
 `register`），部件卸载时登记结束（[rutis 使用 R6](rutis-usage.md#r6-贡献向所有者登记)）。工具和方法命名空间可以从任何语言登记；
-提示词来源和工具来源在有外来部件需要之前仍只限 Rust。R6 落地之前，
-它们是名字 `toolContribution:<tool>`、`sessionMethods:<namespace>`（都在 `session`）和
-`managementMethods:<namespace>`（进程，仅限 protected-local v3），提示词来源和工具来源由宿主预先注册，仅限 Rust。
+提示词来源和工具来源在有外来部件需要之前仍只限 Rust。工具、工具来源和提示词来源现在已经登记。R6 其余部分落地之前，
+方法命名空间仍是名字 `sessionMethods:<namespace>`（`session`）和 `managementMethods:<namespace>`（进程，仅限 protected-local v3）。
 
 两条机制契约把门面绑定到核心部件：分支只在有 `LoopState` 提供者时发布，Session 只在有
 `TimelineTreeControl` 提供者时发布。因此 Loop 和 TimelineTree 是核心部件，用 Rust 编写。

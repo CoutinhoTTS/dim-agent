@@ -1,27 +1,25 @@
 import { definePlugin } from '@arcships/rutis'
-import type { ToolContribution } from '../../../npm/plugin.js'
+import type { ToolRegistry } from '../../../npm/plugin.js'
 import { toolRequest, unloadingAfterCall, unloadingBeforeCall, type RunReply, type WorkflowRuns } from './requests.ts'
 
 export default definePlugin({
   name: 'WorkflowSession',
-  inject: ['workflowRuns'],
-  provides: { 'toolContribution:workflow': { declaration: 'sync', execute: 'async' } },
-  apply(ctx) {
+  inject: ['workflowRuns', 'toolRegistry'],
+  provides: {},
+  async apply(ctx) {
     const owner = ctx.use<WorkflowRuns>('workflowRuns')
     let closed = false
     ctx.effect(() => { closed = true })
-    const tool: ToolContribution = {
-      declaration() {
-        return { name: 'workflow', description: 'List workflow definitions, start a run, inspect stored stage results, or stop a run.',
-          source: 'extension', risk: 'workflow',
-          inputSchema: { type: 'object', required: ['action'], additionalProperties: false, properties: {
-            action: { type: 'string', enum: ['list', 'start', 'status', 'stop'] },
-            name: { type: 'string' }, source: { type: 'string', enum: ['project', 'user', 'plugin'] },
-            params: { type: 'object', additionalProperties: { type: 'string' } }, run_id: { type: 'string' },
-          } },
-        }
+    await ctx.use<ToolRegistry>('toolRegistry').register(
+      { name: 'workflow', description: 'List workflow definitions, start a run, inspect stored stage results, or stop a run.',
+        source: 'extension', risk: 'workflow',
+        inputSchema: { type: 'object', required: ['action'], additionalProperties: false, properties: {
+          action: { type: 'string', enum: ['list', 'start', 'status', 'stop'] },
+          name: { type: 'string' }, source: { type: 'string', enum: ['project', 'user', 'plugin'] },
+          params: { type: 'object', additionalProperties: { type: 'string' } }, run_id: { type: 'string' },
+        } },
       },
-      async execute(call, cancellation) {
+      async (call, cancellation) => {
         if (closed) return { content: unloadingBeforeCall, isError: true }
         if (call.config.interactive === false) return { content: 'workflow is available only in interactive Sessions.', isError: true }
         const request = toolRequest.safeParse(call.arguments)
@@ -48,7 +46,6 @@ export default definePlugin({
         }
         return { content: reply.content, structuredContent: reply.structured }
       },
-    }
-    ctx.provide('toolContribution:workflow', tool)
+    )
   },
 })

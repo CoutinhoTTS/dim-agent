@@ -2,6 +2,7 @@ import { createConnection } from 'node:net'
 import { once } from 'node:events'
 import { definePlugin } from '@arcships/rutis'
 import provides from './session-part.json' with { type: 'json' }
+import type { ToolRegistry } from '../../npm/plugin.js'
 
 type Call = {
   sessionId: string; branchId: string; turnId: string; callId: string
@@ -11,8 +12,9 @@ type MethodCall = { callId: string; method: string; params: { sessionId: string 
 
 export default definePlugin({
   name: 'SessionTypeScriptFixture',
+  inject: ['toolRegistry'],
   provides,
-  apply(ctx, config: { badDeclaration?: boolean; badMethods?: boolean | 'unsupported'; processOwner?: boolean; hangDescribe?: { host: string; port: number } }) {
+  async apply(ctx, config: { badDeclaration?: boolean; badMethods?: boolean | 'unsupported'; processOwner?: boolean; hangDescribe?: { host: string; port: number } }) {
     const generation = crypto.randomUUID()
     const owner = config.processOwner ? ctx.use<{ status(): { generation: number } }>('exampleProcess') : undefined
     let stopped = false
@@ -23,15 +25,14 @@ export default definePlugin({
     let startTool: (() => void) | undefined
     const alive = () => { if (stopped) throw new Error('provider unloaded') }
     ctx.effect(() => { stopped = true })
-    ctx.provide('toolContribution:ts_echo', {
-      declaration() {
-        return {
-          name: config.badDeclaration ? 'wrong_name' : 'ts_echo',
-          description: 'TypeScript flow fixture', inputSchema: { type: 'object' },
-          source: 'extension', risk: 'session',
-        }
+    // A declaration without its risk is refused; the row keeps its methods.
+    let refused: string | undefined
+    await ctx.use<ToolRegistry>('toolRegistry').register(
+      {
+        name: 'ts_echo', description: 'TypeScript flow fixture', inputSchema: { type: 'object' },
+        source: 'extension', ...(config.badDeclaration ? {} : { risk: 'session' }),
       },
-      async execute(call: Call, cancelled: Promise<void>) {
+      async (call: Call, cancelled: Promise<void>) => {
         alive()
         calls++
         if (call.arguments.text === 'malformed') return { content: { invalid: true } }
@@ -44,7 +45,7 @@ export default definePlugin({
         }
         return { content: JSON.stringify({ ...call, generation, calls, processGeneration: owner?.status().generation }) }
       },
-    })
+    ).catch((error: Error) => { refused = error.message })
     ctx.provide('sessionMethods:session.typescript', {
       async describe() {
         alive()
@@ -76,7 +77,7 @@ export default definePlugin({
         if (hold) await cancelled
         alive()
         progress({ phase: 'settled', generation })
-        return { kind: 'value', value: { sessionId: call.params.sessionId, generation, pid: process.pid, calls, cancelled: hold, alive: !stopped } }
+        return { kind: 'value', value: { sessionId: call.params.sessionId, generation, pid: process.pid, calls, cancelled: hold, alive: !stopped, refused } }
       },
     })
   },

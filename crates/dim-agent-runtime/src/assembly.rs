@@ -22,23 +22,7 @@ pub const SESSION_GROUP: &str = "session";
 /// Instanced loader group of one branch, nested in [`SESSION_GROUP`].
 pub const BRANCH_GROUP: &str = "branch";
 
-/// Names registered on an assembly, handed to the registry factories.
-#[derive(Clone, Copy)]
-pub struct Registered<'a> {
-    pub tools: ToolNames<'a>,
-    /// Prompt sources registered with [`AgentBuilder::session_prompt_source`].
-    pub prompt_sources: &'a [String],
-}
-
-/// Tool names registered on an assembly, handed to the tool registry factory.
-#[derive(Clone, Copy)]
-pub struct ToolNames<'a> {
-    /// Fixed contributions registered with [`AgentBuilder::session_tool`].
-    pub contributed: &'a [String],
-    /// Dynamic sources registered with [`AgentBuilder::session_tool_source`].
-    pub sources: &'a [String],
-}
-type SessionMake = Arc<dyn Fn(&SessionScope, Registered<'_>) -> Box<dyn Plugin> + Send + Sync>;
+type SessionMake = Arc<dyn Fn(&SessionScope) -> Box<dyn Plugin> + Send + Sync>;
 type BranchMake = Arc<dyn Fn(&BranchScope) -> Box<dyn Plugin> + Send + Sync>;
 /// A Rust part of the assembly profile, whose dependencies are names ([`Names`]).
 type PartMake = crate::parts::ProfilePart;
@@ -90,10 +74,6 @@ pub(crate) struct Assembly {
     required_parts: Arc<HashSet<String>>,
     /// Nested instanced groups created per Session on request.
     extensions: Vec<(String, Vec<(String, ExtensionMake)>)>,
-    tools: Vec<String>,
-    tool_sources: Vec<String>,
-    host_tools: Vec<String>,
-    prompt_sources: Vec<String>,
     session_methods: Vec<String>,
 }
 #[derive(Clone)]
@@ -123,10 +103,6 @@ impl AgentBuilder {
                 parts: Arc::default(),
                 required_parts: Arc::default(),
                 extensions: vec![],
-                tools: vec![],
-                tool_sources: vec![],
-                host_tools: vec![],
-                prompt_sources: vec![],
                 session_methods: vec![],
             },
         }
@@ -150,81 +126,8 @@ impl AgentBuilder {
     ) -> &mut Self {
         self.assembly
             .session
-            .push(Arc::new(move |scope, _| typed(factory(scope))));
+            .push(Arc::new(move |scope| typed(factory(scope))));
         self
-    }
-    /// Registers the Session capability that collects tools; the factory
-    /// receives every name registered with [`Self::session_tool`] and
-    /// [`Self::session_tool_source`].
-    pub fn session_tool_registry<P: Capability>(
-        &mut self,
-        factory: impl Fn(&SessionScope, ToolNames<'_>) -> P + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.assembly.session.push(Arc::new(move |scope, names| {
-            typed(factory(scope, names.tools))
-        }));
-        self
-    }
-    /// Registers the Session capability that collects prompt sources; the
-    /// factory receives every name registered with
-    /// [`Self::session_prompt_source`].
-    pub fn session_prompt_registry<P: Capability>(
-        &mut self,
-        factory: impl Fn(&SessionScope, &[String]) -> P + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.assembly.session.push(Arc::new(move |scope, names| {
-            typed(factory(scope, names.prompt_sources))
-        }));
-        self
-    }
-    /// Registers a prompt source a Session capability provides under this
-    /// name; a registered name without a provider fails the Session.
-    pub fn session_prompt_source(&mut self, name: impl Into<String>) -> &mut Self {
-        let name = name.into();
-        if !self.assembly.prompt_sources.contains(&name) {
-            self.assembly.prompt_sources.push(name);
-        }
-        self
-    }
-    /// Registers a tool that a Session capability contributes under this name.
-    pub fn session_tool(&mut self, name: impl Into<String>) -> &mut Self {
-        let name = name.into();
-        if !self.assembly.tools.contains(&name) {
-            self.assembly.tools.push(name);
-        }
-        self
-    }
-    /// Registers a dynamic tool source a Session capability provides under
-    /// this name; a registered name without a provider fails the Session.
-    /// The name must match `[A-Za-z0-9_-]{1,64}`, the tool name grammar, so
-    /// its keys (`<name>` or `<name>:<instance>`) never meet the registry's
-    /// own `#contributed:<tool>` keys; another name fails the Session.
-    pub fn session_tool_source(&mut self, name: impl Into<String>) -> &mut Self {
-        let name = name.into();
-        if !self.assembly.tool_sources.contains(&name) {
-            self.assembly.tool_sources.push(name);
-        }
-        self
-    }
-    /// Records tools the host `ToolHost` provides; nothing is injected for
-    /// them. Together with contributions they are the provided tool names.
-    pub fn host_tools(&mut self, names: impl IntoIterator<Item = String>) -> &mut Self {
-        for name in names {
-            if !self.assembly.host_tools.contains(&name) {
-                self.assembly.host_tools.push(name);
-            }
-        }
-        self
-    }
-    /// Every tool name a Session of this assembly can enable: host tools
-    /// recorded with [`Self::host_tools`] and contributions registered with
-    /// [`Self::session_tool`].
-    pub fn provided_tools(&self) -> impl Iterator<Item = &str> {
-        self.assembly
-            .host_tools
-            .iter()
-            .chain(&self.assembly.tools)
-            .map(String::as_str)
     }
     /// Records a `sessionMethods` namespace that a Session capability
     /// provides: the Session's known namespaces (methods contract A.1), which
@@ -436,11 +339,6 @@ impl AgentBuilder {
     ) -> Result<Value> {
         AssertUnwindSafe(async {
             let assembly = &self.assembly;
-            let names = Arc::new((
-                assembly.tools.clone(),
-                assembly.tool_sources.clone(),
-                assembly.prompt_sources.clone(),
-            ));
             let sample = SessionScope {
                 instance: ctx.instance(),
             };
@@ -491,19 +389,8 @@ impl AgentBuilder {
                 });
             }
             for make in &assembly.session {
-                let (make, names) = (make.clone(), names.clone());
-                let build_with = move |scope: &SessionScope| {
-                    make(
-                        scope,
-                        Registered {
-                            tools: ToolNames {
-                                contributed: &names.0,
-                                sources: &names.1,
-                            },
-                            prompt_sources: &names.2,
-                        },
-                    )
-                };
+                let make = make.clone();
+                let build_with = move |scope: &SessionScope| make(scope);
                 let module = modules.name(build_with(&sample).name(), builtins).await;
                 session.push(row(&module));
                 let build_with = Arc::new(build_with);
@@ -1605,12 +1492,40 @@ async fn create_instance(
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let mut waiting = rows(loader, &created.view, Some(&required));
     waiting.extend(instance().2);
-    match wait_active(ctx, &waiting, remaining, cancel)
+    if let Err(error) = wait_active(ctx, &waiting, remaining, cancel)
         .await
         .and_then(|()| validate(ctx, created.view.id, &waiting))
     {
-        Ok(()) => Ok(created),
-        Err(error) => Err((error, Some(created))),
+        return Err((error, Some(created)));
+    }
+    // The other rows are optional (#207). As the loader settles the rows
+    // already Loading when it creates the instance, a row that started
+    // loading because a required part provided what it waited for is
+    // settled before the instance is published; a row still Pending on a
+    // name nothing here provides returns at once. Settling the required
+    // parts first lets each finish telling its dependents it is Active.
+    created.children = rows(loader, &created.view, None);
+    let optional: Vec<FiberView> = created
+        .children
+        .iter()
+        .filter(|view| !waiting.iter().any(|required| required.id == view.id))
+        .cloned()
+        .collect();
+    let settled = async {
+        for view in waiting.iter().chain(&optional) {
+            // An optional row's failure is its own; a required part's
+            // already counted above.
+            let _ = view.await;
+        }
+    };
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    tokio::select! {
+        () = settled => Ok(created),
+        _ = cancel.cancelled() => Err((AgentError::Cancelled("initialization".into()), Some(created))),
+        _ = tokio::time::sleep(remaining) => {
+            let error = timed_out(ctx, &created.children);
+            Err((error, Some(created)))
+        }
     }
 }
 /// Candidate rows, including nested extensions. Main and child branches do

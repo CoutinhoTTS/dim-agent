@@ -1196,7 +1196,7 @@ impl Connection {
             config.system_prompt.push_str(&prompt);
         }
         if let Some(tools) = params.tools {
-            config.tools = tools;
+            config.tools = Some(tools);
         }
         if let Some(policy) = params.permission_policy {
             config.permission_policy = policy;

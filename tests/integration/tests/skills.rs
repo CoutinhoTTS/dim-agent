@@ -968,7 +968,7 @@ async fn catalog_changes_during_assembly_wait_for_session_publication() {
         agent
             .create_session(SessionConfig {
                 cwd,
-                tools: vec!["skill".into(), "gate".into()],
+                tools: Some(vec!["skill".into(), "gate".into()]),
                 ..SessionConfig::default()
             })
             .await

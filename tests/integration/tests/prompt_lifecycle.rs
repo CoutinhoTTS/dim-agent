@@ -149,7 +149,7 @@ async fn model_adoption_preserves_enabled_tools_on_initialization_and_refresh() 
         .build();
         let session = agent
             .create_session(SessionConfig {
-                tools: vec!["echo".into()],
+                tools: Some(vec!["echo".into()]),
                 ..Default::default()
             })
             .await

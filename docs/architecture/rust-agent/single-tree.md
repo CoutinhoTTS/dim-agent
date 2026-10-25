@@ -342,7 +342,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 | 能力 | 作用域 | 重载来源 | 卸载 | 装载 |
 | --- | --- | --- | --- | --- |
-| `ToolRegistry` | Session | `ToolHost`；各 `ToolContribution` 贡献方 | — | 按 Session 配置重新注册宿主工具与贡献工具 |
+| `ToolRegistry` | Session | `ToolHost` | — | 按 Session 配置重新读取宿主工具；注册到它的部件随之重载并重新注册 |
 | `PrepareModelHost` 提供者（当前开发接线：`DefaultPrepareModelPlugin`、`ConfiguredModelPlugin`） | Session | 当前 `ToolRegistry`，无 Provider resolver | — | 重新提供；产品请求准备归 Loop，不由底层 Aimux 提供 |
 | `Loop` | 分支 | `PrepareModelHost` | — | 重建当前 turn、请求阶段、待收工具结果与中断状态；未结束的 turn 待在途操作有终态后提交 `turn/end`（`Failed`）；尚未交给上下文准备的请求由 Loop 提交 `Failed` 模型终态；没有未结束的 turn 时，已采用、未消费的驱动输入照常开始新 turn |
 | `ToolExecutor` | 分支 | `ToolRegistry` | 执行中的批次提交错误结果 | 重建中断状态；已提交而未派发、无结果的 `step/tool-call` 批次提交错误结果 |
@@ -392,4 +392,4 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 关闭回收 | 关闭 Session/分支后子树 driver、注册、索引与父级清理记录归零；多轮创建与关闭不增长 |
 | 规模 | 测 0/100/1000 空 Session、并发创建与关闭、多分支派发延迟；存活申请与创建耗时与原型基线（每空 Session 约 139.3 KiB、16 个任务）同一量级 |
 | 兼容 | 事件序列、Unix/WS 上的 v1/v2 流程（以 [Session 广播](event-driven-flows.md#6-session-广播)修订后的合同为准）、审批与错误码不变；v1/v2 仅增加 `service_reloading`。`session.create` 不再接受 `trace`，结果不再含 `tracePath`（[ADR 005](../../adr/005-observability.md) D5） |
-| 框架合同 | 严格读取在 release 同样拒绝漏声明（含命名工具贡献）；分支已提交事件和 before 不越界；卸载等待运行中的监听调用退出；作用域清理期间终态原样提交，Timeline 关闭后拒绝写入；广播接纳失败不被误认为交付成功；生成图取自真实装配 |
+| 框架合同 | 严格读取在 release 同样拒绝漏声明；分支已提交事件和 before 不越界；卸载等待运行中的监听调用退出；作用域清理期间终态原样提交，Timeline 关闭后拒绝写入；广播接纳失败不被误认为交付成功；生成图取自真实装配 |

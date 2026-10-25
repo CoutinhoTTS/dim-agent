@@ -235,6 +235,14 @@ struct FakeLeaf {
 
 impl FakeLeaf {
     async fn start(server: &RunningServer) -> Self {
+        let (leaf, handle, features) = Self::unhosted(server).await;
+        handle.set(features).await.unwrap();
+        leaf
+    }
+
+    async fn unhosted(
+        server: &RunningServer,
+    ) -> (Self, rutis_bridge::PeerHandle, rutis_bridge::Features) {
         use rutis_bridge::{
             Described, Features, IdentityPlugin, LinkConfig, PeerPlugin, StaticCatalog,
             StaticIdentity, channel::PeerId,
@@ -273,25 +281,26 @@ impl FakeLeaf {
             "ui-leaf",
             StaticIdentity::new(PeerId::new(peer.clone()).unwrap()),
         ));
-        let node = root.plugin(
-            PeerPlugin::new(
-                link,
-                Features {
-                    host: Some(Arc::new(catalog)),
-                    ..Features::default()
-                },
-            )
-            .unwrap(),
-        );
+        let features = Features {
+            host: Some(Arc::new(catalog)),
+            ..Features::default()
+        };
+        let node = PeerPlugin::new(link, Features::default()).unwrap();
+        let handle = node.handle();
+        let node = root.plugin(node);
         (&node).await.unwrap();
-        Self {
-            peer,
-            address: format!("unix:{}", path.display()),
-            root,
-            loaded,
-            unloaded,
-            directory,
-        }
+        (
+            Self {
+                peer,
+                address: format!("unix:{}", path.display()),
+                root,
+                loaded,
+                unloaded,
+                directory,
+            },
+            handle,
+            features,
+        )
     }
 
     /// The process ends: its link closes.
@@ -488,8 +497,24 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
 
     // Hosting: `ui.open` settles once the leaf's `Tui` is loaded; it is
     // online when that `Tui` attached.
-    let first = FakeLeaf::start(&server).await;
-    let opened = client.rpc("ui.open", open(&first, json!({}))).await;
+    let (first, host, features) = FakeLeaf::unhosted(&server).await;
+    let opened = {
+        let mut state = host.link_state().unwrap();
+        let opening = client.rpc("ui.open", open(&first, json!({})));
+        tokio::pin!(opening);
+        tokio::select! {
+            result = &mut opening => panic!("ui.open ended before hosting was offered: {result}"),
+            () = async {
+                while !matches!(&*state.borrow_and_update(), rutis_bridge::LinkState::Ready { .. }) {
+                    state.changed().await.unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            } => {}
+        }
+        assert_eq!(first.loaded.load(Ordering::SeqCst), 0);
+        host.set(features).await.unwrap();
+        opening.await
+    };
     assert_ok(&opened);
     assert_eq!(opened["result"]["uiId"], first.peer.as_str());
     assert_eq!(first.loaded.load(Ordering::SeqCst), 1);

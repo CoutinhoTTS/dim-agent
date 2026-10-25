@@ -1,6 +1,7 @@
 import { definePlugin } from '@arcships/rutis'
 import provides from './session.json' with { type: 'json' }
 import { type InputMessage, changes } from './goal.ts'
+import type { ToolRegistry } from '../../../npm/plugin.js'
 
 type TreeCommands = { input(id: string, input: InputMessage): Promise<{ sequence: number | bigint }> }
 type Call = { branchId: string; arguments: { status?: unknown; summary?: unknown } }
@@ -20,28 +21,26 @@ const text = (value: unknown, limit: number) =>
 export default definePlugin({
   name: 'GoalSession',
   provides,
-  inject: ['treeCommands'],
-  apply(ctx) {
+  inject: ['treeCommands', 'toolRegistry'],
+  async apply(ctx) {
     const tree = ctx.use<TreeCommands>('treeCommands')
-    ctx.provide('toolContribution:goal_update', {
-      declaration() {
-        return {
-          name: 'goal_update',
-          description: 'Report that the current goal is completed or blocked.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              status: { type: 'string', enum: ['completed', 'blocked'] },
-              summary: { type: 'string', minLength: 1, maxLength: SUMMARY_LIMIT },
-            },
-            required: ['status', 'summary'],
-            additionalProperties: false,
+    await ctx.use<ToolRegistry>('toolRegistry').register(
+      {
+        name: 'goal_update',
+        description: 'Report that the current goal is completed or blocked.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            status: { type: 'string', enum: ['completed', 'blocked'] },
+            summary: { type: 'string', minLength: 1, maxLength: SUMMARY_LIMIT },
           },
-          source: 'extension',
-          risk: 'session',
-        }
+          required: ['status', 'summary'],
+          additionalProperties: false,
+        },
+        source: 'extension',
+        risk: 'session',
       },
-      async execute(call: Call) {
+      async (call: Call) => {
         const { status } = call.arguments
         const summary = text(call.arguments.summary, SUMMARY_LIMIT)
         if ((status !== 'completed' && status !== 'blocked') || !summary) {
@@ -50,7 +49,7 @@ export default definePlugin({
         await tree.input(call.branchId, changes.report(call.branchId, status, summary))
         return { content: `goal_update recorded: ${status}.` }
       },
-    })
+    )
     ctx.provide('sessionMethods:session.goal', {
       async describe() {
         return ['set', 'edit', 'pause', 'resume', 'clear'].map(name => ({

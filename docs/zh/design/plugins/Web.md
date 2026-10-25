@@ -2,7 +2,7 @@
 
 状态：已实现为可选的 [Session TypeScript 包](../../../../runtime/plugins/web/README.md)。总体设计：[overview](../overview.md)（Web）。阶段：P2。语言：TypeScript 优先。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
-Web 是一个 Session 插件，以两个按工具名作 key 的 Session 级 `toolContribution` 服务向模型提供 `web_search` 与 `web_fetch`（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)；ToolRegistry 接受具名工具服务作为补充，[ADR 002 D5](../../adr/002-plugin-scope.md)）。搜索交给已配置的内置搜索适配器；抓取下载一个公开页面并返回有界文本。Web 不持有跨 Session 共享的状态，不写任何 Timeline 事件（每次调用与结果本身已是工具调用事实），并在使用时从自己的 Settings 来源 `web` 读取业务配置，因此编辑配置不会重载任何东西（[ADR 002 D4](../../adr/002-plugin-scope.md)）。
+Web 是一个 Session 插件，向模型提供 `web_search` 与 `web_fetch`，这两个工具由它注册到本 Session 的 `toolRegistry`（[工具贡献](../../../architecture/rust-agent/tool-contributions.md)；[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)，[ADR 002 D5](../../adr/002-plugin-scope.md)）。搜索交给已配置的内置搜索适配器；抓取下载一个公开页面并返回有界文本。Web 不持有跨 Session 共享的状态，不写任何 Timeline 事件（每次调用与结果本身已是工具调用事实），并在使用时从自己的 Settings 来源 `web` 读取业务配置，因此编辑配置不会重载任何东西（[ADR 002 D4](../../adr/002-plugin-scope.md)）。
 
 ## 1. 结构
 
@@ -12,14 +12,14 @@ flowchart LR
     Settings["Settings：web 业务来源"]
   end
   subgraph SESS["Session"]
-    Web["Web：toolContribution web_search、web_fetch"]:::new
+    Web["Web：工具 web_search、web_fetch"]:::new
     ToolRegistry["ToolRegistry"]
   end
   subgraph BR["分支"]
     Exec["ToolBinding、ToolExecutor、Approval、Permission"]
   end
   Web -->|"使用时读取来源 web"| Settings
-  ToolRegistry -.->|"按名读取 toolContribution 并跟随其激活"| Web
+  Web -->|"注册自己的工具"| ToolRegistry
   Exec --> ToolRegistry
   Exec -->|"execute(ToolCall)、取消请求"| Web
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
@@ -27,7 +27,7 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Web` | Session（仅启用时安装） | 已具名的 `settings`；缺失保持既有 Pending 语义 | `toolContribution` key `web_search` 与 `web_fetch`，在 Web 的 `provides` 中声明 |
+| `Web` | Session（仅启用时安装） | 已具名的 `settings` 与 `toolRegistry`；缺失保持既有 Pending 语义 | 把 `web_search` 与 `web_fetch` 注册到 `toolRegistry`；不提供任何名称 |
 
 **依赖的契约：** 已实现的 [C4 工具绑定](../../../design/session-typescript.md)、[Settings 具名服务与 row 来源声明](../appserver/settings-service.md)及 Permission 既有的 `network` 风险。#150 提供工具，#166/#175 提供 Settings，#177 提供 Settings 事件。Web 不消费 Session 广播，不等待 #168。**本文定义的契约：** 两个工具、结果格式和 `web` 业务文档。
 
@@ -35,7 +35,7 @@ Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 Ses
 
 搜索 API 密钥是 `searchService.apiKey`，Web Settings 来源中的仅用户字段（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）。Unix 上的文件存储 profile 以 0600 权限写用户文档。原生 profile 将其作为 `user/web` 存入 SQLite；权限边界是产品 home，Unix 新建目录使用 0700，Windows 继承父目录 DACL；已有目录权限保持不变，数据库没有独立的 0600 保证。`userOnly` 限制写入，不屏蔽本地读取：该字段只经客户端方法 `settings.update` 写入，Web 从不写；本地客户端可经 `settings.read` 读回，远程与配对客户端不能。Web 每次调用随文档读取密钥，从不保留，也不把它放入声明、结果、`structuredContent`、诊断、错误或日志。
 
-**重载。** Web 只依赖外层进程服务 Settings。启用、禁用或升级 Web，或 Settings 重载，只重载 Web：ToolRegistry 按名读取 Web 的工具，不依赖 Web（session-boundary A.5，C3），因此 Session 照常运行：Web 重载期间其工具被撤下，Web 重新激活后从下一个请求起再次提供，不需要重载 Session（#241）；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
+**重载。** Web 依赖进程服务 Settings，以及它要注册的本 Session 的 `toolRegistry`。启用、禁用或升级 Web，或 Settings 重载，只重载 Web：ToolRegistry 不依赖 Web（session-boundary A.5），因此 Session 照常运行：Web 重载期间其注册被撤回，Web 重新注册后其工具从下一个请求起再次提供，不需要重载 Session（#241）；在途调用由 ToolExecutor 以 reloaded 结算。这是罕见结构性操作的可接受代价（[ADR 002 D3](../../adr/002-plugin-scope.md)）。配置编辑从不重载。
 
 **节点。** 请求从承载该 Session 的 App Server 进程发出，而非从 Session 的资源节点发出（A2）。
 
@@ -129,7 +129,7 @@ sequenceDiagram
 | --- | --- | --- |
 | 调用期间编辑配置 | 调用继续使用开始时读取的值；下一次调用使用新值 | Web |
 | 两次调用之间移除服务 | 下一次 `web_search` 返回 `search_unavailable` | Web |
-| 调用中途 Web 或 Settings 重载 | 调用以 reloaded 结算；ToolRegistry 与 Loop 照常运行，Web 的工具在 Web 重新激活前不可用，之后从下一个请求起提供（D3，C3，#241） | ToolExecutor |
+| 调用中途 Web 或 Settings 重载 | 调用以 reloaded 结算；ToolRegistry 与 Loop 照常运行，Web 的工具在 Web 重新注册前不可用，之后从下一个请求起提供（D3，#241） | ToolExecutor |
 | 调用中途进程重启 | ToolExecutor 将已提交的调用结算为未能在恢复中存活；Web 从不重复请求 | ToolExecutor |
 | 结果之后发生压缩 | 抓取的文本只经摘要保留 | ContextPreparation |
 
@@ -139,7 +139,7 @@ sequenceDiagram
 
 | 模型看到的内容 | 形式 | 位置 |
 | --- | --- | --- |
-| `web_search`、`web_fetch` 的名称、描述、输入 schema | 工具声明 | 列于 `SessionConfig.tools` 时，位于被采用的 `context/configured.tools` |
+| `web_search`、`web_fetch` 的名称、描述、输入 schema | 工具声明 | Session 挂载它们时，位于被采用的 `context/configured.tools`：没有挂载列表（`SessionConfig.tools`）时总是挂载，有列表时挂载其中列出的 |
 | 搜索结果、抓取文本、错误、重定向提示 | `ToolResult.content`（仅文本） | 该调用所在批次的工具结果位置 |
 
 - 压缩：声明作为配置保留；结果只经摘要保留。
@@ -152,32 +152,23 @@ sequenceDiagram
 
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
-| `web_search` | `toolContribution`（Session，key `web_search`），风险 `network` | 查询已配置的服务；编号结果列表 |
-| `web_fetch` | `toolContribution`（Session，key `web_fetch`），风险 `network` | 抓取一个公开的 `http(s)` URL；带分页的有界文本切片 |
+| `web_search` | 注册到 `toolRegistry` 的工具（Session），风险 `network` | 查询已配置的服务；编号结果列表 |
+| `web_fetch` | 注册到 `toolRegistry` 的工具（Session），风险 `network` | 抓取一个公开的 `http(s)` URL；带分页的有界文本切片 |
 | `web` 来源 | Web 的 Settings 来源中的业务配置，使用时读取 | 搜索服务、私有主机例外、代理 |
 
 没有 Session 方法、`managementMethods` 或 CLI 子命令：受保护客户端经已实现的 `settings.read`/`settings.update` 修改配置，不假设已有 `/settings` 界面。细节见附录 A。
 
 ### 6.1 C4 row 与来源
 
-Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `provides`，宿主使用同一份 row。row id `web` 是来源所有者；TS 不重复登记来源。示例保留现有 loader 与 Settings 数据形状：
+Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `inject` 与 `provides`，宿主使用同一份 row。row id `web` 是来源所有者；TS 不重复登记来源。示例保留现有 loader 与 Settings 数据形状：
 
 ```json
 {
   "id": "web",
   "name": "@dimcode/web",
   "config": {},
-  "inject": ["settings"],
-  "provides": {
-    "toolContribution:web_search": {
-      "declaration": "sync",
-      "execute": "async"
-    },
-    "toolContribution:web_fetch": {
-      "declaration": "sync",
-      "execute": "async"
-    }
-  },
+  "inject": ["settings", "toolRegistry"],
+  "provides": {},
   "settings": [
     {
       "source": "web",
@@ -229,7 +220,7 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `pr
 }
 ```
 
-插件声明 `inject: ["settings"]`，apply 只登记工具和资源清理；`declaration()` 同步返回，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；API 密钥取自该文档的 `searchService.apiKey`。不重复校验或填充已交付的文档。
+插件声明 `inject: ["settings", "toolRegistry"]`，apply 只登记资源清理，并以 `toolRegistry.register(declaration, execute)` 注册两个工具，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；API 密钥取自该文档的 `searchService.apiKey`。不重复校验或填充已交付的文档。
 
 Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `searchService.endpoint` 和 `proxy`，不重新校验 Settings 文档。端点无法解析时，`web_search` 返回 `search_unavailable`；代理无法解析时，`web_search` 返回 `search_unavailable`，`web_fetch` 返回 `connect_failed`。均不建立连接、不回退为直连，诊断不包含配置值。
 
@@ -251,10 +242,10 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 | 原则 §4 第 1 条（改别人的状态写指令） | Web 不改其他模块的状态；工具结果由其所有者 ToolExecutor 写入。 |
 | 原则 §4 第 2 条（交接） | 不适用：Web 不接手任何对象，只执行 ToolExecutor 交给它的调用。 |
 | 原则 §4 第 3 条（只用 before 回调） | 不在写入前干预；参数检查在工具处理函数内部。 |
-| 原则 §4 第 4 条（核心不带业务含义） | 不改核心；工具使用通用的 `toolContribution` 合同。 |
+| 原则 §4 第 4 条（核心不带业务含义） | 不改核心；工具使用通用的工具注册合同。 |
 | 原则 §4 第 5 条（批次） | 不适用：Web 依据调用参数和配置做决定，不依据事件。 |
 | 原则 §4 第 6 条（上下文只含交接后的事件） | 结果只以 ToolExecutor 写入的 `step/tool-result` 事实进入模型。 |
-| 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolContribution` 和 Settings 业务来源。 |
+| 原则 §4 第 7 条（只用公开事件和服务） | Web 只使用 `toolRegistry` 和 Settings 业务来源。 |
 | 原则 §4 第 8 条（向机制所有者提需求） | 复用已实现的 C4 与 Settings 绑定；API 密钥是 Web 自己的仅用户字段，因此不增加凭据服务、core、rutis 或 loader 能力。 |
 | 原则 §4 第 9 条（只有后续决定要用的事实才进 Timeline） | Web 不写事件；抓取缓存只在内存中。 |
 | 原则 §1（Capability 与 App Server 边界） | Web 是放在自己插件包中的 Session Capability；App Server 不含它的代码。 |
@@ -266,18 +257,18 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 
 ## 9. 向机制所有者提出的需求
 
-无。工具接入、row 来源声明、Settings 读写/事件都已有合同与实现；API 密钥是 Web 自己的字段。Web 不另提 core、rutis、loader、生命周期、可选依赖或诊断服务需求。Node row 保留既有必需依赖和 Pending 语义。
+无。工具注册、row 来源声明、Settings 读写/事件都已有合同与实现；API 密钥是 Web 自己的字段。Web 不另提 core、rutis、loader、生命周期、可选依赖或诊断服务需求。Node row 保留既有必需依赖和 Pending 语义。
 
 ## 附录 A. 接口细节
 
 ### A.1 工具
 
-每个工具是一个 `toolContribution` 服务（Session 作用域，key = 工具名）：
+Web 在 apply 中把每个工具注册一次到本 Session 的 `toolRegistry`（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)）：
 
 | 方法 | 类型 | 请求 | 回复 |
 | --- | --- | --- | --- |
-| `declaration` | 同步 | — | `ToolDeclaration {name, description, inputSchema, risk: "network"}` |
-| `execute` | 异步 | `ToolCall {sessionId, branchId, turnId, callId, arguments, config}, cancelled: Promise<void>` | `ToolResult {content: [{type: "text", text}], isError, structuredContent?}` |
+| `toolRegistry.register` | 异步 | `ToolDeclaration {name, description, inputSchema, risk: "network"}`、`execute` | 注册完成时无返回值 |
+| `execute`（Web 自己的函数） | 异步 | `ToolCall {sessionId, branchId, turnId, callId, arguments, config}, cancelled: Promise<void>` | `ToolResult {content: [{type: "text", text}], isError, structuredContent?}` |
 
 C4 额外传入现有按引用的 `cancelled` Promise。其完成时 Web 先中止请求并释放 socket/定时器，再结算自己的调用；row 的 effect 同样释放其持有资源。ToolExecutor 负责中断终态，Web 不写第二条取消事实，也不重试未知结果。业务错误是 `isError: true` 的 `ToolResult`（附录 C）；运行时/协议绑定故障仍按 C4 的调用失败处理，不伪装成成功或业务结果。参数由 handler 校验；违反时返回错误结果，不访问网络。
 
@@ -367,12 +358,12 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址默认�
 
 | 步骤 | 路径 |
 | --- | --- |
-| 提供 | Web 的 `provides` 声明 `toolContribution` `web_search` 与 `web_fetch`；ToolRegistry 登记列于 `SessionConfig.tools` 中的那些；ToolBinding 采用它们。Web 不写入任何内容 |
+| 提供 | Web 把 `web_search` 与 `web_fetch` 注册到 `toolRegistry`，直到其 row 卸载；ToolRegistry 声明 Session 挂载的那些（没有挂载列表时两者都声明，有列表时声明其中列出的）；ToolBinding 采用它们。Web 不写入任何内容 |
 | 调用 | ToolExecutor 在 Dispatcher 上消费 `step/tool-call`，登记批次任务后返回；每次调用依次为 `step/tool-start`、准入、在执行器任务上运行 handler、`step/tool-completed`，然后每个批次一个 `step/tool-result` |
 | Dispatcher | Web 没有订阅 |
 | 状态与复检 | 无 `StateCell`；不消费事实；决定使用参数与调用开始时读取的配置 |
 | 终态事实 | 由 ToolExecutor 写入；Web 对每次调用恰好返回一个 `ToolResult` |
-| 重载 | 卸载会中止在途请求；ToolExecutor 将其以 reloaded 结算（[工具贡献 §4](../../../architecture/rust-agent/tool-contributions.md)） |
+| 重载 | 卸载撤回 Web 的注册并中止在途请求；ToolExecutor 将其以 reloaded 结算（[工具贡献 §4](../../../architecture/rust-agent/tool-contributions.md)）；下一代重新注册 |
 | 进程重启 | 已提交但无结果的调用由 ToolExecutor 的重建结算；Web 从不重复请求 |
 
 ## 附录 B. 完整冲突表
@@ -467,5 +458,5 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址默认�
 
 | 语言中立 | Rust |
 | --- | --- |
-| `toolContribution` key `web_search`、`web_fetch` | Session `ToolContribution`，以 `AgentBuilder::session_tool("web_search")` 与 `("web_fetch")` 注册；ToolRegistry 在分支初始化时按 Session 作用域名称读取已 Active 的贡献，提供方激活或退役时再次读取 |
-| `declaration` / `execute` | `ToolDefinition` / 带 `CancellationToken` 的 handler；disposer 中止在途请求（[工具贡献 §4](../../../architecture/rust-agent/tool-contributions.md)） |
+| 为 `web_search`、`web_fetch` 调用 `toolRegistry.register` | Session 部件注入 `Keyed<ToolRegistry>`，在 `apply` 中为每个工具调用 `tools.register(ctx, ToolContribution {definition, handler})`；部件卸载时注册撤回 |
+| 声明 / `execute` | `ToolDefinition` / 带 `CancellationToken` 的 handler；disposer 中止在途请求（[工具贡献 §4](../../../architecture/rust-agent/tool-contributions.md)） |

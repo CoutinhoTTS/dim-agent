@@ -4,12 +4,8 @@
   "group": "session",
   "config": {},
   "inject": [
-    "workflowRuns"
+    "workflowRuns",
+    "toolRegistry"
   ],
-  "provides": {
-    "toolContribution:workflow": {
-      "declaration": "sync",
-      "execute": "async"
-    }
-  }
+  "provides": {}
 }

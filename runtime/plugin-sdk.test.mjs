@@ -40,7 +40,7 @@ test('packed plugin service types compile the author guide and enforce the publi
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionBroadcast, BranchEvent, Delivery, Services, AgentErrorThrown, MethodReply } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolRegistry, ToolExecute, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionBroadcast, BranchEvent, Delivery, Services, AgentErrorThrown, MethodReply } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const permissions: SessionPermissions;
@@ -48,7 +48,8 @@ declare const workflowFiles: WorkflowFiles;
 declare const metadata: SessionMetadata;
 declare const auxiliary: AuxiliaryModel;
 declare const files: FileScope;
-declare const tool: ToolContribution;
+declare const tools: ToolRegistry;
+declare const execute: ToolExecute;
 declare const methods: SessionMethodsContribution;
 declare const management: ManagementMethodsContribution;
 void management.describe();
@@ -141,7 +142,7 @@ void sessions.input({ ...at, submissionId: 'id', mode: 'replace', rawBlocks: [],
 void sessions.launch({ cwd: '/workspace', policy: { allowed_tools: [] } });
 // @ts-expect-error lease replacement accepts text, not a host storage envelope.
 void files.withLock('state', file => file.replace({ version: 1, text: 'state' }));
-void tool.execute({
+void execute({
   ...at, turnId: 'turn', callId: 'call', arguments: { text: 'hello' },
   config: { permissionPolicy: { preset: 'read-only', allowedTools: [], disallowedTools: [] },
     cwd: '/workspace', model: { providerId: 'test', modelId: 'model' },
@@ -155,11 +156,12 @@ const result: ToolResult = { content: [{ type: 'text', text: 'handle: owned-id' 
   contextMessages: [{ role: 'tool_result', content: [{ type: 'tool_result', tool_use_id: 'call', content: 'done', is_error: false }] }] };
 void result;
 // @ts-expect-error the foreign call uses neutral identities and arguments, not the native shape.
-void tool.execute({ id: 'call', name: 'example_echo', input: {} }, Promise.resolve());
+void execute({ id: 'call', name: 'example_echo', input: {} }, Promise.resolve());
 // @ts-expect-error result content is text or typed blocks, not an arbitrary object.
 const invalidResult: ToolResult = { content: { handle: 'owned-id' } };
-// @ts-expect-error contributed tools declare a Permission risk.
-const missingRisk: ReturnType<ToolContribution['declaration']> = { name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' } };
+void tools.register({ name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' }, risk: 'session' }, execute);
+// @ts-expect-error registered tools declare a Permission risk.
+void tools.register({ name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' } }, execute);
 // @ts-expect-error C4 does not implement a handoff reply.
 const handoff: Awaited<ReturnType<SessionMethodsContribution['call']>> = { kind: 'handedOff' };
 const record: SessionBroadcast = { kind: 'event', branchId: at.branchId, event: {
