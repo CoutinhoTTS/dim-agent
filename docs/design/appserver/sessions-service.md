@@ -866,7 +866,7 @@ Use the existing initialization routine and publication boundary:
 The current `AgentScopePlugin` depends on `AgentDirectory` and `Loader`; its
 `Sessions` child has no dependencies. Neither declares `AgentIndex`, so the
 proposal does not introduce a dependency from the index to its own published
-service. The pinned rutis-loader 0.12.1 `Loader::create_instance` supports calls
+service. The pinned rutis-loader 0.16.0 `Loader::create_instance` supports calls
 from a plugin's `apply`; `AgentIndex::load` already uses that operation. Verify
 this bootstrap path during implementation rather than adding a
 readiness service, gate, flag, event or consumer retry policy.

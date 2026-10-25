@@ -132,8 +132,10 @@ export type BranchEvent = Omit<AgentEvent, 'sequence' | 'data'> & {
   sequence: number | bigint;
   data: Record<string, unknown>;
 };
+/** The services Dim's Rust types serve to other languages, by name:
+ * `ctx.use<Services['name']>('name')`. */
 export type {
-  AgentErrorThrown, BranchLifecycle, Dispatcher, Services as BranchServices,
+  AgentErrorThrown, BranchLifecycle, Dispatcher, Services, SessionIdentity, SessionLifecycle,
   TimelineIdentity, TreeCommands, PermissionState, SessionPermissions, SessionsErrorThrown,
   WorkflowFiles, WorkflowFileEntry, WorkflowRoot, WorkflowFilesErrorThrown,
 } from './branch-services.js';
@@ -158,7 +160,8 @@ export interface Sessions {
   delete(request: { sessionId: string }): Promise<SessionsResult<Record<string, never>>>;
 }
 
-/** The host's creation-time snapshot; provider-owned nested objects remain JSON. */
+/** The host's creation-time snapshot (`sessionConfig.get()`, `ToolCall.config`);
+ * provider-owned nested objects remain JSON. */
 export interface SessionConfig {
   readonly permissionPolicy: PermissionPolicy;
   readonly cwd: string;
@@ -168,19 +171,24 @@ export interface SessionConfig {
     metadata?: JsonObject;
   }>;
   readonly systemPrompt: string;
-  readonly tools: readonly string[];
+  /** The Session's mount list; absent: every tool the process provides is declared. */
+  readonly tools?: readonly string[];
   readonly collaborationRole: 'leader' | 'member';
   /** Native serde omits true; absence means interactive. */
   readonly interactive?: false;
 }
 
-/** Native `session.event`; the event envelope and data are unchanged. */
-export interface SessionEventRecord extends SessionRef { event: AgentEvent }
-/** Original-row `sessionEvents:<part>` setup; register listeners/effects and return null. */
-export interface SessionEventsContribution {
-  bind(binding: { sessionId: string; config: SessionConfig }, closing: Promise<void>): null;
-}
-
+/**
+ * A record on `session/{sessionId}`, the Session's channel on the bus: a row
+ * listens with ``ctx.on(`session/${sessionId}`, listener)``. `event` carries one
+ * dispatched branch event (envelope and data unchanged); the other kinds
+ * belong to their owners and a row that only observes events skips them.
+ */
+export type SessionBroadcast =
+  | { kind: 'event'; branchId: string; event: AgentEvent }
+  | { kind: 'notice'; notice: { source: string; kind: string; data: JsonValue } }
+  | { kind: 'fence'; recipient: string; token: number }
+  | { kind: 'closed' };
 export type JsonSchema = JsonObject & {
   type: 'object' | 'array' | 'string' | 'number' | 'integer' | 'boolean' | 'null';
   properties?: Record<string, JsonSchema>;
@@ -258,10 +266,12 @@ export interface ToolResult {
   backgroundTask?: BackgroundTaskInfo;
   contextMessages?: Message[];
 }
-/** Provide as `toolContribution:<name>`; declaration is synchronous. */
-export interface ToolContribution {
-  declaration(): ToolDefinition;
-  execute(call: ToolCall, cancelled: Promise<void>): Promise<ToolResult>;
+/** How a registered tool runs a call; `cancelled` settles when the call is cancelled. */
+export type ToolExecute = (call: ToolCall, cancelled: Promise<void>) => Promise<ToolResult>;
+/** Session service `toolRegistry`: a Session row registers each of its tools,
+ * which stays registered until the row unloads. The declaration must name its risk. */
+export interface ToolRegistry {
+  register(declaration: ToolDefinition, execute: ToolExecute): Promise<void>;
 }
 
 export interface MethodDeclaration {
@@ -278,17 +288,23 @@ export interface MethodCall {
 export interface SessionMethodCall extends MethodCall {
   params: JsonObject & { sessionId: string; branchId?: string };
 }
-export type MethodReply = { kind: 'value'; value?: JsonValue } |
-  { code: number; appError: string; message: string };
+/** A method's failure as data; Rpc maps `code` to the wire error. A method may
+ * instead rethrow a service error it received. */
+export interface MethodError { code: string; message: string }
+export type MethodReply = { kind: 'value'; value?: JsonValue } | MethodError;
 export type SessionMethodDeclaration = MethodDeclaration;
 export type SessionMethodReply = MethodReply;
-/** Provide as `managementMethods:<namespace>` from the original process row. */
-export interface ManagementMethodsContribution {
-  describe(): Promise<MethodDeclaration[]>;
-  call(call: MethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void): Promise<MethodReply>;
+/** How a registered management namespace serves one call. */
+export type MethodHandler = (call: MethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void) => Promise<MethodReply>;
+/** How a registered Session namespace serves one call. */
+export type SessionMethodHandler = (call: SessionMethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void) => Promise<SessionMethodReply>;
+/** Process service `managementMethods` (protected-local v3 only): a process row
+ * registers each of its namespaces, which stays registered until the row unloads. */
+export interface ManagementMethods {
+  register(namespace: string, declarations: MethodDeclaration[], call: MethodHandler): Promise<void>;
 }
-/** Provide as `sessionMethods:<namespace>`; both methods are asynchronous. */
-export interface SessionMethodsContribution {
-  describe(): Promise<SessionMethodDeclaration[]>;
-  call(call: SessionMethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void): Promise<SessionMethodReply>;
+/** Session service `sessionMethods`: a Session row registers each of its
+ * namespaces, which stays registered until the row unloads. */
+export interface SessionMethods {
+  register(namespace: string, declarations: SessionMethodDeclaration[], call: SessionMethodHandler): Promise<void>;
 }

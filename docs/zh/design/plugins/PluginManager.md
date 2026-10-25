@@ -16,7 +16,7 @@ flowchart LR
     PM["PluginManagerPlugin<br/>plugin.* 方法、包存储、<br/>pluginContents"]:::new
     SET["Settings<br/>loader 行上的类型化操作"]
     LOADER["rutis Loader"]
-    RPC["Rpc 方法表<br/>收集 managementMethods"]
+    RPC["Rpc<br/>读取 managementMethods"]
     CONS["内容所有者<br/>SkillsCatalog、Mcp、Hooks、Workflow"]
   end
   subgraph NODE["每个已配置节点，本地或对端"]
@@ -32,11 +32,11 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。内容所有者依赖 `pluginContents`，按 D3 予以接受：安装、启用或移除包会以数据更新（`changed`）的方式改变已发布的来源，从不触发重载；而 PluginManager 重载（升级、崩溃）会重载内容所有者。Rpc 按调用查找 PluginManager 的 `managementMethods` 服务（key `plugin`），不随它重载（[方法 §3.2](../contracts/session-boundary.md#32-管理方法)）。PluginManager 重载是少见的结构性事件，它向内容所有者的传播被记录在案，而非被阻止。包代码行是普通的 loader 行：它们提供其代码在 `provides` 中声明的命名服务（例如 `toolContribution`、`sessionMethods`、`modalityAdapter`），消费方按服务名和作用域收集它们；当某一行卸载时，其依赖方按同一规则重载。离线对端节点上的代码行不会卸载：其导入的服务保持注册并以 `node_unavailable` 使调用失败，其依赖方既不重载也不变为 Pending（对 [#5](https://github.com/arcships/dim/issues/5) 的要求，见 [§9](#9-向机制所有者提出的需求)）。
+所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。内容所有者依赖 `pluginContents`，按 D3 予以接受：安装、启用或移除包会以数据更新（`changed`）的方式改变已发布的来源，从不触发重载；而 PluginManager 重载（升级、崩溃）会重载内容所有者。Rpc 按调用查找 PluginManager 注册到 `managementMethods` 的命名空间 `plugin`，不随它重载（[方法 §3.2](../contracts/session-boundary.md#32-管理方法)）。PluginManager 重载是少见的结构性事件，它向内容所有者的传播被记录在案，而非被阻止。包代码行是普通的 loader 行：它们提供其代码在 `provides` 中声明的命名服务（例如 `modalityAdapter`），消费方按服务名和作用域收集它们；它们把自己的工具注册到 `toolRegistry`，把方法命名空间注册到 `sessionMethods`；当某一行卸载时，其注册被撤回，其依赖方按同一规则重载。离线对端节点上的代码行不会卸载：其导入的服务保持注册并以 `node_unavailable` 使调用失败，其依赖方既不重载也不变为 Pending（对 [#5](https://github.com/arcships/dim/issues/5) 的要求，见 [§9](#9-向机制所有者提出的需求)）。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `PluginManagerPlugin` | 进程，控制节点 | Settings（loader 可编辑层上的类型化操作）、控制节点上的 `pluginFiles`（扩展）、rutis Loader、每个已配置节点的 `FileStorage` 与 `HostPlatform` | `pluginContents` 进程服务；`managementMethods` key `plugin`（`plugin.*`），由 Rpc 收集 |
+| `PluginManagerPlugin` | 进程，控制节点 | Settings（loader 可编辑层上的类型化操作）、控制节点上的 `pluginFiles`（扩展）、rutis Loader、每个已配置节点的 `FileStorage` 与 `HostPlatform` | `pluginContents` 进程服务；把 `plugin`（`plugin.*`）注册到 `managementMethods` |
 | 包代码行 | 进程，位于包所在节点 | 该节点的 `FileStorage`、代码所声明的依赖 | 在其 `provides` 中声明的命名服务；在使用时读取自己的业务配置（自己的各个具名 Settings 来源与 schema） |
 | 内容所有者 | 进程 | `pluginContents` | —（各自定义自己的类型 key） |
 
@@ -197,7 +197,7 @@ sequenceDiagram
 | §4.7 插件之间只通过公开事件和服务交互 | PluginManager 从不调用内容所有者；所有者读取 `pluginContents`，各插件的业务配置只经 Settings 访问。 |
 | §4.8 向机制所有者提通用需求 | 类型化 loader 操作（#3）、为非 Rust 代码按名字暴露服务（#4）与节点离线行为（#5）在 §9 中提出。 |
 | §4.9 只有后续决定要用的事实才进 Timeline | PluginManager 不写 Timeline 事件；意图留在 loader 行，包留在节点存储，客户端读取 `plugin.list`。 |
-| §1 Capability 与 App Server 边界 | PluginManager 是位于自己 crate 的进程插件，不是 Capability；App Server 只收集它的 `managementMethods`。 |
+| §1 Capability 与 App Server 边界 | PluginManager 是位于自己 crate 的进程插件，不是 Capability；App Server 只分发它注册到 `managementMethods` 的命名空间。 |
 | ADR 002 D1 作用域跟随状态所有者 | 安装按宿主进行，因此 PluginManager 是进程作用域。 |
 | ADR 002 D2 不设接线模块 | 内容所有者与代码行的消费方按名字收集服务；没有接线模块。 |
 | ADR 002 D3 依赖跟随作用域 | 所有依赖都是进程服务；PluginManager 与代码行的重载传播是已记录的少见结构性事件。 |
@@ -291,7 +291,7 @@ PluginManager 内部组件，不是服务：`stage`（拉取、校验）、`comm
 
 包存放在其所在节点上 PluginManager 的包根目录下，通过该节点的 `FileStorage` 写入（A13）。Git 通过该节点的 `HostPlatform` 运行，禁用 hooks 和子模块，仅限 `https://` 和 `ssh://`（A7）。本地路径被复制，从不被引用（A8）。目录按指纹内容寻址，因此更新从不改写运行中行正在使用的文件。
 
-### A.5 方法（`managementMethods`，key `plugin`）
+### A.5 方法（`managementMethods`，命名空间 `plugin`）
 
 | 方法 | 参数 | 结果 | 中断 |
 | --- | --- | --- | --- |

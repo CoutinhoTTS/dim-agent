@@ -1,13 +1,12 @@
 use dim_agent_capabilities::{defaults, timeline_tree::TreeCommands};
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, BranchOptions, BranchScope, Capability, Dispatcher,
-    InBranch, InSession, KeysOf, SessionConfig, Timeline, TimelineIdentity, TimelineKey,
-    TimelineStore, scoped,
+    AgentBuilder, AgentConfig, AgentError, BranchOptions, Dispatcher, SessionConfig, Timeline,
+    TimelineIdentity, TimelineKey, TimelineStore,
 };
 use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
 use rusqlite::Connection;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -15,19 +14,18 @@ use std::{
 };
 
 struct CaptureTimeline {
-    scope: BranchScope,
     timelines: Arc<Mutex<BTreeMap<String, Timeline>>>,
 }
 
 impl TypedPlugin for CaptureTimeline {
-    type Deps = (InBranch<Timeline>, InBranch<TimelineIdentity>);
+    type Deps = (Keyed<Timeline>, Keyed<TimelineIdentity>);
     fn name(&self) -> &str {
         "storage-session.capture-timeline"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        (InBranch(timeline), InBranch(identity)): Self::Deps,
+        (Keyed(timeline), Keyed(identity)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             self.timelines
@@ -38,22 +36,16 @@ impl TypedPlugin for CaptureTimeline {
         })
     }
 }
-impl Capability for CaptureTimeline {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 struct GenericCleanupFault {
-    scope: BranchScope,
     tree: Arc<Mutex<Option<Arc<TreeCommands>>>>,
 }
 impl TypedPlugin for GenericCleanupFault {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<TimelineIdentity>,
-        InBranch<Dispatcher>,
-        InSession<TreeCommands>,
+        Keyed<Timeline>,
+        Keyed<TimelineIdentity>,
+        Keyed<Dispatcher>,
+        Keyed<TreeCommands>,
     );
     fn name(&self) -> &str {
         "storage-session.generic-cleanup"
@@ -61,7 +53,7 @@ impl TypedPlugin for GenericCleanupFault {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(identity), InBranch(dispatcher), InSession(tree)): Self::Deps,
+        (Keyed(timeline), Keyed(identity), Keyed(dispatcher), Keyed(tree)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             if identity.branch_id != "main" {
@@ -97,11 +89,6 @@ impl TypedPlugin for GenericCleanupFault {
         })
     }
 }
-impl Capability for GenericCleanupFault {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn storage_failure_during_generic_cleanup_supersedes_the_session_fault() {
@@ -119,11 +106,11 @@ async fn storage_failure_during_generic_cleanup_supersedes_the_session_fault() {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
-        builder.timeline_store(store.clone()).timeline_plugin(move |scope| CaptureTimeline {
-            scope: *scope, timelines: captured.clone(),
-        }).timeline_plugin(move |scope| GenericCleanupFault {
-            scope: *scope, tree: captured_tree.clone(),
-        });
+        builder.timeline_store(store.clone()).branch_part(move |names| names.part(CaptureTimeline {
+            timelines: captured.clone(),
+        })).branch_part(move |names| names.part(GenericCleanupFault {
+            tree: captured_tree.clone(),
+        }));
         let agent = builder.build();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         let idle = session.branch("main".into(), 0, BranchOptions {
@@ -165,10 +152,9 @@ async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
-        builder.timeline_store(store.clone()).timeline_plugin(move |scope| CaptureTimeline {
-            scope: *scope,
+        builder.timeline_store(store.clone()).branch_part(move |names| names.part(CaptureTimeline {
             timelines: captured.clone(),
-        });
+        }));
         let agent = builder.build();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         let mut siblings = Vec::new();
@@ -215,18 +201,16 @@ async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
     }).await.expect("SQLite sibling failure and cleanup completed");
 }
 
-struct RecordCleanup {
-    scope: BranchScope,
-}
+struct RecordCleanup;
 impl TypedPlugin for RecordCleanup {
-    type Deps = InBranch<Timeline>;
+    type Deps = Keyed<Timeline>;
     fn name(&self) -> &str {
         "storage-session.record-cleanup"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        InBranch(timeline): Self::Deps,
+        Keyed(timeline): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             ctx.effect(|| {
@@ -242,11 +226,6 @@ impl TypedPlugin for RecordCleanup {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for RecordCleanup {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -266,7 +245,7 @@ async fn session_close_and_idle_unload_persist_finalizer_events() {
             defaults::install(&mut builder);
             builder
                 .timeline_store(store.clone())
-                .timeline_plugin(|scope| RecordCleanup { scope: *scope });
+                .branch_part(|names| names.part(RecordCleanup));
             let agent = builder.build();
             let session = agent
                 .create_session(SessionConfig::default())

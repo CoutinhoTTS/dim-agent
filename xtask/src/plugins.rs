@@ -11,14 +11,13 @@ use dim_agent_capabilities::{
     host::{
         PutSessionFile, SessionFileError, SessionFileErrorCode, SessionFilesHost, StoredSessionFile,
     },
-    host_platform::{HostPlatform, HostPlatformConfig, HostPlatformPlugin, ShellStatus},
+    host_platform::{HostPlatform, HostPlatformPlugin, ShellStatus},
     model_provider::ModelProviderPlugin,
     permission::{CommandRulesHost, NoCommandRules},
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
     workspace_tools::{FileWriteCoordinatorPlugin, WorkspaceToolsConfig},
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
 use serde_json::Value;
@@ -37,12 +36,17 @@ const TOOLS: [&str; 8] = [
 ];
 // Runtime assembly and the scripted model adapter are not business plugins.
 // Keep this exclusion list narrow: a newly assembled capability needs a page.
-const INFRASTRUCTURE: [&str; 9] = [
+const INFRASTRUCTURE: [&str; 13] = [
     "rutis-loader",
     "session",
     "branch",
     "SessionScope",
     "BranchScope",
+    // The instances' mounters (ADR 006 D3); the parts they mount have pages.
+    "SessionParts",
+    "SessionOptionalParts",
+    "BranchParts",
+    "BranchOptionalParts",
     "SessionBroadcast",
     "SessionBroadcastEnd",
     "PrepareModelHost",
@@ -72,15 +76,6 @@ impl TypedPlugin for GraphPlatform {
             ctx.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(platform))?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for GraphPlatform {
-    fn keys(&self) -> KeysOf<Self> {
-        HostPlatformPlugin::new(HostPlatformConfig {
-            exec_shell_file: Some((0, "exec-shell.json".into())),
-            isolation_file: Some((0, "host-isolation.json".into())),
-        })
-        .keys()
     }
 }
 
@@ -133,11 +128,16 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     )?;
     let process = rutis::Ctx::root()?;
     // FileStorage refuses symlinked components such as macOS `/var`.
-    (&process.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    (&process.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         storage.canonicalize()?,
     ]))))
         .await?;
-    (&process.plugin(capability_plugin(GraphPlatform(storage.canonicalize()?)))).await?;
+    // As the product's HostPlatform, with its local configuration sources.
+    (&process.plugin(rutis::Typed::with_keys(
+        GraphPlatform(storage.canonicalize()?),
+        (Some(rutis::DepKey::of()),),
+    )))
+        .await?;
     process.provide_as(
         TypeKey::of::<SkillSettingsHost>(),
         Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
@@ -146,8 +146,15 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         TypeKey::of::<SessionFilesHost>(),
         Arc::new(SessionFilesHost(Arc::new(GraphFiles))),
     )?;
-    (&process.plugin(capability_plugin(SkillsCatalogPlugin::new()))).await?;
-    (&process.plugin(capability_plugin(FileWriteCoordinatorPlugin::default()))).await?;
+    (&process.plugin(
+        dim_agent_runtime::names::process_plugin(
+            &dim_agent_capabilities::catalog(),
+            SkillsCatalogPlugin::new(),
+        )
+        .unwrap(),
+    ))
+        .await?;
+    (&process.plugin(rutis::Typed::new(FileWriteCoordinatorPlugin::default()))).await?;
 
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_model_hosts(&mut builder);
@@ -167,7 +174,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     let session = agent
         .create_session(SessionConfig {
             cwd: work.canonicalize()?.to_string_lossy().into_owned(),
-            tools: TOOLS.map(String::from).to_vec(),
+            tools: Some(TOOLS.map(String::from).to_vec()),
             ..SessionConfig::default()
         })
         .await?;

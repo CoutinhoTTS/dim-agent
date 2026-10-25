@@ -16,12 +16,12 @@ use axum::{
     routing::get,
 };
 use dim_agent_capabilities::methods::RpcError;
-use dim_agent_runtime::{Capability, KeysOf, When};
+use dim_agent_runtime::{Names, When};
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Gate, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, KeyedGate, Plugin, TypeKey, TypedPlugin};
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf},
@@ -290,6 +290,15 @@ impl TransportPlugin {
     pub fn new(config: Arc<ServerConfig>) -> Self {
         Self { config }
     }
+    /// This part with its keys: the database lock only with native storage.
+    pub fn part(self, names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
+        let keys = (
+            names.key::<ConnectionHub>()?,
+            names.key::<ServerControl>()?,
+            names.when::<KeyedGate<SqliteStorage>>(self.config.database_path.is_some())?,
+        );
+        Ok(names.part_with(self, keys))
+    }
 }
 fn io_failure(error: io::Error) -> CordisError {
     CordisError::PluginFailed(Box::new(error))
@@ -297,9 +306,9 @@ fn io_failure(error: io::Error) -> CordisError {
 impl TypedPlugin for TransportPlugin {
     /// With native storage, endpoints bind only once the database lock is held.
     type Deps = (
-        Arc<ConnectionHub>,
-        Arc<ServerControl>,
-        When<Gate<SqliteStorage>>,
+        Keyed<ConnectionHub>,
+        Keyed<ServerControl>,
+        When<KeyedGate<SqliteStorage>>,
     );
     fn name(&self) -> &str {
         "Transport"
@@ -307,7 +316,7 @@ impl TypedPlugin for TransportPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (hub, control, _): Self::Deps,
+        (Keyed(hub), Keyed(control), _): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             #[cfg(unix)]
@@ -482,11 +491,6 @@ impl TypedPlugin for TransportPlugin {
             ctx.provide_as(TypeKey::of::<ListenAddresses>(), Arc::new(addresses))?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for TransportPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), (), self.config.database_path.is_some().then_some(()))
     }
 }
 async fn health(AxumState(hub): AxumState<Arc<ConnectionHub>>) -> impl IntoResponse {
@@ -677,7 +681,14 @@ async fn run_connection(
                                 .instance
                                 .set(instance.clone())
                                 .expect("first handshake");
-                            Ok((instance, rpc.owners.listed(&rpc.ctx)))
+                            Ok((
+                                instance,
+                                rpc.management
+                                    .listed()
+                                    .into_iter()
+                                    .map(|decl| decl.name)
+                                    .collect::<Vec<_>>(),
+                            ))
                         })
                         .and_then(|instance| instance);
                     let (instance_id, methods) = match instance {
@@ -726,6 +737,10 @@ async fn run_connection(
                                     if local {
                                         features.extend(WEB_ENTRY_METHODS);
                                         features.extend(UI_HOST_METHODS);
+                                        // Distinguishes a daemon that hosts
+                                        // UI leaves from an older
+                                        // management-only UI registry.
+                                        features.push("ui.leaf");
                                     }
                                     let mut features: Vec<String> =
                                         features.into_iter().map(str::to_owned).collect();

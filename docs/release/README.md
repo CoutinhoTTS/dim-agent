@@ -40,7 +40,17 @@ Cross-built executables are inspected for their ELF, Mach-O or PE target archite
 
 ## GitHub workflows
 
-`ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. It receives no private plugin credentials.
+`ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. It receives no private plugin credentials. Pushes to `main` and manual runs do all of it; a pull request runs only the groups its changed paths need, as decided by `scripts/ci-changes.mjs` (documentation-only changes skip every group, and unrecognized paths run all of them). `ci-ok` passes when every selected job passed, so it is the check to require. CI builds without debug info (`CARGO_PROFILE_DEV_DEBUG=0`).
+
+### CI trust model
+
+Every `ci.yml` job runs on a persistent self-hosted runner, and a pull request's checks build and run that pull request's code, so a job can read and change whatever the runner keeps between jobs. CI therefore verifies only code pushed by people with write access to `arcships/dim`:
+
+- The binding boundary is the repository's GitHub settings: forking is disabled, and "Run workflows from fork pull requests" is off for this private repository. Keep both that way while CI uses self-hosted runners.
+- `ci.yml` also skips every job when a pull request's head branch is not in `arcships/dim`, and `ci-ok` then fails rather than reporting an unverified pull request as passing. This guard is defense in depth only: a pull request supplies its own workflow file, so the settings above are what keep untrusted code off the runners.
+- PR runners must hold no release credentials and stay off private networks; `ci.yml` receives no secrets, and its `GITHUB_TOKEN` can only read repository contents.
+
+Accepting contributions from forks or outside collaborators requires moving their checks to ephemeral runners first.
 
 `release.yml` runs when a `v*.*.*` tag is pushed, or when manually dispatched with an existing tag:
 

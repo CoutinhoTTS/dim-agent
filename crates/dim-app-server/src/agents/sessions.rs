@@ -33,6 +33,7 @@ pub struct SessionRef {
 
 /// Read-only policy access through the stable Agents directory.
 pub struct SessionPermissions(pub(crate) Ctx);
+#[rutis::service]
 impl SessionPermissions {
     /// Reads the branch's dispatched policy while holding its Session lease.
     pub async fn permission(

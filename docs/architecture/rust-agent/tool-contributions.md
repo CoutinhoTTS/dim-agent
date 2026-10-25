@@ -1,49 +1,49 @@
 # Session 工具贡献
 
-状态：Implemented；`branch`、`agent` 以贡献提供；没有通用的 `task` 工具，脱离工作的查询、等待与停止由所属能力各自的工具提供。基线为[单树装配](single-tree.md)与[能力重载协议](single-tree.md#能力重载协议)。
+状态：Implemented；`branch`、`wait`、`skill`、`ask_user`、`agent` 都由提供它们的部件注册到 ToolRegistry；没有通用的 `task` 工具，脱离工作的查询、等待与停止由所属能力各自的工具提供。基线为[单树装配](single-tree.md)与[能力重载协议](single-tree.md#能力重载协议)。
 
 ## 贡献工具与分支初始化
 
-固定表只含配置的宿主工具，在 ToolRegistry `apply` 时确定。每个配置的贡献工具（`branch`、`agent`、`wait` 与 C4 TypeScript 行等）是注册表自有的带版本集合，键为 `#contributed:<tool>`，与其他动态来源走同一刷新、校验、采用与请求快照路径（#241）。
+固定表含宿主的全部工具，按宿主的顺序，在 ToolRegistry `apply` 时确定。其他工具都是注册的：部件在自己的 `apply` 中调用 `register(ctx, ToolContribution)` 注册一个工具，调用 `register_source(ctx, name, provider)` 注册一个动态来源；注册是调用方的 effect，在该部件卸载时撤回。其他语言的 Session 行经桥调用 `toolRegistry.register(declaration, execute)`，注册属于调用方行（桥的 `caller_row`）。宿主不预先登记任何名称，注册表也不去发现提供方。Session 声明哪些宿主工具与注册的工具由其可选的挂载列表 `SessionConfig.tools` 决定（第 2 节）：没有挂载列表时全部声明，部件注册的工具不需修改配置即可使用（#364）。每个挂载的注册工具（`branch`、`agent`、`wait` 与 C4 TypeScript 行等）是注册表自有的带版本集合，键为 `#contributed:<tool>`，与其他动态来源走同一刷新、校验、采用与请求快照路径（#241）。
 
 ```text
+part apply: tools.register(ctx, ToolContribution)
+            (other languages: toolRegistry.register(declaration, execute))
 Session services Active
-    -> ToolBinding reads ToolRegistry (first snapshot: contributors read)
+    -> ToolBinding reads ToolRegistry (first snapshot takes in what is registered)
     -> existing Prompt adoption and BranchOpening finish
     -> Session publication and first input
-provider enters/leaves Active, or a service binding changes
-    -> registry task rereads contributors -> tools.changed
-       (a foreign generation is withdrawn there; the next request's read attaches it)
+a part registers, or unloads and its registration is withdrawn
+    -> registry task rereads -> sources_state() changes
     -> ToolBinding adopts (configuration with a tool part)
        or the next request declares it (no tool part, bind_current)
 Session close starts (SessionLifecycle::closing)
-    -> registry task ends; later retirements change nothing
+    -> registry task ends; later withdrawals change nothing
 ```
 
-注册表在自身 `apply` 期间不能读取未声明的服务，因此贡献方由 ToolBinding 的首次快照读取，之后由注册表自己的任务在任一插件进入或离开 Active、或服务绑定变化时重读；监听器只唤醒该任务。外部（foreign）代次的 `declaration()` 是对提供方运行时的同步调用，在运行时停止或重启时可能永远等待。只有服务于请求或分支首个请求的读取才调用它：`snapshot()`（ToolBinding 初始化与 `bind_current`）、`definitions()`（PrepareModelHost），以及 `bind` 先调用的 `attach_pending()`；它们在取任何注册表锁之前读取变化的外部声明，只在该代次仍是贡献方时提交结果。注册表的任务、`tools.provider_changed` 监听器与 ToolBinding 的后台采用（`current()`）从不调用外部提供方：它们撤下被替换的外部集合，把新代次记为缺失，并接入原生贡献。因此新的外部代次从下一个请求起提供；带工具部分的配置在其下一个请求时接入它，并为之后的请求采用。贡献方对象不变时版本不变；新代以新版本替换。版本与 MCP 相同取新的 UUID，跨注册表实例与进程也不复用，因此分支 `tool_sources` 中持久化的版本只指一个代次，恢复后带工具部分的分支在首个请求前以新版本采用恢复后的代次。提供方缺失或其代次正在卸载时撤下该集合。Session 开始关闭（`SessionLifecycle::closing`）时该任务结束，关闭期间退役的提供方不撤下集合、不发 `tools.changed`；注册表卸载时中止该任务，并等已在执行的刷新结束。尚未 Active 的贡献方记 `tool.attach` 诊断，Active 后的下一个请求起提供，不需要重载 Session。装配等待规则保持不变，可选提供方不阻塞 Session 就绪（#132）。
+注册表没有框架事件监听，读取工具时也不调用其他运行时。每次读取都纳入当时已注册的内容：`snapshot()`（ToolBinding 初始化与 `bind_current`）与 `definitions()`（PrepareModelHost）。Session 发布（`SessionLifecycle::activated`）后，注册表自己的任务还在每次注册或撤回后重读；Session 开始关闭（`SessionLifecycle::closing`）时该任务结束，关闭期间撤回的注册不撤下集合、不改变来源状态；注册表卸载时中止该任务，并等已在执行的刷新结束。集合的版本只随注册变化：同一注册保持同一版本，再次注册以新版本提供。版本与 MCP 相同取新的 UUID，跨注册表实例与进程也不复用，因此分支 `tool_sources` 中持久化的版本只指一个代次，恢复后带工具部分的分支在首个请求前以新版本采用恢复后的代次。挂载列表列出但没有部件注册的工具不声明，记一次 `tool.attach` 进程日志 span，Session 创建不因此失败；有部件注册后从下一个请求起声明，不需要重载 Session。Session 创建不等待可选部件（#132、#207）：注入 `toolRegistry` 的 TypeScript 行在它 apply 时注册，其工具从之后的下一个请求起提供。
 
-配置不含工具部分的分支每个请求经 PrepareModelHost / `bind_current` 声明注册表当前的宿主与贡献工具，贡献工具的变化不写采用事实；只有其他来源的工具需要采用。带工具部分的配置把贡献集合记入 `tool_sources`，与其他来源相同。
+配置不含工具部分的分支每个请求经 PrepareModelHost / `bind_current` 声明注册表当前的宿主与注册工具，注册的变化不写采用事实；只有其他来源的工具需要采用。带工具部分的配置把注册工具的集合记入 `tool_sources`，与其他来源相同。
 
-已安装插件的必需依赖若使装配保持 Pending，Session 仍按既有规则等待或超时。C3 移除的是 ToolRegistry 对可选贡献的硬依赖，不跳过装配中的 Pending 插件。
+已安装插件的必需依赖若使装配保持 Pending，Session 仍按既有规则等待或超时。ToolRegistry 不依赖注册工具的部件，但这不跳过装配中的 Pending 插件。
 
-影响面限于 ToolRegistry 与 ToolBinding；不增加 core 阶段、门面等待、公开服务或事件，复用 rutis 的 `FiberStatusChanged`/`ServiceChanged` 与已有 `tools.changed`、`context/configured`。
+影响面限于 ToolRegistry、ToolBinding 与注册工具的部件；注册建立在 rutis 的 effect（`ctx.effect`）与桥的调用方行之上，不增加 core 阶段、门面等待或事件，复用注册表已有的来源状态 watch 与 `context/configured`。
 
 ## 1. 范围
 
-Session 能力向本 Session 的 `ToolRegistry` 贡献模型可调用的工具。宿主工具仍经 `ToolHost` 提供，不在本文范围。
+Session 能力向本 Session 的 `ToolRegistry` 注册模型可调用的工具。宿主工具仍经 `ToolHost` 提供，不在本文范围。
 
 | 工具来源 | 提供方式 |
 | --- | --- |
 | 宿主工具 | `ToolHost`（产品根由 `WorkspaceToolsPlugin` 提供；审批在执行时由分支 ToolExecutor 经 Approval 准入，不包装 ToolHost） |
-| Session 能力工具 | 本文的 `ToolContribution`；`branch`、`agent` 分别由 `TimelineTreePlugin`、`CollaborationCapabilityPlugin` 以同一方式提供 |
+| Session 能力工具 | 本文的 `ToolContribution`，由部件注册；`branch`、`wait`、`skill`、`ask_user`、`agent` 分别由 `BranchTool`、`Wait`、`Skills`、`Questions`、`CollaborationCapability` 以同一方式注册 |
 
 ## 2. 结构
 
 ```mermaid
 flowchart LR
-  B["AgentBuilder<br/>session_tool(name)"]
   subgraph s["Session"]
-    C["贡献方能力<br/>提供 ToolContribution(name)"]
+    C["注册工具的部件<br/>register(ctx, ToolContribution)"]
     R["ToolRegistryPlugin"]
     H["ToolHost"]
   end
@@ -53,8 +53,7 @@ flowchart LR
     E["ToolExecutorPlugin"]
     A["ApprovalPlugin"]
   end
-  B -->|装配时登记名称| R
-  R -->|first branch read: named lookup| C
+  C -->|"injects; registers"| R
   R -->|injects| H
   TB -->|injects| R
   L -->|injects| TB
@@ -69,55 +68,62 @@ pub struct ToolContribution {
     pub definition: ToolDefinition,
     pub handler: Arc<dyn ToolHandler>,
 }
-impl SessionService for ToolContribution {}
+impl ToolRegistry {
+    pub fn register(&self, ctx: &Ctx, tool: ToolContribution) -> Result<(), CordisError>;
+    pub fn register_source(&self, ctx: &Ctx, name: impl Into<String>,
+        source: Arc<dyn ToolProvider>) -> Result<(), CordisError>;
+}
 ```
 
 | 项 | 规定 |
 | --- | --- |
-| 键 | `TypeKey::keyed_dynamic::<ToolContribution>(name).with_instance(session)`（`SessionScope::named_key`）：按工具名限定、按 Session 实例隔离 |
-| 登记 | `AgentBuilder::session_tool(name)` 在装配时登记贡献名称；同一名称只登记一次 |
-| 提供 | 贡献方能力在自身状态就绪后，于 `apply` 中以上述键提供；`definition` 可按本 Session 配置生成，`definition.name` 等于登记名称 |
-| 宿主工具名 | 宿主工具名经 `AgentBuilder::host_tools` 登记：产品根由 `workspace_tools::install` 登记，测试与开发宿主由 `defaults::tool_host` 登记；其他提供 `ToolHost` 的装配须自行登记，否则显式 profile 不能列出这些工具 |
-| 收集 | `ToolRegistryPlugin` 经 `AgentBuilder::session_tool_registry` 装配，工厂取得全部登记名称；`apply` 校验配置（含已登记来源名须满足工具名语法）；分支 ToolBinding 首次读取时按名称读取本 Session 已 Active 的贡献，之后由注册表在 Session 发布后的自有任务中随贡献方的激活与退役重读，Session 开始关闭时该任务结束；不建立对可选贡献方的硬依赖 |
-| 启用 | 只有 `SessionConfig.tools` 列出的工具进入注册表；未列出的贡献不读取。已登记但未就绪的贡献省略，并记录 `tool.attach` 进程日志 span；稍后才 Active 的贡献从其 Active 后的下一个请求起提供 |
+| 注册 | 部件注入 `ToolRegistry`（`Keyed<ToolRegistry>`），在自身状态就绪后于 `apply` 中调用 `register(ctx, ToolContribution)`；注册是 `ctx` 的 effect，该部件卸载时撤回。`definition` 可按本 Session 配置生成，`definition.name` 即注册名 |
+| 名称 | 须满足 `[A-Za-z0-9_-]{1,64}`；宿主工具名与已被注册的名称不能再注册 |
+| 其他语言 | Session 行注入 `toolRegistry`，调用 `register(declaration, execute)`：`declaration` 是 `ToolDefinition` 数据，须带非空 `risk`；`execute(call, cancelled)` 是该行自己的函数，经桥以中立 ToolCall `{sessionId, branchId, turnId, callId, arguments, config}` 和取消 Promise 回调。注册属于调用方行，该行卸载时撤回；行的 `provides` 不列工具 |
+| 宿主工具 | 来自 `ToolHost` 的定义，在 `apply` 时读取；没有另外登记宿主工具名的步骤 |
+| 收集 | 不发现提供方：每次读取纳入当时已注册的内容；Session 发布后由注册表自有任务随注册与撤回重读，Session 开始关闭时该任务结束；ToolRegistry 不依赖注册它的部件 |
+| 挂载 | `SessionConfig.tools` 是 Session 可选的挂载列表，创建时确定。没有挂载列表时，声明全部宿主工具与全部注册的工具，部件注册的工具不需修改配置即可使用（#364）；产品默认没有挂载列表。有挂载列表时，只声明其中列出的宿主工具与注册工具，`[]` 不声明任何宿主工具或注册工具。列出但没有部件注册的工具省略，并记录一次 `tool.attach` 进程日志 span；之后才注册的工具从其注册后的下一个请求起声明。Agent profile 与 Collaboration 成员用挂载列表限定 agent 看到的工具，有列表的成员总是挂载 `agent` |
+| 执行 | 与挂载分开：已声明工具的调用是否执行由 Permission 决定（预设与 `allowedTools`/`disallowedTools`，可经 `session.permission.update` 实时修改）。Permission 从不改变声明，工具声明属于提示词前缀，因此上下文保持稳定。要阻止某个工具又保持上下文稳定，就保留挂载并在 Permission 中拒绝它；要改变模型看到的工具，就在创建 Session 时改挂载列表 |
 
-固定表只含配置的宿主工具，在 `apply` 时构建。每个配置的贡献工具是注册表自有的带版本集合，键为 `#contributed:<tool>`；已登记来源名满足 `[A-Za-z0-9_-]{1,64}`，不含 `#`，所以二者的键不会相同。声明按 `SessionConfig.tools` 顺序列出宿主与贡献工具，其后是其他来源的工具。
+固定表含宿主的全部工具，在 `apply` 时构建。每个挂载的注册工具是注册表自有的带版本集合，键为 `#contributed:<tool>`；来源名满足 `[A-Za-z0-9_-]{1,64}`，不含 `#`，所以二者的键不会相同。没有挂载列表时，声明先按宿主的顺序列出宿主工具，再按名称列出注册工具；有挂载列表时，按列表顺序列出其中的宿主工具与注册工具；两种情况下其后都是其他来源的工具。
 
 ## 3. 依赖方向
 
 | 方向 | 规定 |
 | --- | --- |
-| `ToolRegistry` → 贡献方 | 按登记名读取当前 Active 的贡献方并跟随其换代，不注入贡献方；保留 `ToolHost`、`SessionConfig`、`SessionIdentity`、`SessionLifecycle` 和既有动态来源的真实依赖 |
-| 贡献方 → `ToolRegistry` | 不注入；贡献方不读取、不修改注册表 |
-| 贡献方状态 | 不因 `ToolRegistry` 或其上游重载而卸载 |
+| `ToolRegistry` → 注册方 | 不注入、不读取注册方；保留 `ToolHost`、`SessionConfig`、`SessionIdentity`、`SessionLifecycle` 的真实依赖 |
+| 注册方 → `ToolRegistry` | 注入 `ToolRegistry` 以注册；不读取、不修改注册表的其他状态 |
+| 注册方状态 | `ToolRegistry` 重载时，注册到它的部件随之重载并重新注册 |
 
 ## 4. 重载
 
 | 情况 | 结果 |
 | --- | --- |
-| 贡献方重载或退出 | 不重载 ToolRegistry；旧集合撤下，旧 handler 的停止与在途工作归贡献方结算。新一代 Active 后以新版本提供，不把已绑定请求改绑到新 handler |
-| `ToolHost` 重载 | `ToolRegistry` 重载并重新收集全部贡献；贡献方不受影响 |
+| 注册方重载或退出 | 不重载 ToolRegistry；其注册撤回，旧集合撤下，旧 handler 的停止与在途工作归注册方结算。新一代重新注册后以新版本提供，不把已绑定请求改绑到新 handler |
+| `ToolHost` 或 `ToolRegistry` 重载 | 注册到 ToolRegistry 的部件随之重载并重新注册 |
 | 旧代处理器 | 被继续持有时调用返回明确的停止错误 |
 
-`agent` 处理器持有贡献方当前代的取消令牌；贡献方卸载后，经旧处理器的调用（包括 `list`）返回 `capability reloading`，不再读取旧代状态。`Agents` 重载后，新一代 Collaboration 的 `agent` 从下一个请求起提供，不需要重载 Session。
+其他语言的工具处理器持有调用方行的代次令牌：该行开始卸载后，经保留处理器的调用不会发出，模型看到的错误说明提供方代次正在卸载、该调用未发出，提供方 Active 后会再次提供该工具；在途调用以错误结束，错误提示它可能已经生效，重试前须检查其状态。原生工具保留各自的重载行为。`agent` 处理器持有注册方当前代的取消令牌；注册方卸载后，经旧处理器的调用（包括 `list`）返回 `capability reloading`，不再读取旧代状态。`Agents` 重载后，新一代 Collaboration 重新注册 `agent`，从下一个请求起提供，不需要重载 Session。
 
 ## 5. 错误
 
 | 情况 | 结果 |
 | --- | --- |
-| 已登记的可选贡献无 Active 提供方 | 该工具不进入声明，提供方 Active 后再提供；记录进程日志 span，ToolRegistry 与 Loop 正常工作 |
-| 已登记来源名不满足工具名语法 | Session 构建失败：`tool source name <name> must match [A-Za-z0-9_-]{1,64}` |
-| 贡献名称与宿主工具重名 | 注册时重复，Session 构建失败 |
-| `SessionConfig.tools` 含未登记且宿主未提供的名称 | 沿用现有错误：`tool <name> is not provided by the host` |
+| 挂载列表列出的工具没有部件注册 | 该工具不进入声明，记录一次 `tool.attach` 进程日志 span；有部件注册后从下一个请求起声明；Session 照常创建，ToolRegistry 与 Loop 正常工作 |
+| 工具名不满足语法、为宿主工具名或已被注册 | `register` 返回错误：`invalid tool name <name>`、`tool <name> is a host tool`、`<name> is registered already` |
+| 其他语言的声明不是有效的 `ToolDefinition` 或缺少 `risk` | `register` 被拒绝：`invalid tool declaration: …`、`tool <name> must declare its risk` |
+| 来源名不满足工具名语法 | `register_source` 返回错误：`tool source name <name> must match [A-Za-z0-9_-]{1,64}` |
+| 挂载列表（`SessionConfig.tools`）含重复名称 | Session 构建失败：`duplicate tool <name>` |
 
 ## 6. 验收
 
-1. 贡献方提供的工具出现在模型工具声明中，调用经 `ToolExecutor` 到达其处理器。
-2. `branch`、`agent` 以贡献提供，分支与协作流程测试经贡献路径通过。
-3. `ToolHost` 重载后贡献方状态保持，工具表恢复一致。
-4. 可选贡献方 Pending、缺失或退出时不传播硬依赖失效；来源所有者仍负责旧 handler 的停止，新一代 Active 后的下一个请求起提供；没有工具部分的配置不为旧版本保留引用。
-5. 未启用的贡献不出现在工具声明中。
-6. 首个请求声明并绑定当时已 Active 的宿主与贡献工具；之后才 Active 的提供方从其后的请求起提供。恢复流程在首个请求前采用本次装载时的工具，已绑定请求保持原工具快照。
+1. 部件注册的工具出现在模型工具声明中，调用经 `ToolExecutor` 到达其处理器。
+2. `branch`、`wait`、`skill`、`ask_user`、`agent` 都经注册提供，分支与协作流程测试经注册路径通过。
+3. ToolRegistry 重载后注册到它的部件重新注册，工具表恢复一致。
+4. 可选的注册方 Pending、缺失或退出时不传播硬依赖失效；注册方仍负责旧 handler 的停止，新一代注册后的下一个请求起提供；没有工具部分的配置不为旧版本保留引用。
+5. 没有挂载列表的 Session 不需修改配置即声明部件注册的工具；有挂载列表时，列表未列出的宿主工具与注册工具不出现在工具声明中。
+6. 首个请求声明并绑定宿主工具与当时已注册的工具；之后才注册的工具从其后的请求起提供。恢复流程在首个请求前采用本次装载时的工具，已绑定请求保持原工具快照。
+7. 挂载列表列出但没有部件注册的工具不使 Session 创建失败。
 
 ## 7. 动态工具来源
 
@@ -131,7 +137,7 @@ remain. Replacements retain old connections for existing bindings; disabling or
 removing an entry closes its instances across Sessions, even with bindings.
 New bindings automatically adopt the replacement through the existing flow below.
 
-- **收集来源**：宿主工具（`S:ToolHost`）、固定贡献（`S:ToolContribution[name]`，如 `skill`、`branch`、`wait`）、动态来源（`S:SessionToolSource[name]`；当前只有 App Server 的 McpSession：登记名 `mcp`，键 `mcp:<serverId>`，版本随连接代次与工具列表变化且不复用，工具名带 server 前缀避免跨来源重名，连接失败时撤销该键）。`SessionConfig.tools` 只列固定工具；动态来源的可见性由来源方自己的配置决定。
+- **收集来源**：宿主工具（`S:ToolHost`）、注册的工具（部件经 `register` 注册，如 `skill`、`branch`、`wait`）、注册的动态来源（部件经 `register_source` 注册；当前只有 App Server 的 McpSession：来源名 `mcp`，键 `mcp:<serverId>`，版本随连接代次与工具列表变化且不复用，工具名带 server 前缀避免跨来源重名，连接失败时撤销该键）。挂载列表（`SessionConfig.tools`）只涉及宿主工具与注册的工具；动态来源的可见性由来源方自己的配置决定。
 - **MCP 启用**：已配置的服务器启用即运行，没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）；项目 `.mcp.json` 的条目默认禁用，只由用户的本地记录启用。已禁用或删除的服务器不发现、不连接，McpSession 不提供其集合（状态 `Disabled`）；配置或启用变化时立即撤销旧集合（仅刷新时保留旧集合至替换就绪）。配置替换时，已绑定请求所持的旧版本 handler 保留其代次直到释放；停用、删除或显式断开会在所有 Session 中关闭它，包括已绑定的请求；停用在来源文件不可读时也生效，被撤回的条目报告为 `Disabled` 而非连接失败。协调者的应用状态变化时各 McpSession 重读选择，外部编辑经目录读取或连接操作被发现后到达每个 Session；Session 开始关闭后不再发现或创建连接。文件根授权、工具权限预设与 Session 回放都不启用条目。
 - **维护变化**：动态来源按整组校验、原子替换；分支采用新的工具集合，作为 `context/configured` 的工具部分写入 Timeline（工具声明属于模型上下文）。
 - **请求一致**：在 Loop 构造请求时固定本请求的声明与实现（同一版本），供 ToolExecutor 按名取实现；本请求结算后释放。Loop 在 `turn/end` 统一 `retain_only(None)`，不在每种结束路径各自释放。
@@ -142,40 +148,37 @@ New bindings automatically adopt the replacement through the existing flow below
 
 | 组件 | 作用域 | 注入 | 提供 | 被谁注入 |
 | --- | --- | --- | --- | --- |
-| `ToolRegistryPlugin` | Session | `S:ToolHost`、`S:SessionConfig`、`S:ToolContribution[name]`、`S:SessionToolSource[name]` | `S:ToolRegistry`、`StateCell<ToolSourcesState>` | ToolBinding；`PrepareModel` 实现（开发路径） |
+| `ToolRegistryPlugin` | Session | `S:ToolHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle` | `S:ToolRegistry`、`S:ToolSourcesView` | ToolBinding、PrepareModelHost；注册工具或来源的部件（BranchTool、Questions、Skills、Wait、CollaborationCapability、McpSession） |
 | `ToolBindingPlugin` | 分支 | `S:ToolRegistry`、`B:Prompt`（采用入口）、`B:Timeline`、`B:BranchLifecycle`、`B:Dispatcher`、`B:BranchOpening` | `B:ToolBinding` | Loop、ToolExecutor |
 
-- 来源方只提供服务，不注入 ToolRegistry 或 ToolBinding（沿用第 3 节）。
+- 来源方注入 ToolRegistry 以注册来源（沿用第 3 节），不注入 ToolBinding。
 - 审批由 ToolExecutor 注入 `B:Approval` 调用，Tools 不涉及。
-- 类型位置：`ToolProvider`、`SessionToolSource`、`ToolSourceSet`、`ToolSourcesState` 在 `dim-agent-capabilities/src/tool_registry.rs`；`ToolBinding` 在 `tool_binding.rs`。`Prompt::adopt_tools` 是 crate 内部入口，因此 ToolBinding 与 Prompt 同在该 crate。持久化类型 `ToolSourceVersion` 在 `dim-agent-types`。
-- 登记：`AgentBuilder::session_tool_source(name)` 在装配时登记来源名，注册表工厂把这些名称作为 `Contributions<SessionToolSource>` 的键。来源名须满足 `[A-Za-z0-9_-]{1,64}`（与工具名语法相同，不含注册表自有键使用的 `#`），否则 Session 构建失败：`tool source name <name> must match [A-Za-z0-9_-]{1,64}`。登记名无提供方时 Session 构建失败（同第 5 节）。App Server 的产品 profile 登记 `mcp`。
+- 类型位置：`ToolProvider`、`ToolSourceSet`、`ToolSourcesState` 在 `dim-agent-capabilities/src/tool_registry.rs`；注册表按名保存注册的表 `Registrations` 在 `dim-agent-runtime/src/registrations.rs`，PromptRegistry 共用；`ToolBinding` 在 `tool_binding.rs`。`Prompt::adopt_tools` 是 crate 内部入口，因此 ToolBinding 与 Prompt 同在该 crate。持久化类型 `ToolSourceVersion` 在 `dim-agent-types`。
+- 注册：来源方在 `apply` 中调用 `register_source(ctx, name, provider)`，注册在其卸载时撤回。来源名须满足 `[A-Za-z0-9_-]{1,64}`（与工具名语法相同，不含注册表自有键使用的 `#`），否则注册失败：`tool source name <name> must match [A-Za-z0-9_-]{1,64}`；同名已被注册时也失败。App Server 的 McpSession 注册 `mcp`。只有 Rust 部件注册来源，直到其他语言的部件需要。
 - `ToolSourcesState` 经只读的 `S:ToolSourcesView`（`PublicService`）对外提供；ToolRegistry 能交出处理器，不公开。
 
 动态来源端口：
 
 ```rust
-pub struct SessionToolSource(pub Arc<dyn ToolProvider>);
-impl SessionService for SessionToolSource {}
-
 pub trait ToolProvider: Send + Sync + 'static {
     /// Every complete set this provider currently offers, one per key.
     fn sets(&self) -> Vec<Arc<ToolSourceSet>>;
 }
 
 pub struct ToolSourceSet {
-    pub key: String,     // "<registered name>" or "<registered name>:<instance>", e.g. "mcp:<serverId>"
+    pub key: String,     // "<source name>" or "<source name>:<instance>", e.g. "mcp:<serverId>"
     pub version: String, // never reused for this key, across provider generations, registry instances and processes
     pub tools: Vec<Arc<ToolContribution>>, // handlers bound to this version's resources
 }
 ```
 
-来源方保证：定义已在其外部边界解析完成；`sets()` 中去掉某个键即撤销该键；替换集合后用自身上下文向 `EventKey::<ToolProviderChanged>::of().instance(session_scope.instance)` 发出通知，消费方每次读完整的当前集合。trait 不叫 `ToolSource`，以免遮蔽 `dim_agent_types::ToolSource`（`ToolDefinition.source` 的展示分类）。
+来源方保证：定义已在其外部边界解析完成；`sets()` 中去掉某个键即撤销该键；替换集合后用自身上下文向 `tool_provider_changes(<Session 实例>)`（私有名 `dim/tools/{instance}/provider-changed`）发出通知，消费方每次读完整的当前集合。trait 不叫 `ToolSource`，以免遮蔽 `dim_agent_types::ToolSource`（`ToolDefinition.source` 的展示分类）。
 
 ### 7.3 状态
 
 | 状态 | 所有者 | 内容 |
 | --- | --- | --- |
-| 固定表 | ToolRegistry | 按 `SessionConfig.tools` 构建（第 2 节规则），本代注册表内不变；宿主工具包装为 `HostTool` 条目 |
+| 固定表 | ToolRegistry | 宿主的全部工具，按宿主的顺序，在 `apply` 时构建，本代注册表内不变；挂载列表（第 2 节规则）决定其中哪些进入声明；宿主工具包装为 `HostTool` 条目 |
 | 当前来源集合 | ToolRegistry | 每个键一个 `Arc<ToolSourceSet>`（强引用）；旧版本只登记弱引用；已持有过的版本集合（用于拒绝复用） |
 | `ToolSourcesState` | ToolRegistry（`StateCell`，外部经 `S:ToolSourcesView` 读，供 MCP 管理界面） | `BTreeMap<key, ToolSourceStatus { adopted: Option<version>, rejected: Option<ToolSourceRejection { version, reason }> }>` |
 | pin 列表 | ToolBinding | `[(sequence, Vec<Arc<ToolSourceSet>>)]`：本分支已采用、可能仍被请求前缀引用的集合；外加在途采用持有的待采用集合 |
@@ -186,24 +189,24 @@ pub struct ToolSourceSet {
 
 ### 7.4 事件
 
-不引入新的 Timeline 事件。来源与注册表的内存变更通知使用现有 rutis 总线（[#122](https://github.com/arcships/dim/issues/122)）。
+不引入新的 Timeline 事件。来源的内存变更通知使用现有 rutis 总线（[#122](https://github.com/arcships/dim/issues/122)），注册表的变更经它的来源状态 watch 发布。
 
 | 事件 | 写入方 | 规定 |
 | --- | --- | --- |
-| `context/configured` | Prompt，由 ToolBinding 经 `adopt_tools` 发起 | `ModelConfiguration` 增加 `tool_sources: Vec<ToolSourceVersion { key, version }>`，为空时不序列化；`tools` 为完整声明：固定工具在前（按 `SessionConfig.tools` 顺序），来源工具按键排序、键内按集合顺序。`tool_sources` 为空表示全部是固定工具 |
+| `context/configured` | Prompt，由 ToolBinding 经 `adopt_tools` 发起 | `ModelConfiguration` 增加 `tool_sources: Vec<ToolSourceVersion { key, version }>`，为空时不序列化；`tools` 为完整声明：挂载的宿主工具与注册工具在前（顺序见第 2 节），其他来源的工具按键排序、键内按集合顺序。`tool_sources` 为空表示全部是固定工具 |
 
 模型选择与工具集合是同一配置的两部分，分别更新：公开的 `ConfigureUpdate.model: Option<ModelSelection { provider_id, model_id, config, metadata }>` 不含工具，外部调用方无法给出 handler。`SessionConfig.model` 使用同一类型，创建时固定完整模型参数；`AgentConfig` 与 Agent profile 的默认身份仍为 `ModelId`。旧 Session 中只含模型身份的记录可读取，缺失参数表示没有显式参数，不沿用另一模型的默认值。Prompt 在其串行采用队列中以前缀里最后一个已采用配置为基础合成：模型更新只替换模型字段，工具采用只替换 `tools/tool_sources`，二者互不淘汰。前缀尚无模型部分时工具采用返回 `InvalidInput("tool set adoption requires a model configuration")`，该分支走 `PrepareModelHost` 路径。只更新模型或工具部分时，`context/configured.system` 沿用上一次已采用的值。
 
-ToolRegistry 的来源变化是 Session 内状态，不写 Timeline。以下 rutis 通知均以 Session 的实例键隔离，不携带工具集合；消费者读取所有者的现态。
+ToolRegistry 的来源变化是 Session 内状态，不写 Timeline。以下通知都只属于一个 Session，不携带工具集合；消费者读取所有者的现态。
 
 | 通知 | 生产者 → 消费者 | 内容与顺序 |
 | --- | --- | --- |
-| `tools.provider_changed` | 来源方 → ToolRegistry | 空通知；来源方完成状态替换后发出，注册表只读取本 Session 已登记的来源 |
-| `tools.changed` | ToolRegistry → 各分支 ToolBinding | 空通知；注册表完成集合替换/撤销及状态更新后发出 |
+| `dim/tools/{instance}/provider-changed` | 来源方 → ToolRegistry | 空通知；来源方完成状态替换后发出，注册表只读取本 Session 已注册的来源 |
+| `sources_state()`（watch） | ToolRegistry → 各分支 ToolBinding | 注册表完成集合替换/撤销后更新 `ToolSourcesState` |
 
-注册表先订阅再初读来源；来源通知变化时重读全部已登记来源，因此另一来源让出工具名后，被拒来源能自动恢复。
-注册表用自身上下文发出 `tools.changed`，不借用来源通知携带的发送方上下文；来源方与注册表均记录发送失败。
-ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任务；发布前的唤醒保留到原有 BranchLifecycle 激活后处理，关闭时退出。
+注册表先订阅再初读来源；来源通知变化时重读全部已注册来源，因此另一来源让出工具名后，被拒来源能自动恢复。注册与撤回不经总线：Session 发布后，注册表的任务随每次注册与撤回重读。
+来源方记录发送失败。
+ToolBinding 先取得注册表的来源状态 watch 再初读注册表，状态变化只唤醒它自己的采用任务；发布前的唤醒保留到原有 BranchLifecycle 激活后处理，关闭时退出。
 每个分支继续通过 Prompt 串行采用工具集合，只有该采用事实影响后续请求；现有请求的 handler 快照不变。
 `ToolSourcesView::subscribe` 仍提供只读状态，不用作部件间的空变更信号。
 
@@ -213,20 +216,20 @@ ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任�
 
 | 方法 | 输入 → 输出 | 错误 |
 | --- | --- | --- |
-| `definitions()` | → 先接入当前 Active 的贡献方（同 `snapshot()`），再给出固定表与当前集合的全部声明（顺序同 7.4） | — |
-| `current()` | → 同 `snapshot()`，但不调用外部提供方：供后台采用读取 | — |
-| `attach_pending()` | 为绑定到已采用工具部分的请求，接入自上次接入后变化的外部贡献方；变化发出 `tools.changed`，分支为下一个请求采用 | — |
-| `snapshot()` | → 同一锁内读出的声明与其所来自的当前集合；ToolBinding 以此构造采用内容 | — |
+| `register(ctx, ToolContribution)` | 代表 `ctx` 所属部件注册工具，直到该部件卸载 | 名称不合语法、为宿主工具名或已被注册 |
+| `register_source(ctx, name, provider)` | 代表 `ctx` 所属部件注册动态来源，直到该部件卸载 | 来源名不合语法或已被注册 |
+| `definitions()` | → 先纳入当前已注册的内容（同 `snapshot()`），再给出挂载的宿主工具与当前集合的全部声明（顺序同 7.4） | — |
+| `snapshot()` | → 纳入当前已注册的内容后，同一锁内读出的声明与其所来自的当前集合；ToolBinding 以此构造采用内容 | — |
 | `sources()` | → 当前集合，按键排序 | — |
 | `source(key, version)` | → `Option<Arc<ToolSourceSet>>`，当前或仍被引用的旧版本 | — |
-| `fixed(name)` | → 宿主工具 `Option<Arc<ToolContribution>>` | — |
-| `contributed(name)` | → 贡献工具当前版本 `Option<Arc<ToolContribution>>` | — |
+| `fixed(name)` | → 挂载的宿主工具 `Option<Arc<ToolContribution>>` | — |
+| `contributed(name)` | → 注册工具当前版本 `Option<Arc<ToolContribution>>` | — |
 
-内部替换 `replace_source(key, expected, set: Option<Arc<ToolSourceSet>>)` 不对外开放。注册表在 `apply` 读全部来源，之后每次来源通知重读，对版本与已持有不同的键执行：
+整组替换是注册表内部的刷新，不对外开放。注册表在 `apply` 读全部来源，之后每次读取、注册变化与来源通知时重读，对版本与已持有不同的键执行：
 
 | 步骤 | 规定 |
 | --- | --- |
-| 校验 | 已持有版本仍为 `expected`；`key` 属于提供它的登记名；`version` 未被本注册表持有过；工具名满足 `[A-Za-z0-9_-]{1,64}`、集合内唯一，且不与固定工具名（宿主工具定义名与全部已登记贡献名，贡献名只能由其自身的 `#contributed:` 集合提供）或其他键当前集合重名 |
+| 校验 | `key` 属于提供它的来源名；`version` 未被本注册表持有过；工具名满足 `[A-Za-z0-9_-]{1,64}`、集合内唯一，且不与保留名（挂载列表中的名称、宿主工具定义名与全部已注册工具名，这些名称只能由其自身的 `#contributed:` 集合提供）或其他键当前集合重名 |
 | 失败 | 整组拒绝，保留旧集合，记 `rejected` 与诊断。被拒版本不算已持有，任一来源下次变化时重新校验；先占名的来源撤销后被拒来源自动恢复 |
 | 成功 | 原子替换，旧版本转弱引用，更新 `ToolSourcesState`，通知 |
 | 撤销 | 移除该键，不会失败 |
@@ -236,7 +239,7 @@ ToolBinding 先订阅再初读注册表，通知只唤醒它自己的采用任�
 | 方法 | 调用方 | 输入 → 输出 | 错误 |
 | --- | --- | --- | --- |
 | `bind(request_id, through, tools, tool_sources)` | Loop | 前缀（至 `through`）中已采用配置的声明与来源版本 → 登记快照；成功后按 7.6 释放旧 pin | `tool source <key>@<version> is unavailable`；`tool <name> has no handler`（声明名在所绑集合与固定表中都不存在）；`request_id` 已登记 |
-| `bind_current(request_id, declared: Option<_>)` | Loop | `None`：配置没有工具部分，声明注册表当前的固定工具；`Some`：核对 `PrepareModelHost` 给出的声明 → 按注册表当前状态登记快照 | 声明名不存在或与当前定义不等 |
+| `bind_current(request_id, declared: Option<_>)` | Loop | `None`：配置没有工具部分，声明注册表当前的宿主与注册工具；`Some`：核对 `PrepareModelHost` 给出的声明 → 按注册表当前状态登记快照 | 声明名不存在或与当前定义不等 |
 | `handler(request_id, name)` | ToolExecutor | → 快照中的 `Arc<ToolContribution>`（`handler` 用于执行，`definition.risk` 供审批） | `request <id> has no active tool binding`；`Unknown tool: <name>`。ToolExecutor 写成工具错误结果 |
 | `transfer(from, to)` | Loop（预算恢复） | 原请求快照改登记到新 `request_id` | `from` 无快照 |
 | `release(request_id)` | Loop | 释放快照；不存在时无操作 | — |
@@ -291,12 +294,13 @@ Loop 释放:
 
 **子分支**：继承父分支前缀中的配置，其 ToolBinding 在 `apply` 及 `branch/start` 分发时按同一规则 pin 或重新采用；不继承父分支的快照与 pin。
 
-**重载与恢复**（沿用[能力重载协议](single-tree.md#能力重载协议)，注入链：来源方、`ToolHost` → ToolRegistry → ToolBinding → Loop、ToolExecutor；Prompt → ToolBinding）：
+**重载与恢复**（沿用[能力重载协议](single-tree.md#能力重载协议)，注入链：`ToolHost` → ToolRegistry → ToolBinding → Loop、ToolExecutor；ToolRegistry → 注册方；Prompt → ToolBinding）：
 
 | 情况 | 结果 |
 | --- | --- |
 | 来源版本变化 | 不是重载：替换、采用；在途调用按旧快照结算 |
-| 动态来源方、`ToolHost` 或 ToolRegistry 重载 | 下游重载，ToolExecutor 以重载结算在途批次；新注册表只含当前版本，前缀版本不可取得的分支在 `apply` 重新采用，一致的直接 pin、不写新事实。固定贡献按第 4 节处理 |
+| 动态来源方重载 | 其注册撤回，集合撤下；新一代重新注册后按正常替换采用；在途调用按旧快照结算 |
+| `ToolHost` 或 ToolRegistry 重载 | 下游重载，ToolExecutor 以重载结算在途批次；注册方随之重载并重新注册，新注册表只含当前版本，前缀版本不可取得的分支在 `apply` 重新采用，一致的直接 pin、不写新事实。注册工具按第 4 节处理 |
 | Prompt 重载 | ToolBinding 及下游重载，快照随旧 ToolBinding 释放 |
 | Loop 单独重载 | ToolBinding 与快照保留；新 Loop 重建后 `retain_only` |
 | ToolBinding 重载后预算恢复 | `transfer` 因无快照失败，turn Failed |

@@ -38,7 +38,7 @@ flowchart LR
   end
   subgraph proc["Process, control node"]
     Coll["Collaboration: leader facts, wake input, hold; member providers by kind"]:::chg
-    EA["ExternalAgent: collaborationMembers:external-agent, externalAgentNodes, managementMethods:external_agents"]:::new
+    EA["ExternalAgent: collaborationMembers:external-agent, externalAgentNodes, managementMethods external_agents"]:::new
     Settings["Settings: source external_agents"]
     PF["pluginFiles: external-agent/members.json"]
     SB["Session broadcast (notify)"]
@@ -64,11 +64,11 @@ External agent connections and live conversations are shared host resources, so 
 
 A bridge row injects `externalAgentNodes` (on a peer, imported over the link) and, in `apply`, attaches a by-reference handle for its node; its effect detaches it, and a dropped link or exited runtime closes the reference, which ExternalAgent treats as detached. The loader runs a row's generations in order, so one node has at most one attachment. This is the registration form #37 accepted. A TypeScript row cannot look up a service per call ([sessions-service D1](../appserver/sessions-service.md), [process TypeScript §5.1](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)), so ExternalAgent never looks a bridge up.
 
-Collaboration, which is native, looks up `collaborationMembers:<kind>` on each call without a dependency, as Rpc does for `managementMethods`. No core part and no Session depends on ExternalAgent; it injects only `settings` and `pluginFiles`, which never reload. ExternalAgent has no Session part: the delegation and decision tools are Collaboration's.
+Collaboration, which is native, looks up `collaborationMembers:<kind>` on each call without a dependency, as Rpc does for management method providers. No core part and no Session depends on ExternalAgent; it injects only `settings`, `pluginFiles` and `managementMethods`, which never reload. ExternalAgent has no Session part: the delegation and decision tools are Collaboration's.
 
 | Part | Scope | Depends on (`inject`) | Provides |
 | --- | --- | --- | --- |
-| `ExternalAgent` | Process row, control node | `settings`, `pluginFiles` | `collaborationMembers:external-agent`; `externalAgentNodes`; `managementMethods:external_agents`; Settings source `external_agents`; `externalAgent.activity` notices |
+| `ExternalAgent` | Process row, control node | `settings`, `pluginFiles`, `managementMethods` | `collaborationMembers:external-agent`; `externalAgentNodes`; registers `external_agents` with `managementMethods`; Settings source `external_agents`; `externalAgent.activity` notices |
 | `ExternalAgentBridge` | Process row, one per node hosting agents | `externalAgentNodes`; that node's HostPlatform exec-argv helper | Nothing by name; a `BridgeHandle` by reference through `attach` |
 | Collaboration (change, §9.2) | Existing process, Session and branch parts | Looks up member providers per call | Routes its operations for non-Session members to the provider of their kind |
 
@@ -299,10 +299,10 @@ The external agent sees only its task text, the messages of its team (each prefi
 | `externalAgentNodes` | Process service, injected by bridge rows | `attach` / `detach` of a node's `BridgeHandle` ([A.3](#a3-bridge-and-adapters)) |
 | `BridgeHandle` | By-reference object of one bridge row | `detect`, `turn`, `cancel`, `close`, `answer` on a node ([A.3](#a3-bridge-and-adapters)) |
 | `externalAgent.activity` | Session broadcast notice on the leader Session, source `ExternalAgent` | Live progress for clients ([A.4](#a4-activity-and-notices)) |
-| `external_agents.list` / `set_enabled` / `configure` | `managementMethods:external_agents` | Detection, enablement, configuration ([A.1](#a1-management-methods)) |
+| `external_agents.list` / `set_enabled` / `configure` | `managementMethods`, namespace `external_agents` | Detection, enablement, configuration ([A.1](#a1-management-methods)) |
 | ACP schema and conformance suite | Shared with AcpGateway | Client side ([A.5](#a5-shared-acp-schema)) |
 
-**Streamed calls.** `run` and `BridgeHandle.turn` produce a sequence of items. Over rutis-bridge 0.12.1 they are `async` methods whose request carries a sink function by reference (`onEvent`, `onUpdate`): the callee calls the sink once per item and awaits each call before the next; the call resolves when the sequence ends and rejects with the error that ends it. They take no AbortSignal: aborting would drop the call and its late reply, so cancellation is the separate `cancel` method and the call is awaited to its end. A closed reference fails the call.
+**Streamed calls.** `run` and `BridgeHandle.turn` produce a sequence of items. Over rutis-bridge 0.16.0 they are `async` methods whose request carries a sink function by reference (`onEvent`, `onUpdate`): the callee calls the sink once per item and awaits each call before the next; the call resolves when the sequence ends and rejects with the error that ends it. They take no AbortSignal: aborting would drop the call and its late reply, so cancellation is the separate `cancel` method and the call is awaited to its end. A closed reference fails the call.
 
 **Clients.** A member whose `agentId` contains `:` is a provider member (`<kind>:<rest>`); Agents' ids are UUIDs ([agents.rs](../../../crates/dim-app-server/src/agents.rs) `create`), so they never contain one. A dim member's id is its `sessionId`; an external member's id is its `extSessionId`, which is not a dim Session. Collaboration's persisted `sessionId` field carries the external `extSessionId`; the `agent` tool result names it `extSessionId`. Clients do not call `session.attach`, `session.history` or `session.stop` with an `extSessionId`. Its view is the leader's own `collaboration/*` facts plus the `externalAgent.activity` notices the client receives while attached to the leader. There is no per-member stop for the user, as for any detached work: `session.stop` is turn-scoped and delivered Collaboration work survives it. The user's options are to ask the leader's model to `cancel` or `close` the member while the leader is open. Closing the leader does not close its members.
 
@@ -358,7 +358,7 @@ Collaboration's members are dim Sessions today: every operation goes through the
 - `list` / `inspect` add the provider's `catalog()` and `members()` entries; `request`, `message`, `cancel`, `close` and `read` call the provider (A.2); `result` is unchanged (it reads the leader's own facts).
 - `collaboration/delivered` is written on the provider's `started`; `collaboration/result` on `run`'s resolution or rejection. Where Collaboration stops or interrupts a Session member it acts on the provider: a turn interrupt before `delivered`, `cancel` and a branch stop call `cancel`, addressed by the `requestId` passed to `run`, so a run can be cancelled before `started`; a reload calls `cancel` and settles `failed (reloading)` without waiting. A leader close, idle unload or deletion does not call a provider cleanup: Collaboration settles an open run by its existing detached-work rule and leaves the member record and process alone. The leader hold, wake input and rebuild settlement apply unchanged. A stop that covers a new member's operation before its `started` calls `cancel {requestId}`; ExternalAgent stops the launch and writes no record.
 - **The record owner holds the relation.** Collaboration keeps no relation for provider members. ExternalAgent's stored `leaderSessionId` is the relation, and every provider call carries the leader Collaboration resolves for the caller: the calling Session itself when it leads, or the leader of the caller's team when a dim member addresses an external teammate (`message`, `read`), with `from` naming the sender. The provider answers by that leader id; another leader, a fork or an unknown id get `not_in_team`, reported as Collaboration's existing `team_member_not_found` without revealing whether the member exists. This is enough because authorization and enumeration are a pure function of records the provider already owns and persists; a registration or reconciliation protocol would copy them into a second owner that must be rebuilt after every restart.
-- **Kinds.** Collaboration gets the configured kinds from assembly, which reads the `collaborationMembers:<kind>` services the rows declare and passes the names to Collaboration, as it reads TypeScript rows' declared `managementMethods:*` into Rpc's `Owners`. Collaboration names no plugin. `list` calls `catalog` and `members` for each configured kind whose provider is found. This needs the assembly item of §9.5.
+- **Kinds.** Collaboration gets the configured kinds from assembly, which reads the `collaborationMembers:<kind>` services the rows declare and passes the names to Collaboration. Collaboration names no plugin. `list` calls `catalog` and `members` for each configured kind whose provider is found. This needs the assembly item of §9.5.
 - **Provider unavailable.** When no provider is found for a kind, operations on it are refused with Collaboration's existing `closed` and the generic detail `member provider <kind> is unavailable; try again later`; nothing is written, `list` omits that kind, and the same `extSessionId` works again once the provider is back.
 - **No new risk category.** The `agent` tool keeps its existing classification, so a leader that cannot call it cannot delegate. No Workflow change is part of this design. A leader close does not call a provider cleanup: Collaboration settles an open run and drops the call; the record and process stay.
 - No event or persisted format changes: target and member ids already are strings.
@@ -375,9 +375,9 @@ Withdrawn: rutis is an external dependency, so no requirement is raised to it. O
 
 | Item | Content |
 | --- | --- |
-| Blocked | Collaboration (native) calls a `MemberProvider` per call and needs the configured kinds. ExternalAgent's process row is TypeScript. Assembly projects only fixed families of TypeScript rows into native services (`sessionMethods`, `managementMethods`, tools, observers; [session_typescript.rs](../../../crates/dim-app-server/src/session_typescript.rs)); any other declared service is registered as a bare shared `HostDispatch`, and `CollaborationPlugin::new` takes no kinds |
+| Blocked | Collaboration (native) calls a `MemberProvider` per call and needs the configured kinds. ExternalAgent's process row is TypeScript. Assembly projects no service a TypeScript row declares into a native type: tools and method namespaces register with their owners (`toolRegistry`, `sessionMethods`, `managementMethods`; [session_typescript.rs](../../../crates/dim-app-server/src/session_typescript.rs)), and any other declared service is registered as a bare shared `HostDispatch`, and `CollaborationPlugin::new` takes no kinds |
 | Mechanisms considered | Calling the bare `HostDispatch` from Collaboration: no typed contract, no method-mode check, and the streamed `run` needs a native sink passed by reference; a Collaboration Settings source listing kinds: duplicates what the rows already declare and can drift from them |
-| Needed | Assembly accepts the family `collaborationMembers:<kind>` on process rows (TypeScript or native): it checks the declared method modes at the configuration boundary, projects a TypeScript provider as the native `MemberProvider` (Appendix G; `run` with the sink by reference, the other methods `async`), and passes the configured kinds to `CollaborationPlugin::new`, as it builds Rpc's `Owners` from declared `managementMethods:*` |
+| Needed | Assembly accepts the family `collaborationMembers:<kind>` on process rows (TypeScript or native): it checks the declared method modes at the configuration boundary, projects a TypeScript provider as the native `MemberProvider` (Appendix G; `run` with the sink by reference, the other methods `async`), and passes the configured kinds to `CollaborationPlugin::new` |
 | Effect on sequence, batch, interrupt, reload | None on Timelines. A provider row's reload is handled per call like any optional provider: Collaboration finds no provider and refuses with `closed` |
 | Owner | App Server assembly / #4 TypeScript bindings |
 
@@ -399,7 +399,7 @@ Withdrawn: rutis is an external dependency, so no requirement is raised to it. O
 
 ### A.1 Management methods
 
-`managementMethods:external_agents` on ExternalAgent's process row:
+Namespace `external_agents`, which ExternalAgent's process row registers with `managementMethods`:
 
 | Method | Params | Result | `mutating` |
 | --- | --- | --- | --- |
@@ -582,7 +582,7 @@ Decided by the maintainer on 2026-10-22 and narrowed on 2026-10-23:
 | Member store | `pluginFiles` file `external-agent/members.json`, payload `{format: 1, members: [StoredMember]}` |
 | `externalAgentNodes` | Process service in each bridge's `Deps`; the bridge detaches in its effect |
 | Notices | `session_broadcast::notify(ctx, leader_session_id, Notice { source: "ExternalAgent", kind: "activity", data })` |
-| `managementMethods:external_agents` | Looked up by Rpc per call |
+| Namespace `external_agents` registered with `managementMethods` | Looked up by Rpc per call |
 
 ```rust
 trait MemberProvider { // collaborationMembers:<kind>

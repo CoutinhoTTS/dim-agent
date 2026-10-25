@@ -10,7 +10,7 @@ use dim_agent_capabilities::{
     model_provider::ModelProviderPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
-use dim_agent_runtime::register_capability;
+use dim_agent_runtime::{Capability, KeysOf, register_capability};
 use dim_app_server::{
     managed_provider::{
         AccountSnapshot, AccountView, CredentialLease, LeaseOwner, ManagedCatalog, ManagedError,
@@ -214,7 +214,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     let config = ServerConfig {
         unix_path: Some(home.join("daemon.sock")),
         product_home: Some(home.clone()),
@@ -224,7 +224,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
             register_capability(builtins, move || FixturePlugin(provider.clone()))
         }))),
         session_defaults: dim_agent_runtime::SessionConfig {
-            tools: ["read"].map(String::from).to_vec(),
+            tools: Some(["read"].map(String::from).to_vec()),
             ..Default::default()
         },
         ..Default::default()

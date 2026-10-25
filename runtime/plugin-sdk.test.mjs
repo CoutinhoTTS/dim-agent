@@ -40,7 +40,7 @@ test('packed plugin service types compile the author guide and enforce the publi
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolContribution, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionEventRecord, SessionEventsContribution, BranchEvent, BranchServices, AgentErrorThrown } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolRegistry, ToolExecute, ToolResult, SessionMethods, SessionMethodHandler, ManagementMethods, MethodHandler, MethodDeclaration, SessionConfig, SessionBroadcast, BranchEvent, Services, AgentErrorThrown, MethodReply } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const permissions: SessionPermissions;
@@ -48,13 +48,17 @@ declare const workflowFiles: WorkflowFiles;
 declare const metadata: SessionMetadata;
 declare const auxiliary: AuxiliaryModel;
 declare const files: FileScope;
-declare const tool: ToolContribution;
-declare const methods: SessionMethodsContribution;
-declare const management: ManagementMethodsContribution;
-void management.describe();
-void management.call({ callId: 'call', method: 'example.status', params: [1, true] }, Promise.resolve(), () => {});
-declare const events: SessionEventsContribution;
-declare const config: SessionConfig;
+declare const tools: ToolRegistry;
+declare const execute: ToolExecute;
+declare const methods: SessionMethods;
+declare const management: ManagementMethods;
+declare const handler: MethodHandler;
+declare const sessionHandler: SessionMethodHandler;
+const declarations: MethodDeclaration[] = [{ name: 'example.status', mutating: false, interruption: 'report', progress: false }];
+void management.register('example', declarations, handler);
+void handler({ callId: 'call', method: 'example.status', params: [1, true] }, Promise.resolve(), () => {});
+// @ts-expect-error a declaration states its interruption and progress.
+void management.register('example', [{ name: 'example.status', mutating: false }], handler);
 const at = { sessionId: 'session', branchId: 'main' };
 const permission: PermissionState = await permissions.permission(at);
 const permissionVersion: number | bigint = permission.version;
@@ -143,40 +147,51 @@ void sessions.input({ ...at, submissionId: 'id', mode: 'replace', rawBlocks: [],
 void sessions.launch({ cwd: '/workspace', policy: { allowed_tools: [] } });
 // @ts-expect-error lease replacement accepts text, not a host storage envelope.
 void files.withLock('state', file => file.replace({ version: 1, text: 'state' }));
-void tool.execute({
+void execute({
   ...at, turnId: 'turn', callId: 'call', arguments: { text: 'hello' },
   config: { permissionPolicy: { preset: 'read-only', allowedTools: [], disallowedTools: [] },
     cwd: '/workspace', model: { providerId: 'test', modelId: 'model' },
     systemPrompt: '', tools: ['example_echo'], collaborationRole: 'leader' },
 }, Promise.resolve());
-void methods.call({ callId: 'call', method: 'session.example.echo', params: { sessionId: 'session' } },
+void methods.register('session.example', [{ name: 'session.example.echo', mutating: false, interruption: 'drain', progress: true }], sessionHandler);
+void sessionHandler({ callId: 'call', method: 'session.example.echo', params: { sessionId: 'session' } },
   Promise.resolve(), () => {});
+// @ts-expect-error a Session method call names its Session.
+void sessionHandler({ callId: 'call', method: 'session.example.echo', params: {} }, Promise.resolve(), () => {});
 const result: ToolResult = { content: [{ type: 'text', text: 'handle: owned-id' }],
   structuredContent: { handle: 'owned-id' }, backgroundTask: { taskId: 'task', wakePolicy: 'manual' },
   blobRefs: [{ blobId: 'blob', sessionId: 'session', kind: 'text', path: '/files/result' }],
   contextMessages: [{ role: 'tool_result', content: [{ type: 'tool_result', tool_use_id: 'call', content: 'done', is_error: false }] }] };
 void result;
 // @ts-expect-error the foreign call uses neutral identities and arguments, not the native shape.
-void tool.execute({ id: 'call', name: 'example_echo', input: {} }, Promise.resolve());
+void execute({ id: 'call', name: 'example_echo', input: {} }, Promise.resolve());
 // @ts-expect-error result content is text or typed blocks, not an arbitrary object.
 const invalidResult: ToolResult = { content: { handle: 'owned-id' } };
-// @ts-expect-error contributed tools declare a Permission risk.
-const missingRisk: ReturnType<ToolContribution['declaration']> = { name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' } };
+void tools.register({ name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' }, risk: 'session' }, execute);
+// @ts-expect-error registered tools declare a Permission risk.
+void tools.register({ name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' } }, execute);
 // @ts-expect-error C4 does not implement a handoff reply.
-const handoff: Awaited<ReturnType<SessionMethodsContribution['call']>> = { kind: 'handedOff' };
-const bound: null = events.bind({ sessionId: 'session', config }, Promise.resolve());
-const record: SessionEventRecord = { ...at, event: {
+const handoff: Awaited<ReturnType<SessionMethodHandler>> = { kind: 'handedOff' };
+const record: SessionBroadcast = { kind: 'event', branchId: at.branchId, event: {
   id: 'event', sequence: 1, create_at: 1, type: 'input', name: 'applied', data: {} } };
-void bound; void record;
-// @ts-expect-error bind is synchronous and returns JSON null.
-const asyncEvents: SessionEventsContribution = { bind: async () => null };
-// @ts-expect-error setup includes the original Session configuration.
-events.bind({ sessionId: 'session' }, Promise.resolve());
-// @ts-expect-error closing uses the existing Promise reference contract.
-events.bind({ sessionId: 'session', config }, new AbortController().signal);
-// @ts-expect-error the record includes both Session and branch identity.
-const unscopedRecord: SessionEventRecord = { event: record.event };
-declare const branch: BranchServices;
+void record;
+const failure: MethodReply = { code: 'invalid_params', message: 'Invalid' };
+void failure;
+// @ts-expect-error Rpc chooses the wire code; a method returns its application code.
+const wireFailure: MethodReply = { code: -32602, appError: 'invalid_params', message: 'Invalid' };
+// @ts-expect-error an event record names its branch.
+const unscopedRecord: SessionBroadcast = { kind: 'event', event: record.event };
+declare const branch: Services;
+const session = await branch.sessionIdentity.get();
+const sessionId: string = session.sessionId;
+const restored: boolean = session.restored;
+const config: SessionConfig = await branch.sessionConfig.get();
+const published: boolean = await branch.sessionLifecycle.activated();
+const held = await branch.sessionLifecycle.hold();
+const released: boolean = held === null ? false : await branch.sessionLifecycle.release(held);
+void sessionId; void restored; void config; void published; void released;
+// @ts-expect-error a hold is the id the row releases, not an object.
+const handle: { release(): void } = await branch.sessionLifecycle.hold();
 const cancelled = () => new Promise<void>(() => {});
 void branch.dispatcher.listen('counter', ['input/message'], async event => {
   const sequence: number | bigint = event.sequence;

@@ -9,14 +9,16 @@ use dim_agent_capabilities::{
     host::*,
     tool_binding::ToolBinding,
     tool_registry::{
-        SessionToolSource, ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged,
-        ToolRegistry, ToolSourceSet, ToolSourcesState, ToolSourcesView, definition,
+        ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged, ToolRegistry,
+        ToolSourceSet, ToolSourcesState, ToolSourcesView, definition, tool_provider_changes,
     },
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, TypedPlugin};
+use rutis::{
+    BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, KeyedGate, TypedPlugin,
+};
 use std::{
     sync::{
         Arc, Mutex,
@@ -70,7 +72,7 @@ impl ToolHandler for Handler {
 struct TestSource {
     sets: Mutex<Vec<Arc<ToolSourceSet>>>,
     // Initial values are moved into the next Session's source.
-    emitter: Option<(Ctx, SessionScope)>,
+    emitter: Option<(Ctx, InstanceId)>,
 }
 impl SessionService for TestSource {}
 impl PublicService for TestSource {}
@@ -86,7 +88,7 @@ impl TestSource {
         *self.sets.lock().unwrap() = sets;
     }
     fn offer(&self, sets: Vec<Arc<ToolSourceSet>>) {
-        let (ctx, scope) = self
+        let (ctx, session) = self
             .emitter
             .as_ref()
             .expect("offer through the Session's TestSource service");
@@ -94,7 +96,7 @@ impl TestSource {
         ctx.events()
             .emit(
                 ctx,
-                &EventKey::<ToolProviderChanged>::of().instance(scope.instance),
+                &tool_provider_changes(*session),
                 Arc::new(ToolProviderChanged),
             )
             .unwrap();
@@ -136,36 +138,43 @@ fn set(
 }
 
 struct SourcePlugin {
-    scope: SessionScope,
-    source: Arc<TestSource>,
+    session: InstanceId,
     name: &'static str,
+    key: DepKey<TestSource>,
+    source: Arc<TestSource>,
+}
+/// Registers `source` as the Session tool source `name` of every Session.
+fn add_source(builder: &mut AgentBuilder, source: Arc<TestSource>, name: &'static str) {
+    names::register::<TestSource>(builder.catalog_mut(), Some(SESSION_GROUP));
+    builder.session_part(move |names| {
+        names.part(SourcePlugin {
+            session: names.instance(SESSION_GROUP)?,
+            name,
+            key: names.key()?,
+            source: source.clone(),
+        })
+    });
 }
 impl TypedPlugin for SourcePlugin {
-    type Deps = ();
+    type Deps = (Keyed<ToolRegistry>,);
     fn name(&self) -> &str {
         "TestSource"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (): Self::Deps,
+        (Keyed(tools),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let source = Arc::new(TestSource {
                 sets: Mutex::new(std::mem::take(&mut *self.source.sets.lock().unwrap())),
-                emitter: Some((ctx.clone(), self.scope)),
+                emitter: Some((ctx.clone(), self.session)),
             });
-            ctx.provide_as(self.scope.key::<TestSource>(), source.clone())?;
-            ctx.provide_as(
-                self.scope.named_key::<SessionToolSource>(self.name),
-                Arc::new(SessionToolSource(source)),
-            )?;
+            ctx.provide_as(self.key.key().clone(), source.clone())?;
+            tools.register_source(ctx, self.name, source)?;
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for SourcePlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 struct Env {
@@ -211,11 +220,13 @@ fn env_named(
     }
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(model.clone())))
+        .process_value(Arc::new(ModelHost(model.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
+        .session_part(|names| {
+            names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+        });
     defaults::tool_host(&mut builder, Arc::new(GateTools(Arc::new(Gate::default()))));
     defaults::install_with_prompt(
         &mut builder,
@@ -225,13 +236,7 @@ fn env_named(
             model: Some(selection("scripted")),
         }),
     );
-    builder
-        .session_tool_source(name)
-        .session_plugin(move |scope| SourcePlugin {
-            scope: *scope,
-            source: source.clone(),
-            name,
-        });
+    add_source(&mut builder, source, name);
     Env {
         agent: builder.build(),
         model,
@@ -242,7 +247,7 @@ impl Env {
     async fn session(&self) -> Session {
         self.agent
             .create_session(SessionConfig {
-                tools: vec!["gate".into()],
+                tools: Some(vec!["gate".into()]),
                 ..SessionConfig::default()
             })
             .await
@@ -283,7 +288,14 @@ async fn adopted(session: &Session, branch: &str, sources: &[(&str, &str)]) {
                     EventKind::ContextConfigured(data) => Some(data.settings.tool_sources.clone()),
                     _ => None,
                 });
-            if current.as_ref() == Some(&expected) {
+            // The registered tools' own sets come with the source sets.
+            let sources = current.map(|sources| {
+                sources
+                    .into_iter()
+                    .filter(|source| !source.key.starts_with("#contributed:"))
+                    .collect::<Vec<_>>()
+            });
+            if sources.as_ref() == Some(&expected) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -337,15 +349,11 @@ impl TypedPlugin for EnableContributor {
         })
     }
 }
-impl Capability for EnableContributor {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 struct OptionalContributor {
-    scope: SessionScope,
     generations: Arc<AtomicUsize>,
     hold: Arc<Gate>,
-    /// Every generation's contribution, to observe its release.
-    provided: Arc<Mutex<Vec<std::sync::Weak<ToolContribution>>>>,
+    /// Every generation's handler, to observe its release.
+    provided: Arc<Mutex<Vec<std::sync::Weak<OptionalHandler>>>>,
 }
 struct OptionalHandler {
     generation: usize,
@@ -377,43 +385,54 @@ impl ToolHandler for OptionalHandler {
     }
 }
 impl TypedPlugin for OptionalContributor {
-    type Deps = Arc<ContributorEnabled>;
+    type Deps = (Keyed<ContributorEnabled>, Keyed<ToolRegistry>);
     fn name(&self) -> &str {
         "OptionalContributor"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        _: Self::Deps,
+        (_, Keyed(tools)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
-            let contribution = Arc::new(ToolContribution {
-                definition: definition(
-                    "optional",
-                    "Report provider generation",
-                    serde_json::json!({"type":"object"}),
-                ),
-                handler: Arc::new(OptionalHandler {
-                    generation,
-                    stopping: ctx.cancellation_token(),
-                    hold: self.hold.clone(),
-                }),
+            let handler = Arc::new(OptionalHandler {
+                generation,
+                stopping: ctx.cancellation_token(),
+                hold: self.hold.clone(),
             });
-            self.provided
-                .lock()
-                .unwrap()
-                .push(Arc::downgrade(&contribution));
-            ctx.provide_as(
-                self.scope.named_key::<ToolContribution>("optional"),
-                contribution,
+            self.provided.lock().unwrap().push(Arc::downgrade(&handler));
+            tools.register(
+                ctx,
+                ToolContribution {
+                    definition: definition(
+                        "optional",
+                        "Report provider generation",
+                        serde_json::json!({"type":"object"}),
+                    ),
+                    handler,
+                },
             )?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for OptionalContributor {
-    fn keys(&self) -> KeysOf<Self> {}
+/// Adds the `optional` tool, whose contributor runs while the process
+/// provides `ContributorEnabled`.
+fn add_optional(
+    builder: &mut AgentBuilder,
+    generations: Arc<AtomicUsize>,
+    hold: Arc<Gate>,
+    provided: Arc<Mutex<Vec<std::sync::Weak<OptionalHandler>>>>,
+) {
+    names::register::<ContributorEnabled>(builder.catalog_mut(), None);
+    builder.session_part(move |names| {
+        names.part(OptionalContributor {
+            generations: generations.clone(),
+            hold: hold.clone(),
+            provided: provided.clone(),
+        })
+    });
 }
 
 async fn plugin_state(view: &rutis::FiberView, state: rutis::FiberState) {
@@ -430,12 +449,12 @@ async fn plugin_state(view: &rutis::FiberView, state: rutis::FiberState) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations() {
     let root = Ctx::root().unwrap();
-    let enabled = root.plugin(capability_plugin(EnableContributor));
+    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
     plugin_state(&enabled, rutis::FiberState::Active).await;
     let generations = Arc::new(AtomicUsize::new(0));
     let hold = Arc::new(Gate::default());
     let held = hold.clone();
-    let provided: Arc<Mutex<Vec<std::sync::Weak<ToolContribution>>>> = Arc::default();
+    let provided: Arc<Mutex<Vec<std::sync::Weak<OptionalHandler>>>> = Arc::default();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install_with_prompt(
@@ -446,22 +465,11 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
             model: Some(selection("scripted")),
         }),
     );
-    builder
-        .session_tool("optional")
-        .session_tool("absent")
-        .session_plugin({
-            let provided = provided.clone();
-            move |scope| OptionalContributor {
-                scope: *scope,
-                generations: generations.clone(),
-                hold: held.clone(),
-                provided: provided.clone(),
-            }
-        });
+    add_optional(&mut builder, generations, held, provided.clone());
     let agent = builder.build_in(&root);
     let session = agent
         .create_session(SessionConfig {
-            tools: vec!["optional".into(), "absent".into(), "echo".into()],
+            tools: Some(vec!["optional".into(), "absent".into(), "echo".into()]),
             permission_policy: PermissionPolicy {
                 allowed_tools: vec!["echo".into(), "optional".into()],
                 ..PermissionPolicy::default()
@@ -552,7 +560,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
     // (#241); this configuration has no tool part, so the next request
     // declares it with no adoption fact.
     let reloaded = session.sequence("main").unwrap();
-    let enabled = root.plugin(capability_plugin(EnableContributor));
+    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
     plugin_state(&enabled, rutis::FiberState::Active).await;
     plugin_state(&provider, rutis::FiberState::Active).await;
     session
@@ -581,6 +589,8 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
         .find(|plugin| plugin.name == "Loop")
         .unwrap();
     let loop_view = root.view(previous_loop.id).unwrap();
+    // A restarted registry holds no registration: the contributor reloads
+    // with it and registers its next generation.
     root.view(registry_id).unwrap().restart().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop_view
@@ -599,7 +609,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    assert_eq!(last_result(&session, "main").await, "generation 2");
+    assert_eq!(last_result(&session, "main").await, "generation 3");
     agent.close().await.unwrap();
     root.shutdown().await.unwrap();
 }
@@ -607,7 +617,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn contributors_are_current_for_the_first_request_without_initial_configuration() {
     let root = Ctx::root().unwrap();
-    let enabled = root.plugin(capability_plugin(EnableContributor));
+    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
     plugin_state(&enabled, rutis::FiberState::Active).await;
     let store = Arc::new(MemoryTimelineStore::default());
     let generations = Arc::new(AtomicUsize::new(0));
@@ -616,25 +626,19 @@ async fn contributors_are_current_for_the_first_request_without_initial_configur
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
-        builder
-            .timeline_store(store.clone())
-            .session_tool("optional")
-            .session_plugin({
-                let generations = generations.clone();
-                let hold = hold.clone();
-                move |scope| OptionalContributor {
-                    scope: *scope,
-                    generations: generations.clone(),
-                    hold: hold.clone(),
-                    provided: Arc::default(),
-                }
-            });
+        builder.timeline_store(store.clone());
+        add_optional(
+            &mut builder,
+            generations.clone(),
+            hold.clone(),
+            Arc::default(),
+        );
         builder.build_in(&root)
     };
     let agent = build();
     let session = agent
         .create_session(SessionConfig {
-            tools: vec!["optional".into(), "echo".into()],
+            tools: Some(vec!["optional".into(), "echo".into()]),
             permission_policy: PermissionPolicy {
                 allowed_tools: vec!["echo".into(), "optional".into()],
                 ..PermissionPolicy::default()
@@ -657,7 +661,7 @@ async fn contributors_are_current_for_the_first_request_without_initial_configur
         .unwrap();
     enabled.dispose().await.unwrap();
     plugin_state(&provider, rutis::FiberState::Pending).await;
-    let enabled = root.plugin(capability_plugin(EnableContributor));
+    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
     plugin_state(&provider, rutis::FiberState::Active).await;
     session
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
@@ -711,6 +715,7 @@ async fn an_accepted_source_change_is_adopted_after_its_emitter_closes() {
             &'a self,
             _: &'a Ctx,
             _: &'a ToolProviderChanged,
+            _: rutis::Call<'a, ()>,
         ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
             Box::pin(async move {
                 self.0.entered.notify_one();
@@ -729,8 +734,8 @@ async fn an_accepted_source_change_is_adopted_after_its_emitter_closes() {
     adopted(&session, "main", &[("mcp:a", "v1")]).await;
     adopted(&other, "main", &[("mcp:a", "v1")]).await;
     let source = session.session_service::<TestSource>().unwrap();
-    let (ctx, scope) = source.emitter.as_ref().unwrap();
-    let key = EventKey::<ToolProviderChanged>::of().instance(scope.instance);
+    let (ctx, session_instance) = source.emitter.as_ref().unwrap();
+    let key = tool_provider_changes(*session_instance);
 
     let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
     let emitter = ctx.plugin(Emitter(send));
@@ -899,6 +904,32 @@ async fn a_name_freed_in_the_same_refresh_admits_the_rejected_set() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_without_a_mount_list_declares_every_registered_tool() {
+    // BranchTool registers `branch`. A Session without a mount list declares
+    // it with the host tools; one whose list does not name it does not (#364).
+    for (tools, expected) in [
+        (None, vec!["gate", "branch", "lookup"]),
+        (Some(vec!["gate".to_owned()]), vec!["gate", "lookup"]),
+    ] {
+        let (source, log) = (TestSource::new(), Arc::new(Log::default()));
+        source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
+        let env = env(source, None);
+        let session = env
+            .agent
+            .create_session(SessionConfig {
+                tools,
+                ..SessionConfig::default()
+            })
+            .await
+            .unwrap();
+        adopted(&session, "main", &[("mcp:a", "v1")]).await;
+        env.turn(&session, "main", &[]).await;
+        assert_eq!(declared(&requests(&session).await[0]), expected);
+        env.agent.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_child_branch_binds_the_inherited_tools() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
@@ -985,7 +1016,6 @@ async fn a_model_update_and_a_tool_adoption_both_take_effect() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_assembly() {
     struct StartupGate {
-        scope: BranchScope,
         gate: Arc<Gate>,
         ready:
             tokio::sync::mpsc::UnboundedSender<(Arc<Timeline>, Arc<ToolRegistry>, Arc<TestSource>)>,
@@ -993,10 +1023,10 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
     }
     impl TypedPlugin for StartupGate {
         type Deps = (
-            BranchGate<ToolBinding>,
-            InBranch<Timeline>,
-            InSession<ToolRegistry>,
-            InSession<TestSource>,
+            KeyedGate<ToolBinding>,
+            Keyed<Timeline>,
+            Keyed<ToolRegistry>,
+            Keyed<TestSource>,
         );
         fn name(&self) -> &str {
             "ToolBindingStartupGate"
@@ -1004,7 +1034,7 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
         fn apply<'a>(
             &'a self,
             _ctx: &'a Ctx,
-            (_, InBranch(timeline), InSession(registry), InSession(source)): Self::Deps,
+            (_, Keyed(timeline), Keyed(registry), Keyed(source)): Self::Deps,
         ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
             Box::pin(async move {
                 self.ready.send((timeline, registry, source)).unwrap();
@@ -1016,11 +1046,6 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
             })
         }
     }
-    impl Capability for StartupGate {
-        fn keys(&self) -> KeysOf<Self> {
-            scoped::<Self::Deps, _>(&self.scope)
-        }
-    }
 
     for fail in [false, true] {
         let (source, log) = (TestSource::new(), Arc::new(Log::default()));
@@ -1029,11 +1054,13 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_value(Arc::new(ModelHost(model.clone())))
+            .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
+            .session_part(|names| {
+                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+            });
         defaults::tool_host(&mut builder, Arc::new(GateTools(Arc::new(Gate::default()))));
         defaults::install_with_prompt(
             &mut builder,
@@ -1043,22 +1070,16 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
                 model: Some(selection("scripted")),
             }),
         );
-        let provider = source.clone();
-        builder
-            .session_tool_source("mcp")
-            .session_plugin(move |scope| SourcePlugin {
-                scope: *scope,
-                source: provider.clone(),
-                name: "mcp",
-            });
+        add_source(&mut builder, source.clone(), "mcp");
         let gate = Arc::new(Gate::default());
         let hold = gate.clone();
         let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
-        builder.timeline_plugin(move |scope| StartupGate {
-            scope: *scope,
-            gate: hold.clone(),
-            ready: send.clone(),
-            fail,
+        builder.branch_part(move |names| {
+            names.part(StartupGate {
+                gate: hold.clone(),
+                ready: send.clone(),
+                fail,
+            })
         });
         let env = Env {
             agent: builder.build(),
@@ -1068,7 +1089,7 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
         let creating = tokio::spawn(async move {
             agent
                 .create_session(SessionConfig {
-                    tools: vec!["gate".into()],
+                    tools: Some(vec!["gate".into()]),
                     ..SessionConfig::default()
                 })
                 .await
@@ -1135,7 +1156,7 @@ async fn registered_sources_keep_their_names_apart_from_contributed_tools() {
     let error = invalid
         .agent
         .create_session(SessionConfig {
-            tools: vec!["gate".into()],
+            tools: Some(vec!["gate".into()]),
             ..SessionConfig::default()
         })
         .await
@@ -1175,31 +1196,21 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
             })
         }
     }
-    impl Capability for CloseGate {
-        fn keys(&self) -> KeysOf<Self> {}
-    }
 
     let root = Ctx::root().unwrap();
-    let enabled = root.plugin(capability_plugin(EnableContributor));
+    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
     plugin_state(&enabled, rutis::FiberState::Active).await;
     let gate = Arc::new(Gate::default());
     let hold = gate.clone();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder
-        .session_tool("optional")
-        .session_plugin(|scope| OptionalContributor {
-            scope: *scope,
-            generations: Arc::default(),
-            hold: Arc::default(),
-            provided: Arc::default(),
-        })
-        .timeline_plugin(move |_| CloseGate(hold.clone()));
+    add_optional(&mut builder, Arc::default(), Arc::default(), Arc::default());
+    builder.branch_part(move |names| names.part(CloseGate(hold.clone())));
     let agent = builder.build_in(&root);
     let session = agent
         .create_session(SessionConfig {
-            tools: vec!["optional".into(), "echo".into()],
+            tools: Some(vec!["optional".into(), "echo".into()]),
             ..SessionConfig::default()
         })
         .await
@@ -1248,7 +1259,7 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
     enabled.dispose().await.unwrap();
     plugin_state(&provider, rutis::FiberState::Pending).await;
     follow(&mut sources, |version| version.is_none()).await;
-    let enabled = root.plugin(capability_plugin(EnableContributor));
+    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
     plugin_state(&provider, rutis::FiberState::Active).await;
     let second = follow(&mut sources, |version| version.is_some()).await;
     assert_ne!(second, first);
@@ -1299,18 +1310,17 @@ async fn adopted_version(session: &Session, branch: &str, key: &str) -> Option<S
 
 /// Hands out the Session's registry, to resolve versions as `bind` does.
 struct RegistryProbe {
-    scope: SessionScope,
     slot: Arc<Mutex<Option<Arc<ToolRegistry>>>>,
 }
 impl TypedPlugin for RegistryProbe {
-    type Deps = (InSession<ToolRegistry>,);
+    type Deps = (Keyed<ToolRegistry>,);
     fn name(&self) -> &str {
         "RegistryProbe"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        (InSession(registry),): Self::Deps,
+        (Keyed(registry),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             *self.slot.lock().unwrap() = Some(registry);
@@ -1318,16 +1328,11 @@ impl TypedPlugin for RegistryProbe {
         })
     }
 }
-impl Capability for RegistryProbe {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_persisted_contributed_version_names_one_generation_across_restores() {
     let root = Ctx::root().unwrap();
-    let enabled = root.plugin(capability_plugin(EnableContributor));
+    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
     plugin_state(&enabled, rutis::FiberState::Active).await;
     let store = Arc::new(MemoryTimelineStore::default());
     let generations = Arc::new(AtomicUsize::new(0));
@@ -1349,33 +1354,20 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
                 model: Some(selection("scripted")),
             }),
         );
-        let generations = generations.clone();
-        builder
-            .timeline_store(store.clone())
-            .session_tool("optional")
-            .session_plugin(move |scope| OptionalContributor {
-                scope: *scope,
-                generations: generations.clone(),
-                hold: Arc::default(),
-                provided: Arc::default(),
-            })
-            .session_tool_source("mcp")
-            .session_plugin(move |scope| SourcePlugin {
-                scope: *scope,
-                source: source.clone(),
-                name: "mcp",
-            })
-            .session_plugin({
-                let slot = registry.clone();
-                move |scope| RegistryProbe {
-                    scope: *scope,
-                    slot: slot.clone(),
-                }
-            });
+        builder.timeline_store(store.clone());
+        add_optional(
+            &mut builder,
+            generations.clone(),
+            Arc::default(),
+            Arc::default(),
+        );
+        add_source(&mut builder, source, "mcp");
+        let slot = registry.clone();
+        builder.session_part(move |names| names.part(RegistryProbe { slot: slot.clone() }));
         builder.build_in(&root)
     };
     let config = SessionConfig {
-        tools: vec!["optional".into(), "echo".into()],
+        tools: Some(vec!["optional".into(), "echo".into()]),
         permission_policy: PermissionPolicy {
             allowed_tools: vec!["echo".into(), "optional".into()],
             ..PermissionPolicy::default()
@@ -1422,232 +1414,5 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
     );
     agent.close().await.unwrap();
     enabled.dispose().await.unwrap();
-    root.shutdown().await.unwrap();
-}
-
-/// The declarations the foreign doubles answered: their generation and
-/// whether the test was serving a request then.
-#[derive(Default)]
-struct Declarations {
-    serving: std::sync::atomic::AtomicBool,
-    calls: Mutex<Vec<(&'static str, bool)>>,
-}
-impl Declarations {
-    fn of(&self, generation: &str) -> Vec<bool> {
-        let calls = self.calls.lock().unwrap();
-        calls
-            .iter()
-            .filter(|(name, _)| *name == generation)
-            .map(|(_, serving)| *serving)
-            .collect()
-    }
-}
-/// A foreign row's tool as ToolRegistry sees it. Outside a request its
-/// declaration does not answer (up to 5 s), like a runtime that is stopping:
-/// a background reader that called it would be held there.
-struct ForeignTool(&'static str, Arc<Declarations>);
-impl rutis_bridge::session::HostDispatch for ForeignTool {
-    fn invoke(
-        &self,
-        method: &str,
-        _: rutis_bridge::session::Value,
-    ) -> rutis_bridge::session::Reply {
-        let value = match method {
-            "declaration" => {
-                let serving = self.1.serving.load(Ordering::SeqCst);
-                self.1.calls.lock().unwrap().push((self.0, serving));
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                while !self.1.serving.load(Ordering::SeqCst) && std::time::Instant::now() < deadline
-                {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                let mut tool = definition(
-                    "foreign",
-                    "Foreign tool",
-                    serde_json::json!({"type":"object"}),
-                );
-                tool.risk = Some("session".into());
-                serde_json::to_value(tool).unwrap()
-            }
-            _ => serde_json::to_value(ToolResult::text(format!("{} ran", self.0))).unwrap(),
-        };
-        Ok(value.into())
-    }
-}
-type ForeignSlot = Arc<
-    Mutex<
-        Option<(
-            Ctx,
-            rutis::ServiceWriter<dyn rutis_bridge::session::HostDispatch>,
-        )>,
-    >,
->;
-/// Provides generation A under the row's tool name with its generation token,
-/// and hands the test a writer that replaces it in place.
-struct ForeignContributor {
-    scope: SessionScope,
-    declarations: Arc<Declarations>,
-    slot: ForeignSlot,
-}
-impl TypedPlugin for ForeignContributor {
-    type Deps = ();
-    fn name(&self) -> &str {
-        "ForeignContributor"
-    }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): (),
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let instance = self.scope.instance;
-            ctx.provide_as(
-                rutis::TypeKey::keyed_dynamic::<CancellationToken>("toolContribution:foreign")
-                    .with_instance(instance),
-                Arc::new(ctx.cancellation_token()),
-            )?;
-            let (_, writer) = ctx.provide_mut_as::<dyn rutis_bridge::session::HostDispatch>(
-                rutis_bridge::session::host_key_in("toolContribution:foreign", instance),
-                Arc::new(ForeignTool("A", self.declarations.clone())),
-            )?;
-            *self.slot.lock().unwrap() = Some((ctx.clone(), writer));
-            Ok(Effect::Done)
-        })
-    }
-}
-impl Capability for ForeignContributor {
-    fn keys(&self) -> KeysOf<Self> {}
-}
-/// A root plugin whose activation wakes every registry's background refresh.
-struct Wake;
-impl TypedPlugin for Wake {
-    type Deps = ();
-    fn name(&self) -> &str {
-        "Wake"
-    }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (): (),
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async { Ok(Effect::Done) })
-    }
-}
-impl Capability for Wake {
-    fn keys(&self) -> KeysOf<Self> {}
-}
-
-/// Waits until the newest tool part of `main` meets `expected` for the
-/// contributed `foreign` set's version.
-async fn foreign_adopted(session: &Session, expected: impl Fn(Option<&str>) -> bool) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if expected(
-                adopted_version(session, "main", "#contributed:foreign")
-                    .await
-                    .as_deref(),
-            ) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the tool part was adopted");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_replaced_foreign_provider_is_read_only_by_a_request() {
-    let root = Ctx::root().unwrap();
-    let declarations = Arc::new(Declarations::default());
-    let slot: ForeignSlot = Arc::default();
-    let (source, log) = (TestSource::new(), Arc::new(Log::default()));
-    // A dynamic source gives the branch a tool part, so its requests bind
-    // the adopted versions (`bind`) and adoption runs in the background.
-    source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
-    let mut builder = AgentBuilder::new(AgentConfig::default());
-    defaults::mock_hosts(&mut builder);
-    defaults::install_with_prompt(
-        &mut builder,
-        Arc::new(EmptyPromptHost),
-        Some(ConfigureUpdate {
-            sources: Vec::new(),
-            model: Some(selection("scripted")),
-        }),
-    );
-    builder
-        .session_tool("foreign")
-        .session_plugin({
-            let (declarations, slot) = (declarations.clone(), slot.clone());
-            move |scope| ForeignContributor {
-                scope: *scope,
-                declarations: declarations.clone(),
-                slot: slot.clone(),
-            }
-        })
-        .session_tool_source("mcp")
-        .session_plugin(move |scope| SourcePlugin {
-            scope: *scope,
-            source: source.clone(),
-            name: "mcp",
-        });
-    let agent = builder.build_in(&root);
-    // Branch initialization serves the first request and reads A.
-    declarations.serving.store(true, Ordering::SeqCst);
-    let session = agent
-        .create_session(SessionConfig {
-            tools: vec!["foreign".into(), "echo".into()],
-            permission_policy: PermissionPolicy {
-                allowed_tools: vec!["echo".into(), "foreign".into()],
-                ..PermissionPolicy::default()
-            },
-            ..SessionConfig::default()
-        })
-        .await
-        .unwrap();
-    foreign_adopted(&session, |version| version.is_some()).await;
-    assert_eq!(declarations.of("A"), [true]);
-
-    // Replace A by B in place, with no absent provider between them, and
-    // wake the background refresh.
-    declarations.serving.store(false, Ordering::SeqCst);
-    let (ctx, writer) = slot.lock().unwrap().take().unwrap();
-    writer
-        .set(&ctx, Arc::new(ForeignTool("B", declarations.clone())))
-        .unwrap();
-    let wake = root.plugin(capability_plugin(Wake));
-    plugin_state(&wake, rutis::FiberState::Active).await;
-    // The registry withdrew A and the branch adopted the withdrawal in the
-    // background; neither read B's declaration.
-    foreign_adopted(&session, |version| version.is_none()).await;
-    assert!(
-        declarations.of("B").is_empty(),
-        "a background reader called B"
-    );
-
-    // The next request attaches B, so the request after it declares B.
-    declarations.serving.store(true, Ordering::SeqCst);
-    session
-        .submit(
-            "tool:echo {\"text\":\"next\"}".into(),
-            InputMode::Queue,
-            "main",
-        )
-        .await
-        .unwrap();
-    session.idle("main").await.unwrap();
-    foreign_adopted(&session, |version| version.is_some()).await;
-    session
-        .submit("tool:foreign {}".into(), InputMode::Queue, "main")
-        .await
-        .unwrap();
-    session.idle("main").await.unwrap();
-    assert_eq!(last_result(&session, "main").await, "B ran");
-    assert_eq!(declarations.of("B"), [true]);
-    tokio::time::timeout(Duration::from_secs(10), agent.close())
-        .await
-        .unwrap()
-        .unwrap();
-    wake.dispose().await.unwrap();
     root.shutdown().await.unwrap();
 }

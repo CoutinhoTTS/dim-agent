@@ -1,22 +1,21 @@
 import { definePlugin } from '@arcships/rutis'
-import type { ManagementMethodsContribution, MethodReply, SessionPermissions, SessionsErrorThrown, SessionRef, Sessions } from '../../npm/plugin.js'
+import type { ManagementMethods, MethodReply, SessionPermissions, SessionsErrorThrown, SessionRef, Sessions } from '../../npm/plugin.js'
 
 let generation = 0
 export default definePlugin({
   name: 'SessionPermissionsFixture',
-  inject: ['sessionPermissions', 'sessions'],
-  provides: { 'managementMethods:permissions': { describe: 'async', call: 'async' } },
-  apply(ctx) {
+  inject: ['sessionPermissions', 'sessions', 'managementMethods'],
+  provides: {},
+  async apply(ctx) {
     const applied = ++generation
     const permissions = ctx.use<SessionPermissions>('sessionPermissions')
     const sessions = ctx.use<Sessions>('sessions')
-    const methods: ManagementMethodsContribution = {
-      async describe() {
-        return ['branch', 'defaults', 'legacy'].map(name => ({
-          name: `permissions.${name}`, mutating: false, interruption: 'report', progress: false,
-        }))
-      },
-      async call(call): Promise<MethodReply> {
+    await ctx.use<ManagementMethods>('managementMethods').register(
+      'permissions',
+      ['branch', 'defaults', 'legacy'].map(name => ({
+        name: `permissions.${name}`, mutating: false, interruption: 'report', progress: false,
+      })),
+      async (call): Promise<MethodReply> => {
         try {
           // Requests cross the generated decoder used by real process callers.
           const at = call.params as unknown as SessionRef
@@ -35,7 +34,6 @@ export default definePlugin({
           } } }
         }
       },
-    }
-    ctx.provide('managementMethods:permissions', methods)
+    )
   },
 })

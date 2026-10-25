@@ -1,4 +1,1 @@
-{
-  "sessionEvents:observer": { "bind": "sync" },
-  "sessionMethods:session.observer": { "describe": "async", "call": "async" }
-}
+{}

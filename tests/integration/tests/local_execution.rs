@@ -143,9 +143,6 @@ impl TypedPlugin for PlatformPlugin {
         })
     }
 }
-impl Capability for PlatformPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hook {
@@ -197,15 +194,14 @@ impl Seen {
     }
 }
 struct Probe {
-    scope: BranchScope,
     hook: Hook,
     seen: Seen,
 }
 impl TypedPlugin for Probe {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<TimelineIdentity>,
-        InSession<TreeCommands>,
+        rutis::Keyed<Timeline>,
+        rutis::Keyed<TimelineIdentity>,
+        rutis::Keyed<TreeCommands>,
     );
     fn name(&self) -> &str {
         "Probe"
@@ -213,7 +209,7 @@ impl TypedPlugin for Probe {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(identity), InSession(tree)): Self::Deps,
+        (rutis::Keyed(timeline), rutis::Keyed(identity), rutis::Keyed(tree)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             self.seen.timelines.lock().unwrap().push((
@@ -235,11 +231,6 @@ impl TypedPlugin for Probe {
         })
     }
 }
-impl Capability for Probe {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 struct Harness {
     root: Ctx,
@@ -252,12 +243,7 @@ struct Harness {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "dim-local-exec-{}-{}-{name}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let path = std::env::temp_dir().join(format!("dim-local-exec-{}-{name}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&path).unwrap();
     std::fs::canonicalize(path).unwrap()
 }
@@ -282,13 +268,13 @@ impl Harness {
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
         let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        let view = root.plugin(rutis::Typed::new(PlatformPlugin(Arc::new(platform))));
         Self::with_platform(root, view, hook, cwd).await
     }
     async fn with_platform(root: Ctx, view: rutis::FiberView, hook: Hook, cwd: PathBuf) -> Self {
         let store = Arc::new(MemoryTimelineStore::default());
         let output_root = scratch("output");
-        let file_writes = root.plugin(capability_plugin(
+        let file_writes = root.plugin(rutis::Typed::new(
             workspace_tools::FileWriteCoordinatorPlugin::default(),
         ));
         wait_active(
@@ -305,11 +291,11 @@ impl Harness {
         builder
             .timeline_store(store.clone())
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_value(Arc::new(ModelHost(model.clone())))
+            .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         dim_agent_capabilities::defaults::install(&mut builder);
         workspace_tools::install(
             &mut builder,
@@ -319,10 +305,11 @@ impl Harness {
         );
         wait::install(&mut builder);
         let probes = seen.clone();
-        builder.timeline_plugin(move |scope| Probe {
-            scope: *scope,
-            hook,
-            seen: probes.clone(),
+        builder.branch_part(move |names| {
+            names.part(Probe {
+                hook,
+                seen: probes.clone(),
+            })
         });
         let agent = builder.build_in(&root);
         Self {
@@ -338,7 +325,7 @@ impl Harness {
     fn config(&self) -> SessionConfig {
         SessionConfig {
             cwd: self.cwd.to_string_lossy().into_owned(),
-            tools: vec!["exec".into(), "wait".into()],
+            tools: Some(vec!["exec".into(), "wait".into()]),
             // These flows exercise execution; approval has its own tests.
             permission_policy: dim_agent_runtime::PermissionPolicy {
                 preset: dim_agent_runtime::PermissionPreset::FullAccess,
@@ -471,16 +458,18 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     )
     .unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     (&storage).await.unwrap();
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             isolation_file: Some((0, "host-isolation.json".into())),
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     std::os::unix::fs::symlink(&secret, harness.cwd.join("escape-link")).unwrap();
@@ -753,7 +742,7 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
         ));
     }
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+    let view = root.plugin(rutis::Typed::new(PlatformPlugin(Arc::new(platform))));
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     let host_tmp = PathBuf::from("/tmp").join(format!("dim-exec-{}", uuid::Uuid::new_v4()));
@@ -938,7 +927,7 @@ async fn default_macos_isolation_reads_git_global_configuration_but_not_other_ho
                 .push(("XDG_CONFIG_HOME".into(), config.as_os_str().into()));
         }
         let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        let view = root.plugin(rutis::Typed::new(PlatformPlugin(Arc::new(platform))));
         let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
         let session = harness.session().await;
         for (command, succeeds) in [
@@ -999,16 +988,18 @@ async fn explicit_file_roots_let_git_read_its_configuration_but_not_their_siblin
     )
     .unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     (&storage).await.unwrap();
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             isolation_file: Some((0, "host-isolation.json".into())),
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     // The default directories that an explicit list repeats on each platform.
@@ -1124,16 +1115,18 @@ async fn isolated_exec_failures_point_to_the_local_policy() {
     )
     .unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     (&storage).await.unwrap();
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             isolation_file: Some((0, "host-isolation.json".into())),
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     // Whether the result carries the note; it names the file and offers
@@ -1260,16 +1253,18 @@ async fn local_isolation_policy_controls_native_sockets() {
     )
     .unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     (&storage).await.unwrap();
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             isolation_file: Some((0, "host-isolation.json".into())),
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     for (address, family) in [("127.0.0.1", "-4"), ("::1", "-6")] {
@@ -1511,15 +1506,17 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     let config = home.join("exec-shell.json");
     std::fs::write(&config, "invalid json").unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             ..HostPlatformConfig::default()
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let platform = harness.root.get::<HostPlatform>().unwrap();
     let session = harness.session().await;
@@ -2079,7 +2076,7 @@ async fn a_turn_stop_keeps_background_work_and_its_wake_starts_a_turn() {
             &[
                 (
                     "exec",
-                    json!({"command": "sleep 1; echo survived", "runInBackground": true}),
+                    json!({"command": "while [ ! -f finish-after-stop ]; do sleep 0.01; done; echo survived", "runInBackground": true}),
                 ),
                 ("wait", json!({"timeoutMs": 60000})),
             ],
@@ -2090,11 +2087,16 @@ async fn a_turn_stop_keeps_background_work_and_its_wake_starts_a_turn() {
     })
     .await;
     session.stop("main", "user stop".into()).await.unwrap();
+    std::fs::write(harness.cwd.join("finish-after-stop"), "").unwrap();
     let events = until(&session, "wake", |events| !notifications(events).is_empty()).await;
     let (_, end) = &ended(&events)[0];
     assert_eq!(end.status, ExecStatus::Completed);
     assert!(text(&end.result).contains("survived"));
     // No pause: the wake arrives after the stop and drives a turn.
+    until(&session, "woken turn", |events| {
+        count(events, "turn/end") == 2
+    })
+    .await;
     session.idle("main").await.unwrap();
     assert_eq!(count(&local_events(&session).await, "turn/start"), 2);
     // That turn consumed the notification: it does not end a later wait.

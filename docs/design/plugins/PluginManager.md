@@ -16,7 +16,7 @@ flowchart LR
     PM["PluginManagerPlugin<br/>plugin.* methods, package store,<br/>pluginContents"]:::new
     SET["Settings<br/>typed operations on loader rows"]
     LOADER["rutis Loader"]
-    RPC["Rpc method table<br/>collects managementMethods"]
+    RPC["Rpc<br/>reads managementMethods"]
     CONS["Content owners<br/>SkillsCatalog, Mcp, Hooks, Workflow"]
   end
   subgraph NODE["Each configured node, local or peer"]
@@ -32,11 +32,11 @@ flowchart LR
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Content owners depend on `pluginContents`, accepted per D3: installing, enabling or removing a package changes published sources as a data update (`changed`), never a reload, while a PluginManager reload (upgrade, crash) reloads the content owners. Rpc looks up PluginManager's `managementMethods` service (key `plugin`) per call and does not reload with it ([methods §3.2](../contracts/session-boundary.md#32-management-method)). A PluginManager reload is a rare structural event whose propagation to content owners is documented, not prevented. Package code rows are ordinary loader rows: they offer the named services their code declares in its `provides` (for example `toolContribution`, `sessionMethods`, `modalityAdapter`), consumers collect them by service name and scope, and when one unloads its dependents reload under the same rule. A code row on an offline peer node does not unload: its imported services stay registered and fail calls with `node_unavailable`, and its dependents neither reload nor go Pending (requirement on [#5](https://github.com/arcships/dim/issues/5), [§9](#9-requirements-raised-to-mechanism-owners)).
+All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Content owners depend on `pluginContents`, accepted per D3: installing, enabling or removing a package changes published sources as a data update (`changed`), never a reload, while a PluginManager reload (upgrade, crash) reloads the content owners. Rpc looks up the namespace `plugin`, which PluginManager registers with `managementMethods`, per call and does not reload with it ([methods §3.2](../contracts/session-boundary.md#32-management-method)). A PluginManager reload is a rare structural event whose propagation to content owners is documented, not prevented. Package code rows are ordinary loader rows: they offer the named services their code declares in its `provides` (for example `modalityAdapter`), which consumers collect by service name and scope, and they register their tools with `toolRegistry` and their method namespaces with `sessionMethods`; when one unloads its registrations are withdrawn and its dependents reload under the same rule. A code row on an offline peer node does not unload: its imported services stay registered and fail calls with `node_unavailable`, and its dependents neither reload nor go Pending (requirement on [#5](https://github.com/arcships/dim/issues/5), [§9](#9-requirements-raised-to-mechanism-owners)).
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `PluginManagerPlugin` | Process, control node | Settings (typed operations on the loader editable layer), `pluginFiles` (extended) on the control node, the rutis Loader, `FileStorage` and `HostPlatform` of each configured node | `pluginContents` process service; `managementMethods` key `plugin` (`plugin.*`), collected by Rpc |
+| `PluginManagerPlugin` | Process, control node | Settings (typed operations on the loader editable layer), `pluginFiles` (extended) on the control node, the rutis Loader, `FileStorage` and `HostPlatform` of each configured node | `pluginContents` process service; registers `plugin` (`plugin.*`) with `managementMethods` |
 | Package code rows | Process, on the package's node | that node's `FileStorage`, what the code declares | named services declared in its `provides`; reads its own business configuration (its named Settings sources, its own schema) at use time |
 | Content owners | Process | `pluginContents` | — (each defines its own type key) |
 
@@ -197,7 +197,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.7 Plugins interact only through public events and services | PluginManager never calls a content owner; owners read `pluginContents`, and each plugin's business configuration is reached only through Settings. |
 | §4.8 Generic requirements to mechanism owners | Typed loader operations (#3), services by name for non-Rust code (#4) and offline-node behaviour (#5) are raised in §9. |
 | §4.9 Only facts later decisions use enter the Timeline | PluginManager writes no Timeline event; intent stays in loader rows, packages in node storage, and clients read `plugin.list`. |
-| §1 Capability and App Server boundary | PluginManager is a process plugin in its own crate, not a Capability; the App Server only collects its `managementMethods`. |
+| §1 Capability and App Server boundary | PluginManager is a process plugin in its own crate, not a Capability; the App Server only dispatches the namespace it registers with `managementMethods`. |
 | ADR 002 D1 Scope follows the owner | Installation is per host, so PluginManager is process-scoped. |
 | ADR 002 D2 No wiring modules | Content owners and code-row consumers collect services by name; no wiring module exists. |
 | ADR 002 D3 Dependencies follow scope | All dependencies are process services; PluginManager and code-row reloads propagate as documented rare structural events. |
@@ -291,7 +291,7 @@ Internal to PluginManager, not a service: `stage` (fetch, verify), `commit` (ato
 
 Packages live under PluginManager's package root on their node, written through that node's `FileStorage` (A13). Git runs through the node's `HostPlatform` with hooks and submodules disabled, `https://` and `ssh://` only (A7). Local paths are copied, never referenced (A8). Directories are content-addressed by fingerprint, so an update never rewrites files a running row uses.
 
-### A.5 Methods (`managementMethods`, key `plugin`)
+### A.5 Methods (`managementMethods`, namespace `plugin`)
 
 | Method | Params | Result | Interruption |
 | --- | --- | --- | --- |

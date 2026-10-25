@@ -10,9 +10,9 @@ use dim_agent_capabilities::{
     methods::{Interruption, MethodDecl, RpcError, params, reply},
     permission::{CommandRulesHost, ReadCommandRules},
 };
-use dim_agent_runtime::{AgentBuilder, Capability, KeysOf, SessionScope, scoped};
+use dim_agent_runtime::{AgentBuilder, Names};
 use dim_agent_types::{COMMAND_SEPARATORS, CommandRule};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -46,7 +46,8 @@ impl BusinessDocument for PermissionSettings {
 /// Registers the Session part; the host registers `PermissionRulesPlugin`
 /// with its Settings.
 pub fn install(builder: &mut AgentBuilder) {
-    builder.session_plugin(CommandRulesPlugin::new);
+    crate::register_names(builder.catalog_mut());
+    builder.session_part(|names| names.part(CommandRulesPlugin::new(names)?));
 }
 
 /// Reads the user source on each call; nothing is cached.
@@ -69,36 +70,29 @@ impl ReadCommandRules for SettingsRules {
     }
 }
 
-struct CommandRulesPlugin {
-    scope: SessionScope,
-}
+struct CommandRulesPlugin(DepKey<CommandRulesHost>);
 impl CommandRulesPlugin {
-    fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+        Ok(Self(names.key()?))
     }
 }
 impl TypedPlugin for CommandRulesPlugin {
-    type Deps = (Arc<SettingsService>,);
+    type Deps = (Keyed<SettingsService>,);
     fn name(&self) -> &str {
         "CommandRules"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (settings,): Self::Deps,
+        (Keyed(settings),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             ctx.provide_as(
-                self.scope.key::<CommandRulesHost>(),
+                self.0.key().clone(),
                 Arc::new(CommandRulesHost(Arc::new(SettingsRules(settings)))),
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for CommandRulesPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -132,17 +126,17 @@ fn error(error: SettingsError) -> RpcError {
 /// Process owner of the `permission` source and its management methods.
 pub struct PermissionRulesPlugin;
 impl TypedPlugin for PermissionRulesPlugin {
-    type Deps = (Arc<SettingsService>,);
+    type Deps = (Keyed<SettingsService>, Keyed<ManagementMethods>);
     fn name(&self) -> &str {
         "PermissionRules"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (settings,): Self::Deps,
+        (Keyed(settings), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            ManagementMethods::provide(
+            methods.register(
                 ctx,
                 "permission",
                 ["permission.rules", "permission.set_rules"]
@@ -194,10 +188,5 @@ impl TypedPlugin for PermissionRulesPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for PermissionRulesPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
     }
 }

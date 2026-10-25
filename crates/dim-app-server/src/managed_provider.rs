@@ -2,12 +2,11 @@
 pub mod management;
 use crate::model_catalog::{MAX_MODEL_TOKENS, ModelEntry};
 use dim_agent_capabilities::host::ModelProtocol;
-use dim_agent_runtime::{Capability, KeysOf};
 use management::{
     BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
     ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -521,11 +520,15 @@ fn checked_lease(lease: CredentialLease) -> Result<CredentialLease, ManagedProvi
 
 pub struct ManagedProvidersPlugin;
 impl TypedPlugin for ManagedProvidersPlugin {
-    type Deps = ();
+    type Deps = (Keyed<crate::methods::ManagementMethods>,);
     fn name(&self) -> &str {
         "ManagedProviders"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (Keyed(methods),): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(ManagedProviders {
                 provider: Mutex::new(None),
@@ -538,27 +541,23 @@ impl TypedPlugin for ManagedProvidersPlugin {
                     Ok(())
                 }))
             })?;
-            management::provide(ctx, service.clone())?;
-            ctx.provide_as(TypeKey::of::<ManagedProviders>(), service)?;
+            management::provide(ctx, &methods, service.clone())?;
+            ctx.provide_as(rutis::TypeKey::of::<ManagedProviders>(), service)?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for ManagedProvidersPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
-
 /// Publishes a provider to ManagedProviders while both are active.
 pub struct ManagedProviderBinding;
 impl TypedPlugin for ManagedProviderBinding {
-    type Deps = (Arc<ManagedProviders>, Arc<dyn ManagedProvider>);
+    type Deps = (Keyed<ManagedProviders>, Keyed<dyn ManagedProvider>);
     fn name(&self) -> &str {
         "ManagedProviderBinding"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (owner, provider): Self::Deps,
+        (Keyed(owner), Keyed(provider)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             if !valid_descriptors(&provider.providers()) {
@@ -588,10 +587,5 @@ impl TypedPlugin for ManagedProviderBinding {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ManagedProviderBinding {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), ())
     }
 }

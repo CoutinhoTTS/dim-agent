@@ -7,11 +7,9 @@
 //! so every count is exact.
 use super::{AgentIndex, builder, config};
 use crate::{RunningServer, ServerConfig, agents::SessionSlot};
-use dim_agent_runtime::{
-    AgentBuilder, Capability, InSession, KeysOf, SessionIdentity, SessionScope, scoped,
-};
+use dim_agent_runtime::{AgentBuilder, SessionIdentity};
 use futures_util::{SinkExt, StreamExt};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -346,7 +344,7 @@ struct HeldState {
 impl HeldRestore {
     fn install(&self, builder: &mut AgentBuilder) {
         let held = self.clone();
-        builder.session_plugin(move |scope| HeldRestorePart(held.clone(), *scope));
+        builder.session_part(move |names| names.part(HeldRestorePart(held.clone())));
     }
     fn hold(&self, id: &str) {
         *self.0.held.lock().unwrap() = Some(id.to_owned());
@@ -360,16 +358,16 @@ impl HeldRestore {
         self.0.release.notify_one();
     }
 }
-struct HeldRestorePart(HeldRestore, SessionScope);
+struct HeldRestorePart(HeldRestore);
 impl TypedPlugin for HeldRestorePart {
-    type Deps = InSession<SessionIdentity>;
+    type Deps = Keyed<SessionIdentity>;
     fn name(&self) -> &str {
         "test.held-restore"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        InSession(identity): Self::Deps,
+        Keyed(identity): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let state = &self.0.0;
@@ -386,10 +384,5 @@ impl TypedPlugin for HeldRestorePart {
             }
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for HeldRestorePart {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
     }
 }

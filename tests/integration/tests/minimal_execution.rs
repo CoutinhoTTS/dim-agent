@@ -116,9 +116,6 @@ impl TypedPlugin for PlatformPlugin {
         })
     }
 }
-impl Capability for PlatformPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 fn scratch(name: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -158,7 +155,7 @@ impl Harness {
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
         let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        let view = root.plugin(rutis::Typed::new(PlatformPlugin(Arc::new(platform))));
         Self::with_platform(root, view, cwd).await
     }
     async fn with_platform(root: Ctx, view: rutis::FiberView, cwd: PathBuf) -> Self {
@@ -175,7 +172,13 @@ impl Harness {
             Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
         )
         .unwrap();
-        (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
+        (&root.plugin(
+            dim_agent_runtime::names::process_plugin(
+                &dim_agent_capabilities::catalog(),
+                SkillsCatalogPlugin::new(),
+            )
+            .unwrap(),
+        ))
             .await
             .unwrap();
         let model = Arc::new(Script::default());
@@ -183,12 +186,12 @@ impl Harness {
         builder
             .timeline_store(Arc::new(MemoryTimelineStore::default()))
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_value(Arc::new(ModelHost(model.clone())))
+            .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_plugin(DefaultPrepareModelPlugin::new);
+            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
         dim_agent_capabilities::defaults::install_minimal_execution(
             &mut builder,
             ModelProviderPlugin::new,
@@ -204,7 +207,7 @@ impl Harness {
     fn config(&self) -> SessionConfig {
         SessionConfig {
             cwd: self.cwd.to_string_lossy().into_owned(),
-            tools: vec!["execute".into()],
+            tools: Some(vec!["execute".into()]),
             permission_policy: PermissionPolicy {
                 preset: PermissionPreset::FullAccess,
                 ..Default::default()
@@ -412,16 +415,18 @@ async fn persistent_isolation_preserves_policy_and_job_control() {
     )
     .unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     (&storage).await.unwrap();
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             isolation_file: Some((0, "host-isolation.json".into())),
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, cwd).await;
     let session = harness.session().await;
     let stop = session
@@ -732,16 +737,18 @@ async fn new_persistent_shells_and_environment_refresh_use_current_preferences()
     };
     set_shell("/bin/bash");
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(capability_plugin(FileStoragePlugin::new(vec![
+    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
     (&storage).await.unwrap();
-    let view = root.plugin(capability_plugin(HostPlatformPlugin::new(
-        HostPlatformConfig {
+    let view = root.plugin(
+        HostPlatformPlugin::new(HostPlatformConfig {
             exec_shell_file: Some((0, "exec-shell.json".into())),
             ..HostPlatformConfig::default()
-        },
-    )));
+        })
+        .typed(&dim_agent_capabilities::catalog())
+        .unwrap(),
+    );
     let harness = Harness::with_platform(root, view, scratch("cwd")).await;
     let session = harness.session().await;
     let alternate = if Path::new("/bin/zsh").is_file() {

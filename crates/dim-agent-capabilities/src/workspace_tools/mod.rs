@@ -18,13 +18,13 @@ use crate::{
 };
 use background::BackgroundExecPlugin;
 use dim_agent_runtime::{
-    AgentBuilder, AgentError, CAPABILITY_RELOADING, Capability, CollaborationRole, InSession,
-    KeysOf, SessionConfig, SessionIdentity, SessionScope, scoped,
+    AgentBuilder, AgentError, CAPABILITY_RELOADING, CollaborationRole, Names, SessionConfig,
+    SessionIdentity,
 };
 use dim_agent_types::*;
 use file_reads::{FileReads, FileReadsPlugin};
 use files::{FileTools, FileWriteCoordinator};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
 use std::{path::PathBuf, sync::Arc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -52,9 +52,6 @@ impl TypedPlugin for FileWriteCoordinatorPlugin {
         })
     }
 }
-impl Capability for FileWriteCoordinatorPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceToolsConfig {
@@ -62,14 +59,12 @@ pub struct WorkspaceToolsConfig {
     pub output_root: PathBuf,
 }
 
-/// Registers the host tool names, WorkspaceTools and its branch parts.
+/// Registers WorkspaceTools and its branch parts.
 pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
     builder
-        .host_tools(TOOL_NAMES.map(String::from))
-        .session_methods(OUTPUT_METHOD)
-        .session_plugin(move |scope| WorkspaceToolsPlugin::new(scope, config.clone()))
-        .timeline_plugin(FileReadsPlugin::new)
-        .timeline_plugin(BackgroundExecPlugin::new);
+        .session_part(move |names| names.part(WorkspaceToolsPlugin::new(names, config.clone())?))
+        .branch_part(|names| names.part(FileReadsPlugin::new(names)?))
+        .branch_part(|names| names.part(BackgroundExecPlugin::new(names)?));
 }
 
 pub(crate) struct WorkspaceTools {
@@ -155,24 +150,25 @@ impl ToolDriver for WorkspaceTools {
 }
 
 struct WorkspaceToolsPlugin {
-    scope: SessionScope,
+    host: rutis::DepKey<ToolHost>,
     config: WorkspaceToolsConfig,
 }
 impl WorkspaceToolsPlugin {
-    fn new(scope: &SessionScope, config: WorkspaceToolsConfig) -> Self {
-        Self {
-            scope: *scope,
+    fn new(names: &Names<'_>, config: WorkspaceToolsConfig) -> Result<Self, CordisError> {
+        Ok(Self {
+            host: names.key()?,
             config,
-        }
+        })
     }
 }
 impl TypedPlugin for WorkspaceToolsPlugin {
     type Deps = (
-        Arc<HostPlatform>,
-        Arc<FileWriteCoordinator>,
-        InSession<SessionConfig>,
-        InSession<SessionIdentity>,
-        InSession<TreeCommands>,
+        Keyed<HostPlatform>,
+        Keyed<FileWriteCoordinator>,
+        Keyed<SessionConfig>,
+        Keyed<SessionIdentity>,
+        Keyed<TreeCommands>,
+        Keyed<SessionMethods>,
     );
     fn name(&self) -> &str {
         "WorkspaceTools"
@@ -180,7 +176,14 @@ impl TypedPlugin for WorkspaceToolsPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (platform, coordinator, InSession(config), InSession(identity), InSession(tree)): Self::Deps,
+        (
+            Keyed(platform),
+            Keyed(coordinator),
+            Keyed(config),
+            Keyed(identity),
+            Keyed(tree),
+            Keyed(methods),
+        ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             // `session.create` validated and canonicalized the cwd.
@@ -213,9 +216,8 @@ impl TypedPlugin for WorkspaceToolsPlugin {
                 }))
             })?;
             let tree = tools.tree.clone();
-            SessionMethods::provide(
+            methods.register(
                 ctx,
-                &self.scope,
                 OUTPUT_METHOD,
                 vec![MethodDecl::new(OUTPUT_METHOD, false, Interruption::Report)],
                 Arc::new(move |_, value, _, _| {
@@ -255,13 +257,8 @@ impl TypedPlugin for WorkspaceToolsPlugin {
                     })
                 }),
             )?;
-            ctx.provide_as(self.scope.key::<ToolHost>(), Arc::new(ToolHost(tools)))?;
+            ctx.provide_as(self.host.key().clone(), Arc::new(ToolHost(tools)))?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for WorkspaceToolsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

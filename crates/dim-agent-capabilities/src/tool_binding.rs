@@ -10,15 +10,12 @@ use crate::{
     context_preparation::ToolSetAdoption,
     history::context_configuration,
     prompt::{Prompt, ToolAdoptOutcome},
-    tool_registry::{ToolContribution, ToolRegistry, ToolSourceSet, ToolsChanged},
+    tool_registry::{ToolContribution, ToolRegistry, ToolSourceSet},
 };
-use dim_agent_runtime::{
-    AgentError, BranchLifecycle, BranchOpening, BranchScope, Capability, Dispatcher, InBranch,
-    InSession, KeysOf, Timeline, scoped,
-};
+use dim_agent_runtime::{AgentError, BranchLifecycle, BranchOpening, Dispatcher, Names, Timeline};
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, Listener, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::HashMap,
     panic::AssertUnwindSafe,
@@ -52,35 +49,9 @@ pub struct ToolBinding {
     changed: tokio::sync::Notify,
 }
 
-impl Listener<ToolsChanged> for Arc<ToolBinding> {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        _: &'a ToolsChanged,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            self.changed.notify_one();
-            Ok(None)
-        })
-    }
-}
-
-/// Which registry read an adoption makes. Branch initialization serves the
-/// branch's first request and attaches changed foreign contributors; an
-/// adoption in the background task never calls into a foreign provider
-/// (`ToolRegistry::current`), and the next request attaches it instead.
-#[derive(Clone, Copy)]
-enum Read {
-    Initial,
-    Background,
-}
-
 /// The registry's tool part and the sets it was built from.
-fn current(registry: &ToolRegistry, read: Read) -> (ToolSetAdoption, Vec<Arc<ToolSourceSet>>) {
-    let (tools, sets) = match read {
-        Read::Initial => registry.snapshot(),
-        Read::Background => registry.current(),
-    };
+fn current(registry: &ToolRegistry) -> (ToolSetAdoption, Vec<Arc<ToolSourceSet>>) {
+    let (tools, sets) = registry.snapshot();
     let adoption = ToolSetAdoption {
         tools,
         tool_sources: sets
@@ -104,9 +75,6 @@ impl ToolBinding {
         tools: &[ToolDefinition],
         tool_sources: &[ToolSourceVersion],
     ) -> Result<(), String> {
-        // This request declares its prefix's tool part; a foreign generation
-        // that changed since is attached now and adopted for the next one.
-        self.registry.attach_pending();
         let sets = tool_sources
             .iter()
             .map(|source| {
@@ -236,7 +204,7 @@ impl ToolBinding {
         cancel: &CancellationToken,
     ) -> dim_agent_runtime::Result<()> {
         // Fix optional providers during branch initialization even without a model.
-        let (adoption, sets) = current(&self.registry, Read::Initial);
+        let (adoption, sets) = current(&self.registry);
         let prefix = crate::history::read_context(timeline, timeline.sequence()).await?;
         let Some(configuration) = context_configuration(&prefix) else {
             return Ok(());
@@ -265,7 +233,7 @@ impl ToolBinding {
             }
             Ok(())
         } else {
-            self.adopt(prompt, cancel, Read::Initial).await
+            self.adopt(prompt, cancel).await
         }
     }
 
@@ -275,9 +243,8 @@ impl ToolBinding {
         &self,
         prompt: &Prompt,
         cancel: &CancellationToken,
-        read: Read,
     ) -> dim_agent_runtime::Result<()> {
-        let (adoption, sets) = current(&self.registry, read);
+        let (adoption, sets) = current(&self.registry);
         {
             let mut state = self.state.lock().unwrap();
             if state.adopted.as_ref() == Some(&adoption) {
@@ -329,21 +296,23 @@ fn register(
 }
 
 pub struct ToolBindingPlugin {
-    scope: BranchScope,
+    binding: DepKey<ToolBinding>,
 }
 impl ToolBindingPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+        Ok(Self {
+            binding: names.key()?,
+        })
     }
 }
 impl TypedPlugin for ToolBindingPlugin {
     type Deps = (
-        InSession<ToolRegistry>,
-        InBranch<Prompt>,
-        InBranch<Timeline>,
-        InBranch<BranchLifecycle>,
-        InBranch<Dispatcher>,
-        InBranch<BranchOpening>,
+        Keyed<ToolRegistry>,
+        Keyed<Prompt>,
+        Keyed<Timeline>,
+        Keyed<BranchLifecycle>,
+        Keyed<Dispatcher>,
+        Keyed<BranchOpening>,
     );
     fn name(&self) -> &str {
         "ToolBinding"
@@ -352,12 +321,12 @@ impl TypedPlugin for ToolBindingPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InSession(registry),
-            InBranch(prompt),
-            InBranch(timeline),
-            InBranch(phase),
-            InBranch(dispatcher),
-            InBranch(opening),
+            Keyed(registry),
+            Keyed(prompt),
+            Keyed(timeline),
+            Keyed(phase),
+            Keyed(dispatcher),
+            Keyed(opening),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -369,12 +338,23 @@ impl TypedPlugin for ToolBindingPlugin {
             let lifecycle = ctx.cancellation_token();
             let tasks = TaskTracker::new();
             let opening_tasks = tasks.clone();
-            // Subscribe before reading the registry so no change is missed.
-            ctx.events().on(
-                ctx,
-                &EventKey::<ToolsChanged>::of().instance(self.scope.session.instance),
-                binding.clone(),
-            )?;
+            // Follow the registry's source state, taken before reading the
+            // registry so no change is missed. A change keeps a permit in
+            // `changed` until the background task below takes it.
+            let mut sources = registry.sources_state();
+            let (forward, forward_cancel) = (binding.clone(), lifecycle.clone());
+            tasks.spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = forward_cancel.cancelled() => return,
+                        changed = sources.changed() => match changed {
+                            Ok(()) => forward.changed.notify_one(),
+                            // The registry is gone with its Session.
+                            Err(_) => return,
+                        },
+                    }
+                }
+            });
             // A new or resumed branch receives its model configuration while
             // `branch/start` or `branch/resume` dispatches (Prompt, which this
             // follows); adopt the tool part then, before the branch takes input.
@@ -439,7 +419,7 @@ impl TypedPlugin for ToolBindingPlugin {
                     }
                     // A failed adoption keeps the pins and the prefix; the
                     // next change retries.
-                    if let Err(error) = watcher.adopt(&prompt, &cancel, Read::Background).await {
+                    if let Err(error) = watcher.adopt(&prompt, &cancel).await {
                         if matches!(error, AgentError::Closed(_)) {
                             return;
                         }
@@ -456,13 +436,8 @@ impl TypedPlugin for ToolBindingPlugin {
                     })
                 }))
             })?;
-            ctx.provide_as(self.scope.key::<ToolBinding>(), binding)?;
+            ctx.provide_as(self.binding.key().clone(), binding)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ToolBindingPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

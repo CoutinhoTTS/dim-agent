@@ -6,17 +6,18 @@ optional managed-provider bindings are connected. Native user MCP/Skill intent
 uses source-owned business documents; MCP connections and Skill content instances belong
 to Sessions. Project MCP entries start disabled until the user enables them. See
 [ADR 004](../../adr/004-loader-plugin-management.md) for implemented configuration
-scope. Rpc looks up [management methods](../../design/appserver/management-methods.md)
-per call as named services of account, provider, MCP and Skills owners, without
-depending on them, so an owner's reload affects only its namespace; business
+scope. Account, provider, MCP, Skills and the other owners register their
+[management methods](../../design/appserver/management-methods.md) namespaces
+with the process's management table, which Rpc reads per call without depending
+on any owner, so an owner's reload affects only its namespace; business
 configuration changes do not reload those plugins. No Methods or Management
-plugin, registration port or separate management adapter row is required.
+plugin or separate management adapter row is required.
 Product assembly preflight remains incomplete; proposals are recorded in
 [ADR 001](../../adr/001-harness-foundation.md). Capability event declarations are
 descriptive contracts that assembly does not check.
 External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-app-server/README.md).
 
-本文统一按 rutis 0.12.1 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。
+本文统一按 rutis 0.16.0 设计，定义服务、事件与装配合同；产品 caps、依赖环预检与跨进程授权由项目实现。本文描述当前 Rust 实现；目标插件契约（部件即 loader 行、按名字的服务目录）见 [ADR 006](../../adr/006-plugin-contract.md) 与[插件契约](../../design/plugin-contract.md)，迁移完成前以本文为准。
 
 ## 结构
 
@@ -140,8 +141,9 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 | `CollaborationDirectoryPlugin` | Team 关系与临时 Agent 归属的目录 | `CollaborationDirectory` | — |
 | `CollaborationPlugin` | 成员关系、临时 Agent 归属、参与 Session 的关闭观察任务 | `Collaboration` | `AgentIndex`、`CollaborationDirectory` |
 | `ConnectionPlugin` | Connection index, admission limits and transport tasks | `ConnectionHub` | `ServerControl` |
-| `RpcPlugin` | Built-in commands, per-call routing of contributed methods and reply drainage | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`; reads `ManagementMethods` providers and, in the product profile, Provider per call without depending on them |
-| Management contributions | Owner-specific declarations, wire validation, business calls and their accepted calls, provided by the business plugin itself | Named `ManagementMethods` services; an owner's unload interrupts its `Report` calls and waits for its `Drain` calls, without reloading Rpc | Each owner's existing business dependencies |
+| `RpcPlugin` | Built-in commands, per-call routing of contributed methods and reply drainage | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`, `ManagementMethods`; reads the management table, each Session's `SessionMethods` table and, in the product profile, Provider per call, without depending on any provider |
+| `ManagementMethodsPlugin` | The process's management method table: the namespaces process plugins register | `ManagementMethods` | — |
+| Management contributions | Owner-specific declarations, wire validation, business calls and their accepted calls, provided by the business plugin itself | Namespaces registered with `ManagementMethods`; an owner's unload withdraws them, interrupts its `Report` calls and waits for its `Drain` calls, without reloading Rpc | `ManagementMethods` and each owner's existing business dependencies |
 | `TransportPlugin` | Unix/WS 监听器、socket 文件、accept 任务 | `ListenAddresses` | `ConnectionHub`、`ServerControl`；原生数据库启用时另注入 `SqliteStorage`，确保数据库独占锁就绪后才绑定端点 |
 
 `AgentsPlugin` 提供 `AgentIndex`（`agent` 分组行由 `serve` 写入）；默认 agentId 由首代固定在 `AgentDirectory`。默认 Agent 与运行时创建的 Agent 都由索引经 `create_instance("agent")` 创建，`AgentScope` 只依赖 `AgentDirectory` 与 loader，二者不重载，所以 `AgentScope` 只在其 Agent 被关闭或进程停止时卸载；`AgentsPlugin` 重载只替换目录逻辑，新一代从目录接管已有 Agent。启用 Session 执行时，每一代（启动、显式 restart 与依赖驱动的重载）在提供 `AgentIndex` 之前装载尚未运行的存储 Agent（无存储记录时为默认 Agent）并登记存储的 Session 归属；此前 `sessions` 返回 `reloading`，不会把健康的存储 Session 判为没有归属。`AgentScope` 先载入子插件 `Sessions`（监听宿主），再登记 effect：先从目录注销，再经 `Agent::close()` 完成各 Session 的业务结算。业务结算不依赖树的祖先关系：显式 `agent.close` 与进程关闭第一阶段先在普通任务上下文结算，再关闭 Agent 实例；effect 幂等地重复结算。多个 Agent 平等并存、互不串扰，hosting 不含 Agent 间关系。
@@ -230,35 +232,35 @@ Dispatcher、before 与 Session 广播统一使用显式 `EventKey<E>`：
 
 | 事件范围 | 键与调用 |
 | --- | --- |
-| 分支已提交事件 | `EventKey::<Committed>::of().instance(branch.instance)`；`on(ctx, &key, listener)` / `serial(ctx, &key, &event).await` |
-| 分支 before | `EventKey::<BeforeCommit>::of().instance(branch.instance)`；内部事件实现 `SyncEvent`，用 `on_waterfall_sync` / `waterfall_sync` |
+| 分支已提交事件 | 分支私有名 `dim/timeline/{instance}/committed`，只由 Dispatcher 构造；`on(ctx, &key, listener)` / `serial(ctx, &key, Arc::new(event)).await` |
+| 分支 before | 分支私有名 `dim/timeline/{instance}/before`，只由 Timeline 构造；`on_sync` / `waterfall_sync` |
 | Session 活事件 | `session_channel(session_id) -> EventKey<SessionBroadcastEvent>`；`emit(ctx, &key, Arc::new(event))` / `on(ctx, &key, listener)` |
 | 进程通知 | 所属 Plugin 导出的 `EventKey<E>::of()`、静态 `named` 键或动态键构造函数 |
 
-服务键使用 `TypeKey`，事件键不代替服务依赖。事件键的身份含载荷类型、可选名字与可选实例；静态与动态同名等值，默认类型通道不等于命名通道。内部事件键不作为 wire 字段或持久身份。Session 键由所属模块导出，调用方不拼接名字。Session 级能力不注册分支实例事件；需要结束记录的监听在比 Session 更晚卸载的宿主 Ctx 注册。`emit` 返回接纳结果，不证明监听器或出站写入完成，错误进入所属故障出口；Fence 输出屏障按[Session 广播](event-driven-flows.md#6-session-广播)执行。
+服务键使用 `TypeKey`，事件键不代替服务依赖。事件键的身份只是名字（`EventKey::of()` 取载荷类型的 `NAME`），静态与动态同名等值，不带实例；属于一个实例的通道怎样命名见 [rutis 使用 §5](../../design/rutis-usage.md#5-the-event-bus)。内部事件键不作为 wire 字段或持久身份。Session 键由所属模块导出，调用方不拼接名字。Session 级能力不注册分支通道；需要结束记录的监听在比 Session 更晚卸载的宿主 Ctx 注册。`emit` 返回接纳结果，不证明监听器或出站写入完成，错误进入所属故障出口；Fence 输出屏障按[Session 广播](event-driven-flows.md#6-session-广播)执行。
 
-Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支通道内的业务 `EventKind`，匹配由 runtime 完成。rutis `EventPattern` 仅匹配同类型、显式命名、无实例的通道，不能覆盖分支实例；也不提供跨名字全序。
+Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支通道内的业务 `EventKind`，匹配由 runtime 完成。rutis `EventPattern` 按名字前缀匹配，不提供跨名字全序。
 
-**唯一总线。** 同一宿主 root 的所有 Plugin 使用 `ctx.events()` 返回的同一 rutis EventBus；实例和命名通道是该总线的路由键。Timeline 是事实日志，Dispatcher 是读取有序日志并向该总线派发的分支任务，SessionBroadcast 是同一总线上的对外投影，三者不各自建立总线。插件内部的队列、状态 watch 和网络传输可保留，但不得成为跨插件业务事件的第二套发布/订阅系统。
+**唯一总线。** 同一宿主 root 的所有 Plugin 使用 `ctx.events()` 返回的同一 rutis EventBus；名字是该总线的路由键。Timeline 是事实日志，Dispatcher 是读取有序日志并向该总线派发的分支任务，SessionBroadcast 是同一总线上的对外投影，三者不各自建立总线。插件内部的队列、状态 watch 和网络传输可保留，但不得成为跨插件业务事件的第二套发布/订阅系统。
 
 **事件分发。** 按 [ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)（issue #2 已决定）：Dispatcher 的 `&[&str]` 参数承载精确、全部与领域选择，只是投递过滤，不校验键是否被声明或有人写入；Timeline 只检查信封，并拒绝在 `EventKind` 保留的领域内写入不透明事件，不维护类型注册表；能力的事件声明是描述契约，监听注册与写入都不读取它。持久事件使用 `AgentEvent` 信封；核心未定义的类型键作为不透明数据承载，v1-v3 协议不投递不透明事件（未实现）。关键业务事件先提交 Timeline 再派发；普通进程通知在同一总线直接分发。JS/MCP/client 的传输在 Rust 边界解码、校验来源与授权后进入同一入口，JS 插件不能另建跨插件 EventBus。监听随注册 Plugin 卸载；重载时先注销旧代再登记新代，遵守分支顺序、停止结算及输出屏障。
 
 ### 同步 before
 
-`Timeline::before(ctx, name, keys, handler)` 在分支实例通道注册 `on_waterfall_sync`，监听随注册 Plugin 卸载；提交锁内调用 `waterfall_sync`，不维护独立注册表或生命周期。`BeforeCommit` 是 runtime 内实现 `SyncEvent` 的调用载荷，不写入 Timeline，不启动 future 或任务。
+`Timeline::before(ctx, name, keys, handler)` 在分支的 before 通道注册 `on_sync`，监听随注册 Plugin 卸载；提交锁内调用 `waterfall_sync`，不维护独立注册表或生命周期。`BeforeCommit` 是 runtime 内的调用载荷，trace 步骤不参与序列化，不写入 Timeline，不启动 future 或任务。
 
-- handler 签名为 `Fn(EventDraft) -> Result<EventDraft>`。包装层固定先调用 `next`，再变形下游结果；先注册者在外层，后注册者先变形，trace 按实际顺序保留 original 与 steps。handler 不能拦截下游。
+- handler 签名为 `Fn(EventDraft) -> Result<EventDraft>`。包装层固定先调用 `call.next()`，再变形下游结果；先注册者在外层，后注册者先变形，trace 按实际顺序保留 original 与 steps。handler 不能拦截下游。
 - handler 报错、panic（`SyncEventPanicked`）或改变事件 kind 时整链回退，原样提交并清空轨迹。
-- `AppendGuard` 阻止 before 和登记回调里的嵌套 append；rutis 的同步重入检测只覆盖同线程、同总线、同完整键。
+- `AppendGuard` 阻止 before 和登记回调里的嵌套 append；rutis 不检测同名的同步重入。
 - 分支作用域关闭中或 Ctx 失活时，before 不执行，原样提交且不留轨迹；写入准入由 Timeline 自身关闭状态决定，Timeline 已关闭后拒绝写入。清理终态提交与正常停止的分发、关闭顺序见[生命周期](lifecycle.md#5-stop-与-close)。
-- rutis 卸载等待已接纳的同步调用栈退出，包括无监听器的终点；该计数不包含返回后的业务提交，Timeline 自己管理提交锁与关闭准入。
+- rutis 卸载等待该 Plugin 正在运行的监听调用退出；该计数不包含返回后的业务提交，Timeline 自己管理提交锁与关闭准入。
 - 回调不执行 I/O，不等待包含自己的卸载，也不重新取得调用方持有的业务锁。异步执行前 Hook 由业务所有者管理，不能改成同步总线调用。
 
 公开流程验证复用 [timeline_flow](../../../crates/dim-agent-runtime/tests/timeline_flow.rs)：多 handler 顺序与 trace、整链回退、嵌套 append 和作用域关闭期间原样提交。
 
 ## RPC 接线
 
-- **Protocol handling**: envelope decoding, hello/version negotiation, v1/v2 error mapping and event filtering follow the App Server contract. Built-in calls use RpcService; a contributed management call is looked up per call among the active `ManagementMethods` providers, whose owners validate concrete DTOs ([management methods](../../design/appserver/management-methods.md)). The local v3 entry serves management; WebSocket does not. Management methods have no notification channel.
+- **Protocol handling**: envelope decoding, hello/version negotiation, v1/v2 error mapping and event filtering follow the App Server contract. Built-in calls use RpcService; a contributed call is looked up per call in the management table, or in the `SessionMethods` table of the Session it names, whose registering owners validate concrete DTOs ([management methods](../../design/appserver/management-methods.md)). The local v3 entry serves management; WebSocket does not. Management methods have no notification channel.
 - **`session.create`**：App Server 解析工作目录、显式或默认模型与准入（产品 profile 经 `ProviderService`），再由 `Agent` 创建 Session。
 - **无 Session 的管理请求**：使用进程 `ProviderService` 与账号服务（Codex/Grok OAuth、`ManagedProviders`），不创建隐藏 Session。
 - **WS**：账号与 provider 管理只经本地传输（Unix socket / Windows named pipe）开放，WS 不开放账号与配置方法。
@@ -288,7 +290,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 ## rutis
 
-设计基准为 crates.io [rutis 0.12.1](https://github.com/arcships/rutis/releases/tag/v0.12.1)。核心服务、事件与生命周期接口沿用 0.10.0 的合同；接口依据见 [0.12.1 源码](https://github.com/arcships/rutis/tree/v0.12.1/crates/rutis/src)。
+设计基准为 crates.io [rutis 0.16.0](https://github.com/arcships/rutis/releases/tag/v0.16.0)。核心服务与生命周期接口沿用 0.10.0 的合同，事件接口为 0.13 起的统一事件；接口依据见 [0.16.0 源码](https://github.com/arcships/rutis/tree/v0.16.0/crates/rutis/src)。
 
 0.5.0 → 0.9.1 的内核变化不改变本文合同：错误、诊断记录与 `EventOptions` 标为 `#[non_exhaustive]`；`RuntimeDiagnostics::event_backlogs` 报告同键 `emit` 积压；根关闭先取消子树再排空实例事件，根 `dispose()` 与 `shutdown()` 并发时共享关闭结果；新增 `TypedPlugin`、`Ctx::dispose_self`、`Ctx::view`、`ServiceChanged`。`apply` 显式返回 `InjectUnsatisfied` 且本代有失败的严格读取时回到 Pending；项目代码不返回该错误，`require` 失败仍是 `ServiceRead`。
 
@@ -296,12 +298,13 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 0.10.0 → 0.11.0：核心与 loader 的合同不变。bridge 支持宿主声明固定事件名、通过 `Process::emit` 投递给 leaf 插件；TypeScript 的 `ctx.on` / `ctx.emit` 使用运行时进程内的同一事件总线。新增跨语言值类型使 `session::Value` 非穷尽；JSON 数据边界仍由现有消费者的 `json()` 校验，未增加产品值类型。C4 的具体广播绑定按 [#168](https://github.com/arcships/dim/issues/168) 评审和验收。
 0.11.0 → 0.12.1：核心不变，loader 无破坏性变更。leaf 插件 `ctx.provide` 的服务即使未在 `provides` 中声明也会到达 rutis，同名时后提供者失败；`ServiceCatalog::new()` 默认按名共享未另行注册的名字；`rutis-bridge` 新增 `build::Exports` / `ServiceCatalog::export_all`，让外部 leaf 直接调用已有 Rust 服务的方法（C5 使用）。
+0.12.1 → 0.16.0：插件 trait、effect、实例服务键、loader 分组与 `Exports` 的合同不变。事件按名字找监听方，载荷为 serde，每个 root 只有一条平总线；带实例的事件键、`SyncEvent`、`Process::emit` 与 `emits` 声明被移除。Dim 的对应改动见 [rutis 0.16 升级](../../design/rutis-0.16-upgrade.md)。
 
 | 能力 | 接口 |
 | --- | --- |
 | 实例键 | `Ctx::instance()`、`TypeKey::instance`/`with_instance`；provide、读取、门控与诊断按作用域子树校验，越界返回 `InstanceOutOfScope` |
-| 事件键 | `EventKey<E>` 与统一的 `on` / `emit` / `serial` / `parallel`；实例键限于实例子树，`emit` 按完整键保序，`serial` 按监听注册顺序等待 |
-| 同步事件 | `SyncEvent`、`on_sync` / `on_waterfall_sync`、`bail_sync` / `waterfall_sync`；等待已接纳调用栈退出，不包含返回后的业务提交 |
+| 事件键 | `EventKey<E>` 与统一的 `on` / `emit` / `serial` / `parallel`；同名的全部监听方都收到，同一进程同名事件按 emit 顺序开始，`serial` 按监听注册顺序等待 |
+| 同步事件 | `on_sync`、`bail_sync` / `waterfall_sync`；监听方经 `call.next()` 调用下游；卸载等待运行中的调用退出，不包含返回后的业务提交 |
 | 严格服务读取 | `Ctx::require` / `require_as` 返回带调用位置的 `ServiceReadError`；不取代 `injects` 门控或产品装配预检 |
 | 子树永久卸载 | `FiberView::shutdown()`：子树内消费者先于提供者 dispose 且不进入 Pending，子树外消费者重载；回收父级、依赖索引与总线记录；结果共享、不可重启 |
 | 就绪观察 | `FiberView::watch()` 观察各作用域子插件状态 |
@@ -339,7 +342,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 | 能力 | 作用域 | 重载来源 | 卸载 | 装载 |
 | --- | --- | --- | --- | --- |
-| `ToolRegistry` | Session | `ToolHost`；各 `ToolContribution` 贡献方 | — | 按 Session 配置重新注册宿主工具与贡献工具 |
+| `ToolRegistry` | Session | `ToolHost` | — | 按 Session 配置重新读取宿主工具；注册到它的部件随之重载并重新注册 |
 | `PrepareModelHost` 提供者（当前开发接线：`DefaultPrepareModelPlugin`、`ConfiguredModelPlugin`） | Session | 当前 `ToolRegistry`，无 Provider resolver | — | 重新提供；产品请求准备归 Loop，不由底层 Aimux 提供 |
 | `Loop` | 分支 | `PrepareModelHost` | — | 重建当前 turn、请求阶段、待收工具结果与中断状态；未结束的 turn 待在途操作有终态后提交 `turn/end`（`Failed`）；尚未交给上下文准备的请求由 Loop 提交 `Failed` 模型终态；没有未结束的 turn 时，已采用、未消费的驱动输入照常开始新 turn |
 | `ToolExecutor` | 分支 | `ToolRegistry` | 执行中的批次提交错误结果 | 重建中断状态；已提交而未派发、无结果的 `step/tool-call` 批次提交错误结果 |
@@ -389,4 +392,4 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 关闭回收 | 关闭 Session/分支后子树 driver、注册、索引与父级清理记录归零；多轮创建与关闭不增长 |
 | 规模 | 测 0/100/1000 空 Session、并发创建与关闭、多分支派发延迟；存活申请与创建耗时与原型基线（每空 Session 约 139.3 KiB、16 个任务）同一量级 |
 | 兼容 | 事件序列、Unix/WS 上的 v1/v2 流程（以 [Session 广播](event-driven-flows.md#6-session-广播)修订后的合同为准）、审批与错误码不变；v1/v2 仅增加 `service_reloading`。`session.create` 不再接受 `trace`，结果不再含 `tracePath`（[ADR 005](../../adr/005-observability.md) D5） |
-| 框架合同 | 严格读取在 release 同样拒绝漏声明（含命名工具贡献）；实例事件和 before 不越界；卸载等待同步回调退出；作用域清理期间终态原样提交，Timeline 关闭后拒绝写入；广播接纳失败不被误认为交付成功；生成图取自真实装配 |
+| 框架合同 | 严格读取在 release 同样拒绝漏声明；分支已提交事件和 before 不越界；卸载等待运行中的监听调用退出；作用域清理期间终态原样提交，Timeline 关闭后拒绝写入；广播接纳失败不被误认为交付成功；生成图取自真实装配 |

@@ -5,10 +5,10 @@ use crate::{
     host::{HostError, PromptHost},
     prompt_state::PromptSnapshot,
 };
-use dim_agent_runtime::{Capability, InBranch, InSession, KeysOf, scoped, *};
+use dim_agent_runtime::*;
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::{BTreeMap, BTreeSet},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -38,7 +38,23 @@ fn validate_entry(target: &PromptSourceTarget, entry: &PromptEntry) -> Result<()
     Ok(())
 }
 
-pub struct InitialPromptConfiguration(pub Option<ConfigureUpdate>);
+/// What a branch adopts when it opens: the Session's prompt sources, and the
+/// model a new Session adopts. Read when the branch opens, so it holds the
+/// sources registered then.
+pub struct InitialPromptConfiguration(Box<dyn Fn() -> Option<ConfigureUpdate> + Send + Sync>);
+impl InitialPromptConfiguration {
+    /// The same configuration for every branch; `None` adopts nothing.
+    pub fn fixed(update: Option<ConfigureUpdate>) -> Self {
+        Self(Box::new(move || update.clone()))
+    }
+    /// The configuration `read` returns when a branch opens.
+    pub fn read(read: impl Fn() -> Option<ConfigureUpdate> + Send + Sync + 'static) -> Self {
+        Self(Box::new(read))
+    }
+    pub fn get(&self) -> Option<ConfigureUpdate> {
+        (self.0)()
+    }
+}
 
 /// Rules and state enter the model context as inputs written with the change.
 fn context_rules(before: &PromptSnapshot, after: &PromptSnapshot) -> Vec<InputBlock> {
@@ -92,7 +108,7 @@ struct PromptState {
 pub struct Prompt {
     host: Arc<PromptHost>,
     /// Sources the Session delivers, and the model a new Session adopts.
-    initial: Option<ConfigureUpdate>,
+    initial: Arc<InitialPromptConfiguration>,
     publisher: Arc<ConfigurationPublisher>,
     timeline: Arc<Timeline>,
     faults: Arc<FaultReporter>,
@@ -592,23 +608,29 @@ impl ConfigureControl for Prompt {
 }
 
 pub struct PromptPlugin {
-    scope: BranchScope,
+    state: DepKey<StateCell<PromptSnapshot>>,
+    prompt: DepKey<Prompt>,
+    configure: DepKey<dyn ConfigureControl>,
 }
 impl PromptPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+        Ok(Self {
+            state: names.state_cell()?,
+            prompt: names.key()?,
+            configure: names.key()?,
+        })
     }
 }
 impl TypedPlugin for PromptPlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InSession<PromptHost>,
-        InSession<InitialPromptConfiguration>,
-        InBranch<ConfigurationPublisher>,
-        InBranch<TimelineIdentity>,
-        InSession<FaultReporter>,
-        (InBranch<BranchLifecycle>, InBranch<BranchOpening>),
+        Keyed<Timeline>,
+        Keyed<Dispatcher>,
+        Keyed<PromptHost>,
+        Keyed<InitialPromptConfiguration>,
+        Keyed<ConfigurationPublisher>,
+        Keyed<TimelineIdentity>,
+        Keyed<FaultReporter>,
+        (Keyed<BranchLifecycle>, Keyed<BranchOpening>),
     );
     fn name(&self) -> &str {
         "Prompt"
@@ -617,14 +639,14 @@ impl TypedPlugin for PromptPlugin {
         &'a self,
         ctx: &'a Ctx,
         (
-            InBranch(timeline),
-            InBranch(dispatcher),
-            InSession(host),
-            InSession(initial),
-            InBranch(publisher),
-            InBranch(identity),
-            InSession(faults),
-            (InBranch(branch_phase), InBranch(opening)),
+            Keyed(timeline),
+            Keyed(dispatcher),
+            Keyed(host),
+            Keyed(initial),
+            Keyed(publisher),
+            Keyed(identity),
+            Keyed(faults),
+            (Keyed(branch_phase), Keyed(opening)),
         ): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -634,7 +656,7 @@ impl TypedPlugin for PromptPlugin {
             let (adoption, mut adoptions) = tokio::sync::mpsc::unbounded_channel();
             let service = Arc::new(Prompt {
                 host,
-                initial: initial.0.clone(),
+                initial,
                 publisher,
                 timeline: timeline.clone(),
                 faults,
@@ -847,22 +869,13 @@ impl TypedPlugin for PromptPlugin {
             state.set(PromptSnapshot::from_context(&context));
             *projecting = projected_through;
             drop(projecting);
-            ctx.provide_as(self.scope.key::<StateCell<PromptSnapshot>>(), state)?;
-            ctx.provide_as::<Prompt>(self.scope.key::<Prompt>(), service.clone())?;
-            ctx.provide_as::<dyn ConfigureControl>(
-                self.scope.key::<dyn ConfigureControl>(),
-                service,
-            )?;
+            ctx.provide_as(self.state.key().clone(), state)?;
+            ctx.provide_as::<Prompt>(self.prompt.key().clone(), service.clone())?;
+            ctx.provide_as::<dyn ConfigureControl>(self.configure.key().clone(), service)?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for PromptPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 impl Prompt {
     pub(crate) async fn initial_completion(&self) -> Result<()> {
         let mut opened = self.opened.subscribe();
@@ -881,7 +894,7 @@ impl Prompt {
     /// Delivers what the Session's sources hold now, compared with what this
     /// branch already has. A new Session also adopts its model.
     async fn open(&self, event: &AgentEvent) -> Result<()> {
-        let Some(initial) = &self.initial else {
+        let Some(initial) = self.initial.get() else {
             return Ok(());
         };
         // A new Session adopts everything; a child or a resumed branch keeps
@@ -891,7 +904,7 @@ impl Prompt {
             EventKind::BranchStart(BranchStartData { parent: None, .. })
         );
         let update = if new_session {
-            initial.clone()
+            initial
         } else {
             ConfigureUpdate {
                 sources: initial.sources.clone(),

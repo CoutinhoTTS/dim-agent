@@ -17,7 +17,7 @@ Terminal / npm launcher
 
 `dim-agent-types` owns serialized data. `dim-agent-runtime` owns instance construction, timeline ordering and close coordination. Capabilities own their work, cancellation and state. Model and tool adapters provide typed ports; transport and product configuration belong to the App Server. The CLI is a client, not another agent execution engine.
 
-Services use rutis 0.10.0 TypedPlugin/Capability contracts. Dependencies are declared once; each instance scope uses the appropriate keys. A managed provider is an optional Rust process plugin that an account build's own executable installs; without it, managed-provider requests fail explicitly while API-key providers remain available.
+Services use rutis 0.16.0 TypedPlugin/Capability contracts. Dependencies are declared once; each instance scope uses the appropriate keys. A managed provider is an optional Rust process plugin that an account build's own executable installs; without it, managed-provider requests fail explicitly while API-key providers remain available.
 
 Capability factories are pure and preserve plugin names and dependency keys. Configuration that must survive reload belongs to the captured plugin configuration; each `apply` acquires fresh I/O resources and registers their cleanup. FileStorage clones share the append-only authorized-root identities, while directory handles, operations and leases belong to one service generation. Rebuilding from the initial root list would let a later project reuse an earlier project's index.
 
@@ -50,7 +50,7 @@ AiMux text and reasoning IDs identify active segments: a completed ID may start 
 | `dim-agent-capabilities` | Default capabilities and their host ports | Does not depend on the App Server |
 | `dim-agent-aimux` | Model configuration, model table, rutis plugin, request and stream mapping | aimux types stay inside the crate; no App Server |
 | `dim-app-server` | RPC, connections, Session registry, approval host, transport, daemon | Composes runtime and capabilities; does not reference the CLI |
-| `dim-cli` | Terminal client and local RPC transport (library) | Depends only on `dim-agent-types`; not an execution engine |
+| `dim-cli` | Terminal client and local RPC transport (library) | Depends on `dim-agent-types`, `rutis` and `rutis-bridge` (the UI leaf node); not an execution engine |
 | `dimcode` | The shipped executable: runs the CLI, or the App Server command line as `dimcode app-server`, which the CLI starts as its daemon | Composition only: depends on `dim-cli` and `dim-app-server`; nothing depends on it |
 | `xtask` | Graph generation, boundary checks, measurement | Development only |
 
@@ -86,6 +86,8 @@ Detailed contracts live under [`rust-agent/`](rust-agent/) and are written in Ch
 | Document | Topic |
 | --- | --- |
 | [principles](rust-agent/principles.md) | Design rules: bounded, orthogonal capabilities and ownership |
+| [plugin contract](../design/plugin-contract.md) (English, accepted, not implemented) | Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability ([ADR 006](../adr/006-plugin-contract.md)) |
+| [How Dim uses rutis](../design/rutis-usage.md) (English, accepted, not implemented) | Parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, bindings |
 | [time-bus](rust-agent/time-bus.md) | Event and state-machine axioms (draft) |
 | [single-tree](rust-agent/single-tree.md) | rutis tree assembly, keys, visibility, startup, close and reload |
 | [lifecycle](rust-agent/lifecycle.md) | Scopes, cancellation, settlement and resource cleanup |

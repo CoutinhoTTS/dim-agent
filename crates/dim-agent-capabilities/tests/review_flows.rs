@@ -25,7 +25,7 @@ fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuil
     // Keep completed events for the cleanup assertions in this flow.
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     builder
-        .session_value(Arc::new(ModelHost(model)))
+        .process_value(Arc::new(ModelHost(model)))
         .session_value(Arc::new(ToolHost(tools)))
         .session_value(Arc::new(
             dim_agent_capabilities::history::HistoryRenderer::default(),
@@ -33,7 +33,7 @@ fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuil
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::install(&mut builder);
     builder
 }
@@ -119,7 +119,7 @@ async fn one_tool_panic_does_not_abandon_other_native_cleanup_or_reorder_actual_
     )
     .build();
     let session = soon(agent.create_session(SessionConfig {
-        tools: vec!["panic".into(), "slow".into()],
+        tools: Some(vec!["panic".into(), "slow".into()]),
         permission_policy: PermissionPolicy {
             preset: PermissionPreset::FullAccess,
             ..Default::default()
@@ -212,7 +212,7 @@ impl LoopState for EmptyLoop {
         self.0.subscribe()
     }
 }
-struct ExtensionControls(Arc<AtomicUsize>, BranchScope);
+struct ExtensionControls(Arc<AtomicUsize>, rutis::DepKey<dyn LoopState>);
 impl TypedPlugin for ExtensionControls {
     type Deps = ();
     fn name(&self) -> &str {
@@ -233,7 +233,7 @@ impl TypedPlugin for ExtensionControls {
                 }))
             })?;
             ctx.provide_as(
-                self.1.key::<dyn LoopState>(),
+                self.1.key().clone(),
                 Arc::new(EmptyLoop(
                     tokio::sync::watch::channel(LoopSnapshot::default()).0,
                 )) as Arc<dyn LoopState>,
@@ -242,19 +242,19 @@ impl TypedPlugin for ExtensionControls {
         })
     }
 }
-impl Capability for ExtensionControls {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_branch_failing_after_its_root_is_built_rolls_it_back_before_releasing_its_registry_slot()
 {
     let live = Arc::new(AtomicUsize::new(0));
     let resources = live.clone();
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::register_names(&mut builder);
     builder
-        .session_plugin(dim_agent_capabilities::timeline_tree::TimelineTreePlugin::new)
-        .timeline_plugin(dim_agent_capabilities::timeline_tree::TreeTimelinePlugin::new)
-        .timeline_plugin(move |scope| ExtensionControls(resources.clone(), *scope));
+        .session_part(|names| {
+            names.part(dim_agent_capabilities::timeline_tree::TimelineTreePlugin::new(names)?)
+        })
+        .branch_part(|names| names.part(dim_agent_capabilities::timeline_tree::TreeTimelinePlugin))
+        .branch_part(move |names| names.part(ExtensionControls(resources.clone(), names.key()?)));
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await

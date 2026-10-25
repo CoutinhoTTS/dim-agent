@@ -6,35 +6,31 @@ use dim_agent_capabilities::{
     prompt_sources,
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::{Capability, InSession, KeysOf, PromptSourceTarget, SessionScope};
+use dim_agent_runtime::PromptSourceTarget;
 use dim_agent_types::{ModelSelection, PromptScope};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde_json::json;
 use std::sync::Arc;
 
 /// Agents' Session entry adopts profile configuration on the addressed branch.
-pub(crate) struct AgentsSessionPlugin {
-    scope: SessionScope,
-}
-impl AgentsSessionPlugin {
-    pub(crate) fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+pub(crate) struct AgentsSessionPlugin;
 impl TypedPlugin for AgentsSessionPlugin {
-    type Deps = (Arc<AgentIndex>, InSession<TreeCommands>);
+    type Deps = (
+        Keyed<AgentIndex>,
+        Keyed<TreeCommands>,
+        Keyed<SessionMethods>,
+    );
     fn name(&self) -> &str {
         "AgentsSession"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (index, InSession(tree)): Self::Deps,
+        (Keyed(index), Keyed(tree), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            SessionMethods::provide(
+            methods.register(
                 ctx,
-                &self.scope,
                 SESSION_NAMESPACE,
                 vec![MethodDecl::new(
                     "session.agent.update",
@@ -108,10 +104,5 @@ impl TypedPlugin for AgentsSessionPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for AgentsSessionPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), self.scope)
     }
 }

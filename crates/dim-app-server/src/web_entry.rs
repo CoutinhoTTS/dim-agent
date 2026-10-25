@@ -5,7 +5,7 @@
 use crate::{
     connection::{ConnectionHub, Entry},
     outbound::MAX_FRAME_BYTES,
-    protocol::{SERVER_VERSION, WebOpened, WebStatus},
+    protocol::{SERVER_VERSION, WebOpened, WebStatus, WebToggled},
     transport::run_ws,
 };
 use axum::{
@@ -36,13 +36,17 @@ const FREE_FAILURES: u32 = 5;
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const CSP: &str = "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'";
 
-/// Process-wide owner of the entry; at most one is open. It stays open while
-/// a local connection that asked for it with `web.open` (its holder) is
-/// connected: `dimcode web` holds it in the foreground, and its exit, however
-/// it ends, closes the entry.
+/// Process-wide owner of the entry; at most one is open. The daemon-owned
+/// `enabled` switch and the local connections that called `web.open` (the
+/// holders) are independent reasons to keep it open. `dimcode web` is a
+/// holder; the TUI toggles the switch.
 pub(crate) struct WebEntry {
     assets: Option<PathBuf>,
-    open: tokio::sync::Mutex<Option<Open>>,
+    state: tokio::sync::Mutex<Lifecycle>,
+}
+struct Lifecycle {
+    enabled: bool,
+    open: Option<Open>,
 }
 struct Open {
     address: SocketAddr,
@@ -58,21 +62,116 @@ impl WebEntry {
     pub fn new(assets: Option<PathBuf>) -> Self {
         Self {
             assets,
-            open: tokio::sync::Mutex::new(None),
+            state: tokio::sync::Mutex::new(Lifecycle {
+                enabled: false,
+                open: None,
+            }),
         }
     }
 
+    /// Adds a holder. The calling connection keeps the entry open until it
+    /// disconnects, even when the TUI switch is off.
     pub async fn open(
         &self,
         hub: &Arc<ConnectionHub>,
         holder: &str,
         port: Option<u16>,
     ) -> Result<WebOpened, RpcError> {
-        let mut open = self.open.lock().await;
-        if let Some(open) = open.as_mut().filter(|open| !open.task.is_finished()) {
+        let mut state = self.state.lock().await;
+        if let Some(open) = state.open.as_mut().filter(|open| !open.task.is_finished()) {
             open.holders.insert(holder.to_owned());
             return Ok(opened(open));
         }
+        state.open = None;
+        let open = self
+            .start(hub, port, HashSet::from([holder.to_owned()]))
+            .await?;
+        let reply = opened(&open);
+        state.open = Some(open);
+        Ok(reply)
+    }
+
+    /// Flips the daemon switch without changing holders. Turning it off
+    /// leaves the entry open while a foreground `dimcode web` still holds it.
+    pub async fn toggle(
+        &self,
+        hub: &Arc<ConnectionHub>,
+        port: Option<u16>,
+    ) -> Result<WebToggled, RpcError> {
+        let mut state = self.state.lock().await;
+        if state.enabled {
+            state.enabled = false;
+            self.close_if_unused(&mut state, hub).await;
+            return Ok(toggled(&state));
+        }
+        state.enabled = true;
+        if !state
+            .open
+            .as_ref()
+            .is_some_and(|open| !open.task.is_finished())
+        {
+            state.open = None;
+            match self.start(hub, port, HashSet::new()).await {
+                Ok(open) => state.open = Some(open),
+                Err(error) => {
+                    state.enabled = false;
+                    return Err(error);
+                }
+            }
+        }
+        Ok(toggled(&state))
+    }
+
+    /// `dimcode web --off`: turn the switch off without disconnecting a
+    /// foreground holder.
+    pub async fn disable(&self, hub: &Arc<ConnectionHub>) -> WebStatus {
+        let mut state = self.state.lock().await;
+        state.enabled = false;
+        self.close_if_unused(&mut state, hub).await;
+        status(hub, &state)
+    }
+
+    pub async fn status(&self, hub: &Arc<ConnectionHub>) -> WebStatus {
+        status(hub, &*self.state.lock().await)
+    }
+
+    /// Called as a local connection ends. When it was the last holder and
+    /// the switch is off, the listener closes, every token is dropped and
+    /// web connections detach.
+    pub async fn release(&self, hub: &Arc<ConnectionHub>, holder: &str) {
+        let mut state = self.state.lock().await;
+        let Some(open) = state.open.as_mut() else {
+            return;
+        };
+        if !open.holders.remove(holder) {
+            return;
+        }
+        self.close_if_unused(&mut state, hub).await;
+    }
+
+    async fn close_if_unused(&self, state: &mut Lifecycle, hub: &Arc<ConnectionHub>) {
+        if state.enabled
+            || state
+                .open
+                .as_ref()
+                .is_some_and(|open| !open.holders.is_empty())
+        {
+            return;
+        }
+        let Some(open) = state.open.take() else {
+            return;
+        };
+        open.stop.cancel();
+        hub.close_entry(Entry::Web);
+        let _ = open.task.await;
+    }
+
+    async fn start(
+        &self,
+        hub: &Arc<ConnectionHub>,
+        port: Option<u16>,
+        holders: HashSet<String>,
+    ) -> Result<Open, RpcError> {
         let assets = match &self.assets {
             Some(path) => path
                 .canonicalize()
@@ -129,46 +228,36 @@ impl WebEntry {
                 tracing::warn!(%error, "web entry stopped");
             }
         });
-        let entry = Open {
+        Ok(Open {
             address,
             bootstrap,
-            holders: HashSet::from([holder.to_owned()]),
+            holders,
             stop,
             task,
-        };
-        let reply = opened(&entry);
-        *open = Some(entry);
-        Ok(reply)
+        })
     }
+}
 
-    pub async fn status(&self, hub: &ConnectionHub) -> WebStatus {
-        let open = self.open.lock().await;
-        let address = open
-            .as_ref()
-            .filter(|open| !open.task.is_finished())
-            .map(|open| open.address);
-        WebStatus {
-            open: address.is_some(),
-            address,
-            connections: hub.entry_count(Entry::Web),
-        }
+fn status(hub: &ConnectionHub, state: &Lifecycle) -> WebStatus {
+    let open = state.open.as_ref().filter(|open| !open.task.is_finished());
+    WebStatus {
+        enabled: state.enabled,
+        open: open.is_some(),
+        address: open.map(|open| open.address),
+        connections: hub.entry_count(Entry::Web),
     }
+}
 
-    /// Called as a local connection ends. When it was the last holder, the
-    /// listener closes, every token is dropped and web connections detach.
-    pub async fn release(&self, hub: &ConnectionHub, holder: &str) {
-        let mut guard = self.open.lock().await;
-        let Some(open) = guard.as_mut() else {
-            return;
-        };
-        if !open.holders.remove(holder) || !open.holders.is_empty() {
-            return;
-        }
-        let open = guard.take().expect("checked above");
-        drop(guard);
-        open.stop.cancel();
-        hub.close_entry(Entry::Web);
-        let _ = open.task.await;
+fn toggled(state: &Lifecycle) -> WebToggled {
+    let open = state.open.as_ref().filter(|open| !open.task.is_finished());
+    let (url, address) = open.map_or((None, None), |open| {
+        (Some(opened(open).url), Some(open.address))
+    });
+    WebToggled {
+        enabled: state.enabled,
+        open: open.is_some(),
+        url,
+        address,
     }
 }
 

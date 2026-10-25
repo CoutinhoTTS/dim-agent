@@ -2,7 +2,7 @@ use super::keys::KeyFilter;
 use crate::{AgentError, BoxFuture, Result, Timeline, panic_message};
 use dim_agent_types::AgentEvent;
 use futures_util::FutureExt;
-use rutis::{CordisError, Ctx, Event, EventKey, InstanceId, Listener};
+use rutis::{Call, CordisError, Ctx, Event, EventKey, InstanceId, Listener};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::Arc,
@@ -11,10 +11,18 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 /// The committed timeline event delivered through the rutis event bus.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct Committed(pub Arc<AgentEvent>);
 impl Event for Committed {
-    const NAME: &'static str = "timeline.committed";
+    // Dispatched only under the branch's private name ([`committed_key`]).
+    const NAME: &'static str = "";
     type Value = ();
+}
+
+/// The branch's private channel. The bus is flat, so the name carries the
+/// branch instance; only the Dispatcher builds it.
+fn committed_key(instance: InstanceId) -> EventKey<Committed> {
+    EventKey::dynamic(format!("dim/timeline/{instance}/committed"))
 }
 
 type Handler = dyn Fn(Arc<AgentEvent>) -> BoxFuture<'static, Result<()>> + Send + Sync;
@@ -31,8 +39,9 @@ struct SubscriptionListener {
 impl Listener<Committed> for SubscriptionListener {
     fn call<'a>(
         &'a self,
-        _ctx: &'a Ctx,
+        ctx: &'a Ctx,
         event: &'a Committed,
+        _call: Call<'a, ()>,
     ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
         if !self.keys.matches(event.0.kind.key()) {
             return Box::pin(async { Ok(None) });
@@ -41,15 +50,21 @@ impl Listener<Committed> for SubscriptionListener {
         let handler = self.handler.clone();
         let failures = self.failures.clone();
         let event = event.0.clone();
+        // Unloading waits for running listeners; ending the call when the
+        // registering part is cancelled keeps branch close prompt.
+        let cancelled = ctx.cancelled();
         Box::pin(async move {
             let future = match catch_unwind(AssertUnwindSafe(|| handler(event))) {
                 Ok(future) => future,
                 Err(panic) => return Err(self::panic(&failures, &name, panic)),
             };
-            match AssertUnwindSafe(future).catch_unwind().await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => failures.fail(error),
-                Err(panic) => return Err(self::panic(&failures, &name, panic)),
+            tokio::select! {
+                _ = cancelled => {}
+                result = AssertUnwindSafe(future).catch_unwind() => match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => failures.fail(error),
+                    Err(panic) => return Err(self::panic(&failures, &name, panic)),
+                },
             }
             Ok(None)
         })
@@ -67,7 +82,7 @@ pub struct DispatchState {
     pub sequence: u64,
     pub failure: Option<AgentError>,
 }
-/// Delivers one branch's committed events on that branch's instance channel.
+/// Delivers one branch's committed events on that branch's private channel.
 #[derive(Clone)]
 pub struct Dispatcher {
     state: Arc<watch::Sender<DispatchState>>,
@@ -96,8 +111,8 @@ impl Dispatcher {
     /// Business outcomes are written to the Timeline by the handler itself.
     /// Handler panics are attributed to `name` and stop the branch.
     ///
-    /// `ctx` must be inside the branch subtree; the listener lives on the
-    /// branch instance channel and is removed with the registering plugin.
+    /// The listener lives on the branch's private channel and is removed
+    /// with the registering plugin.
     pub fn subscribe(
         &self,
         ctx: &Ctx,
@@ -110,7 +125,7 @@ impl Dispatcher {
         ctx.events()
             .on(
                 ctx,
-                &EventKey::<Committed>::of().instance(self.instance),
+                &committed_key(self.instance),
                 SubscriptionListener {
                     name: name.into(),
                     keys,
@@ -213,8 +228,8 @@ impl Dispatcher {
                 .events()
                 .serial(
                     &ctx,
-                    &EventKey::of().instance(self.instance),
-                    &Committed(event.clone()),
+                    &committed_key(self.instance),
+                    Arc::new(Committed(event.clone())),
                 )
                 .await
             {

@@ -116,7 +116,7 @@ restore and fork neither restore nor widen them.
 are data: `unavailable` (the source could not be read, including an invalid persisted file),
 `cancelled` (the caller dropped the call or the provider is unloading).
 
-**Management methods**, namespace `permission`, provided by the process part through
+**Management methods**, namespace `permission`, which the process part registers with
 `managementMethods` (overview §6.2 rule 9; never served to paired devices).
 
 | Method | Request | Reply | Errors |

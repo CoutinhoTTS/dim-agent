@@ -495,6 +495,22 @@ impl Client {
             .unwrap_or_else(|| panic!("{method} should fail: {reply}"))
             .to_owned()
     }
+    /// Waits until `session.mcp` serves the Session again. A process plugin
+    /// restart returns once the process plugins are Active; the Session's
+    /// parts that depend on it reload after, and meanwhile `session.mcp`
+    /// answers `service_reloading`, which asks the client to retry.
+    async fn until_serving(&mut self, session: &str) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while self.rpc("session.mcp", json!({"sessionId":session})).await["error"]["data"]
+                ["appError"]
+                == "service_reloading"
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the Session's MCP parts reload");
+    }
     /// Waits until the Session reports server `id` in `state`.
     async fn mcp_state(&mut self, session: &str, id: &str, state: &str) -> Value {
         let mut last = Value::Null;
@@ -598,7 +614,7 @@ impl Daemon {
                 target_home: Some(native.clone()),
                 unix_path: Some(native.join("daemon.sock")),
                 session_defaults: dim_agent_runtime::SessionConfig {
-                    tools: vec!["read".into()],
+                    tools: Some(vec!["read".into()]),
                     permission_policy: dim_agent_types::PermissionPolicy {
                         preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                         ..Default::default()
@@ -903,6 +919,7 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
     assert_eq!(refresh_token(&daemon), "refresh-5-secret");
     assert_eq!(authority.refreshes.load(Ordering::SeqCst), 4);
     for session in [&first, &second] {
+        client.until_serving(session).await;
         client.mcp_state(session, "docs", "ready").await;
     }
 

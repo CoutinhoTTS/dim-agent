@@ -6,7 +6,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -149,7 +149,7 @@ async fn model_adoption_preserves_enabled_tools_on_initialization_and_refresh() 
         .build();
         let session = agent
             .create_session(SessionConfig {
-                tools: vec!["echo".into()],
+                tools: Some(vec!["echo".into()]),
                 ..Default::default()
             })
             .await
@@ -309,16 +309,16 @@ enum ConfigurationTamper {
     ConfigurationRevision,
 }
 
-struct TamperConfiguration(ConfigurationTamper, BranchScope);
+struct TamperConfiguration(ConfigurationTamper);
 impl TypedPlugin for TamperConfiguration {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (Keyed<Timeline>,);
     fn name(&self) -> &str {
         "TamperConfiguration"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (Keyed(timeline),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let tamper = self.0;
@@ -356,11 +356,6 @@ impl TypedPlugin for TamperConfiguration {
         })
     }
 }
-impl Capability for TamperConfiguration {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
-}
 
 struct GatedContext {
     started: Arc<Notify>,
@@ -388,26 +383,26 @@ fn builder_with_context(host: Arc<Prompts>, prepare: Arc<dyn PrepareContext>) ->
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(PrepareContextHost(prepare)))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(DefaultPrepareModelPlugin::new);
+        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
     defaults::install_with_prompt(&mut builder, host, None);
     builder
 }
 
-struct RejectSecondRequest(Arc<AtomicUsize>, BranchScope);
+struct RejectSecondRequest(Arc<AtomicUsize>);
 impl TypedPlugin for RejectSecondRequest {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (Keyed<Timeline>,);
     fn name(&self) -> &str {
         "RejectSecondPromptRequest"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (Keyed(timeline),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let calls = self.0.clone();
@@ -426,11 +421,6 @@ impl TypedPlugin for RejectSecondRequest {
         })
     }
 }
-impl Capability for RejectSecondRequest {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
-}
 
 #[tokio::test]
 async fn configuration_publication_preserves_trusted_before_changes_atomically() {
@@ -444,7 +434,7 @@ async fn configuration_publication_preserves_trusted_before_changes_atomically()
             Reply::Entry(entry("rules", "1", "trusted")),
         )]))));
         let mut builder = builder(host);
-        builder.timeline_plugin(move |scope| TamperConfiguration(tamper, *scope));
+        builder.branch_part(move |names| names.part(TamperConfiguration(tamper)));
         let agent = builder.build();
         let session = agent
             .create_session(SessionConfig::default())
@@ -1139,19 +1129,19 @@ async fn initial_configuration_loads_before_start_and_failure_rolls_back() {
     );
 }
 
-struct OpeningObserved(BranchScope, Arc<Notify>, CancellationToken);
+struct OpeningObserved(Arc<Notify>, CancellationToken);
 impl TypedPlugin for OpeningObserved {
-    type Deps = InBranch<Dispatcher>;
+    type Deps = Keyed<Dispatcher>;
     fn name(&self) -> &str {
         "OpeningObserved"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        InBranch(dispatcher): Self::Deps,
+        Keyed(dispatcher): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let observed = self.1.clone();
+            let observed = self.0.clone();
             dispatcher.subscribe(
                 ctx,
                 "OpeningObserved",
@@ -1163,7 +1153,7 @@ impl TypedPlugin for OpeningObserved {
             )?;
             // A close must signal the host independently of dispatch drain
             // and capability unload, even if another handler is waiting.
-            let cancelled = self.2.clone();
+            let cancelled = self.1.clone();
             dispatcher.subscribe(ctx, "StartupDrain", &["stop/interrupt"], move |_| {
                 let cancelled = cancelled.clone();
                 Box::pin(async move {
@@ -1175,22 +1165,17 @@ impl TypedPlugin for OpeningObserved {
         })
     }
 }
-impl Capability for OpeningObserved {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.0)
-    }
-}
 
-struct OpeningFailure(BranchScope);
+struct OpeningFailure;
 impl TypedPlugin for OpeningFailure {
-    type Deps = (InBranch<Dispatcher>, InBranch<BranchOpening>);
+    type Deps = (Keyed<Dispatcher>, Keyed<BranchOpening>);
     fn name(&self) -> &str {
         "OpeningFailure"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher), InBranch(opening)): Self::Deps,
+        (Keyed(dispatcher), Keyed(opening)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             dispatcher.subscribe(ctx, "OpeningFailure", &["branch/start"], move |_| {
@@ -1208,16 +1193,11 @@ impl TypedPlugin for OpeningFailure {
         })
     }
 }
-impl Capability for OpeningFailure {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.0)
-    }
-}
 
 #[tokio::test]
 async fn opening_failure_is_not_hidden_by_an_earlier_pending_receipt() {
     let mut builder = builder(Arc::new(Prompts(Mutex::new(BTreeMap::new()))));
-    builder.timeline_plugin(|scope| OpeningFailure(*scope));
+    builder.branch_part(|names| names.part(OpeningFailure));
     let agent = builder.build();
     let result = tokio::time::timeout(
         Duration::from_secs(1),
@@ -1302,8 +1282,8 @@ async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host()
                 });
                 let signal = observed.clone();
                 let cancel_signal = cancelled.clone();
-                builder.timeline_plugin(move |scope| {
-                    OpeningObserved(*scope, signal.clone(), cancel_signal.clone())
+                builder.branch_part(move |names| {
+                    names.part(OpeningObserved(signal.clone(), cancel_signal.clone()))
                 });
                 let agent = builder.build();
                 let creating = agent.clone();
@@ -1980,7 +1960,7 @@ async fn large_request_can_supersede_a_consumed_load_without_a_history_byte_budg
         Reply::Wait(release.clone(), entry("rules", "1", "valid")),
     )]))));
     let mut builder = builder(host);
-    builder.timeline_plugin(|scope| RejectSecondRequest(Arc::new(AtomicUsize::new(0)), *scope));
+    builder.branch_part(|names| names.part(RejectSecondRequest(Arc::new(AtomicUsize::new(0)))));
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())
@@ -2074,18 +2054,17 @@ async fn loader_panic_is_reported_to_the_agent_supervisor() {
 }
 
 struct RetargetModel {
-    scope: BranchScope,
     replace_snapshot: bool,
 }
 impl TypedPlugin for RetargetModel {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (Keyed<Timeline>,);
     fn name(&self) -> &str {
         "RetargetModel"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (Keyed(timeline),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let replace_snapshot = self.replace_snapshot;
@@ -2101,11 +2080,6 @@ impl TypedPlugin for RetargetModel {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for RetargetModel {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -2125,10 +2099,7 @@ async fn before_retargeting_requires_matching_capabilities_without_remerging_par
                 model: Some(original.clone()),
             },
         );
-        builder.timeline_plugin(move |scope| RetargetModel {
-            scope: *scope,
-            replace_snapshot,
-        });
+        builder.branch_part(move |names| names.part(RetargetModel { replace_snapshot }));
         let agent = builder.build();
         let session = agent
             .create_session(SessionConfig::default())

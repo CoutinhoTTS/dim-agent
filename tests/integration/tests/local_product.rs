@@ -18,7 +18,6 @@ use dim_agent_capabilities::{
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
     workspace_tools::WorkspaceToolsConfig,
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
@@ -48,10 +47,16 @@ async fn product(dirs: &Dirs) -> Product {
         Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
     )
     .unwrap();
-    (&root.plugin(capability_plugin(SkillsCatalogPlugin::new())))
+    (&root.plugin(
+        dim_agent_runtime::names::process_plugin(
+            &dim_agent_capabilities::catalog(),
+            SkillsCatalogPlugin::new(),
+        )
+        .unwrap(),
+    ))
         .await
         .unwrap();
-    (&root.plugin(capability_plugin(
+    (&root.plugin(rutis::Typed::new(
         dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default(),
     )))
         .await
@@ -60,12 +65,14 @@ async fn product(dirs: &Dirs) -> Product {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(model.clone())))
+        .process_value(Arc::new(ModelHost(model.clone())))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_plugin(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new);
+        .session_part(|names| {
+            names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+        });
     defaults::install_local_execution(
         &mut builder,
         ModelProviderPlugin::new,
@@ -85,11 +92,13 @@ async fn session(product: &Product, cwd: &Path) -> Session {
         .agent
         .create_session(SessionConfig {
             cwd: cwd.to_string_lossy().into_owned(),
-            tools: [
-                "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
-            ]
-            .map(String::from)
-            .to_vec(),
+            tools: Some(
+                [
+                    "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
+                ]
+                .map(String::from)
+                .to_vec(),
+            ),
             permission_policy: PermissionPolicy {
                 preset: PermissionPreset::WorkspaceWrite,
                 ..Default::default()

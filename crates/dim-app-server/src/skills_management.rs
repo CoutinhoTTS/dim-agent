@@ -13,8 +13,7 @@ use dim_agent_capabilities::{
         SkillSettingsSnapshot,
     },
 };
-use dim_agent_runtime::{Capability, KeysOf, scoped};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -186,24 +185,28 @@ fn issue(issue: dim_agent_capabilities::skills::SkillIssue) -> SkillIssue {
 
 pub struct SkillsCatalogPlugin;
 impl TypedPlugin for SkillsCatalogPlugin {
-    type Deps = (Arc<HostPlatform>, Arc<SettingsService>);
+    type Deps = (
+        Keyed<HostPlatform>,
+        Keyed<SettingsService>,
+        Keyed<ManagementMethods>,
+    );
     fn name(&self) -> &str {
         "SkillsCatalog"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (platform, settings): Self::Deps,
+        (platform, Keyed(settings), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage { settings })));
             let catalog = dim_agent_capabilities::skills::SkillsCatalogPlugin::mount(
                 ctx,
-                (platform, settings),
+                (platform, Keyed(settings)),
             )
             .await?;
             ctx.provide_as(rutis::TypeKey::of::<SkillsCatalog>(), catalog.clone())?;
-            ManagementMethods::provide(
+            methods.register(
                 ctx,
                 "skills",
                 ["skills.catalog", "skills.set_enabled", "skills.refresh"]
@@ -290,10 +293,5 @@ impl TypedPlugin for SkillsCatalogPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for SkillsCatalogPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
     }
 }

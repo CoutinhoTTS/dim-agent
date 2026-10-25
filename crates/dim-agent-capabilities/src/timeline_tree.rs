@@ -1,15 +1,15 @@
 use crate::{
     host::{HostError, HostFuture, ToolExecutionContext},
-    tool_registry::{ToolContribution, ToolHandler},
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
-    AgentError, Branch, BranchOptions, BranchScope, Capability, Dispatcher, InBranch, InSession,
-    KeysOf, Result, SessionIdentity, SessionScope, StoredBranch, Timeline, TimelineContext,
-    TimelineFactory, TimelineInfo, TimelineKey, TimelineStore, TimelineTreeControl, scoped,
+    AgentError, Branch, BranchOptions, Dispatcher, Names, Result, SessionIdentity, StoredBranch,
+    Timeline, TimelineContext, TimelineFactory, TimelineInfo, TimelineKey, TimelineStore,
+    TimelineTreeControl,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -854,20 +854,14 @@ impl TimelineTreeControl for TimelineTree {
     }
 }
 
-pub struct TreeTimelinePlugin {
-    scope: BranchScope,
-}
-impl TreeTimelinePlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+/// Starts the tree's build task for each final `branch/create` of its branch.
+pub struct TreeTimelinePlugin;
 impl TypedPlugin for TreeTimelinePlugin {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<Dispatcher>,
-        InSession<TreeCommands>,
-        InBranch<dim_agent_runtime::TimelineIdentity>,
+        rutis::Keyed<Timeline>,
+        rutis::Keyed<Dispatcher>,
+        rutis::Keyed<TreeCommands>,
+        rutis::Keyed<dim_agent_runtime::TimelineIdentity>,
     );
     fn name(&self) -> &str {
         "TreeTimeline"
@@ -875,7 +869,12 @@ impl TypedPlugin for TreeTimelinePlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(dispatcher), InSession(commands), InBranch(identity)): Self::Deps,
+        (
+            rutis::Keyed(timeline),
+            rutis::Keyed(dispatcher),
+            rutis::Keyed(commands),
+            rutis::Keyed(identity),
+        ): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let cleanup = commands.clone();
@@ -904,24 +903,25 @@ impl TypedPlugin for TreeTimelinePlugin {
         })
     }
 }
-impl Capability for TreeTimelinePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 pub struct TimelineTreePlugin {
-    scope: SessionScope,
+    commands: rutis::DepKey<TreeCommands>,
+    tree: rutis::DepKey<TimelineTree>,
+    control: rutis::DepKey<dyn TimelineTreeControl>,
 }
 impl TimelineTreePlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+        Ok(Self {
+            commands: names.key()?,
+            tree: names.key()?,
+            control: names.key()?,
+        })
     }
 }
 impl TypedPlugin for TimelineTreePlugin {
     type Deps = (
-        InSession<TimelineFactory>,
-        InSession<dyn TimelineStore>,
-        InSession<SessionIdentity>,
+        Keyed<TimelineFactory>,
+        Keyed<dyn TimelineStore>,
+        Keyed<SessionIdentity>,
     );
     fn name(&self) -> &str {
         "TimelineTree"
@@ -929,7 +929,7 @@ impl TypedPlugin for TimelineTreePlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(factory), InSession(store), InSession(identity)): Self::Deps,
+        (Keyed(factory), Keyed(store), Keyed(identity)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let tree = TimelineTree::new(factory, store, identity.session_id.clone());
@@ -942,31 +942,41 @@ impl TypedPlugin for TimelineTreePlugin {
             let commands = Arc::new(TreeCommands {
                 tree: Arc::downgrade(&tree),
             });
+            ctx.provide_as(self.commands.key().clone(), commands)?;
+            ctx.provide_as(self.tree.key().clone(), tree.clone())?;
             ctx.provide_as(
-                self.scope.named_key::<ToolContribution>("branch"),
-                Arc::new(ToolContribution {
-                    definition: branch_definition(),
-                    handler: Arc::new(BranchTool {
-                        tree: commands.clone(),
-                    }),
-                }),
-            )?;
-            ctx.provide_as(self.scope.key::<TreeCommands>(), commands)?;
-            ctx.provide_as(self.scope.key::<TimelineTree>(), tree.clone())?;
-            ctx.provide_as(
-                self.scope.key::<dyn TimelineTreeControl>(),
+                self.control.key().clone(),
                 tree as Arc<dyn TimelineTreeControl>,
             )?;
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for TimelineTreePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
+/// Session part: registers the `branch` tool, which forks the calling
+/// branch through the tree.
+pub struct BranchToolPlugin;
+impl TypedPlugin for BranchToolPlugin {
+    type Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>);
+    fn name(&self) -> &str {
+        "BranchTool"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (Keyed(tree), Keyed(tools)): Self::Deps,
+    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        Box::pin(async move {
+            tools.register(
+                ctx,
+                ToolContribution {
+                    definition: branch_definition(),
+                    handler: Arc::new(BranchTool { tree }),
+                },
+            )?;
+            Ok(Effect::Done)
+        })
     }
 }
-
 struct BranchTool {
     tree: Arc<TreeCommands>,
 }

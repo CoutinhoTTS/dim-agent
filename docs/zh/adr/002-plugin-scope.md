@@ -2,6 +2,9 @@
 
 决策状态：Proposed。适用于 `docs/design/` 中的插件设计及未来的插件。
 
+由 [ADR 006](006-plugin-contract.md) 扩展：D1–D4 不变。D5 由[插件契约](../design/plugin-contract.md)补全：
+Dim 的运行时服务进入命名目录，部件的位置就是它所在 loader 行的组，Rust 是契约的一种绑定。
+
 ## 背景
 
 Dim 在三个作用域装配插件：进程、Session 和分支

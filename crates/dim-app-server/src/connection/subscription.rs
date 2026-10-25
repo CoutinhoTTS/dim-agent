@@ -222,6 +222,7 @@ impl Listener<SessionBroadcastEvent> for Forward {
         &'a self,
         _ctx: &'a Ctx,
         record: &'a SessionBroadcastEvent,
+        _: rutis::Call<'a, ()>,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         match record {
             SessionBroadcastEvent::Closed => {

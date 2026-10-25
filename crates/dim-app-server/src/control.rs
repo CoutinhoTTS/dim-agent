@@ -1,5 +1,4 @@
 use crate::ServerError;
-use dim_agent_runtime::{Capability, KeysOf};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::sync::{
     Arc, Mutex,
@@ -99,7 +98,4 @@ impl TypedPlugin for ServerControlPlugin {
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for ServerControlPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }

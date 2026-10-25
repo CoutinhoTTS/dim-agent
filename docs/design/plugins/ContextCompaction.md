@@ -83,7 +83,7 @@ unreleased.
  |  ProductSummaryStrategy (new part)                                |
  |    provides S:CompactionStrategyHost(Some(summary strategy))      |
  |  ContextMethods (new part)                                        |
- |    provides sessionMethods["session.context"]: compact, usage     |
+ |    registers session.context with sessionMethods: compact, usage  |
  |      compact -> TreeCommands.get(b).service::<AgentLoop>().compact()
  |      usage   -> TreeCommands.get(b).service::<ContextPreparation>().usage()
  +---------------------------------^---------------------------------+
@@ -159,7 +159,7 @@ The Session values hold no state. A resolved connection lives only inside one st
 
 ### 4.1 Session methods (language-neutral, ADR 002 D5)
 
-`sessionMethods`, Session scope, key `session.context`, provided by ContextMethods
+Namespace `session.context`, which ContextMethods registers with the Session's `sessionMethods`
 ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). Both
 methods are declared with `interruption: report`, `progress: false`, `notifications: []` and
 `reply: direct`.
@@ -399,14 +399,13 @@ impl PublicService for ContextPreparation {}
 pub struct ProductContextModel;                    // ResolveContextModel, no dependencies
 pub struct ProductSummaryStrategyPlugin { scope: SessionScope }
 //   Deps = (Arc<ModelHost>, Arc<ProviderConnectionResolver>); provides CompactionStrategyHost
-pub struct ContextMethodsPlugin { scope: SessionScope }
-//   Deps = InSession<TreeCommands>; SessionMethods::provide(ctx, &scope, "session.context", ..)
+pub struct ContextMethodsPlugin;
+//   Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>); methods.register(ctx, "session.context", ..)
 
 // dim-app-server/src/main.rs, product profile only (no --models file):
 builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextModel)))))
        .session_plugin(ProductSummaryStrategyPlugin::new)
-       .session_plugin(ContextMethodsPlugin::new)
-       .session_methods("session.context");
+       .session_part(|names| names.part(ContextMethodsPlugin));
 // --models and mock profiles bind ContextModelHost(None) and CompactionStrategyHost(None)
 ```
 

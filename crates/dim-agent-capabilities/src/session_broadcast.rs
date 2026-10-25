@@ -1,12 +1,9 @@
 //! Broadcasts every dispatched event of one branch on its Session channel,
 //! which also carries owners' notices about the Session's process-level state.
-use dim_agent_runtime::{
-    BranchScope, Capability, Dispatcher, InBranch, InSession, KeysOf, SessionIdentity,
-    SessionScope, TimelineIdentity, scoped,
-};
+use dim_agent_runtime::{Dispatcher, SessionIdentity, TimelineIdentity};
 use dim_agent_types::AgentEvent;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, TypedPlugin};
-use serde::Serialize;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, Keyed, TypedPlugin};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// A record on one Session's channel; the channel name identifies the Session.
@@ -26,8 +23,72 @@ pub enum SessionBroadcastEvent {
     Closed,
 }
 impl Event for SessionBroadcastEvent {
-    const NAME: &'static str = "session.broadcast";
+    // Dispatched only under a Session's name ([`session_channel`]).
+    const NAME: &'static str = "";
     type Value = ();
+}
+
+/// The public serde form of a [`SessionBroadcastEvent`], which every runtime
+/// listening to `session/{id}` receives: `{kind: "event", branchId, event}`,
+/// `{kind: "notice", notice}`, `{kind: "fence", recipient, token}` or
+/// `{kind: "closed"}`. A notice keeps its own `kind` field inside `notice`.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum WireRef<'a> {
+    Event {
+        #[serde(rename = "branchId")]
+        branch_id: &'a str,
+        event: &'a AgentEvent,
+    },
+    Notice {
+        notice: &'a SessionNotice,
+    },
+    Fence {
+        recipient: &'a str,
+        token: u64,
+    },
+    Closed,
+}
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum Wire {
+    Event {
+        #[serde(rename = "branchId")]
+        branch_id: String,
+        event: Arc<AgentEvent>,
+    },
+    Notice {
+        notice: Arc<SessionNotice>,
+    },
+    Fence {
+        recipient: String,
+        token: u64,
+    },
+    Closed,
+}
+impl Serialize for SessionBroadcastEvent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Event { branch_id, event } => WireRef::Event { branch_id, event },
+            Self::Notice(notice) => WireRef::Notice { notice },
+            Self::Fence { recipient, token } => WireRef::Fence {
+                recipient,
+                token: *token,
+            },
+            Self::Closed => WireRef::Closed,
+        }
+        .serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for SessionBroadcastEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Event { branch_id, event } => Self::Event { branch_id, event },
+            Wire::Notice { notice } => Self::Notice(notice),
+            Wire::Fence { recipient, token } => Self::Fence { recipient, token },
+            Wire::Closed => Self::Closed,
+        })
+    }
 }
 
 /// The rutis channel shared by the broadcaster and every listener.
@@ -38,7 +99,7 @@ pub fn session_channel(session_id: &str) -> EventKey<SessionBroadcastEvent> {
 /// An owner's announcement that its process-level state about a Session
 /// changed. The broadcast and Rpc never interpret the fields; it has no
 /// sequence and is never replayed.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionNotice {
     /// The owner, such as `SessionStore`.
     pub source: String,
@@ -61,23 +122,16 @@ pub fn notify(ctx: &Ctx, session_id: &str, notice: SessionNotice) {
     }
 }
 
-pub struct SessionBroadcastPlugin {
-    scope: BranchScope,
-}
-impl SessionBroadcastPlugin {
-    pub fn new(scope: &BranchScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+pub struct SessionBroadcastPlugin;
 impl TypedPlugin for SessionBroadcastPlugin {
-    type Deps = (InBranch<Dispatcher>, InBranch<TimelineIdentity>);
+    type Deps = (Keyed<Dispatcher>, Keyed<TimelineIdentity>);
     fn name(&self) -> &str {
         "SessionBroadcast"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher), InBranch(identity)): Self::Deps,
+        (Keyed(dispatcher), Keyed(identity)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let channel = session_channel(&identity.session_id);
@@ -98,31 +152,18 @@ impl TypedPlugin for SessionBroadcastPlugin {
         })
     }
 }
-impl Capability for SessionBroadcastPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
-
 /// Ends the Session channel. Session capabilities unload after every branch
 /// closed, so this record follows every broadcast event.
-pub struct SessionBroadcastEndPlugin {
-    scope: SessionScope,
-}
-impl SessionBroadcastEndPlugin {
-    pub fn new(scope: &SessionScope) -> Self {
-        Self { scope: *scope }
-    }
-}
+pub struct SessionBroadcastEndPlugin;
 impl TypedPlugin for SessionBroadcastEndPlugin {
-    type Deps = (InSession<SessionIdentity>,);
+    type Deps = (Keyed<SessionIdentity>,);
     fn name(&self) -> &str {
         "SessionBroadcastEnd"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InSession(identity),): Self::Deps,
+        (Keyed(identity),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let channel = session_channel(&identity.session_id);
@@ -141,10 +182,5 @@ impl TypedPlugin for SessionBroadcastEndPlugin {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for SessionBroadcastEndPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }

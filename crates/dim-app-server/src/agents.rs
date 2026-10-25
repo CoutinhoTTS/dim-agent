@@ -7,14 +7,14 @@ use crate::{
 };
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
-    AGENT_GROUP, Agent, AgentBuilder, AgentError, Capability, KeysOf, NoConfig, Session,
-    SessionConfig, TimelineKey, When, capability_plugin,
+    AGENT_GROUP, Agent, AgentBuilder, AgentError, Names, NoConfig, Session, SessionConfig,
+    TimelineKey, When,
 };
 pub use dim_agent_types::AgentProfile;
 use dim_agent_types::{ContentBlock, EventKind};
 use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, Event, EventKey, FiberState, FiberView, TypeKey,
-    TypedFactory, TypedPlugin, TypedPluginFactory,
+    BoxFuture, CordisError, Ctx, Effect, Event, EventKey, FiberState, FiberView, Keyed, Plugin,
+    TypeKey, TypedFactory, TypedPlugin, TypedPluginFactory,
 };
 use rutis_bridge::session::{HostDispatch, host_key};
 use rutis_loader::{Builtins, InstanceResult, Loader};
@@ -77,9 +77,12 @@ pub struct AgentHost {
 }
 
 /// A new loaded incarnation of a stored Session, before its caller receives it.
+/// Listeners resolve the Session through [`AgentIndex::session`]; an event
+/// carries ids, never a handle.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct SessionRestored {
     pub agent_id: String,
-    pub session: Session,
+    pub session_id: String,
 }
 impl Event for SessionRestored {
     const NAME: &'static str = "agent/session-restored";
@@ -89,6 +92,7 @@ impl Event for SessionRestored {
 /// not loaded, so no close announced it. A loaded Session ends through its
 /// close instead. Emitted on the process root: a delete can outlive its
 /// index generation.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct UnloadedSessionDeleted {
     pub agent_id: String,
     pub session_id: String,
@@ -299,9 +303,6 @@ impl TypedPlugin for AgentDirectoryPlugin {
         })
     }
 }
-impl Capability for AgentDirectoryPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// Directory logic and Agent management over the [`AgentDirectory`]:
 /// lookups, Session admission and creating and closing Agents through the
@@ -314,8 +315,6 @@ pub struct AgentIndex {
     session_defaults: SessionConfig,
     /// Protected profiles resolve Session models through a `ModelSelectionHost`.
     selects_models: bool,
-    /// Tools the process assembly provides: host tools and contributions.
-    tools: BTreeSet<String>,
     /// Loading context of `AgentsPlugin`.
     ctx: OnceLock<Ctx>,
     /// The process loader Agents are instances of, and the root they are
@@ -738,7 +737,7 @@ impl AgentIndex {
                         &self.session_restored,
                         Arc::new(SessionRestored {
                             agent_id: host.agent_id.clone(),
-                            session: session.clone(),
+                            session_id: id.to_owned(),
                         }),
                     )
                     .await?;
@@ -1173,14 +1172,12 @@ impl AgentIndex {
         };
         self.load(id.to_string(), false, profile).await
     }
-    /// A profile from outside the process may only select provided tools,
-    /// each once.
+    /// A profile from outside the process lists each tool of its mount list
+    /// once. A tool that no part registers is reported when the Session
+    /// reads its tools.
     pub fn check_profile(&self, profile: &AgentProfile) -> Result<(), String> {
         let mut seen = BTreeSet::new();
-        for tool in &profile.tools {
-            if !self.tools.contains(tool) {
-                return Err(format!("tool {tool} is not provided by the process"));
-            }
+        for tool in profile.tools.iter().flatten() {
             if !seen.insert(tool) {
                 return Err(format!("tool {tool} is listed twice"));
             }
@@ -1484,13 +1481,26 @@ impl AgentsPlugin {
             root,
         }
     }
+    /// This part with its keys: native storage only with a database, and
+    /// settings only with local execution.
+    pub fn part(self, names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
+        let keys = (
+            names.when::<(Keyed<SessionStore>, Keyed<SqliteStorage>)>(
+                self.config.database_path.is_some(),
+            )?,
+            names.when::<Keyed<SettingsService>>(self.config.local_execution())?,
+            names.key::<Loader>()?,
+            names.key::<AgentDirectory>()?,
+        );
+        Ok(names.part_with(self, keys))
+    }
 }
 impl TypedPlugin for AgentsPlugin {
     type Deps = (
-        When<(Arc<SessionStore>, Arc<SqliteStorage>)>,
-        When<Arc<SettingsService>>,
-        Arc<Loader>,
-        Arc<AgentDirectory>,
+        When<(Keyed<SessionStore>, Keyed<SqliteStorage>)>,
+        When<Keyed<SettingsService>>,
+        Keyed<Loader>,
+        Keyed<AgentDirectory>,
     );
     fn name(&self) -> &str {
         "Agents"
@@ -1498,12 +1508,13 @@ impl TypedPlugin for AgentsPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (When(stored), When(settings), loader, directory): Self::Deps,
+        (When(stored), When(settings), Keyed(loader), Keyed(directory)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
+            let settings = settings.map(|Keyed(settings)| settings);
             let mut builder = self.builder.clone();
             let (records, session_store) = match stored {
-                Some((store, storage)) => {
+                Some((Keyed(store), Keyed(storage))) => {
                     builder.timeline_store(store.timeline_store());
                     (Some(Arc::new(AgentRecords(storage))), Some(store))
                 }
@@ -1525,9 +1536,8 @@ impl TypedPlugin for AgentsPlugin {
             let _ = directory.default_agent_id.set(default_id);
             let index = AgentIndex {
                 directory,
-                session_restored: EventKey::of().instance(self.root.instance()),
-                unloaded_session_deleted: EventKey::of().instance(self.root.instance()),
-                tools: builder.provided_tools().map(str::to_owned).collect(),
+                session_restored: EventKey::of(),
+                unloaded_session_deleted: EventKey::of(),
                 builder,
                 session_defaults: self.config.session_defaults.clone(),
                 ctx: OnceLock::from(ctx.clone()),
@@ -1599,26 +1609,17 @@ impl TypedPlugin for AgentsPlugin {
         })
     }
 }
-impl Capability for AgentsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        (
-            self.config.database_path.is_some().then_some(((), ())),
-            self.config.local_execution().then_some(()),
-            (),
-            (),
-        )
-    }
-}
 
 /// The loader row of the Agent group: each Agent is its plugin and its
-/// Sessions (`session_row`).
-pub(crate) fn group_row(session_row: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "id": AGENT_GROUP,
-        "group": true,
-        "instanced": true,
-        "config": [{ "id": "AgentScope", "name": "AgentScope" }, session_row],
-    })
+/// Sessions (`session_row`), with the builder's process values.
+pub(crate) fn group_row(
+    builder: &AgentBuilder,
+    session_row: serde_json::Value,
+) -> serde_json::Value {
+    builder.agent_row([
+        serde_json::json!({ "id": "AgentScope", "name": "AgentScope" }),
+        session_row,
+    ])
 }
 
 /// What an Agent instance is created with.
@@ -1669,7 +1670,7 @@ impl TypedPlugin for AgentScopePlugin {
         Box::pin(async move {
             let spec = &self.0;
             let slot = Arc::new(Mutex::new(None));
-            let sessions = ctx.plugin(capability_plugin(Sessions(slot.clone())));
+            let sessions = ctx.plugin(rutis::Typed::new(Sessions(slot.clone())));
             (&sessions).await.map_err(|error| {
                 CordisError::PluginFailed(format!("Session host failed: {error}").into())
             })?;
@@ -1724,9 +1725,6 @@ impl TypedPlugin for Sessions {
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for Sessions {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 #[cfg(test)]

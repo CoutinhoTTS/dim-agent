@@ -2,7 +2,7 @@
 
 状态：Implemented（[#102](https://github.com/arcships/dim/pull/102)）；capability 页面 [Attachments](../../../architecture/rust-agent/plugins/Attachments.md)。总体设计：[overview §4](../overview.md#4-插件目录)。阶段：P1。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。路线图条目 P2（[#66](https://github.com/arcships/dim/issues/66)）。依赖均已合入：C1（[#47](https://github.com/arcships/dim/issues/47)，[#83](https://github.com/arcships/dim/pull/83)）、S5a（[#59](https://github.com/arcships/dim/issues/59)，[#95](https://github.com/arcships/dim/pull/95)）、S6（[#51](https://github.com/arcships/dim/issues/51)，[#87](https://github.com/arcships/dim/pull/87)）和 S11（[#56](https://github.com/arcships/dim/issues/56)，[#92](https://github.com/arcships/dim/pull/92)）（[roadmap §3.3](../../../design/roadmap.md#33-插件开工顺序)）。
 
-让用户在一次提交中附带图片和大段文本。图片不需要插件：CLI 检查图片（嗅探格式、限制），再在 `session.submit` 中把它们作为图片内容块发送；Rpc 只检查参数形状，模型的图片能力由 ModelProvider 在构建每个请求时处理（S11，[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)）。Attachments 是一个小型 Session 插件，通过 `sessionMethods` 服务（Session 作用域，key `attachment`；[session-boundary](../contracts/session-boundary.md)）提供一个 Session 方法 `attachment.put`；契约是语言中立的，Rust 形式见[附录 G](#附录-g-rust-绑定)。该方法通过 SessionStore 的 `sessionFiles` 服务把文本附件（一次大段粘贴）存为不可变的 Session 文件，并返回其路径；用户文本引用该路径，模型在需要时用 `read` 读取文件。这些文件的分叉共享和删除属于 SessionStore 的行为（[Session 文件](../appserver/session-files.md)）。没有事件。
+让用户在一次提交中附带图片和大段文本。图片不需要插件：CLI 检查图片（嗅探格式、限制），再在 `session.submit` 中把它们作为图片内容块发送；Rpc 只检查参数形状，模型的图片能力由 ModelProvider 在构建每个请求时处理（S11，[总体设计附录 B.1](../overview.md#b1-session-与分支-capability)）。Attachments 是一个小型 Session 插件，把命名空间 `attachment` 注册到本 Session 的 `sessionMethods`（[session-boundary](../contracts/session-boundary.md)），提供一个 Session 方法 `attachment.put`；契约是语言中立的，Rust 形式见[附录 G](#附录-g-rust-绑定)。该方法通过 SessionStore 的 `sessionFiles` 服务把文本附件（一次大段粘贴）存为不可变的 Session 文件，并返回其路径；用户文本引用该路径，模型在需要时用 `read` 读取文件。这些文件的分叉共享和删除属于 SessionStore 的行为（[Session 文件](../appserver/session-files.md)）。没有事件。
 
 路线图条目 P2 实现服务端：Attachments capability、它在 App Server 中的安装，以及验证模型能读取已存文件的流程测试（附录 D）。图片部分属于 ModelProvider（S11）和 CLI（A.1、A.3），不属于 P2。
 
@@ -37,15 +37,15 @@ flowchart LR
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `AttachmentsPlugin` | Session | `S:SessionIdentity`；`P:sessionFiles`（SessionStore） | `sessionMethods` key `attachment`（`attachment.put`） |
+| `AttachmentsPlugin` | Session | `S:SessionIdentity`；`P:sessionFiles`（SessionStore）；`S:sessionMethods` | 把 `attachment`（`attachment.put`）注册到 `sessionMethods` |
 
 Attachments 从不写 Timeline，从不看到图片，也不拥有任何数据。它唯一的进程级依赖 SessionStore 是 Agents 已经依赖的核心部件（[agents.rs](../../../../crates/dim-app-server/src/agents.rs) 中的 `When<(SessionStore, SqliteStorage)>`），因此它不增加重载边（ADR 002 D3）。
 
-**安装。** App Server 的 `serve`（[lib.rs](../../../../crates/dim-app-server/src/lib.rs)）在主机有原生存储和本地执行（`native_home`）时，在 Mcp 的 Session 部分旁边安装 Attachments：只有原生存储才有 SessionStore，只有本地执行才给模型提供 `read`。它在 Rpc 的行读取已记录的命名空间之前，用 `AgentBuilder::session_methods("attachment")` 记录命名空间。C1 按装配而不是按 Session 记录命名空间（[#83](https://github.com/arcships/dim/pull/83) 中的 `AgentBuilder::session_methods`），因此该主机的每个 Session 都提供 `attachment`；没有 Attachments 的主机对 `attachment.put` 回复 `unknown_method`，因为该名称不在任何已记录的命名空间内（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)，已知命名空间）。在 `provides` 中声明该服务随 #4 到来。
+**安装。** App Server 的 `serve`（[lib.rs](../../../../crates/dim-app-server/src/lib.rs)）在主机有原生存储和本地执行（`native_home`）时，在 Mcp 的 Session 部分旁边安装 Attachments：只有原生存储才有 SessionStore，只有本地执行才给模型提供 `read`。该部分在 apply 时把 `attachment` 注册到本 Session 的 `sessionMethods`，因此该主机的每个 Session 都有 `attachment`；没有 Attachments 的主机对 `attachment.put` 回复 `unknown_method`，因为该 Session 没有任何命名空间拥有这个名称（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。
 
 依赖的契约：
 
-- `sessionMethods` 的分发、错误与调用归属（C1，[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）：Rpc 授权 `sessionId`，获取 Session（未加载时恢复它），在调用结算前一直持有它，并按命名空间读取提供方。Attachments 使用 `drain` 中断方式（A.2），不使用进度。
+- `sessionMethods` 的分发、错误与调用归属（C1，[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）：Rpc 授权 `sessionId`，获取 Session（未加载时恢复它），在调用结算前一直持有它，并从该 Session 的方法表读取提供方。Attachments 使用 `drain` 中断方式（A.2），不使用进度。
 - SessionStore 的 `sessionFiles.put`（S5a，[Session 文件 §9](../appserver/session-files.md#9-接口)）：`{sessionId, name, content} -> {fileId, path, bytes}`，错误码 `not_found`、`invalid`、`too_large`、`node_unavailable`、`cancelled`、`storage`。名称规则和 16 MiB 上限归 SessionStore，它在提交（txn 2）之前检查取消。
 - FileStorage（S6，[#87](https://github.com/arcships/dim/pull/87)）：只经 SessionStore 访问，SessionStore 每次调用时按 Session 的节点查找它（#38）。Attachments 不引用任何 FileStorage 操作。
 - `read`（WorkspaceTools，已实现）：读取绝对路径；它的风险类别 `read_filesystem` 在每个权限预设下都被允许（[permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs)）。
@@ -174,7 +174,7 @@ Client      Rpc        Branch Timeline                      Model           Work
 
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
-| `attachment.put` | `sessionMethods`（Session，key `attachment`） | 把文本附件存为 Session 文件，返回其路径 |
+| `attachment.put` | `sessionMethods`（Session，命名空间 `attachment`） | 把文本附件存为 Session 文件，返回其路径 |
 | CLI 图片检查与粘贴引用 | 客户端契约（A.1、A.3） | 提交前嗅探格式、执行限制；用路径引用已存的粘贴 |
 | 构建请求时的图片处理 | ModelProvider 补充（已实现，S11，A.1） | 按请求所用模型发送图片块，或换成文本占位 |
 | `attachment.put` 错误 | `appError`（A.2、附录 C） | 拒绝原因 |
@@ -207,7 +207,7 @@ CLI 只为检查头部和限制而解码图片；ModelProvider 只为检查请�
 
 ## 9. 向机制所有者提出的需求
 
-不向运行时或 rutis 提任何需求。Session 门面按命名空间的读取（`Session::session_named_service`）属于方法契约（[session-boundary §9.1](../contracts/session-boundary.md#91-按名称查找带-key-的-session-服务)），在 C1 中实现。Attachments 对其他插件和 App Server 装配的需要见 [A.4](#a4-对其他所有者的需求)。
+不向运行时或 rutis 提任何需求。Rpc 经 Session 门面读取该 Session 唯一的方法表 `sessionMethods`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。Attachments 对其他插件和 App Server 装配的需要见 [A.4](#a4-对其他所有者的需求)。
 
 ## 附录 A. 接口细节
 
@@ -242,7 +242,7 @@ ModelProvider 补充（已在 S11 实现，`model_provider/images.rs`；[总体�
 
 ### A.2 `attachment.put`
 
-服务 `sessionMethods`，Session 作用域，key `attachment`。`describe()` 返回一个 `MethodDecl`：`{name: "attachment.put", mutating: true, interruption: drain, progress: false, notifications: [], reply: direct}`。`call(MethodCall)` 接受参数 `{sessionId, name?, text}`，回复 `{attachmentId, path, bytes}`；错误为 `MethodError` 数据。
+命名空间 `attachment`，注册到本 Session 的 `sessionMethods`。其声明为一个 `MethodDecl`：`{name: "attachment.put", mutating: true, interruption: drain, progress: false, notifications: [], reply: direct}`。该部件的 `call(MethodCall, cancelled, progress)` 接受参数 `{sessionId, name?, text}`，回复 `{attachmentId, path, bytes}`；错误为 `MethodError` 数据。
 
 | 字段 | 规则 |
 | --- | --- |
@@ -305,9 +305,9 @@ CLI 读取图片（剪贴板、`@`、粘贴的路径），检查后（A.1）在 
 
 **FileStorage（S6，[#51](https://github.com/arcships/dim/issues/51)）。** 无：Attachments 只经 SessionStore 访问文件。
 
-**Rpc 与 Session 门面：C1（[#47](https://github.com/arcships/dim/issues/47)，已在 [#83](https://github.com/arcships/dim/pull/83) 合入）。** 不超出已合入的契约：key `attachment`，经 Session 分发（恢复未加载的 Session），主机未记录 `attachment` 时为 `unknown_method`，提供方未激活时为 `service_reloading`，以及按 `drain` 中断方式的调用归属。不使用逐次调用的进度。
+**Rpc 与 Session 门面：C1（[#47](https://github.com/arcships/dim/issues/47)，已在 [#83](https://github.com/arcships/dim/pull/83) 合入）。** 不超出已合入的契约：命名空间 `attachment`，经 Session 分发（恢复未加载的 Session），该 Session 没有部分注册 `attachment` 时为 `unknown_method`，提供方未激活时为 `service_reloading`，以及按 `drain` 中断方式的调用归属。不使用逐次调用的进度。
 
-**App Server 装配（`serve`，装配线）。** 在设置了 `native_home` 时安装 Attachments，并在构建 Rpc 的行之前记录 `attachment`（§1）。这是 P2 实现中的几行改动，像其他登记一样在装配线的工作之后追加（[roadmap §3.4](../../../design/roadmap.md#34-合入顺序与冲突点)）。
+**App Server 装配（`serve`，装配线）。** 在设置了 `native_home` 时安装 Attachments（§1）。这是 P2 实现中的几行改动，像其他登记一样在装配线的工作之后追加（[roadmap §3.4](../../../design/roadmap.md#34-合入顺序与冲突点)）。
 
 ## 附录 B. 完整冲突表
 
@@ -349,7 +349,7 @@ CLI 读取图片（剪贴板、`@`、粘贴的路径），检查后（A.1）在 
 | `service_reloading` | `-32000` | 卸载在 txn 2 之前中止了写入（`cancelled`） | 无所有者；被清扫 | 是 |
 | `storage_failed` | `-32000` | SessionStore 存储失败（`storage`），包括持久性未确认 | 无所有者；被清扫 | 是 |
 
-分发错误（主机未记录 `attachment` 时的 `unknown_method`、缺少 `sessionId` 时的 `-32602`、Session 或 Attachments 重载时的 `service_reloading`，以及 Rpc 无法获取 Session 时的错误）属于契约（[session-boundary 附录 C](../contracts/session-boundary.md#附录-c-错误与恢复)）。重试会存一个新文件；任何操作都不会自动重试。被 CLI 拒绝的图片从不发送。存储后没有后续提交的文件随其 Session 删除。
+分发错误（该 Session 没有部分注册 `attachment` 时的 `unknown_method`、缺少 `sessionId` 时的 `-32602`、Session 或 Attachments 重载时的 `service_reloading`，以及 Rpc 无法获取 Session 时的错误）属于契约（[session-boundary 附录 C](../contracts/session-boundary.md#附录-c-错误与恢复)）。重试会存一个新文件；任何操作都不会自动重试。被 CLI 拒绝的图片从不发送。存储后没有后续提交的文件随其 Session 删除。
 
 ## 附录 D. 验收
 
@@ -391,7 +391,7 @@ A.2 映射的其余部分也有测试（Q11）。通过 RPC：存储失败（`<d
 | Q2 | 回复字段 | 已决定：`{attachmentId, path, bytes}`，原样传递 SessionStore 的回复。去掉 `lines`：客户端持有文本并决定引用格式（A5），且不添加没有用处的 wire 字段（原则 §3） |
 | Q3 | 由谁检查 `name` | 已决定：SessionStore，它把名称变成路径组件并拥有该规则（Session 文件 §10）。Attachments 把 `invalid` 映射为 `attachment_invalid`，只保留自己的内容规则 |
 | Q4 | `sessionFiles` 错误的映射，包括存储失败 | 已决定（A.2）：`storage` 变为 `storage_failed`，与 SessionTitle 相同（[#66](https://github.com/arcships/dim/issues/66)）；`not_found` 变为 `session_closed`；`cancelled` 变为 `service_reloading`（Q1） |
-| Q5 | Attachments 安装在哪里 | 已决定：在 `serve` 中，主机有原生存储和本地执行时安装（§1）。C1 按装配记录命名空间，因此没有按 Session 的启用。在这样的主机中关闭它推迟到 PluginManager（P3）：Attachments 没有配置也不持有状态，因此 P2 不需要开关 |
+| Q5 | Attachments 安装在哪里 | 已决定：在 `serve` 中，主机有原生存储和本地执行时安装（§1）。这样的主机的每个 Session 都装载该部分，因此没有按 Session 的启用。在这样的主机中关闭它推迟到 PluginManager（P3）：Attachments 没有配置也不持有状态，因此 P2 不需要开关 |
 | Q6 | 路线图条目 P2 的范围 | 已决定：capability、它的安装和流程测试（附录 D）。CLI 部分（A.1 检查、A.3）是 CLI 的工作，图片占位是 S11。`attachment.put` 不调用 S11 |
 | Q7 | 传输帧与 10 MiB 限制 | 已决定：限制不变；超过 16 MiB 的请求到不了 Attachments，因此由客户端检查编码后的大小（A.3） |
 | Q8 | 资源节点 | 推迟到 P3：P3 在每次调用时按 `SessionConfig.resourceNode` 查找节点服务（[overview §6.3](../overview.md#63-多节点)）。SessionStore 已经每次调用时查找 FileStorage，并为每个文件记录其节点（Session 文件 §3.1），因此离线节点会得到 `node_unavailable`，Attachments 无需改动。P2 中每个 Session 都使用控制节点。早先的各行依赖 [#5](https://github.com/arcships/dim/issues/5)，它已撤回 |
@@ -405,9 +405,9 @@ Attachments 用 Rust 实现，放在自己的 crate `dim-agent-attachments` 中�
 
 | 中立契约 | Rust 绑定 |
 | --- | --- |
-| 插件 | `TypedPlugin` 与 `Capability`；`Deps = (InSession<SessionIdentity>, Arc<SessionFilesHost>)`，Session key 限定于工厂的 `SessionScope` |
-| 安装 | `dim_agent_attachments::install(builder)`：`builder.session_methods("attachment").session_plugin(AttachmentsPlugin::new)`。`serve` 在设置了 `native_home` 时调用它，在 Rpc 的行读取 `session_method_namespaces()` 之前；xtask 生成本地执行图时也调用它 |
-| `sessionMethods` key `attachment` | `dim_agent_capabilities::methods::SessionMethods::provide(ctx, &scope, "attachment", vec![MethodDecl::new("attachment.put", true, Interruption::Drain)], handler)`，在 `apply` 中、插件自己的 effect 之后调用。`Handler` 接受 `(method, params, CancellationToken, Progress)`；不使用 `Progress`（`progress: false`） |
+| 插件 | `TypedPlugin`；`Deps = (Keyed<SessionIdentity>, Keyed<SessionFilesHost>, Keyed<SessionMethods>)` |
+| 安装 | `dim_agent_attachments::install(builder)`：`builder.session_part(|names| names.part(AttachmentsPlugin))`。`serve` 在设置了 `native_home` 时调用它；xtask 生成本地执行图时也调用它 |
+| 命名空间 `attachment` | 在 `Keyed<SessionMethods>` 依赖上调用 `methods.register(ctx, "attachment", vec![MethodDecl::new("attachment.put", true, Interruption::Drain)], handler)`（`dim_agent_capabilities::methods`），在 `apply` 中、插件自己的 effect 之后调用。`Handler` 接受 `(method, params, CancellationToken, Progress)`；不使用 `Progress`（`progress: false`） |
 | 参数与回复 | `methods::params::<T>(params)`（形状错误时为 `invalid_params`，包括未知字段）和 `methods::reply(value)` |
 | `sessionFiles.put` | `SessionFilesHost(Arc<dyn PutSessionFile>)`：`put(session_id, name, content: Vec<u8>, cancel)` 返回 `StoredSessionFile {file_id, path, bytes}` 或 `SessionFileError {code: SessionFileErrorCode, message}`（[Session 文件附录 A](../appserver/session-files.md#附录-a-rust-绑定)）；`session_id` 来自 `SessionIdentity`，`cancel` 是处理函数的令牌 |
 | 错误 | `NotFound` → `RpcError::closed()`；`Cancelled` → `RpcError::reloading()`；`Invalid`、`TooLarge`、`NodeUnavailable`、`Storage` 以及 Attachments 自己的检查 → `RpcError::app(-32000, code, message)`，码见 A.2 |
