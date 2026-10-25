@@ -41,22 +41,28 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 
 **登记部件。** 部件登记处是一个进程服务。插件在自己的 `apply` 里为 `session` 或 `branch` 登记生成器。登记是调用方的
 一个 effect，和 Cordis 把 `ctx.on` 绑定到调用方一样：插件的这一代运行多久，登记就保持多久；这一代无论怎样结束，
-登记都会撤销。生成器的依赖在登记时按它的作用域检查，所以点名了作用域之外的组的部件在登记时就失败。
+登记都会撤销。生成器的依赖在实例挂载它时按它的作用域检查，所以点名了作用域之外的组的部件在那时失败。
 
-**挂载。** 每个 Session 实例和分支实例里都有一个宿主部件，即它的挂载器。除了作用域自己的机制，它是该组唯一的一行。
+**插件在哪里运行。** App Server 把插件作为它 loader 里的进程行放置，并以进程名字 `partRegistry` 把登记处交给它们。
+库宿主或测试把插件加到 Agent builder 上（`AgentBuilder::plugin`），自己放置的 Agent 把它们挂进自己的 loader。
+登记处属于一次放置：自己放置的 Agent 只挂它自己的插件登记的部件，所以同一个 builder 建出的两个 Agent 不会挂上
+彼此的部件。
 
-- 实例打开时，挂载器调用为它的作用域登记的所有生成器，用 rutis 的 `ctx.plugin` 把每个结果挂成自己的子节点
-  （对这个实例什么都不返回的生成器就不挂），
-  并等装配 profile 要求的部件都进入 Active，实例这时才发布。profile 之外的部件失败时会被报告，只影响它自己。
+**挂载。** 每个 Session 实例和分支实例里都有两个挂载器行，除了作用域自己的机制，它们是该组仅有的行。
+
+- 实例打开时，每个挂载器调用它负责的、为该作用域登记的生成器，用 rutis 的 `ctx.plugin` 把每个结果挂成自己的
+  子节点；对这个实例什么都不返回的生成器就不挂。
+  - 必需挂载器负责装配 profile 要求的部件。它把这些部件交给实例的创建流程，后者像等必需行一样等它们进入 Active，
+    实例这时才发布。它不在自己的 `apply` 里等，因为 loader 创建实例时会等所有处于 Loading 的行。
+  - 可选挂载器负责其余部件。可选部件失败或处于 Pending 时只影响它自己。
 - 实例打开期间，挂载器跟随登记处：新登记的就挂上，撤销的就卸下。所有实例都卸载完各自那一份，撤销才算结束。
 - 实例关闭时，挂上的部件随它一起关闭，由 rutis 对子节点的所有权保证。
 
 **生成器返回什么。**
 
 - Rust 生成器拿到它所挂进的实例的名字（附录 A），返回一个插件。这个插件可以带着插件在 `apply` 里准备好的东西。
-- 外来生成器返回模块名和配置。挂载器通过运行时解析器解析这个模块，为自己的实例加载一份副本，和实例化组里的行
-  一样加载（用该实例的 `Build` 调用 `Resolved::scoped`）。副本自己声明 `inject` 和 `provides`。插件在 `apply` 里准备的
-  东西，通过两者都导入的模块（同一个运行时进程加载二者）或通过服务交给副本。R7 让外来生成器也能是一个函数。
+- 其他运行时的插件等 rutis 允许运行中的行登记生成器（R7）后，用同样的方式登记部件。在那之前，它的 Session 部件和
+  分支部件仍是各自组里的行，保持 R5 最初形式的放置；不增加过渡用的声明（R5）。
 
 **每个插件和部件：**
 
@@ -64,24 +70,23 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 - 行只保存结构性配置。业务配置放在所有者的来源中（[ADR 002 D4](../adr/002-plugin-scope.md#d4-结构性配置与业务配置分离)）。
 - 部件可以在自己的子树里创建子节点，比如 McpSession 为每个服务器各建一个。这些是部件自己的事。
 
-*现状：*部件登记处和挂载器已经实现（附录 A）。按名称依赖的 Rust 部件由所在实例挂载：profile 通过
-`AgentBuilder::session_part`/`branch_part` 添加，进程插件通过 `PartRegistry::register` 登记更多部件；进程部件通过
-`register_part` 添加。其余部件仍是 `session`、`branch` 组的行，通过 `AgentBuilder::session_plugin`/
-`timeline_plugin` 以作用域类型注册；其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行。
-P3 和 R5 把它们迁到登记处。
+*现状：*部件登记处和挂载器已经实现（附录 A），所有 Rust 部件都已按名称依赖（#391、#392、#396–#398、#400）。
+- 各功能仍通过 `AgentBuilder::session_part`/`branch_part` 添加部件，App Server 通过 `register_part` 添加进程行。
+  每个功能变成一个插件、`AgentBuilder::plugin` 和 `partRegistry` 这个名字属于 [#402](https://github.com/arcships/dim/issues/402)。
+- ToolRegistry、PromptRegistry 和 Rpc 仍读取预先注册的名字，直到贡献改为向它们登记（R6，[#382](https://github.com/arcships/dim/issues/382)）。
+- 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5（[#403](https://github.com/arcships/dim/issues/403)）。
 
 ## 3. 按名字的服务
 
 ### 3.1 标识
 
-- 服务是恰好属于一个组的 camelCase 名称。成组出现的服务共用一个前缀，使用 `prefix:qualifier` 形式的名称，例如
-  `toolContribution:<tool>`、`sessionMethods:<namespace>` 和 `managementMethods:<namespace>`。
+- 服务是恰好属于一个组的 camelCase 名称。
+- 交给同一个所有者的一组贡献（工具、工具来源、提示词来源、Session 方法和管理方法的命名空间）不是一组名字。
+  每个贡献向它的所有者登记，由所有者保管这张表（R6）。
 - 对行的每个副本，名称解析到该名称所属组的最近外层实例。它从不回退到另一个组。一行若指向它
   不在其内的组，在组合时失败。
 - 每个实例中每个名称只有一个提供者。同一实例中同名的第二个提供者会失败。
 - 各语言的部件都依赖名称。Rust 类型 key 是 Rust 绑定存储名称的方式，不是第二个标识。
-- 带前缀服务的消费方按名称找到其实例中已激活的提供者，不论它们用什么语言。宿主不预先注册提供者名称。
-  Rust 消费方可以通过类型化绑定调用原生提供者，但它找到原生和外来提供者的方式相同（R6）。
 
 ### 3.2 形状
 
@@ -184,27 +189,41 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
   （外来行声明自己的组，不再由 App Server 从 `inject` 推断）已在阶段 4 交付（[#376](https://github.com/arcships/dim/issues/376)），
   但插件仍然不是一行。
 - **考虑过的现有机制：**运行时解析器已经能为一个模块所在的实例构造副本（`Resolved::scoped`），服务目录拒绝放错位置的名称。
-- **所需机制：**外来插件是进程里的一行，向部件登记处登记自己的部件，每个部件是一个模块名和配置（§2）。其他语言的
-  Session 行和分支行，以及它们声明的组，都删除。
+- **所需机制：**外来插件是进程里的一行，在自己的代码里通过 R7 的生成器向部件登记处登记部件。其他语言的
+  Session 行和分支行，以及它们声明的组，都删除。不做过渡用的包声明：R7 落地时它就要删掉，而 R6 已经去掉了宿主
+  在运行时启动前知道名字的大部分需要。
 - **影响：**对 Timeline 没有影响。
-- **所有者：**App Server 和各 SDK，仓库内的插件一起改。它在 P3 的部件登记处之后进行。
+- **所有者：**App Server 和各 SDK，仓库内的插件一起改（[#403](https://github.com/arcships/dim/issues/403)）。它等 R7
+  （[#405](https://github.com/arcships/dim/issues/405)）。
 
-### R6. 带前缀服务的提供者按名称查找，只有一个标识
+### R6. 贡献向所有者登记
 
 - **受阻：**[ADR 002 D5](../adr/002-plugin-scope.md#d5-合同语言中立)
-  （“注册：由插件声明……而非宿主侧的 `AgentBuilder` 调用”）。宿主预先注册提供者名称
-  （`session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`）。
-  原生工具贡献和外来工具贡献有不同的 key，因此 ToolRegistry 两者都读，并通过以同一字符串找到的
-  sidecar 令牌检测正在退役的外来代次（`tool_registry.rs:486-509`）。提示词来源和工具来源不对外来部件开放。
-- **考虑过的现有机制：**ToolRegistry 已经在每次读取时接入当时已激活的提供者，并撤下正在退役的提供者
-  （ADR 002 D3，#241）。rutis 用 `rutis/service` 事件报告提供者的出现和离开，标记过的 Rust 服务
-  也在其实例中按名称提供。
-- **所需机制：**每个带前缀服务的消费方（ToolRegistry、PromptRegistry、Rpc 的方法表）按名称找到它自己实例中
-  已激活的、该前缀下的提供者。原生和外来提供者只有一个标识和一条发现路径；它们的服务被撤下时，它们的代次结束。
-  预先注册和 sidecar 令牌被去掉。发现路径在每种语言中都一样：消费方监听 `rutis/service` 事件（名字、作用域、
-  是否可用、行），保留其中前缀相符且作用域是自己实例的，再按名称读取每一个。
+  （“注册：由插件声明……而非宿主侧的 `AgentBuilder` 调用”）。宿主预先注册贡献名称
+  （`session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`），
+  并把外来行的 `provides` 翻译成同样的调用。原生工具贡献和外来工具贡献有不同的 key，因此 ToolRegistry
+  两者都读，并通过以同一字符串找到的 sidecar 令牌检测正在退役的外来代次（`tool_registry.rs:486-509`）；
+  Rpc 对方法命名空间也有同样的拆分。提示词来源和工具来源不对外来部件开放。
+- **考虑过的现有机制：**
+  - 在实例中按名字查找贡献，靠 `rutis/service` 事件或目录列表。不采用：所有者要从框架内部（哪些行提供了哪些名字）
+    得知贡献方在调用时本来就知道的事。
+  - 向所有者登记已经存在：部件登记处（§2）和 `sessionLifecycle.hold`，后者由 bridge 绑定到发起调用的行
+    （`caller_row`）。经调用方的 `ctx.effect` 做的登记在调用方卸载时撤下；bridge 能把其他语言的函数作为可调用的
+    引用传过来（`RemoteFunction`）。
+- **所需机制：**每个所有者为它的贡献提供 `register`：ToolRegistry 管工具和工具来源，PromptRegistry 管提示词来源，
+  Rpc 管 Session 方法和管理方法的命名空间。工具和方法命名空间可以从任何语言登记；提示词来源和工具来源在有外来部件
+  需要之前仍只限 Rust。
+  - 登记属于调用方。在 Rust 里调用方传入自己的 ctx；从其他语言调用时，bridge 把登记绑定到发起调用的行，处理函数
+    是调用方自己的函数，经 bridge 回调。调用方卸载时登记撤下。
+  - 同一个名字向同一个所有者登记第二次会失败，与一个名字有第二个提供者时一样。
+  - 撤下的处理函数不再被调用：经撤下的登记发出的调用被拒绝并说明没有执行，撤下时正在进行的调用报告它可能已经生效，
+    与现在一样，只是不再需要令牌。
+  - 创建 Session 时不再拒绝没有任何部件登记的已配置工具；ToolRegistry 在读取工具时报告它。
+  - 预先注册、`toolContribution:*`、`sessionMethods:*` 和 `managementMethods:*` 这些名字、sidecar 令牌，以及
+    App Server 对外来行 `provides` 的翻译都去掉。ExternalAgent 设计中的 `collaborationMembers:<kind>` 在实现时
+    也同样向 Collaboration 登记。
 - **影响：**对 Timeline 没有影响。工具采样保持 ToolBinding 现有的逐 turn 规则。
-- **所有者：**Dim 运行时（ToolRegistry、PromptRegistry）和 App Server（Rpc）。issue 待开。
+- **所有者：**Dim 运行时（ToolRegistry、PromptRegistry）和 App Server（Rpc），[#382](https://github.com/arcships/dim/issues/382)。
   它在阶段 3 落地。
 
 ### R7. 每个运行时的生成器都能是一个函数
@@ -215,8 +234,8 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 - **所需机制：**运行中的行登记带声明的具名生成器，宿主能在指定实例里为"行 R 的生成器 G"构造工厂。每一份副本在
   生成者的运行时里运行，按实例的标签隔离，按生成器的 `inject` 门控；它属于挂载它的宿主 fiber；生成器撤销时结束。
 - **影响：**对 Timeline 没有影响。
-- **所有者：**rutis，[arcships/rutis#642](https://github.com/arcships/rutis/issues/642)。落地后 Dim 把各 SDK 切换过去；
-  没有东西等它。
+- **所有者：**rutis，[arcships/rutis#642](https://github.com/arcships/rutis/issues/642)。R5 等它；
+  [#405](https://github.com/arcships/dim/issues/405) 跟进它。
 
 ## 附录 A. Rust 绑定
 
@@ -231,11 +250,11 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 | `InSession<T>`、`InBranch<T>` | `Keyed<T>`：对 `T` 的名字的依赖，key 用这个副本实例链中该名字所属组的实例限定（§3.5） |
 | `SessionGate<T>`、`BranchGate<T>` | 对该名字的 `KeyedGate<T>` |
 | 提供服务时的 `scope.key::<T>()` | `names.key::<T>()`，与该名字的消费方拿到的 key 相同 |
-| `Contributions<T>` | 在实例中找到的同一前缀下的名称（R6） |
+| `Contributions<T>` | 无：贡献向所有者登记（R6） |
 | `When<D>` | `When<D>`，key 来自 `Names::when`：工厂构建副本时决定是否包含该名称。不是 rutis `Option<..>`，后者读取但不门控 |
 | `SessionService`、`BranchService` 标记 | 注册在服务目录中的组（`names::register`） |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | `AgentBuilder::session_part`/`branch_part`：`session` 或 `branch` 组中的行；进程行用 `register_part` |
-| `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools` | 无：提供者按名称找到（R6） |
+| `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools` | 所有者的 `register`，由提供贡献的部件调用（R6） |
 | `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`；`Exports` 用于源码无法修改的类型，以及按 Session 或分支提供的服务（§3.4） |
 | `PublicService` | 不变（门面规则） |
 
@@ -293,6 +312,11 @@ registry.register(ctx, PartScope::Session, "Recorder", |mount| {
 
 由配置启用的依赖在工厂中取得 key：
 `names.part_with(plugin, (names.key::<Timeline>()?, names.when::<Keyed<FileStorage>>(enabled)?))`。
+
+宿主为进程名称配置的值（例如脚本化的 `ModelHost`）用 `AgentBuilder::process_value`。Agent 组行
+（`AgentBuilder::agent_row`）包含它的提供方，并按 Agent 实例隔离该名称，因此共享宿主的其他 Agent、宿主自己
+对该名称的提供方都不会与它冲突。自行托管的 Agent 放置这一行；使用 `build_at` 的宿主把它放进自己的 loader，
+该 loader 的服务目录是 builder 的。`session_value` 保留给 Session 名称。
 
 ### A.3 已定的问题
 

@@ -1,7 +1,7 @@
 use dim_agent_runtime::*;
 use dim_agent_types::BranchSource;
 use dim_agent_types::InputMode;
-use rutis::TypedPlugin;
+use rutis::{Keyed, TypedPlugin};
 use std::time::Duration;
 use test_extension_a::Provider;
 use test_extension_b::{Consumer, Snapshot};
@@ -14,8 +14,9 @@ fn builder() -> AgentBuilder {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn external_cross_crate_capabilities_are_isolated_and_installed_in_every_branch() {
     let mut b = builder();
-    b.timeline_plugin(|scope| Consumer::new(scope, true))
-        .timeline_plugin(Provider::new);
+    test_extension_a::register_names(b.catalog_mut());
+    b.branch_part(|names| Consumer::part(names, true))
+        .branch_part(|names| names.part(Provider::new(names)?));
     let agent = b.build();
     let one = agent
         .create_session(SessionConfig::default())
@@ -78,16 +79,16 @@ async fn external_cross_crate_capabilities_are_isolated_and_installed_in_every_b
     assert!(agent.sessions().is_empty());
 }
 /// Tags each input with the branch whose `before` chain it passed.
-struct TagOwnBranch(BranchScope);
+struct TagOwnBranch;
 impl TypedPlugin for TagOwnBranch {
-    type Deps = (InBranch<Timeline>, InBranch<TimelineIdentity>);
+    type Deps = (Keyed<Timeline>, Keyed<TimelineIdentity>);
     fn name(&self) -> &str {
         "test.tag-own-branch"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (InBranch(timeline), InBranch(identity)): Self::Deps,
+        (Keyed(timeline), Keyed(identity)): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let tag = format!("{}/{}", identity.session_id, identity.branch_id);
@@ -99,18 +100,13 @@ impl TypedPlugin for TagOwnBranch {
         })
     }
 }
-impl Capability for TagOwnBranch {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.0)
-    }
-}
 
 /// On the one bus, a branch's `before` chain runs only for its own commits,
 /// in two branches of one Session and in two Sessions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn before_runs_only_on_its_own_branch() {
     let mut b = builder();
-    b.timeline_plugin(|scope| TagOwnBranch(*scope));
+    b.branch_part(|names| names.part(TagOwnBranch));
     let agent = b.build();
     let one = agent
         .create_session(SessionConfig::default())
@@ -160,9 +156,10 @@ async fn before_runs_only_on_its_own_branch() {
 #[tokio::test]
 async fn missing_dependency_and_undeclared_read_fail_before_session_publication() {
     let mut missing = builder();
+    test_extension_a::register_names(missing.catalog_mut());
     missing
         .startup_timeout(Duration::from_millis(50))
-        .timeline_plugin(|scope| Consumer::new(scope, true));
+        .branch_part(|names| Consumer::part(names, true));
     let agent = missing.build();
     let error = agent
         .create_session(SessionConfig::default())
@@ -178,9 +175,9 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
         for session_part in [true, false] {
             let mut b = builder();
             if session_part {
-                b.session_plugin(|_| UnawaitedChild);
+                b.session_part(|names| names.part(UnawaitedChild));
             } else {
-                b.timeline_plugin(|_| UnawaitedChild);
+                b.branch_part(|names| names.part(UnawaitedChild));
             }
             let agent = b.build();
             let error = agent
@@ -195,9 +192,10 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
     }
     // Scoped service reads are strict in every build.
     let mut undeclared = builder();
+    test_extension_a::register_names(undeclared.catalog_mut());
     undeclared
-        .timeline_plugin(Provider::new)
-        .timeline_plugin(|scope| Consumer::new(scope, false));
+        .branch_part(|names| names.part(Provider::new(names)?))
+        .branch_part(|names| Consumer::part(names, false));
     let agent = undeclared.build();
     let error = agent
         .create_session(SessionConfig::default())
@@ -301,9 +299,6 @@ impl TypedPlugin for FailingRollback {
         })
     }
 }
-impl Capability for FailingRollback {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[tokio::test]
 async fn initialization_preserves_each_distinct_cleanup_failure_once() {
@@ -311,13 +306,17 @@ async fn initialization_preserves_each_distinct_cleanup_failure_once() {
     let timeline = cleanups.clone();
     let session = cleanups.clone();
     let mut builder = builder();
-    builder.timeline_plugin(move |_| FailingRollback {
-        fail_apply: true,
-        cleanups: timeline.clone(),
+    builder.branch_part(move |names| {
+        names.part(FailingRollback {
+            fail_apply: true,
+            cleanups: timeline.clone(),
+        })
     });
-    builder.session_plugin(move |_| FailingRollback {
-        fail_apply: false,
-        cleanups: session.clone(),
+    builder.session_part(move |names| {
+        names.part(FailingRollback {
+            fail_apply: false,
+            cleanups: session.clone(),
+        })
     });
     let agent = builder.build();
     let error = agent
@@ -336,7 +335,6 @@ async fn initialization_preserves_each_distinct_cleanup_failure_once() {
 }
 
 struct Marker;
-impl SessionService for Marker {}
 /// Provides `Marker` under its Session's key and reads the marker of the
 /// first Session that loaded a probe.
 struct ScopeProbe {
@@ -369,20 +367,20 @@ impl TypedPlugin for ScopeProbe {
         })
     }
 }
-impl Capability for ScopeProbe {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_fail_publication() {
     let foreign = std::sync::Arc::new(std::sync::Mutex::new(None));
     let seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut scoped = builder();
+    names::register::<Marker>(scoped.catalog_mut(), Some(SESSION_GROUP));
     let (read, observed) = (foreign.clone(), seen.clone());
-    scoped.session_plugin(move |scope| ScopeProbe {
-        provide: Some(scope.key::<Marker>()),
-        read: read.clone(),
-        seen: observed.clone(),
+    scoped.session_part(move |names| {
+        names.part(ScopeProbe {
+            provide: Some(names.key::<Marker>()?.key().clone()),
+            read: read.clone(),
+            seen: observed.clone(),
+        })
     });
     let agent = scoped.build();
     let first = agent
@@ -405,10 +403,12 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_fail_publica
         return;
     }
     let mut unkeyed = builder();
-    unkeyed.session_plugin(|_| ScopeProbe {
-        provide: Some(rutis::TypeKey::of::<Marker>()),
-        read: Default::default(),
-        seen: Default::default(),
+    unkeyed.session_part(|names| {
+        names.part(ScopeProbe {
+            provide: Some(rutis::TypeKey::of::<Marker>()),
+            read: Default::default(),
+            seen: Default::default(),
+        })
     });
     let agent = unkeyed.build();
     let error = agent
@@ -453,8 +453,9 @@ async fn closed_session_and_branch_subtrees_leave_no_plugins_or_bindings() {
         assert_eq!(*baseline.get_or_insert(counts), counts, "round {round}");
     }
     // What remains is the Agent's own: the root, its loader, the Agent
-    // instance and its anchor, and the loader's service.
-    assert_eq!(baseline, Some((4, 1)));
+    // instance with its anchor and process values, the loader's service and
+    // the process ModelHost.
+    assert_eq!(baseline, Some((5, 2)));
     agent.close().await.unwrap();
 }
 
@@ -477,7 +478,7 @@ impl TypedPlugin for UnawaitedChild {
         (): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
-            ctx.plugin(capability_plugin(NamedCapability {
+            ctx.plugin(NamedCapability::plugin(NamedCapability {
                 name: "unawaited-child",
                 bit: 0,
                 installed: Default::default(),
@@ -487,12 +488,11 @@ impl TypedPlugin for UnawaitedChild {
         })
     }
 }
-impl Capability for UnawaitedChild {
-    fn keys(&self) -> KeysOf<Self> {}
-}
-impl Capability for NamedCapability {
-    fn keys(&self) -> KeysOf<Self> {
-        self.pending.then_some(())
+impl NamedCapability {
+    /// Pending until a never-provided gate opens when `pending` is set.
+    fn plugin(self) -> rutis::Typed<Self> {
+        let keys = self.pending.then_some(());
+        rutis::Typed::with_keys(self, keys)
     }
 }
 impl TypedPlugin for NamedCapability {
@@ -536,20 +536,22 @@ async fn plugin_names_cannot_replace_other_capabilities_or_loader_groups() {
     .enumerate()
     {
         let installed = installed.clone();
-        b.session_plugin(move |_| NamedCapability {
-            name,
-            bit: 1 << i,
-            installed: installed.clone(),
-            pending: false,
+        b.session_part(move |_| {
+            Ok(Box::new(NamedCapability::plugin(NamedCapability {
+                name,
+                bit: 1 << i,
+                installed: installed.clone(),
+                pending: false,
+            })))
         });
     }
-    b.session_extension("trace", "Probe", |_, installed: &Arc<AtomicUsize>| {
-        NamedCapability {
+    b.session_extension_part("trace", "Probe", |_, installed: &Arc<AtomicUsize>| {
+        Ok(Box::new(NamedCapability::plugin(NamedCapability {
             name: "Probe",
             bit: 1 << 9,
             installed: installed.clone(),
             pending: false,
-        }
+        })))
     });
     let agent = b.build();
     agent
@@ -569,18 +571,18 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
     for panic_at in [0, 1] {
         let mut b = builder();
         let calls = Arc::new(AtomicUsize::new(0));
-        b.session_plugin(move |_| {
+        b.session_part(move |_| {
             assert_ne!(
                 calls.fetch_add(1, Ordering::SeqCst),
                 panic_at,
                 "factory failure"
             );
-            NamedCapability {
+            Ok(Box::new(NamedCapability::plugin(NamedCapability {
                 name: "factory",
                 bit: 1,
                 installed: Arc::default(),
                 pending: false,
-            }
+            })))
         });
         let agent = b.build();
         let error = agent
@@ -589,20 +591,20 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
             .err()
             .expect("a required factory failure rejects creation");
         if panic_at == 1 {
-            assert!(
-                error.to_string().contains("plugin factory panicked"),
-                "{error}"
-            );
+            // The mounter's load fails with the factory's panic.
+            assert!(error.to_string().contains("factory failure"), "{error}");
         }
         assert!(agent.sessions().is_empty());
         agent.close().await.unwrap();
     }
     let mut b = builder();
-    b.session_extension("extension", "declared", |_, _: &u32| NamedCapability {
-        name: "actual",
-        bit: 1,
-        installed: Arc::default(),
-        pending: false,
+    b.session_extension_part("extension", "declared", |_, _: &u32| {
+        Ok(Box::new(NamedCapability::plugin(NamedCapability {
+            name: "actual",
+            bit: 1,
+            installed: Arc::default(),
+            pending: false,
+        })))
     });
     let agent = b.build();
     let missing_value = agent
@@ -627,11 +629,13 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
 
     let mut b = builder();
     b.startup_timeout(Duration::from_millis(50));
-    b.session_extension("pending", "pending", |_, _: &()| NamedCapability {
-        name: "pending",
-        bit: 1,
-        installed: Arc::default(),
-        pending: true,
+    b.session_extension_part("pending", "pending", |_, _: &()| {
+        Ok(Box::new(NamedCapability::plugin(NamedCapability {
+            name: "pending",
+            bit: 1,
+            installed: Arc::default(),
+            pending: true,
+        })))
     });
     let agent = b.build();
     assert!(
@@ -649,7 +653,7 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
 struct Named(&'static str);
 impl SessionService for Named {}
 impl PublicService for Named {}
-struct NamedProvider(SessionScope);
+struct NamedProvider(rutis::InstanceId);
 impl TypedPlugin for NamedProvider {
     type Deps = ();
     fn name(&self) -> &str {
@@ -663,7 +667,10 @@ impl TypedPlugin for NamedProvider {
         Box::pin(async move {
             for name in ["one", "two"] {
                 ctx.provide_as(
-                    self.0.named_key::<Named>(name),
+                    rutis::DepKey::<Named>::dynamic(name)
+                        .instance(self.0)
+                        .key()
+                        .clone(),
                     std::sync::Arc::new(Named(name)),
                 )?;
             }
@@ -671,14 +678,11 @@ impl TypedPlugin for NamedProvider {
         })
     }
 }
-impl Capability for NamedProvider {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_facade_reads_a_named_session_service_by_name() {
     let mut b = builder();
-    b.session_plugin(|scope| NamedProvider(*scope));
+    b.session_part(|names| names.part(NamedProvider(names.instance(SESSION_GROUP)?)));
     let agent = b.build();
     let session = agent
         .create_session(SessionConfig::default())
@@ -721,9 +725,6 @@ impl TypedPlugin for AssemblyAnchor {
         })
     }
 }
-impl Capability for AssemblyAnchor {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 struct OptionalResource(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 impl TypedPlugin for OptionalResource {
@@ -748,9 +749,6 @@ impl TypedPlugin for OptionalResource {
         })
     }
 }
-impl Capability for OptionalResource {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_close_with_the_scope()
@@ -766,28 +764,39 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
     let closed = Arc::new(AtomicUsize::new(0));
     let rolled_back = Arc::new(AtomicUsize::new(0));
     let mut builtins = Builtins::new();
-    // A display-name collision must not change which row the builder requires.
-    let pending = register_capability(&mut builtins, || NamedCapability {
-        name: "SessionScope",
-        bit: 0,
-        installed: Arc::default(),
-        pending: true,
-    });
-    let failed = register_capability(&mut builtins, {
-        let rolled_back = rolled_back.clone();
-        move || FailingRollback {
-            fail_apply: true,
-            cleanups: rolled_back.clone(),
-        }
-    });
-    let resource = register_capability(&mut builtins, {
-        let closed = closed.clone();
-        move || OptionalResource(closed.clone())
-    });
-    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
-    let anchor = register_capability(&mut builtins, move || AssemblyAnchor(send.clone()));
     let mut b = builder();
     b.timeline_store(store);
+    let catalog = b.catalog();
+    // A display-name collision must not change which row the builder requires.
+    let pending = register_part(&mut builtins, catalog, |_| {
+        Ok(Box::new(NamedCapability::plugin(NamedCapability {
+            name: "SessionScope",
+            bit: 0,
+            installed: Arc::default(),
+            pending: true,
+        })))
+    })
+    .unwrap();
+    let failed = register_part(&mut builtins, catalog, {
+        let rolled_back = rolled_back.clone();
+        move |names| {
+            names.part(FailingRollback {
+                fail_apply: true,
+                cleanups: rolled_back.clone(),
+            })
+        }
+    })
+    .unwrap();
+    let resource = register_part(&mut builtins, catalog, {
+        let closed = closed.clone();
+        move |names| names.part(OptionalResource(closed.clone()))
+    })
+    .unwrap();
+    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+    let anchor = register_part(&mut builtins, catalog, move |names| {
+        names.part(AssemblyAnchor(send.clone()))
+    })
+    .unwrap();
     let mut session_row = b.install(&mut builtins, &root, []).await.unwrap();
     let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -819,13 +828,24 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
     let resolver = RuntimeResolver::node(runtime.handle());
     let plugin = LoaderPlugin::new(
         Chain::new().with(builtins).with(resolver),
-        LoaderOptions::default(),
+        LoaderOptions {
+            catalog: b.catalog().clone(),
+            ..Default::default()
+        },
     );
     let loader = plugin.handle();
     (&root.plugin(plugin)).await.unwrap();
-    loader.reconcile(vec![Layer::new("fixture", serde_json::from_value(json!([{"insert":[
-        {"id":AGENT_GROUP,"group":true,"instanced":true,"config":[{"id":anchor,"name":anchor},session_row]}
-    ]}])).unwrap())],None).await.unwrap();
+    let agent_row = b.agent_row([json!({"id":anchor,"name":anchor}), session_row]);
+    loader
+        .reconcile(
+            vec![Layer::new(
+                "fixture",
+                serde_json::from_value(json!([{"insert":[agent_row]}])).unwrap(),
+            )],
+            None,
+        )
+        .await
+        .unwrap();
     let instance = loader.create_instance(&root, AGENT_GROUP).await.unwrap();
     let anchor_ctx = receive.recv().await.unwrap();
     let mut saved: Option<String> = None;

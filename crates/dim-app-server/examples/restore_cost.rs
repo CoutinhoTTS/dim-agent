@@ -402,10 +402,9 @@ impl ResolveModelConnection for Local {
 /// The product context window over the echo model, in `root`.
 fn product(builder: &mut AgentBuilder, root: &rutis::Ctx) -> std::result::Result<(), Error> {
     let driver: Arc<dyn ModelDriver> = Arc::new(Summarizing(AtomicUsize::new(0)));
-    root.provide(ModelHost(driver.clone()))?;
+    root.provide(ModelHost(driver))?;
     root.provide(ProviderConnectionResolver(Arc::new(Local)))?;
     builder
-        .session_value(Arc::new(ModelHost(driver)))
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(

@@ -4,7 +4,7 @@ mod stdio;
 
 use super::auth::{Credential, McpAuth, Refusal, credential_key};
 use super::config::{BearerAuth, McpServerSettings, RemoteTransport};
-use dim_agent_runtime::{Capability, KeysOf, StateCell};
+use dim_agent_runtime::StateCell;
 use dim_agent_types::{
     ContentBlock, ImageSource, ImageSourceType, JsonObject, JsonSchema, ToolContent, ToolResult,
 };
@@ -32,7 +32,7 @@ use rmcp::{
         },
     },
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
@@ -818,14 +818,14 @@ impl McpServerPlugin {
 }
 impl TypedPlugin for McpServerPlugin {
     // Also orders this server inside the directory's lifetime.
-    type Deps = (Arc<McpAuth>,);
+    type Deps = (Keyed<McpAuth>,);
     fn name(&self) -> &str {
         "McpServer"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (auth,): Self::Deps,
+        (Keyed(auth),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let state = StateCell::new(McpServerState::Disconnected);
@@ -869,10 +869,5 @@ impl TypedPlugin for McpServerPlugin {
             ctx.provide_as(self.key.clone(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for McpServerPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        ((),)
     }
 }

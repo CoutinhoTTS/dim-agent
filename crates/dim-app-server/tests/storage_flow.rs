@@ -1,7 +1,7 @@
 use dim_agent_capabilities::history::{HistoryRenderer, read_context};
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, SessionConfig, StoredEvent, Timeline, TimelineKey,
-    TimelineStore, TimelineTrace, TraceStep, capability_plugin,
+    TimelineStore, TimelineTrace, TraceStep,
 };
 use dim_agent_types::*;
 use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
@@ -2638,10 +2638,10 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
 async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     let database = Database::new();
     let root = rutis::Ctx::root().unwrap();
-    let sqlite = root.plugin(capability_plugin(
+    let sqlite = root.plugin(rutis::Typed::new(
         dim_app_server::storage::SqliteStoragePlugin::new(database.0.clone()),
     ));
-    let session = root.plugin(capability_plugin(
+    let session = root.plugin(rutis::Typed::new(
         dim_app_server::storage::SessionStorePlugin::new(0),
     ));
     (&sqlite).await.unwrap();
@@ -2717,9 +2717,9 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     replacement.close().await.unwrap();
 
-    let plugin = dim_agent_runtime::capability_plugin(
-        dim_app_server::storage::SqliteStoragePlugin::new(database.0.clone()),
-    );
+    let plugin = rutis::Typed::new(dim_app_server::storage::SqliteStoragePlugin::new(
+        database.0.clone(),
+    ));
     assert!(rutis::Plugin::apply(&plugin, &root).await.is_err());
     let reopened = SqliteStorage::open(database.0.clone()).unwrap();
     reopened.close().await.unwrap();

@@ -44,12 +44,17 @@ tokio::task_local! {
 #[derive(Clone, Default)]
 struct ModelReload(Arc<std::sync::Mutex<Vec<rutis::FiberView>>>);
 impl ModelReload {
+    /// `model` is the process ModelHost; restarting the Session's context
+    /// hosts reloads ContextPreparation, and so ModelProvider, and Loop.
     fn install(&self, builder: &mut AgentBuilder, model: Arc<CancelThenEcho>) {
         let views = self.0.clone();
-        builder.session_plugin(move |scope| ModelHostOwner {
-            scope: *scope,
-            model: model.clone(),
-            views: views.clone(),
+        builder.process_value(Arc::new(ModelHost(model.clone())));
+        builder.session_part(move |names| {
+            names.part(ContextHostsOwner {
+                keys: (names.key()?, names.key()?, names.key()?),
+                model: model.clone(),
+                views: views.clone(),
+            })
         });
     }
 
@@ -59,15 +64,21 @@ impl ModelReload {
     }
 }
 
-struct ModelHostOwner {
-    scope: SessionScope,
+/// Where the Session's context hosts are provided.
+type HostKeys = (
+    rutis::DepKey<PrepareContextHost>,
+    rutis::DepKey<ContextModelHost>,
+    rutis::DepKey<CompactionStrategyHost>,
+);
+struct ContextHostsOwner {
+    keys: HostKeys,
     model: Arc<CancelThenEcho>,
     views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
 }
-impl TypedPlugin for ModelHostOwner {
+impl TypedPlugin for ContextHostsOwner {
     type Deps = ();
     fn name(&self) -> &str {
-        "test.model-host-owner"
+        "test.context-hosts-owner"
     }
 
     fn apply<'a>(
@@ -76,24 +87,25 @@ impl TypedPlugin for ModelHostOwner {
         (): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
-            let view = ctx.plugin(capability_plugin(TestModelHost(
-                self.scope,
+            let view = ctx.plugin(rutis::Typed::new(TestContextHosts(
+                self.keys.clone(),
                 self.model.clone(),
             )));
+            // A required part awaits the children it mounts in apply.
+            (&view).await.map_err(|error| {
+                CordisError::PluginFailed(format!("context hosts failed: {error}").into())
+            })?;
             self.views.lock().unwrap().push(view);
             Ok(Effect::Done)
         })
     }
 }
-impl Capability for ModelHostOwner {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
-struct TestModelHost(SessionScope, Arc<CancelThenEcho>);
-impl TypedPlugin for TestModelHost {
+struct TestContextHosts(HostKeys, Arc<CancelThenEcho>);
+impl TypedPlugin for TestContextHosts {
     type Deps = ();
     fn name(&self) -> &str {
-        "test.model-host"
+        "test.context-hosts"
     }
 
     fn apply<'a>(
@@ -102,28 +114,19 @@ impl TypedPlugin for TestModelHost {
         (): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
+            let (prepare, model, strategy) = &self.0;
             ctx.provide_as(
-                self.0.key::<ModelHost>(),
-                Arc::new(ModelHost(self.1.clone())),
-            )?;
-            ctx.provide_as(
-                self.0.key::<PrepareContextHost>(),
+                prepare.key().clone(),
                 Arc::new(PrepareContextHost(self.1.clone())),
             )?;
+            ctx.provide_as(model.key().clone(), Arc::new(ContextModelHost(None)))?;
             ctx.provide_as(
-                self.0.key::<ContextModelHost>(),
-                Arc::new(ContextModelHost(None)),
-            )?;
-            ctx.provide_as(
-                self.0.key::<CompactionStrategyHost>(),
+                strategy.key().clone(),
                 Arc::new(CompactionStrategyHost(None)),
             )?;
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for TestModelHost {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 struct CancelThenEcho {
@@ -1069,16 +1072,16 @@ struct InterruptGate {
     release: tokio::sync::Notify,
     once: std::sync::atomic::AtomicBool,
 }
-struct InterruptGatePlugin(Arc<InterruptGate>, BranchScope);
+struct InterruptGatePlugin(Arc<InterruptGate>);
 impl TypedPlugin for InterruptGatePlugin {
-    type Deps = (InBranch<Dispatcher>,);
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str {
         "test.interrupt-gate"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(dispatcher),): Self::Deps,
+        (Keyed(dispatcher),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let gate = self.0.clone();
@@ -1096,11 +1099,6 @@ impl TypedPlugin for InterruptGatePlugin {
         })
     }
 }
-impl Capability for InterruptGatePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run() {
@@ -1111,7 +1109,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
     // publication and Loop's subscription need not complete in that order.
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .session_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
@@ -1124,7 +1122,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
         .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
         .timeline_store(store.clone());
     let copy = gate.clone();
-    builder.timeline_plugin(move |scope| InterruptGatePlugin(copy.clone(), *scope));
+    builder.branch_part(move |names| names.part(InterruptGatePlugin(copy.clone())));
     defaults::install(&mut builder);
     let agent = builder.build();
     // Listener order among capabilities that load concurrently is not fixed:
@@ -1281,7 +1279,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
         builder
             .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_value(Arc::new(ModelHost(Arc::new(HeldTextModel(end.clone())))))
+            .process_value(Arc::new(ModelHost(Arc::new(HeldTextModel(end.clone())))))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))

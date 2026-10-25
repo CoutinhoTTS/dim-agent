@@ -501,13 +501,11 @@ async fn an_allowed_approval_is_rechecked_against_the_current_policy() {
 /// Commits an `allow` for every pending approval while `stop/interrupt` is
 /// dispatched, after ToolExecutor cancelled the batch and before the admit
 /// waiting on it runs: the response then finds its request cancelled.
-struct RespondOnStop {
-    scope: BranchScope,
-}
+struct RespondOnStop;
 impl rutis::TypedPlugin for RespondOnStop {
     type Deps = (
-        InBranch<Dispatcher>,
-        InBranch<dim_agent_capabilities::approval::Approval>,
+        rutis::Keyed<Dispatcher>,
+        rutis::Keyed<dim_agent_capabilities::approval::Approval>,
     );
     fn name(&self) -> &str {
         "RespondOnStop"
@@ -515,7 +513,7 @@ impl rutis::TypedPlugin for RespondOnStop {
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (InBranch(dispatcher), InBranch(approval)): Self::Deps,
+        (rutis::Keyed(dispatcher), rutis::Keyed(approval)): Self::Deps,
     ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
         use futures_util::FutureExt;
         Box::pin(async move {
@@ -534,11 +532,6 @@ impl rutis::TypedPlugin for RespondOnStop {
         })
     }
 }
-impl Capability for RespondOnStop {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
-    }
-}
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_response_that_finds_its_batch_stopped_ends_as_an_interrupt() {
@@ -549,7 +542,7 @@ async fn a_response_that_finds_its_batch_stopped_ends_as_an_interrupt() {
         defaults::install(&mut builder);
         defaults::mock_model_hosts(&mut builder);
         defaults::tool_host(&mut builder, tools.clone());
-        builder.timeline_plugin(|scope| RespondOnStop { scope: *scope });
+        builder.branch_part(|names| names.part(RespondOnStop));
         let agent = builder.build();
         let session = agent
             .create_session(config(preset(PermissionPreset::WorkspaceWrite)))

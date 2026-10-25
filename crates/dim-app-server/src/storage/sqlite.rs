@@ -1,4 +1,4 @@
-use dim_agent_runtime::{AgentError, Capability, KeysOf, Result};
+use dim_agent_runtime::{AgentError, Result};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
 use std::{
@@ -484,9 +484,6 @@ impl TypedPlugin for SqliteStoragePlugin {
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for SqliteStoragePlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 pub(super) fn error(error: impl std::fmt::Display) -> AgentError {

@@ -4,7 +4,7 @@ use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
     host::{SessionFileErrorCode, SessionFilesHost, StoredSessionFile},
 };
-use dim_agent_runtime::{Capability, KeysOf, SessionConfig, capability_plugin};
+use dim_agent_runtime::SessionConfig;
 use dim_app_server::storage::{SessionStore, SessionStorePlugin, SqliteStoragePlugin};
 use rusqlite::Connection;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, TypedPlugin};
@@ -81,11 +81,6 @@ impl TypedPlugin for Consumer {
         })
     }
 }
-impl Capability for Consumer {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), ())
-    }
-}
 
 struct Store {
     root: Ctx,
@@ -106,10 +101,10 @@ impl Store {
                 .await
                 .unwrap();
         }
-        root.plugin(capability_plugin(SqliteStoragePlugin::new(home.database())));
-        root.plugin(capability_plugin(SessionStorePlugin::new(0)));
+        root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(home.database())));
+        root.plugin(rutis::Typed::new(SessionStorePlugin::new(0)));
         let captured = Arc::new(OnceLock::new());
-        let consumer = root.plugin(capability_plugin(Consumer(captured.clone())));
+        let consumer = root.plugin(rutis::Typed::new(Consumer(captured.clone())));
         let mut status = consumer.watch();
         while status.borrow().state != FiberState::Active {
             assert_ne!(status.borrow().state, FiberState::Failed);

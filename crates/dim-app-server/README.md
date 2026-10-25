@@ -190,8 +190,9 @@ configuration; a later acquisition can reconnect. It reports cleanup failure rat
 loader reconciliation as proof of successful cleanup.
 
 Standalone hosts using `McpPlugin::new(home_root)` register `McpPublication` and its
-`standalone_template` with their `Builtins` and include both rows in the immutable
-assembly. The publication plugin owns its coordinator worker: it starts after
+`standalone_template` with their `Builtins` and the catalog their loader uses
+(`dim_app_server::catalog()` holds the App Server's names), and include both rows in the
+immutable assembly. The publication plugin owns its coordinator worker: it starts after
 apply and is settled, with its cleanup result, when the plugin unloads. Pass an
 explicit `McpOwner::new(ctx, loader)` when acquiring connections. Agent hosts
 instead use `mcp::install` and the declared Session loader. Its typed port is a

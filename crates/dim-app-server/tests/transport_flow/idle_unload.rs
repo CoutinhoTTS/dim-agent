@@ -29,7 +29,7 @@ struct LoadsState {
 impl Loads {
     pub(crate) fn install(&self, builder: &mut AgentBuilder) {
         let loads = self.clone();
-        builder.session_plugin(move |scope| LoadsPart(loads.clone(), *scope));
+        builder.session_part(move |names| names.part(LoadsPart(loads.clone())));
     }
     /// How often `id` has loaded, and whether its last load restored it.
     pub(crate) fn of(&self, id: &str) -> (usize, bool) {
@@ -70,11 +70,11 @@ impl Loads {
         self.0.release.notify_one();
     }
 }
-struct LoadsPart(Loads, dim_agent_runtime::SessionScope);
+struct LoadsPart(Loads);
 impl TypedPlugin for LoadsPart {
     type Deps = (
-        InSession<SessionIdentity>,
-        InSession<dyn TimelineTreeControl>,
+        rutis::Keyed<SessionIdentity>,
+        rutis::Keyed<dyn TimelineTreeControl>,
     );
     fn name(&self) -> &str {
         "test.loads"
@@ -82,7 +82,7 @@ impl TypedPlugin for LoadsPart {
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (InSession(identity), InSession(tree)): Self::Deps,
+        (rutis::Keyed(identity), rutis::Keyed(tree)): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             let state = self.0.0.clone();
@@ -111,11 +111,6 @@ impl TypedPlugin for LoadsPart {
             })?;
             Ok(rutis::Effect::Done)
         })
-    }
-}
-impl Capability for LoadsPart {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.1)
     }
 }
 

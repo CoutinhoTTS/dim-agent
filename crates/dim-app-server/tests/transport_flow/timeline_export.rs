@@ -3,7 +3,7 @@
 //! live and from copies, without changing it.
 use super::*;
 use axum::{Json, Router, extract::State, routing::post};
-use dim_agent_runtime::{BranchScope, Timeline, TimelineKey, TimelineStore};
+use dim_agent_runtime::{Timeline, TimelineKey, TimelineStore};
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
 use rusqlite::OpenFlags;
 use std::{
@@ -376,18 +376,16 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 }
 
 /// Tags every input message, so its events carry a before trace.
-struct TagInput {
-    scope: BranchScope,
-}
+struct TagInput;
 impl TypedPlugin for TagInput {
-    type Deps = (InBranch<Timeline>,);
+    type Deps = (rutis::Keyed<Timeline>,);
     fn name(&self) -> &str {
         "TagInput"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (InBranch(timeline),): Self::Deps,
+        (rutis::Keyed(timeline),): Self::Deps,
     ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
         Box::pin(async move {
             timeline.before(ctx, "tag-input", &["input/message"], |mut draft| {
@@ -396,11 +394,6 @@ impl TypedPlugin for TagInput {
             })?;
             Ok(rutis::Effect::Done)
         })
-    }
-}
-impl Capability for TagInput {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -412,7 +405,7 @@ async fn timeline_export_carries_before_traces() {
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder.timeline_plugin(|scope: &BranchScope| TagInput { scope: *scope });
+    builder.branch_part(|names| names.part(TagInput));
     let server = serve(
         builder,
         ServerConfig {

@@ -9,11 +9,11 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::*,
     methods::{RpcError, SessionMethods},
-    tool_registry::ToolContribution,
+    tool_registry::{ToolContribution, contribution_key},
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, TypedPlugin};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -90,15 +90,16 @@ impl ModelDriver for Script {
 /// Reaches the `ask_user` contribution of the latest Session, to call the
 /// tool contract directly where no model output can (a duplicate call id).
 #[derive(Clone, Default)]
-struct Probe(Arc<Mutex<Option<(Ctx, SessionScope)>>>);
+struct Probe(Arc<Mutex<Option<Reach>>>);
+/// The latest Session's context and the key of its `ask_user` contribution.
+type Reach = (Ctx, DepKey<ToolContribution>);
 impl Probe {
     fn tool(&self) -> Arc<ToolContribution> {
-        let (ctx, scope) = self.0.lock().unwrap().clone().unwrap();
-        ctx.get_as::<ToolContribution>(scope.named_key::<ToolContribution>("ask_user"))
-            .unwrap()
+        let (ctx, key) = self.0.lock().unwrap().clone().unwrap();
+        ctx.get_as::<ToolContribution>(key.key().clone()).unwrap()
     }
 }
-struct ProbePlugin(SessionScope, Probe);
+struct ProbePlugin(DepKey<ToolContribution>, Probe);
 impl TypedPlugin for ProbePlugin {
     type Deps = ();
     fn name(&self) -> &str {
@@ -109,12 +110,9 @@ impl TypedPlugin for ProbePlugin {
         ctx: &'a Ctx,
         (): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        *self.1.0.lock().unwrap() = Some((ctx.clone(), self.0));
+        *self.1.0.lock().unwrap() = Some((ctx.clone(), self.0.clone()));
         Box::pin(async { Ok(Effect::Done) })
     }
-}
-impl Capability for ProbePlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }
 
 struct Fixture {
@@ -132,7 +130,7 @@ impl Fixture {
         builder
             .timeline_store(Arc::new(MemoryTimelineStore::default()))
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_value(Arc::new(ModelHost(model.clone())))
+            .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
@@ -142,7 +140,12 @@ impl Fixture {
         defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_agent_questions::install(&mut builder);
         let slot = probe.clone();
-        builder.session_plugin(move |scope| ProbePlugin(*scope, slot.clone()));
+        builder.session_part(move |names| {
+            names.part(ProbePlugin(
+                contribution_key(names, "ask_user")?,
+                slot.clone(),
+            ))
+        });
         let agent = builder.build_in(&root);
         Self {
             root,

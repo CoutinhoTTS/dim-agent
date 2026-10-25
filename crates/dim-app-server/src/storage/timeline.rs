@@ -9,15 +9,15 @@ use super::{
 };
 use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::{
-    AgentError, BoxFuture, Capability, KeysOf, PublishCallback, Result, SessionConfig,
-    StoredBranch, StoredEvent, TimelineInfo, TimelineKey, TimelineStore, TimelineTrace, scoped,
+    AgentError, BoxFuture, PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent,
+    TimelineInfo, TimelineKey, TimelineStore, TimelineTrace,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
     SessionForkedData,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use rutis::{CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::{CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
 use rutis_bridge::session::{HostDispatch, host_key};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1149,14 +1149,14 @@ impl SessionStorePlugin {
     }
 }
 impl TypedPlugin for SessionStorePlugin {
-    type Deps = (Arc<SqliteStorage>,);
+    type Deps = (Keyed<SqliteStorage>,);
     fn name(&self) -> &str {
         "SessionStore"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (db,): Self::Deps,
+        (Keyed(db),): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let store = Arc::new(SessionStore::new(db, ctx.clone(), self.files_root));
@@ -1186,11 +1186,6 @@ impl TypedPlugin for SessionStorePlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for SessionStorePlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
     }
 }
 

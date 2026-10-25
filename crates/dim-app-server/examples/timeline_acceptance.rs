@@ -21,7 +21,7 @@ use dim_agent_runtime::*;
 use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
 use rusqlite::Connection;
-use rutis::{CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::{
     io::{BufRead, Write},
     path::{Path, PathBuf},
@@ -82,28 +82,22 @@ fn quantile(values: &mut [f64], p: f64) -> f64 {
 }
 
 struct CaptureTree {
-    scope: SessionScope,
     captured: Arc<Mutex<Option<Arc<TreeCommands>>>>,
 }
 impl TypedPlugin for CaptureTree {
-    type Deps = InSession<TreeCommands>;
+    type Deps = Keyed<TreeCommands>;
     fn name(&self) -> &str {
         "measurement.tree"
     }
     fn apply<'a>(
         &'a self,
         _: &'a Ctx,
-        InSession(tree): Self::Deps,
+        Keyed(tree): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             *self.captured.lock().unwrap() = Some(tree);
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for CaptureTree {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 struct Compactor {
@@ -182,18 +176,17 @@ impl CompactionStrategy for FixedSummary {
     }
 }
 struct CaptureStop {
-    scope: BranchScope,
     observed: Arc<Mutex<Vec<Instant>>>,
 }
 impl TypedPlugin for CaptureStop {
-    type Deps = InBranch<Dispatcher>;
+    type Deps = Keyed<Dispatcher>;
     fn name(&self) -> &str {
         "measurement.stop"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        InBranch(dispatcher): Self::Deps,
+        Keyed(dispatcher): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let observed = self.observed.clone();
@@ -203,11 +196,6 @@ impl TypedPlugin for CaptureStop {
             })?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for CaptureStop {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 async fn memory(steps: usize) -> std::result::Result<(), Error> {
@@ -225,7 +213,7 @@ async fn memory(steps: usize) -> std::result::Result<(), Error> {
     builder
         .timeline_store(store.clone())
         .session_value(Arc::new(HistoryRenderer::default()))
-        .session_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compactor {
@@ -235,9 +223,10 @@ async fn memory(steps: usize) -> std::result::Result<(), Error> {
             FixedSummary,
         )))))
         .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?))
-        .session_plugin(move |scope| CaptureTree {
-            scope: *scope,
-            captured: capture.clone(),
+        .session_part(move |names| {
+            names.part(CaptureTree {
+                captured: capture.clone(),
+            })
         });
     defaults::install(&mut builder);
     let agent = builder.build();
@@ -575,13 +564,15 @@ async fn reads() -> std::result::Result<(), Error> {
         defaults::install(&mut builder);
         builder
             .timeline_store(store.clone())
-            .session_plugin(move |scope| CaptureTree {
-                scope: *scope,
-                captured: target.clone(),
+            .session_part(move |names| {
+                names.part(CaptureTree {
+                    captured: target.clone(),
+                })
             })
-            .timeline_plugin(move |scope| CaptureStop {
-                scope: *scope,
-                observed: stop_target.clone(),
+            .branch_part(move |names| {
+                names.part(CaptureStop {
+                    observed: stop_target.clone(),
+                })
             });
         let agent = builder.build();
         let session = agent.restore_session(name.into()).await?;

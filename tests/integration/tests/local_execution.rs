@@ -143,9 +143,6 @@ impl TypedPlugin for PlatformPlugin {
         })
     }
 }
-impl Capability for PlatformPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hook {
@@ -197,15 +194,14 @@ impl Seen {
     }
 }
 struct Probe {
-    scope: BranchScope,
     hook: Hook,
     seen: Seen,
 }
 impl TypedPlugin for Probe {
     type Deps = (
-        InBranch<Timeline>,
-        InBranch<TimelineIdentity>,
-        InSession<TreeCommands>,
+        rutis::Keyed<Timeline>,
+        rutis::Keyed<TimelineIdentity>,
+        rutis::Keyed<TreeCommands>,
     );
     fn name(&self) -> &str {
         "Probe"
@@ -213,7 +209,7 @@ impl TypedPlugin for Probe {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (InBranch(timeline), InBranch(identity), InSession(tree)): Self::Deps,
+        (rutis::Keyed(timeline), rutis::Keyed(identity), rutis::Keyed(tree)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             self.seen.timelines.lock().unwrap().push((
@@ -233,11 +229,6 @@ impl TypedPlugin for Probe {
             }
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for Probe {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -282,7 +273,7 @@ impl Harness {
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
         let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        let view = root.plugin(rutis::Typed::new(PlatformPlugin(Arc::new(platform))));
         Self::with_platform(root, view, hook, cwd).await
     }
     async fn with_platform(root: Ctx, view: rutis::FiberView, hook: Hook, cwd: PathBuf) -> Self {
@@ -305,7 +296,7 @@ impl Harness {
         builder
             .timeline_store(store.clone())
             .session_value(Arc::new(HistoryRenderer::default()))
-            .session_value(Arc::new(ModelHost(model.clone())))
+            .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
@@ -319,10 +310,11 @@ impl Harness {
         );
         wait::install(&mut builder);
         let probes = seen.clone();
-        builder.timeline_plugin(move |scope| Probe {
-            scope: *scope,
-            hook,
-            seen: probes.clone(),
+        builder.branch_part(move |names| {
+            names.part(Probe {
+                hook,
+                seen: probes.clone(),
+            })
         });
         let agent = builder.build_in(&root);
         Self {
@@ -755,7 +747,7 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
         ));
     }
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+    let view = root.plugin(rutis::Typed::new(PlatformPlugin(Arc::new(platform))));
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
     let host_tmp = PathBuf::from("/tmp").join(format!("dim-exec-{}", uuid::Uuid::new_v4()));
@@ -940,7 +932,7 @@ async fn default_macos_isolation_reads_git_global_configuration_but_not_other_ho
                 .push(("XDG_CONFIG_HOME".into(), config.as_os_str().into()));
         }
         let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(capability_plugin(PlatformPlugin(Arc::new(platform))));
+        let view = root.plugin(rutis::Typed::new(PlatformPlugin(Arc::new(platform))));
         let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
         let session = harness.session().await;
         for (command, succeeds) in [
