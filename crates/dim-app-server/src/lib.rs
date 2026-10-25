@@ -483,16 +483,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // installed, so their names are registered here.
     dim_agent_capabilities::register_names(&mut builder);
     register_names(builder.catalog_mut());
-    for name in [
-        "managedProvider",
-        "pluginFiles",
-        "sessions",
-        "sessionMetadata",
-        "auxiliaryModel",
-        "settings",
-    ] {
-        builder.catalog_mut().register_shared(name);
-    }
     let mut node_resolver = None;
     let mut private_row = None;
     let mut rows = vec![register_part(
@@ -548,12 +538,16 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         row
     };
     if let Some(home_root) = product_root {
-        rows.push(register_capability(&mut builtins, move || {
-            plugin_files::PluginFilesPlugin(home_root)
-        }));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| names.part(plugin_files::PluginFilesPlugin(home_root)),
+        )?);
         rows.push(owner(
             "account",
-            register_capability(&mut builtins, || managed_provider::ManagedProvidersPlugin),
+            register_part(&mut builtins, builder.catalog(), |names| {
+                names.part(managed_provider::ManagedProvidersPlugin)
+            })?,
         ));
         if let Some(plugin) = &config.managed_plugin {
             let plugin = plugin.clone();
@@ -605,9 +599,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             rows.push(register_capability(&mut builtins, move || {
                 NodeRows(row_resolver.clone(), "node", "NodeRows")
             }));
-            rows.push(register_capability(&mut builtins, || {
-                managed_provider::ManagedProviderBinding
-            }));
+            rows.push(register_part(
+                &mut builtins,
+                builder.catalog(),
+                managed_provider::ManagedProviderBinding::part,
+            )?);
             node_resolver = Some(resolver);
             private_row = Some(
                 serde_json::json!({"id":"ManagedProviderPlugin","name":entry,"config":{"home":config.product_home}}),
@@ -615,19 +611,21 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }
         rows.push(owner(
             "account.codex",
-            register_capability(&mut builtins, move || {
-                codex_oauth::OpenAICodexOAuthPlugin::new(home_root)
-            }),
+            register_part(&mut builtins, builder.catalog(), move |names| {
+                names.part(codex_oauth::OpenAICodexOAuthPlugin::new(home_root))
+            })?,
         ));
         rows.push(owner(
             "account.grok",
-            register_capability(&mut builtins, move || {
-                grok_oauth::GrokOAuthPlugin::new(home_root)
-            }),
+            register_part(&mut builtins, builder.catalog(), move |names| {
+                names.part(grok_oauth::GrokOAuthPlugin::new(home_root))
+            })?,
         ));
         rows.push(owner(
             "provider",
-            register_capability(&mut builtins, provider::ProviderPlugin::default),
+            register_part(&mut builtins, builder.catalog(), |names| {
+                provider::ProviderPlugin::default().part(names)
+            })?,
         ));
     }
     let settings_sources = config
@@ -653,10 +651,16 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .reserve::<skills_management::SkillDocument>()
         .reserve::<permission_rules::PermissionSettings>()
         .declare(settings_sources);
-        rows.push(register_capability(&mut builtins, move || settings.clone()));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| settings.clone().part(names),
+        )?);
         rows.push(owner(
             "settings",
-            register_capability(&mut builtins, || settings_methods::SettingsMethodsPlugin),
+            register_part(&mut builtins, builder.catalog(), |names| {
+                names.part(settings_methods::SettingsMethodsPlugin)
+            })?,
         ));
     }
     if let Some(home_root) = execution_root {
@@ -666,10 +670,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         if native_home.is_some() {
             dim_agent_attachments::install(&mut builder);
         }
-        rows.push(mcp::McpPublication::register(&mut builtins));
+        rows.push(mcp::McpPublication::register(
+            &mut builtins,
+            builder.catalog(),
+        )?);
         rows.push(owner(
             "mcp",
-            register_capability(&mut builtins, move || mcp::McpPlugin::new(home_root)),
+            register_part(&mut builtins, builder.catalog(), move |names| {
+                names.part(mcp::McpPlugin::new(home_root))
+            })?,
         ));
         rows.push(register_part(
             &mut builtins,
@@ -686,11 +695,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         )?);
         rows.push(owner(
             "skills",
-            register_capability(&mut builtins, || skills_management::SkillsCatalogPlugin),
+            register_part(&mut builtins, builder.catalog(), |names| {
+                names.part(skills_management::SkillsCatalogPlugin)
+            })?,
         ));
         rows.push(owner(
             "permission",
-            register_capability(&mut builtins, || permission_rules::PermissionRulesPlugin),
+            register_part(&mut builtins, builder.catalog(), |names| {
+                names.part(permission_rules::PermissionRulesPlugin)
+            })?,
         ));
     }
     let session_parts = config
@@ -975,9 +988,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     })
 }
 
-/// Registers the names of the App Server's services that its parts provide
-/// and depend on ([`dim_agent_runtime::names`]).
+/// The names the App Server's parts provide or read (rutis usage §3.4), and
+/// the names its process parts share across languages. Registering them again
+/// does nothing, so each installer applies them.
 pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
+    use dim_agent_capabilities::host::{AuxiliaryModelHost, ModelSelectionHost};
     use dim_agent_runtime::{SESSION_GROUP, names::register};
     register::<ServerControl>(catalog, None);
     register::<storage::SqliteStorage>(catalog, None);
@@ -991,7 +1006,36 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<ListenAddresses>(catalog, None);
     register::<ui_host::UiHost>(catalog, None);
     register::<settings::SettingsService>(catalog, None);
+    register::<managed_provider::ManagedProviders>(catalog, None);
+    register::<codex_oauth::OpenAICodexOAuthService>(catalog, None);
+    register::<grok_oauth::GrokOAuthService>(catalog, None);
+    register::<provider::ProviderSecretHost>(catalog, None);
+    register::<provider::ProviderService>(catalog, None);
+    register::<ModelSelectionHost>(catalog, None);
+    register::<AuxiliaryModelHost>(catalog, None);
+    register::<mcp::McpService>(catalog, None);
+    register::<mcp::McpAuth>(catalog, None);
+    register::<mcp::Publication>(catalog, None);
     register::<collaboration::CollaborationCapability>(catalog, Some(SESSION_GROUP));
+    register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
+    for name in [
+        "managedProvider",
+        "pluginFiles",
+        "sessions",
+        "sessionMetadata",
+        "auxiliaryModel",
+        "settings",
+    ] {
+        catalog.register_shared(name);
+    }
+}
+
+/// The capabilities' catalog with the App Server's names, for mounting its
+/// parts outside [`serve`] ([`dim_agent_runtime::names::process_plugin`]).
+pub fn catalog() -> dim_agent_runtime::names::ServiceCatalog {
+    let mut catalog = dim_agent_capabilities::catalog();
+    register_names(&mut catalog);
+    catalog
 }
 
 /// Creates a directory that holds the native store, and any missing parents,

@@ -2,8 +2,8 @@
 pub(crate) mod management;
 use crate::model_catalog::{MAX_MODEL_TOKENS, ModelEntry};
 use dim_agent_capabilities::host::ModelProtocol;
-use dim_agent_runtime::{Capability, KeysOf};
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use dim_agent_runtime::Names;
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Plugin, TypedPlugin};
 use rutis_bridge::session::{HostDispatch, Value as RpcValue};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -537,19 +537,28 @@ impl TypedPlugin for ManagedProvidersPlugin {
         })
     }
 }
-impl Capability for ManagedProvidersPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
-}
+/// Binds the private plugin's `managedProvider` service to ManagedProviders.
 pub struct ManagedProviderBinding;
+impl ManagedProviderBinding {
+    /// This part with its keys from `names`: the foreign service is found at
+    /// its name's key.
+    pub fn part(names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
+        let keys = (
+            names.key::<ManagedProviders>()?,
+            names.named::<dyn HostDispatch>("managedProvider")?,
+        );
+        Ok(names.part_with(Self, keys))
+    }
+}
 impl TypedPlugin for ManagedProviderBinding {
-    type Deps = (Arc<ManagedProviders>, Keyed<dyn HostDispatch>);
+    type Deps = (Keyed<ManagedProviders>, Keyed<dyn HostDispatch>);
     fn name(&self) -> &str {
         "ManagedProviderBinding"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (owner, Keyed(dispatch)): Self::Deps,
+        (Keyed(owner), Keyed(dispatch)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let generation = uuid::Uuid::new_v4();
@@ -597,10 +606,5 @@ impl TypedPlugin for ManagedProviderBinding {
             *owner.providers.lock().unwrap() = providers;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for ManagedProviderBinding {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), DepKey::dynamic("managedProvider"))
     }
 }
