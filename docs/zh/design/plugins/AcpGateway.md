@@ -255,7 +255,7 @@ sequenceDiagram
 
 | 步骤 | 路径 |
 | --- | --- |
-| Prompt 写入 | `session.submit` 先询问 Session 的 `submitCheck` 服务（[Hooks A.6.2](Hooks.md#a62-操作者输入入口处的提交检查)），它们可能在写入任何内容之前以 `input_blocked` 拒绝，或返回追加在用户内容之后的上下文；然后 `Session::input`（网关的用户内容）：`validate`，然后追加 `input/message`；回复携带已提交事件 |
+| Prompt 写入 | `session.submit` 先调用向 Session 的 `submitChecks` 登记的检查（[Hooks A.6.2](Hooks.md#a62-操作者输入入口处的提交检查)），它们可能在写入任何内容之前以 `input_blocked` 拒绝，或返回追加在用户内容之后的上下文；然后 `Session::input`（网关的用户内容）：`validate`，然后追加 `input/message`；回复携带已提交事件 |
 | 采纳 | InputQueue（Dispatcher）追加 `input/applied`；Loop 追加 `turn/start`、`input/consumed` 并运行轮次 |
 | 撤回 | `session.input.withdraw`（InputQueue 的 `sessionMethods`）写入 `input/withdraw`；InputQueue 按顺序消费它，若仍持有未应用的该输入则写入 `input/deleted`，否则不写入任何内容（`notHeld`） |
 | 停止 | `session.stop` 经 Session 门面写入轮次作用域的 `stop/interrupt` 并等待结算 |
