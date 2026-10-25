@@ -27,9 +27,16 @@ pub fn install(builder: &mut AgentBuilder) {
             "SkillContent",
             |names, config| names.part(content::ContentPlugin(config.clone())),
         )
-        .session_part(|names| names.part(content::ContributionsPlugin::new(names)?))
-        .session_part(|names| names.part(SkillsPlugin::new(names)?))
-        .branch_part(|names| names.part(SkillsBranchPlugin::new(names)?));
+        .require_feature(
+            dim_agent_runtime::Feature::new("Skills")
+                .session("SkillContributions", |names| {
+                    names.part(content::ContributionsPlugin::new(names)?)
+                })
+                .session("Skills", |names| names.part(SkillsPlugin::new(names)?))
+                .branch("SkillsBranch", |names| {
+                    names.part(SkillsBranchPlugin::new(names)?)
+                }),
+        );
 }
 
 /// A parsed `SKILL.md`; the body is read at scan time with path variables

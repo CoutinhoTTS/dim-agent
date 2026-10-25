@@ -46,9 +46,12 @@ const MAX_COMMAND_BYTES: usize = 64 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const PROGRESS_MAX_BYTES: usize = 64 * 1024;
 
-/// Installs ShellInput in every Session and records its namespace.
+/// Installs ShellInput in every Session.
 pub fn install(builder: &mut AgentBuilder) {
-    builder.session_part(|names| names.part(ShellInputPlugin));
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("ShellInput")
+            .session("ShellInput", |names| names.part(ShellInputPlugin)),
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

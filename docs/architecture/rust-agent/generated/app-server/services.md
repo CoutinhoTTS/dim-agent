@@ -8,6 +8,28 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
+    p51["Attachments"]
+    p50["McpSession"]
+    p49["AgentsSession"]
+    p48["CommandRules"]
+    p47["Skills"]
+    p46["PromptSources"]
+    p45["ShellInput"]
+    p44["Wait"]
+    p43["WorkspaceTools"]
+    p42["BranchTool"]
+    p41["ToolExecution"]
+    p40["Permission"]
+    p39["ModelProvider"]
+    p38["Loop"]
+    p37["Prompt"]
+    p36["ContextPreparation"]
+    p35["ToolRegistry"]
+    p34["InputQueue"]
+    p33["SessionMethods"]
+    p32["TimelineTree"]
+    p31["SessionBroadcast"]
+    p30["PartRegistry"]
     p29["Transport"]
     p28["Rpc"]
     p27["Connection"]
@@ -36,6 +58,27 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p51
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p50
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p49
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p48
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p47
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p46
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p45
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p44
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p43
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p42
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p41
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p40
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p39
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p38
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p37
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p36
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p35
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p34
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p33
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p32
+  p30 -->|"dim_agent_runtime::parts::PartRegistry"| p31
   p27 -->|"dim_app_server::connection::ConnectionHub"| p29
   p3 -->|"dim_app_server::control::ServerControl"| p29
   p7 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p29

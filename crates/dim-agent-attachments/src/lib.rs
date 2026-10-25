@@ -15,11 +15,13 @@ const NAMESPACE: &str = "attachment";
 /// The content limit of one put (A2); SessionStore's own cap is 16 MiB.
 const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 
-/// Records the namespace and installs the Session part. A host calls this
-/// only where SessionStore provides `sessionFiles` and the model has `read`,
-/// before Rpc reads the recorded namespaces.
+/// Installs Attachments in the profile. A host calls this only where
+/// SessionStore provides `sessionFiles` and the model has `read`.
 pub fn install(builder: &mut AgentBuilder) {
-    builder.session_part(|names| names.part(AttachmentsPlugin));
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("Attachments")
+            .session("Attachments", |names| names.part(AttachmentsPlugin)),
+    );
 }
 
 #[derive(serde::Deserialize)]

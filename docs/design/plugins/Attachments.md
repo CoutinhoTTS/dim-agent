@@ -406,7 +406,7 @@ Attachments is implemented in Rust in its own crate, `dim-agent-attachments` ([l
 | Neutral contract | Rust binding |
 | --- | --- |
 | Plugin | `TypedPlugin`; `Deps = (Keyed<SessionIdentity>, Keyed<SessionFilesHost>, Keyed<SessionMethods>)` |
-| Installation | `dim_agent_attachments::install(builder)`: `builder.session_part(|names| names.part(AttachmentsPlugin))`. `serve` calls it when `native_home` is set; xtask's local graph calls it too |
+| Installation | `dim_agent_attachments::install(builder)`: `builder.require_feature(Feature::new("Attachments").session("Attachments", |names| names.part(AttachmentsPlugin)))`, a plugin that registers its Session part, required by the profile. `serve` calls it when `native_home` is set; xtask's local graph calls it too |
 | Namespace `attachment` | `methods.register(ctx, "attachment", vec![MethodDecl::new("attachment.put", true, Interruption::Drain)], handler)` on the `Keyed<SessionMethods>` dependency (`dim_agent_capabilities::methods`), called in `apply` after the plugin's own effects. `Handler` takes `(method, params, CancellationToken, Progress)`; `Progress` is unused (`progress: false`) |
 | Params and reply | `methods::params::<T>(params)` (`invalid_params` on a wrong shape, unknown fields included) and `methods::reply(value)` |
 | `sessionFiles.put` | `SessionFilesHost(Arc<dyn PutSessionFile>)`: `put(session_id, name, content: Vec<u8>, cancel)` returns `StoredSessionFile {file_id, path, bytes}` or `SessionFileError {code: SessionFileErrorCode, message}` ([session files Appendix A](../appserver/session-files.md#appendix-a-rust-binding)); `session_id` comes from `SessionIdentity`, `cancel` is the handler's token |

@@ -10,7 +10,9 @@
 //! follow registrations and withdrawals while the instance is open, and a
 //! mounted part closes with its instance.
 use crate::{Names, SessionConfig};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, TypeKey};
+use rutis::{
+    BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Keyed, Plugin, TypeKey, TypedPlugin,
+};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -155,6 +157,18 @@ impl PartRegistry {
             let _ = view.dispose().await;
         }))
         .await;
+    }
+
+    /// The names of `required` that nothing has registered, in any scope.
+    fn missing(&self, required: &HashSet<String>) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        let mut missing: Vec<String> = required
+            .iter()
+            .filter(|name| !state.entries.iter().any(|entry| &entry.name == *name))
+            .cloned()
+            .collect();
+        missing.sort();
+        missing
     }
 
     fn entries(&self, scope: PartScope) -> Vec<Arc<Entry>> {
@@ -381,6 +395,27 @@ impl Plugin for PartMounter {
             let mut seen = HashMap::new();
             waiting.extend(self.reconcile(ctx, id, &mut seen)?);
             let cancel = ctx.cancellation_token();
+            if self.required {
+                // A required part nothing has registered yet holds the
+                // instance as a required row does: it is mounted once its
+                // plugin registers it, or the creation gives up.
+                loop {
+                    let missing = site.registry.missing(&site.required);
+                    if missing.is_empty() {
+                        break;
+                    }
+                    tokio::select! {
+                        changed = changes.changed() => if changed.is_err() { break },
+                        () = cancel.cancelled() => {
+                            return Err(CordisError::PluginFailed(
+                                format!("required parts not registered: {}", missing.join(", "))
+                                    .into(),
+                            ));
+                        }
+                    }
+                    waiting.extend(self.reconcile(ctx, id, &mut seen)?);
+                }
+            }
             let follow = {
                 let this = PartMounter {
                     site: site.clone(),
@@ -416,6 +451,139 @@ impl Plugin for PartMounter {
                 // the instance's creation waits for these instead.
                 site.mounted.lock().unwrap().extend(waiting);
             }
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// One part a [`Feature`] registers.
+#[derive(Clone)]
+struct FeaturePart {
+    scope: PartScope,
+    name: String,
+    generator: Generator,
+}
+
+/// A plugin that owns nothing for the process: while it runs it registers
+/// its Session and branch parts ([ADR 006 D3](../../../docs/adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)).
+/// A feature that holds process state writes its own plugin and registers
+/// with [`PartRegistry::register`]. Add it with
+/// [`AgentBuilder::feature`](crate::AgentBuilder::feature); the host's
+/// profile requires parts by name
+/// ([`AgentBuilder::require_part`](crate::AgentBuilder::require_part)).
+#[derive(Clone)]
+pub struct Feature {
+    name: String,
+    parts: Vec<FeaturePart>,
+}
+
+impl Feature {
+    /// A feature whose plugin is named `name`.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            parts: vec![],
+        }
+    }
+
+    /// A part of every Session named `name`: `make` builds a Session's copy
+    /// from the names its dependencies resolve to there, usually
+    /// `|names| names.part(MyPart)`.
+    pub fn session(
+        self,
+        name: impl Into<String>,
+        make: impl Fn(&Names<'_>) -> Result<Box<dyn Plugin>, CordisError> + Send + Sync + 'static,
+    ) -> Self {
+        self.when(PartScope::Session, name, move |mount| {
+            make(mount.names).map(Some)
+        })
+    }
+
+    /// A part of every branch named `name`, as [`Self::session`].
+    pub fn branch(
+        self,
+        name: impl Into<String>,
+        make: impl Fn(&Names<'_>) -> Result<Box<dyn Plugin>, CordisError> + Send + Sync + 'static,
+    ) -> Self {
+        self.when(PartScope::Branch, name, move |mount| {
+            make(mount.names).map(Some)
+        })
+    }
+
+    /// A part of `scope` that `generator` builds or not for each instance,
+    /// from its identity and configuration ([`Mount`]).
+    pub fn when(
+        mut self,
+        scope: PartScope,
+        name: impl Into<String>,
+        generator: impl Fn(&Mount<'_>) -> Result<Option<Box<dyn Plugin>>, CordisError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.parts.push(FeaturePart {
+            scope,
+            name: name.into(),
+            generator: Arc::new(generator),
+        });
+        self
+    }
+
+    /// The name of its plugin.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The names of the parts it registers.
+    pub fn part_names(&self) -> impl Iterator<Item = &str> {
+        self.parts.iter().map(|part| part.name.as_str())
+    }
+
+    /// Its plugin, keyed from `names`.
+    pub fn plugin(&self, names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
+        names.part(FeaturePlugin(self.clone()))
+    }
+}
+
+struct FeaturePlugin(Feature);
+
+impl TypedPlugin for FeaturePlugin {
+    type Deps = (Keyed<PartRegistry>,);
+    fn name(&self) -> &str {
+        &self.0.name
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a Ctx,
+        (Keyed(registry),): Self::Deps,
+    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            for part in &self.0.parts {
+                let generator = part.generator.clone();
+                registry.register(ctx, part.scope, part.name.clone(), move |mount| {
+                    generator(mount)
+                })?;
+            }
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// Provides a placement's registry to its plugins, at the process name
+/// `partRegistry`.
+pub(crate) struct PartRegistryPlugin {
+    pub registry: Arc<PartRegistry>,
+    pub key: rutis::DepKey<PartRegistry>,
+}
+
+impl TypedPlugin for PartRegistryPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "PartRegistry"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        Box::pin(async move {
+            ctx.provide_as(self.key.key().clone(), self.registry.clone())?;
             Ok(Effect::Done)
         })
     }

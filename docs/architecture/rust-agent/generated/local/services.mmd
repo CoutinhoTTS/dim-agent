@@ -1,26 +1,26 @@
 %% Generated from live rutis diagnostics; do not edit.
 flowchart LR
   subgraph main["main"]
-    p33["branch"]
-    p36["BranchOptionalParts"]
-    p35["BranchParts"]
-    p52["SkillsBranch"]
-    p51["PromptSourcesBranch"]
-    p50["WaitBranch"]
-    p49["BackgroundExec"]
-    p48["FileReads"]
-    p47["ToolExecutor"]
-    p46["ToolBinding"]
-    p45["Approval"]
-    p44["Permission"]
-    p43["ModelProvider"]
-    p42["Loop"]
-    p41["InputQueue"]
-    p40["Prompt"]
-    p39["ContextPreparation"]
-    p38["TreeTimeline"]
-    p37["SessionBroadcast"]
-    p34["BranchScope"]
+    p54["branch"]
+    p57["BranchOptionalParts"]
+    p56["BranchParts"]
+    p73["ToolExecutor"]
+    p72["SkillsBranch"]
+    p71["ToolBinding"]
+    p70["PromptSourcesBranch"]
+    p69["Approval"]
+    p68["Permission"]
+    p67["ModelProvider"]
+    p66["WaitBranch"]
+    p65["Loop"]
+    p64["Prompt"]
+    p63["BackgroundExec"]
+    p62["FileReads"]
+    p61["ContextPreparation"]
+    p60["InputQueue"]
+    p59["SessionBroadcast"]
+    p58["TreeTimeline"]
+    p55["BranchScope"]
   end
   subgraph process["process"]
     p6["rutis-loader"]
@@ -30,140 +30,140 @@ flowchart LR
     p2["FileStorage"]
   end
   subgraph session["session"]
-    p10["session"]
-    p31["SkillContentInstances"]
-    p32["SkillContent"]
-    p14["SessionOptionalParts"]
-    p13["SessionParts"]
-    p30["Questions"]
-    p29["Attachments"]
-    p28["Skills"]
-    p27["SkillContributions"]
-    p26["PromptSources"]
-    p25["PromptRegistry"]
-    p24["ShellInput"]
-    p23["Wait"]
-    p22["WorkspaceTools"]
-    p21["BranchTool"]
-    p20["ToolRegistry"]
-    p19["InputMethods"]
-    p18["SessionMethods"]
-    p17["TimelineTree"]
-    p16["SessionBroadcastEnd"]
-    p15["PrepareModelHost"]
-    p12["SessionExtension"]
-    p11["SessionScope"]
+    p31["session"]
+    p52["SkillContentInstances"]
+    p53["SkillContent"]
+    p35["SessionOptionalParts"]
+    p34["SessionParts"]
+    p51["Questions"]
+    p50["Attachments"]
+    p49["Skills"]
+    p48["SkillContributions"]
+    p47["PromptSources"]
+    p46["PromptRegistry"]
+    p45["ShellInput"]
+    p44["Wait"]
+    p43["WorkspaceTools"]
+    p42["BranchTool"]
+    p41["ToolRegistry"]
+    p40["InputMethods"]
+    p39["SessionMethods"]
+    p38["SessionBroadcastEnd"]
+    p37["TimelineTree"]
+    p36["PrepareModelHost"]
+    p33["SessionExtension"]
+    p32["SessionScope"]
   end
-  p28 -->|"dim_agent_capabilities::skills::session::SessionSkills@session"| p52
-  p34 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p52
-  p40 -->|"dyn dim_agent_runtime::contracts::ConfigureControl@main"| p52
-  p25 -->|"dim_agent_capabilities::host::PromptHost@session"| p51
-  p34 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p51
-  p40 -->|"dim_agent_runtime::state::StateCell<dim_agent_capabilities::prompt_state::PromptSnapshot>@main"| p51
-  p40 -->|"dyn dim_agent_runtime::contracts::ConfigureControl@main"| p51
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p50
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p50
-  p11 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p49
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p49
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p49
-  p45 -->|"dim_agent_capabilities::approval::Approval@main"| p47
-  p46 -->|"dim_agent_capabilities::tool_binding::ToolBinding@main"| p47
-  p34 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p47
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p47
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p47
-  p40 -->|"dim_agent_capabilities::prompt::Prompt@main"| p46
-  p20 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p46
-  p34 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p46
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p46
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p46
-  p34 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p46
-  p44 -->|"dim_agent_capabilities::permission::Permission@main"| p45
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p45
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p45
-  p11 -->|"dim_agent_capabilities::permission::CommandRulesHost@session"| p44
-  p11 -->|"dim_agent_runtime::config::SessionConfig@session"| p44
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p44
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p44
-  p39 -->|"dim_agent_capabilities::context_preparation::ContextPreparation@main"| p43
-  p34 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p43
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p43
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p43
-  p11 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p42
-  p11 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p42
-  p11 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p42
-  p15 -->|"dim_agent_capabilities::host::PrepareModelHost@session"| p42
-  p46 -->|"dim_agent_capabilities::tool_binding::ToolBinding@main"| p42
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p42
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p42
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p41
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p41
-  p39 -->|"dim_agent_capabilities::context_preparation::ConfigurationPublisher@main"| p40
-  p25 -->|"dim_agent_capabilities::host::PromptHost@session"| p40
-  p25 -->|"dim_agent_capabilities::prompt::InitialPromptConfiguration@session"| p40
-  p34 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p40
-  p34 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p40
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p40
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p40
-  p11 -->|"dim_agent_runtime::lifecycle::FaultReporter@session"| p40
-  p34 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p40
-  p11 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p39
-  p11 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p39
-  p11 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p39
-  p11 -->|"dim_agent_capabilities::host::PrepareContextHost@session"| p39
-  p34 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p39
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p39
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p39
-  p17 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p38
-  p34 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p38
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p38
-  p34 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p38
-  p34 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p37
-  p34 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p37
+  p69 -->|"dim_agent_capabilities::approval::Approval@main"| p73
+  p71 -->|"dim_agent_capabilities::tool_binding::ToolBinding@main"| p73
+  p55 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p73
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p73
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p73
+  p49 -->|"dim_agent_capabilities::skills::session::SessionSkills@session"| p72
+  p55 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p72
+  p64 -->|"dyn dim_agent_runtime::contracts::ConfigureControl@main"| p72
+  p64 -->|"dim_agent_capabilities::prompt::Prompt@main"| p71
+  p41 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p71
+  p55 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p71
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p71
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p71
+  p55 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p71
+  p46 -->|"dim_agent_capabilities::host::PromptHost@session"| p70
+  p55 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p70
+  p64 -->|"dim_agent_runtime::state::StateCell<dim_agent_capabilities::prompt_state::PromptSnapshot>@main"| p70
+  p64 -->|"dyn dim_agent_runtime::contracts::ConfigureControl@main"| p70
+  p68 -->|"dim_agent_capabilities::permission::Permission@main"| p69
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p69
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p69
+  p32 -->|"dim_agent_capabilities::permission::CommandRulesHost@session"| p68
+  p32 -->|"dim_agent_runtime::config::SessionConfig@session"| p68
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p68
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p68
+  p61 -->|"dim_agent_capabilities::context_preparation::ContextPreparation@main"| p67
+  p55 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p67
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p67
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p67
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p66
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p66
+  p32 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p65
+  p32 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p65
+  p32 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p65
+  p36 -->|"dim_agent_capabilities::host::PrepareModelHost@session"| p65
+  p71 -->|"dim_agent_capabilities::tool_binding::ToolBinding@main"| p65
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p65
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p65
+  p61 -->|"dim_agent_capabilities::context_preparation::ConfigurationPublisher@main"| p64
+  p46 -->|"dim_agent_capabilities::host::PromptHost@session"| p64
+  p46 -->|"dim_agent_capabilities::prompt::InitialPromptConfiguration@session"| p64
+  p55 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p64
+  p55 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p64
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p64
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p64
+  p32 -->|"dim_agent_runtime::lifecycle::FaultReporter@session"| p64
+  p55 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p64
+  p32 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p63
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p63
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p63
+  p32 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p61
+  p32 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p61
+  p32 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p61
+  p32 -->|"dim_agent_capabilities::host::PrepareContextHost@session"| p61
+  p55 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p61
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p61
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p61
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p60
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p60
+  p55 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p59
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p59
+  p37 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p58
+  p55 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p58
+  p55 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p58
+  p55 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p58
   p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p4
   p2 -->|"dim_agent_capabilities::file_storage::FileStorage"| p3
-  p27 -->|"dim_agent_capabilities::skills::content::SkillContributions@session"| p32
-  p18 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p30
-  p20 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p30
-  p11 -->|"dim_agent_runtime::config::SessionConfig@session"| p30
-  p18 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p29
-  p11 -->|"dim_agent_runtime::config::SessionIdentity@session"| p29
-  p25 -->|"dim_agent_capabilities::prompt_registry::PromptRegistry@session"| p28
-  p4 -->|"dim_agent_capabilities::skills::catalog::SkillsCatalog"| p28
-  p27 -->|"dim_agent_capabilities::skills::content::SkillContributions@session"| p28
-  p20 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p28
-  p11 -->|"dim_agent_runtime::config::SessionConfig@session"| p28
-  p11 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p28
-  p11 -->|"dim_agent_runtime::scope::SessionLoader@session"| p28
-  p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p26
-  p25 -->|"dim_agent_capabilities::prompt_registry::PromptRegistry@session"| p26
-  p11 -->|"dim_agent_runtime::config::SessionConfig@session"| p26
-  p11 -->|"dim_agent_runtime::config::SessionConfig@session"| p25
-  p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p24
-  p18 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p24
-  p17 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p24
-  p11 -->|"dim_agent_runtime::config::SessionConfig@session"| p24
-  p11 -->|"dim_agent_runtime::config::SessionIdentity@session"| p24
-  p11 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p24
-  p17 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p23
-  p20 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p23
-  p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p22
-  p18 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p22
-  p17 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p22
-  p5 -->|"dim_agent_capabilities::workspace_tools::files::FileWriteCoordinator"| p22
-  p11 -->|"dim_agent_runtime::config::SessionConfig@session"| p22
-  p11 -->|"dim_agent_runtime::config::SessionIdentity@session"| p22
-  p17 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p21
-  p20 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p21
-  p22 -->|"dim_agent_capabilities::host::ToolHost@session"| p20
-  p11 -->|"dim_agent_runtime::config::SessionConfig@session"| p20
-  p11 -->|"dim_agent_runtime::config::SessionIdentity@session"| p20
-  p11 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p20
-  p18 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p19
-  p17 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p19
-  p11 -->|"dim_agent_runtime::assembly::TimelineFactory@session"| p17
-  p11 -->|"dim_agent_runtime::config::SessionIdentity@session"| p17
-  p11 -->|"dyn dim_agent_runtime::timeline_store::TimelineStore@session"| p17
-  p11 -->|"dim_agent_runtime::config::SessionIdentity@session"| p16
-  p20 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p15
-  p11 -->|"dim_agent_runtime::config::SessionConfig@session"| p15
-  p11 -->|"dim_agent_runtime::config::SessionIdentity@session"| p12
+  p48 -->|"dim_agent_capabilities::skills::content::SkillContributions@session"| p53
+  p39 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p51
+  p41 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p51
+  p32 -->|"dim_agent_runtime::config::SessionConfig@session"| p51
+  p39 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p50
+  p32 -->|"dim_agent_runtime::config::SessionIdentity@session"| p50
+  p46 -->|"dim_agent_capabilities::prompt_registry::PromptRegistry@session"| p49
+  p4 -->|"dim_agent_capabilities::skills::catalog::SkillsCatalog"| p49
+  p48 -->|"dim_agent_capabilities::skills::content::SkillContributions@session"| p49
+  p41 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p49
+  p32 -->|"dim_agent_runtime::config::SessionConfig@session"| p49
+  p32 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p49
+  p32 -->|"dim_agent_runtime::scope::SessionLoader@session"| p49
+  p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p47
+  p46 -->|"dim_agent_capabilities::prompt_registry::PromptRegistry@session"| p47
+  p32 -->|"dim_agent_runtime::config::SessionConfig@session"| p47
+  p32 -->|"dim_agent_runtime::config::SessionConfig@session"| p46
+  p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p45
+  p39 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p45
+  p37 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p45
+  p32 -->|"dim_agent_runtime::config::SessionConfig@session"| p45
+  p32 -->|"dim_agent_runtime::config::SessionIdentity@session"| p45
+  p32 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p45
+  p37 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p44
+  p41 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p44
+  p3 -->|"dim_agent_capabilities::host_platform::HostPlatform"| p43
+  p39 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p43
+  p37 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p43
+  p5 -->|"dim_agent_capabilities::workspace_tools::files::FileWriteCoordinator"| p43
+  p32 -->|"dim_agent_runtime::config::SessionConfig@session"| p43
+  p32 -->|"dim_agent_runtime::config::SessionIdentity@session"| p43
+  p37 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p42
+  p41 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p42
+  p43 -->|"dim_agent_capabilities::host::ToolHost@session"| p41
+  p32 -->|"dim_agent_runtime::config::SessionConfig@session"| p41
+  p32 -->|"dim_agent_runtime::config::SessionIdentity@session"| p41
+  p32 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p41
+  p39 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p40
+  p37 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p40
+  p32 -->|"dim_agent_runtime::config::SessionIdentity@session"| p38
+  p32 -->|"dim_agent_runtime::assembly::TimelineFactory@session"| p37
+  p32 -->|"dim_agent_runtime::config::SessionIdentity@session"| p37
+  p32 -->|"dyn dim_agent_runtime::timeline_store::TimelineStore@session"| p37
+  p41 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p36
+  p32 -->|"dim_agent_runtime::config::SessionConfig@session"| p36
+  p32 -->|"dim_agent_runtime::config::SessionIdentity@session"| p33

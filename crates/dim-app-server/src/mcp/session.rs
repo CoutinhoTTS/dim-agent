@@ -37,7 +37,11 @@ pub fn install(builder: &mut AgentBuilder) {
             "McpServer",
             |names, value| names.part(super::publication::ConnectionPlugin::new(value)),
         )
-        .session_part(|names| names.part(McpSessionPlugin::new(names)?));
+        .require_feature(
+            dim_agent_runtime::Feature::new("McpSession").session("McpSession", |names| {
+                names.part(McpSessionPlugin::new(names)?)
+            }),
+        );
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

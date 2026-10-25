@@ -404,8 +404,9 @@ pub struct ContextMethodsPlugin;
 
 // dim-app-server/src/main.rs, product profile only (no --models file):
 builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextModel)))))
-       .session_plugin(ProductSummaryStrategyPlugin::new)
-       .session_part(|names| names.part(ContextMethodsPlugin));
+       .require_feature(Feature::new("ContextCompaction")
+           .session("ProductSummaryStrategy", |names| names.part(ProductSummaryStrategyPlugin::new(names)?))
+           .session("ContextMethods", |names| names.part(ContextMethodsPlugin)));
 // --models and mock profiles bind ContextModelHost(None) and CompactionStrategyHost(None)
 ```
 

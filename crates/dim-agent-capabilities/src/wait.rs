@@ -27,15 +27,20 @@ use tokio_util::sync::CancellationToken;
 const WAIT_TOOL: &str = "wait";
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 
-/// Registers the Session tool and the branch part.
-pub fn install(builder: &mut AgentBuilder) {
-    builder
-        .session_part(|names| names.part(WaitPlugin))
-        .branch_part(|names| {
+/// The Wait plugin: the Session tool and the branch part.
+pub fn feature() -> dim_agent_runtime::Feature {
+    dim_agent_runtime::Feature::new("Wait")
+        .session("Wait", |names| names.part(WaitPlugin))
+        .branch("WaitBranch", |names| {
             names.part(WaitBranchPlugin {
                 wait: names.key::<Wait>()?,
             })
-        });
+        })
+}
+
+/// Installs Wait in the profile.
+pub fn install(builder: &mut AgentBuilder) {
+    builder.require_feature(feature());
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

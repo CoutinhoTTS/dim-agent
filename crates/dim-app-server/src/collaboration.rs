@@ -65,9 +65,15 @@ fn member_create_failed(detail: String) -> Failure {
 /// Registers the Session and branch halves; `serve` provides the process half.
 pub fn install(builder: &mut AgentBuilder) {
     crate::register_names(builder.catalog_mut());
-    builder
-        .session_part(|names| names.part(CollaborationCapabilityPlugin::new(names)?))
-        .branch_part(|names| names.part(CollaborationTimelinePlugin));
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("CollaborationParts")
+            .session("CollaborationCapability", |names| {
+                names.part(CollaborationCapabilityPlugin::new(names)?)
+            })
+            .branch("CollaborationTimeline", |names| {
+                names.part(CollaborationTimelinePlugin)
+            }),
+    );
 }
 
 // ---------------------------------------------------------------- process

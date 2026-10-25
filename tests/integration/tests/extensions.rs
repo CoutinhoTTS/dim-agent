@@ -453,9 +453,10 @@ async fn closed_session_and_branch_subtrees_leave_no_plugins_or_bindings() {
         assert_eq!(*baseline.get_or_insert(counts), counts, "round {round}");
     }
     // What remains is the Agent's own: the root, its loader, the Agent
-    // instance with its anchor and process values, the loader's service and
-    // the process ModelHost.
-    assert_eq!(baseline, Some((5, 2)));
+    // instance with its anchor and process values, the row providing its
+    // registry and the 13 plugins of the profile's features; and the
+    // loader's service, the process ModelHost and `partRegistry`.
+    assert_eq!(baseline, Some((19, 3)));
     agent.close().await.unwrap();
 }
 
@@ -737,6 +738,8 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
         names.part(AssemblyAnchor(send.clone()))
     })
     .unwrap();
+    // The features' plugins are this host's rows, as the App Server's are.
+    let plugins = b.plugin_rows(&mut builtins).await.unwrap();
     let mut session_row = b.install(&mut builtins, &root, []).await.unwrap();
     let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -775,12 +778,13 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
     );
     let loader = plugin.handle();
     (&root.plugin(plugin)).await.unwrap();
-    let agent_row = b.agent_row([json!({"id":anchor,"name":anchor}), session_row]);
+    let mut rows = plugins;
+    rows.push(b.agent_row([json!({"id":anchor,"name":anchor}), session_row]));
     loader
         .reconcile(
             vec![Layer::new(
                 "fixture",
-                serde_json::from_value(json!([{"insert":[agent_row]}])).unwrap(),
+                serde_json::from_value(json!([{"insert":rows}])).unwrap(),
             )],
             None,
         )

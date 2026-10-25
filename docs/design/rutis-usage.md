@@ -88,9 +88,17 @@ besides the scope's own mechanisms.
 
 *Today:* the part registry and the mounters are implemented (appendix A), and every Rust part is
 name-bound (#391, #392, #396–#398, #400).
-- The features still add their parts with `AgentBuilder::session_part`/`branch_part`, and the App Server
-  its process rows with `register_part`. Each feature becoming one plugin, `AgentBuilder::plugin` and the
-  `partRegistry` name are [#402](https://github.com/arcships/dim/issues/402).
+- Each feature of the capabilities crates and each App Server Session part is a plugin that registers
+  its parts: a `Feature` (a plugin that owns nothing for the process) added with
+  `AgentBuilder::feature`, or its own plugin added with `AgentBuilder::plugin`. The install functions,
+  which are the profiles, require the parts they install by name (`require_feature`,
+  `require_part`). The App Server places the builder's plugins as process rows and provides
+  `AgentBuilder::parts()` as `partRegistry` (`AgentBuilder::plugin_rows`); an Agent placing itself
+  mounts them in its own loader with a registry of its own. A required part nothing has registered
+  yet holds an instance's creation as a required row does. The process state of some features is
+  still in rows of its own, and tests still add profile parts with
+  `AgentBuilder::session_part`/`branch_part` ([#402](https://github.com/arcships/dim/issues/402),
+  [#375](https://github.com/arcships/dim/issues/375)).
 - Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry, and Session
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).
@@ -365,9 +373,12 @@ impl TypedPlugin for WaitBranch {
     }
 }
 
-// A part of every branch's profile; `names` gives this copy's keys, for its dependencies and for `wait`.
-builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
-// A process row.
+// A plugin that owns nothing for the process: it registers a part of every branch, and the profile
+// requires it. `names` gives each copy's keys, for its dependencies and for `wait`.
+builder.require_feature(
+    Feature::new("Wait").branch("WaitBranch", |names| names.part(WaitBranch(names.key::<Wait>()?))),
+);
+// A process row of the App Server's loader.
 register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 
 // From a process plugin's `apply`: a Session part of every Session that mounts `record` (one
@@ -382,10 +393,12 @@ registry.register(ctx, PartScope::Session, "Recorder", |mount| {
 })?;
 ```
 
-The assembly profile's own parts (`AgentBuilder::session_part`, `branch_part`) are mounted by the
-required mounter, which hands them to the instance's publication with its required rows. The
-registry (`PartRegistry`) serves every Agent of the builder. A registration is an effect of the
-caller's `ctx`. The mounters unload their copies themselves before rutis's own cascade, so a copy that
+The required mounter mounts the parts the profile requires (`AgentBuilder::require_part`) and hands
+them to the instance's publication with its required rows; a required part nothing has registered
+yet holds the creation until it is, within the creation's deadline. The builder's registry
+(`AgentBuilder::parts`) serves the Agents a host places (`build_at`), which provides it to its
+process plugins as `partRegistry` (`AgentBuilder::plugin_rows`); an Agent placing itself creates a
+registry of its own for the plugins it mounts. A registration is an effect of the caller's `ctx`. The mounters unload their copies themselves before rutis's own cascade, so a copy that
 already failed is not reported again when its instance closes, and `SessionLoader` creates instances
 from its instance's Session scope row, since the loader places an instance only from a row's
 context.

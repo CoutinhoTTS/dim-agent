@@ -61,10 +61,18 @@ pub struct WorkspaceToolsConfig {
 
 /// Registers WorkspaceTools and its branch parts.
 pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
-    builder
-        .session_part(move |names| names.part(WorkspaceToolsPlugin::new(names, config.clone())?))
-        .branch_part(|names| names.part(FileReadsPlugin::new(names)?))
-        .branch_part(|names| names.part(BackgroundExecPlugin::new(names)?));
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("WorkspaceTools")
+            .session("WorkspaceTools", move |names| {
+                names.part(WorkspaceToolsPlugin::new(names, config.clone())?)
+            })
+            .branch("FileReads", |names| {
+                names.part(FileReadsPlugin::new(names)?)
+            })
+            .branch("BackgroundExec", |names| {
+                names.part(BackgroundExecPlugin::new(names)?)
+            }),
+    );
 }
 
 pub(crate) struct WorkspaceTools {

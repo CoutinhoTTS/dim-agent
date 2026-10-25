@@ -339,7 +339,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     if config.product_home.is_some() {
         config.daemon_profile = protocol::DaemonProfile::Product;
     }
-    builder.session_part(|names| names.part(agents::AgentsSessionPlugin));
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("AgentsSession").session("AgentsSession", |names| {
+            names.part(agents::AgentsSessionPlugin)
+        }),
+    );
     #[cfg(not(unix))]
     if config.unix_path.is_some() {
         return Err(ServerError::Configuration(
@@ -765,6 +769,25 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             builder.catalog(),
             move |names| TransportPlugin::new(config.clone()).part(names),
         )?);
+    }
+    // The builder's plugins are host rows too: each registers its Session
+    // and branch parts with the builder's registry, provided to them as
+    // `partRegistry`.
+    match builder.plugin_rows(&mut builtins).await {
+        Ok(plugins) => rows.extend(
+            plugins
+                .iter()
+                .map(|row| row["id"].as_str().expect("plugin row id").to_owned()),
+        ),
+        Err(error) => {
+            startup.armed = false;
+            handle.shutdown().cancel();
+            return Err(match root.shutdown().await {
+                Ok(()) => error,
+                Err(cleanup) => error.with_cleanup(cleanup.into()),
+            }
+            .into());
+        }
     }
     // Register every host module before allocating scoped module names.
     // Agents, Sessions and branches are instances of this same loader.
