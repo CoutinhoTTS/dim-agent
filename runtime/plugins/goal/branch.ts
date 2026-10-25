@@ -2,9 +2,9 @@ import { definePlugin } from '@arcships/rutis'
 import type { SettingsResult } from '../../../npm/plugin.d.ts'
 import { type AgentEvent, type InputMessage, Fold, OBJECTIVE_KEY, STATUS_KEY, decideInterrupt, decideTurnEnd, isOpening, marker, writes } from './goal.ts'
 
+type Delivery = { replay: AgentEvent[] } | { live: AgentEvent }
 type Dispatcher = {
-  listen(name: string, keys: string[], handler: (event: AgentEvent) => void | Promise<void>): Promise<void>
-  committed(): Promise<number | bigint>
+  consume(name: string, keys: string[], handler: (delivery: Delivery) => void | Promise<void>): Promise<void>
   local(start: number | bigint, through: number | bigint): Promise<AgentEvent[]>
   history(through: number | bigint): Promise<AgentEvent[]>
 }
@@ -112,20 +112,13 @@ export default definePlugin({
       }
     }
 
-    // Subscribe, fix the cutoff, fold through it; live events at or below it
-    // are already folded (A.6 Load).
-    let cutoff = -1n
-    let rebuilt!: () => void
-    const ready = new Promise<void>(resolve => { rebuilt = resolve })
-    await dispatcher.listen('Goal', KEYS, async event => {
-      await ready
-      if (BigInt(event.sequence) > cutoff) consume(event, true)
+    // Fold the replayed history; the decisions the previous generation owed
+    // are taken once, before any live event (A.6 Load).
+    await dispatcher.consume('Goal', KEYS, delivery => {
+      if ('live' in delivery) return consume(delivery.live, true)
+      for (const event of delivery.replay) consume(event, false)
+      decideEnd()
+      if (start !== undefined) decideStart(start)
     })
-    cutoff = BigInt(await dispatcher.committed())
-    for (const event of await dispatcher.local(0, cutoff)) consume(event, false)
-    rebuilt()
-    // Decisions the previous generation owed are taken once.
-    decideEnd()
-    if (start !== undefined) decideStart(start)
   },
 })

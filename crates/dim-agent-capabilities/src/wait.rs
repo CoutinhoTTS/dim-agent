@@ -12,7 +12,7 @@ use crate::{
     tool_registry::{ToolContribution, ToolHandler, contribution_key, definition},
     workspace_tools::background::{WAKE_TASK_TAG, tagged},
 };
-use dim_agent_runtime::{AgentBuilder, AgentError, CAPABILITY_RELOADING, Dispatcher, Timeline};
+use dim_agent_runtime::{AgentBuilder, AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher};
 use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use serde_json::{Value, json};
@@ -84,6 +84,17 @@ pub struct Wait {
 }
 
 impl Wait {
+    fn rebuild(&self, events: &[Arc<AgentEvent>]) {
+        self.state.lock().unwrap().open = events
+            .iter()
+            .rev()
+            .find_map(|event| match event.kind {
+                EventKind::TurnStart(_) => Some(true),
+                EventKind::TurnEnd(_) => Some(false),
+                _ => None,
+            })
+            .unwrap_or(false);
+    }
     fn consume(&self, event: &AgentEvent) {
         let mut state = self.state.lock().unwrap();
         match &event.kind {
@@ -327,54 +338,37 @@ pub struct WaitBranchPlugin {
     wait: DepKey<Wait>,
 }
 impl TypedPlugin for WaitBranchPlugin {
-    type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str {
         "WaitBranch"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(dispatcher), Keyed(timeline)): Self::Deps,
+        (Keyed(dispatcher),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let wait = Arc::new(Wait {
                 state: Mutex::new(State::default()),
                 arrived: Notify::new(),
             });
-            // Subscribe, then rebuild under the gate: see the capability
-            // reload protocol. The handler skips events the rebuild covered.
-            let rebuilt = Arc::new(tokio::sync::Mutex::new(0u64));
-            let gate = rebuilt.clone();
-            let mut rebuilding = rebuilt.lock().await;
+            // A rebuild restores only whether a turn is open; arrivals
+            // before a reload are not replayed.
             let consumer = wait.clone();
-            dispatcher.subscribe(
-                ctx,
-                "Wait",
-                &["input/message", "turn/start", "turn/end"],
-                move |event| {
-                    let gate = gate.clone();
-                    let consumer = consumer.clone();
-                    Box::pin(async move {
-                        if event.sequence > *gate.lock().await {
-                            consumer.consume(&event);
+            dispatcher
+                .follow(
+                    ctx,
+                    "Wait",
+                    &["input/message", "turn/start", "turn/end"],
+                    move |delivery| {
+                        match delivery {
+                            Delivery::Replay(events) => consumer.rebuild(&events),
+                            Delivery::Live(event) => consumer.consume(&event),
                         }
-                        Ok(())
-                    })
-                },
-            )?;
-            let through = timeline.committed();
-            let events = timeline.local(..=through).await?;
-            wait.state.lock().unwrap().open = events
-                .iter()
-                .rev()
-                .find_map(|event| match event.kind {
-                    EventKind::TurnStart(_) => Some(true),
-                    EventKind::TurnEnd(_) => Some(false),
-                    _ => None,
-                })
-                .unwrap_or(false);
-            *rebuilding = through;
-            drop(rebuilding);
+                        Box::pin(async { Ok(()) })
+                    },
+                )
+                .await?;
             ctx.provide_as(self.wait.key().clone(), wait)?;
             Ok(Effect::Done)
         })

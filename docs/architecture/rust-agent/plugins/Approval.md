@@ -9,8 +9,8 @@ rechecks policy before allowing an approved call to start.
 | Service | Purpose |
 | --- | --- |
 | `B:Permission` | Evaluate current policy and recheck an allowed response. |
-| `B:Dispatcher` | Receive approval responses. |
-| `B:Timeline` | Commit requests/cancellations and recover abandoned requests. |
+| `B:Dispatcher` | Replay requests to recover abandoned ones, then receive approval responses. |
+| `B:Timeline` | Commit requests/cancellations. |
 
 ## Events and lifetime
 

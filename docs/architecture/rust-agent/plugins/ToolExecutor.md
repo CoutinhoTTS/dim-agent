@@ -11,8 +11,8 @@ individual call failures and publishes correlated results.
 | `B:Approval` | Admit each call under permission/approval policy. |
 | `B:ToolBinding` | Resolve the request's pinned tools. |
 | `B:TimelineIdentity` | Construct the calling branch execution context; Session and branch ids of the `tool.execute` span. |
-| `B:Dispatcher` | Receive batches/interrupts and report faults. |
-| `B:Timeline` | Replay batches and commit progress/results. |
+| `B:Dispatcher` | Replay batches, receive batches/interrupts and report faults. |
+| `B:Timeline` | Commit progress/results. |
 
 ## Events and lifetime
 

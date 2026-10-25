@@ -283,7 +283,7 @@ TypeScript, in `runtime/plugins/goal` (C4 tool/method row, C5 branch row):
 | --- | --- | --- |
 | `goal.ts` | Shared: change and continuation inputs (A.5), marker parsing, the fold (§2) and the decisions (A.4) | — |
 | `session.ts`, `session.json` | `GoalPlugin`: `toolContribution:goal_update`, `sessionMethods:session.goal`; writes with `treeCommands.input` | Session row, `inject: ["treeCommands"]` |
-| `branch.ts`, `settings.json` | `GoalBranchPlugin`: subscribes with `dispatcher.listen`, rebuilds through `dispatcher.committed()`/`local()`, decides, and writes owned tasks; reads `maxContinuations`; declares the `goal` source | Branch row, `inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]`, `settings` from `settings.json` |
+| `branch.ts`, `settings.json` | `GoalBranchPlugin`: registers with `dispatcher.consume`, folds the replay, decides on live events, and writes owned tasks; reads `maxContinuations`; declares the `goal` source | Branch row, `inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]`, `settings` from `settings.json` |
 
 The new-branch check (§3.4) reads the inherited prefix with `dispatcher.history(S)` and excludes the
 branch's local events. An embedder installs Goal by adding the two rows to
@@ -403,8 +403,8 @@ Status blocks state only the status and the objective is a separate block, so a 
 
 | Step | Path |
 | --- | --- |
-| Load | Subscribe to the Dispatcher (`"Goal"`), fix `S = committed()` under the gate, fold the local events through `S`, set `rebuilt = S`, provide `goal`. If the latest `turn/end` is not `decided` and the goal is active, take its decision once; if `branch/start` is consumed, not `decided` and `inherited_live`, take the start `clear` decision once |
-| Consume | The Dispatcher handler skips `sequence <= rebuilt`, advances the fold, and decides on `branch/start`, `turn/end`, `stop/interrupt` and `input/deleted` (A.4); it registers a write task when needed and returns without awaiting |
+| Load | Register with the Dispatcher (`"Goal"`, `consume`) and fold the replayed local events through its cutoff `S`. In the same replay, before any live event: if the latest `turn/end` is not `decided` and the goal is active, take its decision once; if `branch/start` is consumed, not `decided` and `inherited_live`, take the start `clear` decision once |
+| Consume | For each live event after `S`, the Dispatcher handler advances the fold, and decides on `branch/start`, `turn/end`, `stop/interrupt` and `input/deleted` (A.4); it registers a write task when needed and returns without awaiting |
 | Write | `input/message` with source `goal`, `submissionId: "goal:<uuid>"`, marker and mode, written through `Branch::input`, the branch's public input entry, which validates at the boundary and appends the `input/message` ([interrupt](../../architecture/rust-agent/interrupt.md)). The Session part's calls write the same way and never consult the fold |
 | Consumption | InputQueue appends `input/applied`; Loop appends `input/consumed`. Goal never writes Steer |
 | Recheck | A turn-end task reads Settings, then rechecks the same deciding turn over consumed state only ([time-bus](../../architecture/rust-agent/time-bus.md) §4); later facts precede the write in sequence and are resolved by InputQueue, Loop and the fold |

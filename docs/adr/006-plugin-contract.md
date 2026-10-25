@@ -340,7 +340,7 @@ sugar over the contract, but no semantics (D1).
 4. Cross-language parity: the Session and branch scopes get their lifecycle services in every
    language and Rust services are exported through the catalog (done in #376); foreign plugins
    register their parts as Rust ones do once rutis#642 lands (#403).
-5. The mechanism requirements of D8.
+5. The mechanism requirements of D8 (R2 and R3 done in #376, R1 in #380).
 6. Guidance and generated documents follow each step.
 
 Dim is unreleased, so no step keeps a compatibility path: no aliases, shims or transition shapes for

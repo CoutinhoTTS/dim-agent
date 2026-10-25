@@ -8,8 +8,8 @@ bounded completion notices on the calling branch.
 
 | Service | Purpose |
 | --- | --- |
-| `B:Dispatcher` | Consume command ends and interrupts in dispatch order. |
-| `B:Timeline` | Commit ends/notices and recover unreported ends. |
+| `B:Dispatcher` | Replay commands, then consume command ends and interrupts in dispatch order. |
+| `B:Timeline` | Commit ends/notices, recovered ones included. |
 | `S:SessionLifecycle` | `hold()`: each running task holds the Session, so an idle unload waits for it. |
 
 ## Events and lifetime

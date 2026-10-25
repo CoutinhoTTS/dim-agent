@@ -15,8 +15,8 @@ cache or event.
 | --- | --- |
 | `S:SessionConfig` | Seed the initial permission policy. |
 | `S:CommandRulesHost` | Read the user's command rules when deciding a command call. |
-| `B:Dispatcher` | Apply committed policy changes and settle update waiters. |
-| `B:Timeline` | Write changes and replay ancestor/local policies. |
+| `B:Dispatcher` | Replay local policies, apply committed policy changes and settle update waiters. |
+| `B:Timeline` | Write changes and read ancestor policies. |
 
 ## Events and lifetime
 

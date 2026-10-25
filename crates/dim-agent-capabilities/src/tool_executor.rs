@@ -4,7 +4,7 @@ use crate::{
     tool_binding::ToolBinding,
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, TimelineIdentity,
+    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, Names, Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -23,8 +23,6 @@ struct ToolState {
     /// and are cancelled. Folded from consumed events, so rebuilt on load.
     interrupted: Option<String>,
     closed: bool,
-    /// Events up to this sequence were applied by the rebuild at load.
-    rebuilt: u64,
 }
 pub struct ToolExecutor {
     state: Mutex<ToolState>,
@@ -94,17 +92,11 @@ impl TypedPlugin for ToolExecutorPlugin {
             let owner = service.clone();
             let faults = dispatcher.clone();
             let lifecycle = ctx.cancellation_token();
-            // Subscribe, then rebuild under the state lock; see the reload protocol.
-            let rebuild_timeline = timeline.clone();
-            let gate = Arc::new(tokio::sync::Mutex::new(()));
-            let rebuilding = gate.lock().await;
-            let handler_gate = gate.clone();
-            dispatcher.subscribe(
+            dispatcher.follow(
                 ctx,
                 "ToolExecutor",
                 &["step/tool-call", "stop/interrupt", "turn/start", "turn/end"],
-                move |event| {
-                    let gate = handler_gate.clone();
+                move |delivery| {
                     let owner = owner.clone();
                     let timeline = timeline.clone();
                     let faults = faults.clone();
@@ -113,12 +105,14 @@ impl TypedPlugin for ToolExecutorPlugin {
                     let approval = approval.clone();
                     let identity = identity.clone();
                     Box::pin(async move {
-                    let _ready = gate.lock().await;
+                    let event = match delivery {
+                        Delivery::Replay(events) => {
+                            return rebuild(&mut owner.state.lock().unwrap(), &timeline, &events);
+                        }
+                        Delivery::Live(event) => event,
+                    };
                     (|| {
                         let mut state = owner.state.lock().unwrap();
-                        if event.sequence <= state.rebuilt {
-                            return Ok(());
-                        }
                         if let EventKind::StopInterrupt(data) = &event.kind {
                             state.interrupted = Some(data.reason.clone());
                             let cancel = state.current.clone();
@@ -327,15 +321,7 @@ impl TypedPlugin for ToolExecutorPlugin {
                     })()
                     })
                 },
-            )?;
-            let through = rebuild_timeline.committed();
-            let events = rebuild_timeline.local(..=through).await?;
-            rebuild(
-                &mut service.state.lock().unwrap(),
-                &rebuild_timeline,
-                &events,
-            )?;
-            drop(rebuilding);
+            ).await?;
             ctx.provide_as(self.executor.key().clone(), service)?;
             Ok(Effect::Done)
         })
@@ -381,7 +367,6 @@ fn rebuild(
     timeline: &Timeline,
     events: &[Arc<AgentEvent>],
 ) -> dim_agent_runtime::Result<()> {
-    state.rebuilt = events.last().map_or(0, |event| event.sequence);
     let mut open = Vec::new();
     for event in events {
         match &event.kind {
