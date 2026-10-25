@@ -329,7 +329,7 @@ impl Env {
                     .join(if project { "project" } else { "other" })
                     .to_string_lossy()
                     .into(),
-                tools: vec![],
+                tools: Some(vec![]),
                 permission_policy: PermissionPolicy {
                     preset,
                     ..Default::default()
@@ -1205,7 +1205,7 @@ async fn an_unpublished_session_never_starts_discovery() {
         .agent
         .create_session(SessionConfig {
             cwd: env.home.join("other").to_string_lossy().into(),
-            tools: vec![],
+            tools: Some(vec![]),
             ..Default::default()
         })
         .await;

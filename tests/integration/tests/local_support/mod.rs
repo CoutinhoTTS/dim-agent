@@ -362,7 +362,7 @@ impl Env {
             .create_session(SessionConfig {
                 cwd: cwd.to_string_lossy().into_owned(),
                 system_prompt: system_prompt.into(),
-                tools: vec!["skill".into(), "gate".into()],
+                tools: Some(vec!["skill".into(), "gate".into()]),
                 ..SessionConfig::default()
             })
             .await

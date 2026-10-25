@@ -8,7 +8,7 @@ use crate::{
 };
 use dim_agent_capabilities::{
     methods::{SessionMethods, within},
-    tool_registry::valid_tool_name,
+    tool_registry::ToolRegistry,
 };
 use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, SESSION_GROUP, SessionScope};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory, TypeKey};
@@ -23,7 +23,6 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use tokio_util::sync::CancellationToken;
 
 // The Session and branch services served by name (build.rs). Public for the
 // generated catalog (`xtask graph`).
@@ -131,8 +130,15 @@ impl Parts {
         let (mut session_rows, mut branch_rows, mut process_rows) =
             (Vec::new(), Vec::new(), Vec::new());
         // Before the rows register their names and the resolvers take the
-        // catalog.
-        builder.catalog_mut().export_all(exports::all());
+        // catalog. A part of any language registers its tools with
+        // `toolRegistry`, which provides its own dispatcher in each Session.
+        builder
+            .catalog_mut()
+            .export_all(exports::all())
+            .register_shared_instance(
+                dim_agent_runtime::names::name_of::<ToolRegistry>(),
+                SESSION_GROUP,
+            );
         for row in &config.rows {
             let id = row
                 .get("id")
@@ -225,18 +231,7 @@ impl Parts {
                 if group != Some(SESSION_GROUP) {
                     continue;
                 }
-                if let Some(tool) = service.strip_prefix("toolContribution:") {
-                    if !valid_tool_name(tool)
-                        || methods != &serde_json::json!({"declaration":"sync", "execute":"async"})
-                    {
-                        return Err(invalid("invalid toolContribution identity or method modes"));
-                    }
-                    if builder.provided_tools().any(|existing| existing == tool) {
-                        return Err(invalid("TypeScript tool collides with an existing tool"));
-                    }
-                    // Keep disabled identities known when restoring saved tool selections.
-                    builder.session_tool(tool);
-                } else if let Some(namespace) = service.strip_prefix("sessionMethods:") {
+                if let Some(namespace) = service.strip_prefix("sessionMethods:") {
                     if methods != &serde_json::json!({"describe":"async", "call":"async"})
                         || builder
                             .session_method_namespaces()
@@ -368,11 +363,6 @@ impl Resolver for SessionResolver {
             let families = Families {
                 session_methods: names("sessionMethods:"),
                 management: names("managementMethods:"),
-                tools: snapshot
-                    .keys()
-                    .filter(|name| name.starts_with("toolContribution:"))
-                    .cloned()
-                    .collect(),
             };
             let mut resolved = Resolved::new(Arc::new(BoundFactory {
                 inner: original.factory.clone(),
@@ -417,13 +407,12 @@ impl Resolver for SessionResolver {
     }
 }
 
-/// The provided names of the families the host binds: Session tools and
-/// methods in a Session, management methods at the process.
+/// The provided names of the families the host binds: Session methods in a
+/// Session, management methods at the process.
 #[derive(Clone)]
 struct Families {
     session_methods: Arc<[String]>,
     management: Arc<[String]>,
-    tools: Arc<[String]>,
 }
 
 #[derive(Clone, Copy)]
@@ -456,19 +445,15 @@ impl PluginFactory<Value> for BoundFactory {
             ),
             _ => None,
         };
-        let (namespaces, tools) = match self.place {
-            Place::Process => (self.families.management.clone(), Arc::default()),
-            Place::Session(_) => (
-                self.families.session_methods.clone(),
-                self.families.tools.clone(),
-            ),
-            Place::Branch => (Arc::default(), Arc::default()),
+        let namespaces = match self.place {
+            Place::Process => self.families.management.clone(),
+            Place::Session(_) => self.families.session_methods.clone(),
+            Place::Branch => Arc::default(),
         };
         Ok(Box::new(BoundRow {
             inner: self.inner.build(config)?,
             place: self.place,
             namespaces,
-            tools,
             packages,
         }))
     }
@@ -478,7 +463,6 @@ struct BoundRow {
     inner: Box<dyn Plugin>,
     place: Place,
     namespaces: Arc<[String]>,
-    tools: Arc<[String]>,
     packages: Option<Arc<WorkflowPackages>>,
 }
 struct ProjectedServices {
@@ -525,13 +509,6 @@ impl Plugin for BoundRow {
                 Place::Session(scope) => Some(scope),
                 Place::Process | Place::Branch => None,
             };
-            for name in self.tools.iter() {
-                ctx.provide_as(
-                    TypeKey::keyed_dynamic::<CancellationToken>(name.as_str())
-                        .with_instance(session.expect("Session tool row").instance),
-                    Arc::new(ctx.cancellation_token()),
-                )?;
-            }
             let keys: Arc<[TypeKey]> = self
                 .namespaces
                 .iter()
@@ -541,11 +518,6 @@ impl Plugin for BoundRow {
                     }
                     None => host_key(&format!("managementMethods:{namespace}")),
                 })
-                .chain(
-                    self.tools
-                        .iter()
-                        .map(|name| host_key_in(name, session.expect("Session tool row").instance)),
-                )
                 .collect();
             let changed = Arc::new(tokio::sync::Notify::new());
             // rows.load may reply before its service notification is projected.
@@ -565,7 +537,7 @@ impl Plugin for BoundRow {
             let cleanup = self.inner.apply(ctx).await?;
             ctx.effect(move || cleanup)?;
             let cancelled = ctx.cancellation_token();
-            for (index, key) in keys.iter().enumerate() {
+            for (namespace, key) in self.namespaces.iter().zip(keys.iter()) {
                 let service = loop {
                     if let Some(service) = ctx.get_as::<dyn HostDispatch>(key.clone()) {
                         break service;
@@ -574,9 +546,6 @@ impl Plugin for BoundRow {
                         _ = changed.notified() => {},
                         _ = cancelled.cancelled() => return Err(CordisError::PluginFailed("TypeScript row binding cancelled".into())),
                     }
-                };
-                let Some(namespace) = self.namespaces.get(index) else {
-                    continue;
                 };
                 match session {
                     Some(scope) => {

@@ -3,7 +3,7 @@ import part from './session-part.ts'
 
 export default definePlugin({
   name: 'ProcessDependentSessionFixture',
-  inject: ['exampleProcess'],
+  inject: ['exampleProcess', 'toolRegistry'],
   provides: part.provides,
   apply: part.apply,
 })

@@ -28,7 +28,7 @@ async fn agent_close_during_assembly_never_activates_the_session() {
     // A configuration the Session accepts: only the close ends its creation.
     let config = SessionConfig {
         cwd: cwd.to_string_lossy().into_owned(),
-        tools: vec!["skill".into(), "gate".into()],
+        tools: Some(vec!["skill".into(), "gate".into()]),
         ..SessionConfig::default()
     };
     let creating = tokio::spawn(async move { agent.create_session(config).await });

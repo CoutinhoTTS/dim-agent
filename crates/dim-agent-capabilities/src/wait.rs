@@ -9,7 +9,7 @@
 use crate::{
     host::{HostError, HostFuture, ToolExecutionContext},
     timeline_tree::TreeCommands,
-    tool_registry::{ToolContribution, ToolHandler, contribution_key, definition},
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
     workspace_tools::background::{WAKE_TASK_TAG, tagged},
 };
 use dim_agent_runtime::{AgentBuilder, AgentError, CAPABILITY_RELOADING, Dispatcher, Timeline};
@@ -30,12 +30,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 /// Registers the Session tool and the branch part.
 pub fn install(builder: &mut AgentBuilder) {
     builder
-        .session_tool(WAIT_TOOL)
-        .session_part(|names| {
-            names.part(WaitPlugin {
-                contribution: contribution_key(names, WAIT_TOOL)?,
-            })
-        })
+        .session_part(|names| names.part(WaitPlugin))
         .branch_part(|names| {
             names.part(WaitBranchPlugin {
                 wait: names.key::<Wait>()?,
@@ -298,26 +293,24 @@ impl ToolHandler for WaitTool {
     }
 }
 
-pub struct WaitPlugin {
-    contribution: DepKey<ToolContribution>,
-}
+pub struct WaitPlugin;
 impl TypedPlugin for WaitPlugin {
-    type Deps = (Keyed<TreeCommands>,);
+    type Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>);
     fn name(&self) -> &str {
         "Wait"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(tree),): Self::Deps,
+        (Keyed(tree), Keyed(tools)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            ctx.provide_as(
-                self.contribution.key().clone(),
-                Arc::new(ToolContribution {
+            tools.register(
+                ctx,
+                ToolContribution {
                     definition: wait_definition(),
                     handler: Arc::new(WaitTool(tree)),
-                }),
+                },
             )?;
             Ok(Effect::Done)
         })

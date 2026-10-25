@@ -73,7 +73,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 *现状：*部件登记处和挂载器已经实现（附录 A），所有 Rust 部件都已按名称依赖（#391、#392、#396–#398、#400）。
 - 各功能仍通过 `AgentBuilder::session_part`/`branch_part` 添加部件，App Server 通过 `register_part` 添加进程行。
   每个功能变成一个插件、`AgentBuilder::plugin` 和 `partRegistry` 这个名字属于 [#402](https://github.com/arcships/dim/issues/402)。
-- ToolRegistry、PromptRegistry 和 Rpc 仍读取预先注册的名字，直到贡献改为向它们登记（R6，[#382](https://github.com/arcships/dim/issues/382)）。
+- 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记。Rpc 仍读取预先注册的方法命名空间，直到它们改为向 Rpc 登记（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5（[#403](https://github.com/arcships/dim/issues/403)）。
 
 ## 3. 按名字的服务
@@ -220,7 +220,9 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
   - 同一个名字向同一个所有者登记第二次会失败，与一个名字有第二个提供者时一样。
   - 撤下的处理函数不再被调用：经撤下的登记发出的调用被拒绝并说明没有执行，撤下时正在进行的调用报告它可能已经生效，
     与现在一样，只是不再需要令牌。
-  - 创建 Session 时不再拒绝没有任何部件登记的已配置工具；ToolRegistry 在读取工具时报告它。
+  - 没有挂载列表（`SessionConfig.tools`）的 Session 声明全部已登记的工具，因此插件的工具不需要修改配置
+    （[#364](https://github.com/arcships/dim/issues/364)）；有挂载列表的 Session 声明其中列出的工具。创建 Session
+    时不拒绝列出但没有任何部件登记的工具；ToolRegistry 在读取工具时报告它。
   - 预先注册、`toolContribution:*`、`sessionMethods:*` 和 `managementMethods:*` 这些名字、sidecar 令牌，以及
     App Server 对外来行 `provides` 的翻译都去掉。ExternalAgent 设计中的 `collaborationMembers:<kind>` 在实现时
     也同样向 Collaboration 登记。
@@ -296,11 +298,12 @@ builder.branch_part(|names| names.part(WaitBranch(names.key::<Wait>()?)));
 // A process row.
 register_part(&mut builtins, builder.catalog(), |names| names.part(Recorder))?;
 
-// From a process plugin's `apply`: a Session part of every Session that enables it, withdrawn
-// when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
+// From a process plugin's `apply`: a Session part of every Session that mounts `record` (one
+// without a mount list mounts every tool), withdrawn when the plugin unloads. `builder.parts()` is the registry; `builder.require_part(name)` makes
 // such a part required.
 registry.register(ctx, PartScope::Session, "Recorder", |mount| {
-    if !mount.session.tools.iter().any(|tool| tool == "record") {
+    let mounted = mount.session.tools.as_ref();
+    if !mounted.is_none_or(|tools| tools.iter().any(|tool| tool == "record")) {
         return Ok(None);
     }
     mount.names.part(Recorder).map(Some)

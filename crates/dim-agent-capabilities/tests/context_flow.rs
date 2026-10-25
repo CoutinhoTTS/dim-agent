@@ -1306,7 +1306,7 @@ async fn a_single_long_turn_compacts_inside_itself_instead_of_skipping() {
         builder_with_context(Arc::new(EchoModel), HistoryRenderer::default(), context).build();
     let session = agent
         .create_session(SessionConfig {
-            tools: vec!["echo".into()],
+            tools: Some(vec!["echo".into()]),
             permission_policy: dim_agent_runtime::PermissionPolicy {
                 preset: dim_agent_runtime::PermissionPreset::FullAccess,
                 ..Default::default()

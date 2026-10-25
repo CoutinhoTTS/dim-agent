@@ -171,7 +171,8 @@ export interface SessionConfig {
     metadata?: JsonObject;
   }>;
   readonly systemPrompt: string;
-  readonly tools: readonly string[];
+  /** The Session's mount list; absent: every tool the process provides is declared. */
+  readonly tools?: readonly string[];
   readonly collaborationRole: 'leader' | 'member';
   /** Native serde omits true; absence means interactive. */
   readonly interactive?: false;
@@ -265,10 +266,12 @@ export interface ToolResult {
   backgroundTask?: BackgroundTaskInfo;
   contextMessages?: Message[];
 }
-/** Provide as `toolContribution:<name>`; declaration is synchronous. */
-export interface ToolContribution {
-  declaration(): ToolDefinition;
-  execute(call: ToolCall, cancelled: Promise<void>): Promise<ToolResult>;
+/** How a registered tool runs a call; `cancelled` settles when the call is cancelled. */
+export type ToolExecute = (call: ToolCall, cancelled: Promise<void>) => Promise<ToolResult>;
+/** Session service `toolRegistry`: a Session row registers each of its tools,
+ * which stays registered until the row unloads. The declaration must name its risk. */
+export interface ToolRegistry {
+  register(declaration: ToolDefinition, execute: ToolExecute): Promise<void>;
 }
 
 export interface MethodDeclaration {

@@ -105,7 +105,7 @@ fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) -> Agent
     builder
         .timeline_store(Arc::new(MemoryTimelineStore::default()))
         .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
-        .session_value(Arc::new(InitialPromptConfiguration(None)))
+        .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
         .session_value(Arc::new(CommandRulesHost(rules)));
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     defaults::mock_model_hosts(&mut builder);
@@ -114,7 +114,7 @@ fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) -> Agent
 }
 fn config(policy: PermissionPolicy) -> SessionConfig {
     SessionConfig {
-        tools: TOOLS.iter().map(|(name, _)| name.to_string()).collect(),
+        tools: Some(TOOLS.iter().map(|(name, _)| name.to_string()).collect()),
         permission_policy: policy,
         ..SessionConfig::default()
     }

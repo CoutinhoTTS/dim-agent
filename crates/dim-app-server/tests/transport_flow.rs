@@ -301,7 +301,6 @@ struct ToolReload(
 );
 impl ToolReload {
     fn install(&self, builder: &mut AgentBuilder, tools: Arc<dyn ToolDriver>) {
-        builder.host_tools(tools.definitions().into_iter().map(|tool| tool.name));
         let views = self.0.clone();
         let hold = self.1.clone();
         builder.session_part(move |names| {

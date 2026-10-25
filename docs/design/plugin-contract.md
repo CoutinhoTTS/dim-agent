@@ -125,18 +125,17 @@ R4). This table says what each name Dim defines is for.
 
 The Rust host ports and registries (ToolRegistry, PromptRegistry, ToolHost, ModelHost,
 PrepareModelHost and the others in the [generated services](../architecture/rust-agent/generated/services.md))
-get names and scopes in phase 2. They stay Rust-only unless a foreign part needs them.
+get names and scopes in phase 2. They stay Rust-only unless a foreign part needs them. So do
+`BranchOpening` (opening receipts are Rust futures) and the facades' state reads (`StateCell<S>`,
+`PublicService`), which are keyed by Rust type. A foreign part exposes its state through a service.
 
 Tools, tool sources, prompt sources and method namespaces are not names. A part registers each with
 its owner, `register` on ToolRegistry, PromptRegistry or Rpc, and the registration ends when the
 part unloads ([rutis usage R6](rutis-usage.md#r6-contributions-register-with-their-owner)). Tools and
 method namespaces register from any language; prompt and tool sources stay Rust-only until a
-foreign part needs one.
-Until R6 lands, they are the names `toolContribution:<tool>`, `sessionMethods:<namespace>` (both
-`session`) and `managementMethods:<namespace>` (process, protected-local v3 only), and prompt and
-tool sources are pre-registered by the host and Rust-only. So do
-`BranchOpening` (opening receipts are Rust futures) and the facades' state reads (`StateCell<S>`,
-`PublicService`), which are keyed by Rust type. A foreign part exposes its state through a service.
+foreign part needs one. Tools, tool sources and prompt sources register today. Until the rest of R6
+lands, method namespaces are the names `sessionMethods:<namespace>` (`session`) and
+`managementMethods:<namespace>` (process, protected-local v3 only).
 
 Two mechanism contracts tie the facades to core parts: a branch is published only with a `LoopState`
 provider, and a Session only with a `TimelineTreeControl` provider. Loop and TimelineTree are therefore

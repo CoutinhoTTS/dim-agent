@@ -8,15 +8,15 @@ use crate::{
     host_platform::{
         ExecShellRuntime, HostPlatform, Os, OutputEncoding, ShellEdition, ShellStatus,
     },
-    prompt_registry::{PromptRegistryPlugin, PromptSource, source_key, targets},
+    prompt_registry::{PromptRegistry, PromptRegistryPlugin, targets},
     prompt_state::PromptSnapshot,
 };
 use dim_agent_runtime::{
-    AgentBuilder, BranchLifecycle, ConfigureControl, ConfigureUpdate, Names, PromptSourceTarget,
+    AgentBuilder, BranchLifecycle, ConfigureControl, ConfigureUpdate, PromptSourceTarget,
     SessionConfig, StateCell,
 };
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
@@ -52,12 +52,13 @@ pub fn install(builder: &mut AgentBuilder) {
 /// Registers PromptSources with a replaceable date source, checked every
 /// `every`.
 pub fn install_with_clock(builder: &mut AgentBuilder, today: Today, every: Duration) {
-    for name in SOURCES {
-        builder.session_prompt_source(name);
-    }
     builder
-        .session_prompt_registry(PromptRegistryPlugin::new)
-        .session_part(move |names| names.part(PromptSourcesPlugin::new(names, today.clone())?))
+        .session_part(|names| names.part(PromptRegistryPlugin::new(names)?))
+        .session_part(move |names| {
+            names.part(PromptSourcesPlugin {
+                today: today.clone(),
+            })
+        })
         .branch_part(move |names| {
             Ok(names.part_with(
                 PromptSourcesBranchPlugin { every },
@@ -378,31 +379,23 @@ impl LoadPrompt for Sources {
     }
 }
 
-/// Session part: provides each of its sources to the prompt registry by name.
+/// Session part: registers each of its sources with the prompt registry.
 pub struct PromptSourcesPlugin {
-    sources: Vec<DepKey<PromptSource>>,
-    today: Today,
-}
-impl PromptSourcesPlugin {
-    pub fn new(names: &Names<'_>, today: Today) -> Result<Self, CordisError> {
-        Ok(Self {
-            sources: SOURCES
-                .iter()
-                .map(|name| source_key(names, name))
-                .collect::<Result<_, _>>()?,
-            today,
-        })
-    }
+    pub today: Today,
 }
 impl TypedPlugin for PromptSourcesPlugin {
-    type Deps = (Keyed<HostPlatform>, Keyed<SessionConfig>);
+    type Deps = (
+        Keyed<HostPlatform>,
+        Keyed<SessionConfig>,
+        Keyed<PromptRegistry>,
+    );
     fn name(&self) -> &str {
         "PromptSources"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(platform), Keyed(config)): Self::Deps,
+        (Keyed(platform), Keyed(config), Keyed(registry)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let sources: Arc<dyn LoadPrompt> = Arc::new(Sources {
@@ -411,8 +404,8 @@ impl TypedPlugin for PromptSourcesPlugin {
                 today: self.today.clone(),
                 stopped: ctx.cancellation_token(),
             });
-            for key in &self.sources {
-                ctx.provide_as(key.key().clone(), Arc::new(PromptSource(sources.clone())))?;
+            for name in SOURCES {
+                registry.register(ctx, name, sources.clone())?;
             }
             Ok(Effect::Done)
         })
