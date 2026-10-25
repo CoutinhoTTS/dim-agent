@@ -68,7 +68,12 @@ pub(crate) struct Assembly {
     timeline: Vec<BranchMake>,
     session_parts: Vec<PartMake>,
     branch_parts: Vec<PartMake>,
-    /// The parts plugins register, shared by every Agent of this builder.
+    /// The process plugins the builder adds ([`AgentBuilder::plugin`]).
+    plugins: Vec<PartMake>,
+    /// Where the plugin of each feature is in `plugins`, by name.
+    features: std::collections::HashMap<String, usize>,
+    /// The parts plugins register: the builder's for a host that places
+    /// its Agents (`build_at`), a fresh one in each Agent placing itself.
     pub parts: Arc<crate::parts::PartRegistry>,
     /// Registered parts the profile requires, by name.
     required_parts: Arc<HashSet<String>>,
@@ -99,6 +104,8 @@ impl AgentBuilder {
                 timeline: vec![],
                 session_parts: vec![],
                 branch_parts: vec![],
+                plugins: vec![],
+                features: Default::default(),
                 parts: Arc::default(),
                 required_parts: Arc::default(),
                 extensions: vec![],
@@ -136,11 +143,85 @@ impl AgentBuilder {
         &mut self.catalog
     }
     /// The registry where plugins register Session and branch parts
-    /// ([`PartRegistry::register`](crate::PartRegistry::register)). Every
-    /// Agent of this builder mounts from it; the host hands it to its process
-    /// plugins.
+    /// ([`PartRegistry::register`](crate::PartRegistry::register)) in a host
+    /// that places its Agents ([`Self::build_at`]): every such Agent mounts
+    /// from it, and [`Self::plugin_rows`] provides it to the host's process
+    /// plugins as `partRegistry`. An Agent placing itself ([`Self::build`],
+    /// [`Self::build_in`]) has a registry of its own, where only its own
+    /// plugins register.
     pub fn parts(&self) -> Arc<crate::PartRegistry> {
         self.assembly.parts.clone()
+    }
+    /// Adds a process plugin: `make` builds it from the names its
+    /// dependencies resolve to at the process, usually
+    /// `|names| names.part(MyPlugin)`. An Agent placing itself mounts it in
+    /// its own loader; a host placing its Agents places it with
+    /// [`Self::plugin_rows`]. It reaches the registry by the process name
+    /// `partRegistry`.
+    pub fn plugin(
+        &mut self,
+        make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> &mut Self {
+        self.assembly.plugins.push(Arc::new(make));
+        self
+    }
+    /// Adds the plugin of `feature` ([`Self::plugin`]). A feature of the
+    /// same name added before is replaced.
+    pub fn feature(&mut self, feature: crate::Feature) -> &mut Self {
+        let name = feature.name().to_owned();
+        let make: PartMake = Arc::new(move |names| feature.plugin(names));
+        match self.assembly.features.get(&name) {
+            Some(&index) => self.assembly.plugins[index] = make,
+            None => {
+                self.assembly
+                    .features
+                    .insert(name, self.assembly.plugins.len());
+                self.assembly.plugins.push(make);
+            }
+        }
+        self
+    }
+    /// Adds `feature` ([`Self::feature`]) and makes each of its parts part
+    /// of the profile ([`Self::require_part`]): what an install function of
+    /// the profile does for the features it installs.
+    pub fn require_feature(&mut self, feature: crate::Feature) -> &mut Self {
+        for name in feature.part_names() {
+            Arc::make_mut(&mut self.assembly.required_parts).insert(name.to_owned());
+        }
+        self.feature(feature)
+    }
+    /// Registers in `builtins` the module providing [`Self::parts`] at
+    /// `partRegistry` and those of the plugins added with [`Self::plugin`],
+    /// and returns their rows, for a host that places its Agents. Register
+    /// them before [`Self::install`]; a module of the same name registered
+    /// already fails.
+    pub async fn plugin_rows(&self, builtins: &mut Builtins) -> Result<Vec<Value>> {
+        let registry = self.assembly.parts.clone();
+        let registry: PartMake = Arc::new(move |names| {
+            names.part(crate::parts::PartRegistryPlugin {
+                registry: registry.clone(),
+                key: names.key()?,
+            })
+        });
+        let mut rows = vec![];
+        for make in std::iter::once(&registry).chain(&self.assembly.plugins) {
+            let name = make(&Names::check(&self.catalog, &[], None))
+                .map_err(|error| AgentError::Build(format!("a process plugin: {error}")))?
+                .name()
+                .to_owned();
+            if builtins.resolve(&name).await.is_ok() {
+                return Err(AgentError::Build(format!(
+                    "module {name} is registered already"
+                )));
+            }
+            let make = make.clone();
+            register_part(builtins, &self.catalog, move |names| make(names))?;
+            rows.push(row(&name));
+        }
+        Ok(rows)
     }
     /// Makes the registered part `name` part of the profile: a Session or
     /// branch publishes only once its copy is Active, and a copy that fails
@@ -806,6 +887,12 @@ pub(crate) async fn own_placement(
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<(Placement, Owned)> {
+    // A registry of this placement's own: only its own plugins register
+    // there, so Agents built from one builder do not mount each other's
+    // parts.
+    let mut builder = builder.clone();
+    builder.assembly.parts = Arc::default();
+    let builder = &builder;
     let (root, parent) = match host {
         None => {
             let root = Ctx::root_with_sink(
@@ -814,13 +901,14 @@ pub(crate) async fn own_placement(
             );
             (Some(root.clone()), root)
         }
-        Some(host) => (
-            None,
-            host.isolate(
-                TypeKey::of::<Loader>(),
-                &format!("dim-agent/{}", uuid::Uuid::new_v4()),
-            ),
-        ),
+        Some(host) => {
+            let label = format!("dim-agent/{}", uuid::Uuid::new_v4());
+            (
+                None,
+                host.isolate(TypeKey::of::<Loader>(), &label)
+                    .isolate(TypeKey::of::<crate::PartRegistry>(), &label),
+            )
+        }
     };
     let mut builtins = Builtins::new();
     builtins.register_with::<NoConfig, _, _>("AgentAnchor", |build| {
@@ -829,8 +917,15 @@ pub(crate) async fn own_placement(
             .ok_or_else(|| CordisError::PluginFailed("Agent created without its slot".into()))?;
         Factory::new(move || typed(AgentAnchor((*slot).clone())))
     });
-    let session_row = match builder.install(&mut builtins, &parent, []).await {
-        Ok(row) => row,
+    let installed = async {
+        let plugins = match builder.assembly.plugins.is_empty() {
+            true => vec![],
+            false => builder.plugin_rows(&mut builtins).await?,
+        };
+        Ok::<_, AgentError>((plugins, builder.install(&mut builtins, &parent, []).await?))
+    };
+    let (plugin_rows, session_row) = match installed.await {
+        Ok(rows) => rows,
         Err(error) => {
             if let Some(root) = root {
                 root.shutdown().await.map_err(AgentError::from)?;
@@ -853,7 +948,9 @@ pub(crate) async fn own_placement(
     };
     let placed = async {
         wait_active(&parent, std::slice::from_ref(&view), timeout, cancel).await?;
-        let rows = json!([{ "insert": [builder.agent_row([row("AgentAnchor"), session_row])] }]);
+        let mut inserted = plugin_rows;
+        inserted.push(builder.agent_row([row("AgentAnchor"), session_row]));
+        let rows = json!([{ "insert": inserted }]);
         let rows = serde_json::from_value(rows).map_err(|e| AgentError::Build(e.to_string()))?;
         let report = loader
             .reconcile(vec![rutis_loader::Layer::new("assembly", rows)], None)

@@ -18,7 +18,7 @@ The output already exists. Before transferring a command, `ExecProcess` creates
 its output file; the pipe pumps keep updating that file and its bounded preview.
 `exec/started` carries the task identity and output path, and `exec/ended` carries
 the final result. The command's owner is
-[BackgroundExec](../architecture/rust-agent/plugins/BackgroundExec.md), not Rpc
+[BackgroundExec](../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec), not Rpc
 or the client.
 
 Existing alternatives do not supply a client read:

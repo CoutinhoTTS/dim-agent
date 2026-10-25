@@ -52,24 +52,28 @@ pub fn install(builder: &mut AgentBuilder) {
 /// Registers PromptSources with a replaceable date source, checked every
 /// `every`.
 pub fn install_with_clock(builder: &mut AgentBuilder, today: Today, every: Duration) {
-    builder
-        .session_part(|names| names.part(PromptRegistryPlugin::new(names)?))
-        .session_part(move |names| {
-            names.part(PromptSourcesPlugin {
-                today: today.clone(),
+    builder.require_feature(
+        dim_agent_runtime::Feature::new("PromptSources")
+            .session("PromptRegistry", |names| {
+                names.part(PromptRegistryPlugin::new(names)?)
             })
-        })
-        .branch_part(move |names| {
-            Ok(names.part_with(
-                PromptSourcesBranchPlugin { every },
-                (
-                    names.key()?,
-                    names.key()?,
-                    names.key()?,
-                    names.state_cell()?,
-                ),
-            ))
-        });
+            .session("PromptSources", move |names| {
+                names.part(PromptSourcesPlugin {
+                    today: today.clone(),
+                })
+            })
+            .branch("PromptSourcesBranch", move |names| {
+                Ok(names.part_with(
+                    PromptSourcesBranchPlugin { every },
+                    (
+                        names.key()?,
+                        names.key()?,
+                        names.key()?,
+                        names.state_cell()?,
+                    ),
+                ))
+            }),
+    );
 }
 
 /// Every source this capability provides, in delivery order.

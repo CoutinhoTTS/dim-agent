@@ -189,6 +189,7 @@ impl TypedPlugin for SkillsCatalogPlugin {
         Keyed<HostPlatform>,
         Keyed<SettingsService>,
         Keyed<ManagementMethods>,
+        Keyed<dim_agent_runtime::PartRegistry>,
     );
     fn name(&self) -> &str {
         "SkillsCatalog"
@@ -196,7 +197,7 @@ impl TypedPlugin for SkillsCatalogPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (platform, Keyed(settings), Keyed(methods)): Self::Deps,
+        (platform, Keyed(settings), Keyed(methods), Keyed(parts)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage { settings })));
@@ -206,6 +207,7 @@ impl TypedPlugin for SkillsCatalogPlugin {
             )
             .await?;
             ctx.provide_as(rutis::TypeKey::of::<SkillsCatalog>(), catalog.clone())?;
+            dim_agent_capabilities::skills::register_parts(ctx, &parts)?;
             methods.register(
                 ctx,
                 "skills",

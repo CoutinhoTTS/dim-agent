@@ -402,15 +402,6 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         Arc::new(SkillSettingsHost(options.settings.clone())),
     )
     .unwrap();
-    (&root.plugin(
-        dim_agent_runtime::names::process_plugin(
-            &dim_agent_capabilities::catalog(),
-            SkillsCatalogPlugin::new(),
-        )
-        .unwrap(),
-    ))
-        .await
-        .unwrap();
     let model = Arc::new(ScriptedModel::default());
     let gate = Arc::new(Gate::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -446,8 +437,13 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
             })
         });
     }
+    // The Agent's own plugin: the catalog, and the Skills parts it
+    // registers. Placed now, so the catalog is there before any Session.
+    builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
+    let agent = builder.build_in(&root);
+    agent.start().await.unwrap();
     Env {
-        agent: builder.build_in(&root),
+        agent,
         root,
         model,
         gate,

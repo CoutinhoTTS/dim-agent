@@ -429,8 +429,9 @@ async fn set_project_enabled(
     }
 }
 
-/// The directory, its management methods and the OAuth credential authority,
-/// whose store `mcp-oauth.json` lives in the home root.
+/// The plugin: the directory, its management methods, the OAuth credential
+/// authority, whose store `mcp-oauth.json` lives in the home root, and the
+/// Session part `McpSession`, which it registers.
 pub struct McpPlugin {
     home_root: usize,
 }
@@ -445,6 +446,7 @@ impl TypedPlugin for McpPlugin {
         Keyed<publication::Publication>,
         Keyed<FileStorage>,
         Keyed<crate::methods::ManagementMethods>,
+        Keyed<dim_agent_runtime::PartRegistry>,
     );
     fn name(&self) -> &str {
         "Mcp"
@@ -452,7 +454,7 @@ impl TypedPlugin for McpPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(settings), Keyed(publication), Keyed(files), Keyed(methods)): Self::Deps,
+        (Keyed(settings), Keyed(publication), Keyed(files), Keyed(methods), Keyed(parts)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let auth = McpAuth::new(files, self.home_root).map_err(CordisError::PluginFailed)?;
@@ -487,6 +489,17 @@ impl TypedPlugin for McpPlugin {
             )?;
             ctx.provide_as(TypeKey::of::<McpAuth>(), auth)?;
             ctx.provide_as(TypeKey::of::<McpService>(), service)?;
+            parts.register(
+                ctx,
+                dim_agent_runtime::PartScope::Session,
+                "McpSession",
+                |mount| {
+                    mount
+                        .names
+                        .part(McpSessionPlugin::new(mount.names)?)
+                        .map(Some)
+                },
+            )?;
             Ok(Effect::Done)
         })
     }

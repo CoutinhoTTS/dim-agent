@@ -1,7 +1,8 @@
 # Local-execution business plugins
 
-This directory covers the **33 business plugins and content groups in the local-execution
-profile**, not every App Server plugin. The authoritative assembly is
+This directory has one page per plugin of the **local-execution profile**, not every App Server
+plugin. A plugin's page documents each part it registers and, for a plugin that owns process
+state, the plugin itself: each has its own dependency table and generated block. The authoritative assembly is
 [`defaults::install_local_execution`](../../../../crates/dim-agent-capabilities/src/defaults.rs)
 plus Attachments (which `serve` adds where the host has native storage) and
 Questions (which the product profiles add), with process services and scripted model hosts supplied by
@@ -12,18 +13,36 @@ home. The host fixture reuses HostPlatformPlugin's declared dependencies and key
 SessionStore's `sessionFiles` is a graph-only fixture that stores nothing.
 
 Infrastructure rows `BranchScope`, `SessionScope`, `SessionBroadcast`,
-`SessionBroadcastEnd`, `SessionExtension`, `rutis-loader`, `session` and `branch`, and the scripted
-`PrepareModelHost` plugin are excluded. They can still appear as providers or
+`SessionBroadcastEnd`, `SessionExtension`, `rutis-loader`, `session` and `branch`, the instances'
+mounters (`SessionParts`, `SessionOptionalParts`, `BranchParts`, `BranchOptionalParts`), the row
+providing `partRegistry`, and the scripted `PrepareModelHost` plugin are excluded. They can still appear as providers or
 consumers in the generated blocks. A service dependency is not necessarily a
 plugin with the same name.
 
 ## Index
 
-| Scope | Plugins |
-| --- | --- |
-| Process | [FileWriteCoordinator](FileWriteCoordinator.md), [SkillsCatalog](SkillsCatalog.md), [HostPlatform](HostPlatform.md), [FileStorage](FileStorage.md) |
-| Session | [Skills](Skills.md), [SkillContributions](SkillContributions.md), [SkillContentInstances](SkillContentInstances.md), [SkillContent](SkillContent.md), [PromptSources](PromptSources.md), [PromptRegistry](PromptRegistry.md), [Wait](Wait.md), [ShellInput](ShellInput.md), [WorkspaceTools](WorkspaceTools.md), [ToolRegistry](ToolRegistry.md), [TimelineTree](TimelineTree.md), [InputMethods](InputMethods.md), [Attachments](Attachments.md), [Questions](Questions.md), [SessionMethods](SessionMethods.md) |
-| Branch | [SkillsBranch](SkillsBranch.md), [PromptSourcesBranch](PromptSourcesBranch.md), [WaitBranch](WaitBranch.md), [BackgroundExec](BackgroundExec.md), [FileReads](FileReads.md), [ToolExecutor](ToolExecutor.md), [ToolBinding](ToolBinding.md), [Approval](Approval.md), [Permission](Permission.md), [ModelProvider](ModelProvider.md), [Loop](Loop.md), [InputQueue](InputQueue.md), [Prompt](Prompt.md), [ContextPreparation](ContextPreparation.md), [TreeTimeline](TreeTimeline.md) |
+| Plugin | Process | Session parts | Branch parts |
+| --- | --- | --- | --- |
+| [Skills](Skills.md) | SkillsCatalog | SkillContributions, Skills, SkillContent (SkillContentInstances) | SkillsBranch |
+| [PromptSources](PromptSources.md) | — | PromptRegistry, PromptSources | PromptSourcesBranch |
+| [WorkspaceTools](WorkspaceTools.md) | — | WorkspaceTools | FileReads, BackgroundExec |
+| [Wait](Wait.md) | — | Wait | WaitBranch |
+| [TimelineTree](TimelineTree.md) | — | TimelineTree | TreeTimeline |
+| [InputQueue](InputQueue.md) | — | InputMethods | InputQueue |
+| [Permission](Permission.md) | — | — | Permission, Approval |
+| [ToolExecution](ToolExecution.md) | — | — | ToolBinding, ToolExecutor |
+| [ToolRegistry](ToolRegistry.md) | — | ToolRegistry | — |
+| [SessionMethods](SessionMethods.md) | — | SessionMethods | — |
+| [ShellInput](ShellInput.md) | — | ShellInput | — |
+| [Attachments](Attachments.md) | — | Attachments | — |
+| [Questions](Questions.md) | — | Questions | — |
+| [BranchTool](BranchTool.md) | — | BranchTool | — |
+| [ContextPreparation](ContextPreparation.md) | — | — | ContextPreparation |
+| [Prompt](Prompt.md) | — | — | Prompt |
+| [Loop](Loop.md) | — | — | Loop |
+| [ModelProvider](ModelProvider.md) | — | — | ModelProvider |
+| [HostPlatform](HostPlatform.md) | HostPlatform | — | — |
+| [FileStorage](FileStorage.md) | FileStorage | — | — |
 
 Optional TypeScript packages are outside this native profile. [Web](../../../design/plugins/Web.md) provides `web_search` and `web_fetch` through existing Session rows; its [package documentation](../../../../runtime/plugins/web/README.md) describes installation and verification. It adds no service to the assembly recorded here.
 
@@ -38,7 +57,9 @@ are listed only when enabled in this assembly. A dependency used only as a
 lifecycle gate is still a dependency. Per-call branch service lookups are
 explained separately from injected services.
 
-Plugins implement rutis `TypedPlugin` plus runtime `Capability` (the current Rust binding of the
+Each plugin is one process row that registers its Session and branch parts with the part registry
+([ADR 006 D3](../../../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it));
+parts implement rutis `TypedPlugin` plus runtime `Capability` (the current Rust binding of the
 [plugin contract](../../../design/plugin-contract.md); the trait is not the contract's Capability
 relation); `Deps` and
 scoped keys control readiness and lifecycle, not a security sandbox. Factories
@@ -67,5 +88,7 @@ current table labels. `cargo run --locked -p xtask -- check` checks recorded-gra
 coverage in both directions, block freshness and exact dependency tables. Missing
 or empty documentation directories fail. Run `graph` after assembly changes so
 new capabilities participate in that check; plugins outside this profile are not
-covered by it. Both `## Dependencies` and `## 依赖` are supported. Linked tests
+covered by it. A page documents the names of the generated blocks it holds; each
+name's dependency table is the `Dependencies` (or `依赖`) table between the
+previous block and its own. Linked tests
 are existing evidence to consult, not a claim that every lifetime edge is covered.

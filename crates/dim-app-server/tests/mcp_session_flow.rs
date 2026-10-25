@@ -276,7 +276,6 @@ impl Env {
                     .typed(&dim_app_server::catalog())
                     .unwrap(),
             ),
-            root.plugin(rutis::Typed::new(McpPlugin::new(0))),
         ];
         wait_active(
             &root,
@@ -291,7 +290,6 @@ impl Env {
             .authorize_project(home.join("project"), &CancellationToken::new())
             .await
             .unwrap();
-        let directory = root.get::<McpService>().unwrap();
         let model = Arc::new(Model::default());
         let mut builder = AgentBuilder::new(Default::default());
         builder
@@ -311,8 +309,13 @@ impl Env {
             }),
         );
         mcp::install(&mut builder);
+        // The Agent's own plugin: it registers McpSession with the Agent.
+        builder.plugin(|names| names.part(McpPlugin::new(0)));
         configure(&mut builder, &remote);
         let agent = builder.build_in(&root);
+        // The directory runs before any Session does.
+        agent.start().await.unwrap();
+        let directory = root.get::<McpService>().unwrap();
         Self {
             root,
             publication,

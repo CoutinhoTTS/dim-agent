@@ -360,7 +360,7 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
         defaults,
         host_platform::{HostPlatform, ShellStatus},
         permission::PermissionState,
-        workspace_tools::{FileWriteCoordinatorPlugin, WorkspaceToolsConfig},
+        workspace_tools::WorkspaceToolsConfig,
     };
     use dim_agent_runtime::{AgentBuilder, AgentConfig};
     use dim_agent_types::{EventKind, InputMode, PermissionPolicy, PermissionPreset};
@@ -378,11 +378,6 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
     store
         .root
         .provide_as(rutis::TypeKey::of::<HostPlatform>(), Arc::new(platform))
-        .unwrap();
-    (&store
-        .root
-        .plugin(rutis::Typed::new(FileWriteCoordinatorPlugin::default())))
-        .await
         .unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(store.sessions.timeline_store());
