@@ -96,7 +96,10 @@ async fn owner_contributions_survive_reload_and_keep_entry_boundaries() {
             json!({"sessionId": uuid::Uuid::new_v4().to_string()}),
         )
         .await;
-    assert_eq!(reply["error"]["data"]["appError"], "unknown_method", "{reply}");
+    assert_eq!(
+        reply["error"]["data"]["appError"], "unknown_method",
+        "{reply}"
+    );
     // A management provider reload neither reloads Rpc nor closes the
     // connection: the same client keeps every namespace once Mcp is active.
     server.restart("Mcp").await.unwrap();
