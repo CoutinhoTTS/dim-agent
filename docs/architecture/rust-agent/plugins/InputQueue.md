@@ -47,15 +47,15 @@ observable input queue.
 
 | Service | Purpose |
 | --- | --- |
-| `B:Dispatcher` | Consume input/turn/interrupt transitions. |
-| `B:Timeline` | Commit application decisions and replay the queue. |
+| `B:Dispatcher` | Replay the queue, then consume input/turn/interrupt transitions. |
+| `B:Timeline` | Commit application decisions. |
 
 ### Events and lifetime
 
 Consumes `input/message`, `input/consumed`, `turn/start`, `turn/end`,
 `stop/interrupt`; produces `input/applied`. It does not run a model itself.
-Subscription and replay share a sequence gate; restore writes owed application
-decisions without duplicating already committed ones. No background tasks or
+It registers with `Dispatcher::follow`; the replay writes owed application
+decisions, without duplicating already committed ones, before any live event. No background tasks or
 external resources. Reload reconstructs state from local history. An idle append
 is pending until a driving input; an interrupt is not permission to start a new
 turn from previously unapplied input.

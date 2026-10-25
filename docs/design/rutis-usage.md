@@ -368,12 +368,13 @@ each export's name and group are the ones the binding derives for its type.
 ```rust
 pub struct WaitBranch(DepKey<Wait>);
 impl TypedPlugin for WaitBranch {
-    // "dispatcher" and "timeline" are branch names; nothing here says so.
-    type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
+    // "dispatcher" is a branch name; nothing here says so.
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str { "WaitBranch" }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
+    fn apply<'a>(&'a self, ctx: &'a Ctx, (Keyed(dispatcher),): Self::Deps)
         -> BoxFuture<'a, Result<Effect, CordisError>> {
-        /* rebuild (plugin contract §7.2), then ctx.provide_as(self.0.key().clone(), wait) */
+        /* dispatcher.follow(ctx, "Wait", keys, handler).await?, the Rust form of `consume`
+           (plugin contract §5.2), then ctx.provide_as(self.0.key().clone(), wait) */
     }
 }
 
@@ -464,31 +465,29 @@ async def apply(ctx, config):
 ```
 
 ```ts
-// A Capability that rebuilds by hand (plugin contract §7.2, today's form).
+// A Capability that rebuilds from history, then follows live events (plugin contract §5.2).
 export default definePlugin({
   name: 'ExampleCounter',
   inject: ['dispatcher'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
-    let count = 0, through = 0n
-    let ready!: () => void
-    const rebuilt = new Promise<void>(resolve => { ready = resolve })
-    await dispatcher.listen('example-counter', ['input/message'], async event => {
-      await rebuilt
-      if (BigInt(event.sequence) > through) count++
+    let count = 0
+    const fold = (event: BranchEvent) => {
+      if (event.type === 'input' && event.name === 'message') count++
+    }
+    await dispatcher.consume('example-counter', ['input/message'], delivery => {
+      if ('live' in delivery) fold(delivery.live)
+      else delivery.replay.forEach(fold)
     })
-    const cutoff = await dispatcher.committed()
-    count = (await dispatcher.local(0, cutoff))
-      .filter(event => event.type === 'input' && event.name === 'message').length
-    through = BigInt(cutoff)
     ctx.provide('exampleCounter', { get: () => ({ count }) })
-    ready()
   },
 })
 ```
 
-With R1 the same part registers once and folds every event, replayed or live, in one handler.
+The hand-written form stays valid: `listen` before `committed()`, then a rebuild from `local`
+through that cutoff while the handler waits, skipping the live events it covered.
 
-The repository's fixtures show both languages: `runtime/fixtures/branch-part.ts` and
-`runtime/fixtures/python/python_branch_part.py`.
+The repository's fixtures show both languages and both forms: `runtime/fixtures/branch-part.ts`
+rebuilds by hand, `runtime/fixtures/python/python_branch_part.py` and `runtime/plugins/goal/branch.ts`
+use `consume`.

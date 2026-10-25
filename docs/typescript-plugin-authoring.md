@@ -563,7 +563,7 @@ rows.
 
 | Service | Contract |
 | --- | --- |
-| `dispatcher` | `listen(name, keys, handler)` registers on the calling row's context. Its throw/rejection follows the native branch failure path. `committed/local/history` read committed history for reconstruction. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
+| `dispatcher` | `consume(name, keys, handler)` registers an ordered consumer on the calling row's context: the handler receives `{ replay }`, the branch's own committed history through a fixed cutoff, then `{ live }` for each matching event after it, and the call resolves once the replay is handled. `listen(name, keys, handler)` registers for live events only. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
 | `treeCommands` | Session directory `list/info`, validated `input` by branch id and `create`. These are the Rust data methods, not the process `sessions` request envelopes. |
 | `branchLifecycle` | Background work waits for `activated()` and releases its resources when `closing()` resolves. Never wait for activation inside a Dispatcher callback. |
 | `timelineIdentity` | `get()` returns the original Session and branch ids. |
@@ -589,17 +589,11 @@ export default definePlugin({
       if (event.type === 'input' && event.name === 'message') count++
       through = BigInt(event.sequence)
     }
-    let finishRebuild!: () => void
-    const rebuilt = new Promise<void>(resolve => { finishRebuild = resolve })
-    await dispatcher.listen('example-counter', ['input/message'], async event => {
-      await rebuilt
-      if (BigInt(event.sequence) > through) fold(event)
+    await dispatcher.consume('example-counter', ['input/message'], delivery => {
+      if ('live' in delivery) fold(delivery.live)
+      else for (const event of delivery.replay) fold(event)
     })
-    const cutoff = await dispatcher.committed()
-    for (const event of await dispatcher.local(0, cutoff)) fold(event)
-    through = BigInt(cutoff)
     ctx.provide('exampleCounter', { get: () => ({ count, through }) })
-    finishRebuild()
   },
 })
 ```
@@ -617,11 +611,18 @@ Configure the same declaration on its structural row:
 }
 ```
 
-Subscribe before sampling the committed cutoff. Rebuild from `local` through that fixed cutoff;
-`history` also includes the ancestor prefix and is a different input. The handler waits only for
-this initial fold, skips events already folded and resumes ordered consumption. A rebuild repeats
-no external side effect. Publish a derived service after reconstruction. This example's state
-belongs to the branch row and is rebuilt on each generation.
+`consume` subscribes, fixes the committed cutoff and hands the handler the replay: this branch's
+own events through the cutoff as `local` reads them, without the ancestor prefix and not filtered
+by the keys, since a rebuild may need facts it does not consume live. Live events after the cutoff
+follow through the same handler in sequence order; none is delivered twice. Live events wait until
+the replay call returns, so do what the replay leaves to do, such as ending the operations a
+previous generation left open, in that call. A rebuild repeats no external side effect. Publish a
+derived service after `consume` resolves. This example's state belongs to the branch row and is
+rebuilt on each generation.
+
+The hand-written form stays valid: subscribe with `listen` before sampling `committed()`, rebuild
+from `local` through that fixed cutoff while the handler waits, and skip live events at or below
+it. The [real Node part](../runtime/fixtures/branch-part.ts) is written that way.
 
 Callbacks can run on opening facts before publication. Register long work in the part's owned
 tasks and return; do not wait for dispatch, activation or a child creation whose progress depends
@@ -664,7 +665,7 @@ so ask them through their commands, such as input through `treeCommands.input`, 
 appending their events. The branch's Timeline is closed by the branch itself, so `timeline` has no
 `close`.
 
-Extension events behave like any other branch event. `dispatcher.listen` with a key such as
+Extension events behave like any other branch event. `dispatcher.consume` with a key such as
 `myplugin/*` delivers them in order, `local` and `history` return them, they are persisted and
 restored with the branch, and a restored generation rebuilds from them. They never reach the
 model's context; write an adopted input or return a tool result when the model needs content
@@ -673,7 +674,7 @@ feeds do not deliver them. History keeps them after your plugin is uninstalled.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
-import type { BranchEvent, Services } from 'dimcode/plugin'
+import type { Services } from 'dimcode/plugin'
 
 export default definePlugin({
   name: 'ExampleCheckpoints',
@@ -684,19 +685,15 @@ export default definePlugin({
     const timeline = ctx.use<Services['timeline']>('timeline')
     // Rebuild from your own events in history; act only on live events.
     let steps = 0
-    let through = 0n
-    let finishRebuild!: () => void
-    const rebuilt = new Promise<void>(resolve => { finishRebuild = resolve })
-    await dispatcher.listen('example-checkpoints', ['myplugin/*', 'turn/end'], async (event: BranchEvent) => {
-      await rebuilt
-      if (BigInt(event.sequence) <= through) return
-      if (event.type === 'myplugin') steps++
-      else await timeline.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1 } })
+    await dispatcher.consume('example-checkpoints', ['myplugin/*', 'turn/end'], async delivery => {
+      if ('replay' in delivery) {
+        for (const event of delivery.replay) if (event.type === 'myplugin') steps++
+      } else if (delivery.live.type === 'myplugin') {
+        steps++
+      } else {
+        await timeline.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1 } })
+      }
     })
-    const cutoff = await dispatcher.committed()
-    for (const event of await dispatcher.local(0, cutoff)) if (event.type === 'myplugin') steps++
-    through = BigInt(cutoff)
-    finishRebuild()
   },
 })
 ```

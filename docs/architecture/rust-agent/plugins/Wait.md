@@ -48,15 +48,14 @@ Provides branch-local wait state recording eligible arrivals during an open turn
 
 | Service | Purpose |
 | --- | --- |
-| `B:Dispatcher` | Consume arrivals and turn boundaries. |
-| `B:Timeline` | Rebuild whether a turn is open. |
+| `B:Dispatcher` | Replay whether a turn is open, then consume arrivals and turn boundaries. |
 
 ### Events and lifetime
 
 Consumes `input/message`, `turn/start`, `turn/end`; produces no events directly.
 Tagged background notices and steer inputs can end a wait; the input opening a
-turn does not. Turn end clears pending arrivals. Subscription precedes replay
-under a sequence gate. Reload rebuilds only open-turn status, not old arrival
+turn does not. Turn end clears pending arrivals. It registers with
+`Dispatcher::follow`. Reload rebuilds only open-turn status, not old arrival
 notifications. Wait futures are caller-owned and use caller cancellation; the
 plugin does not spawn tasks. Only one wait can run per branch.
 
@@ -70,7 +69,7 @@ plugin does not spawn tasks. Only one wait can run per branch.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline` |
+| 注入 | `B:Dispatcher` |
 | 提供 | `B:Wait` |
 | 被注入于 | — |
 <!-- /generated -->

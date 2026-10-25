@@ -6,7 +6,7 @@ use crate::{
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, TimelineIdentity,
+    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, Names, Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -232,8 +232,6 @@ struct PreparationState {
     /// Why the current operation was cancelled by an interrupt.
     stop_reason: Option<String>,
     closed: bool,
-    /// Events up to this sequence were applied by the rebuild at load.
-    rebuilt: u64,
 }
 
 /// What a preparation at the committed head would write into
@@ -280,7 +278,6 @@ impl ContextPreparation {
         state: &mut PreparationState,
         events: &[Arc<AgentEvent>],
     ) -> dim_agent_runtime::Result<()> {
-        state.rebuilt = events.last().map_or(0, |event| event.sequence);
         let mut open: Vec<ContextPrepareData> = Vec::new();
         // An automatic compaction start without its result was in flight.
         let mut started: Vec<(u64, ContextCompactionStartData)> = Vec::new();
@@ -649,110 +646,111 @@ impl TypedPlugin for ContextPreparationPlugin {
             let owner = service.clone();
             let failures = dispatcher.clone();
             let lifecycle = ctx.cancellation_token();
-            // Subscribe, then rebuild under the gate; see the reload protocol.
-            let gate = Arc::new(tokio::sync::Mutex::new(()));
-            let rebuilding = gate.lock().await;
-            let handler_gate = gate.clone();
-            dispatcher.subscribe(
-                ctx,
-                "ContextPreparation",
-                &[
-                    "context/prepare",
-                    "stop/interrupt",
-                    "step/model-start",
-                    "input/applied",
-                    "turn/start",
-                    "turn/end",
-                ],
-                move |event| {
-                    let owner = owner.clone();
-                    let failures = failures.clone();
-                    let lifecycle = lifecycle.clone();
-                    let gate = handler_gate.clone();
-                    Box::pin(async move {
-                        let _ready = gate.lock().await;
-                        if event.sequence <= owner.state.lock().unwrap().rebuilt {
-                            return Ok(());
-                        }
-                        if let EventKind::StopInterrupt(data) = &event.kind {
-                            let mut state = owner.state.lock().unwrap();
-                            state.interrupted = Some(data.reason.clone());
-                            if let Some((_, cancel)) = state.current.clone() {
-                                state.stop_reason = Some(data.reason.clone());
-                                cancel.cancel();
+            dispatcher
+                .follow(
+                    ctx,
+                    "ContextPreparation",
+                    &[
+                        "context/prepare",
+                        "stop/interrupt",
+                        "step/model-start",
+                        "input/applied",
+                        "turn/start",
+                        "turn/end",
+                    ],
+                    move |delivery| {
+                        let owner = owner.clone();
+                        let failures = failures.clone();
+                        let lifecycle = lifecycle.clone();
+                        Box::pin(async move {
+                            let event = match delivery {
+                                Delivery::Replay(events) => {
+                                    return owner
+                                        .rebuild(&mut owner.state.lock().unwrap(), &events);
+                                }
+                                Delivery::Live(event) => event,
+                            };
+                            if let EventKind::StopInterrupt(data) = &event.kind {
+                                let mut state = owner.state.lock().unwrap();
+                                state.interrupted = Some(data.reason.clone());
+                                if let Some((_, cancel)) = state.current.clone() {
+                                    state.stop_reason = Some(data.reason.clone());
+                                    cancel.cancel();
+                                }
+                                return Ok(());
                             }
-                            return Ok(());
-                        }
-                        if matches!(
-                            event.kind,
-                            EventKind::ModelStart(_) | EventKind::InputApplied(_)
-                        ) {
-                            let mut state = owner.state.lock().unwrap();
-                            state.steer.apply(&event);
-                            // A steer of the running request replaces it; an
-                            // interrupt already ended it.
-                            if let Some((request, cancel)) = &state.current
-                                && state.interrupted.is_none()
-                                && state.steer.steered(request)
+                            if matches!(
+                                event.kind,
+                                EventKind::ModelStart(_) | EventKind::InputApplied(_)
+                            ) {
+                                let mut state = owner.state.lock().unwrap();
+                                state.steer.apply(&event);
+                                // A steer of the running request replaces it; an
+                                // interrupt already ended it.
+                                if let Some((request, cancel)) = &state.current
+                                    && state.interrupted.is_none()
+                                    && state.steer.steered(request)
+                                {
+                                    cancel.cancel();
+                                }
+                                return Ok(());
+                            }
+                            if matches!(event.kind, EventKind::TurnStart(_) | EventKind::TurnEnd(_))
                             {
-                                cancel.cancel();
+                                owner.state.lock().unwrap().interrupted = None;
+                                return Ok(());
                             }
-                            return Ok(());
-                        }
-                        if matches!(event.kind, EventKind::TurnStart(_) | EventKind::TurnEnd(_)) {
-                            owner.state.lock().unwrap().interrupted = None;
-                            return Ok(());
-                        }
-                        let EventKind::ContextPrepare(source) = &event.kind else {
-                            unreachable!()
-                        };
-                        let mut state = owner.state.lock().unwrap();
-                        if state.closed {
-                            return Err(AgentError::Closed("ContextPreparation".into()));
-                        }
-                        if state.current.is_some() {
-                            return Err(AgentError::fault(
-                                "ContextPreparation",
-                                "concurrent preparation",
-                            ));
-                        }
-                        let reason = state.interrupted.clone().or_else(|| {
-                            state
-                                .steer
-                                .steered(&source.request_id)
-                                .then(|| REPLACED_BY_STEER.to_owned())
-                        });
-                        if let Some(reason) = reason {
-                            drop(state);
-                            return owner
-                                .complete(source.clone(), Err(HostError::Cancelled(reason)));
-                        }
-                        state.stop_reason = None;
-                        let cancel = lifecycle.child_token();
-                        state.current = Some((source.request_id.clone(), cancel.clone()));
-                        let source = source.clone();
-                        let worker = owner.clone();
-                        owner.tasks.spawn(async move {
-                            let result = AssertUnwindSafe(worker.run(source, cancel, lifecycle))
-                                .catch_unwind()
-                                .await
-                                .map_err(|panic| {
-                                    AgentError::fault("ContextPreparation", panic_message(panic))
-                                })
-                                .and_then(|result| result);
-                            if let Err(error) = result {
-                                worker.errors.lock().unwrap().push(error.clone());
-                                failures.fail(error);
+                            let EventKind::ContextPrepare(source) = &event.kind else {
+                                unreachable!()
+                            };
+                            let mut state = owner.state.lock().unwrap();
+                            if state.closed {
+                                return Err(AgentError::Closed("ContextPreparation".into()));
                             }
-                        });
-                        Ok(())
-                    })
-                },
-            )?;
-            let through = service.timeline.committed();
-            let events = service.timeline.local(..=through).await?;
-            service.rebuild(&mut service.state.lock().unwrap(), &events)?;
-            drop(rebuilding);
+                            if state.current.is_some() {
+                                return Err(AgentError::fault(
+                                    "ContextPreparation",
+                                    "concurrent preparation",
+                                ));
+                            }
+                            let reason = state.interrupted.clone().or_else(|| {
+                                state
+                                    .steer
+                                    .steered(&source.request_id)
+                                    .then(|| REPLACED_BY_STEER.to_owned())
+                            });
+                            if let Some(reason) = reason {
+                                drop(state);
+                                return owner
+                                    .complete(source.clone(), Err(HostError::Cancelled(reason)));
+                            }
+                            state.stop_reason = None;
+                            let cancel = lifecycle.child_token();
+                            state.current = Some((source.request_id.clone(), cancel.clone()));
+                            let source = source.clone();
+                            let worker = owner.clone();
+                            owner.tasks.spawn(async move {
+                                let result =
+                                    AssertUnwindSafe(worker.run(source, cancel, lifecycle))
+                                        .catch_unwind()
+                                        .await
+                                        .map_err(|panic| {
+                                            AgentError::fault(
+                                                "ContextPreparation",
+                                                panic_message(panic),
+                                            )
+                                        })
+                                        .and_then(|result| result);
+                                if let Err(error) = result {
+                                    worker.errors.lock().unwrap().push(error.clone());
+                                    failures.fail(error);
+                                }
+                            });
+                            Ok(())
+                        })
+                    },
+                )
+                .await?;
             ctx.provide_as(self.context.key().clone(), service)?;
             Ok(Effect::Done)
         })

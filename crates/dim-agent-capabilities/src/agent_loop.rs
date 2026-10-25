@@ -7,8 +7,8 @@ use crate::{
     tool_binding::ToolBinding,
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Dispatcher, LoopPhase, LoopSnapshot, LoopState, Names,
-    Result, StateCell, Timeline,
+    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, LoopPhase, LoopSnapshot, LoopState,
+    Names, Result, StateCell, Timeline,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -123,8 +123,6 @@ pub struct AgentLoop {
     history: Arc<HistoryRenderer>,
     /// Compaction is bound: budget recovery and manual steps run.
     policy: Option<ContextPolicy>,
-    /// Events up to this sequence were applied by the rebuild at load.
-    rebuilt: AtomicU64,
     tasks: TaskTracker,
     lifecycle: CancellationToken,
     dispatcher: Arc<Dispatcher>,
@@ -813,9 +811,6 @@ impl AgentLoop {
     }
     fn on_event(self: &Arc<Self>, event: Arc<AgentEvent>) -> Result<()> {
         let mut slot = self.turn.lock().unwrap();
-        if event.sequence <= self.rebuilt.load(Ordering::Acquire) {
-            return Ok(());
-        }
         match &event.kind {
             EventKind::InputApplied(data) => {
                 let input = Applied::new(&event, data);
@@ -1246,7 +1241,6 @@ impl TypedPlugin for LoopPlugin {
                 binding,
                 history,
                 policy,
-                rebuilt: AtomicU64::new(0),
                 tasks: TaskTracker::new(),
                 lifecycle: ctx.cancellation_token(),
                 dispatcher: dispatcher.clone(),
@@ -1263,54 +1257,47 @@ impl TypedPlugin for LoopPlugin {
                 }))
             })?;
             let owner = service.clone();
-            let gate = Arc::new(tokio::sync::Mutex::new(()));
-            let rebuild = gate.lock().await;
-            let handler_gate = gate.clone();
-            dispatcher.subscribe(
-                ctx,
-                "Loop",
-                &[
-                    "input/applied",
-                    "input/consumed",
-                    "stop/interrupt",
-                    "turn/start",
-                    "turn/end",
-                    "step/model-start",
-                    "step/tool-use-start",
-                    "step/tool-use",
-                    "step/model-output-end",
-                    "step/tool-start",
-                    "step/tool-completed",
-                    "step/tool-result",
-                    "context/compact",
-                    "context/compaction",
-                ],
-                move |event| {
-                    let owner = owner.clone();
-                    let gate = handler_gate.clone();
-                    Box::pin(async move {
-                        let _ready = gate.lock().await;
-                        owner.on_event(event)
-                    })
-                },
-            )?;
-            let through = service.timeline.committed();
-            let events = service.timeline.local(..=through).await?;
-            service.rebuilt.store(
-                events.last().map_or(0, |event| event.sequence),
-                Ordering::Release,
-            );
-            {
-                let mut slot = service.turn.lock().unwrap();
-                service.rebuild(&mut slot, &events)?;
-                // A new Loop keeps only the bindings of the request it resumes.
-                service.binding.retain_only(
-                    slot.as_ref()
-                        .and_then(|turn| turn.request.as_ref())
-                        .map(|request| request.id.as_str()),
-                );
-            }
-            drop(rebuild);
+            dispatcher
+                .follow(
+                    ctx,
+                    "Loop",
+                    &[
+                        "input/applied",
+                        "input/consumed",
+                        "stop/interrupt",
+                        "turn/start",
+                        "turn/end",
+                        "step/model-start",
+                        "step/tool-use-start",
+                        "step/tool-use",
+                        "step/model-output-end",
+                        "step/tool-start",
+                        "step/tool-completed",
+                        "step/tool-result",
+                        "context/compact",
+                        "context/compaction",
+                    ],
+                    move |delivery| {
+                        let result = match delivery {
+                            Delivery::Replay(events) => {
+                                let mut slot = owner.turn.lock().unwrap();
+                                let rebuilt = owner.rebuild(&mut slot, &events);
+                                if rebuilt.is_ok() {
+                                    // A new Loop keeps only the bindings of the request it resumes.
+                                    owner.binding.retain_only(
+                                        slot.as_ref()
+                                            .and_then(|turn| turn.request.as_ref())
+                                            .map(|request| request.id.as_str()),
+                                    );
+                                }
+                                rebuilt
+                            }
+                            Delivery::Live(event) => owner.on_event(event),
+                        };
+                        Box::pin(async { result })
+                    },
+                )
+                .await?;
             ctx.provide_as(self.state.key().clone(), service.observable.clone())?;
             ctx.provide_as(self.service.key().clone(), service.clone())?;
             ctx.provide_as(self.loop_state.key().clone(), service as Arc<dyn LoopState>)?;
