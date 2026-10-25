@@ -41,7 +41,7 @@ with its existing owner; management never writes another owner's state.
 
 | Surface | Consumers and change |
 | --- | --- |
-| `managementMethods`, process, key `provider` | Local v3 Desktop/CLI and trusted process callers; §3 extends this existing named binding |
+| `managementMethods`, process, namespace `provider` | Local v3 Desktop/CLI and trusted process callers; §3 extends this existing namespace |
 | Existing `account`, `account.codex`, `account.grok` namespaces | Existing account operations; no new account method, event or managed host capability |
 | `ProviderConnectionResolver`, `ModelSelectionHost` | Provider implements catalog/route decisions through existing types; no new core port |
 | `auxiliaryModel.complete` | Existing caller-selected S4 contract, unchanged |

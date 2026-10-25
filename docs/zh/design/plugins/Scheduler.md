@@ -16,7 +16,7 @@ Scheduler 把任务配置存于 Settings 业务来源 schedule，把运行历史
 flowchart LR
   subgraph PROC["进程（控制节点）"]
     Sched["Scheduler：定时器、运行跟踪器、任务存储"]
-    MM["managementMethods key schedule"]
+    MM["managementMethods: namespace schedule"]
     Agents["Agents：sessions"]
     Rpc["Rpc 方法表"]
     Store["进程存储：pluginFiles，运行历史"]
@@ -32,14 +32,14 @@ flowchart LR
   Sched --> Agents
   Sched --> Store
   Sched --> Set
-  Sched --> MM
-  Rpc -->|"按名称收集 managementMethods"| MM
+  Sched -->|"注册 schedule"| MM
+  Rpc -->|"按调用读取"| MM
   Agents -->|"sessions 调用"| TL
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
   class Sched,MM,Tool new
 ```
 
-任务和窗口跨 Session，属于进程；提供工具属于 Session（[ADR 002](../../adr/002-plugin-scope.md) D1/D2）。进程部分声明现有 sessions、sessionPermissions、settings、pluginFiles。Agents 稳定目录提供 sessions，每次调用查找 index；index 重载使调用返回 reloading，不重载 Scheduler 或 Session（[S2 D1](../../../design/appserver/sessions-service.md#3-decisions)、[#35](https://github.com/arcships/dim/issues/35)）。Session 工具按已确认的绑定声明 scheduleJobs 依赖（§1.1）；未声明 ctx.use 不是原生服务的通用可选查找。C3 使核心独立于可选 row，不建立 ToolRegistry、Loop 或 Session 就绪对 Scheduler 的依赖。任务编辑走 Settings owner 写入和事件，不触发结构重载。
+任务和窗口跨 Session，属于进程；提供工具属于 Session（[ADR 002](../../adr/002-plugin-scope.md) D1/D2）。进程部分声明现有 sessions、sessionPermissions、settings、pluginFiles、managementMethods。Agents 稳定目录提供 sessions，每次调用查找 index；index 重载使调用返回 reloading，不重载 Scheduler 或 Session（[S2 D1](../../../design/appserver/sessions-service.md#3-decisions)、[#35](https://github.com/arcships/dim/issues/35)）。Session 工具按已确认的绑定声明 scheduleJobs 依赖（§1.1）；未声明 ctx.use 不是原生服务的通用可选查找。C3 使核心独立于可选 row，不建立 ToolRegistry、Loop 或 Session 就绪对 Scheduler 的依赖。任务编辑走 Settings owner 写入和事件，不触发结构重载。
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
@@ -64,7 +64,7 @@ flowchart LR
 | --- | --- |
 | Session 工具 | 普通 C4 row 注入 toolRegistry，在 apply 中以其声明和异步 execute 注册 schedule，注册不做 I/O；注册和提供者代际变化遵循当前 C4 绑定（§1.1）。 |
 | 进程包 / scheduleJobs | ServerConfig.session_typescript.rows 中不带组的行在共享运行时装载普通进程 owner。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）；具体包仍未实现。 |
-| 管理命名空间 | 进程行声明 managementMethods:schedule，在原行内绑定原生 ManagementMethods，复用按调用准入及 report/drain；Scheduler 仍须实现具体方法。 |
+| 管理命名空间 | 进程行注入 managementMethods，在 apply 中注册 schedule，注册使用原生按调用准入及 report/drain；Scheduler 仍须实现具体方法。 |
 | Settings | owner settings.read/update、settings.changed 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `scheduler/`；父目录缺失时在事务回调前返回 `io`。Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
 | Sessions | 既有信封 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}，lookup 返回 accepted/unknown，直接使用既有形状。 |
@@ -87,8 +87,8 @@ flowchart LR
 | `id` | `scheduler` | `scheduler-session` |
 | `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
 | `config` | `{}` | `{}` |
-| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles` | `scheduleJobs`、`toolRegistry` |
-| `provides` | `scheduleJobs: {call:"async"}`；`managementMethods:schedule: {describe:"async",call:"async"}` | `{}`；apply 把 `schedule` 注册到 `toolRegistry` |
+| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles`、`managementMethods` | `scheduleJobs`、`toolRegistry` |
+| `provides` | `scheduleJobs: {call:"async"}`；apply 把 `schedule` 注册到 `managementMethods` | `{}`；apply 把 `schedule` 注册到 `toolRegistry` |
 | `settings` | §7.1 完整的 schedule 来源及 schema | 无 |
 
 **加载器限制。** 在固定依赖的 rutis 版本修复
@@ -116,7 +116,7 @@ A.6 的 drain 同样依赖 [#267](https://github.com/arcships/dim/pull/267) 的�
 开始清理后，保留的 handler 使用[已确认功能绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
 的当前不可用提供者与重试合同，不固化其错误文本，也不假定具体的提供者重新接入路径。
 
-进程 describe 只返回 A.3 的六个字面方法：list/history 不修改状态并使用 report；
+进程行注册的声明只有 A.3 的六个字面方法：list/history 不修改状态并使用 report；
 其余四个修改方法使用 drain；全部 progress:false。结果与错误使用既有 MethodReply；
 工具把 A.2 回复放入 ToolResult.content 与 isError，不新增 App Server 方法。
 
@@ -345,7 +345,7 @@ sequenceDiagram
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
 | `schedule` | 注册到 `toolRegistry` 的工具（Session），风险 `persistent_configuration` | 模型管理任务 |
-| `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods`（进程，key `schedule`） | 运维方管理任务 |
+| `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods`（进程，命名空间 `schedule`） | 运维方管理任务 |
 | 运行结果投递 | 向保存方分支尝试一个 Steer，不补发（A.6） | Scheduler 自有通知；持久记录为 schedule.history |
 | CLI 入口 | 方法绑定后的独立客户端工作 | 本文不声称已实现命令 |
 | `sessions` | 依赖（进程） | 带节点、模型和启动方上限 policy 的非交互运行 Session；input、history、lookup、stop、withdraw、delete |
@@ -389,7 +389,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 | §4.9 只有后续决定使用的事实进 Timeline | 不写 Scheduler Timeline 事件，任务在 Settings、运行在进程存储。 |
 | §1 Capability 与 App Server 边界 | 进程插件拥有任务和运行，Session Capability 提供工具；通过 pluginFiles 存储，不设 App Server 业务模块。 |
 | ADR 002 D1 作用域跟随状态所有者 | 任务跨越 Session（进程部分）；工具属于 Session（Session 部分）。 |
-| ADR 002 D2 不设接线模块 | 现有 Rpc/ToolRegistry 消费业务方法/工具，不设接线插件或通知总线。#234 已提供原行管理投影；Scheduler 自己的方法尚未实现。 |
+| ADR 002 D2 不设接线模块 | 现有 Rpc/ToolRegistry 消费业务方法/工具，不设接线插件或通知总线。进程行把其命名空间注册到 `managementMethods`；Scheduler 自己的方法尚未实现。 |
 | ADR 002 D3 依赖跟随作用域 | 稳定 sessions 隔离 index 重载；C3 隔离核心与可选 row；可选工具行按 §1.1 的可用性约束声明 owner 依赖。 |
 | ADR 002 D4 结构性配置与业务配置分离 | 任务和运行上限是 Settings 业务来源 `schedule` 中使用时读取的业务数据；没有结构性变化。 |
 | ADR 002 D5 语言中立 | 直接使用既有服务名称/信封，本文规定的合同与绑定限制明确区分（§1.1、附录 G）。 |
@@ -448,7 +448,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 ### A.3 管理方法
 
-`managementMethods` key `schedule`：`describe(): async -> MethodDecl[]` 列出下列方法（除 `list` 和 `history` 外均为 `mutating`）；`call(MethodCall): async -> MethodReply` 分派它们。参数和结果是 JSON 对象；错误为附录 C 中的代码。
+命名空间 `schedule`，注册到 `managementMethods`：其声明列出下列方法（除 `list` 和 `history` 外均为 `mutating`）；其 `call(MethodCall, cancelled, progress): async -> MethodReply` 分派它们。参数和结果是 JSON 对象；错误为附录 C 中的代码。
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
@@ -459,7 +459,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | `schedule.run_now` | `{job_id}` | `run_id` 或跳过原因 |
 | `schedule.history` | `{job_id, limit?}` | 运行列表，最新在前 |
 
-进程行的 managementMethods:schedule（§1.3）复用现有准入：list/history 为 report，变更为 drain，使已接受工作在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method；这不表示 TS schedule 命名空间已实现。
+进程行的 schedule 命名空间（§1.3）复用现有准入：list/history 为 report，变更为 drain，使已接受工作在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method；这不表示 TS schedule 命名空间已实现。
 
 ### A.4 调度格式
 
@@ -727,7 +727,7 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 | 中立 | Rust |
 | --- | --- |
 | 注册到 toolRegistry 的工具 schedule | SchedulerSession 在 apply 中经 `Keyed<ToolRegistry>` 调用 `tools.register(ctx, ToolContribution {definition, handler})`；execute(ToolCall,cancel) |
-| managementMethods:schedule | 既有原行 TS 投影到 Rust ManagementMethods，由 Rpc 按调用查找而不依赖 |
+| 注册到 `managementMethods` 的命名空间 `schedule` | 由 Rpc 按调用查找而不依赖 |
 | sessions | 公开命名服务 host_key("sessions")；原生请求类型和 AgentIndex::acquire 是私有实现，不是外部 crate API |
 | scheduleJobs | 本文规定的 Scheduler 进程服务；依赖绑定见 §1.1，具体包未实现 |
 | 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；使用 A.7 已确定的内部 v1 格式 |

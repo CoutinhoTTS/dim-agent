@@ -681,7 +681,14 @@ async fn run_connection(
                                 .instance
                                 .set(instance.clone())
                                 .expect("first handshake");
-                            Ok((instance, rpc.owners.listed(&rpc.ctx)))
+                            Ok((
+                                instance,
+                                rpc.management
+                                    .listed()
+                                    .into_iter()
+                                    .map(|decl| decl.name)
+                                    .collect::<Vec<_>>(),
+                            ))
                         })
                         .and_then(|instance| instance);
                     let (instance_id, methods) = match instance {

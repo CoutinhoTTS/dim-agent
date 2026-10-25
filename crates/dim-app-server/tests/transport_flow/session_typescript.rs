@@ -219,8 +219,9 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
             json!({"sessionId":created["result"]["sessionId"],"request":request}),
         )
         .await;
+    // Pending, the row never registers its namespace.
     assert_eq!(
-        missing["error"]["data"]["appError"], "service_reloading",
+        missing["error"]["data"]["appError"], "unknown_method",
         "{missing}"
     );
     drop(client);
@@ -931,9 +932,12 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
         // The optional observer can still be publishing after native creation.
         let methods = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                match session.session_named_service::<SessionMethods>("session.observer") {
-                    Ok(methods) => break methods,
-                    Err(dim_agent_runtime::AgentError::Reloading(_)) => {
+                match session
+                    .session_service::<SessionMethods>()
+                    .map(|table| table.provider("session.observer.status"))
+                {
+                    Ok(Some(methods)) => break methods,
+                    Ok(None) | Err(dim_agent_runtime::AgentError::Reloading(_)) => {
                         tokio::task::yield_now().await;
                     }
                     Err(error) => panic!("observer methods: {error}"),
@@ -1030,8 +1034,8 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             .unwrap()
             .sequence("main")
             .unwrap();
-        // Retries only `service_reloading`, as `when_served` does, and names
-        // the Session's rows and their states if the row never serves.
+        // Retries as `when_served` does, and names the Session's rows and
+        // their states if the row never serves.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let reply = loop {
             let reply = client
@@ -1040,7 +1044,7 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
                     json!({"sessionId":id,"sequence":sequence}),
                 )
                 .await;
-            if reply["error"]["data"]["appError"] != "service_reloading" {
+            if !waiting(&reply) {
                 break reply;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1206,14 +1210,14 @@ pub(super) fn setup() -> (
     (builder, recv, release)
 }
 
-/// The reply of `method` once the optional row that serves it is Active: a
-/// Session is published without waiting for its optional rows, and a row
-/// still loading answers `service_reloading` without running the call.
+/// The reply of `method` once the optional row that serves it has registered
+/// it: a Session is published without waiting for its optional rows, and a
+/// namespace is `unknown_method` until its row registers it.
 pub(super) async fn when_served(client: &mut Client, method: &str, params: Value) -> Value {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let reply = client.rpc(method, params.clone()).await;
-            if reply["error"]["data"]["appError"] != "service_reloading" {
+            if !waiting(&reply) {
                 return reply;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1221,6 +1225,15 @@ pub(super) async fn when_served(client: &mut Client, method: &str, params: Value
     })
     .await
     .unwrap_or_else(|_| panic!("{method} is served"))
+}
+
+/// Whether `reply` says the row that serves its method is not serving yet.
+pub(super) fn waiting(reply: &Value) -> bool {
+    ["unknown_method", "service_reloading"].contains(
+        &reply["error"]["data"]["appError"]
+            .as_str()
+            .unwrap_or_default(),
+    )
 }
 
 pub(super) async fn new_session(client: &mut Client, tools: Value) -> String {
@@ -1402,7 +1415,9 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
     );
 
     let retained = session
-        .session_named_service::<SessionMethods>("session.typescript")
+        .session_service::<SessionMethods>()
+        .unwrap()
+        .provider("session.typescript.report")
         .unwrap();
     let report = client
         .send("session.typescript.report", json!({"sessionId":first}))
@@ -1423,7 +1438,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
         "operation_interrupted"
     );
     let drained = client.response(drain).await;
-    assert_eq!(drained["result"]["cancelled"], true);
+    assert_eq!(drained["result"]["cancelled"], true, "{drained}");
     assert_eq!(drained["result"]["alive"], true);
     assert_eq!(
         retained
@@ -1649,8 +1664,11 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
     let mut parts = fixture();
     let mut gate = parts.rows.remove(0);
     let entry = PathBuf::from(gate["name"].as_str().unwrap());
+    // The disabled row makes `lateGate` a Session name that nothing provides
+    // until the test does.
     gate["id"] = json!("disabled-gate");
     gate["disabled"] = json!(true);
+    gate["provides"] = json!({"lateGate":{"declaration":"sync","execute":"async"}});
     parts.rows.push(json!({"id":"typescript", "name":entry.with_file_name("session-late.ts"), "group":"session", "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/session-late.json")).unwrap()}));
     parts.rows.push(gate);
     let (mut builder, mut requests, _) = setup();
@@ -1689,7 +1707,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
         client
             .rpc("session.late.status", json!({"sessionId":session}))
             .await["error"]["data"]["appError"],
-        "service_reloading"
+        "unknown_method"
     );
     submit(&mut client, &session, r#"tool:echo {"text":"before"}"#).await;
     assert!(!requests.recv().await.unwrap().contains(&"late".into()));
@@ -1701,7 +1719,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
             .any(|part| part.name.ends_with("runtime/fixtures/session-part.ts"))
     );
     ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
-        rutis_bridge::session::host_key_in("sessionMethods:session.typescript", session_instance),
+        rutis_bridge::session::host_key_in("lateGate", session_instance),
         Arc::new(GateValue),
     )
     .unwrap();
@@ -1793,13 +1811,14 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     server.shutdown();
     server.join().await.unwrap();
 
+    // Refused declarations fail the row, and a row whose provides differs
+    // from its module's is Unresolved: neither registers its namespace.
     for bad_methods in [json!(true), json!("unsupported"), Value::Null] {
         let mut parts = fixture();
         if !bad_methods.is_null() {
             parts.rows[0]["config"] = json!({"badMethods":bad_methods});
         } else {
-            parts.rows[0]["provides"]["sessionMethods:session.ghost"] =
-                json!({"describe":"async", "call":"async"});
+            parts.rows[0]["provides"]["ghost"] = json!({"read":"sync"});
         }
         let (mut builder, mut requests, _) = setup();
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
@@ -1851,7 +1870,7 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
             client
                 .rpc("session.typescript.status", json!({"sessionId":session}))
                 .await["error"]["data"]["appError"],
-            "service_unavailable"
+            "unknown_method"
         );
         submit(&mut client, &session, r#"tool:echo {"text":"native"}"#).await;
         assert!(!requests.recv().await.unwrap().contains(&"ts_echo".into()));
@@ -1859,51 +1878,74 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         server.join().await.unwrap();
     }
 
-    for (change, expected) in [
-        (
-            json!({"sessionMethods:session.create":{"describe":"async","call":"async"}}),
-            "invalid Session namespace",
-        ),
-        (
-            json!({"sessionMethods:session.delete":{"describe":"async","call":"async"}}),
-            "invalid Session namespace",
-        ),
-        (
-            json!({"sessionMethods:session.fork":{"describe":"async","call":"async"}}),
-            "invalid Session namespace",
-        ),
-        (
-            json!({"sessionMethods:session.input":{"describe":"async","call":"async"}}),
-            "duplicate Session method namespace",
-        ),
-        (
-            json!({"sessionMethods:shell":{"describe":"async","call":"async"}}),
-            "duplicate Session method namespace",
-        ),
+    // A foreign row cannot take a built-in method's namespace or one a
+    // native part registered: its registration is refused, which fails it.
+    for (namespace, expected) in [
+        ("session.create", "invalid Session namespace"),
+        ("session.delete", "invalid Session namespace"),
+        ("session.fork", "invalid Session namespace"),
+        ("session.input", "is registered already"),
     ] {
         let mut parts = fixture();
-        parts.rows[0]["disabled"] = json!(true);
-        parts.rows[0]["provides"] = change;
+        parts.rows[0]["config"] = json!({"namespace":namespace});
         let (mut builder, _, _) = setup();
-        // A disabled foreign row must not claim the native ShellInput owner.
-        dim_agent_capabilities::shell_input::install(&mut builder);
-        let error = serve(
+        let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
+        builder.session_part(move |names| ControlledGate::part(names, send.clone()));
+        let server = serve(
             builder,
             ServerConfig {
+                unix_path: Some(std::env::temp_dir().join(format!(
+                    "dm-ts-{}/server.sock",
+                    &uuid::Uuid::new_v4().simple().to_string()[..8]
+                ))),
                 session_typescript: Some(parts),
                 ..Default::default()
             },
         )
         .await
-        .err()
-        .expect("invalid structural input must fail");
-        assert!(error.to_string().contains(expected), "{error}");
+        .unwrap();
+        let mut client = Client::new_version(&server, false, 3).await;
+        new_session(&mut client, json!(["echo"])).await;
+        let (session_instance, _, loader, _) = controls.recv().await.unwrap();
+        let view = loader
+            .entries()
+            .into_iter()
+            .find(|entry| {
+                entry.id == "typescript"
+                    && entry.instance.as_ref().is_some_and(|instance| {
+                        instance.chain.iter().any(|(_, id)| *id == session_instance)
+                    })
+            })
+            .unwrap()
+            .view
+            .unwrap();
+        let mut state = view.watch();
+        let failed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = state.borrow_and_update().clone();
+                if snapshot.state == rutis::FiberState::Failed {
+                    break snapshot;
+                }
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            failed
+                .error
+                .as_ref()
+                .is_some_and(|error| error.to_string().contains(expected)),
+            "{namespace}: {failed:?}"
+        );
+        server.shutdown();
+        server.join().await.unwrap();
     }
 
     let mut parts = fixture();
     let mut repeated = parts.rows[0].clone();
     repeated["id"] = json!("different-row");
-    repeated["provides"] = json!({});
+    repeated["provides"] = json!({"other":{"read":"sync"}});
     parts.rows.push(repeated);
     let (builder, _, _) = setup();
     let error = serve(
@@ -1923,11 +1965,12 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
 }
 
 /// #207: Session creation does not wait for TypeScript parts, so a published
-/// Session can hold a Failed part. Its namespace has no provider until the
-/// part is fixed, so it answers the non-retryable `service_unavailable`.
+/// Session can hold a Failed part. A part that failed before registering its
+/// namespace never held it, so the namespace answers the non-retryable
+/// `unknown_method`, not `service_reloading`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_session_typescript_failed_part_namespace_is_unavailable() {
+async fn node_session_typescript_failed_part_namespace_stays_unknown() {
     let mut parts = fixture();
     parts.rows[0]["config"] = json!({"badMethods":true});
     let (mut builder, _requests, _) = setup();
@@ -1983,7 +2026,7 @@ async fn node_session_typescript_failed_part_namespace_is_unavailable() {
     }
     assert_eq!(
         replies,
-        vec![(json!(-32000), json!("service_unavailable")); 3],
+        vec![(json!(-32601), json!("unknown_method")); 3],
         "part once session.create replied {published:?}, now {:?}",
         part().status
     );
@@ -2159,80 +2202,6 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
         r#"tool:echo {"text":"native survives row reload"}"#,
     )
     .await;
-    server.shutdown();
-    server.join().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_session_typescript_unload_cancels_a_stalled_describe() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut parts = fixture();
-    parts.rows[0]["config"] =
-        json!({"hangDescribe":{"host":"127.0.0.1","port":listener.local_addr().unwrap().port()}});
-    let (mut builder, mut requests, _) = setup();
-    let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder.session_part(move |names| ControlledGate::part(names, send.clone()));
-    let server = serve(
-        builder,
-        ServerConfig {
-            unix_path: Some(std::env::temp_dir().join(format!(
-                "dm-ts-{}/server.sock",
-                &uuid::Uuid::new_v4().simple().to_string()[..8]
-            ))),
-            session_typescript: Some(parts),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
-    let creating = client
-        .send("session.create", create(json!(["ts_echo", "echo"])))
-        .await;
-    let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-        .await
-        .unwrap()
-        .unwrap();
-    let (session_instance, _, loader, _) = controls.recv().await.unwrap();
-    let view = loader
-        .entries()
-        .into_iter()
-        .find(|entry| {
-            entry.id == "typescript"
-                && entry.instance.as_ref().is_some_and(|instance| {
-                    instance.chain.iter().any(|(_, id)| *id == session_instance)
-                })
-        })
-        .unwrap()
-        .view
-        .unwrap();
-    assert_eq!(view.state().state, rutis::FiberState::Loading);
-    tokio::time::timeout(Duration::from_secs(5), view.dispose())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::io::AsyncReadExt::read(&mut socket, &mut [0])
-        )
-        .await
-        .unwrap()
-        .unwrap(),
-        0,
-        "foreign row cleanup must close its socket"
-    );
-    let created = client.response(creating).await;
-    assert_ok(&created);
-    let session_id = created["result"]["sessionId"].as_str().unwrap();
-    submit(
-        &mut client,
-        session_id,
-        r#"tool:echo {"text":"native after cancelled binding"}"#,
-    )
-    .await;
-    assert!(!requests.recv().await.unwrap().contains(&"ts_echo".into()));
     server.shutdown();
     server.join().await.unwrap();
 }

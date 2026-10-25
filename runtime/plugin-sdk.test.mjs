@@ -40,7 +40,7 @@ test('packed plugin service types compile the author guide and enforce the publi
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolRegistry, ToolExecute, ToolResult, SessionMethodsContribution, ManagementMethodsContribution, SessionConfig, SessionBroadcast, BranchEvent, Services, AgentErrorThrown, MethodReply } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolRegistry, ToolExecute, ToolResult, SessionMethods, SessionMethodHandler, ManagementMethods, MethodHandler, MethodDeclaration, SessionConfig, SessionBroadcast, BranchEvent, Services, AgentErrorThrown, MethodReply } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const permissions: SessionPermissions;
@@ -50,10 +50,15 @@ declare const auxiliary: AuxiliaryModel;
 declare const files: FileScope;
 declare const tools: ToolRegistry;
 declare const execute: ToolExecute;
-declare const methods: SessionMethodsContribution;
-declare const management: ManagementMethodsContribution;
-void management.describe();
-void management.call({ callId: 'call', method: 'example.status', params: [1, true] }, Promise.resolve(), () => {});
+declare const methods: SessionMethods;
+declare const management: ManagementMethods;
+declare const handler: MethodHandler;
+declare const sessionHandler: SessionMethodHandler;
+const declarations: MethodDeclaration[] = [{ name: 'example.status', mutating: false, interruption: 'report', progress: false }];
+void management.register('example', declarations, handler);
+void handler({ callId: 'call', method: 'example.status', params: [1, true] }, Promise.resolve(), () => {});
+// @ts-expect-error a declaration states its interruption and progress.
+void management.register('example', [{ name: 'example.status', mutating: false }], handler);
 const at = { sessionId: 'session', branchId: 'main' };
 const permission: PermissionState = await permissions.permission(at);
 const permissionVersion: number | bigint = permission.version;
@@ -148,8 +153,11 @@ void execute({
     cwd: '/workspace', model: { providerId: 'test', modelId: 'model' },
     systemPrompt: '', tools: ['example_echo'], collaborationRole: 'leader' },
 }, Promise.resolve());
-void methods.call({ callId: 'call', method: 'session.example.echo', params: { sessionId: 'session' } },
+void methods.register('session.example', [{ name: 'session.example.echo', mutating: false, interruption: 'drain', progress: true }], sessionHandler);
+void sessionHandler({ callId: 'call', method: 'session.example.echo', params: { sessionId: 'session' } },
   Promise.resolve(), () => {});
+// @ts-expect-error a Session method call names its Session.
+void sessionHandler({ callId: 'call', method: 'session.example.echo', params: {} }, Promise.resolve(), () => {});
 const result: ToolResult = { content: [{ type: 'text', text: 'handle: owned-id' }],
   structuredContent: { handle: 'owned-id' }, backgroundTask: { taskId: 'task', wakePolicy: 'manual' },
   blobRefs: [{ blobId: 'blob', sessionId: 'session', kind: 'text', path: '/files/result' }],
@@ -163,7 +171,7 @@ void tools.register({ name: 'example_echo', description: '', source: 'extension'
 // @ts-expect-error registered tools declare a Permission risk.
 void tools.register({ name: 'example_echo', description: '', source: 'extension', inputSchema: { type: 'object' } }, execute);
 // @ts-expect-error C4 does not implement a handoff reply.
-const handoff: Awaited<ReturnType<SessionMethodsContribution['call']>> = { kind: 'handedOff' };
+const handoff: Awaited<ReturnType<SessionMethodHandler>> = { kind: 'handedOff' };
 const record: SessionBroadcast = { kind: 'event', branchId: at.branchId, event: {
   id: 'event', sequence: 1, create_at: 1, type: 'input', name: 'applied', data: {} } };
 void record;

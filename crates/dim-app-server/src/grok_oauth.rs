@@ -71,14 +71,14 @@ pub(crate) fn production() -> GrokOAuthConfig {
     }
 }
 impl TypedPlugin for GrokOAuthPlugin {
-    type Deps = (Keyed<FileStorage>,);
+    type Deps = (Keyed<FileStorage>, Keyed<crate::methods::ManagementMethods>);
     fn name(&self) -> &str {
         "GrokOAuth"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(files),): Self::Deps,
+        (Keyed(files), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Service::new(
@@ -102,7 +102,7 @@ impl TypedPlugin for GrokOAuthPlugin {
                 return Err(error);
             }
             let service = Arc::new(GrokOAuthService(service));
-            management::provide(ctx, service.clone())?;
+            management::provide(ctx, &methods, service.clone())?;
             ctx.provide_as(TypeKey::of::<GrokOAuthService>(), service)?;
             Ok(Effect::Done)
         })

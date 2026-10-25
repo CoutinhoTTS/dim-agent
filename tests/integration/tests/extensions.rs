@@ -648,66 +648,6 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
     agent.close().await.unwrap();
 }
 
-/// A Session service provided once per name, as `sessionMethods` is once per
-/// namespace.
-struct Named(&'static str);
-impl SessionService for Named {}
-impl PublicService for Named {}
-struct NamedProvider(rutis::InstanceId);
-impl TypedPlugin for NamedProvider {
-    type Deps = ();
-    fn name(&self) -> &str {
-        "test.named"
-    }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            for name in ["one", "two"] {
-                ctx.provide_as(
-                    rutis::DepKey::<Named>::dynamic(name)
-                        .instance(self.0)
-                        .key()
-                        .clone(),
-                    std::sync::Arc::new(Named(name)),
-                )?;
-            }
-            Ok(rutis::Effect::Done)
-        })
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn session_facade_reads_a_named_session_service_by_name() {
-    let mut b = builder();
-    b.session_part(|names| names.part(NamedProvider(names.instance(SESSION_GROUP)?)));
-    let agent = b.build();
-    let session = agent
-        .create_session(SessionConfig::default())
-        .await
-        .unwrap();
-    for name in ["one", "two"] {
-        assert_eq!(
-            session.session_named_service::<Named>(name).unwrap().0,
-            name
-        );
-    }
-    // A name nobody provides reads as reloading; telling an absent name from
-    // a reloading provider is the caller's (methods contract §9.1).
-    assert!(matches!(
-        session.session_named_service::<Named>("three"),
-        Err(AgentError::Reloading(_))
-    ));
-    session.close().await.unwrap();
-    assert!(matches!(
-        session.session_named_service::<Named>("one"),
-        Err(AgentError::Closed(_))
-    ));
-    agent.close().await.unwrap();
-}
-
 struct AssemblyAnchor(tokio::sync::mpsc::UnboundedSender<rutis::Ctx>);
 impl TypedPlugin for AssemblyAnchor {
     type Deps = ();

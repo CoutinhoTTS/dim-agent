@@ -497,9 +497,9 @@ runtime package and anchor paths, an optional Python runtime (`python`: an inter
 rows. Each row declares its group: `"group": "session"` or `"branch"`, or none for a process owner;
 the host places it there. The runtimes' standard error reaches the process log; their standard
 output is discarded.
-Tool names and Session method
-namespaces come from each row's existing `RowSchema.provides` dictionary; share one declaration
-source between the host row and TypeScript module. See the [binding contract](../../docs/design/session-typescript.md)
+A Session row registers its tools
+and Session method namespaces from its own `apply`, with the `toolRegistry` and `sessionMethods`
+services it injects; its `RowSchema.provides` lists only the services it provides by name. See the [binding contract](../../docs/design/session-typescript.md)
 and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
 
 The `dim-app-server` binary builds this configuration from `--session-rows FILE` with the
@@ -519,9 +519,9 @@ dim-app-server --product-home /absolute/product-home --home /absolute/product-ho
 Rows that declare Settings sources need `--product-home` or `--home`. Without the flag, their
 namespaces answer `unknown_method` and are absent from `session.methods`.
 
-Process rows can provide `managementMethods:<namespace>` with asynchronous `describe`
-and `call`. Their original row projects the foreign service to native management
-admission, progress and cancellation; Rpc still looks up each provider per call.
+Process rows inject `managementMethods` and register their namespaces from their own
+`apply`, with native management admission, progress and cancellation; Rpc reads the
+management table per call.
 Process owners survive Session closure. Optional Pending/Failed rows affect only
 their own namespaces, while required host infrastructure and the shared runtime
 declaration gate retain the startup deadline. Module top levels must do no business

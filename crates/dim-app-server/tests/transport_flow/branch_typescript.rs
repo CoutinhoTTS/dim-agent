@@ -292,7 +292,7 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
         "name": root.join("runtime/fixtures/tree-create.ts"),
         "group": "session",
         "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/tree-create.json")).unwrap(),
-        "inject": ["treeCommands"],
+        "inject": ["treeCommands", "sessionMethods"],
         "config": {},
     })];
     let plugin_hold = hold.clone();

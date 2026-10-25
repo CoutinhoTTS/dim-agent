@@ -261,6 +261,11 @@ impl Env {
         )
         .unwrap();
         let root = Ctx::root().unwrap();
+        // The management table the process providers register with.
+        root.plugin(
+            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+                .unwrap(),
+        );
         let (publication, _) = mcp_host::Host::start(&root).await;
         let views = vec![
             root.plugin(rutis::Typed::new(

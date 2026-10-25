@@ -95,8 +95,12 @@ pub struct SelectionResult {
     pub selection: Option<crate::provider::ProviderSelection>,
 }
 
-pub(super) fn provide(ctx: &Ctx, provider: Arc<ProviderService>) -> Result<(), CordisError> {
-    ManagementMethods::provide(
+pub(super) fn provide(
+    ctx: &Ctx,
+    methods: &ManagementMethods,
+    provider: Arc<ProviderService>,
+) -> Result<(), CordisError> {
+    methods.register(
         ctx,
         "provider",
         [

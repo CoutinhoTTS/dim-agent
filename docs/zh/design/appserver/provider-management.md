@@ -37,7 +37,7 @@ Provider 拥有进程配置、目录、覆盖、偏好、校验、安全投影�
 
 | 表面 | 消费者与改动 |
 | --- | --- |
-| `managementMethods`，process，key `provider` | 本地 v3 Desktop/CLI 和受信任进程调用者；§3 沿既有具名绑定扩展 |
+| `managementMethods`，process，命名空间 `provider` | 本地 v3 Desktop/CLI 和受信任进程调用者；§3 沿既有命名空间扩展 |
 | `account`、`account.codex`、`account.grok` | 复用账号调用，不新增账号方法、事件或 managed host capability |
 | `ProviderConnectionResolver`、`ModelSelectionHost` | Provider 沿现有类型处理目录和路由，不增加 core 端口 |
 | `auxiliaryModel.complete` | S4 由调用者显式选模型的合同不变 |

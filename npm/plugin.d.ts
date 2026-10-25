@@ -294,13 +294,17 @@ export interface MethodError { code: string; message: string }
 export type MethodReply = { kind: 'value'; value?: JsonValue } | MethodError;
 export type SessionMethodDeclaration = MethodDeclaration;
 export type SessionMethodReply = MethodReply;
-/** Provide as `managementMethods:<namespace>` from the original process row. */
-export interface ManagementMethodsContribution {
-  describe(): Promise<MethodDeclaration[]>;
-  call(call: MethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void): Promise<MethodReply>;
+/** How a registered management namespace serves one call. */
+export type MethodHandler = (call: MethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void) => Promise<MethodReply>;
+/** How a registered Session namespace serves one call. */
+export type SessionMethodHandler = (call: SessionMethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void) => Promise<SessionMethodReply>;
+/** Process service `managementMethods` (protected-local v3 only): a process row
+ * registers each of its namespaces, which stays registered until the row unloads. */
+export interface ManagementMethods {
+  register(namespace: string, declarations: MethodDeclaration[], call: MethodHandler): Promise<void>;
 }
-/** Provide as `sessionMethods:<namespace>`; both methods are asynchronous. */
-export interface SessionMethodsContribution {
-  describe(): Promise<SessionMethodDeclaration[]>;
-  call(call: SessionMethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void): Promise<SessionMethodReply>;
+/** Session service `sessionMethods`: a Session row registers each of its
+ * namespaces, which stays registered until the row unloads. */
+export interface SessionMethods {
+  register(namespace: string, declarations: SessionMethodDeclaration[], call: SessionMethodHandler): Promise<void>;
 }

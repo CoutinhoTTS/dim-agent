@@ -11,7 +11,7 @@ use dim_agent_capabilities::{
     adapters::MockTools,
     defaults,
     file_storage::FileStoragePlugin,
-    methods::{RpcError, SessionMethods},
+    methods::{MethodProvider, RpcError, SessionMethods},
     workspace_tools::{self, WorkspaceToolsConfig},
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
@@ -424,14 +424,16 @@ impl Contract {
         let agent = builder.build_in(&root);
         Self { root, store, agent }
     }
-    async fn session(&self) -> (String, Arc<SessionMethods>) {
+    async fn session(&self) -> (String, Arc<MethodProvider>) {
         let session = self
             .agent
             .create_session(SessionConfig::default())
             .await
             .unwrap();
         let methods = session
-            .session_named_service::<SessionMethods>("attachment")
+            .session_service::<SessionMethods>()
+            .unwrap()
+            .provider("attachment.put")
             .unwrap();
         (session.id().to_owned(), methods)
     }
@@ -442,7 +444,7 @@ impl Contract {
 }
 /// One `attachment.put` admitted under the calling load's token `stopping`.
 async fn put(
-    methods: &SessionMethods,
+    methods: &MethodProvider,
     session: &str,
     stopping: CancellationToken,
 ) -> Result<Value, RpcError> {
@@ -528,8 +530,8 @@ async fn an_inactive_node_storage_answers_node_unavailable() {
             .agent
             .get_session(&sid)
             .unwrap()
-            .session_named_service::<SessionMethods>("attachment")
-            .is_ok()
+            .session_service::<SessionMethods>()
+            .is_ok_and(|methods| methods.provider("attachment.put").is_some())
     );
     contract.close().await;
 }

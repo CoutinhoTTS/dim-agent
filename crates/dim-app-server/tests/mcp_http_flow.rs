@@ -94,6 +94,10 @@ impl Fixture {
                     .typed(&dim_app_server::catalog())
                     .unwrap(),
             ),
+            root.plugin(
+                dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+                    .unwrap(),
+            ),
             root.plugin(Typed::new(McpPlugin::new(0))),
             root.plugin(Typed::new(Capture(capture.clone()))),
         ];

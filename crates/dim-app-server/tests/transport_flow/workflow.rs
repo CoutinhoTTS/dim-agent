@@ -94,8 +94,6 @@ fn probe_rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
             .unwrap()
             .join("fixtures/workflow-package.ts")
     );
-    parts.rows[0]["provides"]["managementMethods:workflowprobe"] =
-        json!({"describe":"async","call":"async"});
     parts
 }
 
@@ -1174,12 +1172,14 @@ async fn node_workflow_rejects_invalid_inner_records_without_changing_bytes() {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let reply = client.rpc("workflow.status", json!({})).await;
-                let code = &reply["error"]["data"]["appError"];
-                if code == "service_reloading" {
+                if session_typescript::waiting(&reply) {
                     tokio::task::yield_now().await;
                     continue;
                 }
-                assert_eq!(code, "invalid_data", "{reply}");
+                assert_eq!(
+                    reply["error"]["data"]["appError"], "invalid_data",
+                    "{reply}"
+                );
                 break;
             }
         })

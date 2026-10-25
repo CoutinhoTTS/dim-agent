@@ -1,23 +1,22 @@
 import { createConnection } from 'node:net'
 import { once } from 'node:events'
 import { definePlugin } from '@arcships/rutis'
-import type { PluginFiles, SessionMethodsContribution } from '../../npm/plugin.js'
+import type { PluginFiles, SessionMethods } from '../../npm/plugin.js'
 
 export default definePlugin({
   name: 'PublicFilesSessionFixture',
-  inject: ['pluginFiles'],
-  provides: { 'sessionMethods:session.files': { describe: 'async', call: 'async' } },
+  inject: ['pluginFiles', 'sessionMethods'],
+  provides: {},
   async apply(ctx, config: { gate: { host: string; port: number } }) {
     const scope = await ctx.use<PluginFiles>('pluginFiles').open()
     ctx.effect(() => scope.close())
-    const methods: SessionMethodsContribution = {
-      async describe() {
-        return ['read', 'write', 'hold'].map(name => ({
-          name: `session.files.${name}`, mutating: name !== 'read',
-          interruption: 'drain', progress: false,
-        }))
-      },
-      async call(call) {
+    await ctx.use<SessionMethods>('sessionMethods').register(
+      'session.files',
+      ['read', 'write', 'hold'].map(name => ({
+        name: `session.files.${name}`, mutating: name !== 'read',
+        interruption: 'drain', progress: false,
+      })),
+      async call => {
         if (call.method === 'session.files.hold') {
           let started!: () => void
           const connected = new Promise<void>(resolve => { started = resolve })
@@ -40,7 +39,6 @@ export default definePlugin({
             : await file.read())
         return { kind: 'value', value: result }
       },
-    }
-    ctx.provide('sessionMethods:session.files', methods)
+    )
   },
 })

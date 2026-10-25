@@ -6,7 +6,7 @@ use crate::{
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::{Branch, Names};
+use dim_agent_runtime::Branch;
 use dim_agent_types::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde_json::{Value, json};
@@ -15,30 +15,20 @@ use tokio_util::sync::CancellationToken;
 
 pub const NAMESPACE: &str = "session.context";
 
-pub struct ContextMethodsPlugin {
-    methods: rutis::DepKey<SessionMethods>,
-}
-impl ContextMethodsPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
-        Ok(Self {
-            methods: SessionMethods::key(names, NAMESPACE)?,
-        })
-    }
-}
+pub struct ContextMethodsPlugin;
 impl TypedPlugin for ContextMethodsPlugin {
-    type Deps = Keyed<TreeCommands>;
+    type Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>);
     fn name(&self) -> &str {
         "ContextMethods"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        Keyed(tree): Self::Deps,
+        (Keyed(tree), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            SessionMethods::provide_at(
+            methods.register(
                 ctx,
-                &self.methods,
                 NAMESPACE,
                 vec![
                     MethodDecl::new("session.context.compact", true, Interruption::Report),
