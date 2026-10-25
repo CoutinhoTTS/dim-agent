@@ -15,7 +15,7 @@ owners rows without a group.
 
 ## Scope and ownership
 
-A TypeScript Session part supplies named tools and Session methods and observes its Session's
+A TypeScript Session part registers tools, supplies Session methods and observes its Session's
 broadcast. One Node process serves all such parts; loader instances isolate their services.
 The Session owns the part's state and lifetime. Native execution remains available when a part
 is absent, Pending, failed or reloading. Instance labels are namespacing, not a sandbox.
@@ -24,8 +24,8 @@ The existing owners implement their language bindings:
 
 | Owner | Responsibility |
 | --- | --- |
-| App Server assembly | Validate structural input, register names derived from declarations, append ordinary rows inside `SESSION_GROUP`, select the existing runtime resolver. |
-| ToolRegistry | Read a named foreign declaration when it attaches a provider generation and retain that generation in its versioned contributed set (A.5, #241). |
+| App Server assembly | Validate structural input, register method namespaces derived from declarations, serve `toolRegistry` to Session rows, append ordinary rows inside `SESSION_GROUP`, select the existing runtime resolver. |
+| ToolRegistry | Accept a row's `register(declaration, execute)`, decode the declaration once and keep the registration, owned by the calling row, in its versioned contributed set (A.5, #241). |
 | C1 `SessionMethods` | Bind a foreign handler to the existing generation-owned admission, progress, interruption and drain. |
 | Session broadcast | Encode its own records for the native rutis event path. |
 | TypeScript part | Own its business state, work, effects, errors and cancellation settlement. |
@@ -54,7 +54,7 @@ Each row retains loader's `id`, `name` (module entry), `config`, `disabled`, `in
 semantics. It adds `group`: `"session"` for a Session part, `"branch"` for a branch part, absent for a
 process owner. The host places the row in that group and does not pass `group` to the loader, whose
 own `group` field marks a row that is a group. The row metadata is `provides`, with **exactly the
-existing `rutis_bridge::runtime::RowSchema.provides` shape**, rather than a parallel tool/namespace
+existing `rutis_bridge::runtime::RowSchema.provides` shape**, rather than a parallel namespace
 list, and, only for a package that owns Settings sources, `settings` (below):
 
 ```json
@@ -63,8 +63,8 @@ list, and, only for a package that owns Settings sources, `settings` (below):
   "name": "/absolute/web/index.ts",
   "group": "session",
   "config": {},
+  "inject": ["toolRegistry"],
   "provides": {
-    "toolContribution:web_fetch": {"declaration": "sync", "execute": "async"},
     "sessionMethods:session.web": {"describe": "async", "call": "async"}
   }
 }
@@ -79,14 +79,15 @@ The host passes them to Settings with the row id as owner and does not hand `set
 loader. A source is process state, so it belongs to one row: a second row declaring the same
 source fails assembly, as two packages would. Rows without `settings` are unchanged.
 
-`toolContribution:<tool>` and `sessionMethods:<namespace>` encode the existing neutral service
-identity and key as one bridge service name. The colon separates the family from the complete
-key; the namespace keeps its dots. The catalog registers every name a row provides, if it does not
-hold it yet, as a shared service in the row's group, so each instance has its own copy
-([How Dim uses rutis §3.5](rutis-usage.md#35-how-each-runtime-resolves-a-name)). The tools and
-namespaces of `session` rows are derived from these names and passed to the
-existing `AgentBuilder::session_tool` / `session_methods` during assembly. Authors do not make
-these Rust calls and do not separately maintain arrays of tool names and namespaces.
+`sessionMethods:<namespace>` encodes the existing neutral service identity and key as one bridge
+service name. The colon separates the family from the complete key; the namespace keeps its dots.
+The catalog registers every name a row provides, if it does not hold it yet, as a shared service in
+the row's group, so each instance has its own copy
+([How Dim uses rutis §3.5](rutis-usage.md#35-how-each-runtime-resolves-a-name)). The namespaces of
+`session` rows are derived from these names and passed to the existing
+`AgentBuilder::session_methods` during assembly. Authors do not make this Rust call and do not
+separately maintain an array of namespaces. Tools are not in `provides`: a row registers each tool
+from its code through `toolRegistry` ([Tools](#tools)).
 
 `provides` and `settings` are structural input, not a new package manifest or persistence format.
 No filename, package schema, version field, content discovery or integrity scheme is introduced.
@@ -118,22 +119,24 @@ Rows naming the same module must use the same snapshot; distinct row ids alone d
 conflicting structural declarations valid.
 
 At this external configuration boundary reject a group other than `session` or `branch`, malformed identities, unsupported method modes,
-duplicate tools, duplicate namespaces, host-tool collisions and the C1 reserved-name/namespace
-collisions. Disabled rows are not instantiated and contribute no callable methods. Their declared
-tool identities remain known to ToolRegistry, so a stored `SessionConfig.tools` can omit a disabled
-provider rather than fail as an unknown host tool. New model requests never declare that missing
-tool. Enabled rows alone determine C1's known namespace list: a disabled namespace is
+duplicate namespaces and the C1 reserved-name/namespace collisions. Tool names are checked when a
+row registers them ([Tools](#tools)). Disabled rows are not instantiated, register no tools and
+contribute no callable methods. A stored `SessionConfig.tools` that names one of their tools is not
+refused, and new model requests do not declare that tool. Enabled rows alone determine C1's known namespace list: a disabled namespace is
 `unknown_method`, not an indefinitely reloading service. A declaration changing structurally
 requires rebuilding the host assembly; business settings do not change it. Missing dependencies
 of an enabled row keep their existing Pending/reload behavior.
 
 ## Tools
 
-The service and data contract is [Session boundary A.5](contracts/session-boundary.md#a5-tool-contribution).
-`declaration()` is synchronous; `execute(call, cancelled)` is asynchronous. The second argument
-is the existing bridge's by-reference cancellation Promise, an implementation of A.5's cancel
-action, not a new durable token, method or cancellation registry. It resolves on turn cancellation,
-when the owning row unloads, and when the native call ends. The provider must release external
+The data contract is [Session boundary A.5](contracts/session-boundary.md#a5-tool-contribution).
+A Session row injects `toolRegistry` and, from its `apply`, calls
+`await ctx.use<ToolRegistry>('toolRegistry').register(declaration, execute)` once per tool.
+`declaration` is the tool's `ToolDefinition` data; `execute(call, cancelled)` is the row's own
+asynchronous function, which the host calls back through the bridge. The second argument is the
+existing bridge's by-reference cancellation Promise, an implementation of A.5's cancel action, not
+a new durable token, method or cancellation registry. It resolves on turn cancellation, when the
+registering row unloads, and when the native call ends. The provider must release external
 resources before settling.
 
 The tool owner performs the only conversion between the neutral call and native execution:
@@ -146,10 +149,11 @@ The tool owner performs the only conversion between the neutral call and native 
 | `config` | This Session's immutable `SessionConfig` serialized with its existing serde representation. |
 
 Do not pass the native `{id, name, input}` object and silently treat it as the neutral shape.
-The selected service identity already fixes the tool name. Declaration and result decoding use
-the existing `ToolDefinition` and `ToolResult` serde types. The declaration's `name` must equal
-the selected tool key, and a contributed tool supplies its required Permission risk. No second
-schema parser or normalization pass is added after this boundary.
+The registered declaration fixes the tool name. Declaration and result decoding use the existing
+`ToolDefinition` and `ToolResult` serde types. `register` refuses a declaration that is not a
+`ToolDefinition` or has no Permission risk, a name outside the tool name grammar, a host tool's name
+and a name registered already; the row sees the refusal as a rejected Promise. No second schema
+parser or normalization pass is added after this boundary.
 
 `ToolResult.content` is model-readable and uses the existing native JSON contract (text or typed
 content blocks); `structuredContent`, blob references and background fields retain their existing
@@ -159,29 +163,22 @@ malformed result or unloaded provider becomes the existing host/tool failure and
 it is never turned into an empty successful result. Cancellation uses ToolExecutor's existing
 interruption result rather than inventing a provider error fact.
 
-ToolRegistry reads the ordinary native contribution and neutral service identity when it
-attaches a provider generation (A.5). Assembly permits only one configured owner per tool key;
-no other provider is tried after that owner's declaration or execution fails. The foreign
-service is looked up directly by its Session instance and bridge name. Its synchronous
-`declaration()` is decoded there, and the handler retains that exact object together with the
-original row context's existing `CancellationToken`, published under the same tool service name
-and Session instance as a typed native key. Cancellation rejects later executions through this
-retained handler and ends its in-flight native wait; it does not select a replacement generation
-or force an uncooperative JavaScript task to stop. The TypeScript owner still settles its work
-through its effects. There is no eager declaration during row apply, polling, asynchronous
-attachment or changed `ToolContribution`
-storage type. Synchronous declaration must not perform external asynchronous business work;
-like a synchronous Rust provider it can delay its caller if it does not return.
+The registration belongs to the calling row (the bridge's `caller_row`) and is withdrawn when that
+row unloads; the row's `provides` lists no tools and the host registers no tool names. ToolRegistry
+decodes the declaration once, at registration, and keeps a native `ToolHandler` that holds `execute`
+and the calling row's generation token. Once the row starts unloading, a call through a retained
+handler is not made, and a call in flight ends with an error warning that it may already have taken
+effect. The handler does not select a replacement generation or force an uncooperative JavaScript
+task to stop; the TypeScript owner still settles its work through its effects. There is no polling
+and no later declaration call.
 
-Each configured foreign tool is a registry-owned versioned set (A.5, #241). Absent/Pending
-providers omit only their tool and produce the existing attach diagnostic; once a row's
-generation is active, the next request offers its tool without a Session reload. A malformed
-foreign declaration is rejected when that generation is attached, omits only that provider's
-tool, and records an explicit invalid-declaration diagnostic; the registry never caches an
-invalid definition or an empty successful substitute, and does not retry the same generation.
-A retired generation's set is withdrawn and the next active generation gets a new version.
-ToolBinding adopts changes through Prompt/BranchOpening as for other sources, and each request
-keeps its selected handlers. A new generation is not substituted into an old request.
+Each configured foreign tool is a registry-owned versioned set (A.5, #241). A configured tool that
+no row has registered (its row is absent, Pending or disabled, or has not applied yet) is not
+offered and produces the existing `tool.attach` diagnostic; once a row registers it, the next
+request offers it without a Session reload. A withdrawn registration's set is withdrawn, and the
+row's next generation registers again under a new version. ToolBinding adopts changes through
+Prompt/BranchOpening as for other sources, and each request keeps its selected handlers. A new
+generation is not substituted into an old request.
 
 ## Session methods
 
@@ -244,9 +241,8 @@ is invented for an uncooperative plugin.
 
 `rows.load` can reply before the native projection publishes its exported services. The original
 row subscribes to the existing `ServiceChanged` event before loading and waits for all its own
-declared tool and method-service projections before its apply returns and it becomes Active.
-C1 binds the method namespaces during that apply; tool declarations remain unread until
-ToolRegistry attaches the row's generation. The row context owns the subscription and cancellation ends the wait.
+declared method-service projections before its apply returns and it becomes Active.
+C1 binds the method namespaces during that apply; the row's own apply registers its tools. The row context owns the subscription and cancellation ends the wait.
 The foreign cleanup is registered immediately after loading, so a failed declaration or cancelled
 binding still releases that row. This wait does not make another optional row required or change
 Session publication.
@@ -334,7 +330,7 @@ leader/member eligibility using the serialized creation snapshot are checked. Ow
 through close and row-only reload settles before effects finish, stale listeners stop, and
 native/other-Session use continues. A Session row that names a branch service fails at composition,
 naming the branch group, without affecting native or other rows. Throwing listeners, Pending and
-disabled rows, tools that follow their row's activation (#241) and C1 drain keep their behavior.
+disabled rows, tools that follow their row's registration (#241) and C1 drain keep their behavior.
 
 ## Lifetime and failure
 
@@ -351,28 +347,27 @@ calls, Session channel records, or background tasks that wait for `sessionLifecy
 and end at `closing()`. Row Active alone never permits business work from TS apply.
 
 Session assembly uses the registered required-part membership implemented by [#137](https://github.com/arcships/dim/pull/137).
-Session assembly settles rows already Loading, including their tool/method projection waits.
+Session assembly settles rows already Loading, including their method projection waits.
 Host-appended optional rows stay in the original disposal group and diagnostics and do not enter
 the Session's required Active wait: a row genuinely Pending on a missing dependency does not
 delay native Session use. Their hard dependencies, key validation and failure reporting do
 not weaken. Disabled parts have no row instance. An optional failure changes only its features;
 there is no automatic retry of an operation that may have produced external side effects.
 
-Restore rebuilds rows and reads and follows providers through the same code as create; history does not
-install or enable code. Structural reload can fail in-flight calls as ADR 002 permits. Runtime
+Restore rebuilds rows, which register their tools again, through the same code as create; history
+does not install or enable code. Structural reload can fail in-flight calls as ADR 002 permits. Runtime
 process loss is an infrastructure failure; no special runtime-crash recovery mechanism is added.
-Completely removing a configured tool identity differs from disabling its row: the existing
-Session tool validation rejects an unknown saved name. C4 does not silently edit persisted
-Session configuration or introduce a history-driven reinstallation path. Retain the disabled
-structural declaration when existing Sessions need to remain loadable; package-uninstallation
-policy belongs to PluginManager rather than an undocumented fallback in ToolRegistry.
+A saved `SessionConfig.tools` entry that no row registers, because its row is disabled or removed,
+is not offered, and the Session still loads. C4 does not silently edit persisted Session
+configuration or introduce a history-driven reinstallation path; package-uninstallation policy
+belongs to PluginManager.
 
 ## Impact and verification
 
 | Area | Implementation and remaining boundary |
 | --- | --- |
-| App Server `ServerConfig` and assembly | Public embedding input, row boundary validation, names/catalog derived from `provides`, optional Session rows and native resolver factory composition. |
-| ToolRegistry and its page | Native/foreign owner selection and declaration decoding when a generation is attached. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
+| App Server `ServerConfig` and assembly | Public embedding input, row boundary validation, method namespaces and catalog derived from `provides`, the `toolRegistry` export, optional Session rows and native resolver factory composition. |
+| ToolRegistry and its page | Foreign `register` through its dispatcher, declaration decoding at registration and the calling row's generation token on each foreign handler. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
 | C1 `methods` module | Neutral DTO/error decoding and generation-owned foreign handler construction. No Rpc dispatch replacement. |
 | Session broadcast | Rows listen to `session/{sessionId}` themselves, with the id from `sessionIdentity`. C6 retains notices. |
 | Dependencies | Existing pinned `rutis-bridge` at the language-boundary owners; no new library or rutis change. Regenerate graphs through `xtask graph`, then run `xtask check`. |
@@ -381,7 +376,7 @@ policy belongs to PluginManager rather than an undocumented fallback in ToolRegi
 
 The executable Node/Rpc flows cover two Sessions sharing a Node PID; an Active tool declared on the immediate
 first model request after create and restore and executed through ToolExecutor; a pending optional
-part that does not block native use; a later Active tool offered from the next request without a reload; disabled rows;
+part that does not block native use; a tool registered later offered from the next request without a reload; disabled rows;
 actual C1 Rpc call/listing, progress, `report` and `drain`; stale provider rejection; continued
 native/other-Session use after one part closes. Native Session broadcast flows additionally cover single-copy delivery to two rows,
 Session/branch routing and native content/order, delivery from `apply`, client
@@ -414,16 +409,16 @@ Node delivery is unverified; the CLI Windows checks do not establish C4 support 
 
 ## Ablation
 
-`provides` is retained solely because the existing assembly needs names before Node is online;
-all names and service modes are derived from that one existing dictionary shape. A second
+`provides` is retained solely because the existing assembly needs method namespaces before Node is
+online; all namespaces and service modes are derived from that one existing dictionary shape. A second
 manifest, separate name arrays, registration manager and per-call provider are unnecessary.
 Same-row factory composition is retained because C1 must drain before unloading its foreign
-handler. The tool declaration stays at first registry read, so no deferred contribution wrapper
-or eager tool registration is needed. Promise cancellation preserves the existing `drain` reply.
+handler. Tools register from the row's own apply, so the host needs no tool names before Node is
+online and reads no declaration later. Promise cancellation preserves the existing `drain` reply.
 Startup uses the existing process readiness loop and SDK catalog publication; the row's own
-service-publication wait covers tools and methods without moving declaration reads. Retaining
-the original row's token ends stale native tool waits without a tracker, per-call subscription or
-new liveness API. Rows listen to the Session channel themselves, so there is no relay, per-row
+service-publication wait covers methods. The foreign handler holds the calling row's generation
+token, which ends stale native tool waits without a tracker, per-call subscription, separate
+token or new liveness API. Rows listen to the Session channel themselves, so there is no relay, per-row
 transport or duplicate emission; identity, configuration and closing come from the Session
 services every language reads, so there is no setup method.
 
@@ -443,7 +438,7 @@ services every language reads, so there is no setup method.
 | §1 | Each business part is a Session foreign row; existing NodeRows owns shared runtime I/O. `sessionLifecycle.closing()` stops owned work. |
 | ADR 002 D1 | Session state belongs to that part; Node and its loader resources are shared process resources. Branch facts remain branch-owned. |
 | ADR 002 D2 | No new wiring capability or forwarding owner: existing NodeRows and original-row binding own their resources. No registration host or method aggregation plugin. |
-| ADR 002 D3 | Core never hard-depends on optional parts; ToolRegistry reads tool providers by name and follows their activation (#241), and per-call C1 lookup is unchanged. Required dependencies remain required. |
+| ADR 002 D3 | Core never hard-depends on optional parts; ToolRegistry follows the tool registrations of rows, which last until their row unloads (#241), and per-call C1 lookup is unchanged. Required dependencies remain required. |
 | ADR 002 D4 | Only structural rows enter loader input; business Settings changes do not reload parts. |
 | ADR 002 D5 | Canonical named service/key, data, errors and cancel action; Rust/native details are bindings. Existing unsupported C1 features are explicit. |
 

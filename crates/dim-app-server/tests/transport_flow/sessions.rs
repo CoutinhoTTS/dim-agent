@@ -206,7 +206,7 @@ async fn serve_with(setup: Setup) -> Served {
             };
             builder
                 .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
-                .session_value(Arc::new(InitialPromptConfiguration(None)))
+                .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
                 .session_part(move |names| names.part(HeldRulesPart(rules.clone(), names.key()?)));
             defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
         }

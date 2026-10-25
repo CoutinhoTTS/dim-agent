@@ -6,7 +6,7 @@ Status: Optional package implemented. Overall design: [overview §4](../overview
 
 > **Offline resource nodes.** Rows about an offline resource node describe P3 multi-node behaviour. #5 is withdrawn (rutis is an external dependency, and it withdraws imported services when a link drops), so these rows are redesigned in P3 following overview §6.3: node services are looked up on each call by `resourceNode`. In P1/P2 every Session uses the control node.
 
-Workflow owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own new non-interactive Session launched through Agents. The process part owns runs and reaches launched Sessions through the process service `sessions` ([session-access](../contracts/session-access.md)), as Collaboration does. User-saved definitions live in Workflow's Settings source `workflow`, project definitions stay project files that Workflow reads through FileStorage, and run records live in `pluginFiles`. The Session part declares the `workflow` tool as a `toolContribution` in every Session, and only interactive Sessions can use it; operators use the `workflow.*` management methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). When a run ends, its result is reported once to the starting branch as Steer input. Workflow writes no Timeline event of its own.
+Workflow owns workflow definitions and runs. A run advances a fixed list of steps; each stage runs in its own new non-interactive Session launched through Agents. The process part owns runs and reaches launched Sessions through the process service `sessions` ([session-access](../contracts/session-access.md)), as Collaboration does. User-saved definitions live in Workflow's Settings source `workflow`, project definitions stay project files that Workflow reads through FileStorage, and run records live in `pluginFiles`. The Session part registers the `workflow` tool with `toolRegistry` in every Session, and only interactive Sessions can use it; operators use the `workflow.*` management methods, a `managementMethods` entry. All contracts are language-neutral named services ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust forms are in [Appendix G](#appendix-g-rust-binding). When a run ends, its result is reported once to the starting branch as Steer input. Workflow writes no Timeline event of its own.
 
 ## 1. Structure
 
@@ -21,7 +21,7 @@ flowchart LR
     Rpc["Rpc method table"]
   end
   subgraph SESS["Interactive Session (starter)"]
-    Tool["WorkflowSession: toolContribution key workflow"]
+    Tool["WorkflowSession: tool workflow"]
   end
   subgraph STG["Stage Sessions"]
     TL["main Timeline"]
@@ -42,9 +42,9 @@ A run spans Sessions, so runs belong to the process ([ADR 002](../../adr/002-plu
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
 | `Workflow` | Process (control node) | Existing `sessions`, `settings`, `pluginFiles`, `workflowFiles` | Run engine; `workflowRuns` and management namespace `workflow` |
-| `WorkflowSession` | Session, installed when enabled | C4 tool contract, creation configuration; declared `workflowRuns` dependency (§1.1) | `toolContribution:workflow`; handler refuses when `interactive === false` |
+| `WorkflowSession` | Session, installed when enabled | C4 tool contract, creation configuration; declared `workflowRuns` and `toolRegistry` dependencies (§1.1) | Registers `workflow` with `toolRegistry`; handler refuses when `interactive === false` |
 
-**Existing contracts:** [C4 tools](../session-typescript.md), [S2 sessions](../appserver/sessions-service.md), [Settings](../appserver/settings-service.md), [method admission](../contracts/session-boundary.md), [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts specified here:** `dim.workflow/v1`, `toolContribution:workflow`, `workflowRuns.call`, management namespace `workflow`, Settings source `workflow`, stage/report marker text and run records. Project/package file access is delivered by #265; the concrete package binding is §1.3. No `PluginContents` service is assumed.
+**Existing contracts:** [C4 tools](../session-typescript.md), [S2 sessions](../appserver/sessions-service.md), [Settings](../appserver/settings-service.md), [method admission](../contracts/session-boundary.md), [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts specified here:** `dim.workflow/v1`, the `workflow` tool, `workflowRuns.call`, management namespace `workflow`, Settings source `workflow`, stage/report marker text and run records. Project/package file access is delivered by #265; the concrete package binding is §1.3. No `PluginContents` service is assumed.
 
 ### 1.1 Existing bindings and delivery requirements
 
@@ -96,8 +96,8 @@ installation or PluginManager implementation is included.
 | `id` | `workflow` | `workflow-session` |
 | `name` | `@dimcode/workflow` | `@dimcode/workflow/session` |
 | `config` | `{packages:[{id,root}, ...]}`; an empty list installs no package definitions | `{}` |
-| `inject` | `sessions`, `settings`, `pluginFiles`, `workflowFiles` | `workflowRuns` |
-| `provides` | `workflowRuns: {call:"async"}`; `managementMethods:workflow: {describe:"async",call:"async"}` | `toolContribution:workflow: {declaration:"sync",execute:"async"}` |
+| `inject` | `sessions`, `settings`, `pluginFiles`, `workflowFiles` | `workflowRuns`, `toolRegistry` |
+| `provides` | `workflowRuns: {call:"async"}`; `managementMethods:workflow: {describe:"async",call:"async"}` | `{}`; apply registers `workflow` with `toolRegistry` |
 | `settings` | One user-only `workflow` source, `userFile:"workflow.json"`, no `projectFile`, `userOnly:["/projectEnabled"]`, with definitions, enablement and A11 concurrency fields from the source contract | Absent |
 
 Module declarations and supplied rows agree on dependencies and method kinds.
@@ -327,7 +327,7 @@ Report and stage inputs are unkeyed: after compaction they survive only through 
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `workflow` (`list`, `start`, `status`, `stop`) | `toolContribution` (Session, key `workflow`), risk category of Collaboration's `agent` tool | Model runs workflows |
+| `workflow` (`list`, `start`, `status`, `stop`) | Tool registered with `toolRegistry` (Session), risk category of Collaboration's `agent` tool | Model runs workflows |
 | `workflow.list/save/start/status/stop` | `managementMethods` (process, key `workflow`) | Operators manage definitions and runs |
 | CLI entry | Separate client work after method binding | No implemented CLI command is claimed here |
 | `sessions` | Depended on | Stage Sessions: launch, input, history, lookup, stop, withdraw, delete |
@@ -354,7 +354,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.9 Only facts later decisions use enter the Timeline | Workflow writes no Timeline event; runs stay in process storage, and only stage tasks and reports, which models consume, enter Timelines as inputs. |
 | §1 Capability and App Server boundary | The process plugin owns definitions and runs; the Session Capability offers its tool. Storage uses `pluginFiles`; no App Server business module. |
 | ADR 002 D1 | Runs span Sessions (process part); the tool belongs to a Session (Session part). |
-| ADR 002 D2 | Existing Rpc/ToolRegistry consume feature-owned methods/tools; no wiring plugin, extra Provider port or registry. The TS management binding is available. |
+| ADR 002 D2 | Existing Rpc consumes feature-owned methods and ToolRegistry keeps the tool the feature registers; no wiring plugin, extra Provider port or registry. The TS management binding is available. |
 | ADR 002 D3 | Stable sessions isolates index reload; C3 keeps core independent of optional rows; the optional tool row declares its owner dependency under §1.1's availability constraints. |
 | ADR 002 D4 | Definitions and run limits are business data read at use time; nothing structural changes. |
 | ADR 002 D5 | `workflowRuns`, the tool, the methods and the definition format are named services or data; Rust forms are in Appendix G. |
@@ -421,7 +421,7 @@ At start, validate the supplied parameter names/values once, reject missing requ
 
 ### A.2 Tool `workflow`
 
-`toolContribution:workflow` is declared independently of interactivity (#30). The handler refuses when `config.interactive === false` (A8); omission means true. C4 supplies creation configuration, not current Permission state. Synchronous `declaration()` does no I/O; `execute(ToolCall, cancelled)` uses the existing second by-reference cancellation Promise. Accepted run work belongs to the process owner; cleanup and the pre/post-persistence cancellation behavior use that ownership, not cancellation inferred from a JavaScript Promise. ToolExecutor owns terminal tool facts.
+The `workflow` tool is registered independently of interactivity (#30). The handler refuses when `config.interactive === false` (A8); omission means true. C4 supplies creation configuration, not current Permission state. Registration does no I/O; `execute(ToolCall, cancelled)` uses the existing second by-reference cancellation Promise. Accepted run work belongs to the process owner; cleanup and the pre/post-persistence cancellation behavior use that ownership, not cancellation inferred from a JavaScript Promise. ToolExecutor owns terminal tool facts.
 
 `workflowRuns`, process scope, no key, defined here: `call(RunRequest): async -> RunReply`, where `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` uses the actions below and `RunReply = {content: string, structured: JSON}` or an error `{code, message}` from the list below. Risk: the category Collaboration's `agent` tool declares (today none, so unclassified: ReadOnly denies, WorkspaceWrite asks, FullAccess allows; E2).
 
@@ -606,7 +606,7 @@ Public bindings are available. The optional TypeScript package owns feature serv
 
 | Neutral | Current binding |
 | --- | --- |
-| `toolContribution` key `workflow` | Session-scoped `ToolContribution` registered in `WorkflowSession`'s `provides` |
+| Tool `workflow` registered with `toolRegistry` | `WorkflowSession` injects `Keyed<ToolRegistry>` and calls `tools.register(ctx, ToolContribution {definition, handler})` in its `apply` |
 | `managementMethods` key `workflow` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | `sessions` | Public named host service; native request module and AgentIndex::acquire are private implementation details, not an external crate API |
 | `workflowRuns` | Feature-owned process service implemented by the package; declared dependency binding in §1.1 |

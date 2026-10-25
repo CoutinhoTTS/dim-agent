@@ -482,8 +482,11 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
                 .await,
         );
     }
+    for session in &sessions {
+        registered(&server, session, &["ts_echo"]).await;
+    }
     let (_, _, loader, registry) = controls.recv().await.unwrap();
-    let retained = registry.contributed("ts_echo").unwrap();
+    let retained = session_typescript::registration(&registry, "ts_echo").await;
     assert_ok(
         &client
             .rpc(
@@ -526,6 +529,7 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
         retired_error,
     );
     let fresh = session_typescript::new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    registered(&server, &fresh, &["ts_echo"]).await;
     session_typescript::submit(&mut client, &fresh, r#"tool:ts_echo {"text":"new owner"}"#).await;
     let fresh = server.agent().unwrap().get_session(&fresh).unwrap();
     let history = fresh.history("main", None).await.unwrap();

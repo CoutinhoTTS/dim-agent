@@ -50,7 +50,7 @@ fn install_profile(
 ) {
     builder
         .session_value(Arc::new(PromptHost(host)))
-        .session_value(Arc::new(InitialPromptConfiguration(initial)))
+        .session_value(Arc::new(InitialPromptConfiguration::fixed(initial)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
     install_with_prompt_capability(builder, model);
 }
@@ -85,7 +85,7 @@ fn install_with_prompt_capability_and_branch(
         .session_part(|names| names.part(TimelineTreePlugin::new(names)?))
         .session_part(|names| names.part(crate::input_queue::InputMethodsPlugin::new(names)?))
         .session_methods(crate::input_queue::INPUT_METHODS)
-        .session_tool_registry(ToolRegistryPlugin::new)
+        .session_part(|names| names.part(ToolRegistryPlugin::new(names)?))
         .branch_part(|names| names.part(SessionBroadcastPlugin))
         .branch_part(|names| names.part(TreeTimelinePlugin))
         .branch_part(|names| names.part(ContextPreparationPlugin::new(names)?))
@@ -98,7 +98,7 @@ fn install_with_prompt_capability_and_branch(
         .branch_part(|names| names.part(ToolBindingPlugin::new(names)?))
         .branch_part(|names| names.part(ToolExecutorPlugin::new(names)?));
     if branch_tool {
-        builder.session_tool("branch");
+        builder.session_part(|names| names.part(crate::timeline_tree::BranchToolPlugin));
     }
 }
 
@@ -136,12 +136,10 @@ pub fn install_local_execution(
     crate::skills::install(builder);
 }
 
-/// Installs `driver` as the Session `ToolHost` and records its tool names.
+/// Installs `driver` as the Session `ToolHost`.
 pub fn tool_host(builder: &mut AgentBuilder, driver: Arc<dyn ToolDriver>) {
     crate::register_names(builder);
-    builder
-        .host_tools(driver.definitions().into_iter().map(|tool| tool.name))
-        .session_value(Arc::new(ToolHost(driver)));
+    builder.session_value(Arc::new(ToolHost(driver)));
 }
 
 /// Use this with a custom `ToolHost` binding, e.g. [`tool_host`].

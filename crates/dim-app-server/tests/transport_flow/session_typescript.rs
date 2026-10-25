@@ -1228,6 +1228,25 @@ pub(super) async fn when_served(client: &mut Client, method: &str, params: Value
     .unwrap_or_else(|_| panic!("{method} is served"))
 }
 
+/// The current registration of `tool`, once its row has registered it: a
+/// Session is published without waiting for its optional rows.
+pub(super) async fn registration(
+    registry: &dim_agent_capabilities::tool_registry::ToolRegistry,
+    tool: &str,
+) -> Arc<dim_agent_capabilities::tool_registry::ToolContribution> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            registry.snapshot();
+            if let Some(registered) = registry.contributed(tool) {
+                return registered;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("a row registers {tool}"))
+}
+
 pub(super) async fn new_session(client: &mut Client, tools: Value) -> String {
     let mut params = create(tools);
     params["permissionPolicy"]["allowedTools"] = json!(["ts_echo", "native_slow", "echo", "wait"]);
@@ -1275,12 +1294,15 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
     let mut client = Client::new_version(&server, false, 3).await;
     let first = new_session(&mut client, json!(["ts_echo", "native_slow", "echo"])).await;
     let second = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    for session in [&first, &second] {
+        registered(&server, session, &["ts_echo"]).await;
+    }
     submit(&mut client, &first, r#"tool:ts_echo {"text":"first"}"#).await;
     assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
     let status = client
         .rpc("session.typescript.status", json!({"sessionId":first}))
         .await;
-    assert_eq!(status["result"]["calls"], 1);
+    assert_eq!(status["result"]["calls"], 1, "{status}");
     let other = client
         .rpc("session.typescript.status", json!({"sessionId":second}))
         .await;
@@ -1471,6 +1493,7 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     let (server, _requests, _) = start(config.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let session_id = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    registered(&server, &session_id, &["ts_echo"]).await;
     submit(&mut client, &session_id, r#"tool:ts_echo {"text":"saved"}"#).await;
     drop(client);
     server.shutdown();
@@ -1479,6 +1502,12 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     let (server, mut requests, _) = start(config.clone()).await;
     assert!(server.agent().unwrap().get_session(&session_id).is_none());
     let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":session_id}))
+            .await,
+    );
+    registered(&server, &session_id, &["ts_echo"]).await;
     submit(
         &mut client,
         &session_id,
@@ -1501,6 +1530,7 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
         .await;
     assert_ok(&forked);
     let fork_id = forked["result"]["sessionId"].as_str().unwrap();
+    registered(&server, fork_id, &["ts_echo"]).await;
     let source_status = client
         .rpc("session.typescript.status", json!({"sessionId":session_id}))
         .await;
@@ -1706,7 +1736,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
             .any(|part| part.name.ends_with("runtime/fixtures/session-part.ts"))
     );
     ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
-        rutis_bridge::session::host_key_in("toolContribution:ts_echo", session_instance),
+        rutis_bridge::session::host_key_in("sessionMethods:session.typescript", session_instance),
         Arc::new(GateValue),
     )
     .unwrap();
@@ -1777,10 +1807,18 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     let session = created["result"]["sessionId"].as_str().unwrap();
     submit(&mut client, session, r#"tool:echo {"text":"native"}"#).await;
     assert!(!requests.recv().await.unwrap().contains(&"ts_echo".into()));
-    assert_ok(
-        &client
-            .rpc("session.typescript.status", json!({"sessionId":session}))
-            .await,
+    // The registration without a risk was refused; the row keeps its methods.
+    let status = when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId":session}),
+    )
+    .await;
+    assert!(
+        status["result"]["refused"]
+            .as_str()
+            .is_some_and(|refused| refused.contains("must declare its risk")),
+        "{status}"
     );
     assert_ok(
         &client
@@ -1795,8 +1833,8 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         if !bad_methods.is_null() {
             parts.rows[0]["config"] = json!({"badMethods":bad_methods});
         } else {
-            parts.rows[0]["provides"]["toolContribution:ghost"] =
-                json!({"declaration":"sync", "execute":"async"});
+            parts.rows[0]["provides"]["sessionMethods:session.ghost"] =
+                json!({"describe":"async", "call":"async"});
         }
         let (mut builder, mut requests, _) = setup();
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
@@ -1857,14 +1895,6 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     }
 
     for (change, expected) in [
-        (
-            json!({"toolContribution:echo":{"declaration":"sync","execute":"async"}}),
-            "collides",
-        ),
-        (
-            json!({"toolContribution:ts_echo":{"declaration":"async","execute":"async"}}),
-            "method modes",
-        ),
         (
             json!({"sessionMethods:session.create":{"describe":"async","call":"async"}}),
             "invalid Session namespace",
@@ -1998,7 +2028,7 @@ async fn node_session_typescript_failed_part_namespace_is_unavailable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_session_typescript_tool_only_first_request_on_create_and_restore() {
+async fn node_session_typescript_tool_only_row_serves_after_create_and_restore() {
     let home = std::env::temp_dir().join(format!("dm-ts-tool-{}", uuid::Uuid::new_v4()));
     let mut parts = fixture();
     let entry = PathBuf::from(parts.rows[0]["name"].as_str().unwrap());
@@ -2019,10 +2049,12 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
         let session_id = match &saved {
             Some(id) => {
                 assert!(server.agent().unwrap().get_session(id).is_none());
+                assert_ok(&client.rpc("session.attach", json!({"sessionId":id})).await);
                 id.clone()
             }
             None => new_session(&mut client, json!(["ts_echo", "echo"])).await,
         };
+        registered(&server, &session_id, &["ts_echo"]).await;
         submit(
             &mut client,
             &session_id,
@@ -2078,10 +2110,14 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
     let mut client = Client::new_version(&server, false, 3).await;
     let session_id = new_session(&mut client, json!(["ts_echo", "echo"])).await;
     let (session_instance, _, loader, registry) = controls.recv().await.unwrap();
-    let retained = registry.contributed("ts_echo").unwrap();
-    let old = client
-        .rpc("session.typescript.status", json!({"sessionId":session_id}))
-        .await;
+    // The row binds its methods once its `apply` has registered its tool.
+    let old = when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId":session_id}),
+    )
+    .await;
+    let retained = registration(&registry, "ts_echo").await;
     assert_ok(&client.rpc("session.submit", json!({"sessionId":session_id,"branchId":"main","text":r#"tool:ts_echo {"text":"cancel"}"#})).await);
     assert_ok(
         &client

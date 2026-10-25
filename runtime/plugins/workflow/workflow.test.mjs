@@ -163,8 +163,10 @@ async function fixture(t, options = {}) {
   const open = async () => {
     loaded = await load(plugin, { config: { packages: options.packages ?? [] }, services })
     methods = loaded.service('managementMethods:workflow')
-    tool = await load(sessionPlugin, { services: { workflowRuns: loaded.service('workflowRuns') } })
-    contribution = tool.service('toolContribution:workflow')
+    tool = await load(sessionPlugin, { services: {
+      workflowRuns: loaded.service('workflowRuns'),
+      toolRegistry: { async register(declaration, execute) { contribution = { declaration, execute } } },
+    } })
   }
   await open()
   const close = async () => { await tool.unload(); await loaded.unload() }

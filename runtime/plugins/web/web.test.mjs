@@ -26,15 +26,22 @@ async function listen(t, server) {
 
 async function plugin(t, document = { allowPrivateHosts: [] }) {
   let current = document;
-  const loaded = await load(web, { services: { settings: {
-    async read() { return { ok: true, value: { revision: 'revision', document: current } }; },
-  } } });
+  const registered = new Map();
+  const loaded = await load(web, { services: {
+    settings: {
+      async read() { return { ok: true, value: { revision: 'revision', document: current } }; },
+    },
+    toolRegistry: {
+      async register(declaration, execute) { registered.set(declaration.name, { declaration, execute }); },
+    },
+  } });
   t.after(() => loaded.unload());
   return {
     loaded,
+    registered,
     set(next) { current = next; },
     call(name, args, cancelled = new Promise(() => {})) {
-      return loaded.service(`toolContribution:${name}`).execute({
+      return registered.get(name).execute({
         sessionId: 'session', branchId: 'main', turnId: 'turn', callId: 'call', arguments: args,
       }, cancelled);
     },

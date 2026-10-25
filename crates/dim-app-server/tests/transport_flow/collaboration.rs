@@ -891,7 +891,7 @@ async fn leader_delegates_and_team_members_communicate() {
         &lead,
         tool(
             json!({"action": "request", "prompt": "x", "profile": {"name": "bad",
-            "description": "", "systemPrompt": "", "tools": ["nope"]}}),
+            "description": "", "systemPrompt": "", "tools": ["echo", "echo"]}}),
         ),
         "queue",
     )
@@ -927,7 +927,7 @@ async fn leader_delegates_and_team_members_communicate() {
         .rfind(|(error, _)| *error)
         .unwrap();
     assert!(
-        profile_refusal.contains("tool nope is not provided by the process"),
+        profile_refusal.contains("tool echo is listed twice"),
         "{profile_refusal}"
     );
     assert!(!timeline.iter().any(|event| matches!(&event.kind,

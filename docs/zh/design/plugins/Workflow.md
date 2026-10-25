@@ -6,7 +6,7 @@
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 `resourceNode` 查找。P1/P2 中每个 Session 都使用控制节点。
 
-Workflow 拥有工作流定义和运行。一次运行推进一个固定的步骤列表；每个阶段在通过 Agents 启动的一个新非交互 Session 中运行。进程部分拥有运行，并通过进程服务 `sessions`（[session-access](../contracts/session-access.md)）访问启动的 Session，方式与 Collaboration 相同。用户保存的定义存于 Workflow 的 Settings 来源 `workflow`，项目定义仍是项目文件，由 Workflow 经 FileStorage 读取，运行记录存于 `pluginFiles`。Session 部分以 `toolContribution` 在每个 Session 中声明 `workflow` 工具，只有交互 Session 可以使用它；运维方使用 `workflow.*` 管理方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。运行结束时，其结果以 Steer 输入向起始分支报告一次。Workflow 不写自己的 Timeline 事件。
+Workflow 拥有工作流定义和运行。一次运行推进一个固定的步骤列表；每个阶段在通过 Agents 启动的一个新非交互 Session 中运行。进程部分拥有运行，并通过进程服务 `sessions`（[session-access](../contracts/session-access.md)）访问启动的 Session，方式与 Collaboration 相同。用户保存的定义存于 Workflow 的 Settings 来源 `workflow`，项目定义仍是项目文件，由 Workflow 经 FileStorage 读取，运行记录存于 `pluginFiles`。Session 部分在每个 Session 中把 `workflow` 工具注册到 `toolRegistry`，只有交互 Session 可以使用它；运维方使用 `workflow.*` 管理方法，即一个 `managementMethods` 条目。所有契约都是语言中立的命名服务（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 形式见[附录 G](#附录-g-rust-绑定)。运行结束时，其结果以 Steer 输入向起始分支报告一次。Workflow 不写自己的 Timeline 事件。
 
 ## 1. 结构
 
@@ -21,7 +21,7 @@ flowchart LR
     Rpc["Rpc 方法表"]
   end
   subgraph SESS["交互 Session（起始方）"]
-    Tool["WorkflowSession：toolContribution key workflow"]
+    Tool["WorkflowSession：工具 workflow"]
   end
   subgraph STG["阶段 Session"]
     TL["main Timeline"]
@@ -42,9 +42,9 @@ flowchart LR
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
 | Workflow | 进程（控制节点） | 既有 sessions/settings/pluginFiles/workflowFiles | 运行引擎，拟定 workflowRuns 与管理命名空间 workflow |
-| WorkflowSession | 启用时安装的 Session 部分 | C4 工具、创建配置；声明 workflowRuns 依赖（§1.1） | toolContribution:workflow；interactive === false 时拒绝 |
+| WorkflowSession | 启用时安装的 Session 部分 | C4 工具、创建配置；声明 workflowRuns 与 toolRegistry 依赖（§1.1） | 把 workflow 注册到 toolRegistry；interactive === false 时拒绝 |
 
-**既有合同：** [C4 工具](../../../design/session-typescript.md)、[S2 sessions](../appserver/sessions-service.md)、[Settings](../appserver/settings-service.md)、[方法准入](../contracts/session-boundary.md)、[pluginFiles](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)。**本插件规定的合同：** dim.workflow/v1、toolContribution:workflow、workflowRuns.call、管理命名空间 workflow、Settings 来源 workflow、阶段/报告标记文本与运行记录。项目/包文件访问已由 #265 交付，具体包绑定见 §1.3，不假定 PluginContents 服务存在。
+**既有合同：** [C4 工具](../../../design/session-typescript.md)、[S2 sessions](../appserver/sessions-service.md)、[Settings](../appserver/settings-service.md)、[方法准入](../contracts/session-boundary.md)、[pluginFiles](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)。**本插件规定的合同：** dim.workflow/v1、workflow 工具、workflowRuns.call、管理命名空间 workflow、Settings 来源 workflow、阶段/报告标记文本与运行记录。项目/包文件访问已由 #265 交付，具体包绑定见 §1.3，不假定 PluginContents 服务存在。
 
 ### 1.1 现有绑定与交付要求
 
@@ -87,8 +87,8 @@ A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之�
 | `id` | `workflow` | `workflow-session` |
 | `name` | `@dimcode/workflow` | `@dimcode/workflow/session` |
 | `config` | `{packages:[{id,root}, ...]}`；空列表表示未安装包定义 | `{}` |
-| `inject` | `sessions`、`settings`、`pluginFiles`、`workflowFiles` | `workflowRuns` |
-| `provides` | `workflowRuns: {call:"async"}`；`managementMethods:workflow: {describe:"async",call:"async"}` | `toolContribution:workflow: {declaration:"sync",execute:"async"}` |
+| `inject` | `sessions`、`settings`、`pluginFiles`、`workflowFiles` | `workflowRuns`、`toolRegistry` |
+| `provides` | `workflowRuns: {call:"async"}`；`managementMethods:workflow: {describe:"async",call:"async"}` | `{}`；apply 把 `workflow` 注册到 `toolRegistry` |
 | `settings` | 唯一用户来源 workflow、userFile:"workflow.json"、无 projectFile、userOnly:["/projectEnabled"]，包含来源合同的定义、启用状态与 A11 并发字段 | 无 |
 
 模块与包行声明相同依赖和方法种类，共用现有运行时。workflowFiles 属于已经注入的 Settings
@@ -307,7 +307,7 @@ Workflow 自身重载或重启使运行 interrupted，不重新启动（E15）�
 
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
-| `workflow`（`list`、`start`、`status`、`stop`） | `toolContribution`（Session，key `workflow`），风险类别同 Collaboration 的 `agent` 工具 | 模型运行工作流 |
+| `workflow`（`list`、`start`、`status`、`stop`） | 注册到 `toolRegistry` 的工具（Session），风险类别同 Collaboration 的 `agent` 工具 | 模型运行工作流 |
 | `workflow.list/save/start/status/stop` | `managementMethods`（进程，key `workflow`） | 运维方管理定义和运行 |
 | CLI 入口 | 方法绑定后的独立客户端工作 | 本文不声称已实现命令 |
 | `sessions` | 依赖 | 阶段 Session：launch、input、history、lookup、stop、withdraw、delete |
@@ -334,7 +334,7 @@ Workflow 无宿主本地批准（[overview §6.4](../overview.md#64-约定)）�
 | §4.9 只有后续决定要用的事实才进 Timeline | Workflow 不写 Timeline 事件；运行留在进程存储，只有模型要消费的阶段任务和报告作为输入进入 Timeline。 |
 | §1 Capability 与 App Server 边界 | 进程插件拥有定义和运行，Session Capability 提供工具；通过 pluginFiles 存储，不设 App Server 业务模块。 |
 | ADR 002 D1 作用域跟随状态所有者 | 运行跨越 Session（进程部分）；工具属于 Session（Session 部分）。 |
-| ADR 002 D2 不设接线模块 | 现有 Rpc/ToolRegistry 消费业务方法/工具，不增接线插件、Provider 端口或注册表；TS 管理绑定已提供。 |
+| ADR 002 D2 不设接线模块 | 现有 Rpc 消费业务方法，ToolRegistry 保存本功能注册的工具，不增接线插件、Provider 端口或注册表；TS 管理绑定已提供。 |
 | ADR 002 D3 依赖跟随作用域 | 稳定 sessions 隔离 index 重载，C3 隔离核心和可选 row，可选工具行按 §1.1 的可用性约束声明 owner 依赖。 |
 | ADR 002 D4 结构性配置与业务配置分离 | 定义和运行上限是使用时读取的业务数据；没有结构性变化。 |
 | ADR 002 D5 合同语言中立 | `workflowRuns`、工具、方法和定义格式都是命名服务或数据；Rust 形式见附录 G。 |
@@ -400,7 +400,7 @@ Settings 在边界按声明 schema 校验/填默认，Workflow 直接使用返�
 
 ### A.2 工具 `workflow`
 
-toolContribution:workflow 不按交互性改变声明（#30），config.interactive === false 时拒绝（A8），省略表示 true。C4 交付创建配置，不是当前 Permission；同步 declaration 不做 I/O。execute(ToolCall,cancelled) 使用既有第二个按引用取消 Promise。已接受运行归进程 owner，清理及持久化前/后取消行为按该所有权处理，不从 JS Promise 推断原生调用已取消。ToolExecutor 拥有工具终态事实。
+workflow 工具不按交互性改变注册（#30），config.interactive === false 时拒绝（A8），省略表示 true。C4 交付创建配置，不是当前 Permission；注册不做 I/O。execute(ToolCall,cancelled) 使用既有第二个按引用取消 Promise。已接受运行归进程 owner，清理及持久化前/后取消行为按该所有权处理，不从 JS Promise 推断原生调用已取消。ToolExecutor 拥有工具终态事实。
 
 `workflowRuns`，进程作用域，无 key，在此定义：`call(RunRequest): async -> RunReply`，其中 `RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}` 使用下列动作，`RunReply = {content: string, structured: JSON}`，或下列错误码中的 `{code, message}`。风险：Collaboration 的 `agent` 工具声明的类别（目前没有，因此未分类：ReadOnly 拒绝、WorkspaceWrite 询问、FullAccess 允许；E2）。
 
@@ -585,7 +585,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 
 | 中立 | 当前绑定 |
 | --- | --- |
-| `toolContribution` key `workflow` | 在 `WorkflowSession` 的 `provides` 中注册的 Session 级 `ToolContribution` |
+| 注册到 `toolRegistry` 的工具 `workflow` | `WorkflowSession` 注入 `Keyed<ToolRegistry>`，在 `apply` 中调用 `tools.register(ctx, ToolContribution {definition, handler})` |
 | `managementMethods` key `workflow` | 由 Rpc 按调用查找，不是 Rpc 的依赖（[方法附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 | sessions | 公开命名 host 服务；原生请求模块、AgentIndex::acquire 为私有实现，不是外部 crate API |
 | workflowRuns | 包实现的业务进程服务；依赖绑定见 §1.1 |

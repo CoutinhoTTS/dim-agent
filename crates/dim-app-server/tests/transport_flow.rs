@@ -301,7 +301,6 @@ struct ToolReload(
 );
 impl ToolReload {
     fn install(&self, builder: &mut AgentBuilder, tools: Arc<dyn ToolDriver>) {
-        builder.host_tools(tools.definitions().into_iter().map(|tool| tool.name));
         let views = self.0.clone();
         let hold = self.1.clone();
         builder.session_part(move |names| {
@@ -387,6 +386,33 @@ fn create(tools: Value) -> Value {
 }
 fn assert_ok(value: &Value) {
     assert!(value.get("error").is_none(), "{value}");
+}
+/// Waits until a part has registered each of `tools` in `session` and its
+/// registry has adopted them: a Session is published without waiting for its
+/// optional rows, which register their tools when they apply.
+async fn registered(server: &RunningServer, session: &str, tools: &[&str]) {
+    let session = server.agent().unwrap().get_session(session).unwrap();
+    let view = session
+        .session_service::<dim_agent_capabilities::tool_registry::ToolSourcesView>()
+        .unwrap();
+    let mut state = view.subscribe();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let adopted = tools.iter().all(|tool| {
+                state
+                    .borrow()
+                    .0
+                    .get(&format!("#contributed:{tool}"))
+                    .is_some_and(|status| status.adopted.is_some())
+            });
+            if adopted {
+                return;
+            }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{tools:?} are registered in {}", session.id()));
 }
 /// Waits until the idle unload pass has released this loaded instance: it
 /// is closed, and was unloaded rather than closed for good.

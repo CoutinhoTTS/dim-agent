@@ -16,7 +16,7 @@
 use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, params},
-    tool_registry::{ToolContribution, ToolHandler, definition},
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
 use dim_agent_runtime::{AgentBuilder, CAPABILITY_RELOADING, Names, SessionConfig};
 use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
@@ -49,7 +49,6 @@ const CANCELLED: &str = "The question was cancelled before the user answered.";
 /// `SessionConfig.tools`; installation never reads `interactive`.
 pub fn install(builder: &mut AgentBuilder) {
     builder
-        .session_tool(TOOL)
         .session_methods(NAMESPACE)
         .session_part(|names| names.part(QuestionsPlugin::new(names)?));
 }
@@ -438,26 +437,24 @@ fn ask_user_definition() -> ToolDefinition {
 /// The Questions Session part: `toolContribution` `ask_user` and
 /// `sessionMethods` `session.question`.
 pub struct QuestionsPlugin {
-    contribution: rutis::DepKey<ToolContribution>,
     methods: rutis::DepKey<SessionMethods>,
 }
 impl QuestionsPlugin {
     pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
         Ok(Self {
-            contribution: dim_agent_capabilities::tool_registry::contribution_key(names, TOOL)?,
             methods: SessionMethods::key(names, NAMESPACE)?,
         })
     }
 }
 impl TypedPlugin for QuestionsPlugin {
-    type Deps = (Keyed<SessionConfig>,);
+    type Deps = (Keyed<SessionConfig>, Keyed<ToolRegistry>);
     fn name(&self) -> &str {
         "Questions"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(config),): Self::Deps,
+        (Keyed(config), Keyed(tools)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let questions = Arc::new(Questions {
@@ -474,12 +471,12 @@ impl TypedPlugin for QuestionsPlugin {
                     Ok(())
                 }))
             })?;
-            ctx.provide_as(
-                self.contribution.key().clone(),
-                Arc::new(ToolContribution {
+            tools.register(
+                ctx,
+                ToolContribution {
                     definition: ask_user_definition(),
                     handler: Arc::new(AskUser(questions.clone())),
-                }),
+                },
             )?;
             SessionMethods::provide_at(
                 ctx,

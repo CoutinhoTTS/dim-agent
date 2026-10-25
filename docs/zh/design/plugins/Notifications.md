@@ -4,7 +4,7 @@
 
 > **已撤回。** 这个插件没有独立的职责，它的每一项职责都有现成的所有者：用户正在使用的 Session 的提醒（任务结束、审批或问题待处理）归客户端，客户端本来就收得到这些事件；定时任务结果的通知归 Scheduler；对外沟通渠道（Slack、飞书等）由各平台各自的插件和工具负责，没有通用渠道，也没有 `notify` 工具。本文仅作参考保留。
 
-Notifications 是一个 Session 插件。当其交互式 leader Session 上的任务完成或失败、有审批待处理或有问题等待回答时，它向已配置的外部渠道（Slack、飞书）投递消息；它依据 Scheduler 的运行结果事件通知，报告在其 Session 中结束的定时运行；以 key 为 `notify` 的 Session 级 `toolContribution` 服务向模型提供 `notify` 工具；并通过 key 为 `notifications` 的 Session 级 `sessionMethods` 服务提供 `notifications.test`（[session-boundary](../contracts/session-boundary.md)）。它只通过既有的 Session 广播观察其 Session，以分支的固定前缀确认每个触发，不向任何 Timeline 写入。终端内提醒（响铃、聚焦）属于 CLI。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
+Notifications 是一个 Session 插件。当其交互式 leader Session 上的任务完成或失败、有审批待处理或有问题等待回答时，它向已配置的外部渠道（Slack、飞书）投递消息；它依据 Scheduler 的运行结果事件通知，报告在其 Session 中结束的定时运行；向模型提供 `notify` 工具，该工具由它注册到本 Session 的 `toolRegistry`；并通过 key 为 `notifications` 的 Session 级 `sessionMethods` 服务提供 `notifications.test`（[session-boundary](../contracts/session-boundary.md)）。它只通过既有的 Session 广播观察其 Session，以分支的固定前缀确认每个触发，不向任何 Timeline 写入。终端内提醒（响铃、聚焦）属于 CLI。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
 ## 1. 结构
 
@@ -25,7 +25,7 @@ flowchart LR
   EXT["Slack / 飞书 HTTPS 端点"]
   NP -->|"监听：turn/end、approval/request、question/asked"| SB
   NP -->|"检查时读取前缀"| TT
-  TR -->|"按名称收集 toolContribution notify"| NP
+  NP -->|"注册 notify"| TR
   NP -.->|"监听，无依赖边"| RO
   NP -->|"使用时读取"| Settings
   NP -->|"标签"| META
@@ -36,7 +36,7 @@ flowchart LR
 
 | 部件 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Notifications` | Session（仅启用时安装） | 其所在 Session 的 Session 广播、TimelineTree、`SessionConfig`；进程服务 Settings 业务来源、SessionStore 标题元数据；监听（不依赖）Scheduler 的 `scheduled_run_outcomes` 事件 | `toolContribution` key `notify`（风险 `outbound_message`）和 `sessionMethods` key `notifications`（`notifications.test`），在其 `provides` 中声明；触发名 `turn.completed`、`turn.failed`、`approval.pending`、`question.pending`、`schedule.ended`；业务文档 `notifications` |
+| `Notifications` | Session（仅启用时安装） | 其所在 Session 的 Session 广播、TimelineTree、`SessionConfig`；进程服务 Settings 业务来源、SessionStore 标题元数据；监听（不依赖）Scheduler 的 `scheduled_run_outcomes` 事件 把 `notify`（风险 `outbound_message`）注册到 `toolRegistry`；`sessionMethods` key `notifications`（`notifications.test`），在其 `provides` 中声明；触发名 `turn.completed`、`turn.failed`、`approval.pending`、`question.pending`、`schedule.ended`；业务文档 `notifications` |
 
 Session 广播、TimelineTree 和 `SessionConfig` 是既有的类型化服务；Settings 业务来源和 SessionStore 标题元数据是补充（[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。把这些服务按名称暴露给 TypeScript 实现属于 issue [#4](https://github.com/arcships/dim/issues/4) 的工作，见 [session-access §9](../contracts/session-access.md#9-向机制所有者提出的需求)；跨语言按名称监听 Scheduler 的事件是对 rutis 的需求，见 [Scheduler §9](Scheduler.md#9-向机制所有者提出的需求)。运行结果以事件通知到达，而非依赖（[ADR 002 D2](../../adr/002-plugin-scope.md)）：没有 Scheduler 时 `schedule.ended` 触发不起作用。Settings 或 SessionStore 重载会重载 Notifications，并经 `notify` 重载 ToolRegistry 及其依赖方；这是可接受的（[D3](../../adr/002-plugin-scope.md)）。`notifications` 文档属于业务配置（[D4](../../adr/002-plugin-scope.md)）：使用时读取，从不触发重载。
 
@@ -173,7 +173,7 @@ sequenceDiagram
 
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
-| `notify {message, channel?}` | `toolContribution`（Session，key `notify`），风险 `outbound_message` | 模型发起的、发往已配置渠道的消息 |
+| `notify {message, channel?}` | 注册到 `toolRegistry` 的工具（Session），风险 `outbound_message` | 模型发起的、发往已配置渠道的消息 |
 | `notifications.test {sessionId, channel?}` | `sessionMethods`（Session，key `notifications`） | 向已配置渠道发送一条固定的测试消息 |
 | `scheduled_run_outcomes` | 被监听的进程事件（Scheduler 的契约；无依赖） | `schedule.ended` 触发 |
 | `notifications` 文档 | 业务配置，Settings 用户作用域，使用时读取 | 渠道、触发、延迟 |
@@ -232,7 +232,7 @@ webhook URL、bot token 和签名密钥是 Notifications 自己的凭据（[sett
 
 ### A.2 工具 `notify`
 
-一个 `toolContribution` 服务（Session，key `notify`）：`declaration(): sync -> ToolDeclaration` 与 `execute(ToolCall): async -> ToolResult`，内容为文本。取消是取消请求或消费方丢弃调用；未完成的 HTTP 请求被中止。错误是带下列文本的错误 `ToolResult`。
+一个注册到本 Session `toolRegistry` 的工具（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)）：其 `ToolDeclaration` 与 `execute(ToolCall, cancelled): async -> ToolResult`，内容为文本。取消是取消请求或消费方丢弃调用；未完成的 HTTP 请求被中止。错误是带下列文本的错误 `ToolResult`。
 
 | 项目 | 值 |
 | --- | --- |
@@ -365,7 +365,7 @@ webhook URL、bot token 和签名密钥是 Notifications 自己的凭据（[sett
 
 | 语言中立 | Rust |
 | --- | --- |
-| `toolContribution` key `notify` | Session `ToolContribution`，以 `AgentBuilder::session_tool("notify")` 注册；ToolRegistry 收集 `Contributions<ToolContribution>`；经 `CancellationToken` 取消 |
+| 注册到 `toolRegistry` 的工具 `notify` | Session `ToolContribution`，在部件 `apply` 中经 `Keyed<ToolRegistry>` 以 `tools.register(ctx, ..)` 注册；经 `CancellationToken` 取消 |
 | `sessionMethods` key `notifications` | `SessionMethodContribution(Arc<dyn MethodProvider>)`，位于 `SessionScope::named_key::<SessionMethodContribution>("notifications")` |
 | Session 广播监听器 | `session_channel(session_id)` 上的监听器，由 `ctx.effect` 移除 |
 | `scheduled_run_outcomes` | `on(host_ctx, &scheduled_run_outcomes(), listener)`，使用 `EventKey<RunOutcome>`（[Scheduler](Scheduler.md)） |

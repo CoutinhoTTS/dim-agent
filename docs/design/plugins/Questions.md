@@ -4,7 +4,7 @@ Status: Ready (redesign, [#144](https://github.com/arcships/dim/issues/144)); th
 
 The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer, or a decline. **The question is the pending tool call, and the answer is its tool result.** A client sees the question as the committed `step/tool-call` of `ask_user` that has no `step/tool-result` yet, answers it with the Session method `session.question.respond`, and the waiting handler returns the answer as its `ToolResult`; ToolExecutor publishes it in the batch's `step/tool-result` like any other tool output. The model learns the user's choice only from `ToolResult.content`.
 
-Questions defines **no Timeline events** and has **one part**, a Session Capability. It provides the `ask_user` tool (`toolContribution`, key `ask_user`) and the method `session.question.respond` (`sessionMethods`, namespace `session.question`) ([session-boundary](../contracts/session-boundary.md)), and holds, in memory, the waiters of the Session's running `ask_user` calls, as a running tool holds its I/O. Interrupt, close, reload, restart and fork are settled by the existing tool-call lifecycle of [ToolExecutor](../../architecture/rust-agent/plugins/ToolExecutor.md).
+Questions defines **no Timeline events** and has **one part**, a Session Capability. It registers the `ask_user` tool with the Session's `toolRegistry` and provides the method `session.question.respond` (`sessionMethods`, namespace `session.question`) ([session-boundary](../contracts/session-boundary.md)), and holds, in memory, the waiters of the Session's running `ask_user` calls, as a running tool holds its I/O. Interrupt, close, reload, restart and fork are settled by the existing tool-call lifecycle of [ToolExecutor](../../architecture/rust-agent/plugins/ToolExecutor.md).
 
 Changes from the merged redesign ([#178](https://github.com/arcships/dim/pull/178)), all from checking it against current `main` and the ablation review (§11):
 
@@ -24,7 +24,7 @@ flowchart LR
     RPC["Rpc"]
   end
   subgraph S["Session scope"]
-    QS["QuestionsPlugin: toolContribution ask_user, sessionMethods session.question, waiters (branchId, requestId, callId)"]:::new
+    QS["QuestionsPlugin: tool ask_user, sessionMethods session.question, waiters (branchId, requestId, callId)"]:::new
     TR["ToolRegistry"]
     CFG["SessionConfig"]
     SB["Session broadcast"]
@@ -33,7 +33,7 @@ flowchart LR
     TE["ToolExecutor"]
     TL["Timeline + Dispatcher"]
   end
-  TR -- "collects toolContribution by name" --> QS
+  QS -- "registers ask_user" --> TR
   TE -- "execute(call, {branchId, requestId}, batch cancel token)" --> QS
   RPC -- "sessionMethods session.question" --> QS
   QS -- "reads interactive per call" --> CFG
@@ -47,7 +47,7 @@ Contracts are given in language-neutral form; the Rust form is [Appendix G](#app
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `QuestionsPlugin` | Session | `S:SessionConfig` | `toolContribution` key `ask_user`; `sessionMethods` namespace `session.question` (`session.question.respond`) |
+| `QuestionsPlugin` | Session | `S:SessionConfig`, `S:ToolRegistry` | Registers `ask_user` with `toolRegistry`; `sessionMethods` namespace `session.question` (`session.question.respond`) |
 
 Installation: the part is installed whenever the plugin is enabled; installation never reads `SessionConfig.interactive` ([session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin)), so `ask_user` is declared in every Session and a fork keeps the same tool set and prompt prefix.
 
@@ -55,7 +55,7 @@ Contracts depended on, all implemented on `main`:
 
 | Contract | Owner | Status |
 | --- | --- | --- |
-| `toolContribution`, offered while its provider is active ([session-boundary A.5](../contracts/session-boundary.md)) | ToolRegistry | Implemented (C3, #241) |
+| Tool registration with `toolRegistry`, offered while its registering part is loaded ([session-boundary A.5](../contracts/session-boundary.md#a5-tool-contribution)) | ToolRegistry | Implemented (#241, #382) |
 | Tool call execution: the call's `ToolExecutionContext.branchId` and `requestId` (the `request_id` of its `step/tool-call`), one cancel token per batch cancelled by `stop/interrupt` and by ToolExecutor's unload, a returned result kept when the cancel comes later, `HostError::Cancelled(reason)` written as an error result with `reason` as its text, reload-settled results that fail the turn ([tool_executor.rs](../../../crates/dim-agent-capabilities/src/tool_executor.rs)) | ToolExecutor | Implemented |
 | `sessionMethods` with `MethodDecl {name, mutating, interruption, progress}` ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)) | Rpc, runtime | Implemented (C1) |
 | `SessionConfig.interactive`, absent means `true` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)) | Agents | Implemented (C2) |
@@ -184,7 +184,7 @@ Exactly one of `respond` and the cancel removes the entry. If `respond` wins, th
 
 | Scenario | Outcome |
 | --- | --- |
-| Questions part reloads while waiting | Unload drops the senders; handlers return Cancelled with `capability reloading`; the batch is reload-settled and the turn fails ([ADR 002](../../adr/002-plugin-scope.md) D3). ToolRegistry does not reload with it; the next request offers the new generation, without a Session reload ([session-boundary A.5](../contracts/session-boundary.md#a5-tool-contribution)). Nothing is re-asked |
+| Questions part reloads while waiting | Unload drops the senders; handlers return Cancelled with `capability reloading`; the batch is reload-settled and the turn fails ([ADR 002](../../adr/002-plugin-scope.md) D3). ToolRegistry does not reload with it; the new generation registers again and the next request offers it, without a Session reload ([session-boundary A.5](../contracts/session-boundary.md#a5-tool-contribution)). Nothing is re-asked |
 | ToolExecutor (branch) reloads while waiting | Its unload cancels the batch token; the handler removes its entry and returns; ToolExecutor writes reload-settled results and the turn fails |
 | Graceful restart while waiting (SIGINT, SIGTERM, `daemon.shutdown` without `force`) | The App Server closes every loaded Session as `session.close` does (close row below); after the restart the call is already settled and is not asked again |
 | Crash or forced shutdown while waiting | On restore, ToolExecutor's rebuild settles the open batch as not executed (`capability reloading`); the turn fails |
@@ -235,7 +235,7 @@ Never visible: the waiter table, `structuredContent`, client rendering. Compacti
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `ask_user` | `toolContribution` (Session, key `ask_user`), risk `session` | Ask 1–4 questions, wait for the answer |
+| `ask_user` | Tool registered with `toolRegistry` (Session), risk `session` | Ask 1–4 questions, wait for the answer |
 | `session.question.respond` | `sessionMethods` (Session, namespace `session.question`) | Answer or decline a waiting call |
 | Pending-question rule | Client contract | `ask_user` call without its `step/tool-result` |
 
@@ -259,7 +259,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.8 Infrastructure unchanged | No change to Timeline, Dispatcher, envelope, assembly or facades; no requirement raised (§9). |
 | §4.9 Only facts later decisions use | No event is added; every omitted fact is justified in §2. Display before the batch settles would use a Session broadcast notice, not the Timeline (F1). |
 | §1 Capability and App Server boundary | The part is a Capability in its own crate; Rpc and the CLI hold no Questions logic beyond the client contract. |
-| ADR 002 D1 Scope | Tool, method and waiters are Session services; a waiter is the `ask_user` handler's own call, which the Session-scoped tool contribution runs, so it has the same owner. Branch lifecycle reaches it through ToolExecutor's cancel token. |
+| ADR 002 D1 Scope | Tool, method and waiters are Session services; a waiter is the `ask_user` handler's own call, which the Session-scoped registered tool runs, so it has the same owner. Branch lifecycle reaches it through ToolExecutor's cancel token. |
 | ADR 002 D2 No wiring modules | ToolRegistry and Rpc collect the services by name; there is no adapter part. |
 | ADR 002 D3 Scope dependencies | The part depends only on the Session's `SessionConfig`; nothing core depends on Questions; a reload settles waiting calls, which is accepted. |
 | ADR 002 D4 Configuration | Not applicable: Questions has no configuration. `interactive` is Session creation data read at call time, not configuration of Questions. |
@@ -319,7 +319,7 @@ EN and Chinese documents are kept in sync.
 
 ### A.1 Tool `ask_user`
 
-Service `toolContribution`, Session scope, key `ask_user`. The declaration has the name, a fixed description, the schema below and risk `session`; `execute(ToolCall, {branchId, requestId}, cancel)` returns a `ToolResult`. The consumer cancels by the cancel token of the call.
+Registered with the Session's `toolRegistry` under the name `ask_user` ([session-boundary A.5](../contracts/session-boundary.md#a5-tool-contribution)). The declaration has the name, a fixed description, the schema below and risk `session`; `execute(ToolCall, {branchId, requestId}, cancel)` returns a `ToolResult`. The consumer cancels by the cancel token of the call.
 
 | Parameter | Type | Rule |
 | --- | --- | --- |
@@ -514,7 +514,7 @@ Flow tests through RPC, tool calls and events:
 
 | Neutral contract | Rust binding |
 | --- | --- |
-| `toolContribution` key `ask_user` | `AgentBuilder::session_tool("ask_user")`; `ctx.provide_as(scope.named_key::<ToolContribution>("ask_user"), ToolContribution {definition, handler})`, as Wait does; `ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`; cancelled = `HostError::Cancelled(reason)` |
+| Tool `ask_user` registered with `toolRegistry` | `Keyed<ToolRegistry>`; `tools.register(ctx, ToolContribution {definition, handler})` in `apply`, as Wait does; `ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`; cancelled = `HostError::Cancelled(reason)` |
 | `sessionMethods` namespace `session.question` | `AgentBuilder::session_methods("session.question")`; `SessionMethods::provide(ctx, &scope, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)`, as ShellInput does |
 | `S:SessionConfig` | `InSession<SessionConfig>`, field `interactive` read per call |
 

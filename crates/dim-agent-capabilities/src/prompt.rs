@@ -38,7 +38,23 @@ fn validate_entry(target: &PromptSourceTarget, entry: &PromptEntry) -> Result<()
     Ok(())
 }
 
-pub struct InitialPromptConfiguration(pub Option<ConfigureUpdate>);
+/// What a branch adopts when it opens: the Session's prompt sources, and the
+/// model a new Session adopts. Read when the branch opens, so it holds the
+/// sources registered then.
+pub struct InitialPromptConfiguration(Box<dyn Fn() -> Option<ConfigureUpdate> + Send + Sync>);
+impl InitialPromptConfiguration {
+    /// The same configuration for every branch; `None` adopts nothing.
+    pub fn fixed(update: Option<ConfigureUpdate>) -> Self {
+        Self(Box::new(move || update.clone()))
+    }
+    /// The configuration `read` returns when a branch opens.
+    pub fn read(read: impl Fn() -> Option<ConfigureUpdate> + Send + Sync + 'static) -> Self {
+        Self(Box::new(read))
+    }
+    pub fn get(&self) -> Option<ConfigureUpdate> {
+        (self.0)()
+    }
+}
 
 /// Rules and state enter the model context as inputs written with the change.
 fn context_rules(before: &PromptSnapshot, after: &PromptSnapshot) -> Vec<InputBlock> {
@@ -92,7 +108,7 @@ struct PromptState {
 pub struct Prompt {
     host: Arc<PromptHost>,
     /// Sources the Session delivers, and the model a new Session adopts.
-    initial: Option<ConfigureUpdate>,
+    initial: Arc<InitialPromptConfiguration>,
     publisher: Arc<ConfigurationPublisher>,
     timeline: Arc<Timeline>,
     faults: Arc<FaultReporter>,
@@ -640,7 +656,7 @@ impl TypedPlugin for PromptPlugin {
             let (adoption, mut adoptions) = tokio::sync::mpsc::unbounded_channel();
             let service = Arc::new(Prompt {
                 host,
-                initial: initial.0.clone(),
+                initial,
                 publisher,
                 timeline: timeline.clone(),
                 faults,
@@ -878,7 +894,7 @@ impl Prompt {
     /// Delivers what the Session's sources hold now, compared with what this
     /// branch already has. A new Session also adopts its model.
     async fn open(&self, event: &AgentEvent) -> Result<()> {
-        let Some(initial) = &self.initial else {
+        let Some(initial) = self.initial.get() else {
             return Ok(());
         };
         // A new Session adopts everything; a child or a resumed branch keeps
@@ -888,7 +904,7 @@ impl Prompt {
             EventKind::BranchStart(BranchStartData { parent: None, .. })
         );
         let update = if new_session {
-            initial.clone()
+            initial
         } else {
             ConfigureUpdate {
                 sources: initial.sources.clone(),

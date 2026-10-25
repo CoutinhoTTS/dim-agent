@@ -2,17 +2,17 @@
 
 Status: Draft. Overall design: [overview §3 integration](../overview.md#3-integration-by-existing-mechanisms), [Appendix B Rpc and ToolRegistry](../overview.md#appendix-b-supplements-to-existing-plugins); rules: [ADR 002](../../adr/002-plugin-scope.md) D2, D3, D5. Phase: P0. Language: neutral contracts; Rust binding in [Appendix F](#appendix-f-rust-binding). The [C4 binding](../session-typescript.md) implements a non-Rust Session tool/method subset; Session broadcast uses the separate C4 leaf observation contract.
 
-This contract defines three named services in the language-neutral form of ADR 002 D5. Each is identified by a service name, a scope and an instance key; its methods take and return serializable data; errors are data; cancellation is a protocol action. A plugin in any language provides them by declaring them in its `provides` (loader row), and consumers collect them by name and scope. They are built on mechanisms the runtime already has: named services collected per scope and Rpc's existing dispatch through the Session, as `approval.respond` does today. Implementation status: `managementMethods` (#14), `sessionMethods` (C1) and the `toolContribution` attach rule (C3) are implemented through the Rust bindings in Appendix F; of `callChannel`, only per-call `progress` (C1) is implemented. The C4 embedding entry also derives Session tools/namespaces from `provides` and binds their neutral DTO subset. The rest of `callChannel` and general plugin installation are not implemented, nor are `ConnectionEntry {name, deviceId}`, routing by `deviceId` and exported rutis links (proposed for P3, with RemoteGateway).
+This contract defines two named services and one registration in the language-neutral form of ADR 002 D5. Each service is identified by a service name, a scope and an instance key; its methods take and return serializable data; errors are data; cancellation is a protocol action. A plugin in any language provides the method services by declaring them in its `provides` (loader row), and Rpc collects them by name and scope. A tool is not a service: a Session part registers it with the Session's `toolRegistry`, and the registration lasts until that part unloads. They are built on mechanisms the runtime already has: named services collected per scope, Rpc's existing dispatch through the Session, as `approval.respond` does today, and registrations that are effects of their caller. Implementation status: `managementMethods` (#14), `sessionMethods` (C1) and tool registration (#382) are implemented through the Rust bindings in Appendix F; of `callChannel`, only per-call `progress` (C1) is implemented. The C4 embedding entry also derives Session method namespaces from `provides`, lets Session rows register tools through `toolRegistry`, and binds their neutral DTO subset. The rest of `callChannel` and general plugin installation are not implemented, nor are `ConnectionEntry {name, deviceId}`, routing by `deviceId` and exported rutis links (proposed for P3, with RemoteGateway).
 
 | Service | Scope | Key | Provided by | Collected by |
 | --- | --- | --- | --- | --- |
 | `sessionMethods` | Session | namespace | Session-scoped plugin parts (Questions, Goal, SessionTitle, Attachments, ShellInput) and InputQueue (`session.input`) | Rpc, dispatching through the Session |
 | `managementMethods` | Process | namespace | Process plugins only (Mcp, Provider, Scheduler, ...; Settings has no namespace yet) | Rpc, looked up per call |
-| `toolContribution` | Session | tool name | Session-scoped plugin parts (Questions, Goal, Web, Scheduler, Workflow) | ToolRegistry (supplement: named tool services) |
+| Tool registration (`toolRegistry.register`) | Session | tool name | Session-scoped plugin parts (Questions, Goal, Web, Scheduler, Workflow), each registering its own tools | ToolRegistry, which owns `toolRegistry` (supplement: tool registration) |
 
 **Management methods** are client RPC methods about the host rather than a Session: `account.*`, `provider.*`, `mcp.*` and `skills.*`, plus the methods of new process plugins (settings methods are future work; Settings publishes none yet). `daemon.shutdown` stays an Rpc built-in and is likewise never served to paired devices. Before #14, Rpc injected their services directly (`ProductServices` and `ExecutionServices` in [connection.rs](../../../crates/dim-app-server/src/connection.rs)); #14 removed them, and Rpc now looks the methods up through `managementMethods`, per call and without a dependency on their providers. Only process plugins provide them, and they are never served to paired remote devices. Session methods have no level; the only split is `sessionMethods` (dispatched through a Session) versus `managementMethods`.
 
-Proposed (P3, with RemoteGateway; not implemented): Rpc decides what a connection is served from its `ConnectionEntry {name, deviceId}`: a local connection gets Session and management methods, a connection with a `deviceId` (a paired device through RemoteGateway) never gets management methods, and an exported rutis link gets management methods only when exported. Today Rpc serves every connection by the existing transport profile rules (A.3). There is no registry, no port and no Management plugin. Providers are optional plugins installed only when enabled. Rpc looks up a `managementMethods` provider on each call and does not depend on it, so a provider that is disabled, Pending, Failed or reloading affects only its own namespace (§3.2). ToolRegistry does not depend on `toolContribution` providers either: it reads the providers active at the first ToolRegistry read during branch initialization and then follows them, so a provider that becomes active later is offered from the next request and a retiring one is withdrawn, without a Session reload (A.5).
+Proposed (P3, with RemoteGateway; not implemented): Rpc decides what a connection is served from its `ConnectionEntry {name, deviceId}`: a local connection gets Session and management methods, a connection with a `deviceId` (a paired device through RemoteGateway) never gets management methods, and an exported rutis link gets management methods only when exported. Today Rpc serves every connection by the existing transport profile rules (A.3). There is no registry, no port and no Management plugin. Providers are optional plugins installed only when enabled. Rpc looks up a `managementMethods` provider on each call and does not depend on it, so a provider that is disabled, Pending, Failed or reloading affects only its own namespace (§3.2). ToolRegistry does not depend on the parts that register tools either; they depend on it. A tool registered later is offered from the next request, and a withdrawn one is no longer offered, without a Session reload (A.5).
 
 Acting on a tool call or an input before it is committed is not a service of this contract. Approval and the Session input path are unchanged; InputQueue's withdrawal is its owner's change ([overview Appendix B](../overview.md#appendix-b-supplements-to-existing-plugins)).
 
@@ -33,7 +33,7 @@ flowchart LR
   subgraph SES["Session"]
     SM["sessionMethods[namespace]: Questions, Goal, SessionTitle, ..."]
     TR["ToolRegistry"]
-    TC2["toolContribution[tool]: Web, Questions, ..."]
+    TC2["Tool parts: Web, Questions, ..."]
   end
   subgraph BR["Branch"]
     BS["Branch services: Goal, InputQueue"]
@@ -45,16 +45,16 @@ flowchart LR
   Rpc -->|"resolve sessionId"| AI
   AI -->|"sessionMethods by namespace"| SM
   SM -->|"branch service"| BS
-  TR -->|"collect by name"| TC2
+  TC2 -->|"register tools"| TR
 ```
 
 | Service | Absent |
 | --- | --- |
 | `sessionMethods` | `unknown_method` when the Session does not list the namespace; when it lists it but the provider is not active, `service_reloading` while the providing part starts or reloads and `service_unavailable` once it failed or cannot run (A.1) |
 | `managementMethods` | `unknown_method` when no configured namespace owns the name or its owner row is disabled or absent (§3.2) |
-| `toolContribution` | The tool is omitted and reported in diagnostics (A.5) |
+| Tool registration | A configured tool that no part has registered is not offered and is reported in diagnostics; it is offered from the next request once a part registers it (A.5) |
 
-Contracts defined here: the three services, `MethodDecl`, `MethodCall`, `MethodReply`, `MethodError`, the `session.methods` listing method, the `callChannel` companion service (only `progress` implemented), `ToolDeclaration`, `ToolCall`, `ToolResult`, what each entry is served, naming, reserved names, the migration of existing management methods and the compatibility table. Contracts used: `SessionConfig` ([session-access](session-access.md#a3-sessionconfig-fields)), source input conventions ([session-access A.2](session-access.md#a2-source-input-conventions)), the Rpc command envelope and `appError` codes.
+Contracts defined here: the two method services, tool registration, `MethodDecl`, `MethodCall`, `MethodReply`, `MethodError`, the `session.methods` listing method, the `callChannel` companion service (only `progress` implemented), `ToolDeclaration`, `ToolCall`, `ToolResult`, what each entry is served, naming, reserved names, the migration of existing management methods and the compatibility table. Contracts used: `SessionConfig` ([session-access](session-access.md#a3-sessionconfig-fields)), source input conventions ([session-access A.2](session-access.md#a2-source-input-conventions)), the Rpc command envelope and `appError` codes.
 
 ## 2. Data and state
 
@@ -116,15 +116,17 @@ Assembly builds the fixed configured `(namespace, row)` pairs in [lib.rs](../../
 | Session method on a Session that does not list that namespace | — | `unknown_method` | Rpc |
 | Management owner reloads | — | Calls into its namespace return `service_reloading` until the new generation is active; a Failed, Unresolved or Disposed owner returns `service_unavailable` (§3.2); admitted calls belong to the provider and follow their `interruption`; Rpc does not reload and connections stay open | Rpc |
 | Management method or `daemon.shutdown` on a connection with a `deviceId` | — | `unknown_method` | Rpc |
-| Two providers claim one namespace or tool name | assembly | Assembly fails; keys are unique per scope | Assembly |
+| Two providers claim one namespace | assembly | Assembly fails; keys are unique per scope | Assembly |
+| A part registers a tool name that is registered already or is a host tool's | registration | The registration is refused | ToolRegistry |
 | A Session namespace overlaps a configured management namespace | assembly | Assembly fails (A.1) | Assembly |
-| Tool-contribution provider reloads during a turn | call < reload | The in-flight call fails; that provider's tools are withdrawn and offered again, as a new version, once its next generation is active; ToolRegistry and Loop keep running (D3) | ToolRegistry |
+| A part that registered tools reloads during a turn | call < reload | Its registrations are withdrawn when it unloads. A foreign call in flight ends with an error warning that it may already have taken effect, and a later call through a retained handler is not made; a native tool settles by its own reload rule. The part's next generation registers again, and its tools are offered, as a new version, from the next request; ToolRegistry and Loop keep running (D3) | ToolRegistry |
+| ToolRegistry reloads | — | The parts registered with it reload and register again | ToolRegistry |
 
 Full table: [Appendix B](#appendix-b-full-conflict-table).
 
 ## 5. Context mapping
 
-Methods have no model-visible effect. A method that changes model context does so through its owner's input or Timeline facts, and those owners' mappings apply. A `toolContribution` reaches the model only through its declaration and its `ToolResult`, as any tool does.
+Methods have no model-visible effect. A method that changes model context does so through its owner's input or Timeline facts, and those owners' mappings apply. A registered tool reaches the model only through its declaration and its `ToolResult`, as any tool does.
 
 ## 6. Interfaces (summary)
 
@@ -135,12 +137,12 @@ Methods have no model-visible effect. A method that changes model context does s
 | `managementMethods[namespace].describe / call` | async | Same shapes, process scope, management methods; implemented only as the Rust subset in Appendix F |
 | `session.methods {sessionId}` (wire, Rpc built-in) | async | List a Session's methods (protocol v3) |
 | `callChannel.progress / notify / closed` (Rpc) | sync / async | Per-call progress (implemented, Appendix F) and connection-bound notifications (not implemented) |
-| `toolContribution[tool].declaration() -> ToolDeclaration` | sync | Tool declaration |
-| `toolContribution[tool].execute(ToolCall) -> ToolResult` | async | Tool execution |
+| `toolRegistry.register(ToolDeclaration, execute)` | async | Register a tool until the calling part unloads |
+| `execute(ToolCall, cancelled) -> ToolResult` (the registering part's function) | async | Tool execution |
 
 ## 7. Security
 
-Proposed (P3, with RemoteGateway; not implemented): the connection's `ConnectionEntry {name, deviceId}` is the only authority for what it is served: local RPC gets Session and management methods, a connection with a `deviceId` (RemoteGateway) gets Session methods only (paired devices may call every Session method, including `shell.*`, decision E3), and a rutis link serves management methods only when they are explicitly exported in host-local link configuration. Rpc validates only at the external boundary: param shape and `sessionId` authorization for every Session-scoped method, exactly as for its built-ins. Feature checks (content sniffing, size limits, model capability) belong to the method's owner. A `toolContribution` is admitted by Approval and Permission like every tool, under its declared risk. There is no host-local approval: Approval and Permission govern only actions an agent decides, and commands that user or project configuration runs are that configuration's responsibility and run when enabled ([overview §6.4](../overview.md#64-conventions)). The former `mcp.approve`/`mcp.revoke` are removed (A.4).
+Proposed (P3, with RemoteGateway; not implemented): the connection's `ConnectionEntry {name, deviceId}` is the only authority for what it is served: local RPC gets Session and management methods, a connection with a `deviceId` (RemoteGateway) gets Session methods only (paired devices may call every Session method, including `shell.*`, decision E3), and a rutis link serves management methods only when they are explicitly exported in host-local link configuration. Rpc validates only at the external boundary: param shape and `sessionId` authorization for every Session-scoped method, exactly as for its built-ins. Feature checks (content sniffing, size limits, model capability) belong to the method's owner. A registered tool is admitted by Approval and Permission like every tool, under its declared risk. There is no host-local approval: Approval and Permission govern only actions an agent decides, and commands that user or project configuration runs are that configuration's responsibility and run when enabled ([overview §6.4](../overview.md#64-conventions)). The former `mcp.approve`/`mcp.revoke` are removed (A.4).
 
 ## 8. Rule check
 
@@ -149,18 +151,18 @@ Proposed (P3, with RemoteGateway; not implemented): the connection's `Connection
 | §4 rule 1 (command events) | Not applicable: the services write no Timeline event themselves; a method that changes branch state calls its owner, which writes (for example InputQueue's `input/deleted` for `session.input.withdraw`). |
 | §4 rule 2 (handover) | Not applicable: methods and tool contributions hand nothing over; a tool call is handed to ToolExecutor by the existing `step/tool-call` contract. |
 | §4 rule 3 (before callbacks only) | Rpc validates only param shape and `sessionId` authorization; feature checks belong to the method's owner, and acting before a commit is left to Timeline before callbacks. |
-| §4 rule 4 (no business meaning in core) | Rpc and ToolRegistry collect services by name and never name a provider or interpret a method. |
+| §4 rule 4 (no business meaning in core) | Rpc collects services by name and ToolRegistry keeps what parts register; neither names a provider or interprets a method. |
 | §4 rule 5 (batch) | Not applicable: no decision here is taken on a Timeline event; owners decide from their own facts. |
-| §4 rule 6 (model context) | Methods have no model-visible effect, and a `toolContribution` reaches the model only through its declaration and `ToolResult` (§5). |
+| §4 rule 6 (model context) | Methods have no model-visible effect, and a registered tool reaches the model only through its declaration and `ToolResult` (§5). |
 | §4 rule 7 (public events and services) | Providers reach branches only through the branch's public services, and Rpc dispatches only through the Session's `sessionMethods`. |
 | §4 rule 8 (requirements) | A keyed read of a Session service by name is raised in §9.1; drain on unload and listing active providers are withdrawn (rutis is an external dependency). |
 | §4 rule 9 (only decision facts in the Timeline) | Method tables and served entries are assembly data, never Timeline facts (§2). |
 | §1 (Capability and App Server boundary) | Rpc only collects and dispatches; the business code of every method lives in its provider's plugin. |
-| ADR 002 D1 | `sessionMethods` and `toolContribution` are Session-scoped, `managementMethods` process-scoped, matching their owners. |
-| ADR 002 D2 | No registry, port or Management plugin; Rpc and ToolRegistry collect by name. |
-| ADR 002 D3 | Providers depend on their own or an enclosing scope. ToolRegistry offers the `toolContribution` providers that are active, following their activation and retirement, and does not depend on them (A.5); Rpc depends neither on management providers (§3.2) nor on Session method providers (A.1), so their reloads stay within their namespace. |
+| ADR 002 D1 | `sessionMethods` and tool registrations are Session-scoped, `managementMethods` process-scoped, matching their owners. |
+| ADR 002 D2 | No new registry, port or Management plugin; Rpc collects by name, and tools register with ToolRegistry, which owns the Session's tools. |
+| ADR 002 D3 | Providers depend on their own or an enclosing scope. ToolRegistry offers the tools registered with it, following their registration and withdrawal, and does not depend on the parts that register them (A.5); Rpc depends neither on management providers (§3.2) nor on Session method providers (A.1), so their reloads stay within their namespace. |
 | ADR 002 D4 | A link's management export is structural host-local configuration; no business configuration is defined here. |
-| ADR 002 D5 | Every service is named with scope, key and data-only methods; Rust types appear only in Appendix F. The implemented Rust binding of `managementMethods` is a subset that does not yet meet D5 (Appendix F). |
+| ADR 002 D5 | Every service is named with scope, key and data-only methods, and a part of any language registers a tool with the same data and its own `execute`; Rust types appear only in Appendix F. The implemented Rust binding of `managementMethods` is a subset that does not yet meet D5 (Appendix F). |
 
 ## 9. Requirements raised to mechanism owners
 
@@ -358,22 +360,22 @@ No protocol version is added and persistence formats are unchanged.
 
 ### A.5 Tool contribution
 
-ToolRegistry accepts named tool services without a hard dependency on their providers (C3, ADR 002 D3, #34). The fixed table holds the configured host tools. Each configured contributed tool is a registry-owned versioned set keyed `#contributed:<tool>` (#241): it is offered while its provider is Active, withdrawn when the provider is missing or its generation is unloading, and replaced under a new version when a new generation becomes active. A version is a new UUID, never reused even across registry instances and processes, so a version persisted in `tool_sources` names one generation. The registry reads contributors from ToolBinding's first read during branch initialization (it may not read undeclared services while it applies) and again whenever a provider enters or leaves Active or a service binding changes, in its own task, which ends when the Session starts closing. That task and ToolBinding's background adoption never call into a foreign provider (its declaration is a synchronous call into another runtime): they withdraw a replaced foreign set, and the next request's read attaches the new generation, with no registry lock held; a branch whose configuration has a tool part adopts it for the request after. A contributor that is not yet active is omitted and reported in diagnostics; it is offered from the next request after it becomes active, without a Session reload. Required dependency waiting rules are unchanged, and optional providers still never gate Session readiness (#132).
+A Session part contributes a tool by registering it with the Session's `toolRegistry`, from any language. The registration belongs to the part that made it and is withdrawn when that part unloads (ADR 002 D3, D5). ToolRegistry does not depend on the parts that register; they depend on it, so when ToolRegistry reloads, the parts registered with it reload and register again. The fixed table holds the configured host tools. Each configured registered tool is a registry-owned versioned set keyed `#contributed:<tool>` (#241): it is offered while a part has it registered, withdrawn with the registration, and offered under a new version when a part registers it again. A version is a new UUID, never reused even across registry instances and processes, so a version persisted in `tool_sources` names one generation. Every read takes in what is registered then; once the Session is published, the registry's own task also rereads after every registration and withdrawal, until the Session starts closing. A configured tool that no part has registered is not offered and is reported in diagnostics, and the Session still starts; the tool is offered from the next request after a part registers it, without a Session reload. Required dependency waiting rules are unchanged, and optional parts never gate Session readiness (#132, #207).
 
-ToolBinding reconciles the table through the existing Prompt / BranchOpening flow before the Session accepts input. A branch with adopted model configuration uses `Prompt::adopt_tools` when its tool part differs; a branch whose configuration has no tool part declares and binds the registry's current host and contributed tools through PrepareModelHost / `bind_current` on every request, so a contributed tool's change needs no adoption there. No new core readiness phase is needed. Source changes, including contributed tools in a configuration with a tool part, go through the existing registry notification and Prompt adoption path (`context/configured` with `tool_sources`), and requests retain the handlers selected for their own prefix. Tool names come from host-side `AgentBuilder::session_tool` until #4 provides `provides`-based registration. Name uniqueness, host-tool collisions and enablement through `SessionConfig.tools` are unchanged ([tool contributions](../../architecture/rust-agent/tool-contributions.md)).
+ToolBinding reconciles the table through the existing Prompt / BranchOpening flow before the Session accepts input. A branch with adopted model configuration uses `Prompt::adopt_tools` when its tool part differs; a branch whose configuration has no tool part declares and binds the registry's current host and registered tools through PrepareModelHost / `bind_current` on every request, so a registration change needs no adoption there. No new core readiness phase is needed. Source changes, including registered tools in a configuration with a tool part, go through the existing registry notification and Prompt adoption path (`context/configured` with `tool_sources`), and requests retain the handlers selected for their own prefix. A tool name follows `[A-Za-z0-9_-]{1,64}`; a name that is registered already or is a host tool's is refused. Enablement is through `SessionConfig.tools`, and only duplicate configured names fail the Session ([tool contributions](../../architecture/rust-agent/tool-contributions.md)).
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
-| `declaration` | sync | — | `ToolDeclaration` |
-| `execute` | async | `ToolCall` | `ToolResult` |
+| `toolRegistry.register` | async | `ToolDeclaration`, `execute` | Nothing once registered; an error when refused |
+| `execute` (the registering part's function) | async | `ToolCall`, `cancelled` | `ToolResult` |
 
 ```text
 // ToolDeclaration
-{ "name": "web_fetch",           // equals the key
+{ "name": "web_fetch",           // the registered name
   "description": "string",
   "inputSchema": { /* JSON Schema */ },
   "source": "static" | "builtin" | "extension" | "dynamic", // required, as ToolDefinition requires it
-  "risk": "network" }            // Permission category; required for new tools
+  "risk": "network" }            // Permission category; required
 // ToolCall
 { "sessionId": "string", "branchId": "string", "turnId": "string", "callId": "string",
   "arguments": {}, "config": { /* SessionConfig data */ } }
@@ -382,7 +384,7 @@ ToolBinding reconciles the table through the existing Prompt / BranchOpening flo
   "structuredContent?": {}, "isError": false }
 ```
 
-Cancellation: turn interrupt sends a cancel request for `callId` (or drops the call); ToolExecutor settles the call as interrupted. A provider error is returned as `ToolResult` with `isError: true`. The declaration may depend on the Session's configuration. ToolRegistry reads it when it attaches a provider generation: at ToolBinding's first read during branch initialization, or at the first read for a request after that generation becomes active; its background task never calls it, since the call is synchronous; the next request offers it without a Session reload (A.5).
+Cancellation: turn interrupt settles `cancelled` for `callId` (or drops the call); ToolExecutor settles the call as interrupted. A provider error is returned as `ToolResult` with `isError: true`. The declaration may depend on the Session's configuration: the part builds it when it registers. Once a row of another language that registered a tool starts unloading, a call through a handler that an earlier request retained is not made, and a call in flight ends with an error warning that it may already have taken effect; a native tool settles by its own reload rule. The part's next generation registers again and is offered from the next request.
 
 ## Appendix B. Full conflict table
 
@@ -399,7 +401,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 | A Session namespace overlaps a configured management namespace | assembly | Assembly fails | Assembly |
 | Two clients mutate the same configuration | storage revision | Second gets the provider's conflict | Provider |
 | `daemon.shutdown` concurrent with another call | admission | Admission stops, then admitted calls settle per `interruption` | Process coordinator |
-| Tool contribution called during turn `stop/interrupt` | interrupt < result | Cancel request for `callId`; ToolExecutor settles the call as interrupted | ToolExecutor |
+| Registered tool called during turn `stop/interrupt` | interrupt < result | Cancel request for `callId`; ToolExecutor settles the call as interrupted | ToolExecutor |
 | Unsettled tool batch, compaction, child branch cut, `input/withdraw`, `input/deleted` | — | No effect on methods | — |
 | Process restart mid-call | — | Reply lost; outcome per provider persistence; never replayed | Provider |
 
@@ -420,7 +422,7 @@ Cancellation: turn interrupt sends a cancel request for `callId` (or drops the c
 2. A management method is reachable on the local entry, returns `unknown_method` on RemoteGateway, and is reachable over a link only when exported. A `shell.*` Session method is reachable on RemoteGateway like every Session method.
 3. A recorded transcript of every migrated management method matches the pre-migration transcript, and `hello.features` is unchanged for v3 local profiles.
 4. On a RemoteGateway test entry, `session.permission.update` and `session.exec.stop` succeed.
-5. A tool provided as `toolContribution` by a non-Rust plugin is declared to the model and executed through ToolExecutor like a Rust tool. A tool in `SessionConfig.tools` whose provider is missing is omitted and reported in diagnostics, and the Session still starts.
+5. A tool that a non-Rust plugin registers through `toolRegistry` is declared to the model and executed through ToolExecutor like a Rust tool. A tool in `SessionConfig.tools` that no part has registered is omitted and reported in diagnostics, the Session still starts, and the tool is offered from the next request once a part registers it.
 6. Progress precedes the response; progress the connection cannot take is dropped without closing the connection or losing the response; `notify` reports `gone` after disconnect.
 7. With an enabled management provider that is Pending, `hello` succeeds, every other namespace works, and the provider's namespace returns `service_reloading`; with one that is Failed or Unresolved it returns `service_unavailable`; with a disabled one it returns `unknown_method`. Once PluginManager provides `plugin.set_enabled` (not implemented), it can disable the provider unless it is PluginManager itself. Reloading a management provider neither reloads Rpc nor closes connections.
 
@@ -439,13 +441,13 @@ The [TypeScript process binding](../process-typescript.md) implements same-row
 projection of the existing `managementMethods` subset, reusing native call
 admission and settlement. Entry admission is unchanged.
 
-The neutral services map to the existing native owners below. C3 attaches tools by name as their providers become active (A.5). The [C4 binding](../session-typescript.md) accepts Session services as `dyn HostDispatch` at `host_key_in("toolContribution:<tool>", session_instance)` and `host_key_in("sessionMethods:<namespace>", session_instance)`. ToolRegistry decodes each attached generation's declaration once and retains that generation's handler. The same loader row binds neutral method DTOs to C1 admission/progress/report/drain and drains admitted calls before the foreign cleanup runs. The host derives names from the row's `RowSchema.provides`; no arbitrary service lookup is added to the Session facade. Management methods use the same native call owner through the process-row binding. Session rows read Session identity, configuration and closing from the `sessionIdentity`, `sessionConfig` and `sessionLifecycle` services; each listens to its Session's `session/{sessionId}` channel itself. It adds no public facade lookup or critical branch input path. Connection notifications, handoff and origin remain outside the implemented C4 subset.
+The neutral services map to the existing native owners below. Tools register with ToolRegistry (A.5). The [C4 binding](../session-typescript.md) accepts Session method services as `dyn HostDispatch` at `host_key_in("sessionMethods:<namespace>", session_instance)` and serves `toolRegistry` to Session rows through ToolRegistry's own dispatcher. The same loader row binds neutral method DTOs to C1 admission/progress/report/drain and drains admitted calls before the foreign cleanup runs. The host derives method namespaces from the row's `RowSchema.provides`; no arbitrary service lookup is added to the Session facade. Management methods use the same native call owner through the process-row binding. Session rows read Session identity, configuration and closing from the `sessionIdentity`, `sessionConfig` and `sessionLifecycle` services; each listens to its Session's `session/{sessionId}` channel itself. It adds no public facade lookup or critical branch input path. Connection notifications, handoff and origin remain outside the implemented C4 subset.
 
 | Neutral service | Rust type and key | Registration in Rust assemblies | Collection | Status |
 | --- | --- | --- | --- | --- |
 | `managementMethods[ns]` | `ManagementMethods`, process scope, key `TypeKey::keyed_dynamic::<ManagementMethods>(ns)` | `ManagementMethods::provide(ctx, ns, Vec<MethodDecl>, Handler)` in the owner's `apply`; assembly adds the `(ns, row)` pair to `Owners` | Per call through `Owners`: keyed read with `Ctx::get_as`, row status from `loader.get(row)`; not in Rpc's `Deps` | Implemented (#14) |
 | `sessionMethods[ns]` | `SessionMethods`, the Session-scoped counterpart of `ManagementMethods`, in dim-agent-capabilities `methods` with the shared types (A.1), key `SessionScope::named_key::<SessionMethods>(ns)` | `AgentBuilder::session_methods(ns)`, which also records the Session's known namespaces | Per call: `Session::session_named_service::<SessionMethods>(ns)` (§9.1) on the Session `sessionId` names, after `index.acquire`; not in Rpc's `Deps` | Implemented (C1) |
-| `toolContribution[tool]` | `ToolContribution {definition, handler}`, `SessionScope::named_key::<ToolContribution>(tool)` | `AgentBuilder::session_tool(tool)` (existing) | Keyed reads at ToolBinding's first read and again when a provider becomes active or retires; missing or inactive providers omitted and reported in diagnostics; each generation is a registry-owned versioned set (A.5, #241) | Implemented in C3 |
+| Tool registration | `ToolContribution {definition, handler}`, registered with the Session's `ToolRegistry` (`Keyed<ToolRegistry>`) | `tools.register(ctx, ToolContribution)` in the part's `apply`; a dynamic source uses `tools.register_source(ctx, name, provider)` | Every read takes in what is registered; a configured name that nothing has registered is omitted and reported in diagnostics; each registration is a registry-owned versioned set (A.5, #241) | Implemented (#382) |
 | `callChannel` | `progress`: the handler's `Progress` argument, one per call | — | Rpc gives each admitted call a sink to its calling connection | `progress` implemented (C1); `notify`, `closed`, `takeFinalReply` not implemented |
 
 ```rust
@@ -489,4 +491,4 @@ impl ManagementMethods { // Deref<Target = MethodProvider>
 
 C4's Session `describe`/`call` binding accepts the required declaration fields above, `{callId, method, params}`, a cancellation Promise and a per-call progress callback. It decodes `{kind:"value", value}` or owned `{code, appError, message}` errors; an omitted `value`, including JavaScript `undefined` omitted by JSON serialization, becomes JSON `null`. The original row's cancellation ends a pending `describe` wait. Unsupported declaration/reply fields and malformed data fail at this boundary. Not implemented: the corresponding foreign management binding, `callChannel` connection notifications/final-reply handoff, `origin`, and the `notifications` and `reply` declaration fields.
 
-`ToolContribution` and `ToolHandler` remain the native types in `dim-agent-capabilities/src/tool_registry.rs`. C4 decodes a foreign synchronous declaration when ToolRegistry attaches its generation and wraps its async execute service in a `ToolHandler`. That handler retains both the service and the original row context's existing cancellation token under the tool's Session-scoped typed key. Row cancellation rejects later calls through the retained handler and ends its in-flight native wait without rebinding to a replacement generation; the foreign owner still settles its JavaScript work. Each execution derives a child cancellation token so completing one call cannot cancel other tools in the same batch.
+`ToolContribution` and `ToolHandler` are the native types in `dim-agent-capabilities/src/tool_registry.rs`. `ToolRegistry::register(ctx, ToolContribution)` registers on behalf of the part that owns `ctx`, until that part unloads; it refuses a name outside `[A-Za-z0-9_-]{1,64}`, a host tool's name and a name registered already. Other languages reach `toolRegistry` through ToolRegistry's dispatcher: `register(declaration, execute)` decodes the declaration as `ToolDefinition` once, requires a nonempty `risk`, and registers, on behalf of the calling row (the bridge's `caller_row`), a `ToolHandler` that calls `execute` back through the bridge. That handler holds the calling row's generation token: once the row starts unloading, a call through a retained handler is not made, and a call in flight ends with an error warning that it may already have taken effect, without rebinding to a replacement generation; the foreign owner still settles its JavaScript work. Each execution derives a child cancellation token so completing one call cannot cancel other tools in the same batch.

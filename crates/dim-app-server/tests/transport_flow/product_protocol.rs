@@ -871,8 +871,10 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             )
             .await,
     );
-    // Reload discards owner handles; the same attachment must acquire the new
-    // native state subscriptions and publish their initial snapshot.
+    // Reload discards the MCP owner handle; the same attachment must acquire
+    // the new native state subscription and publish its initial snapshot. The
+    // registry does not depend on MCP: the new owner registers its source
+    // with the same registry.
     let old_mcp = session.session_service::<McpSession>().unwrap();
     let old_tools = session.session_service::<ToolSourcesView>().unwrap();
     client
@@ -883,11 +885,8 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     // notification still buffered in the socket cannot prove their readiness.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let (Ok(mcp), Ok(tools)) = (
-                session.session_service::<McpSession>(),
-                session.session_service::<ToolSourcesView>(),
-            ) && !Arc::ptr_eq(&mcp, &old_mcp)
-                && !Arc::ptr_eq(&tools, &old_tools)
+            if let Ok(mcp) = session.session_service::<McpSession>()
+                && !Arc::ptr_eq(&mcp, &old_mcp)
             {
                 break;
             }
@@ -895,7 +894,11 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         }
     })
     .await
-    .expect("Session MCP owners replaced after process reload");
+    .expect("Session MCP owner replaced after process reload");
+    assert!(Arc::ptr_eq(
+        &session.session_service::<ToolSourcesView>().unwrap(),
+        &old_tools
+    ));
     mcp_disabled(&mut client).await;
     assert_ok(&client.rpc("session.mcp", json!({"sessionId":sid})).await);
     assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":revision,"enabled":true})).await);

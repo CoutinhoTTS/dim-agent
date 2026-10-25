@@ -606,6 +606,12 @@ async fn node_workflow_sources_stages_policy_and_report_use_the_real_package() {
             )
             .await;
         assert_ok(&created);
+        registered(
+            &server,
+            created["result"]["sessionId"].as_str().unwrap(),
+            &["workflow"],
+        )
+        .await;
         let starter = created["result"]["sessionId"].as_str().unwrap();
         ready(&mut client).await;
         let document = json!({"schema":"dim.workflow/v1","name":"review","description":"Review in parallel",
@@ -775,6 +781,12 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
     let created = client.rpc("session.create", json!({"cwd":home,"tools":["workflow"],
         "permissionPolicy":{"preset":"workspace-write","allowedTools":["workflow"],"disallowedTools":[]}})).await;
     assert_ok(&created);
+    registered(
+        &server,
+        created["result"]["sessionId"].as_str().unwrap(),
+        &["workflow"],
+    )
+    .await;
     let starter = agent
         .get_session(created["result"]["sessionId"].as_str().unwrap())
         .unwrap();
@@ -990,6 +1002,12 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
     let unrelated = client.rpc("session.create", json!({"cwd":home,"tools":["workflow"],
         "permissionPolicy":{"preset":"workspace-write","allowedTools":["workflow"],"disallowedTools":[]}})).await;
     assert_ok(&unrelated);
+    registered(
+        &server,
+        unrelated["result"]["sessionId"].as_str().unwrap(),
+        &["workflow"],
+    )
+    .await;
     let unrelated = agent
         .get_session(unrelated["result"]["sessionId"].as_str().unwrap())
         .unwrap();
@@ -1099,6 +1117,12 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
         )
         .await;
     assert_ok(&denied);
+    registered(
+        &server,
+        denied["result"]["sessionId"].as_str().unwrap(),
+        &["workflow"],
+    )
+    .await;
     let session = agent
         .get_session(denied["result"]["sessionId"].as_str().unwrap())
         .unwrap();
@@ -1221,6 +1245,12 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
             )
             .await;
         assert_ok(&created);
+        registered(
+            &server,
+            created["result"]["sessionId"].as_str().unwrap(),
+            &["workflow"],
+        )
+        .await;
         let starter = agent
             .get_session(created["result"]["sessionId"].as_str().unwrap())
             .unwrap();
@@ -1395,6 +1425,12 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
         )
         .await;
     assert_ok(&created);
+    registered(
+        &server,
+        created["result"]["sessionId"].as_str().unwrap(),
+        &["workflow"],
+    )
+    .await;
     let starter = agent
         .get_session(created["result"]["sessionId"].as_str().unwrap())
         .unwrap();
@@ -1764,6 +1800,12 @@ async fn node_workflow_report_wakes_wait_and_is_adopted_after_its_start_batch() 
         )
         .await;
     assert_ok(&created);
+    registered(
+        &server,
+        created["result"]["sessionId"].as_str().unwrap(),
+        &["workflow"],
+    )
+    .await;
     let starter = agent
         .get_session(created["result"]["sessionId"].as_str().unwrap())
         .unwrap();

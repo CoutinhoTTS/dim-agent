@@ -4,7 +4,7 @@
 
 模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答或拒绝回答。**问题就是待完成的工具调用，回答就是它的工具结果。** 客户端把已提交、尚无 `step/tool-result` 的 `ask_user` 的 `step/tool-call` 视为问题，用 Session 方法 `session.question.respond` 回答；等待中的处理函数把回答作为自己的 `ToolResult` 返回，ToolExecutor 像发布其他工具输出一样把它写进该批次的 `step/tool-result`。模型只从 `ToolResult.content` 得知用户的选择。
 
-Questions **不定义任何 Timeline 事件**，只有**一个部分**，即一个 Session Capability。它提供 `ask_user` 工具（`toolContribution`，key `ask_user`）和方法 `session.question.respond`（`sessionMethods`，命名空间 `session.question`）（[session-boundary](../contracts/session-boundary.md)），并在内存中持有本 Session 正在运行的 `ask_user` 调用的等待者，如同运行中的工具持有自己的 I/O。中断、关闭、重载、重启和 fork 都由 [ToolExecutor](../../../architecture/rust-agent/plugins/ToolExecutor.md) 现有的工具调用生命周期结算。
+Questions **不定义任何 Timeline 事件**，只有**一个部分**，即一个 Session Capability。它把 `ask_user` 工具注册到本 Session 的 `toolRegistry`，并提供方法 `session.question.respond`（`sessionMethods`，命名空间 `session.question`）（[session-boundary](../contracts/session-boundary.md)），并在内存中持有本 Session 正在运行的 `ask_user` 调用的等待者，如同运行中的工具持有自己的 I/O。中断、关闭、重载、重启和 fork 都由 [ToolExecutor](../../../architecture/rust-agent/plugins/ToolExecutor.md) 现有的工具调用生命周期结算。
 
 相对已合入的重新设计（[#178](https://github.com/arcships/dim/pull/178)）的修改，全部来自对照当前 `main` 的核对和消融审查（§11）：
 
@@ -24,7 +24,7 @@ flowchart LR
     RPC["Rpc"]
   end
   subgraph S["Session 作用域"]
-    QS["QuestionsPlugin：toolContribution ask_user，sessionMethods session.question，等待者 (branchId, requestId, callId)"]:::new
+    QS["QuestionsPlugin：工具 ask_user，sessionMethods session.question，等待者 (branchId, requestId, callId)"]:::new
     TR["ToolRegistry"]
     CFG["SessionConfig"]
     SB["Session 广播"]
@@ -33,7 +33,7 @@ flowchart LR
     TE["ToolExecutor"]
     TL["Timeline + Dispatcher"]
   end
-  TR -- "按名字收集 toolContribution" --> QS
+  QS -- "注册 ask_user" --> TR
   TE -- "execute(call, {branchId, requestId}, 批次取消令牌)" --> QS
   RPC -- "sessionMethods session.question" --> QS
   QS -- "每次调用读取 interactive" --> CFG
@@ -47,7 +47,7 @@ flowchart LR
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `QuestionsPlugin` | Session | `S:SessionConfig` | `toolContribution` key `ask_user`；`sessionMethods` 命名空间 `session.question`（`session.question.respond`） |
+| `QuestionsPlugin` | Session | `S:SessionConfig`、`S:ToolRegistry` | 把 `ask_user` 注册到 `toolRegistry`；`sessionMethods` 命名空间 `session.question`（`session.question.respond`） |
 
 安装：插件启用时就安装该部分；安装从不读取 `SessionConfig.interactive`（[session access §9.4](../contracts/session-access.md#94-按启用状态安装可选部分)），因此每个 Session 都声明 `ask_user`，fork 后工具集合和提示词前缀不变。
 
@@ -55,7 +55,7 @@ flowchart LR
 
 | 合同 | 所有者 | 状态 |
 | --- | --- | --- |
-| `toolContribution`，提供方 Active 时提供（[session-boundary A.5](../contracts/session-boundary.md)） | ToolRegistry | 已实现（C3，#241） |
+| 向 `toolRegistry` 注册工具，注册部件装载期间提供（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)） | ToolRegistry | 已实现（#241、#382） |
 | 工具调用执行：调用的 `ToolExecutionContext.branchId` 与 `requestId`（其 `step/tool-call` 的 `request_id`）；每个批次一个取消令牌，由 `stop/interrupt` 和 ToolExecutor 卸载触发；取消晚于返回时保留已返回的结果；`HostError::Cancelled(reason)` 写成以 `reason` 为文本的错误结果；重载结算的结果使 turn 失败（[tool_executor.rs](../../../../crates/dim-agent-capabilities/src/tool_executor.rs)） | ToolExecutor | 已实现 |
 | `sessionMethods` 与 `MethodDecl {name, mutating, interruption, progress}`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)） | Rpc、运行时 | 已实现（C1） |
 | `SessionConfig.interactive`，缺省为 `true`（[session access A.3](../contracts/session-access.md#a3-sessionconfig-字段)） | Agents | 已实现（C2） |
@@ -184,7 +184,7 @@ sequenceDiagram
 
 | 场景 | 结果 |
 | --- | --- |
-| 等待中 Questions 部分重载 | 卸载丢弃发送端；处理函数返回 Cancelled `capability reloading`；批次被重载结算，turn 失败（[ADR 002](../../adr/002-plugin-scope.md) D3）。ToolRegistry 不随之重载，下一个请求即提供新一代，不需要重载 Session（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)）。不会重新提问 |
+| 等待中 Questions 部分重载 | 卸载丢弃发送端；处理函数返回 Cancelled `capability reloading`；批次被重载结算，turn 失败（[ADR 002](../../adr/002-plugin-scope.md) D3）。ToolRegistry 不随之重载，新一代重新注册后下一个请求即提供，不需要重载 Session（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)）。不会重新提问 |
 | 等待中 ToolExecutor（分支）重载 | 它的卸载取消批次令牌；处理函数删除自己的条目并返回；ToolExecutor 写重载结算的结果，turn 失败 |
 | 等待中正常重启（SIGINT、SIGTERM、不带 `force` 的 `daemon.shutdown`） | App Server 像 `session.close` 一样关闭每个已载入的 Session（见下方关闭一行）；重启后该调用已经结算，不会重新提问 |
 | 等待中崩溃或强制关闭 | 恢复时 ToolExecutor 重建，把未结束的批次结算为未执行（`capability reloading`）；turn 失败 |
@@ -235,7 +235,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 
 | 接口 | 种类 | 用途 |
 | --- | --- | --- |
-| `ask_user` | `toolContribution`（Session，key `ask_user`），风险 `session` | 提出 1–4 个问题并等待回答 |
+| `ask_user` | 注册到 `toolRegistry` 的工具（Session），风险 `session` | 提出 1–4 个问题并等待回答 |
 | `session.question.respond` | `sessionMethods`（Session，命名空间 `session.question`） | 回答或拒绝等待中的调用 |
 | 待答问题规则 | 客户端合同 | 没有对应 `step/tool-result` 的 `ask_user` 调用 |
 
@@ -259,7 +259,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 | §4.8 基础设施不变 | 不改 Timeline、Dispatcher、信封、装配或门面；不提需求（§9）。 |
 | §4.9 只有后续决定要用的事实才进 Timeline | 不新增事件；每个省略的事实都在 §2 说明理由。批次结算前的显示会走 Session 广播通知，而不是 Timeline（F1）。 |
 | §1 Capability 与 App Server 边界 | 该部分是独立 crate 中的 Capability；Rpc 和 CLI 除客户端合同外不含 Questions 逻辑。 |
-| ADR 002 D1 作用域 | 工具、方法和等待者都是 Session 服务；等待者是 Session 级工具贡献运行的 `ask_user` 处理函数自己的调用，所有者相同。分支生命周期经 ToolExecutor 的取消令牌到达它。 |
+| ADR 002 D1 作用域 | 工具、方法和等待者都是 Session 服务；等待者是 Session 级注册工具运行的 `ask_user` 处理函数自己的调用，所有者相同。分支生命周期经 ToolExecutor 的取消令牌到达它。 |
 | ADR 002 D2 不设接线模块 | ToolRegistry 和 Rpc 按名字收集服务；没有适配部分。 |
 | ADR 002 D3 作用域依赖 | 该部分只依赖 Session 的 `SessionConfig`；核心不依赖 Questions；重载会结算等待中的调用，这是接受的。 |
 | ADR 002 D4 配置 | 不适用：Questions 没有配置。`interactive` 是调用时读取的 Session 创建数据，不是 Questions 的配置。 |
@@ -319,7 +319,7 @@ Session fork 只在没有缺少结果的工具提议的静止点切 `main`（[se
 
 ### A.1 工具 `ask_user`
 
-服务 `toolContribution`，Session 作用域，key `ask_user`。声明包含名称、固定描述、下列 schema 和风险 `session`；`execute(ToolCall, {branchId, requestId}, cancel)` 返回 `ToolResult`。调用方通过该调用的取消令牌取消。
+以名称 `ask_user` 注册到本 Session 的 `toolRegistry`（[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)）。声明包含名称、固定描述、下列 schema 和风险 `session`；`execute(ToolCall, {branchId, requestId}, cancel)` 返回 `ToolResult`。调用方通过该调用的取消令牌取消。
 
 | 参数 | 类型 | 规则 |
 | --- | --- | --- |
@@ -514,7 +514,7 @@ CLI 处理所挂接 Session 所有分支的问题（A9）。它从所有分支�
 
 | 中立合同 | Rust 绑定 |
 | --- | --- |
-| `toolContribution` key `ask_user` | `AgentBuilder::session_tool("ask_user")`；`ctx.provide_as(scope.named_key::<ToolContribution>("ask_user"), ToolContribution {definition, handler})`，与 Wait 相同；`ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`；取消 = `HostError::Cancelled(reason)` |
+| 注册到 `toolRegistry` 的工具 `ask_user` | `Keyed<ToolRegistry>`；在 `apply` 中调用 `tools.register(ctx, ToolContribution {definition, handler})`，与 Wait 相同；`ToolHandler::execute(call, ToolExecutionContext {branch_id, request_id, ..}, CancellationToken)`；取消 = `HostError::Cancelled(reason)` |
 | `sessionMethods` 命名空间 `session.question` | `AgentBuilder::session_methods("session.question")`；`SessionMethods::provide(ctx, &scope, "session.question", vec![MethodDecl::new("session.question.respond", true, Interruption::Report)], handler)`，与 ShellInput 相同 |
 | `S:SessionConfig` | `InSession<SessionConfig>`，每次调用读取字段 `interactive` |
 

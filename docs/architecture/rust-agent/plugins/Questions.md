@@ -13,6 +13,7 @@ its `ToolResult`, so Questions writes no events. Design:
 | Service | Purpose |
 | --- | --- |
 | `S:SessionConfig` | `interactive`, read on each call: a non-interactive Session gets an error result at once. |
+| `S:ToolRegistry` | Register `ask_user`, until this part unloads. |
 
 ## Tool
 
@@ -162,7 +163,7 @@ Rules: [principles](../principles.md) §1 and §4,
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `S:SessionConfig` |
-| 提供 | `S:SessionMethods#session.question`、`S:ToolContribution#ask_user` |
+| 注入 | `S:SessionConfig`、`S:ToolRegistry` |
+| 提供 | `S:SessionMethods#session.question` |
 | 被注入于 | — |
 <!-- /generated -->

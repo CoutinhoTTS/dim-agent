@@ -26,7 +26,8 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Read or set a Session's title | `sessionMetadata`, process | Implemented by SessionStore: `read` and the revision-checked `setTitle` ([title metadata](design/appserver/session-title-metadata.md)). SessionTitle is the title's one writer; other plugins only read. |
 | Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the row's `settings` member. |
 | Read/save Workflow definition files | `workflowFiles`, process | Generated `read/list/replace/createDirectory`; fixed project directories and the calling row's read-only packages ([contract](design/p6-p7-bindings.md#3-workflow-definition-files)). |
-| Offer client methods or model tools | `sessionMethods:<namespace>`, `toolContribution:<tool>`, Session | Provided by a row in the `session` group. |
+| Offer model tools | `toolRegistry`, Session | A row in the `session` group registers each tool with `register` ([Session tools](#session-tools-and-client-methods)). |
+| Offer client methods | `sessionMethods:<namespace>`, Session | Provided by a row in the `session` group. |
 | Offer host management methods | `managementMethods:<namespace>`, process | Provided by a process row, through protected-local v3 Rpc. |
 | Know this Session and its phases | `sessionIdentity`, `sessionConfig`, `sessionLifecycle`, Session | `get()` returns `{sessionId, restored}` or the creation-time configuration; `activated()`, `closing()`, `hold()` and `release(id)` ([Session observation](#session-observation)). |
 | Observe this Session | the `session/{sessionId}` channel | Listen with `ctx.on` ([Session observation](#session-observation)). |
@@ -48,7 +49,8 @@ what a row injects or provides.
 ```json
 [
   { "id": "example-session", "name": "/absolute/example/session.ts", "group": "session",
-    "provides": { "toolContribution:example_echo": { "declaration": "sync", "execute": "async" } },
+    "inject": ["toolRegistry"],
+    "provides": { "sessionMethods:session.example": { "describe": "async", "call": "async" } },
     "config": {} },
   { "id": "example-counter", "name": "/absolute/example/counter.ts", "group": "branch",
     "inject": ["dispatcher"], "provides": { "exampleCounter": { "get": "sync" } }, "config": {} }
@@ -246,9 +248,8 @@ For example, this row declares a user-scoped Web source:
 {
   "id": "web",
   "name": "/absolute/path/to/web.ts",
-  "provides": {
-    "toolContribution:web_fetch": { "declaration": "sync", "execute": "async" }
-  },
+  "inject": ["settings", "toolRegistry"],
+  "provides": {},
   "settings": [{
     "source": "web",
     "userFile": "web.json",
@@ -376,47 +377,44 @@ and definition semantics remain with Settings and the Workflow package.
 
 ## Session tools and client methods
 
-A row in the `session` group provides `toolContribution:<tool>` or `sessionMethods:<namespace>`.
-The host configures ordinary rows through `ServerConfig.session_typescript`;
-general CLI installation remains PluginManager work. Give each row the same
-`provides` dictionary the module exports. The host derives tool names and method
-namespaces from that dictionary; keep it as one packaging source rather than
-maintaining separate registration lists. The public
+A row in the `session` group registers its tools with the Session's `toolRegistry` and provides
+`sessionMethods:<namespace>`. The host configures ordinary rows through
+`ServerConfig.session_typescript`; general CLI installation remains PluginManager work. Give each
+row the same `provides` dictionary the module exports. The host derives method namespaces from that
+dictionary; keep it as one packaging source rather than maintaining separate registration lists.
+Tools are not in it: a row registers each tool from its code. The public
 [embedding example](../crates/dim-app-server/examples/session_typescript.rs)
 shows the row input and actual Session calls.
 
 ```ts
 import { definePlugin, type MethodKind } from '@arcships/rutis';
-import type { ToolContribution, SessionMethodsContribution } from 'dimcode/plugin';
+import type { SessionMethodsContribution, ToolRegistry } from 'dimcode/plugin';
 
 export const provides = {
-  'toolContribution:example_echo': { declaration: 'sync', execute: 'async' },
   'sessionMethods:session.example': { describe: 'async', call: 'async' },
 } satisfies Record<string, Record<string, MethodKind>>;
 
 export default definePlugin({
   name: 'SessionExample',
+  inject: ['toolRegistry'],
   provides,
-  apply(ctx) {
-    const tool: ToolContribution = {
-      declaration() {
-        return {
-          name: 'example_echo', description: 'Echo supplied text',
-          source: 'extension', risk: 'session',
-          inputSchema: {
-            type: 'object', properties: { text: { type: 'string' } },
-            required: ['text'], additionalProperties: false,
-          },
-        };
+  async apply(ctx) {
+    await ctx.use<ToolRegistry>('toolRegistry').register(
+      {
+        name: 'example_echo', description: 'Echo supplied text',
+        source: 'extension', risk: 'session',
+        inputSchema: {
+          type: 'object', properties: { text: { type: 'string' } },
+          required: ['text'], additionalProperties: false,
+        },
       },
-      async execute(call) {
+      async call => {
         if (typeof call.arguments.text !== 'string') {
           return { content: 'text must be a string', isError: true };
         }
         return { content: call.arguments.text };
       },
-    };
-    ctx.provide('toolContribution:example_echo', tool);
+    );
 
     const methods: SessionMethodsContribution = {
       async describe() {
@@ -438,12 +436,15 @@ build. The App Server does not discover this export or install a plugin by itsel
 Online module metadata must match the configured row snapshot. Disabled, Pending
 and malformed rows have the outcomes in the
 [binding contract](design/session-typescript.md#host-input-and-declaration-discovery).
-ToolRegistry offers a configured tool while its provider is active: a provider
-that becomes active later, or a new generation after a reload, is offered from
-the next request without a Session reload.
+ToolRegistry offers a configured tool while a row has it registered: the
+registration lasts until the row unloads, and a row that registers later, or its
+next generation after a reload, is offered from the next request without a
+Session reload. A configured tool that no row registers is not offered and does
+not fail the Session.
 
-`declaration` is synchronous and must not start asynchronous work. Its name matches
-the tool key and its Permission risk is nonempty. Permission recognises
+`register(declaration, execute)` refuses a declaration whose name is not a valid
+tool name, is a host tool or is registered already, and one without a Permission
+risk. Permission recognises
 `read_filesystem`, `write_filesystem`, `execute_process`, `network` and `session`.
 Any other string (including `read`) is unclassified: without a tool-specific policy
 override it is denied under read-only and requires approval under workspace-write. Use the exact category for the tool's

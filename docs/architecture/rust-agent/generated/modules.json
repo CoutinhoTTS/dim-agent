@@ -1057,6 +1057,15 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::registrations",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime",
+      "file": "crates/dim-agent-runtime/src/registrations.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
       "id": "dim_agent_runtime::scope",
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime",
@@ -4386,7 +4395,7 @@
       "to": "dim_agent_capabilities::prompt_registry",
       "references": [
         "mod prompt_registry",
-        "path prompt_registry::PromptSource"
+        "path prompt_registry::PromptRegistry"
       ]
     },
     {
@@ -5538,7 +5547,7 @@
       "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::prompt",
       "references": [
-        "path InitialPromptConfiguration",
+        "path InitialPromptConfiguration::fixed",
         "path PromptPlugin::new",
         "use crate::prompt::InitialPromptConfiguration",
         "use crate::prompt::PromptPlugin"
@@ -5595,6 +5604,7 @@
       "references": [
         "path TimelineTreePlugin::new",
         "path TreeTimelinePlugin",
+        "path crate::timeline_tree::BranchToolPlugin",
         "use crate::timeline_tree::TimelineTreePlugin",
         "use crate::timeline_tree::TreeTimelinePlugin"
       ]
@@ -5666,13 +5676,6 @@
       "to": "dim_agent_types::model",
       "references": [
         "path model"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::defaults",
-      "to": "dim_agent_types::tool",
-      "references": [
-        "path tool"
       ]
     },
     {
@@ -6934,28 +6937,8 @@
       "to": "dim_agent_capabilities::prompt",
       "references": [
         "path InitialPromptConfiguration",
+        "path InitialPromptConfiguration::read",
         "use crate::prompt::InitialPromptConfiguration"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt_registry",
-      "to": "dim_agent_runtime::assembly",
-      "references": [
-        "path dim_agent_runtime::SESSION_GROUP"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt_registry",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path Contributions",
-        "path InSession",
-        "path KeysOf",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::Contributions",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf"
       ]
     },
     {
@@ -6980,15 +6963,16 @@
       "from": "dim_agent_capabilities::prompt_registry",
       "to": "dim_agent_runtime::names",
       "references": [
-        "path dim_agent_runtime::Names"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
       "from": "dim_agent_capabilities::prompt_registry",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::registrations",
       "references": [
-        "path SessionScope",
-        "use dim_agent_runtime::SessionScope"
+        "path Registrations",
+        "use dim_agent_runtime::Registrations"
       ]
     },
     {
@@ -7059,13 +7043,11 @@
       "from": "dim_agent_capabilities::prompt_sources",
       "to": "dim_agent_capabilities::prompt_registry",
       "references": [
+        "path PromptRegistry",
         "path PromptRegistryPlugin::new",
-        "path PromptSource",
-        "path source_key",
         "path targets",
+        "use crate::prompt_registry::PromptRegistry",
         "use crate::prompt_registry::PromptRegistryPlugin",
-        "use crate::prompt_registry::PromptSource",
-        "use crate::prompt_registry::source_key",
         "use crate::prompt_registry::targets"
       ]
     },
@@ -7105,14 +7087,6 @@
         "use dim_agent_runtime::ConfigureControl",
         "use dim_agent_runtime::ConfigureUpdate",
         "use dim_agent_runtime::PromptSourceTarget"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt_sources",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -7606,8 +7580,6 @@
         "mod session",
         "path SkillsBranchPlugin::new",
         "path SkillsPlugin::new",
-        "path session::INSTRUCTIONS_SOURCE",
-        "path session::LIST",
         "use session::SessionSkills",
         "use session::SkillsBranch",
         "use session::SkillsBranchPlugin",
@@ -7779,11 +7751,9 @@
       "from": "dim_agent_capabilities::skills::session",
       "to": "dim_agent_capabilities::prompt_registry",
       "references": [
-        "path PromptSource",
-        "path source_key",
+        "path PromptRegistry",
         "path targets",
-        "use crate::prompt_registry::PromptSource",
-        "use crate::prompt_registry::source_key",
+        "use crate::prompt_registry::PromptRegistry",
         "use crate::prompt_registry::targets"
       ]
     },
@@ -7832,11 +7802,11 @@
       "references": [
         "path ToolContribution",
         "path ToolHandler",
-        "path contribution_key",
+        "path ToolRegistry",
         "path crate::tool_registry::definition",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolHandler",
-        "use crate::tool_registry::contribution_key"
+        "use crate::tool_registry::ToolRegistry"
       ]
     },
     {
@@ -8044,11 +8014,11 @@
       "references": [
         "path ToolContribution",
         "path ToolHandler",
-        "path contribution_key",
+        "path ToolRegistry",
         "path crate::tool_registry::definition",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolHandler",
-        "use crate::tool_registry::contribution_key"
+        "use crate::tool_registry::ToolRegistry"
       ]
     },
     {
@@ -8429,23 +8399,7 @@
       "from": "dim_agent_capabilities::tool_registry",
       "to": "dim_agent_runtime::assembly",
       "references": [
-        "path ToolNames",
-        "path dim_agent_runtime::SESSION_GROUP",
-        "use dim_agent_runtime::ToolNames"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::tool_registry",
-      "to": "dim_agent_runtime::capability",
-      "references": [
-        "path Capability",
-        "path Contributions",
-        "path InSession",
-        "path KeysOf",
-        "use dim_agent_runtime::Capability",
-        "use dim_agent_runtime::Contributions",
-        "use dim_agent_runtime::InSession",
-        "use dim_agent_runtime::KeysOf"
+        "path dim_agent_runtime::SESSION_GROUP"
       ]
     },
     {
@@ -8472,17 +8426,18 @@
       "from": "dim_agent_capabilities::tool_registry",
       "to": "dim_agent_runtime::names",
       "references": [
-        "path dim_agent_runtime::Names"
+        "path Names",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
       "from": "dim_agent_capabilities::tool_registry",
-      "to": "dim_agent_runtime::scope",
+      "to": "dim_agent_runtime::registrations",
       "references": [
-        "path SessionScope",
-        "path SessionService",
-        "use dim_agent_runtime::SessionScope",
-        "use dim_agent_runtime::SessionService"
+        "path Registration",
+        "path Registrations",
+        "use dim_agent_runtime::Registration",
+        "use dim_agent_runtime::Registrations"
       ]
     },
     {
@@ -8524,11 +8479,11 @@
       "references": [
         "path ToolContribution",
         "path ToolHandler",
-        "path contribution_key",
+        "path ToolRegistry",
         "path definition",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolHandler",
-        "use crate::tool_registry::contribution_key",
+        "use crate::tool_registry::ToolRegistry",
         "use crate::tool_registry::definition"
       ]
     },
@@ -9539,10 +9494,11 @@
       "references": [
         "path ToolContribution",
         "path ToolHandler",
+        "path ToolRegistry",
         "path definition",
-        "path dim_agent_capabilities::tool_registry::contribution_key",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
+        "use dim_agent_capabilities::tool_registry::ToolRegistry",
         "use dim_agent_capabilities::tool_registry::definition"
       ]
     },
@@ -9699,6 +9655,15 @@
         "use parts::Mount",
         "use parts::PartRegistry",
         "use parts::PartScope"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::registrations",
+      "references": [
+        "mod registrations",
+        "use registrations::Registration",
+        "use registrations::Registrations"
       ]
     },
     {
@@ -12749,11 +12714,11 @@
       "references": [
         "path ToolContribution",
         "path ToolHandler",
-        "path contribution_key",
+        "path ToolRegistry",
         "path definition",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
-        "use dim_agent_capabilities::tool_registry::contribution_key",
+        "use dim_agent_capabilities::tool_registry::ToolRegistry",
         "use dim_agent_capabilities::tool_registry::definition"
       ]
     },
@@ -14647,18 +14612,18 @@
       "from": "dim_app_server::mcp::session",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
-        "path SessionToolSource",
         "path ToolContribution",
         "path ToolHandler",
         "path ToolProvider",
         "path ToolProviderChanged",
+        "path ToolRegistry",
         "path ToolSourceSet",
         "path tool_provider_changes",
-        "use dim_agent_capabilities::tool_registry::SessionToolSource",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
         "use dim_agent_capabilities::tool_registry::ToolProvider",
         "use dim_agent_capabilities::tool_registry::ToolProviderChanged",
+        "use dim_agent_capabilities::tool_registry::ToolRegistry",
         "use dim_agent_capabilities::tool_registry::ToolSourceSet",
         "use dim_agent_capabilities::tool_registry::tool_provider_changes"
       ]
@@ -15854,8 +15819,10 @@
       "from": "dim_app_server::session_typescript",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
-        "path valid_tool_name",
-        "use dim_agent_capabilities::tool_registry::valid_tool_name"
+        "path ToolRegistry",
+        "path tool_registry::dispatch",
+        "use dim_agent_capabilities::tool_registry",
+        "use dim_agent_capabilities::tool_registry::ToolRegistry"
       ]
     },
     {
@@ -15868,6 +15835,13 @@
         "use dim_agent_runtime::AgentBuilder",
         "use dim_agent_runtime::BRANCH_GROUP",
         "use dim_agent_runtime::SESSION_GROUP"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path dim_agent_runtime::names::name_of"
       ]
     },
     {

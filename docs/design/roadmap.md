@@ -13,7 +13,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | 已有 | 位置 | 对应工作项 |
 | --- | --- | --- |
 | 同步 `Timeline::before`（一个草稿进、一个草稿出，失败提交原草稿） | `dim-agent-runtime/src/core/timeline.rs` | 不变（[原则 §4 第 3 条](../architecture/rust-agent/principles.md)） |
-| `ToolContribution` / `SessionToolSource`，分支初始化时按名接入已 Active 的提供方 | `dim-agent-capabilities/src/tool_registry.rs` | C3（#82 已合入） |
+| `ToolContribution` 与工具来源由部件注册到 ToolRegistry，部件卸载时撤回 | `dim-agent-capabilities/src/tool_registry.rs` | C3（#82 已合入）、#382 |
 | Session 门面的 `history(branch, through)`：上限是已发布的头部，只读已发布的事件（内部 `Timeline::history` 才以已分配的头部为上限） | `dim-agent-runtime/src/agent.rs` | 不需要新接口：先取已发布的 head（`sequence`），再 `history(Some(head))`（#50） |
 | `PluginFilesPlugin`（UTF-8、锁、显式 v1 格式） | `dim-app-server/src/plugin_files.rs` | S10（#91、#135 已合入） |
 | Settings Rust 业务来源、C4 行声明的 JSON 来源、TypeScript owner 读写和 owner/client 写入边界；变更经既有 rutis 事件及 TypeScript leaf 事件通知 | `dim-app-server/src/settings.rs`、`settings_methods.rs`、`session_typescript.rs`；事件合同在 `dim-agent-capabilities/src/settings.rs` | S8a、S8b 来源、读写与事件（#90、#166、#175、#177 已合入） |
@@ -88,8 +88,8 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 | C2 | `SessionConfig.interactive` 与 `session.create` 参数（只做这一个字段；存储保持 v13，旧记录缺省为交互） | S | Rpc | — | SessionTitle、S2、Questions（重设计 #178 已合入、实现待办） |
 | C6 | Session 广播通知记录，Rpc 原样转发 | S | Rpc | — | S5b |
 | ~~C7~~ | ~~固定前缀读~~：不需要新接口，现有门面组合即可（#50，session-access §9.2） | — | — | — | — |
-| C3 | `toolContribution` 按名收集；不硬依赖可选插件：在分支初始化首次读取 ToolRegistry 时同步接入当时已 Active 的提供方，并沿既有 BranchOpening 在 Session 接受输入前完成采用；之后激活或退役的提供方由 ToolRegistry 跟随，从下一个请求起提供或撤下，不需要重载（#241）；`SessionConfig.tools` 里提供方没起来的工具直接省略（#34） | S | 装配 | — | Web、Goal、Scheduler、Workflow |
-| C4 | #4 Session 级：TypeScript 部件提供 `toolContribution`、`sessionMethods`，订阅 Session 广播，随 Session 装配和卸载；Session 装配不等可选插件的部件（#34，装配实现由 #132 跟踪，完整 C4 验收以其落地为前提） | L，先 spike | 装配 | C3、#132（验收） | 所有 TypeScript 插件 |
+| C3 | 部件把工具注册到 ToolRegistry（#382），注册在部件卸载时撤回；ToolRegistry 不硬依赖可选插件：分支初始化首次读取 ToolRegistry 时纳入当时已注册的工具，并沿既有 BranchOpening 在 Session 接受输入前完成采用；之后注册或撤回的工具由 ToolRegistry 跟随，从下一个请求起提供或撤下，不需要重载（#241）；`SessionConfig.tools` 里没有部件注册的工具直接省略（#34） | S | 装配 | — | Web、Goal、Scheduler、Workflow |
+| C4 | #4 Session 级：TypeScript 部件向 `toolRegistry` 注册工具、提供 `sessionMethods`，订阅 Session 广播，随 Session 装配和卸载；Session 装配不等可选插件的部件（#34，装配实现由 #132 跟踪，完整 C4 验收以其落地为前提） | L，先 spike | 装配 | C3、#132（验收） | 所有 TypeScript 插件 |
 | C5 | #4 分支级：TypeScript 部件按名使用 `Dispatcher`、`Branch::input`、`TreeCommands` | M | 装配 | C4 | Goal |
 | S1 | InputQueue 撤回：`input/withdraw`、`input/deleted`、`session.input.withdraw`（新事件需做格式决定） | M | 事件类型 | C1 | `Ctrl+S`/`/queue`、Goal、S2 |
 | S2 | Agents `sessions` 服务：`launch`、`input`、`idle`、`withdraw` | L | `agents.rs` | C2、S1 | Scheduler、Workflow |
@@ -195,7 +195,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 ```mermaid
 flowchart LR
   PR14["#14"] --> C1["C1 sessionMethods"]
-  C3["C3 toolContribution"] --> C4["C4 TS 工具/方法（已合入）"] --> C5["C5 分支级 #196（已合入）"]
+  C3["C3 可选工具"] --> C4["C4 TS 工具/方法（已合入）"] --> C5["C5 分支级 #196（已合入）"]
   C1 --> S1["S1 撤回"]
   C2["C2 interactive"] --> S2["S2 sessions"]
   S1 --> S2

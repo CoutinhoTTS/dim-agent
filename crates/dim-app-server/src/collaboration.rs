@@ -12,7 +12,7 @@ use dim_agent_capabilities::{
     context_block,
     host::{HostError, HostFuture, ToolExecutionContext},
     timeline_tree::TreeCommands,
-    tool_registry::{ToolContribution, ToolHandler, contribution_key, definition},
+    tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
 use dim_agent_runtime::{
     AgentBuilder, AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, Session,
@@ -66,7 +66,6 @@ fn member_create_failed(detail: String) -> Failure {
 pub fn install(builder: &mut AgentBuilder) {
     crate::register_names(builder.catalog_mut());
     builder
-        .session_tool(AGENT_TOOL)
         .session_part(|names| names.part(CollaborationCapabilityPlugin::new(names)?))
         .branch_part(|names| names.part(CollaborationTimelinePlugin));
 }
@@ -2292,13 +2291,11 @@ impl ToolHandler for AgentTool {
 }
 
 struct CollaborationCapabilityPlugin {
-    contribution: DepKey<ToolContribution>,
     service: DepKey<CollaborationCapability>,
 }
 impl CollaborationCapabilityPlugin {
     fn new(names: &Names<'_>) -> Result<Self, CordisError> {
         Ok(Self {
-            contribution: contribution_key(names, AGENT_TOOL)?,
             service: names.key::<CollaborationCapability>()?,
         })
     }
@@ -2310,6 +2307,7 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
         Keyed<SessionConfig>,
         Keyed<TreeCommands>,
         Keyed<SessionLifecycle>,
+        Keyed<ToolRegistry>,
     );
     fn name(&self) -> &str {
         "CollaborationCapability"
@@ -2323,6 +2321,7 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
             Keyed(config),
             Keyed(tree),
             Keyed(lifecycle),
+            Keyed(tools),
         ): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
@@ -2334,15 +2333,15 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
                 lifecycle,
                 state: Mutex::new(State::default()),
             });
-            ctx.provide_as(
-                self.contribution.key().clone(),
-                Arc::new(ToolContribution {
+            tools.register(
+                ctx,
+                ToolContribution {
                     definition: agent_definition(config.collaboration_role),
                     handler: Arc::new(AgentTool {
                         capability: service.clone(),
                         stopping: ctx.cancellation_token(),
                     }),
-                }),
+                },
             )?;
             ctx.provide_as(self.service.key().clone(), service)?;
             Ok(Effect::Done)
