@@ -1462,7 +1462,13 @@ async fn node_scheduler_applied_inputs_interrupted_before_consumption_expire_wit
         assert_ok(&accepted);
         let (session, input) = tokio::time::timeout(Duration::from_secs(10), events.recv())
             .await
-            .unwrap()
+            .unwrap_or_else(|_| {
+                panic!(
+                    "Scheduler input gate (reuse={reuse}, stale_prefix={stale_prefix}): accepted={accepted}, runs={}, plugins={:?}",
+                    stored(&home),
+                    server.diagnostics().plugins
+                )
+            })
             .unwrap();
         let executing = agent.get_session(&session).unwrap();
         let history_reply = if stale_prefix {
@@ -3734,9 +3740,10 @@ async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_na
         process_typescript::select_model(&mut client).await;
         let failure = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let reply = client.rpc("schedule.list", json!({})).await;
-                if !session_typescript::waiting(&reply) {
-                    return reply;
+                if server.diagnostics().plugins.iter().any(|part| {
+                    part.name == "@dimcode/scheduler" && part.state == rutis::FiberState::Failed
+                }) {
+                    return client.rpc("schedule.list", json!({})).await;
                 }
                 tokio::task::yield_now().await;
             }

@@ -92,7 +92,9 @@ export default definePlugin({
         }
       },
     }
-    ctx.provide('scheduleJobs', owner)
+    // Keep the namespace known even when restoration fails, without admitting new work during it.
+    try { await scheduler.restore() }
+    catch (error) { scheduler.fault = error }
 
     await ctx.use<ManagementMethods>('managementMethods').register(
       'schedule',
@@ -138,7 +140,8 @@ export default definePlugin({
         }
       },
     )
-    await scheduler.restore()
+    if (scheduler.fault) throw scheduler.fault
+    ctx.provide('scheduleJobs', owner)
     ctx.on('settings/schedule', () => scheduler.changed())
     scheduler.startTimer()
   },
