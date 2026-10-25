@@ -73,7 +73,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 *现状：*部件登记处和挂载器已经实现（附录 A），所有 Rust 部件都已按名称依赖（#391、#392、#396–#398、#400）。
 - 各功能仍通过 `AgentBuilder::session_part`/`branch_part` 添加部件，App Server 通过 `register_part` 添加进程行。
   每个功能变成一个插件、`AgentBuilder::plugin` 和 `partRegistry` 这个名字属于 [#402](https://github.com/arcships/dim/issues/402)。
-- ToolRegistry、PromptRegistry 和 Rpc 仍读取预先注册的名字，直到贡献改为向它们登记（R6，[#382](https://github.com/arcships/dim/issues/382)）。
+- 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记。Rpc 仍读取预先注册的方法命名空间，直到它们改为向 Rpc 登记（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5（[#403](https://github.com/arcships/dim/issues/403)）。
 
 ## 3. 按名字的服务
@@ -236,6 +236,20 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 - **影响：**对 Timeline 没有影响。
 - **所有者：**rutis，[arcships/rutis#642](https://github.com/arcships/rutis/issues/642)。R5 等它；
   [#405](https://github.com/arcships/dim/issues/405) 跟进它。
+
+### R8. 创建实例时，也等待在等待期间变得可加载的行
+
+- **受阻：**登记工具的其他语言 Session 行要注入 `toolRegistry`，它在所在 Session 内提供。创建 Session 实例时，
+  这一行在 ToolRegistry 激活之前就启动了，所以处于 Pending。`Loader::create_instance` 对每一行只等一次
+  （它的 `settle` 是邮箱栅栏），ToolRegistry 激活后这一行的加载就不在创建过程里了。于是它的工具从它登记之后的
+  那次请求起才提供：创建或恢复后的第一次请求可能没有这些工具。[C4 绑定](../../design/session-typescript.md)
+  在装配时等待已经处于 Loading 的行，只有确实缺依赖而 Pending 的行才不等；loader 区分不了这两种情况。
+- **考虑过的现有机制：**Dim 的必需部件由实例等待（§2），但其他语言的行按设计是可选的（#207）。在 Dim 里等
+  （在行的绑定里或在创建 Session 时）会在 loader 的规则之外再加一条等待规则。
+- **所需机制：**某一行等待的依赖在等待期间由实例内提供，使它离开 Pending 时，`create_instance` 继续等待它。
+  等待一个实例内无人提供的名字而 Pending 的行，仍然不拖延创建。
+- **影响：**对 Timeline 没有影响。
+- **所有者：**rutis-loader。落地之前，流程测试在第一次请求前等待登记完成（`ToolSourcesView`）。
 
 ## 附录 A. Rust 绑定
 

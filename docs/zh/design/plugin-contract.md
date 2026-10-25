@@ -118,9 +118,8 @@ Rust 宿主端口和注册表（ToolRegistry、PromptRegistry、ToolHost、Model
 
 工具、工具来源、提示词来源和方法命名空间不是名字。部件向它们的所有者登记（ToolRegistry、PromptRegistry 或 Rpc 上的
 `register`），部件卸载时登记结束（[rutis 使用 R6](rutis-usage.md#r6-贡献向所有者登记)）。工具和方法命名空间可以从任何语言登记；
-提示词来源和工具来源在有外来部件需要之前仍只限 Rust。R6 落地之前，
-它们是名字 `toolContribution:<tool>`、`sessionMethods:<namespace>`（都在 `session`）和
-`managementMethods:<namespace>`（进程，仅限 protected-local v3），提示词来源和工具来源由宿主预先注册，仅限 Rust。
+提示词来源和工具来源在有外来部件需要之前仍只限 Rust。工具、工具来源和提示词来源现在已经登记。R6 其余部分落地之前，
+方法命名空间仍是名字 `sessionMethods:<namespace>`（`session`）和 `managementMethods:<namespace>`（进程，仅限 protected-local v3）。
 
 两条机制契约把门面绑定到核心部件：分支只在有 `LoopState` 提供者时发布，Session 只在有
 `TimelineTreeControl` 提供者时发布。因此 Loop 和 TimelineTree 是核心部件，用 Rust 编写。
@@ -297,7 +296,7 @@ issue 拆分，在本设计合并时替换 #370–#376：
 | #375（删除旧 API） | P3 的结尾 |
 | #376（其他语言的原始行） | P4（R2、R3、R5） |
 | #362（`SkillsCatalog` watch） | 关闭：在平总线上，该事件到达每个 Session 行 |
-| 新开 | P1（0.16 升级）、P5（R1）、R4、R6 |
+| 新开 | P1（0.16 升级）、P5（R1）、R4、R6、R8 |
 
 ## 11. 规则检查
 
@@ -313,6 +312,6 @@ issue 拆分，在本设计合并时替换 #370–#376：
 | §4 第 5 条（批次） | 不变 |
 | §4 第 6 条（上下文） | 不变 |
 | §4 第 7 条（只通过公开内容交互） | 不变 |
-| §4 第 8 条（基础设施默认不变） | R1–R7 各自来自机制自身的职责，并在其内闭环；rutis 按现状使用 |
+| §4 第 8 条（基础设施默认不变） | R1–R8 各自来自机制自身的职责，并在其内闭环；rutis 按现状使用 |
 | §4 第 9 条（只写需要的事实） | 不新增事实 |
 | ADR 002 D1–D5 | D1–D4 不变；D5 补全：一个命名服务目录，注册由插件声明（R6），Rust 作为一种绑定 |

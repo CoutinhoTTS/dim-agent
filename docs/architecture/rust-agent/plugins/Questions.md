@@ -1,7 +1,7 @@
 # Questions
 
 Owner: [dim-agent-questions](../../../../crates/dim-agent-questions/src/lib.rs).
-Provides the `ask_user` tool (`toolContribution#ask_user`) and the Session
+Registers the `ask_user` tool with ToolRegistry and provides the Session
 method `session.question.respond` (`sessionMethods["session.question"]`). The
 model asks the user 1 to 4 multiple-choice questions and waits; a client
 answers or declines. The question is the pending tool call and the answer is

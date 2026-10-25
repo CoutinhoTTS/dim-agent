@@ -124,18 +124,17 @@ the [authoring guide](../typescript-plugin-authoring.md#available-services) are 
 
 The Rust host ports and registries (ToolRegistry, PromptRegistry, ToolHost, ModelHost,
 PrepareModelHost and the others in the [generated services](../architecture/rust-agent/generated/services.md))
-get names and scopes in phase 2. They stay Rust-only unless a foreign part needs them.
+get names and scopes in phase 2. They stay Rust-only unless a foreign part needs them. So do
+`BranchOpening` (opening receipts are Rust futures) and the facades' state reads (`StateCell<S>`,
+`PublicService`), which are keyed by Rust type. A foreign part exposes its state through a service.
 
 Tools, tool sources, prompt sources and method namespaces are not names. A part registers each with
 its owner, `register` on ToolRegistry, PromptRegistry or Rpc, and the registration ends when the
 part unloads ([rutis usage R6](rutis-usage.md#r6-contributions-register-with-their-owner)). Tools and
 method namespaces register from any language; prompt and tool sources stay Rust-only until a
-foreign part needs one.
-Until R6 lands, they are the names `toolContribution:<tool>`, `sessionMethods:<namespace>` (both
-`session`) and `managementMethods:<namespace>` (process, protected-local v3 only), and prompt and
-tool sources are pre-registered by the host and Rust-only. So do
-`BranchOpening` (opening receipts are Rust futures) and the facades' state reads (`StateCell<S>`,
-`PublicService`), which are keyed by Rust type. A foreign part exposes its state through a service.
+foreign part needs one. Tools, tool sources and prompt sources register today. Until the rest of R6
+lands, method namespaces are the names `sessionMethods:<namespace>` (`session`) and
+`managementMethods:<namespace>` (process, protected-local v3 only).
 
 Two mechanism contracts tie the facades to core parts: a branch is published only with a `LoopState`
 provider, and a Session only with a `TimelineTreeControl` provider. Loop and TimelineTree are therefore
@@ -334,7 +333,7 @@ Issue split, replacing #370–#376 when this design is merged:
 | #375 (delete the old API) | The end of P3 |
 | #376 (raw rows for other languages) | P4 (R2, R3, R5) |
 | #362 (`SkillsCatalog` watch) | Closed: on the flat bus the event reaches every Session row |
-| new | P1 (0.16 upgrade), P5 (R1), R4, R6 |
+| new | P1 (0.16 upgrade), P5 (R1), R4, R6, R8 |
 
 ## 11. Rule check
 
@@ -350,6 +349,6 @@ This design changes the plugin infrastructure's contract, not a business plugin.
 | §4 rule 5 (batches) | Unchanged |
 | §4 rule 6 (context) | Unchanged |
 | §4 rule 7 (public interaction only) | Unchanged |
-| §4 rule 8 (infrastructure unchanged by default) | R1–R7 each come from the mechanism's own responsibility and close inside it; rutis is used as it is |
+| §4 rule 8 (infrastructure unchanged by default) | R1–R8 each come from the mechanism's own responsibility and close inside it; rutis is used as it is |
 | §4 rule 9 (only needed facts) | No fact is added |
 | ADR 002 D1–D5 | D1–D4 unchanged; D5 completed: one named catalog, registration declared by the plugin (R6), Rust as a binding |
