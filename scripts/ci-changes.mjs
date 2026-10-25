@@ -3,6 +3,7 @@
 import {appendFileSync,readFileSync} from 'node:fs';
 
 export const groups=['rust','windows','xtask','web','scripts'];
+const everything=Object.fromEntries(groups.map(group=>[group,true]));
 
 const rules=[
   // xtask check validates the plugin pages against the generated snapshots.
@@ -29,33 +30,40 @@ export function classify(files) {
   return Object.fromEntries(groups.map(group=>[group,needed.has(group)]));
 }
 
-// GitHub lists at most 3000 files for a pull request; a longer list is cut short.
+// GitHub lists at most 3000 files for a pull request and silently drops the rest.
 const fileLimit=3000;
 
+// `entries` is the pull request files listing; `changedFiles` is the pull request's own count.
+// A listing that may be incomplete selects every group.
+export function selectGroups(entries,changedFiles) {
+  if (entries.length>=fileLimit||entries.length!==changedFiles) return everything;
+  // A rename also counts its old path, so moving source into docs/ keeps the source checks.
+  return classify(entries.flatMap(({filename,previous_filename})=>previous_filename?[filename,previous_filename]:[filename]));
+}
+
 async function pullRequestFiles(repository,number,token) {
-  const files=[];
+  const entries=[];
   for (let page=1;;page++) {
     const response=await fetch(`https://api.github.com/repos/${repository}/pulls/${number}/files?per_page=100&page=${page}`,{
       headers:{accept:'application/vnd.github+json',authorization:`Bearer ${token}`,'x-github-api-version':'2022-11-28'},
     });
     if (!response.ok) throw new Error(`Listing pull request files failed: ${response.status} ${await response.text()}`);
     const batch=await response.json();
-    files.push(...batch.map(({filename,previous_filename})=>[filename,previous_filename]).flat().filter(Boolean));
-    if (batch.length<100) return files;
+    entries.push(...batch);
+    if (batch.length<100) return entries;
   }
 }
 
 if (import.meta.main) {
   const {GITHUB_EVENT_NAME,GITHUB_EVENT_PATH,GITHUB_REPOSITORY,GITHUB_TOKEN,GITHUB_OUTPUT}=process.env;
-  let result=Object.fromEntries(groups.map(group=>[group,true]));
+  let result=everything;
   // Pushes to main and manual runs verify everything.
   if (GITHUB_EVENT_NAME==='pull_request') {
     const {number,changed_files}=JSON.parse(readFileSync(GITHUB_EVENT_PATH)).pull_request;
-    if (changed_files<fileLimit) {
-      const files=await pullRequestFiles(GITHUB_REPOSITORY,number,GITHUB_TOKEN);
-      console.log(files.join('\n'));
-      result=classify(files);
-    }
+    const entries=await pullRequestFiles(GITHUB_REPOSITORY,number,GITHUB_TOKEN);
+    console.log(`${entries.length} of ${changed_files} files listed`);
+    console.log(entries.map(({filename})=>filename).join('\n'));
+    result=selectGroups(entries,changed_files);
   }
   const lines=Object.entries(result).map(([group,value])=>`${group}=${value}`);
   console.log(lines.join('\n'));
