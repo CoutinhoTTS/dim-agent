@@ -21,7 +21,11 @@ use std::result::Result;
 /// lowercased, as `#[rutis::service]` names a type (`Timeline` is
 /// `timeline`, `dyn LoopState` `loopState`, `HTTPClient` `httpClient`).
 pub fn name_of<T: ?Sized>() -> String {
-    let full = type_name::<T>();
+    name_of_type(type_name::<T>())
+}
+
+/// [`name_of`] for a type known by its name ([`rutis::TypeKey::type_name`]).
+pub fn name_of_type(full: &str) -> String {
     let full = full.strip_prefix("dyn ").unwrap_or(full);
     let path = full.split(['<', ' ']).next().unwrap_or(full);
     let ident = path.rsplit("::").next().unwrap_or(path);

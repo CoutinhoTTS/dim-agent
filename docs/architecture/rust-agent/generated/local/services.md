@@ -59,7 +59,6 @@ flowchart LR
     p30["SessionScope"]
   end
   p53 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p71
-  p53 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p71
   p46 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p70
   p53 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p70
   p53 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p70

@@ -1464,7 +1464,6 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/managed_provider.rs",
       "unexpandedMacros": [
-        "json",
         "matches",
         "vec"
       ]
@@ -2434,29 +2433,6 @@
         "format",
         "json",
         "println"
-      ]
-    },
-    {
-      "id": "dim_cli::runtime",
-      "crate": "dim_cli",
-      "parent": "dim_cli",
-      "file": "crates/dim-cli/src/runtime.rs",
-      "unexpandedMacros": [
-        "format",
-        "include_bytes",
-        "include_str",
-        "matches"
-      ]
-    },
-    {
-      "id": "dim_cli::runtime::tests",
-      "crate": "dim_cli",
-      "parent": "dim_cli::runtime",
-      "file": "crates/dim-cli/src/runtime.rs",
-      "unexpandedMacros": [
-        "assert",
-        "assert_eq",
-        "format"
       ]
     },
     {
@@ -4776,7 +4752,10 @@
       "from": "dim_agent_capabilities::agent_loop",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -4940,7 +4919,10 @@
       "from": "dim_agent_capabilities::approval",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -4958,6 +4940,7 @@
       "references": [
         "path AgentError::Cancelled",
         "path AgentError::Closed",
+        "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
       ]
     },
@@ -5318,7 +5301,10 @@
       "from": "dim_agent_capabilities::context_preparation",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -6185,7 +6171,10 @@
       "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -6397,7 +6386,10 @@
       "from": "dim_agent_capabilities::model_provider",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -6662,7 +6654,10 @@
       "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -6681,6 +6676,7 @@
         "path AgentError::Cancelled",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
+        "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
       ]
     },
@@ -8336,7 +8332,10 @@
       "from": "dim_agent_capabilities::tool_executor",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -8540,16 +8539,11 @@
       "from": "dim_agent_capabilities::wait",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::wait",
-      "to": "dim_agent_runtime::core::timeline",
-      "references": [
-        "path Timeline",
-        "use dim_agent_runtime::Timeline"
       ]
     },
     {
@@ -8805,7 +8799,10 @@
       "from": "dim_agent_capabilities::workspace_tools::background",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -9637,6 +9634,7 @@
       "from": "dim_agent_runtime",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "use core::Delivery",
         "use core::Dispatcher"
       ]
     },
@@ -11328,8 +11326,9 @@
       "to": "dim_app_server::managed_provider",
       "references": [
         "mod managed_provider",
-        "path managed_provider::ManagedPluginConfig",
-        "path managed_provider::ManagedProviderBinding::part",
+        "path managed_provider::ManagedProvider",
+        "path managed_provider::ManagedProviderBinding",
+        "path managed_provider::ManagedProviderRow",
         "path managed_provider::ManagedProviders",
         "path managed_provider::ManagedProvidersPlugin"
       ]
@@ -11437,6 +11436,7 @@
       "to": "dim_app_server::provider",
       "references": [
         "mod provider",
+        "path provider",
         "path provider::ProviderPlugin::default",
         "path provider::ProviderService"
       ]
@@ -12498,7 +12498,7 @@
       "from": "dim_app_server::cli",
       "to": "dim_app_server::managed_provider",
       "references": [
-        "path crate::managed_provider::ManagedPluginConfig"
+        "path crate::managed_provider::ManagedProviderRow"
       ]
     },
     {
@@ -13727,18 +13727,27 @@
     },
     {
       "from": "dim_app_server::managed_provider",
-      "to": "dim_agent_runtime::names",
-      "references": [
-        "path Names",
-        "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_app_server::managed_provider",
       "to": "dim_app_server::managed_provider::management",
       "references": [
         "mod management",
-        "path management::provide"
+        "path BrowserLogin",
+        "path BrowserLoginBegin",
+        "path DeviceLogin",
+        "path LoginBegin",
+        "path LoginState",
+        "path LoginState::Completed",
+        "path ManagedBrowserLoginComplete",
+        "path ManagedLoginAttempt",
+        "path Usage",
+        "path management::provide",
+        "use management::BrowserLogin",
+        "use management::BrowserLoginBegin",
+        "use management::DeviceLogin",
+        "use management::LoginBegin",
+        "use management::LoginState",
+        "use management::ManagedBrowserLoginComplete",
+        "use management::ManagedLoginAttempt",
+        "use management::Usage"
       ]
     },
     {
@@ -13788,11 +13797,9 @@
       "from": "dim_app_server::managed_provider::management",
       "to": "dim_app_server::managed_provider",
       "references": [
-        "path AccountSnapshot",
         "path ManagedProviders",
         "path crate::managed_provider::AccountSnapshot",
         "path super::ManagedProviderError",
-        "use super::AccountSnapshot",
         "use super::ManagedProviders"
       ]
     },
@@ -17459,14 +17466,6 @@
     },
     {
       "from": "dim_cli",
-      "to": "dim_cli::runtime",
-      "references": [
-        "mod runtime",
-        "path runtime"
-      ]
-    },
-    {
-      "from": "dim_cli",
       "to": "dim_cli::sanitize",
       "references": [
         "mod sanitize"
@@ -17611,13 +17610,6 @@
       "to": "dim_cli::client::web_assets_tests",
       "references": [
         "mod web_assets_tests"
-      ]
-    },
-    {
-      "from": "dim_cli::client",
-      "to": "dim_cli::runtime",
-      "references": [
-        "path crate::runtime::root"
       ]
     },
     {
@@ -18763,21 +18755,6 @@
       ]
     },
     {
-      "from": "dim_cli::runtime",
-      "to": "dim_cli::runtime::tests",
-      "references": [
-        "mod tests"
-      ]
-    },
-    {
-      "from": "dim_cli::runtime::tests",
-      "to": "dim_cli::runtime",
-      "references": [
-        "path MAGIC",
-        "path extract"
-      ]
-    },
-    {
       "from": "dim_cli::session",
       "to": "dim_agent_types",
       "references": [
@@ -18962,9 +18939,6 @@
         "path ApprovalCallData",
         "path ApprovalDecision::Allow",
         "path ApprovalDecision::Deny",
-        "path dim_agent_types::ExecStatus::Cancelled",
-        "path dim_agent_types::ExecStatus::Completed",
-        "path dim_agent_types::ExecStatus::Failed",
         "use dim_agent_types::ApprovalCallData",
         "use dim_agent_types::ApprovalDecision"
       ]
@@ -19150,7 +19124,6 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::model::view",
       "references": [
-        "path TaskOutputState::Finished",
         "path TaskOutputState::Live",
         "path TaskOutputState::ReadError",
         "path TaskOutputState::Unavailable",
@@ -19184,7 +19157,6 @@
       "references": [
         "path Projection",
         "path Projection::default",
-        "path crate::projection::result_text",
         "use crate::projection::Projection"
       ]
     },

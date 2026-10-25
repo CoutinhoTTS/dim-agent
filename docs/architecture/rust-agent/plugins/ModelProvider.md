@@ -12,8 +12,8 @@ settlement and bounded retry/recovery.
 | --- | --- |
 | `B:ContextPreparation` | Validate budget and access prepared context. |
 | `P:ModelHost` | The process model driver; scripted in this local graph. |
-| `B:Dispatcher` | Receive calls/steers/interrupts and report faults. |
-| `B:Timeline` | Commit output and reconstruct unsettled calls. |
+| `B:Dispatcher` | Replay unsettled calls, receive calls/steers/interrupts and report faults. |
+| `B:Timeline` | Commit output. |
 | `B:TimelineIdentity` | Session and branch ids of the `model.invoke` span. |
 
 ## Events and lifetime

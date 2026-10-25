@@ -229,7 +229,7 @@ Withdrawn: rutis is an external dependency, so no requirement is raised to it. P
 
 ### A.1 Package manifest `dim-plugin.json` (schema 2)
 
-Version 1 is the existing managed-provider manifest ([App Server contract](../../../crates/dim-app-server/README.md#optional-managed-provider)); it stays for `--plugin-dir` and is not installable here (A3).
+Version 1 was the manifest of the former `--plugin-dir` account package, which a Rust managed provider plugin replaced ([App Server contract](../../../crates/dim-app-server/README.md#managed-provider-plugins)); it is not installable here (A3).
 
 ```json
 {
@@ -390,7 +390,7 @@ Flow tests through `plugin.*` methods with a local test marketplace and a test c
 | --- | --- | --- | --- |
 | A1 | Package code is Node runtime rows (rutis-bridge) that provide and consume named services; no dynamic Rust code; access to the runtime's typed services by name waits on #4 | Overview §4, Appendix C; ADR 002 D5 | More `code.runtime` values |
 | A2 | Package code runs when its package is enabled; there is no host-local approval | Decision R6 (round 2); overview conventions | An approval step before code loads |
-| A3 | Manifest schema 2 extends the existing format; v1 only for `--plugin-dir` | App Server README; judgment | Compatibility mapping |
+| A3 | Manifest schema 2 extends the former account-package format; v1 is not accepted | App Server README; judgment | Compatibility mapping |
 | A4 | One installed version per `(node, id)` | Judgment | Side-by-side versions |
 | A5 | Marketplace index format and name | Judgment; feature list "Git plugin marketplaces" | Format replaced |
 | A6 | Sources are node content; executing consumers match the Session's resource node | Overview multiple nodes; judgment | Consumers read peer content through imported services |

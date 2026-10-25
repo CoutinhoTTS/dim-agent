@@ -5,8 +5,8 @@ import type { BranchEvent, Services } from '../../npm/plugin.js'
 // After the first live turn end it appends `fixture/turn-seen` through the
 // branch `timeline`, recording that an event in a core domain which matches no
 // core contract (`input/forged`) was refused when decoded, and that the
-// exported Timeline has no `close`. It subscribes to its own domain like any other key, and on
-// its event writes a marked input with what it received. Rebuilding from
+// exported Timeline has no `close`. It consumes its own domain like any other key, and on
+// its event writes a marked input with what it received. The replayed
 // history folds its own events, so a restored generation does not append
 // again.
 export default definePlugin({
@@ -22,9 +22,6 @@ export default definePlugin({
     // Set when the rebuild folded this part's own event: a restored generation.
     let restored = false
     let reported = false
-    let cutoff = 0n
-    let rebuilt!: () => void
-    const ready = new Promise<void>(resolve => { rebuilt = resolve })
     const attempt = async (call: () => Promise<unknown>) => {
       try {
         await call()
@@ -59,12 +56,9 @@ export default definePlugin({
         })
       }
     }
-    await dispatcher.listen('extension-events-fixture', ['turn/end', 'fixture/*'], async event => {
-      await ready
-      if (BigInt(event.sequence) > cutoff) await step(event, true)
+    await dispatcher.consume('extension-events-fixture', ['turn/end', 'fixture/*'], async delivery => {
+      if ('live' in delivery) return step(delivery.live, true)
+      for (const event of delivery.replay) await step(event, false)
     })
-    cutoff = BigInt(await dispatcher.committed())
-    if (cutoff > 0n) for (const event of await dispatcher.local(0, cutoff)) await step(event, false)
-    rebuilt()
   },
 })

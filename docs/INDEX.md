@@ -22,6 +22,7 @@
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
 - [Read-only member conversations in the CLI](design/member-conversation.md) (accepted #300; implementation and acceptance in progress in #324, #263)
+- [Subagent model policy](design/subagent-model-policy.md) (proposal, #263; native new-member model choice)
 - [CLI background command output](design/background-task-output.md) (native C1 read implemented; CLI detail and refresh in progress in #324)
 - [Commands and members in the background-task list](design/background-task-list.md) (command/member implementation in progress in #324; Workflow integration is separate)
 - [Workflows in the CLI task view](design/workflow-task-view.md) (proposal, #264; existing management reads/stops)

@@ -19,8 +19,8 @@ cache or event.
 | --- | --- |
 | `S:SessionConfig` | Seed the initial permission policy. |
 | `S:CommandRulesHost` | Read the user's command rules when deciding a command call. |
-| `B:Dispatcher` | Apply committed policy changes and settle update waiters. |
-| `B:Timeline` | Write changes and replay ancestor/local policies. |
+| `B:Dispatcher` | Replay local policies, apply committed policy changes and settle update waiters. |
+| `B:Timeline` | Write changes and read ancestor policies. |
 
 ### Events and lifetime
 
@@ -69,8 +69,8 @@ rechecks policy before allowing an approved call to start.
 | Service | Purpose |
 | --- | --- |
 | `B:Permission` | Evaluate current policy and recheck an allowed response. |
-| `B:Dispatcher` | Receive approval responses. |
-| `B:Timeline` | Commit requests/cancellations and recover abandoned requests. |
+| `B:Dispatcher` | Replay requests to recover abandoned ones, then receive approval responses. |
+| `B:Timeline` | Commit requests/cancellations. |
 
 ### Events and lifetime
 
