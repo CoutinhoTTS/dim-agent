@@ -2304,26 +2304,9 @@ impl Worker {
                 output.target.branch_id == branch_id && output.target.task_id == data.task_id
             })
         {
-            let target = TaskTarget {
-                branch_id: branch_id.to_owned(),
-                task_id: data.task_id.clone(),
-            };
             self.watch_task_output(None);
-            let status = match data.status {
-                dim_agent_types::ExecStatus::Completed => "Completed",
-                dim_agent_types::ExecStatus::Failed => "Failed",
-                dim_agent_types::ExecStatus::Cancelled => "Cancelled",
-            };
-            self.send(Update::TaskOutput {
-                projection_id: self.projection_id,
-                target,
-                text: Some(crate::projection::result_text(&data.result)),
-                state: TaskOutputState::Finished {
-                    status,
-                    failed: data.status == dim_agent_types::ExecStatus::Failed
-                        || data.result.is_error == Some(true),
-                },
-            });
+            self.publish();
+            return;
         }
         self.changed();
     }
