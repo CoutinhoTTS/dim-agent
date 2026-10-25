@@ -198,12 +198,17 @@ impl Plugin for TuiRow {
 
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
-            let session = ctx
-                .require_as::<Peer>(self.injects[0].clone())?
-                .connection()
-                .clone();
+            let peer = ctx.require_as::<Peer>(self.injects[0].clone())?;
+            let session = peer.connection().clone();
+            let mut offers = peer.offers();
             let key = ctx.instance().to_string();
             let load = async {
+                // Link readiness precedes the leaf's host feature.
+                while !offers.borrow_and_update().families.contains("plugins") {
+                    offers.changed().await.map_err(|_| {
+                        SessionError::Transport("the leaf link ended before hosting Tui".into())
+                    })?;
+                }
                 let loaded = session
                     .invoke_async(
                         "",
