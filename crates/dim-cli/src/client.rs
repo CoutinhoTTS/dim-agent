@@ -101,7 +101,7 @@ pub struct Client {
     _bridge: tokio::process::Child,
 }
 impl Client {
-    async fn open(endpoint: &Path, _server: &Server) -> io::Result<Self> {
+    async fn open(endpoint: &Path, _server: &Server, _starting: bool) -> io::Result<Self> {
         #[cfg(unix)]
         let stream = {
             use std::os::unix::fs::FileTypeExt;
@@ -111,7 +111,7 @@ impl Client {
                 metadata.file_type().is_socket() && metadata.uid() == unsafe { libc::geteuid() };
             if !owned_socket || metadata.mode() & 0o077 != 0 {
                 return Err(io::Error::new(
-                    if owned_socket {
+                    if _starting && owned_socket {
                         io::ErrorKind::WouldBlock
                     } else {
                         io::ErrorKind::PermissionDenied
@@ -546,7 +546,7 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     };
     let server = server(options)?;
     let binary = &server.program;
-    match Client::open(&endpoint, &server).await {
+    match Client::open(&endpoint, &server, false).await {
         Ok(mut client) => {
             client.hello(profile.as_ref()).await?;
             return Ok(Some(client));
@@ -659,15 +659,14 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     let mut child = command.spawn()?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        match Client::open(&endpoint, &server).await {
+        // Only the newly spawned owner's socket may be awaiting chmod.
+        match Client::open(&endpoint, &server, true).await {
             Ok(mut client) => {
                 client.hello(profile.as_ref()).await?;
                 return Ok(Some(client));
             }
-            Err(error) if missing(&error) => {}
-            // Only the newly spawned owner's socket may be awaiting chmod.
-            #[cfg(unix)]
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error)
+                if missing(&error) || cfg!(unix) && error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error.into()),
         }
         if let Some(status) = child.try_wait()? {
