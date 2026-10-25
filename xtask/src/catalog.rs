@@ -94,11 +94,12 @@ async fn collect() -> Result<String> {
         let agent = server
             .agent()
             .ok_or("the product profile has no default Agent")?;
-        // The tool selection only chooses among provided tools, not parts.
+        // No mount list: the Session declares every tool. A list chooses
+        // among tools, not parts.
         let session = agent
             .create_session(SessionConfig {
                 cwd: dir.to_string_lossy().into_owned(),
-                tools: Vec::new(),
+                tools: None,
                 ..Default::default()
             })
             .await?;

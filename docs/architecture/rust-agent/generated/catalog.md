@@ -57,6 +57,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `prepareContextHost` | session | SessionScope | Rust-only | — |
 | `prepareModelHost` | session | PrepareModelHost | Rust-only | — |
 | `promptHost` | session | PromptRegistry | Rust-only | — |
+| `promptRegistry` | session | PromptRegistry | Rust-only | — |
 | `sessionConfig` | session | SessionScope | yes | `get` async |
 | `sessionIdentity` | session | SessionScope | yes | `get` async |
 | `sessionLifecycle` | session | SessionScope | yes | `activated` async, `closing` async, `hold` async, `release` async |
