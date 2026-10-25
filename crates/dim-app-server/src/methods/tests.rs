@@ -269,6 +269,9 @@ async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
         let fixture = Fixture(state.clone());
         let assembly =
             Assembly::new(|builtins| vec![row(part(builtins, move || fixture.clone()))]).await;
+        // It registers once the table it depends on is active, which the
+        // loader's reconcile does not wait for.
+        assembly.state("Fixture", FiberState::Active).await;
         // The calling load never unloads here: only the provider reloads.
         let entry = CancellationToken::new();
         let write = assembly.dispatch("fixture.write", &entry).unwrap();
@@ -333,6 +336,7 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
     assembly.state("Waiting", FiberState::Pending).await;
     assembly.state("Broken", FiberState::Failed).await;
     assembly.state("Other", FiberState::Active).await;
+    assembly.state("Fixture", FiberState::Active).await;
     assert!(matches!(
         assembly
             .loader
