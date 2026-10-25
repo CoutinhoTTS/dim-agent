@@ -902,7 +902,11 @@ pub(crate) async fn own_placement(
             (Some(root.clone()), root)
         }
         Some(host) => {
-            let label = format!("dim-agent/{}", uuid::Uuid::new_v4());
+            // Numbered in the process, as `agent_row`'s label, so a generated
+            // description of an assembly stays the same across runs.
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let label = format!("dim-agent/{number}");
             (
                 None,
                 host.isolate(TypeKey::of::<Loader>(), &label)
