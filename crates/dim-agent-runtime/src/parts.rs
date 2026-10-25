@@ -159,27 +159,12 @@ impl PartRegistry {
         .await;
     }
 
-    /// The names of `required` that nothing has registered, in any scope.
-    fn missing(&self, required: &HashSet<String>) -> Vec<String> {
-        let state = self.state.lock().unwrap();
-        let mut missing: Vec<String> = required
-            .iter()
-            .filter(|name| !state.entries.iter().any(|entry| &entry.name == *name))
-            .cloned()
-            .collect();
-        missing.sort();
-        missing
-    }
-
-    fn entries(&self, scope: PartScope) -> Vec<Arc<Entry>> {
-        self.state
-            .lock()
-            .unwrap()
-            .entries
-            .iter()
-            .filter(|entry| entry.scope == scope)
-            .cloned()
-            .collect()
+    /// Every registration of every scope at one moment, by name: a mounter
+    /// decides and mounts from the same snapshot, in the same order each time.
+    fn snapshot(&self) -> Vec<Arc<Entry>> {
+        let mut entries = self.state.lock().unwrap().entries.clone();
+        entries.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        entries
     }
 
     /// Records a mounted copy. False when its entry was withdrawn meanwhile;
@@ -274,18 +259,37 @@ impl PartMounter {
         self.site.required.contains(&entry.name) == self.required
     }
 
-    /// Mounts the entries this mounter owns that it has not seen yet, and
-    /// forgets withdrawn ones, whose copies the registry unloads. Returns the
-    /// new copies. A registered part that fails to build fails a required
-    /// mounter; for the optional one it affects only that part.
+    /// The required names `snapshot` has no registration of, in any scope.
+    fn missing(&self, snapshot: &[Arc<Entry>]) -> Vec<String> {
+        let mut missing: Vec<String> = self
+            .site
+            .required
+            .iter()
+            .filter(|name| !snapshot.iter().any(|entry| &entry.name == *name))
+            .cloned()
+            .collect();
+        missing.sort();
+        missing
+    }
+
+    /// Mounts the entries of `snapshot` this mounter owns that it has not
+    /// seen yet, and forgets withdrawn ones, whose copies the registry
+    /// unloads. Returns the new copies. A registered part that fails to build
+    /// fails a required mounter; for the optional one it affects only that
+    /// part.
     fn reconcile(
         &self,
         ctx: &Ctx,
         id: u64,
         seen: &mut HashMap<u64, Option<FiberView>>,
+        snapshot: &[Arc<Entry>],
     ) -> Result<Vec<FiberView>, CordisError> {
         let site = &self.site;
-        let entries = site.registry.entries(site.scope);
+        let entries: Vec<_> = snapshot
+            .iter()
+            .filter(|entry| entry.scope == site.scope)
+            .cloned()
+            .collect();
         let live: HashSet<_> = entries.iter().map(|entry| entry.id).collect();
         seen.retain(|entry, _| live.contains(entry));
         let mut new = vec![];
@@ -379,29 +383,33 @@ impl Plugin for PartMounter {
             let mut changes = site.registry.version.subscribe();
             changes.mark_unchanged();
             let mut seen = HashMap::new();
-            waiting.extend(self.reconcile(ctx, id, &mut seen)?);
             let cancel = ctx.cancellation_token();
-            if self.required {
-                // A required part nothing has registered yet holds the
-                // instance as a required row does: it is mounted once its
-                // plugin registers it, or the creation gives up.
-                loop {
-                    let missing = site.registry.missing(&site.required);
-                    if missing.is_empty() {
-                        break;
-                    }
-                    tokio::select! {
-                        changed = changes.changed() => if changed.is_err() { break },
-                        () = cancel.cancelled() => {
-                            return Err(CordisError::PluginFailed(
-                                format!("required parts not registered: {}", missing.join(", "))
-                                    .into(),
-                            ));
-                        }
-                    }
-                    waiting.extend(self.reconcile(ctx, id, &mut seen)?);
+            // A required part nothing has registered yet holds the instance
+            // as a required row does. The required mounter mounts once every
+            // required part is registered, from the snapshot it checked, so
+            // a registration between the check and the mounting cannot be
+            // left out of what the instance waits for.
+            let snapshot = loop {
+                let snapshot = site.registry.snapshot();
+                let missing = if self.required {
+                    self.missing(&snapshot)
+                } else {
+                    vec![]
+                };
+                if missing.is_empty() {
+                    break snapshot;
                 }
-            }
+                tokio::select! {
+                    changed = changes.changed() => if changed.is_err() { break snapshot },
+                    () = cancel.cancelled() => {
+                        return Err(CordisError::PluginFailed(
+                            format!("required parts not registered: {}", missing.join(", "))
+                                .into(),
+                        ));
+                    }
+                }
+            };
+            waiting.extend(self.reconcile(ctx, id, &mut seen, &snapshot)?);
             let follow = {
                 let this = PartMounter {
                     site: site.clone(),
@@ -415,7 +423,8 @@ impl Plugin for PartMounter {
                             _ = cancel.cancelled() => return,
                         }
                         // After publication a late part never fails the instance.
-                        if let Err(error) = this.reconcile(&ctx, id, &mut seen) {
+                        let snapshot = this.site.registry.snapshot();
+                        if let Err(error) = this.reconcile(&ctx, id, &mut seen, &snapshot) {
                             tracing::warn!(%error, "a registered part failed to build");
                         }
                     }
