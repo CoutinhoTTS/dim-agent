@@ -243,12 +243,7 @@ struct Harness {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "dim-local-exec-{}-{}-{name}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let path = std::env::temp_dir().join(format!("dim-local-exec-{}-{name}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&path).unwrap();
     std::fs::canonicalize(path).unwrap()
 }
