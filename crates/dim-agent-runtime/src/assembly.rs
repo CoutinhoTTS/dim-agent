@@ -1428,7 +1428,14 @@ async fn create_instance(
         .report
         .into_iter()
         .filter(|(id, _)| required.as_ref().is_none_or(|rows| rows.contains(id)))
-        .filter_map(|(_, result)| match result {
+        .filter_map(|(id, result)| match result {
+            // A mounter fails only while building the parts it mounts: a
+            // part naming a service outside its scope, or a generator that
+            // fails. That is a failure of the assembly, as it was for a
+            // part checked when the assembly was installed.
+            InstanceResult::Failed(error) if crate::parts::PartMounter::is_row(&id) => {
+                Some(AgentError::Build(loader_error(error).to_string()))
+            }
             InstanceResult::Failed(error) => Some(loader_error(error)),
             _ => None,
         })

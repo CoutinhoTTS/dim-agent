@@ -360,8 +360,9 @@ async fn a_rust_part_reads_a_crossing_name_at_its_catalog_key() {
 }
 
 /// A registered part's names are checked where an instance mounts it: a
-/// Session part reading a branch name fails that Session's creation, and a
-/// process row reading a Session name fails its registration.
+/// Session part reading a branch name fails that Session's creation as a
+/// build failure, and a process row reading a Session name fails its
+/// registration.
 #[tokio::test]
 async fn a_misplaced_part_fails_where_it_is_mounted_naming_the_group() {
     let log = Log::default();
@@ -377,6 +378,11 @@ async fn a_misplaced_part_fails_where_it_is_mounted_naming_the_group() {
         .await
         .err()
         .expect("a Session part reading branch names fails");
+    // A failure of the assembly, which clients see as `session_build_failed`.
+    assert!(
+        matches!(error, dim_agent_runtime::AgentError::Build(_)),
+        "{error:?}"
+    );
     assert!(
         error.to_string().contains(
             "timelineIdentity is a branch service: place the part inside the branch group"
