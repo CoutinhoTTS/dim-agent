@@ -111,9 +111,7 @@ async fn report_restart(kill_runtime: bool) {
     };
     config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -258,9 +256,7 @@ async fn report_crash(phase: &str, fault: ReportFault) {
     };
     config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -1210,9 +1206,7 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
     config.session_defaults.permission_policy =
         serde_json::from_value(json!({"preset":"full-access"})).unwrap();
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -1313,13 +1307,13 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
         let first = agent
             .get_session(run["result"]["stages"][0]["session_id"].as_str().unwrap())
             .unwrap();
-        let original_scope = first.scope().unwrap();
+        let original_instance = first.instance().unwrap();
         let owner = loader.get("workflow").unwrap().view.unwrap();
         server.restart("Agents").await.unwrap();
         assert_eq!(owner.state().state, rutis::FiberState::Active);
         assert_eq!(
-            agent.get_session(first.id()).unwrap().scope().unwrap(),
-            original_scope
+            agent.get_session(first.id()).unwrap().instance().unwrap(),
+            original_instance
         );
         assert_eq!(
             client.rpc("workflow.status", json!({"run_id":id})).await["result"]["policy_cap"],
@@ -1388,9 +1382,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
         }),
         config,
         |builder| {
-            builder.session_part(move |names| {
-                session_typescript::ControlledGate::part(names, send.clone())
-            });
+            builder.require_feature(session_typescript::ControlledGate::feature(send));
         },
     )
     .await;
@@ -1504,7 +1496,7 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
             );
         }
         if mode == "reload" {
-            let original_scope = stage.scope().unwrap();
+            let original_instance = stage.instance().unwrap();
             let stops_before_reload = stage
                 .local("main", ..)
                 .await
@@ -1526,8 +1518,8 @@ async fn node_workflow_stop_and_reload_settle_held_consumed_and_completed_work()
             assert_eq!(run["stages"][0]["session_id"], stage.id());
             assert_eq!(run["stages"][1]["state"], "skipped");
             assert_eq!(
-                agent.get_session(stage.id()).unwrap().scope().unwrap(),
-                original_scope
+                agent.get_session(stage.id()).unwrap().instance().unwrap(),
+                original_instance
             );
             tokio::time::timeout(Duration::from_secs(5), async {
                 while client.rpc("workflow.status", json!({"run_id":id})).await["result"]["report"]
@@ -1742,7 +1734,11 @@ async fn node_workflow_report_wakes_wait_and_is_adopted_after_its_start_batch() 
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::tool_host(
         &mut builder,
         Arc::new(ConfirmTool {
@@ -1919,9 +1915,7 @@ async fn native_retention(fault: &str) {
     };
     config.session_defaults.tools = Some(vec!["echo".into(), "workflow".into()]);
     let (server, agent) = launch_with(Arc::new(MockTools), config, |builder| {
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send));
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;

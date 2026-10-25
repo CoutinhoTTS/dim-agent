@@ -133,13 +133,21 @@ impl Fixture {
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(None)))
             .session_value(Arc::new(CompactionStrategyHost(None)))
-            .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+            .require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                }),
+            );
         defaults::install(&mut builder);
         // The host's `wait` holds a batch open next to `ask_user`.
         defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_agent_questions::install(&mut builder);
         let slot = probe.clone();
-        builder.session_part(move |names| names.part(ProbePlugin(slot.clone())));
+        builder.require_feature(
+            Feature::new("test.questions-probe").session("test.questions-probe", move |names| {
+                names.part(ProbePlugin(slot.clone()))
+            }),
+        );
         let agent = builder.build_in(&root);
         Self {
             root,

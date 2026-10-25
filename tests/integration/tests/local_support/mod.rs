@@ -416,9 +416,11 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         .session_value(Arc::new(ContextModelHost(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
         .session_value(Arc::new(CompactionStrategyHost(None)))
-        .session_part(|names| {
-            names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
-        });
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     let today = options.today.clone();
     prompt_sources::install_with_clock(
@@ -428,14 +430,21 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
     );
     skills::install(&mut builder);
     if let Some(hold) = options.hold {
-        builder.session_part(move |names| names.part(AssemblyHoldPlugin(hold.clone())));
+        builder.require_feature(
+            Feature::new("AssemblyHold").session("AssemblyHold", move |names| {
+                names.part(AssemblyHoldPlugin(hold.clone()))
+            }),
+        );
     }
     if let Some(probe) = options.probe {
-        builder.session_part(move |names| {
-            names.part(LifecycleProbePlugin {
-                probe: probe.clone(),
-            })
-        });
+        builder.require_feature(Feature::new("LifecycleProbe").session(
+            "LifecycleProbe",
+            move |names| {
+                names.part(LifecycleProbePlugin {
+                    probe: probe.clone(),
+                })
+            },
+        ));
     }
     // The Agent's own plugin: the catalog, and the Skills parts it
     // registers. Placed now, so the catalog is there before any Session.

@@ -7,7 +7,7 @@
 //! so every count is exact.
 use super::{AgentIndex, builder, config};
 use crate::{RunningServer, ServerConfig, agents::SessionSlot};
-use dim_agent_runtime::{AgentBuilder, SessionIdentity};
+use dim_agent_runtime::{AgentBuilder, Feature, SessionIdentity};
 use futures_util::{SinkExt, StreamExt};
 use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use serde_json::{Value, json};
@@ -344,7 +344,11 @@ struct HeldState {
 impl HeldRestore {
     fn install(&self, builder: &mut AgentBuilder) {
         let held = self.clone();
-        builder.session_part(move |names| names.part(HeldRestorePart(held.clone())));
+        builder.require_feature(
+            Feature::new("test.held-restore").session("test.held-restore", move |names| {
+                names.part(HeldRestorePart(held.clone()))
+            }),
+        );
     }
     fn hold(&self, id: &str) {
         *self.0.held.lock().unwrap() = Some(id.to_owned());

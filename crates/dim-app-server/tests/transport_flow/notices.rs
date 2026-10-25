@@ -105,7 +105,10 @@ async fn attached_submit(clients: &mut [&mut Client]) -> String {
 async fn an_owner_notice_follows_its_observed_event_to_v3_clients_only() {
     for _ in 0..5 {
         let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
-            builder.session_part(|names| names.part(OwnerPlugin));
+            builder.require_feature(
+                Feature::new("test.notice-owner")
+                    .session("test.notice-owner", |names| names.part(OwnerPlugin)),
+            );
         })
         .await;
         let mut ipc = Client::new_version(&server, false, 3).await;

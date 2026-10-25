@@ -362,10 +362,6 @@ impl TypedPlugin for UiHostPlugin {
     }
 }
 
-impl dim_agent_runtime::Capability for UiHostPlugin {
-    fn keys(&self) -> dim_agent_runtime::KeysOf<Self> {}
-}
-
 pub(crate) fn leaf_failed(message: impl std::fmt::Display) -> RpcError {
     RpcError::app(-32000, "ui_leaf_failed", message.to_string())
 }

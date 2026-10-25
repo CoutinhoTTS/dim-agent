@@ -1,6 +1,6 @@
 //! Immutable content services owned by real Session loader instances.
 use super::{CatalogView, SkillDefinition, SkillStatus, SkillView, SkillsError};
-use dim_agent_runtime::{Names, SessionLoader, SessionService};
+use dim_agent_runtime::{Names, SessionLoader};
 use rutis::{
     BoxFuture, CordisError, Ctx, DepKey, Effect, FiberView, InstanceId, Keyed, TypeKey, TypedPlugin,
 };
@@ -26,11 +26,8 @@ pub(super) struct ContentConfig {
     key: TypeKey,
 }
 struct Contribution(Arc<SkillDefinition>);
-impl SessionService for Contribution {}
 #[derive(Default)]
 pub struct SkillContributions(Mutex<HashMap<TypeKey, Arc<Contribution>>>);
-impl SessionService for SkillContributions {}
-
 /// Ready before Skills creates any content instances; no apply-time dependency cycle.
 pub(super) struct ContributionsPlugin(DepKey<SkillContributions>);
 impl ContributionsPlugin {

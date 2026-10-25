@@ -59,10 +59,10 @@ explained separately from injected services.
 
 Each plugin is one process row that registers its Session and branch parts with the part registry
 ([ADR 006 D3](../../../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it));
-parts implement rutis `TypedPlugin` plus runtime `Capability` (the current Rust binding of the
-[plugin contract](../../../design/plugin-contract.md); the trait is not the contract's Capability
-relation); `Deps` and
-scoped keys control readiness and lifecycle, not a security sandbox. Factories
+parts are plain rutis `TypedPlugin`s that depend on services by name (`Keyed<T>` and the other
+forms of the [Rust binding](../../../design/rutis-usage.md#appendix-a-rust-binding)), each name in
+the catalog group it is registered in; `Deps` and the keys the catalog gives each copy control
+readiness and lifecycle, not a security sandbox. Generators and factories
 capture configuration and stable identities, not live I/O. `apply` acquires
 generation resources and `ctx.effect` registers cleanup. Capabilities own their
 tasks, cancellation and terminal outcomes; Dispatcher handlers register work

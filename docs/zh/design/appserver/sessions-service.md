@@ -475,7 +475,7 @@ S1 的撤回合同（A.4）、输入约定（A.2）与 `interactive`（A.3）不
 | --- | --- |
 | 被什么挡住 | `sessions.withdraw` 必须转交给 InputQueue 的决定；A.4 与附录 E 指名了该服务，但它还不存在（InputQueue 目前没有公开服务） |
 | 考虑过的现有机制 | 由 Agents 写入 `input/withdraw`：Agents 就得等待并解释 InputQueue 的结果（§4 第 1、7 条）。经 `sessionMethods` 的 `session.input.withdraw`：它是客户端方法，进程插件没有连接就用不到 |
-| 需要的通用能力 | 一个分支作用域的公开服务（`BranchService` + `PublicService`），可在分支外经 `Session::service` 取得，方法为 `withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`。它追加 `input/withdraw`，只以 InputQueue 对这条指令的决定作答：`input/deleted` 分发后为 `Deleted { sequence }`，或不写任何内容的 `NotHeld`。失败为 `Closed`、`UnknownBranch`、`Reloading`（追加后 InputQueue 重载；后继实例按历史决定）或 `InvalidInput`（它自己的检查，包括 `reason` 长度上限，与事件一起只定义一次）。在恢复的 Session 上，它按从历史重建的持有集合正确决定 |
+| 需要的通用能力 | 一个分支作用域的公开服务（名字注册在分支组中的 `PublicService`），可在分支外经 `Session::service` 取得，方法为 `withdraw(input_id, reason: Option<String>) -> Result<WithdrawOutcome, AgentError>`。它追加 `input/withdraw`，只以 InputQueue 对这条指令的决定作答：`input/deleted` 分发后为 `Deleted { sequence }`，或不写任何内容的 `NotHeld`。失败为 `Closed`、`UnknownBranch`、`Reloading`（追加后 InputQueue 重载；后继实例按历史决定）或 `InvalidInput`（它自己的检查，包括 `reason` 长度上限，与事件一起只定义一次）。在恢复的 Session 上，它按从历史重建的持有集合正确决定 |
 | 对序号、批次、中断、重载的影响 | 不超出 A.4：一条指令事件，按序号顺序决定 |
 | 负责方与 issue | S1，[#58](https://github.com/arcships/dim/issues/58)。`input/withdraw`/`input/deleted` 的格式决定归 S1；S2 不需要格式决定 |
 

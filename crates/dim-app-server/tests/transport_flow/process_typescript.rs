@@ -419,8 +419,7 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
     parts.rows[0]["config"] = json!({"processOwner":true});
     let (mut builder, _requests, release) = session_typescript::setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder
-        .session_part(move |names| session_typescript::ControlledGate::part(names, send.clone()));
+    builder.require_feature(session_typescript::ControlledGate::feature(send));
     let mut config = config(&home, parts);
     config.unix_path = Some(home.join("server.sock"));
     let server = serve(builder, config).await.unwrap();
@@ -582,8 +581,7 @@ async fn node_process_typescript_dependency_reload_settles_calls_and_keeps_failu
     parts.rows[1]["config"] = json!({"failAfter":2});
     let (mut builder, _, _) = session_typescript::setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder
-        .session_part(move |names| session_typescript::ControlledGate::part(names, send.clone()));
+    builder.require_feature(session_typescript::ControlledGate::feature(send));
     let mut config = config(&home, parts);
     config.unix_path = Some(home.join("server.sock"));
     let server = serve(builder, config).await.unwrap();
@@ -663,9 +661,7 @@ async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled
         }
         let (mut builder, mut requests, _) = session_typescript::setup();
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-        builder.session_part(move |names| {
-            session_typescript::ControlledGate::part(names, send.clone())
-        });
+        builder.require_feature(session_typescript::ControlledGate::feature(send));
         let mut config = config(&home, parts);
         config.unix_path = Some(home.join("server.sock"));
         let server = serve(builder, config).await.unwrap();
@@ -836,8 +832,7 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
     config.file_roots = vec![package.clone(), other.clone()];
     let (mut builder, _, _) = session_typescript::setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
-    builder
-        .session_part(move |names| session_typescript::ControlledGate::part(names, send.clone()));
+    builder.require_feature(session_typescript::ControlledGate::feature(send));
     config.unix_path = Some(PathBuf::from("/tmp").join(format!(
         "wf-{}/server.sock",
         &uuid::Uuid::new_v4().simple().to_string()[..8]

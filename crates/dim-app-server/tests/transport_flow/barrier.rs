@@ -85,11 +85,14 @@ async fn setup(ws: bool) -> (RunningServer, Client, String, Arc<Gate>) {
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let plugin_gate = gate.clone();
-    builder.session_part(move |names| {
-        names.part(DelayPlugin {
-            gate: plugin_gate.clone(),
-        })
-    });
+    builder.require_feature(Feature::new("test.delay-session-broadcast").session(
+        "test.delay-session-broadcast",
+        move |names| {
+            names.part(DelayPlugin {
+                gate: plugin_gate.clone(),
+            })
+        },
+    ));
     let server = serve(
         builder,
         ServerConfig {

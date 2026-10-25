@@ -9,7 +9,7 @@
 //! parts that are Capabilities because they inject `dispatcher` or `timeline`.
 //! `check` builds the same assembly and fails when the file differs.
 use crate::app_server;
-use dim_agent_runtime::{SessionConfig, names::name_of_type};
+use dim_agent_runtime::{Feature, SessionConfig, names::name_of_type};
 use rutis::{
     BoxFuture, CordisError, Ctx, Effect, InstanceId, RuntimeDiagnostics, TypeKey, TypedPlugin,
 };
@@ -85,7 +85,10 @@ async fn collect() -> Result<String> {
     let server = app_server::serve_product(&dir, |builder| {
         dim_app_server::session_typescript::share_names(builder.catalog_mut());
         let probe = probe.clone();
-        builder.branch_part(move |names| names.part(probe.clone()));
+        builder.require_feature(
+            Feature::new("CatalogProbe")
+                .branch("CatalogProbe", move |names| names.part(probe.clone())),
+        );
     })
     .await?;
     let table = async {

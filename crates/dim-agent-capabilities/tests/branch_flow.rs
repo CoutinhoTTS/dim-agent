@@ -219,9 +219,17 @@ fn builder(probe: &Arc<Probe>) -> AgentBuilder {
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
     let writer = probe.clone();
-    builder.branch_part(move |names| names.part(CleanupWriter(writer.clone())));
+    builder.require_feature(
+        Feature::new("test.cleanup-writer").branch("test.cleanup-writer", move |names| {
+            names.part(CleanupWriter(writer.clone()))
+        }),
+    );
     let probe = probe.clone();
-    builder.branch_part(move |names| names.part(ProbePlugin(probe.clone())));
+    builder.require_feature(
+        Feature::new("test.branch-probe").branch("test.branch-probe", move |names| {
+            names.part(ProbePlugin(probe.clone()))
+        }),
+    );
     builder
 }
 fn options(prompt: &str) -> BranchOptions {
@@ -1162,11 +1170,14 @@ async fn closing_after_dispatch_before_the_build_first_poll_is_a_normal_cancella
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder.branch_part(move |names| {
-        names.part(CaptureTreeDispatch {
-            ports: captured.clone(),
-        })
-    });
+    builder.require_feature(Feature::new("test.capture-tree-dispatch").branch(
+        "test.capture-tree-dispatch",
+        move |names| {
+            names.part(CaptureTreeDispatch {
+                ports: captured.clone(),
+            })
+        },
+    ));
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await

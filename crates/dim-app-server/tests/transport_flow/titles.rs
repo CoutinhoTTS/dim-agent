@@ -97,10 +97,13 @@ async fn serve_titles(store: &Store) -> (RunningServer, dim_agent_runtime::Agent
     let metadata = Metadata::default();
     let consumer = metadata.clone();
     let (server, agent) = launch_with(Arc::new(MockTools), store.config(), move |builder| {
-        builder.session_part(move |names| {
-            let service = names.named::<dyn HostDispatch>("sessionMetadata")?;
-            Ok(names.part_with(MetadataConsumer(consumer.clone()), service))
-        });
+        builder.require_feature(Feature::new("title-metadata-consumer").session(
+            "title-metadata-consumer",
+            move |names| {
+                let service = names.named::<dyn HostDispatch>("sessionMetadata")?;
+                Ok(names.part_with(MetadataConsumer(consumer.clone()), service))
+            },
+        ));
     })
     .await;
     (server, agent, metadata)

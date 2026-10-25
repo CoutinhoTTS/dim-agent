@@ -1684,7 +1684,7 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
         let models=server.models();
         for complete in [false,true]{
             let mut custom=builder(models.clone(),Arc::new(MockTools));
-            custom.branch_part(move|names|names.part(RewriteNative{complete}));
+            custom.require_feature(Feature::new("test.rewrite-native").branch("test.rewrite-native", move|names|names.part(RewriteNative{complete})));
             let agent=model_agent(models.clone(),Some(custom));
             let session=agent.create_session(server.session_config()).await.unwrap();
             session.submit("tool".into(),InputMode::Queue,"main").await.unwrap();session.idle("main").await.unwrap();

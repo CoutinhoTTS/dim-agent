@@ -198,18 +198,10 @@ impl PartRegistry {
 /// already failed as it counts a failed row ([`crate::assembly`]).
 pub(crate) type Copies = Arc<Mutex<Vec<FiberView>>>;
 
-/// A part of the assembly profile, added with
-/// [`AgentBuilder::session_part`](crate::AgentBuilder::session_part) or
-/// [`AgentBuilder::branch_part`](crate::AgentBuilder::branch_part).
-pub(crate) type ProfilePart =
-    Arc<dyn Fn(&Names<'_>) -> Result<Box<dyn Plugin>, CordisError> + Send + Sync>;
-
 /// What a mounter knows of its instance.
 pub(crate) struct MountSite {
     pub scope: PartScope,
     pub registry: Arc<PartRegistry>,
-    /// The profile's own parts, which the required mounter mounts.
-    pub profile: Vec<ProfilePart>,
     /// Registered parts the profile requires, by name.
     pub required: Arc<HashSet<String>>,
     pub catalog: Arc<rutis_loader::ServiceCatalog>,
@@ -388,12 +380,6 @@ impl Plugin for PartMounter {
             let site = self.site.clone();
             let id = site.registry.mounter();
             let mut waiting = vec![];
-            if self.required {
-                for part in &site.profile {
-                    let part = site.with_mount(|mount| part(mount.names))?;
-                    waiting.push(mount(ctx, part, &site.copies)?);
-                }
-            }
             let mut changes = site.registry.version.subscribe();
             changes.mark_unchanged();
             let mut seen = HashMap::new();

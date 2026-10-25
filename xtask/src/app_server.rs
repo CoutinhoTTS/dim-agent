@@ -11,7 +11,7 @@ use dim_agent_capabilities::{
     summary_strategy::ProductSummaryStrategyPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
-use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use rutis::RuntimeDiagnostics;
 use serde_json::Value;
@@ -59,9 +59,18 @@ pub async fn serve_product(
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(
             ProductContextModel,
         )))))
-        .session_part(|names| names.part(ProductSummaryStrategyPlugin::new(names)?))
-        .session_part(|names| names.part(ContextMethodsPlugin))
-        .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+        .require_feature(
+            Feature::new("ContextCompaction")
+                .session("ProductSummaryStrategy", |names| {
+                    names.part(ProductSummaryStrategyPlugin::new(names)?)
+                })
+                .session("ContextMethods", |names| names.part(ContextMethodsPlugin)),
+        )
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                names.part(DefaultPrepareModelPlugin::new(names)?)
+            }),
+        );
     dim_app_server::collaboration::install(&mut builder);
     dim_agent_questions::install(&mut builder);
     observe(&mut builder);

@@ -585,10 +585,10 @@ Codex 的 `apply_patch` 没有别名：它的输入是补丁，而 Dim 的 `writ
 | 中立 | Rust |
 | --- | --- |
 | 准入决定 | 提议的 `Permission::admit_decision(call, source: &BranchSource, risk, cancel)`，由 `Approval::admit` 使用；`decide` 保留给复核 |
-| `toolAdvice` | 提议的分支级 `ToolAdvice(Arc<dyn AdviseTool>)`，位于 `BranchScope::named_key::<ToolAdvice>("hooks")`，其名称以提议的 `AgentBuilder::tool_advice(name)` 登记；`advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`；Permission 的工厂收到登记的名称，Permission 每次准入时逐个查找（A.6.1） |
-| `submitCheck` | 提议的 Session 级 `SubmitCheck(Arc<dyn CheckSubmission>)`，位于 `SessionScope::named_key::<SubmitCheck>("hooks")`；`check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`，其名称以提议的 `AgentBuilder::submit_check(name)` 登记；由 `Connection::submit`、`Connection::create_branch` 与 `InputMethods` 在 `Session::input`、`Session::branch` / steer 批次之前查找（A.6.2） |
+| `toolAdvice` | 提议的 `ToolAdvice(Arc<dyn AdviseTool>)`，位于分支组中的一个名字下，key 为 `hooks`（`names.named::<ToolAdvice>(name)`），其名称以提议的 `AgentBuilder::tool_advice(name)` 登记；`advise(ToolAdviceRequest, CancellationToken) -> HostFuture<ToolAdviceReply>`；Permission 的工厂收到登记的名称，Permission 每次准入时逐个查找（A.6.1） |
+| `submitCheck` | 提议的 `SubmitCheck(Arc<dyn CheckSubmission>)`，位于 Session 组中的一个名字下，key 为 `hooks`（`names.named::<SubmitCheck>(name)`）；`check(SubmitCheckRequest, CancellationToken) -> HostFuture<SubmitCheckReply>`，其名称以提议的 `AgentBuilder::submit_check(name)` 登记；由 `Connection::submit`、`Connection::create_branch` 与 `InputMethods` 在 `Session::input`、`Session::branch` / steer 批次之前查找（A.6.2） |
 | `input_blocked` | `RpcError::app(-32000, "input_blocked", message)`；`data` 只有 `{appError}` |
-| `Approval.respond` | 经 `InBranch<Approval>` 调用 `Approval::respond(approval_id, ApprovalDecision)` |
+| `Approval.respond` | 经 `Keyed<Approval>` 调用 `Approval::respond(approval_id, ApprovalDecision)` |
 | `HookSources` | Session 端口 `HookSourcesHost(Arc<dyn ReadHookSources>)`，由 App Server 绑定，如同 `CommandRulesHost` 与 `SkillSettingsHost` |
 | `hooks`、`hooks-projects` | App Server 中的 `BusinessDocument` 类型（`hooks`：`USER_FILE` 为 `hooks.json`，没有 `PROJECT_FILE`；`hooks-projects`：`USER_FILE` 为 `hooks-projects.json`） |
 | `.dimcode/hooks.json` | 由 `HooksSettings` 经 `FileStorage::path(root, ".dimcode/hooks.json")` 与 `read_limited` 读取，`root` 来自 `SettingsService::project_root(cwd)`，解析为 `hooks` 文档类型 |

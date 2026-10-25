@@ -18,7 +18,6 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `collaborationDirectory` | process | CollaborationDirectory | Rust-only | — |
 | `connectionHub` | process | Connection | Rust-only | — |
 | `fileStorage` | process | FileStorage | Rust-only | — |
-| `fileWriteCoordinator` | process | FileWriteCoordinator | Rust-only | — |
 | `grokOAuthService` | process | GrokOAuth | Rust-only | — |
 | `hostPlatform` | process | HostPlatform | Rust-only | — |
 | `listenAddresses` | process | Transport | Rust-only | — |
@@ -30,6 +29,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `modelHost` | process | Aimux | Rust-only | — |
 | `modelSelectionHost` | process | Provider | Rust-only | — |
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | Rust-only | — |
+| `partRegistry` | process | PartRegistry | Rust-only | — |
 | `pluginFiles` | process | PluginFiles | yes | `open` async |
 | `providerConnectionResolver` | process | Provider | Rust-only | — |
 | `providerService` | process | Provider | Rust-only | — |
@@ -83,7 +83,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `configurationPublisher` | branch | ContextPreparation | Rust-only | — |
 | `configureControl` | branch | Prompt | Rust-only | — |
 | `contextPreparation` | branch | ContextPreparation | Rust-only | — |
-| `dispatcher` | branch | BranchScope | yes | `changed` async, `committed` async, `history` async, `listen` async, `local` async, `notify` async, `sequence` async |
+| `dispatcher` | branch | BranchScope | yes | `changed` async, `committed` async, `consume` async, `history` async, `listen` async, `local` async, `notify` async, `sequence` async |
 | `fileReads` | branch | FileReads | Rust-only | — |
 | `inputQueue` | branch | InputQueue | Rust-only | — |
 | `loopState` | branch | Loop | Rust-only | — |
@@ -116,4 +116,4 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | ToolBinding | branch | `dispatcher`, `timeline` |
 | ToolExecutor | branch | `dispatcher`, `timeline` |
 | TreeTimeline | branch | `dispatcher`, `timeline` |
-| WaitBranch | branch | `dispatcher`, `timeline` |
+| WaitBranch | branch | `dispatcher` |

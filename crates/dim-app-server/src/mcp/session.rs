@@ -13,7 +13,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::{
     AgentBuilder, Names, PublicService, SESSION_GROUP, SessionConfig, SessionLifecycle,
-    SessionLoader, SessionService, StateCell,
+    SessionLoader, StateCell,
 };
 use dim_agent_types::{
     ToolCall, ToolContent, ToolDefinition, ToolMetadata, ToolResult, ToolSource,
@@ -101,7 +101,6 @@ pub struct McpSession {
     refresh: watch::Sender<()>,
     stopped: CancellationToken,
 }
-impl SessionService for McpSession {}
 impl PublicService for McpSession {}
 impl McpSession {
     pub fn state(&self) -> McpSessionState {
