@@ -14,7 +14,7 @@ atomic ConfigurationPublisher used by Prompt.
 | `S:CompactionStrategyHost` | Optional compaction strategy; the policy exists when both hosts are bound. |
 | `S:PrepareContextHost` | Host preparation hook. |
 | `B:TimelineIdentity` | Identify configuration publication scope; Session and branch ids of the `context.prepare` span. |
-| `B:Dispatcher` | Receive preparation/steer/interrupt transitions and report faults. |
+| `B:Dispatcher` | Replay and receive preparation/steer/interrupt transitions and report faults. |
 | `B:Timeline` | Read fixed context, publish handoff and configuration facts. |
 
 ## Events and lifetime

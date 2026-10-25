@@ -23,7 +23,7 @@ External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-ap
 
 每个进程一个 rutis root。进程级服务、Session 与分支都是这棵树上的 Plugin；所有有状态服务、监听器和长期任务都由 Plugin 提供，依赖全部经 `TypedPlugin::Deps` 声明。`main` 只解析启动参数、建立 Tokio runtime、调用 `serve`、处理进程信号；纯协议解析、序列化与无状态转换是普通函数。
 
-可选的 managed provider 账号插件由外部单独提供：给出 `--plugin-dir`、`--js-runtime` 与 `--node` 时，rutis Node runtime 与该插件作为同一进程树中的独立 loader 行装载，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；插件不可用时其 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#optional-managed-provider)）。
+可选的 managed provider 是外部维护的 Rust 进程级 Plugin（Dim 账号在私有仓库 `dim-oauth-plugin-rust`）：账号版的 `dimcode` 通过 `cli::run_with` 注册它的行，它以类型化服务 `ManagedProvider` 提供，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；没有它时 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#managed-provider-plugins)）。
 
 MCP connection generations are nested `McpConnections` group instances owned by
 each Session in the same loader. `McpPublication` serializes source selection
@@ -348,6 +348,8 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 装载：失败判定 | 读取到的已提交而没有终态的操作，由所属能力提交失败终态，不执行；未结束的 turn 在其在途操作全部有终态后以 `Failed` 结束，期间不再发起模型请求或派发工具调用 |
 | 历史投影 | turn 结束时仍未得到结果的工具提议，投影为未执行的错误结果 |
 | 已知代价 | 未随重载的上下文准备跨过重载时，已判失败的 turn 仍可能完成一次模型调用 |
+
+`Dispatcher::follow`（其他语言为 `dispatcher.consume`）把订阅与重建合为一次注册（[插件契约 §5.2](../../design/plugin-contract.md#52-consuming-facts)）：它先注册订阅，固定 `S`，把 `local(..=S)` 作为一次重放交给处理器；处理器在重放中计算状态、完成失败判定，S 之后的事件在重放处理完后才以实时事件交给同一处理器。手写的订阅、闸门与跳过仍然有效。
 
 随上游重载的能力：
 

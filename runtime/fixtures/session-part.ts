@@ -22,7 +22,12 @@ export default definePlugin({
     let toolStarted = false
     let startTool: (() => void) | undefined
     const alive = () => { if (stopped) throw new Error('provider unloaded') }
-    ctx.effect(() => { stopped = true })
+    const pending = new Set<Promise<void>>()
+    ctx.effect(async () => {
+      // Cancellation is asynchronous; keep owned state until accepted calls settle.
+      await Promise.all(pending)
+      stopped = true
+    })
     // A declaration without its risk is refused; the row keeps its methods.
     let refused: string | undefined
     await ctx.use<ToolRegistry>('toolRegistry').register(
@@ -58,21 +63,29 @@ export default definePlugin({
     await ctx.use<SessionMethods>('sessionMethods').register(
       namespace, declarations,
       async (call: MethodCall, cancelled: Promise<void>, progress: (data: unknown) => void) => {
-        alive()
-        if (call.method.endsWith('.error')) return { code: `owned_${generation}`, message: 'fixture error' }
-        if (call.method.endsWith('.undefined')) return { kind: 'value', value: undefined }
-        if (call.method.endsWith('.extra_value')) return { kind: 'value', value: null, extra: true }
-        if (call.method.endsWith('.extra_error')) return { code: 'fixture', message: 'fixture error', extra: true }
-        if (call.method.endsWith('.handed_off')) return { kind: 'handed_off' }
-        if (call.method.endsWith('.malformed')) return { invalid: true }
-        if (call.method.endsWith('.wait_fast') && !fastFinished) await new Promise<void>(resolve => { finishFast = resolve })
-        if (call.method.endsWith('.wait_tool') && !toolStarted) await new Promise<void>(resolve => { startTool = resolve })
-        const hold = call.method.endsWith('.report') || call.method.endsWith('.drain')
-        progress({ phase: 'started', generation })
-        if (hold) await cancelled
-        alive()
-        progress({ phase: 'settled', generation })
-        return { kind: 'value', value: { sessionId: call.params.sessionId, generation, pid: process.pid, calls, cancelled: hold, alive: !stopped, refused } }
+        let done!: () => void
+        const settled = new Promise<void>(resolve => { done = resolve })
+        pending.add(settled)
+        try {
+          alive()
+          if (call.method.endsWith('.error')) return { code: `owned_${generation}`, message: 'fixture error' }
+          if (call.method.endsWith('.undefined')) return { kind: 'value', value: undefined }
+          if (call.method.endsWith('.extra_value')) return { kind: 'value', value: null, extra: true }
+          if (call.method.endsWith('.extra_error')) return { code: 'fixture', message: 'fixture error', extra: true }
+          if (call.method.endsWith('.handed_off')) return { kind: 'handed_off' }
+          if (call.method.endsWith('.malformed')) return { invalid: true }
+          if (call.method.endsWith('.wait_fast') && !fastFinished) await new Promise<void>(resolve => { finishFast = resolve })
+          if (call.method.endsWith('.wait_tool') && !toolStarted) await new Promise<void>(resolve => { startTool = resolve })
+          const hold = call.method.endsWith('.report') || call.method.endsWith('.drain')
+          progress({ phase: 'started', generation })
+          if (hold) await cancelled
+          alive()
+          progress({ phase: 'settled', generation })
+          return { kind: 'value', value: { sessionId: call.params.sessionId, generation, pid: process.pid, calls, cancelled: hold, alive: !stopped, refused } }
+        } finally {
+          pending.delete(settled)
+          done()
+        }
       },
     )
   },

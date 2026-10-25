@@ -43,11 +43,6 @@
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
             "scope": null,
             "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "status": "Ready"
           }
         ],
         "resolved": [
@@ -56,23 +51,11 @@
             "scope": null,
             "provider": 52,
             "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "provider": 52,
-            "generation": 1
           }
         ],
         "reads": [
           {
             "service": "dim_agent_runtime::core::dispatcher::Dispatcher@main",
-            "provider": 52,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_agent_runtime::core::timeline::Timeline@main",
             "provider": 52,
             "declared": true,
             "external": true

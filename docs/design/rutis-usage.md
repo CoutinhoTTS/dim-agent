@@ -144,9 +144,10 @@ hand-written adapter layer.
 
 Each name is declared once. A service that crosses languages declares its name on its Rust type with
 `#[rutis::service]`. A Rust-only service, or a name a foreign part provides, is registered in the
-host's loader catalog. The catalog shares only those names (`share_registered_only`). `xtask` will
-generate the authoritative table from the real assembly (R4). The names Dim defines are listed in the
-[plugin contract §4](plugin-contract.md#4-dims-services).
+host's loader catalog. The catalog shares only those names (`share_registered_only`). `xtask graph`
+writes the authoritative table from the real assembly, the
+[generated catalog](../architecture/rust-agent/generated/catalog.md), and `xtask check` fails when it is
+stale (R4). What each name Dim defines is for is in the [plugin contract §4](plugin-contract.md#4-dims-services).
 
 *Today:* the process services that cross languages are marked `#[rutis::service]`. The services
 provided per Session or branch are listed with their group in the App Server's build script
@@ -229,15 +230,17 @@ These requirements concern how Dim uses rutis. They follow
 
 ### R4. The catalog is generated and Capabilities are marked automatically
 
-- **Blocked:** §3.4 here and [plugin contract §8](plugin-contract.md#8-guarantees-conventions-and-the-audit). Today the catalog is spread across `build.rs`, the authoring guide and
-  design documents, and nothing marks which parts are Capabilities.
+- **Blocked:** §3.4 here and [plugin contract §8](plugin-contract.md#8-guarantees-conventions-and-the-audit). The catalog was spread across `build.rs`, the authoring guide and
+  design documents, and nothing marked which parts are Capabilities.
 - **Existing mechanisms considered:** `xtask graph` already records injected and provided services
   from the real assembly.
 - **Needed:** `xtask graph` writes the catalog table (name, group, provider, crosses languages,
   methods) and marks which parts are Capabilities, from the names they inject (`dispatcher`,
   `timeline`).
 - **Effect:** none at runtime.
-- **Owner:** `xtask`. Issue to be opened.
+- **Owner:** `xtask`. Delivered ([#381](https://github.com/arcships/dim/issues/381)): `xtask graph`
+  writes the [generated catalog](../architecture/rust-agent/generated/catalog.md) from the App Server
+  product profile with one Session, and `xtask check` fails when it is stale.
 
 ### R5. Foreign plugins register their parts
 
@@ -366,12 +369,13 @@ each export's name and group are the ones the binding derives for its type.
 ```rust
 pub struct WaitBranch(DepKey<Wait>);
 impl TypedPlugin for WaitBranch {
-    // "dispatcher" and "timeline" are branch names; nothing here says so.
-    type Deps = (Keyed<Dispatcher>, Keyed<Timeline>);
+    // "dispatcher" is a branch name; nothing here says so.
+    type Deps = (Keyed<Dispatcher>,);
     fn name(&self) -> &str { "WaitBranch" }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (dispatcher, timeline): Self::Deps)
+    fn apply<'a>(&'a self, ctx: &'a Ctx, (Keyed(dispatcher),): Self::Deps)
         -> BoxFuture<'a, Result<Effect, CordisError>> {
-        /* rebuild (plugin contract §7.2), then ctx.provide_as(self.0.key().clone(), wait) */
+        /* dispatcher.follow(ctx, "Wait", keys, handler).await?, the Rust form of `consume`
+           (plugin contract §5.2), then ctx.provide_as(self.0.key().clone(), wait) */
     }
 }
 
@@ -462,31 +466,29 @@ async def apply(ctx, config):
 ```
 
 ```ts
-// A Capability that rebuilds by hand (plugin contract §7.2, today's form).
+// A Capability that rebuilds from history, then follows live events (plugin contract §5.2).
 export default definePlugin({
   name: 'ExampleCounter',
   inject: ['dispatcher'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
-    let count = 0, through = 0n
-    let ready!: () => void
-    const rebuilt = new Promise<void>(resolve => { ready = resolve })
-    await dispatcher.listen('example-counter', ['input/message'], async event => {
-      await rebuilt
-      if (BigInt(event.sequence) > through) count++
+    let count = 0
+    const fold = (event: BranchEvent) => {
+      if (event.type === 'input' && event.name === 'message') count++
+    }
+    await dispatcher.consume('example-counter', ['input/message'], delivery => {
+      if ('live' in delivery) fold(delivery.live)
+      else delivery.replay.forEach(fold)
     })
-    const cutoff = await dispatcher.committed()
-    count = (await dispatcher.local(0, cutoff))
-      .filter(event => event.type === 'input' && event.name === 'message').length
-    through = BigInt(cutoff)
     ctx.provide('exampleCounter', { get: () => ({ count }) })
-    ready()
   },
 })
 ```
 
-With R1 the same part registers once and folds every event, replayed or live, in one handler.
+The hand-written form stays valid: `listen` before `committed()`, then a rebuild from `local`
+through that cutoff while the handler waits, skipping the live events it covered.
 
-The repository's fixtures show both languages: `runtime/fixtures/branch-part.ts` and
-`runtime/fixtures/python/python_branch_part.py`.
+The repository's fixtures show both languages and both forms: `runtime/fixtures/branch-part.ts`
+rebuilds by hand, `runtime/fixtures/python/python_branch_part.py` and `runtime/plugins/goal/branch.ts`
+use `consume`.

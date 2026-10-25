@@ -11,7 +11,7 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 - After each design or implementation, do an ablation review: check whether every change is necessary and prefer removing abstractions, wrappers, intermediate state and extra branches that do not serve the requirement. Where a simplification is plausible, try it and confirm the result still satisfies the requirement and interface contracts within the affected scope. For structure that is required, state its purpose; do not deliberately revert fixes or manufacture test failures to prove necessity. If nothing can be removed, say so instead of inventing experiments.
 - Process serves delivery; keep effort proportional to the complexity and risk of the change. Handle ordinary changes directly and only delegate complex work that can progress independently. Tracking issues individually does not mean a separate agent, report or full verification run per issue.
 - Development and tests use an isolated `--home` (or `DIMCODE_HOME`); never touch the product home `~/.dimcode`.
-- This is a public repository. The private account plugin, its account realm and token flows, and any credentials stay out of it; see the [managed provider boundary](docs/architecture/development.md#managed-provider-boundary).
+- This is a public repository. The private account plugin (`dim-oauth-plugin-rust`), its account realm and token flows, and any credentials stay out of it; see the [managed provider boundary](docs/architecture/development.md#managed-provider-boundary).
 - Review correctness, security, compatibility and unnecessary abstraction before committing. Commit complete, reviewable units on their declared parent, with their documentation and observable-behavior tests. Never commit secrets or scratch experiments.
 
 ## Data and interface conventions
@@ -56,11 +56,11 @@ Assembly graphs and crate dependencies are computed from the actual code by `xta
 
 | Command (workspace root) | Purpose |
 | --- | --- |
-| `cargo run --locked -p xtask -- graph` | Regenerate `docs/architecture/rust-agent/generated/`: `services.mmd` / `services.md` (service assembly), `instances.mmd` (instance keys), `modules.mmd` (module dependencies), `crates.mmd` (crate dependencies) and their `.json` snapshots |
-| `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions |
+| `cargo run --locked -p xtask -- graph` | Regenerate `docs/architecture/rust-agent/generated/`: `services.mmd` / `services.md` (service assembly), `instances.mmd` (instance keys), `modules.mmd` (module dependencies), `crates.mmd` (crate dependencies) and their `.json` snapshots, and `catalog.md` (the service catalog and the parts that are Capabilities) |
+| `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions, and that `catalog.md` matches the real assembly |
 | `cargo run --release --locked -p xtask -- measure` | Resource measurement; pass `--model-config PATH` (e.g. `crates/dim-agent-aimux/examples/offline.json`) |
 
-Run `check` after adding or removing a Capability or changing assembly or crate dependencies, and `graph` after changing assembly. `check` also validates the plugin pages under `docs/architecture/rust-agent/plugins/` against the code, so update a capability's page with it; use the `.json` snapshot diff to confirm the change is as intended. Hand-written diagrams in documentation only describe the target structure; the generated output is authoritative for the current implementation.
+Run `check` after adding or removing a Capability or changing assembly or crate dependencies, and `graph` after changing assembly. `check` also validates the plugin pages under `docs/architecture/rust-agent/plugins/` against the code, so update a capability's page with it, and fails when the generated service catalog is stale; use the `.json` snapshot diff to confirm the change is as intended. Hand-written diagrams in documentation only describe the target structure; the generated output is authoritative for the current implementation.
 
 ## Agent v4 development rules
 

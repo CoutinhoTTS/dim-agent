@@ -45,7 +45,7 @@ enclosing instance. Its methods are the type's public `&self` methods that can c
 | Name | Group | Rust type | Methods used by parts |
 | --- | --- | --- | --- |
 | `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options, cancelled)` |
-| `dispatcher` | `branch` | `Dispatcher` | `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)`, `notify()`, `sequence()`, `changed()` |
+| `dispatcher` | `branch` | `Dispatcher` | `consume(name, keys, handler)`, `listen(name, keys, handler)`, `committed()`, `local(start, through)`, `history(through)`, `notify()`, `sequence()`, `changed()` |
 | `branchLifecycle` | `branch` | `BranchLifecycle` | `activated()`, `closing()` |
 | `timeline` | `branch` | `Timeline` | `append({type, name, data, tags?})` → the committed event; `ancestors()`, `sequence()`, `committed()`, `hasPending()` |
 | `timelineIdentity` | `branch` | `TimelineIdentity` | `get()` → `{sessionId, branchId}` |
@@ -130,9 +130,12 @@ same-module snapshots, online metadata, disablement and Pending apply unchanged.
 
 ## Subscription, rebuild and recovery
 
-1. Subscribe first with `dispatcher.listen`, then read `committed()` and `local(0, cutoff)`, and
-   fold that history. Live events at or below the cutoff are already folded; the handler waits for
-   the fold before handling later ones. This is InputQueue's native pattern.
+1. Register with `dispatcher.consume`. The handler first receives `{ replay }`, the branch's own
+   history through the cutoff, and folds it; then `{ live }` for each matching event after the
+   cutoff. Live events wait until the replay is handled, so what the rebuild owes is written
+   before them. This is the native Capabilities' `Dispatcher::follow`. Subscribing with `listen`
+   first, then reading `committed()` and `local(0, cutoff)` and skipping live events at or below
+   the cutoff, stays valid.
 2. Folding history repeats no side effect; decisions act on live events. A restored or reloaded
    generation rebuilds the same way and does not repeat a write its predecessor committed.
 3. A handler registers its work with its part and returns. Network and tool waits belong to that
