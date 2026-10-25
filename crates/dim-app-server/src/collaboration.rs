@@ -62,18 +62,13 @@ fn member_create_failed(detail: String) -> Failure {
     }
 }
 
-/// Registers the Session and branch halves; `serve` provides the process half.
+/// Requires the Session and branch parts in the profile; Collaboration,
+/// which `serve` places at the process, registers them.
 pub fn install(builder: &mut AgentBuilder) {
     crate::register_names(builder.catalog_mut());
-    builder.require_feature(
-        dim_agent_runtime::Feature::new("CollaborationParts")
-            .session("CollaborationCapability", |names| {
-                names.part(CollaborationCapabilityPlugin::new(names)?)
-            })
-            .branch("CollaborationTimeline", |names| {
-                names.part(CollaborationTimelinePlugin)
-            }),
-    );
+    builder
+        .require_part("CollaborationCapability")
+        .require_part("CollaborationTimeline");
 }
 
 // ---------------------------------------------------------------- process
@@ -572,7 +567,8 @@ impl Listener<UnloadedSessionDeleted> for Arc<Collaboration> {
     }
 }
 
-/// Process plugin; loads after `Agents` and reloads with it.
+/// The plugin: the process service, which loads after `Agents` and reloads
+/// with it, and the Session and branch parts it registers.
 pub(crate) struct CollaborationPlugin {}
 impl CollaborationPlugin {
     pub fn new() -> Self {
@@ -580,14 +576,18 @@ impl CollaborationPlugin {
     }
 }
 impl TypedPlugin for CollaborationPlugin {
-    type Deps = (Keyed<AgentIndex>, Keyed<CollaborationDirectory>);
+    type Deps = (
+        Keyed<AgentIndex>,
+        Keyed<CollaborationDirectory>,
+        Keyed<dim_agent_runtime::PartRegistry>,
+    );
     fn name(&self) -> &str {
         "Collaboration"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (Keyed(index), Keyed(directory)): Self::Deps,
+        (Keyed(index), Keyed(directory), Keyed(parts)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let service = Arc::new(Collaboration {
@@ -631,6 +631,21 @@ impl TypedPlugin for CollaborationPlugin {
             // established meanwhile.
             service.reconcile().await;
             ctx.provide_as(TypeKey::of::<Collaboration>(), service)?;
+            use dim_agent_runtime::PartScope;
+            parts.register(
+                ctx,
+                PartScope::Session,
+                "CollaborationCapability",
+                |mount| {
+                    mount
+                        .names
+                        .part(CollaborationCapabilityPlugin::new(mount.names)?)
+                        .map(Some)
+                },
+            )?;
+            parts.register(ctx, PartScope::Branch, "CollaborationTimeline", |mount| {
+                mount.names.part(CollaborationTimelinePlugin).map(Some)
+            })?;
             Ok(Effect::Done)
         })
     }
