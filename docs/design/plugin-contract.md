@@ -99,9 +99,10 @@ Which scope that is, is a Dim decision:
 ## 4. Dim's services
 
 The names Dim defines, each following the identity and shape rules of
-[rutis usage §3](rutis-usage.md#3-services-by-name). `xtask` will generate the authoritative table
-from the real assembly (rutis usage R4). Until then, this table, `crates/dim-app-server/build.rs` and
-the [authoring guide](../typescript-plugin-authoring.md#available-services) are the reference.
+[rutis usage §3](rutis-usage.md#3-services-by-name). The authoritative table is the
+[generated catalog](../architecture/rust-agent/generated/catalog.md): `xtask graph` writes it from the
+real assembly with each name's group, provider, methods and whether it crosses languages (rutis usage
+R4). This table says what each name Dim defines is for.
 
 | Name | Scope | Provider | Crosses languages today | Notes |
 | --- | --- | --- | --- | --- |
@@ -251,7 +252,7 @@ The rules a design answers (§6) are conventions. Three things check them:
 
 | Check | What it covers |
 | --- | --- |
-| `xtask graph` / `check` | Today: crate boundaries, generated assembly graphs, and plugin pages against the code. After rutis usage R4 it also writes the catalog table and marks which parts are Capabilities (they inject `dispatcher` or `timeline`) |
+| `xtask graph` / `check` | Crate boundaries, generated assembly graphs, plugin pages against the code, and the [catalog table](../architecture/rust-agent/generated/catalog.md), which also marks which parts are Capabilities (they inject `dispatcher` or `timeline`) |
 | Review and the pull request template | The Rule check: principles §4 rules 1–9, §1, ADR 002 D1–D5 |
 | Flow tests | Observable behaviour: ordering, rebuild, reload settlement, close |
 

@@ -5097,6 +5097,8 @@ dependencies = [
  "dim-agent-types",
  "dim-app-server",
  "rutis",
+ "rutis-bridge",
+ "rutis-loader",
  "serde_json",
  "syn 2.0.119",
  "tokio",
