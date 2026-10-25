@@ -3,9 +3,10 @@
 Decision status: Accepted by the repository owner (2026-10-24); D4 amended the same day to say how
 each runtime resolves a name, where a Rust key comes from, which names a part may provide inside an
 instance and how prefixed providers are found. D3 replaced the same day: a plugin is one row, and
-each Session and branch mounts the parts that plugins register for it. Implementation: P1, P2 and
-the first form of P4 done, P3 in progress; the phases are in the
-[plugin contract design](../design/plugin-contract.md#10-migration).
+each Session and branch mounts the parts that plugins register for it. D3 and D4 amended on
+2026-10-25: where plugins run, the identity of prefixed providers, and foreign plugins waiting for
+rutis#642. Implementation: P1, P2 and the first form of P4 done, P3 in progress; the phases are in
+the [plugin contract design](../design/plugin-contract.md#10-migration).
 [中文](../zh/adr/006-plugin-contract.md)
 
 Relation to other decisions:
@@ -151,10 +152,11 @@ an external dependency.
 - **Registrations follow the open instances.** A generator registered while instances are open is
   mounted into each of them. A withdrawn one is unmounted from each, and the withdrawal finishes once
   those parts have unloaded.
-- **What a generator returns.** In Rust, a plugin built for the instance from its keys (D4). In
-  another runtime, a module name and configuration that the instance loads as its child, until
-  rutis lets a generator be a function in every runtime
-  ([arcships/rutis#642](https://github.com/arcships/rutis/issues/642)). A generator may also return
+- **What a generator returns.** In Rust, a plugin built for the instance from its keys (D4). A plugin
+  in another runtime registers its parts the same way once rutis lets a running row register
+  generators ([arcships/rutis#642](https://github.com/arcships/rutis/issues/642)); until then its
+  Session and branch parts stay rows of their groups, and no interim declaration is built
+  ([#403](https://github.com/arcships/dim/issues/403)). A generator may also return
   nothing for an instance: it sees the instance's identity and configuration, and a Session whose
   configuration turns a feature off gets no part of it at all. Choosing per instance goes through
   business configuration such as `SessionConfig`, never through rows.
@@ -165,6 +167,10 @@ an external dependency.
   plugin does not declare that it is required.
 - **Inside a part.** A part may still create children in its own subtree, as McpSession does for each
   server and Skills for each content. They are the part's business.
+- **Where plugins run.** The App Server places plugins as process rows of its loader. A library
+  host or a test adds them to the Agent builder, and an Agent that places itself mounts them in its
+  own loader. The registry belongs to a placement, so an Agent that places itself mounts only the
+  parts its own plugins register.
 
 Placement follows ADR 002 D1 unchanged: a plugin registers a part for each scope where it owns
 state. Nothing else encodes placement: no plugin trait, no factory signature, no inference from
@@ -221,12 +227,19 @@ facade, not feature parts. The details are
   provider names, and there is one identity per provider, not a native one and a foreign one. A
   consumer learns of providers from rutis's `rutis/service` events, which reach every runtime, and
   reads each by name, in every language the same way.
+  - The identity is the name. Every provider is at the name's dispatcher key; a Rust provider is also
+    at its native key, which a Rust consumer reads first, so a native call stays native.
+  - A provider declares its name in the catalog, as any name; the host keeps no list of expected
+    providers.
+  - A provider's generation ends when its service is withdrawn; no side channel marks a retiring
+    provider.
 
 The implementation removes: the `Capability` trait and its keys, `SessionScope`/`BranchScope`,
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`, `SessionService`/`BranchService`,
 `session_plugin`/`timeline_plugin`, the host-side name pre-registration, the native/foreign split of
-prefixed providers, the Session and branch rows and the App Server's inference of a row's group,
-and the per-prefix placement checks that the catalog's groups already express. `PublicService`
+prefixed providers, the Session and branch rows (those of other languages once rutis#642 lands)
+and the App Server's inference of a row's group, and the per-prefix placement checks that the
+catalog's groups already express. `PublicService`
 stays. It limits which branch services the Session and branch facades expose to ordinary callers,
 which is a facade rule, not a plugin rule.
 
@@ -321,9 +334,9 @@ sugar over the contract, but no semantics (D1).
    its Session and branch parts, every part takes name dependencies, prefixed providers are found by
    name, and the layer types and the host-side pre-registration are deleted. The old types exist only
    until this step has moved every part.
-4. Cross-language parity: foreign plugins register their parts as Rust ones do, the Session and
-   branch scopes get their lifecycle services in every language, and Rust services are exported
-   through the catalog.
+4. Cross-language parity: the Session and branch scopes get their lifecycle services in every
+   language and Rust services are exported through the catalog (done in #376); foreign plugins
+   register their parts as Rust ones do once rutis#642 lands (#403).
 5. The mechanism requirements of D8.
 6. Guidance and generated documents follow each step.
 
@@ -350,8 +363,8 @@ persisted or wire format.
   part owned by the instance that mounted it; isolation by the instance's labels. How they are put
   together, an instance pulling the generators registered for its scope, has no precedent in Cordis
   or Koishi, where one plugin with filtered contexts is the norm.
-- A foreign generator is a module name and configuration until rutis#642 lands; its process state
-  reaches its parts through a shared module or a service.
+- Until rutis#642 lands, a foreign feature keeps one row per part (#403, #405), while a Rust feature
+  becomes one row with #402.
 - The 33 plugin pages under `docs/architecture/rust-agent/plugins/` are regrouped by plugin in step 3.
 
 ## Alternatives considered
