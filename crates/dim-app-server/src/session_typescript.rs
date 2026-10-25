@@ -16,7 +16,7 @@ use rutis_bridge::{
     runtime::{LocalRuntime, Stdio},
     session::{HostDispatch, host_key, host_key_in},
 };
-use rutis_loader::{Build, LoaderError, Resolved, Resolver, RuntimeResolver};
+use rutis_loader::{Build, LoaderError, Resolved, Resolver, RuntimeResolver, ServiceCatalog};
 use serde_json::{Map, Value};
 use std::{
     collections::{HashMap, HashSet},
@@ -24,9 +24,20 @@ use std::{
     sync::Arc,
 };
 
-// The Session and branch services served by name (build.rs). Public for the
-// generated catalog (`xtask graph`).
-rutis_bridge::include_exports!(pub mod exports);
+// The Session and branch services served by name (build.rs).
+rutis_bridge::include_exports!(mod exports);
+
+/// The names a host of foreign parts shares across languages beyond those
+/// the catalog already shares: the Session and branch services listed in
+/// build.rs, and `toolRegistry`, with which a part of any language registers
+/// its tools and which provides its own dispatcher in each Session. The
+/// generated catalog (`xtask graph`) shares them the same way.
+pub fn share_names(catalog: &mut ServiceCatalog) {
+    catalog.export_all(exports::all()).register_shared_instance(
+        dim_agent_runtime::names::name_of::<ToolRegistry>(),
+        SESSION_GROUP,
+    );
+}
 
 /// The runtimes of other languages and their loader rows, each with a
 /// `RowSchema.provides` snapshot for names needed before its runtime starts.
@@ -130,15 +141,8 @@ impl Parts {
         let (mut session_rows, mut branch_rows, mut process_rows) =
             (Vec::new(), Vec::new(), Vec::new());
         // Before the rows register their names and the resolvers take the
-        // catalog. A part of any language registers its tools with
-        // `toolRegistry`, which provides its own dispatcher in each Session.
-        builder
-            .catalog_mut()
-            .export_all(exports::all())
-            .register_shared_instance(
-                dim_agent_runtime::names::name_of::<ToolRegistry>(),
-                SESSION_GROUP,
-            );
+        // catalog.
+        share_names(builder.catalog_mut());
         for row in &config.rows {
             let id = row
                 .get("id")
