@@ -8,7 +8,8 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p47["Attachments"]
+    p48["Attachments"]
+    p47["PrepareModelHost"]
     p46["CommandRules"]
     p45["PromptSources"]
     p44["ShellInput"]
@@ -54,6 +55,7 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
+  p29 -->|"dim_agent_runtime::parts::PartRegistry"| p48
   p29 -->|"dim_agent_runtime::parts::PartRegistry"| p47
   p29 -->|"dim_agent_runtime::parts::PartRegistry"| p46
   p29 -->|"dim_agent_runtime::parts::PartRegistry"| p45

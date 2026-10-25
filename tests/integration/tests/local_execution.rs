@@ -243,12 +243,7 @@ struct Harness {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "dim-local-exec-{}-{}-{name}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let path = std::env::temp_dir().join(format!("dim-local-exec-{}-{name}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&path).unwrap();
     std::fs::canonicalize(path).unwrap()
 }
@@ -2082,7 +2077,7 @@ async fn a_turn_stop_keeps_background_work_and_its_wake_starts_a_turn() {
             &[
                 (
                     "exec",
-                    json!({"command": "sleep 1; echo survived", "runInBackground": true}),
+                    json!({"command": "while [ ! -f finish-after-stop ]; do sleep 0.01; done; echo survived", "runInBackground": true}),
                 ),
                 ("wait", json!({"timeoutMs": 60000})),
             ],
@@ -2093,11 +2088,16 @@ async fn a_turn_stop_keeps_background_work_and_its_wake_starts_a_turn() {
     })
     .await;
     session.stop("main", "user stop".into()).await.unwrap();
+    std::fs::write(harness.cwd.join("finish-after-stop"), "").unwrap();
     let events = until(&session, "wake", |events| !notifications(events).is_empty()).await;
     let (_, end) = &ended(&events)[0];
     assert_eq!(end.status, ExecStatus::Completed);
     assert!(text(&end.result).contains("survived"));
     // No pause: the wake arrives after the stop and drives a turn.
+    until(&session, "woken turn", |events| {
+        count(events, "turn/end") == 2
+    })
+    .await;
     session.idle("main").await.unwrap();
     assert_eq!(count(&local_events(&session).await, "turn/start"), 2);
     // That turn consumed the notification: it does not end a later wait.
