@@ -92,7 +92,6 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<wait::Wait>(catalog, branch);
     register::<workspace_tools::file_reads::FileReads>(catalog, branch);
     register::<host_platform::HostPlatform>(catalog, None);
-    register::<workspace_tools::files::FileWriteCoordinator>(catalog, None);
     register::<file_storage::FileStorage>(catalog, None);
     // The model service is the process's; a Session reaches it by name.
     register::<host::ModelHost>(catalog, None);

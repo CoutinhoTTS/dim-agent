@@ -85,6 +85,8 @@ pub fn register<T: ?Sized + Send + Sync + 'static>(
 pub fn catalog() -> ServiceCatalog {
     let mut catalog = ServiceCatalog::new();
     catalog.share_registered_only();
+    // Where the process plugins of a placement register their parts.
+    register::<crate::PartRegistry>(&mut catalog, None);
     let session = Some(SESSION_GROUP);
     register::<SessionConfig>(&mut catalog, session);
     register::<AgentConfig>(&mut catalog, session);

@@ -578,6 +578,12 @@ async fn a_late_update_response_does_not_overwrite_a_newer_setting() {
         Arc::new(SkillSettingsHost(settings.clone())),
     )
     .unwrap();
+    // Where the Skills plugin registers its parts; no Agent mounts them here.
+    root.provide_as(
+        rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
+        Arc::new(dim_agent_runtime::PartRegistry::default()),
+    )
+    .unwrap();
     (&root.plugin(
         dim_agent_runtime::names::process_plugin(
             &dim_agent_capabilities::catalog(),
@@ -816,6 +822,12 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
     root.provide_as(
         rutis::TypeKey::of::<SkillSettingsHost>(),
         Arc::new(SkillSettingsHost(settings.clone())),
+    )
+    .unwrap();
+    // Where the Skills plugin registers its parts; no Agent mounts them here.
+    root.provide_as(
+        rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
+        Arc::new(dim_agent_runtime::PartRegistry::default()),
     )
     .unwrap();
     (&root.plugin(

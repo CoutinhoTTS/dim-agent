@@ -884,6 +884,12 @@ mod tests {
                 .await
                 .unwrap();
             let owner = McpOwner::new(root.clone(), loader.clone());
+            // Where Mcp registers its Session part; no Agent mounts it here.
+            root.provide_as(
+                rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
+                Arc::new(dim_agent_runtime::PartRegistry::default()),
+            )
+            .unwrap();
             let views = [
                 root.plugin(rutis::Typed::new(
                     dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![

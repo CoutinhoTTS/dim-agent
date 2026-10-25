@@ -306,9 +306,19 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
                     .session_value(Arc::new(ContextModelHost(Some(Arc::new(
                         ProductContextModel,
                     )))))
-                    .session_part(|names| names.part(ProductSummaryStrategyPlugin::new(names)?))
-                    .session_part(|names| names.part(ContextMethodsPlugin))
-                    .session_part(|names| names.part(DefaultPrepareModelPlugin::new(names)?));
+                    .require_feature(
+                        dim_agent_runtime::Feature::new("ContextCompaction")
+                            .session("ProductSummaryStrategy", |names| {
+                                names.part(ProductSummaryStrategyPlugin::new(names)?)
+                            })
+                            .session("ContextMethods", |names| names.part(ContextMethodsPlugin)),
+                    )
+                    .require_feature(
+                        dim_agent_runtime::Feature::new("PrepareModelHost")
+                            .session("PrepareModelHost", |names| {
+                                names.part(DefaultPrepareModelPlugin::new(names)?)
+                            }),
+                    );
             }
             collaboration::install(&mut builder);
             dim_agent_questions::install(&mut builder);
