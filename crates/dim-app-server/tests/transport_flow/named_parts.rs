@@ -43,8 +43,8 @@ impl TypedPlugin for GreeterPart {
     }
 }
 
-/// Reads the TypeScript row's `sessionMethods:session.greeter` from each
-/// branch, at the name's catalog key.
+/// Reads the TypeScript row's `namedGreeter` from each branch, at the
+/// name's catalog key.
 struct MethodsReader(Log);
 impl TypedPlugin for MethodsReader {
     type Deps = (Keyed<dyn HostDispatch>, Keyed<TimelineIdentity>);
@@ -83,7 +83,7 @@ async fn node_named_parts_share_services_across_languages_per_session() {
             Ok(names.part_with(
                 MethodsReader(read.clone()),
                 (
-                    names.named("sessionMethods:session.greeter")?,
+                    names.named("namedGreeter")?,
                     names.key::<TimelineIdentity>()?,
                 ),
             ))
@@ -94,7 +94,7 @@ async fn node_named_parts_share_services_across_languages_per_session() {
         "id": "named-greeter",
         "name": root.join("named-greeter.ts"),
         "group": "session",
-        "inject": ["testGreeter"],
+        "inject": ["testGreeter", "sessionMethods"],
         "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/named-greeter.json")).unwrap(),
         "config": {},
     })];
@@ -132,7 +132,7 @@ async fn node_named_parts_share_services_across_languages_per_session() {
         assert!(
             read.iter()
                 .any(|entry| entry.starts_with("row named-greeter ")
-                    && entry.contains("describe")
+                    && entry.contains("ask")
                     && entry.ends_with(&format!(" for {id}"))),
             "{read:?}"
         );

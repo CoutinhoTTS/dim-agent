@@ -895,6 +895,7 @@ mod tests {
                         .typed(&catalog)
                         .unwrap(),
                 ),
+                root.plugin(crate::methods::ManagementMethodsPlugin::typed(&catalog).unwrap()),
                 root.plugin(rutis::Typed::new(McpPlugin::new(0))),
             ];
             wait_active(&root, &views, Duration::from_secs(5), &stop)

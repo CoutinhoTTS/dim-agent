@@ -190,7 +190,9 @@ fn today() -> Value {
 /// Calls `session.question.respond` as Rpc does, through the Session.
 async fn respond(session: &Session, params: Value) -> Result<Value, RpcError> {
     let methods = session
-        .session_named_service::<SessionMethods>("session.question")
+        .session_service::<SessionMethods>()
+        .unwrap()
+        .provider("session.question.respond")
         .unwrap();
     let accepted = methods.accept(
         "session.question.respond".into(),

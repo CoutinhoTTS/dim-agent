@@ -18,6 +18,7 @@ async function fixture(t, config = {}) {
     beforeWrite: undefined,
     ...config,
   }
+  const methods = new Map()
   const services = {
     settings: { read: async () => state.settingsError
       ? { ok: false, error: { code: 'invalid_document', message: 'private diagnostic' } }
@@ -49,6 +50,7 @@ async function fixture(t, config = {}) {
       collaborationRole: 'leader', model: { providerId: 'creation', modelId: 'stale' }, ...config.creation,
     }) },
     sessionLifecycle: { activated: async () => true, closing: () => closing.promise },
+    sessionMethods: { async register(namespace, declarations, call) { methods.set(namespace, { declarations, call }) } },
   }
   const loaded = await load(plugin, { services })
   t.after(() => loaded.unload())
@@ -76,10 +78,10 @@ async function fixture(t, config = {}) {
     await apply(await input([{ type: 'text', text }], branchId), branchId)
     await flush()
   }
-  const rename = (title, cancelled = pending()) => loaded.service('sessionMethods:session.rename').call({
+  const rename = (title, cancelled = pending()) => methods.get('session.rename').call({
     callId: crypto.randomUUID(), method: 'session.rename', params: { sessionId: 'session', title },
   }, cancelled, () => {})
-  return { state, loaded, closing, commit, adopted, emit, input, apply, submit, rename }
+  return { state, loaded, methods, closing, commit, adopted, emit, input, apply, submit, rename }
 }
 
 test('titles the first adopted operator input through fixed pages; rename wins and clear uses current settings', async t => {
@@ -202,7 +204,7 @@ test('three failed attempts stop until reload; Settings failures never use a fal
   for (const title of [0, '', 'line\nbreak']) {
     assert.equal((await broken.rename(title)).code, 'invalid_params')
   }
-  const unknown = await broken.loaded.service('sessionMethods:session.rename').call({
+  const unknown = await broken.methods.get('session.rename').call({
     callId: 'unknown-method', method: 'session.unknown', params: { title: 'Valid' },
   }, pending(), () => {})
   assert.equal(unknown.code, 'invalid_params')

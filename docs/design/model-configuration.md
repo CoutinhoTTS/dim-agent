@@ -26,11 +26,12 @@ The Session entry extends Agents' public entry surface. Its factory captures onl
 configuration and instance identity; services come from `Deps`. Provider remains a
 per-call lookup. Rpc's generic Session-method dispatch does not implement modes.
 
-`AgentsSession` injects process `AgentIndex` and Session `TreeCommands`, provides
-`sessionMethods["session.agent"]`, and reads the addressed branch's public Prompt
-service per call. `SessionMethods::provide` owns admission, tasks and cleanup;
-unload reports interruption and releases the waiter without revoking committed
-Prompt commands. The entry stores no adopted configuration. Its implementation is
+`AgentsSession` injects process `AgentIndex` and Session `TreeCommands` and
+`sessionMethods`, registers the namespace `session.agent` with `sessionMethods`
+from its `apply`, and reads the addressed branch's public Prompt service per
+call. The Session's method table owns admission, tasks and cleanup of the
+registration; unload reports interruption and releases the waiter without
+revoking committed Prompt commands. The entry stores no adopted configuration. Its implementation is
 [Agents' configuration entry](../../crates/dim-app-server/src/agents/configuration.rs).
 
 ## Existing mechanisms

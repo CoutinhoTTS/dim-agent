@@ -6,11 +6,12 @@ optional managed-provider bindings are connected. Native user MCP/Skill intent
 uses source-owned business documents; MCP connections and Skill content instances belong
 to Sessions. Project MCP entries start disabled until the user enables them. See
 [ADR 004](../../adr/004-loader-plugin-management.md) for implemented configuration
-scope. Rpc looks up [management methods](../../design/appserver/management-methods.md)
-per call as named services of account, provider, MCP and Skills owners, without
-depending on them, so an owner's reload affects only its namespace; business
+scope. Account, provider, MCP, Skills and the other owners register their
+[management methods](../../design/appserver/management-methods.md) namespaces
+with the process's management table, which Rpc reads per call without depending
+on any owner, so an owner's reload affects only its namespace; business
 configuration changes do not reload those plugins. No Methods or Management
-plugin, registration port or separate management adapter row is required.
+plugin or separate management adapter row is required.
 Product assembly preflight remains incomplete; proposals are recorded in
 [ADR 001](../../adr/001-harness-foundation.md). Capability event declarations are
 descriptive contracts that assembly does not check.
@@ -140,8 +141,9 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 | `CollaborationDirectoryPlugin` | Team 关系与临时 Agent 归属的目录 | `CollaborationDirectory` | — |
 | `CollaborationPlugin` | 成员关系、临时 Agent 归属、参与 Session 的关闭观察任务 | `Collaboration` | `AgentIndex`、`CollaborationDirectory` |
 | `ConnectionPlugin` | Connection index, admission limits and transport tasks | `ConnectionHub` | `ServerControl` |
-| `RpcPlugin` | Built-in commands, per-call routing of contributed methods and reply drainage | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`; reads `ManagementMethods` providers and, in the product profile, Provider per call without depending on them |
-| Management contributions | Owner-specific declarations, wire validation, business calls and their accepted calls, provided by the business plugin itself | Named `ManagementMethods` services; an owner's unload interrupts its `Report` calls and waits for its `Drain` calls, without reloading Rpc | Each owner's existing business dependencies |
+| `RpcPlugin` | Built-in commands, per-call routing of contributed methods and reply drainage | Registers RpcService with ConnectionHub; unregisters and drains on unload | `AgentIndex`, Collaboration gate, `ConnectionHub`, `ServerControl`, `ManagementMethods`; reads the management table, each Session's `SessionMethods` table and, in the product profile, Provider per call, without depending on any provider |
+| `ManagementMethodsPlugin` | The process's management method table: the namespaces process plugins register | `ManagementMethods` | — |
+| Management contributions | Owner-specific declarations, wire validation, business calls and their accepted calls, provided by the business plugin itself | Namespaces registered with `ManagementMethods`; an owner's unload withdraws them, interrupts its `Report` calls and waits for its `Drain` calls, without reloading Rpc | `ManagementMethods` and each owner's existing business dependencies |
 | `TransportPlugin` | Unix/WS 监听器、socket 文件、accept 任务 | `ListenAddresses` | `ConnectionHub`、`ServerControl`；原生数据库启用时另注入 `SqliteStorage`，确保数据库独占锁就绪后才绑定端点 |
 
 `AgentsPlugin` 提供 `AgentIndex`（`agent` 分组行由 `serve` 写入）；默认 agentId 由首代固定在 `AgentDirectory`。默认 Agent 与运行时创建的 Agent 都由索引经 `create_instance("agent")` 创建，`AgentScope` 只依赖 `AgentDirectory` 与 loader，二者不重载，所以 `AgentScope` 只在其 Agent 被关闭或进程停止时卸载；`AgentsPlugin` 重载只替换目录逻辑，新一代从目录接管已有 Agent。启用 Session 执行时，每一代（启动、显式 restart 与依赖驱动的重载）在提供 `AgentIndex` 之前装载尚未运行的存储 Agent（无存储记录时为默认 Agent）并登记存储的 Session 归属；此前 `sessions` 返回 `reloading`，不会把健康的存储 Session 判为没有归属。`AgentScope` 先载入子插件 `Sessions`（监听宿主），再登记 effect：先从目录注销，再经 `Agent::close()` 完成各 Session 的业务结算。业务结算不依赖树的祖先关系：显式 `agent.close` 与进程关闭第一阶段先在普通任务上下文结算，再关闭 Agent 实例；effect 幂等地重复结算。多个 Agent 平等并存、互不串扰，hosting 不含 Agent 间关系。
@@ -258,7 +260,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 
 ## RPC 接线
 
-- **Protocol handling**: envelope decoding, hello/version negotiation, v1/v2 error mapping and event filtering follow the App Server contract. Built-in calls use RpcService; a contributed management call is looked up per call among the active `ManagementMethods` providers, whose owners validate concrete DTOs ([management methods](../../design/appserver/management-methods.md)). The local v3 entry serves management; WebSocket does not. Management methods have no notification channel.
+- **Protocol handling**: envelope decoding, hello/version negotiation, v1/v2 error mapping and event filtering follow the App Server contract. Built-in calls use RpcService; a contributed call is looked up per call in the management table, or in the `SessionMethods` table of the Session it names, whose registering owners validate concrete DTOs ([management methods](../../design/appserver/management-methods.md)). The local v3 entry serves management; WebSocket does not. Management methods have no notification channel.
 - **`session.create`**：App Server 解析工作目录、显式或默认模型与准入（产品 profile 经 `ProviderService`），再由 `Agent` 创建 Session。
 - **无 Session 的管理请求**：使用进程 `ProviderService` 与账号服务（Codex/Grok OAuth、`ManagedProviders`），不创建隐藏 Session。
 - **WS**：账号与 provider 管理只经本地传输（Unix socket / Windows named pipe）开放，WS 不开放账号与配置方法。

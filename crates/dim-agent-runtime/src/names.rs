@@ -199,6 +199,14 @@ impl<'a> Names<'a> {
         };
         Ok(DepKey::of().instance(instance))
     }
+    /// Whether the assembly names `T`: a part whose dependency on it is
+    /// optional includes it only then ([`Self::when`]).
+    pub fn registered<T: ?Sized + 'static>(&self) -> bool {
+        !matches!(
+            self.catalog.key_in(&name_of::<T>(), &Build::default()),
+            Err(LoaderError::UnknownService(_))
+        )
+    }
     /// The key of the service `name` as the catalog keys it for this copy.
     /// A name that crosses languages is at its dispatcher's key, so `T` is
     /// then `dyn HostDispatch`: there a provider of any language is found.

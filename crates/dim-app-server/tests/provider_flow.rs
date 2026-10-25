@@ -245,6 +245,11 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
     let cancel = CancellationToken::new();
     for restart in [false, true] {
         let root = Ctx::root().unwrap();
+        // The management table the process providers register with.
+        root.plugin(
+            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+                .unwrap(),
+        );
         root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ])));
@@ -555,6 +560,11 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     std::fs::create_dir_all(&home).unwrap();
     let home = home.canonicalize().unwrap();
     let root = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
@@ -812,6 +822,11 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     std::fs::create_dir_all(&home).unwrap();
     let home = home.canonicalize().unwrap();
     let root = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
@@ -1235,6 +1250,11 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         db.execute("UPDATE providers SET record=json_set(record,'$.definitionFingerprint','previous-bundle') WHERE provider_id='openai'", []).unwrap();
     }
     let root = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
@@ -1309,6 +1329,11 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
         .join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&home).unwrap();
     let root = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
@@ -1677,6 +1702,11 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
     let mut saved_version = 0;
     for restart in [false, true] {
         let root = Ctx::root().unwrap();
+        // The management table the process providers register with.
+        root.plugin(
+            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+                .unwrap(),
+        );
         root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
         ])));
@@ -1968,6 +1998,11 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     std::fs::write(home.join("auth.json"), "{broken").unwrap();
 
     let root = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
@@ -2568,6 +2603,11 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     root.shutdown().await.unwrap();
 
     let restarted = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    restarted.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     let plugins = [
         restarted.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
@@ -2679,6 +2719,11 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .unwrap();
     }
     let isolated = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    isolated.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     let plugins = [
         isolated.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
             home.clone(),
@@ -2814,6 +2859,11 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     std::fs::create_dir_all(&home).unwrap();
 
     let root = Ctx::root().unwrap();
+    // The management table the process providers register with.
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));

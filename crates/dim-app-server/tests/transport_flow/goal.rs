@@ -28,7 +28,7 @@ fn goal_rows() -> SessionTypeScriptConfig {
                 "name": goal.join("session.ts"),
                 "group": "session",
                 "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/plugins/goal/session.json")).unwrap(),
-                "inject": ["treeCommands"],
+                "inject": ["treeCommands", "toolRegistry", "sessionMethods"],
                 "config": {},
             }),
             json!({

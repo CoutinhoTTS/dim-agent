@@ -212,8 +212,8 @@ and only that package is written against it. This is the trust model of in-proce
 
 ### 4.3 Management methods `settings.*` (client path)
 
-Namespace `settings`, provided through `managementMethods` by `SettingsMethods`, a process part
-that depends on Settings (§4.5). They are never served to paired devices (overview §6.2 rule 9).
+Namespace `settings`, which `SettingsMethods`, a process part that depends on Settings, registers
+with `managementMethods` (§4.5). They are never served to paired devices (overview §6.2 rule 9).
 
 | Method | Request | Reply | Errors |
 | --- | --- | --- | --- |

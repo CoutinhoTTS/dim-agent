@@ -83,8 +83,8 @@ fn install_with_prompt_capability_and_branch(
     builder
         .session_part(|names| names.part(SessionBroadcastEndPlugin))
         .session_part(|names| names.part(TimelineTreePlugin::new(names)?))
-        .session_part(|names| names.part(crate::input_queue::InputMethodsPlugin::new(names)?))
-        .session_methods(crate::input_queue::INPUT_METHODS)
+        .session_part(crate::methods::SessionMethodsPlugin::part)
+        .session_part(|names| names.part(crate::input_queue::InputMethodsPlugin))
         .session_part(|names| names.part(ToolRegistryPlugin::new(names)?))
         .branch_part(|names| names.part(SessionBroadcastPlugin))
         .branch_part(|names| names.part(TreeTimelinePlugin))

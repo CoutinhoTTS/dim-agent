@@ -8,14 +8,11 @@
     "sessions",
     "settings",
     "pluginFiles",
-    "workflowFiles"
+    "workflowFiles",
+    "managementMethods"
   ],
   "provides": {
     "workflowRuns": {
-      "call": "async"
-    },
-    "managementMethods:workflow": {
-      "describe": "async",
       "call": "async"
     }
   },

@@ -27,8 +27,8 @@ This does not disable checking a plugin's calls against the service interfaces.
 | Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the row's `settings` member. |
 | Read/save Workflow definition files | `workflowFiles`, process | Generated `read/list/replace/createDirectory`; fixed project directories and the calling row's read-only packages ([contract](design/p6-p7-bindings.md#3-workflow-definition-files)). |
 | Offer model tools | `toolRegistry`, Session | A row in the `session` group registers each tool with `register` ([Session tools](#session-tools-and-client-methods)). |
-| Offer client methods | `sessionMethods:<namespace>`, Session | Provided by a row in the `session` group. |
-| Offer host management methods | `managementMethods:<namespace>`, process | Provided by a process row, through protected-local v3 Rpc. |
+| Offer client methods | `sessionMethods`, Session | A row in the `session` group registers each method namespace with `register` ([Session tools](#session-tools-and-client-methods)). |
+| Offer host management methods | `managementMethods`, process | A process row registers each namespace with `register`; protected-local v3 Rpc serves it ([management methods](#process-owners-and-management-methods)). |
 | Know this Session and its phases | `sessionIdentity`, `sessionConfig`, `sessionLifecycle`, Session | `get()` returns `{sessionId, restored}` or the creation-time configuration; `activated()`, `closing()`, `hold()` and `release(id)` ([Session observation](#session-observation)). |
 | Observe this Session | the `session/{sessionId}` channel | Listen with `ctx.on` ([Session observation](#session-observation)). |
 | Consume branch events in order or act on branches | `dispatcher`, `branchLifecycle`, `timelineIdentity`, branch; `treeCommands`, Session | Use `Services` from the SDK. |
@@ -49,9 +49,7 @@ what a row injects or provides.
 ```json
 [
   { "id": "example-session", "name": "/absolute/example/session.ts", "group": "session",
-    "inject": ["toolRegistry"],
-    "provides": { "sessionMethods:session.example": { "describe": "async", "call": "async" } },
-    "config": {} },
+    "inject": ["toolRegistry", "sessionMethods"], "provides": {}, "config": {} },
   { "id": "example-counter", "name": "/absolute/example/counter.ts", "group": "branch",
     "inject": ["dispatcher"], "provides": { "exampleCounter": { "get": "sync" } }, "config": {} }
 ]
@@ -134,46 +132,44 @@ share the configured Node runtime and declaration catalog. Process scope describ
 lifetime, not a dedicated operating-system process. This embedding input does
 not select additional named runtimes or replicate workers.
 
-Declare management methods on their original process row. The host derives
-the namespace from `provides` and publishes the native method contribution before
-that row becomes Active. The same owner retains accepted calls through cleanup.
+A process row injects `managementMethods` and registers each of its namespaces from
+`apply` with `register(namespace, declarations, call)`. The registration lasts until
+the row unloads, and the same owner retains accepted calls through cleanup.
 For example:
 
 ```ts
 import { definePlugin } from '@arcships/rutis';
-import type { ManagementMethodsContribution } from 'dimcode/plugin';
-
-export const provides = {
-  'managementMethods:example': { describe: 'async', call: 'async' },
-} as const;
+import type { ManagementMethods } from 'dimcode/plugin';
 
 export default definePlugin({
-  name: 'ExampleProcess', provides,
-  apply(ctx) {
-    const methods: ManagementMethodsContribution = {
-      async describe() {
-        return [{ name: 'example.status', mutating: false,
-          interruption: 'report', progress: false }];
-      },
-      async call(call) {
-        return { kind: 'value', value: { method: call.method, params: call.params } };
-      },
-    };
-    ctx.provide('managementMethods:example', methods);
+  name: 'ExampleProcess',
+  inject: ['managementMethods'],
+  provides: {},
+  async apply(ctx) {
+    await ctx.use<ManagementMethods>('managementMethods').register(
+      'example',
+      [{ name: 'example.status', mutating: false, interruption: 'report', progress: false }],
+      async call => ({ kind: 'value', value: { method: call.method, params: call.params } }),
+    );
   },
 });
 ```
 
-Pass this declaration snapshot with the ordinary process loader row. Management
-params are the client's original JSON; the host adds no Session id. Declaration,
-progress, application errors, cancellation and `report`/`drain` use the existing
-method contract. Unsupported replies fail explicitly. A client disconnect does
+Pass the module's `inject` and `provides` with the ordinary process loader row.
+`declarations` is data, and `call` serves each call with the cancellation, progress
+and replies of [Session client methods](#session-tools-and-client-methods). `register`
+refuses a namespace or method name outside the grammar, a method outside its namespace
+or declared twice, a namespace registered already, a built-in method name and the
+reserved roots `hello`, `daemon`, `agent`, `approval` and `session`; an `apply` that
+awaits a refusal fails its row. Management params are the client's original JSON; the
+host adds no Session id. Unsupported replies fail explicitly. A client disconnect does
 not cancel accepted work.
 
-Optional process rows do not determine host startup or restart readiness.
-Pending dependencies stay Pending and their namespaces return `service_reloading`;
-failed/unresolved owners return `service_unavailable`, while disabled owners are
-unknown. `hello.features` lists only Active providers at that call. Required host
+Optional process rows do not determine host startup or restart readiness. A namespace
+no row has registered is unknown. Once its registration is withdrawn, the row that
+registered it answers: `service_reloading` while it reloads or waits for a dependency,
+`service_unavailable` once it failed or cannot run, and unknown when it is disabled.
+`hello.features` lists the methods registered at that call. Required host
 infrastructure and the shared declaration gate retain the startup deadline.
 See the [process binding](design/process-typescript.md) for validation and lifetime.
 
@@ -270,8 +266,7 @@ adds project scope and `userOnly` lists protected member JSON Pointers. The row'
 entries, duplicate source claims and claims on Rust sources fail assembly. Rust
 sources such as `mcp` are not served by this named API. See the
 [source declaration contract](design/appserver/settings-service.md#31-source-declaration)
-and the working [owner fixture](../runtime/fixtures/settings-owner.ts), its
-[provides declaration](../runtime/fixtures/settings-owner.json) and
+and the working [owner fixture](../runtime/fixtures/settings-owner.ts) and its
 [Settings declaration](../runtime/fixtures/settings-owner.settings.json).
 
 `read` and `update` are asynchronous and return `SettingsResult<SettingsSnapshot>`.
@@ -377,27 +372,22 @@ and definition semantics remain with Settings and the Workflow package.
 
 ## Session tools and client methods
 
-A row in the `session` group registers its tools with the Session's `toolRegistry` and provides
-`sessionMethods:<namespace>`. The host configures ordinary rows through
+A row in the `session` group registers its tools with the Session's `toolRegistry` and its client
+method namespaces with the Session's `sessionMethods`. The host configures ordinary rows through
 `ServerConfig.session_typescript`; general CLI installation remains PluginManager work. Give each
-row the same `provides` dictionary the module exports. The host derives method namespaces from that
-dictionary; keep it as one packaging source rather than maintaining separate registration lists.
-Tools are not in it: a row registers each tool from its code. The public
+row the same `inject` and `provides` the module declares. Neither tools nor method namespaces are
+in `provides`: a row registers each from its code. The public
 [embedding example](../crates/dim-app-server/examples/session_typescript.rs)
 shows the row input and actual Session calls.
 
 ```ts
-import { definePlugin, type MethodKind } from '@arcships/rutis';
-import type { SessionMethodsContribution, ToolRegistry } from 'dimcode/plugin';
-
-export const provides = {
-  'sessionMethods:session.example': { describe: 'async', call: 'async' },
-} satisfies Record<string, Record<string, MethodKind>>;
+import { definePlugin } from '@arcships/rutis';
+import type { SessionMethods, ToolRegistry } from 'dimcode/plugin';
 
 export default definePlugin({
   name: 'SessionExample',
-  inject: ['toolRegistry'],
-  provides,
+  inject: ['toolRegistry', 'sessionMethods'],
+  provides: {},
   async apply(ctx) {
     await ctx.use<ToolRegistry>('toolRegistry').register(
       {
@@ -416,23 +406,20 @@ export default definePlugin({
       },
     );
 
-    const methods: SessionMethodsContribution = {
-      async describe() {
-        return [{ name: 'session.example.echo', mutating: false,
-          interruption: 'report', progress: true }];
-      },
-      async call(call, _cancelled, progress) {
+    await ctx.use<SessionMethods>('sessionMethods').register(
+      'session.example',
+      [{ name: 'session.example.echo', mutating: false, interruption: 'report', progress: true }],
+      async (call, _cancelled, progress) => {
         progress({ phase: 'started' });
         return { kind: 'value', value: call.params };
       },
-    };
-    ctx.provide('sessionMethods:session.example', methods);
+    );
   },
 });
 ```
 
-Copy the exported declaration into the existing host row during your package's
-build. The App Server does not discover this export or install a plugin by itself.
+Copy the module's `inject` and `provides` into the existing host row during your package's
+build. The App Server does not discover them or install a plugin by itself.
 Online module metadata must match the configured row snapshot. Disabled, Pending
 and malformed rows have the outcomes in the
 [binding contract](design/session-typescript.md#host-input-and-declaration-discovery).
@@ -471,10 +458,16 @@ reference the model needs into `content`; `structuredContent` is for persistence
 UI and internal consumers. The SDK preserves the native result fields without
 another conversion layer.
 
-`describe` and `call` are asynchronous. Each method declares its full name,
-`mutating`, `interruption` and `progress`. `call` receives an opaque runtime
-`callId`, the method and original params containing `sessionId` and optional
-`branchId`; it also receives cancellation and a per-call progress callback.
+`sessionMethods.register(namespace, declarations, call)` takes the declarations as data: each
+method declares its full name inside the namespace, `mutating`, `interruption` and
+`progress`. It refuses a namespace or method name outside the grammar, a method
+outside its namespace or declared twice, a namespace the Session has registered
+already, one that is, contains or lies inside a built-in method, and one under the
+`hello`, `daemon`, `agent` or `approval` roots; an `apply` that awaits a refusal
+fails its row. The registration lasts until the row unloads, and `session.methods`
+lists the methods registered at that call. `call` is asynchronous and receives an
+opaque runtime `callId`, the method and original params containing `sessionId` and
+optional `branchId`; it also receives cancellation and a per-call progress callback.
 Return `{kind: 'value', value}`, return a failure as data, `{code, message}`, or
 rethrow the service error you received. An omitted value becomes JSON null. Rpc maps a failure to
 the wire error: `code` becomes `appError`, with JSON-RPC code -32602 for `invalid_params` and

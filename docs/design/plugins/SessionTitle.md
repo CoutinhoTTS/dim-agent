@@ -2,7 +2,7 @@
 
 Status: Implemented as an optional TypeScript package. Overall design: [overview](../overview.md) (SessionTitle). Phase: P1. Language: TypeScript first. Scope: [ADR 002](../../adr/002-plugin-scope.md) (Session).
 
-SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the delivered C6 notice record is described in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` through the Session-scoped `sessionMethods` service keyed `session.rename` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
+SessionTitle is a Session plugin that gives an interactive leader Session a title stored through SessionStore metadata. It observes its own Session through the existing Session broadcast; when the first operator input on `main` is adopted (`input/applied`), it generates a title from that input's text alone through the Provider `AuxiliaryModel`, with the model from its own setting. The title is SessionStore state: SessionTitle writes it only through SessionStore's typed `setTitle` operation, and SessionStore announces each change with a Session broadcast notice that clients consume (the delivered C6 notice record is described in [§9](#9-requirements-raised-to-mechanism-owners); the SessionStore title metadata and the Rpc forwarding are supplements in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). It serves `session.rename` by registering the namespace `session.rename` with its Session's `sessionMethods` ([methods and tool contributions](../contracts/session-boundary.md)). It writes no Timeline event and has no model-visible effect. Contracts are given in neutral form ([ADR 002 D5](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)); the Rust binding is in Appendix G.
 
 ## 0. Implementation boundary
 
@@ -41,13 +41,13 @@ API. Retain T and page with through=T and after=the last returned sequence; neve
 through together. Use native HistoryPage/AgentEvent data. S2's stable directory reads the index per
 call, so index reload does not reload this consumer.
 
-Use the [C4 binding contract](../session-typescript.md): the row is in the `session` group and
-declares `sessionMethods:session.rename` with async describe/call in its provides dictionary.
+Use the [C4 binding contract](../session-typescript.md): the row is in the `session` group, injects
+`sessionMethods` and registers `session.rename` with it from `apply`; its provides dictionary is empty.
 `apply` reads the Session identity and creation configuration and registers observation/cleanup;
 it does not start an asynchronous initialization job. Its creation configuration is immutable.
 The same row declares all its dependencies in `inject`: the process services `sessions`,
 `settings`, `sessionMetadata` and `auxiliaryModel`, and the Session services `sessionIdentity`,
-`sessionConfig` and `sessionLifecycle`. The package is optional and is installed through the
+`sessionConfig`, `sessionLifecycle` and `sessionMethods`. The package is optional and is installed through the
 existing `ServerConfig.session_typescript.rows` input, as Web is; it adds no default-profile
 installation or plugin-specific App Server wiring.
 
@@ -93,7 +93,7 @@ flowchart LR
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `SessionTitle` | Session | Session services `sessionIdentity`, `sessionConfig` and `sessionLifecycle`; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and required `auxiliaryModel` (absent providers keep the row Pending) | sessionMethods key session.rename from its provides dictionary; Settings source session-title |
+| `SessionTitle` | Session | Session services `sessionIdentity`, `sessionConfig`, `sessionLifecycle` and `sessionMethods`; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and required `auxiliaryModel` (absent providers keep the row Pending) | Registers session.rename with sessionMethods; Settings source session-title |
 
 Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; S5b supplies title metadata and C6 the notices; Provider supplies the named auxiliary operation. The package declares its source in the ordinary row's settings member, alongside provides. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the package (D4).
 
@@ -210,7 +210,7 @@ Never sent: images, raw input blocks, deleted inputs, later inputs, assistant ou
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `session.rename {sessionId, title \| null}` | `sessionMethods` key `session.rename` | Set or clear a manual title |
+| `session.rename {sessionId, title \| null}` | `sessionMethods` namespace `session.rename` | Set or clear a manual title |
 | `session-title` source: `enabled`, `maxLength`, `model` | Business configuration (Settings source) | Turn generation off; title length; model for titles (unset: the Session's model) |
 | `title`, `titleSource`, `titleRevision` in v3 `session.list`/`session.summaries` | Rpc protocol fields read from SessionStore ([S5b §8](../appserver/session-title-metadata.md#8-session-lists)) | Display; the revision orders a list against notices |
 | Title notice, `data: {title, titleSource, titleRevision}` | Session broadcast notice emitted by SessionStore (C6 record, §9; [S5b §7](../appserver/session-title-metadata.md#7-the-title-notice)) | Live title update for subscribed clients |
@@ -262,7 +262,7 @@ post-commit title notices. SessionTitle consumes these delivered contracts.
 
 ### A.1 `session.rename`
 
-Served through `sessionMethods` (Session, key `session.rename`): `describe(): async -> MethodDecl[]` returns one declaration `{name: "session.rename", mutating: true, interruption: "report", progress: false}`; `call(MethodCall): async -> MethodReply` handles it. A dropped call is cancelled before `setTitle` or completes atomically after it.
+Registered with `sessionMethods` (Session, namespace `session.rename`) with one declaration `{name: "session.rename", mutating: true, interruption: "report", progress: false}`; its `call(MethodCall, cancelled, progress): async -> MethodReply` handles it. A dropped call is cancelled before `setTitle` or completes atomically after it.
 
 | Params | Result | Errors |
 | --- | --- | --- |
@@ -389,7 +389,7 @@ auxiliary binding use the owner contracts in §0. No shared contract or Core cha
 
 | Neutral | Rust |
 | --- | --- |
-| `sessionMethods` key `session.rename` | C4 infers session.rename from sessionMethods:session.rename and uses SessionMethods::provide_foreign on the original row; Rust providers use SessionMethods::provide with complete MethodDecl values |
+| Namespace `session.rename` registered with `sessionMethods` | The TypeScript row calls `ctx.use('sessionMethods').register('session.rename', declarations, call)`, and the registration belongs to the row; a Rust provider calls `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` on a `Keyed<SessionMethods>` dependency |
 | Session broadcast listener | Listener on `session_channel(session_id)` for `Event` records, removed by `ctx.effect` |
 | Generation task | Spawned under `ctx.effect` |
 

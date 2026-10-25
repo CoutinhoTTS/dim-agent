@@ -3,16 +3,17 @@
 Status: Implemented for [#4](https://github.com/arcships/dim/issues/4), following
 [#232](https://github.com/arcships/dim/pull/232). The public embedding input supports
 process, [C4 Session](session-typescript.md) and [C5 branch](branch-typescript.md)
-rows in one runtime. Foreign management contributions use the existing
-[native management](appserver/management-methods.md) dispatch and call owner.
+rows in one runtime. Foreign management namespaces register with the same
+[management table](appserver/management-methods.md) and call owner as native ones.
 
 ## 1. Scope and existing mechanisms
 
 The App Server already assembles process plugins with rutis-loader, runs Node
-rows, exports process services by name and dispatches native `ManagementMethods`
-contributions. Its public TypeScript input places each configured row at process,
-Session or branch scope. A foreign `managementMethods:<namespace>` declaration
-is bound to a native management contribution inside its original row.
+rows, exports process services by name and dispatches the namespaces process
+parts register with its `managementMethods` table. Its public TypeScript input
+places each configured row at process, Session or branch scope. A foreign process
+row injects `managementMethods` and registers its namespaces from its own apply,
+as a native owner does.
 
 These host bindings use the existing runtime, loader and method
 owners. Plugin business state and work stay in its package. There is no new
@@ -23,27 +24,27 @@ work. The embedding caller supplies the rows explicitly, as it does for C4.
 
 Source anchors: [`serve` / `Processes`](../../crates/dim-app-server/src/lib.rs),
 [`Parts` / same-row binding](../../crates/dim-app-server/src/session_typescript.rs),
-[`ManagementMethods` / `Owners`](../../crates/dim-app-server/src/methods.rs) and
+[`ManagementMethods` / `management_provider`](../../crates/dim-app-server/src/methods.rs) and
 the [shared method owner](../../crates/dim-agent-capabilities/src/methods.rs).
 
 ## 2. Host input and process placement
 
 Process owners are rows of the existing public `SessionTypeScriptConfig.rows` without a
 `group`; Session and branch parts declare `"group": "session"` or `"branch"`
-([How Dim uses rutis §2](rutis-usage.md#2-parts-are-loader-rows)). The name of the configuration
+([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). The name of the configuration
 type is retained to avoid an unrelated rename. This is a Rust source change, not a persisted or
 wire format change.
 
 All rows use ordinary loader rows and the existing `RowSchema.provides`
-snapshot. For example, a process row can declare:
+snapshot of the services they provide by name. For example, a process row that
+registers a management namespace and provides no service declares:
 
 ```json
 {
   "id": "example-process",
   "name": "/absolute/example/process.ts",
-  "provides": {
-    "managementMethods:example": { "describe": "async", "call": "async" }
-  }
+  "inject": ["managementMethods"],
+  "provides": {}
 }
 ```
 
@@ -59,7 +60,7 @@ rows. Keep its existing runtime name. Do not
 start another runtime for each package or reuse the private managed-provider
 slot. A process row uses its original non-instanced factory, not a fabricated
 `SessionScope`. The original row remains the owner of its foreign resources and
-any native method contribution.
+of the namespaces it registers.
 
 `session/{sessionId}` is not a process-row observation contract. rutis has one
 bus per root, so trusted process rows can technically listen to any Session's
@@ -78,12 +79,12 @@ Validate the combined external configuration before assembly:
 - Register a process row's provided names that the `ServiceCatalog` does not hold yet as shared,
   without an instance key; Session and branch rows' names get their group's instance key. A row
   that names a service of a group it is not inside fails at composition, by rutis; a second
-  provider of a name fails with rutis's duplicate-provider error. Only process rows bind
-  management families, and only Session rows bind tools and Session methods.
-- `managementMethods:<namespace>` has a nonempty, valid namespace and exactly
-  the asynchronous `describe` / `call` modes. Other process-provided services
-  retain the ordinary bridge method declarations; no host business parser is
-  introduced for them.
+  provider of a name fails with rutis's duplicate-provider error. `toolRegistry` and
+  `sessionMethods` are Session services, so only Session rows register tools and Session
+  methods; process rows register management namespaces with `managementMethods`.
+- Process-provided services retain the ordinary bridge method declarations; no
+  host business parser is introduced for them. Management namespaces are checked
+  when a row registers them (§3), not here.
 - Reuse C4's comparison of the online module declaration with its structural
   `provides` snapshot, including its narrowly identified offline placeholder.
   A mismatch fails resolution of that row; names do not change at runtime.
@@ -117,14 +118,16 @@ whose typed `Failure.id` belongs to an extension row remains that row's
 diagnostic, rather than a host startup error. Required-row failures remain fatal.
 Malformed structure, duplicate identities and skipped rows (`report.issues`)
 remain configuration errors; do not parse diagnostic strings to classify them.
-The namespace inventory still names installed rows, so Rpc can distinguish an
-unavailable owner from an unknown namespace using its existing row-status table.
+A namespace a row registered keeps naming that row after it is withdrawn, so
+Rpc can tell an unavailable owner from an unknown namespace using its existing
+row-status table. A row that stays Pending or fails before it registers holds no
+namespace, so its names are `unknown_method`.
 
 Preserve the existing runtime gate: named Node factories inject `RuntimeRows`.
 While the initial reconcile holds the loader operation, the rows remain Pending;
 the existing `RuntimeRowsPlugin` refresh task obtains that operation afterwards,
 refreshes declarations and then publishes `RuntimeRows`. Only then can extension
-`apply` and management `describe` start. A row's own resolution failure is
+`apply`, and with it management registration, start. A row's own resolution failure is
 reported in its status while the refresh continues for other rows. Shared
 runtime/declaration infrastructure failure retains the existing C4 failure
 boundary; runtime crashes are infrastructure failures under ADR 002 D3.
@@ -167,29 +170,35 @@ During owner reload, keep the existing per-namespace status, admission and
 generation settlement rules. Rpc and Sessions do not acquire dependencies on
 that owner; real declared dependents retain rutis' normal reload behavior.
 
-## 3. Management declaration and dispatch
+## 3. Management registration and dispatch
 
-Derive `(namespace, original row id)` from each process row's
-`managementMethods:<namespace>` entry and append it to the existing `Owners`
-input. There is no separate namespace configuration. Retain disabled owners in
-the known management namespace inventory, matching native longest-namespace
-routing: a disabled child namespace is unknown and is never served by its parent.
+A process row injects `managementMethods` and, from its `apply`, calls
+`await ctx.use<ManagementMethods>('managementMethods').register(namespace, declarations, call)`
+once per namespace. The registration belongs to the calling row and is withdrawn
+when that row unloads. There is no separate namespace configuration, and the
+host derives no namespace from the row's declaration.
 
-Apply existing namespace grammar, reserved roots, built-in exclusions, duplicate
-ownership and management/Session overlap validation at assembly. Do not accept
-a process namespace that contains or lies inside a native management namespace,
-or a namespace that would fail `ManagementMethods::provide`. Process rows may
-still own nested namespaces relative to each other. Rpc continues to
-validate that every configured namespace names a loader row. It neither injects
-nor retains a foreign provider; each request looks up the native contribution.
+The management table checks each registration as it checks a native owner's
+([management methods](appserver/management-methods.md)): the name grammar, at
+least one method, each unique and inside the namespace; no reserved root
+(`hello`, `daemon`, `agent`, `approval`, `session`) and no prefix equal to an
+exact built-in (`Invalid management namespace`); no declaration equal to a
+built-in (`Invalid management contribution`); and no namespace registered
+already (`<namespace> is registered already`). The row sees a refusal as a
+rejected Promise; a row that lets it propagate from `apply` fails, and only its
+own namespaces are affected. Rows may own namespaces nested in each other's or
+a native owner's: a name belongs to the longest namespace in the table that
+holds it, and a withdrawn namespace keeps holding its names, so its parent never
+answers them. Rpc neither injects nor retains a foreign provider; each request
+reads the table.
 
 The language-neutral payloads are the implemented subset of
 [session-boundary A.1](contracts/session-boundary.md#a1-method-contributions):
 
-| Method | Input | Output |
+| Function | Input | Output |
 | --- | --- | --- |
-| `describe()` | No arguments. | `MethodDecl[]`: `name`, `mutating`, `interruption` (`report` / `drain`), `progress`. |
-| `call(call, cancelled, progress)` | `{callId, method, params}`, a by-reference cancellation `Promise<void>`, and a callback receiving one JSON value. | `{kind:"value", value?}` or `{code, appError, message}`. Omitted value means JSON `null`. |
+| `register(namespace, declarations, call)` | A namespace; `MethodDecl[]`: `name`, `mutating`, `interruption` (`report` / `drain`), `progress`, each required; the row's `call` function. | A Promise that resolves once registered and rejects when refused. |
+| `call(call, cancelled, progress)` (the row's function) | `{callId, method, params}`, a by-reference cancellation `Promise<void>`, and a callback receiving one JSON value. | `{kind:"value", value?}` or `{code, message}`, whose `code` is the `appError`. Omitted value means JSON `null`. |
 
 `callId` is the binding's opaque correlation id. Preserve the client's params
 without adding a Session id or inventing origin fields. Notifications, handoff,
@@ -197,35 +206,36 @@ paired-device management, a generic `callChannel` service and new discovery
 endpoints are outside this subset. Unsupported declarations or replies fail
 explicitly, as in C4; they are never accepted and then ignored.
 
-The native binding lives in the original process row's apply:
+The table registers the namespace on behalf of the calling row, inside that
+row's own apply: it decodes the declarations once at the bridge boundary and
+registers the shared method owner's `MethodProvider`, with its existing
+declaration validation and native admission. The namespace is registered before
+the row becomes Active; the host waits for no service projection. The shared
+method owner holds the only foreign DTO/parser/handler implementation, and Rpc
+has none. Session and management registrations keep their distinct tables and
+scope rules.
 
-1. Subscribe to the existing service-projection notification before applying
-   the resolved runtime row. Register its cleanup immediately with `ctx.effect`.
-2. Await this row's declared foreign projections, using uninstanced
-   `host_key("managementMethods:<namespace>")`. Read only its own services;
-   external dependencies remain declared. Row cancellation ends a pending bind.
-3. Call `describe`, decode once at the bridge boundary and provide native
-   `ManagementMethods` with its existing declaration validation and
-   `MethodProvider`. Publish it before this row becomes Active.
-4. Reuse C1's foreign method decoding and invocation in the shared method owner;
-   do not copy a second DTO/parser/handler implementation into Rpc. Session and
-   management contributions keep their distinct native keys and scope rules.
-
-Use the current protected-local protocol-v3 entry admission, `Owners` routing,
-`hello.features`, row-status errors and progress/reply delivery. No call may
-switch to a new provider generation after admission. Declared application
-errors preserve their code and `appError`; transport or malformed-reply errors
-use a redacted binding failure rather than exposing runtime stacks.
+Use the current protected-local protocol-v3 entry admission, routing through the
+management table, `hello.features` (the methods of the namespaces registered
+now), row-status errors and progress/reply delivery. No call may switch to a new
+provider generation after admission. Declared application errors preserve their
+code and `appError`; transport or malformed-reply errors use a redacted binding
+failure rather than exposing runtime stacks.
 
 ## 4. Work ownership and cleanup
 
-Register native call admission/drain cleanup after foreign row cleanup, as C4
-does, so accepted calls settle before the foreign row is released. Provider or
-admitting Rpc unload resolves the cancellation Promise for both interruption
-modes. `report` replies `operation_interrupted` while its original work settles;
-`drain` returns the original work's result. Both remain tracked until settlement.
-End each Promise lease on ordinary completion as well. A client disconnect does
-not cancel admitted work. Uncooperative JavaScript may delay unloading; no forced
+The call admission's unload effect belongs to the calling row's context, as in
+C4. Provider or admitting Rpc unload resolves the cancellation Promise for both
+interruption modes; the provider's Promise resolves when the row's generation is
+cancelled, before the runtime unloads the row's plugin. `report` replies
+`operation_interrupted` while its original work settles; `drain` returns the
+original work's result when it settles while the plugin still runs. A call still
+running when the runtime unloads the plugin cannot reply: it answers
+`operation_interrupted` and may already have taken effect ([rutis usage
+R6](rutis-usage.md#r6-contributions-register-with-their-owner)), so an owner
+whose work must not be lost settles on cancellation or reconciles in its next
+generation, as Workflow's open attempt does. End each Promise lease on ordinary
+completion as well. A client disconnect does not cancel admitted work. No forced
 success, timeout, rollback or replay is inferred.
 
 Business background tasks and their effects belong to the process package.
@@ -238,8 +248,8 @@ settle P6/P7 timer, report or native-writer lifetime acceptance.
 
 | Owner | Necessary implementation scope |
 | --- | --- |
-| App Server assembly / TypeScript binding | Place rows without a group at the process, validate combined declarations, use original process factories, assemble their rows, collect Settings sources and derive management owner pairs. Use the same required-host row selection for startup/report errors and restart completion (§2.1–2.2). |
-| Shared method owner and native management owner | Reuse the existing foreign decoding/call boundary; provide `ManagementMethods` inside the original row, with the existing native admission and cleanup. |
+| App Server assembly / TypeScript binding | Place rows without a group at the process, validate combined declarations, use original process factories, assemble their rows, serve `managementMethods` to them by name and collect Settings sources. Use the same required-host row selection for startup/report errors and restart completion (§2.1–2.2). |
+| Shared method owner and management table | The table's foreign `register` reuses the existing foreign decoding/call boundary and registers on behalf of the calling row, with the existing native admission and cleanup. |
 | SDK types and author guide | Describe the supported process contribution using the existing method payload definitions; retain existing Session exports for callers. |
 | Examples and transport fixtures | Update all configuration literals and add a real Node process-owner fixture through normal protected-local Rpc. |
 
@@ -253,8 +263,9 @@ do not claim isolation from the hung module-load residual in §2.1.
 2. Configuring no process row preserves current C4/C5 behavior. A disabled row is
    unknown; malformed/colliding structure is rejected. With a real missing
    declared dependency, native startup and Session calls succeed while the row
-   stays Pending and its namespace answers `service_reloading`. A throwing
-   `apply` or invalid declaration makes only that owner unavailable. Hold an
+   stays Pending; its namespace, never registered, answers `unknown_method`. A
+   throwing `apply` or refused registration fails only that owner; a namespace
+   it registered before answers `service_unavailable`. Hold an
    extension's asynchronous `apply` after runtime declaration publication and
    verify native startup still completes; release it through its original
    effects. Required infrastructure failures still fail startup and clean up.
@@ -452,17 +463,17 @@ behavior; no-run-effect behavior requires each package's business-flow acceptanc
 | §1 Scope/App Server | Process parts are loader rows, not Capabilities; App Server owns assembly/wire binding, packages own all feature work. |
 | ADR 002 D1 | Process rows outlive Sessions; existing Session/branch rows retain their own lifetimes. |
 | ADR 002 D2 | Bind in the original row; no adapter or management plugin. |
-| ADR 002 D3 | Rpc resolves providers per call. Host startup and restart readiness exclude optional extension rows while those rows retain their own hard dependencies and normal reload behavior (§2.1–2.2). A hung top-level module load remains a shared-gate startup limit (§2.1). |
+| ADR 002 D3 | Rpc reads the management table per call and depends on no provider. Host startup and restart readiness exclude optional extension rows while those rows retain their own hard dependencies and normal reload behavior (§2.1–2.2). A hung top-level module load remains a shared-gate startup limit (§2.1). |
 | ADR 002 D4 | Structural declarations stay in rows; Settings documents remain business data and do not reload rows. |
-| ADR 002 D5 | Named `managementMethods:<namespace>` implements the existing neutral payloads; Rust `ManagementMethods` is its native binding. |
+| ADR 002 D5 | The process service `managementMethods` and its `register` implement the existing neutral payloads; Rust `ManagementMethods` is its native binding. |
 
 ## 7. Requirements raised to mechanism owners
 
 | Item | Content |
 | --- | --- |
-| Contract served | ADR 002 D5's process `managementMethods` contract needs ordinary process placement and projection from its named foreign service to native management dispatch, owned by the original row. |
-| Existing mechanisms considered | Reuse the public C4 runtime, `RuntimeResolver`, `ServiceCatalog`, original-row projection, `Owners` and `MethodProvider`. The same assembly-owned required-row selection covers startup failures/readiness and restart. The existing `RuntimeRows` gate orders initial reconcile and extension apply without another task. Session factories have the wrong lifetime for process owners; events cannot install an absent row or contribute its management namespace. |
-| Generic binding | Explicit process rows, same-row named management projection, and required-host selection for startup and restart within App Server assembly. No new core service, facade, rutis requirement, loader API or public restart endpoint. |
+| Contract served | ADR 002 D5's process `managementMethods` contract needs ordinary process placement and a foreign `register` on the native management table, owned by the calling row. |
+| Existing mechanisms considered | Reuse the public C4 runtime, `RuntimeResolver`, `ServiceCatalog`, the management table and `MethodProvider`. The same assembly-owned required-row selection covers startup failures/readiness and restart. The existing `RuntimeRows` gate orders initial reconcile and extension apply without another task. Session factories have the wrong lifetime for process owners; events cannot install an absent row or contribute its management namespace. |
+| Generic binding | Explicit process rows, management registration by the calling row, and required-host selection for startup and restart within App Server assembly. No new core service, facade, rutis requirement, loader API or public restart endpoint. |
 | Ordering and lifecycle impact | No Timeline sequence, batch or event change. Keep one initial reconcile, the existing runtime declaration gate and required-row deadline. Optional row failures stay local at startup and restart; native management admission and provider report/drain settlement remain unchanged. |
 | Implementation owner / issue | zerob13, App Server assembly and method binding under #4. Architecture review by the existing assembly/management maintainers; this does not assign new work to S2 or rutis. |
 | Public storage placement | §5.2 registers the existing PluginFilesPlugin once per authorized product root for public and managed consumers. It uses no Session factory, private plugin slot or new filesystem API. No Timeline ordering, lifecycle protocol or mechanism-owner extension is requested. |
