@@ -257,7 +257,7 @@ async fn codex(
     let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.to_owned(),
     ])));
-    let plugin = root.plugin(capability_plugin(OpenAICodexOAuthPlugin::with_config(
+    let plugin = root.plugin(rutis::Typed::new(OpenAICodexOAuthPlugin::with_config(
         0,
         config(base, true),
     )));
@@ -628,12 +628,12 @@ async fn minimal_ts_legacy_records_recover_only_from_fixed_plugin_config() {
             home.clone(),
         ])));
         let plugin = if codex_owner {
-            root.plugin(capability_plugin(OpenAICodexOAuthPlugin::with_config(
+            root.plugin(rutis::Typed::new(OpenAICodexOAuthPlugin::with_config(
                 0,
                 config(&f.base, true),
             )))
         } else {
-            root.plugin(capability_plugin(GrokOAuthPlugin::with_config(
+            root.plugin(rutis::Typed::new(GrokOAuthPlugin::with_config(
                 0,
                 config(&f.base, false),
             )))
@@ -808,7 +808,7 @@ async fn grok_device_flow_observes_slowdown_expiry_cancellation_and_uri_trust() 
     let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
         home.clone(),
     ])));
-    let plugin = root.plugin(capability_plugin(GrokOAuthPlugin::with_config(
+    let plugin = root.plugin(rutis::Typed::new(GrokOAuthPlugin::with_config(
         0,
         config(&f.base, false),
     )));
@@ -900,19 +900,21 @@ async fn grok_device_flow_observes_slowdown_expiry_cancellation_and_uri_trust() 
 async fn managed_provider_selection_http_recovery_and_restart_flow() {
     let (f, server, home) = fixture().await;
     let (root, _, _, codex) = codex(&home, &f.base).await;
-    let grok_plugin = root.plugin(capability_plugin(GrokOAuthPlugin::with_config(
+    let grok_plugin = root.plugin(rutis::Typed::new(GrokOAuthPlugin::with_config(
         0,
         config(&f.base, false),
     )));
-    let dim = root.plugin(capability_plugin(
+    let dim = root.plugin(rutis::Typed::new(
         dim_app_server::managed_provider::ManagedProvidersPlugin,
     ));
-    let sqlite = root.plugin(capability_plugin(
+    let sqlite = root.plugin(rutis::Typed::new(
         dim_app_server::storage::SqliteStoragePlugin::new(home.join("native.sqlite")),
     ));
-    let provider_plugin = root.plugin(dim_agent_runtime::capability_plugin(
-        ProviderPlugin::default(),
-    ));
+    let provider_plugin = root.plugin(
+        ProviderPlugin::default()
+            .typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
     let aimux = root.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin));
     for plugin in [&grok_plugin, &dim, &sqlite, &provider_plugin, &aimux] {
         active(plugin).await;
@@ -1321,19 +1323,21 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
     drop(db);
     let (restarted, _, _, _) = self::codex(&home, &f.base).await;
     let plugins = [
-        restarted.plugin(capability_plugin(GrokOAuthPlugin::with_config(
+        restarted.plugin(rutis::Typed::new(GrokOAuthPlugin::with_config(
             0,
             config(&f.base, false),
         ))),
-        restarted.plugin(capability_plugin(
+        restarted.plugin(rutis::Typed::new(
             dim_app_server::managed_provider::ManagedProvidersPlugin,
         )),
-        restarted.plugin(capability_plugin(
+        restarted.plugin(rutis::Typed::new(
             dim_app_server::storage::SqliteStoragePlugin::new(home.join("native.sqlite")),
         )),
-        restarted.plugin(dim_agent_runtime::capability_plugin(
-            ProviderPlugin::default(),
-        )),
+        restarted.plugin(
+            ProviderPlugin::default()
+                .typed(&dim_app_server::catalog())
+                .unwrap(),
+        ),
         restarted.plugin(capability_plugin(dim_agent_aimux::AimuxPlugin)),
     ];
     for plugin in &plugins {
@@ -1404,7 +1408,7 @@ async fn login_retains_ts_claim_precedence_and_bounds_pending_attempts() {
         .unwrap();
     service.begin_browser(&cancel).await.unwrap();
 
-    let grok_plugin = root.plugin(capability_plugin(GrokOAuthPlugin::with_config(
+    let grok_plugin = root.plugin(rutis::Typed::new(GrokOAuthPlugin::with_config(
         0,
         config(&f.base, false),
     )));

@@ -9,8 +9,10 @@ pub(crate) use workflow_files::WorkflowPackages;
 
 use crate::storage::SqliteStorage;
 use dim_agent_capabilities::file_storage::{FilePath, FileStorage, FileStorageError};
-use dim_agent_runtime::{Capability, KeysOf, When};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, TypeKey, TypedPlugin};
+use dim_agent_runtime::{Names, When, names::ServiceCatalog};
+use rutis::{
+    BoxFuture, CordisError, Ctx, Effect, Event, EventKey, Keyed, Plugin, TypeKey, TypedPlugin,
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
@@ -513,16 +515,40 @@ impl SettingsPlugin {
         self.declarations.extend(declarations);
         self
     }
+    /// This part with its keys from `names`: SqliteStorage only for the
+    /// native profile.
+    pub fn part(self, names: &Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError> {
+        let keys = self.keys(names)?;
+        Ok(names.part_with(self, keys))
+    }
+    /// This part keyed from `catalog`, to mount it directly.
+    pub fn typed(
+        self,
+        catalog: &ServiceCatalog,
+    ) -> std::result::Result<rutis::Typed<Self>, CordisError> {
+        let build = Default::default();
+        let keys = self.keys(&Names::copy(catalog, &build))?;
+        Ok(rutis::Typed::with_keys(self, keys))
+    }
+    fn keys(
+        &self,
+        names: &Names<'_>,
+    ) -> std::result::Result<<<Self as TypedPlugin>::Deps as rutis::Deps>::Keys, CordisError> {
+        Ok((
+            names.key()?,
+            names.when::<Keyed<SqliteStorage>>(self.native)?,
+        ))
+    }
 }
 impl TypedPlugin for SettingsPlugin {
-    type Deps = (Arc<FileStorage>, When<Arc<SqliteStorage>>);
+    type Deps = (Keyed<FileStorage>, When<Keyed<SqliteStorage>>);
     fn name(&self) -> &str {
         "Settings"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (files, When(database)): Self::Deps,
+        (Keyed(files), When(database)): Self::Deps,
     ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
         Box::pin(async move {
             let mut claims = BTreeMap::new();
@@ -562,7 +588,7 @@ impl TypedPlugin for SettingsPlugin {
             }
             let service = Arc::new(SettingsService {
                 files,
-                database,
+                database: database.map(|Keyed(database)| database),
                 home_root: self.home_root,
                 projects: self.projects.clone(),
                 stopping: CancellationToken::new(),
@@ -594,10 +620,5 @@ impl TypedPlugin for SettingsPlugin {
             ctx.provide_as(TypeKey::of::<SettingsService>(), service)?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for SettingsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        ((), self.native.then_some(()))
     }
 }

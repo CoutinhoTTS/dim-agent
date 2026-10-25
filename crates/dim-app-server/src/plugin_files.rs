@@ -1,8 +1,7 @@
 //! Generic, host-owned file transactions for an explicitly authorized plugin root.
 //! No account formats or provider policy belong at this boundary.
 use dim_agent_capabilities::file_storage::{FileLease, FileStorage, FileStorageError};
-use dim_agent_runtime::{Capability, KeysOf};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value, host_key};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -297,14 +296,14 @@ impl HostDispatch for Dispatch {
 #[derive(Clone)]
 pub struct PluginFilesPlugin(pub usize);
 impl TypedPlugin for PluginFilesPlugin {
-    type Deps = Arc<FileStorage>;
+    type Deps = Keyed<FileStorage>;
     fn name(&self) -> &str {
         "PluginFiles"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        storage: Self::Deps,
+        Keyed(storage): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let files = Arc::new(Files {
@@ -332,7 +331,4 @@ impl TypedPlugin for PluginFilesPlugin {
             Ok(Effect::Done)
         })
     }
-}
-impl Capability for PluginFilesPlugin {
-    fn keys(&self) -> KeysOf<Self> {}
 }

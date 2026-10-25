@@ -13,7 +13,6 @@ use dim_agent_capabilities::{
     host::*,
     tool_registry::ToolSourcesView,
 };
-use dim_agent_runtime::capability_plugin;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use dim_app_server::{
@@ -267,8 +266,12 @@ impl Env {
             root.plugin(rutis::Typed::new(
                 dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
             )),
-            root.plugin(capability_plugin(SettingsPlugin::new(0, vec![]))),
-            root.plugin(dim_agent_runtime::capability_plugin(McpPlugin::new(0))),
+            root.plugin(
+                SettingsPlugin::new(0, vec![])
+                    .typed(&dim_app_server::catalog())
+                    .unwrap(),
+            ),
+            root.plugin(rutis::Typed::new(McpPlugin::new(0))),
         ];
         wait_active(
             &root,
@@ -373,11 +376,10 @@ impl Env {
 /// Fails Session assembly after McpSession applied, once discovery started
 /// during assembly would have reached the server.
 struct FailAfterMcp {
-    scope: SessionScope,
     remote: Arc<Remote>,
 }
 impl rutis::TypedPlugin for FailAfterMcp {
-    type Deps = InSession<McpSession>;
+    type Deps = rutis::KeyedGate<McpSession>;
     fn name(&self) -> &str {
         "FailAfterMcp"
     }
@@ -397,11 +399,6 @@ impl rutis::TypedPlugin for FailAfterMcp {
                 "assembly failed after McpSession".into(),
             ))
         })
-    }
-}
-impl Capability for FailAfterMcp {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&self.scope)
     }
 }
 
@@ -1197,9 +1194,10 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
 async fn an_unpublished_session_never_starts_discovery() {
     let env = Env::with(|builder, remote| {
         let remote = remote.clone();
-        builder.session_plugin(move |scope| FailAfterMcp {
-            scope: *scope,
-            remote: remote.clone(),
+        builder.session_part(move |names| {
+            names.part(FailAfterMcp {
+                remote: remote.clone(),
+            })
         });
     })
     .await;

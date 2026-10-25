@@ -90,9 +90,6 @@ impl TypedPlugin for Probe {
         })
     }
 }
-impl Capability for Probe {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// A call to the owner's Session method; the `settings` envelope it returned.
 async fn owner(client: &mut Client, session: &str, method: &str, mut params: Value) -> Value {
@@ -116,7 +113,7 @@ async fn node_settings_typescript_owner_reads_and_writes() {
         Arc::new(MockTools),
         config(&home, rows(vec![owner_row(OWNER)])),
         move |builder| {
-            builder.session_plugin(move |_| Probe(probe.clone()));
+            builder.session_part(move |names| names.part(Probe(probe.clone())));
         },
     )
     .await;

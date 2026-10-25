@@ -106,8 +106,8 @@ impl Store {
                 .await
                 .unwrap();
         }
-        root.plugin(capability_plugin(SqliteStoragePlugin::new(home.database())));
-        root.plugin(capability_plugin(SessionStorePlugin::new(0)));
+        root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(home.database())));
+        root.plugin(rutis::Typed::new(SessionStorePlugin::new(0)));
         let captured = Arc::new(OnceLock::new());
         let consumer = root.plugin(capability_plugin(Consumer(captured.clone())));
         let mut status = consumer.watch();

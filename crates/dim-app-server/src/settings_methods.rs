@@ -10,8 +10,7 @@ use dim_agent_capabilities::{
     file_storage::FileStorageError,
     methods::{Interruption, MethodDecl, RpcError, params, reply},
 };
-use dim_agent_runtime::{Capability, KeysOf, scoped};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::sync::Arc;
 
 /// The client path's wire errors (§4.3).
@@ -34,14 +33,14 @@ fn wire(error: SettingsError) -> RpcError {
 /// change user-only fields.
 pub struct SettingsMethodsPlugin;
 impl TypedPlugin for SettingsMethodsPlugin {
-    type Deps = (Arc<SettingsService>,);
+    type Deps = (Keyed<SettingsService>,);
     fn name(&self) -> &str {
         "SettingsMethods"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (service,): Self::Deps,
+        (Keyed(service),): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             ManagementMethods::provide(
@@ -87,10 +86,5 @@ impl TypedPlugin for SettingsMethodsPlugin {
             )?;
             Ok(Effect::Done)
         })
-    }
-}
-impl Capability for SettingsMethodsPlugin {
-    fn keys(&self) -> KeysOf<Self> {
-        scoped::<Self::Deps, _>(&())
     }
 }

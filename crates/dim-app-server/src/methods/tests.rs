@@ -1,8 +1,11 @@
 //! Per-call lookup, provider-owned calls and namespace ownership contracts.
 use super::*;
 use dim_agent_capabilities::methods::Interruption;
-use dim_agent_runtime::{Capability, KeysOf, capability_plugin, register_capability, wait_active};
-use rutis::{BoxFuture, Effect, Gate, TypedPlugin};
+use dim_agent_runtime::{
+    names::{NamedDeps, register},
+    register_part, wait_active,
+};
+use rutis::{BoxFuture, Effect, KeyedGate, TypedPlugin};
 use rutis_loader::{Builtins, Layer, LoaderPlugin, Patch};
 use serde_json::json;
 use std::{
@@ -48,15 +51,12 @@ impl TypedPlugin for Owner {
         })
     }
 }
-impl Capability for Owner {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// A provider that stays Pending on a service nobody provides.
 struct Missing;
 struct Waiting;
 impl TypedPlugin for Waiting {
-    type Deps = Gate<Missing>;
+    type Deps = KeyedGate<Missing>;
     fn name(&self) -> &str {
         "Waiting"
     }
@@ -76,9 +76,6 @@ impl TypedPlugin for Waiting {
         })
     }
 }
-impl Capability for Waiting {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 /// A provider whose apply fails before it provides `broken`.
 struct Broken;
@@ -91,10 +88,17 @@ impl TypedPlugin for Broken {
         Box::pin(async { Err(CordisError::PluginFailed("broken owner".into())) })
     }
 }
-impl Capability for Broken {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
+/// Registers `make`'s part as a process row and returns its name.
+fn part<P>(builtins: &mut Builtins, make: impl Fn() -> P + Send + Sync + 'static) -> String
+where
+    P: TypedPlugin,
+    P::Deps: NamedDeps,
+{
+    let mut catalog = dim_agent_runtime::names::catalog();
+    register::<Missing>(&mut catalog, None);
+    register_part(builtins, &catalog, move |names| names.part(make())).unwrap()
+}
 fn decl(name: &str, interruption: Interruption) -> MethodDecl {
     MethodDecl::new(name, false, interruption)
 }
@@ -225,9 +229,6 @@ impl TypedPlugin for Fixture {
         })
     }
 }
-impl Capability for Fixture {
-    fn keys(&self) -> KeysOf<Self> {}
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
@@ -235,7 +236,7 @@ async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
         let state = Arc::new(State::default());
         let fixture = Fixture(state.clone());
         let assembly = Assembly::new(
-            |builtins| vec![row(register_capability(builtins, move || fixture.clone()))],
+            |builtins| vec![row(part(builtins, move || fixture.clone()))],
             &[("fixture", "Fixture")],
         )
         .await;
@@ -291,11 +292,11 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
     let assembly = Assembly::new(
         |builtins| {
             vec![
-                row(register_capability(builtins, move || fixture.clone())),
-                row(register_capability(builtins, || Waiting)),
-                row(register_capability(builtins, || Broken)),
-                disabled(register_capability(builtins, move || off.clone())),
-                row(register_capability(builtins, move || unlisted.clone())),
+                row(part(builtins, move || fixture.clone())),
+                row(part(builtins, || Waiting)),
+                row(part(builtins, || Broken)),
+                disabled(part(builtins, move || off.clone())),
+                row(part(builtins, move || unlisted.clone())),
                 // Names a module the loader cannot resolve.
                 json!({"id": "Unresolvable", "name": "unregistered"}),
             ]
@@ -388,7 +389,7 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
         "session.create.extra",
     ] {
         let read = format!("{namespace}.read");
-        let invalid = root.plugin(capability_plugin(Owner::new(
+        let invalid = root.plugin(rutis::Typed::new(Owner::new(
             "Owner",
             namespace,
             &[read.as_str()],
@@ -414,9 +415,9 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
         let (parent, child) = (parent.clone(), child.clone());
         let assembly = Assembly::new(
             |builtins| {
-                let child = register_capability(builtins, move || child.clone());
+                let child = part(builtins, move || child.clone());
                 vec![
-                    row(register_capability(builtins, move || parent.clone())),
+                    row(part(builtins, move || parent.clone())),
                     if child_enabled {
                         row(child)
                     } else {
