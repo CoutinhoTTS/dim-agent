@@ -44,7 +44,7 @@ See [ADR 004](../../adr/004-loader-plugin-management.md).
 rutis root
 └─ rutis-loader（根下唯一的插件；以下每项都是它的一行，模块名即插件名）
     ├─ ServerControl
-    ├─ FileStorage、FileWriteCoordinator
+    ├─ FileStorage
     ├─ Aimux ──► ModelHost / request 对象                   （--model-config PATH 或产品配置）
     ├─ ConfiguredModels ──► 开发目录与 resolver              （--model-config PATH）
     ├─ SqliteStorage ──► SessionStore                       （--database PATH 或 --home PATH）
@@ -123,7 +123,6 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 | `FileStoragePlugin` | 文件操作准入、锁租约、在途 I/O 和原子替换清理 | `FileStorage` | — |
 | `SqliteStoragePlugin` | 共享数据库连接、事务、原生 schema 门禁、文件维护锁与关停 | `SqliteStorage` | —；启动参数固定数据库路径 |
 | `SessionStorePlugin` | 原生会话目录、Timeline 落盘/恢复及写入任务 | `SessionStore`、`TimelineStore` 持久化端口 | `SqliteStorage` |
-| `FileWriteCoordinatorPlugin` | 跨 Session 的逐路径写入 FIFO 准入域；跨代共享 | `FileWriteCoordinator` | — |
 | `SettingsPlugin` | Generic BusinessDocument sources and per-source CAS; no domain interpretation, approvals, connections or discovery | `SettingsService` | `FileStorage`, `When<SqliteStorage>` |
 | `OpenAICodexOAuthPlugin` / `GrokOAuthPlugin` | 各自账号字段、登录、刷新与终态 | `OpenAICodexOAuthService` / `GrokOAuthService` | `FileStorage` |
 | `ManagedProvidersPlugin` | 可选 managed provider 的当前绑定代次与在途操作；未绑定时请求明确失败 | `ManagedProviders` | —；`ManagedProviderBinding` 另注入 `ManagedProviders` 与 JS 宿主分发 |

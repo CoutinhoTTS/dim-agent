@@ -16,7 +16,7 @@ use dim_agent_capabilities::{
     permission::{CommandRulesHost, NoCommandRules},
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
-    workspace_tools::{FileWriteCoordinatorPlugin, WorkspaceToolsConfig},
+    workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::*;
 use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
@@ -154,7 +154,6 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         .unwrap(),
     ))
         .await?;
-    (&process.plugin(rutis::Typed::new(FileWriteCoordinatorPlugin::default()))).await?;
 
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_model_hosts(&mut builder);

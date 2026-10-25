@@ -5,7 +5,12 @@ Owner: [workspace_tools/mod.rs](../../../../crates/dim-agent-capabilities/src/wo
 [exec.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs).
 Provides ToolHost for read, write, edit, glob, grep and exec, and registers the
 leaf namespace `session.exec.output` with `sessionMethods` for the active
-command's bounded tail preview.
+command's bounded tail preview. The WorkspaceTools plugin registers this part
+and the branch parts FileReads and BackgroundExec, and holds the file-write
+coordinator: one per-path FIFO admission domain shared by write and edit across
+every Session it serves, which it hands to each Session's part. The plugin keeps
+the same coordinator across its generations and theirs, so old calls settle in
+the domain new ones enter.
 
 ## Dependencies
 
@@ -13,7 +18,6 @@ command's bounded tail preview.
 | --- | --- |
 | `P:HostPlatform` | Home, shell, environment and process supervision. |
 | `S:TreeCommands` | Resolve the calling branch per call. |
-| `P:FileWriteCoordinator` | Shared write/edit admission across Sessions. |
 | `S:SessionConfig` | cwd and collaboration role. |
 | `S:SessionIdentity` | Session-specific output directory. |
 | `S:SessionMethods` | Register the `session.exec.output` namespace, until this part unloads. |
@@ -103,7 +107,7 @@ empty live preview and unavailable historical captures.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:FileWriteCoordinator`、`P:HostPlatform`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionMethods`、`S:TreeCommands` |
+| 注入 | `P:HostPlatform`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionMethods`、`S:TreeCommands` |
 | 提供 | `S:ToolHost` |
 | 被注入于 | `ToolRegistry` |
 <!-- /generated -->

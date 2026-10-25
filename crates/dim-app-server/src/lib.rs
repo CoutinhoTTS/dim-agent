@@ -507,13 +507,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         builder.catalog(),
         move |names| names.part(files.clone()),
     )?);
-    let file_writes =
-        dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default();
-    rows.push(register_part(
-        &mut builtins,
-        builder.catalog(),
-        move |names| names.part(file_writes.clone()),
-    )?);
     if config.model_catalog.is_some() || product_root.is_some() {
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             names.part(dim_agent_aimux::AimuxPlugin)

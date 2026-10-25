@@ -279,12 +279,9 @@ impl Harness {
     async fn with_platform(root: Ctx, view: rutis::FiberView, hook: Hook, cwd: PathBuf) -> Self {
         let store = Arc::new(MemoryTimelineStore::default());
         let output_root = scratch("output");
-        let file_writes = root.plugin(rutis::Typed::new(
-            workspace_tools::FileWriteCoordinatorPlugin::default(),
-        ));
         wait_active(
             &root,
-            &[view, file_writes],
+            &[view],
             Duration::from_secs(5),
             &CancellationToken::new(),
         )

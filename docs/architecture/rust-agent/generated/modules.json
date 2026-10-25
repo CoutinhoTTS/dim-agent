@@ -3554,7 +3554,6 @@
       "to": "dim_agent_aimux::plugin",
       "references": [
         "mod plugin",
-        "path ConfiguredModelPlugin::new",
         "use plugin::AimuxPlugin",
         "use plugin::ConfiguredModelPlugin",
         "use plugin::ConfiguredModelsPlugin"
@@ -3587,13 +3586,6 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path dim_agent_runtime::names::register"
-      ]
-    },
-    {
-      "from": "dim_agent_aimux",
-      "to": "dim_agent_runtime::parts",
-      "references": [
-        "path dim_agent_runtime::Feature::new"
       ]
     },
     {
@@ -3786,6 +3778,14 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::plugin",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::PartRegistry",
+        "path dim_agent_runtime::PartScope::Session"
       ]
     },
     {
@@ -4564,13 +4564,6 @@
       "to": "dim_agent_capabilities::workspace_tools::file_reads",
       "references": [
         "path workspace_tools::file_reads::FileReads"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities",
-      "to": "dim_agent_capabilities::workspace_tools::files",
-      "references": [
-        "path workspace_tools::files::FileWriteCoordinator"
       ]
     },
     {
@@ -11268,13 +11261,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_agent_capabilities::workspace_tools",
-      "references": [
-        "path dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_agent_runtime::agent",
       "references": [
         "path Agent",
@@ -11334,13 +11320,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_agent_runtime::parts",
-      "references": [
-        "path dim_agent_runtime::Feature::new"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_app_server::agent_records",
       "references": [
         "mod agent_records"
@@ -11359,13 +11338,6 @@
         "path agents::register",
         "use agents::AgentIndex",
         "use agents::AgentsPlugin"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_app_server::agents::configuration",
-      "references": [
-        "path agents::AgentsSessionPlugin"
       ]
     },
     {
@@ -11785,6 +11757,14 @@
     },
     {
       "from": "dim_app_server::agents",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::PartRegistry",
+        "path dim_agent_runtime::PartScope::Session"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path TimelineKey",
@@ -11855,7 +11835,7 @@
       "to": "dim_app_server::agents::configuration",
       "references": [
         "mod configuration",
-        "use configuration::AgentsSessionPlugin"
+        "path configuration::AgentsSessionPlugin"
       ]
     },
     {
@@ -12884,7 +12864,7 @@
       "from": "dim_app_server::collaboration",
       "to": "dim_agent_runtime::parts",
       "references": [
-        "path dim_agent_runtime::Feature::new"
+        "path dim_agent_runtime::PartRegistry"
       ]
     },
     {
@@ -13947,6 +13927,14 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::PartRegistry",
+        "path dim_agent_runtime::PartScope::Session"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_agent_types",
       "references": [
         "path dim_agent_types::JsonObject"
@@ -14039,6 +14027,7 @@
       "to": "dim_app_server::mcp::session",
       "references": [
         "mod session",
+        "path McpSessionPlugin::new",
         "use session::McpSession",
         "use session::McpSessionPlugin",
         "use session::McpSessionState",
@@ -14517,6 +14506,14 @@
     },
     {
       "from": "dim_app_server::mcp::publication::tests",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path dim_agent_runtime::PartRegistry",
+        "path dim_agent_runtime::PartRegistry::default"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::publication::tests",
       "to": "dim_app_server",
       "references": [
         "path crate::catalog"
@@ -14769,13 +14766,6 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::session",
-      "to": "dim_agent_runtime::parts",
-      "references": [
-        "path dim_agent_runtime::Feature::new"
       ]
     },
     {
@@ -15094,7 +15084,10 @@
       "from": "dim_app_server::permission_rules",
       "to": "dim_agent_runtime::parts",
       "references": [
-        "path dim_agent_runtime::Feature::new"
+        "path PartRegistry",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
       ]
     },
     {
@@ -24212,6 +24205,14 @@
     {
       "module": "dim_app_server::agents::sessions::tests::deferred_inputs",
       "path": "MemoryTimelineStore::default"
+    },
+    {
+      "module": "dim_app_server::collaboration",
+      "path": "PartScope::Branch"
+    },
+    {
+      "module": "dim_app_server::collaboration",
+      "path": "PartScope::Session"
     },
     {
       "module": "dim_app_server::managed_oauth",

@@ -24,7 +24,7 @@ use dim_agent_runtime::{
 use dim_agent_types::*;
 use file_reads::{FileReads, FileReadsPlugin};
 use files::{FileTools, FileWriteCoordinator};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
 use std::{path::PathBuf, sync::Arc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -32,39 +32,26 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 pub const TOOL_NAMES: [&str; 6] = ["read", "write", "edit", "glob", "grep", "exec"];
 const OUTPUT_METHOD: &str = "session.exec.output";
 
-/// Process-owned coordinator. Clone the plugin across loader generations so
-/// in-flight mutations and newly loaded Sessions retain the same lock domain.
-#[derive(Clone, Default)]
-pub struct FileWriteCoordinatorPlugin(Arc<FileWriteCoordinator>);
-impl TypedPlugin for FileWriteCoordinatorPlugin {
-    type Deps = ();
-    fn name(&self) -> &str {
-        "FileWriteCoordinator"
-    }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(TypeKey::of::<FileWriteCoordinator>(), self.0.clone())?;
-            Ok(Effect::Done)
-        })
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct WorkspaceToolsConfig {
     /// Absolute root of command output files, `<output_root>/<session_id>/`.
     pub output_root: PathBuf,
 }
 
-/// Registers WorkspaceTools and its branch parts.
+/// Installs the WorkspaceTools plugin: its Session part and its branch
+/// parts. The plugin holds the file-write coordinator, one lock domain for
+/// every Session it serves, across their generations and its own, and hands
+/// it to each Session's part.
 pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
+    let coordinator = Arc::<FileWriteCoordinator>::default();
     builder.require_feature(
         dim_agent_runtime::Feature::new("WorkspaceTools")
             .session("WorkspaceTools", move |names| {
-                names.part(WorkspaceToolsPlugin::new(names, config.clone())?)
+                names.part(WorkspaceToolsPlugin::new(
+                    names,
+                    config.clone(),
+                    coordinator.clone(),
+                )?)
             })
             .branch("FileReads", |names| {
                 names.part(FileReadsPlugin::new(names)?)
@@ -160,19 +147,24 @@ impl ToolDriver for WorkspaceTools {
 struct WorkspaceToolsPlugin {
     host: rutis::DepKey<ToolHost>,
     config: WorkspaceToolsConfig,
+    coordinator: Arc<FileWriteCoordinator>,
 }
 impl WorkspaceToolsPlugin {
-    fn new(names: &Names<'_>, config: WorkspaceToolsConfig) -> Result<Self, CordisError> {
+    fn new(
+        names: &Names<'_>,
+        config: WorkspaceToolsConfig,
+        coordinator: Arc<FileWriteCoordinator>,
+    ) -> Result<Self, CordisError> {
         Ok(Self {
             host: names.key()?,
             config,
+            coordinator,
         })
     }
 }
 impl TypedPlugin for WorkspaceToolsPlugin {
     type Deps = (
         Keyed<HostPlatform>,
-        Keyed<FileWriteCoordinator>,
         Keyed<SessionConfig>,
         Keyed<SessionIdentity>,
         Keyed<TreeCommands>,
@@ -184,14 +176,7 @@ impl TypedPlugin for WorkspaceToolsPlugin {
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (
-            Keyed(platform),
-            Keyed(coordinator),
-            Keyed(config),
-            Keyed(identity),
-            Keyed(tree),
-            Keyed(methods),
-        ): Self::Deps,
+        (Keyed(platform), Keyed(config), Keyed(identity), Keyed(tree), Keyed(methods)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             // `session.create` validated and canonicalized the cwd.
@@ -202,7 +187,7 @@ impl TypedPlugin for WorkspaceToolsPlugin {
                     cwd.clone(),
                     platform.home.clone(),
                     output_dir.clone(),
-                    coordinator,
+                    self.coordinator.clone(),
                 ),
                 output_dir,
                 member: config.collaboration_role == CollaborationRole::Member,

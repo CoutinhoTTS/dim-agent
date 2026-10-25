@@ -56,11 +56,6 @@ async fn product(dirs: &Dirs) -> Product {
     ))
         .await
         .unwrap();
-    (&root.plugin(rutis::Typed::new(
-        dim_agent_capabilities::workspace_tools::FileWriteCoordinatorPlugin::default(),
-    )))
-        .await
-        .unwrap();
     let model = Arc::new(ScriptedModel::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder

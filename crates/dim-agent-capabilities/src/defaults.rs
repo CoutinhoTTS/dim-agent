@@ -173,8 +173,8 @@ pub fn install_minimal_execution(
 }
 
 /// Product profile of the local execution and context capabilities. The
-/// composition root also registers the process plugins `HostPlatformPlugin`,
-/// `FileWriteCoordinatorPlugin`, and `SkillsCatalogPlugin`, plus the product
+/// composition root also registers the process plugins `HostPlatformPlugin`
+/// and `SkillsCatalogPlugin`, plus the product
 /// `SkillSettingsHost`, and binds the Session `CommandRulesHost`. A new
 /// Session adopts `SessionConfig.model` with its prompt sources.
 pub fn install_local_execution(
