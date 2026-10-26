@@ -13,8 +13,13 @@ test('documents that code reads keep their checks',()=>{
   assert.deepEqual(classify(['docs/design/appserver/native-storage-format.md']),only('rust'));
 });
 
+test('dependency policy changes select the scan without compiling the workspace',()=>{
+  assert.deepEqual(classify(['deny.toml','LICENSE','docs/release/README.md']),only('dependencies'));
+});
+
 test('source areas select their groups',()=>{
   assert.deepEqual(classify(['web/src/main.ts']),only('web'));
+  assert.deepEqual(classify(['web/src/features/chat/quote-cases.json']),only('web','rust','windows'));
   assert.deepEqual(classify(['scripts/stage-web.mjs']),only('scripts','web'));
   assert.deepEqual(classify(['crates/dim-app-server/src/lib.rs','runtime/fixtures/session-part.json']),only('rust'));
   assert.deepEqual(classify(['crates/dim-cli/src/main.rs']),only('rust','windows'));

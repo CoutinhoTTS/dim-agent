@@ -3,6 +3,7 @@
 //! on that connection; registrations leave with their connection's
 //! attachment or the connection itself; the methods are local-only.
 use super::*;
+use rutis::host::CtxHost;
 
 async fn attached_session(client: &mut Client) -> String {
     let created = client
@@ -312,21 +313,21 @@ impl FakeLeaf {
 
 struct LeafTransport(std::sync::Mutex<Option<std::os::unix::net::UnixListener>>);
 
-impl rutis::Plugin for LeafTransport {
+impl rutis::host::DynPlugin for LeafTransport {
     fn name(&self) -> &str {
         "test/leaf-transport"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, Result<rutis::host::Effect, rutis::Error>> {
         Box::pin(async move {
             let listener = self.0.lock().unwrap().take();
-            ctx.provide_as::<dyn rutis_bridge::Transport>(
+            ctx.provide_at::<dyn rutis_bridge::Transport>(
                 rutis_bridge::transport_key("ui-leaf"),
                 Arc::new(Accept(std::sync::Mutex::new(listener))),
             )?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -340,7 +341,7 @@ impl rutis_bridge::Transport for Accept {
     fn dial<'a>(
         &'a self,
         _: &'a rutis_bridge::Dial,
-    ) -> rutis::BoxFuture<
+    ) -> rutis::host::BoxFuture<
         'a,
         Result<rutis_bridge::channel::Channel, rutis_bridge::channel::ConnectError>,
     > {
@@ -373,14 +374,14 @@ struct FakeTuiFactory {
     unloaded: Arc<AtomicUsize>,
 }
 
-impl rutis::PluginFactory<Value> for FakeTuiFactory {
+impl rutis::host::PluginFactory<Value> for FakeTuiFactory {
     fn name(&self) -> &str {
         "Tui"
     }
-    fn injects(&self) -> &[rutis::TypeKey] {
-        &[]
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        Vec::new()
     }
-    fn build(&self, config: &Value) -> Result<Box<dyn rutis::Plugin>, rutis::CordisError> {
+    fn build(&self, config: &Value) -> Result<Box<dyn rutis::host::DynPlugin>, rutis::Error> {
         Ok(Box::new(FakeTui {
             socket: self.socket.clone(),
             config: config.clone(),
@@ -400,14 +401,14 @@ struct FakeTui {
     unloaded: Arc<AtomicUsize>,
 }
 
-impl rutis::Plugin for FakeTui {
+impl rutis::host::DynPlugin for FakeTui {
     fn name(&self) -> &str {
         "Tui"
     }
     fn apply<'a>(
         &'a self,
         _: &'a rutis::Ctx,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, Result<rutis::host::Effect, rutis::Error>> {
         Box::pin(async move {
             let mut stream = BufReader::new(UnixStream::connect(&self.socket).await.unwrap());
             let session = self.config["sessionId"].clone();
@@ -444,7 +445,7 @@ impl rutis::Plugin for FakeTui {
             }
             self.loaded.fetch_add(1, Ordering::SeqCst);
             let unloaded = self.unloaded.clone();
-            Ok(rutis::Effect::Disposer(Box::new(move || {
+            Ok(rutis::host::Effect::Disposer(Box::new(move || {
                 drop(stream);
                 unloaded.fetch_add(1, Ordering::SeqCst);
                 Ok(())

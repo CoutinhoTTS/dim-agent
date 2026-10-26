@@ -60,7 +60,7 @@ pub fn summary(preset: PermissionPreset) -> &'static str {
             "reads run; writes, commands, network and unclassified tools are denied"
         }
         PermissionPreset::WorkspaceWrite => {
-            "reads and file writes run; commands, network and unclassified tools ask"
+            "reads and workspace file writes run; outside writes, commands, network and unclassified tools ask"
         }
         PermissionPreset::FullAccess => "every tool call runs without asking",
     }

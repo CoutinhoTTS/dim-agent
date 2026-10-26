@@ -4,7 +4,8 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{CordisError, Ctx, Effect, TypedPlugin};
+use rutis::host::CtxHost;
+use rutis::{Ctx, Plugin};
 use std::{
     sync::{
         Arc,
@@ -35,7 +36,7 @@ fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuil
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::install(&mut builder);
@@ -216,34 +217,26 @@ impl LoopState for EmptyLoop {
         self.0.subscribe()
     }
 }
-struct ExtensionControls(Arc<AtomicUsize>, rutis::DepKey<dyn LoopState>);
-impl TypedPlugin for ExtensionControls {
+struct ExtensionControls(Arc<AtomicUsize>, rutis::host::Key<dyn LoopState>);
+impl Plugin for ExtensionControls {
     type Deps = ();
     fn name(&self) -> &str {
         "review.extension-controls"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            let live = self.0.clone();
-            ctx.effect(|| {
-                Effect::Disposer(Box::new(move || {
-                    live.fetch_sub(1, Ordering::SeqCst);
-                    Ok(())
-                }))
-            })?;
-            ctx.provide_as(
-                self.1.key().clone(),
-                Arc::new(EmptyLoop(
-                    tokio::sync::watch::channel(LoopSnapshot::default()).0,
-                )) as Arc<dyn LoopState>,
-            )?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        let live = self.0.clone();
+        ctx.effect(|| async move {
+            live.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        })?;
+        ctx.provide_at(
+            self.1.clone(),
+            Arc::new(EmptyLoop(
+                tokio::sync::watch::channel(LoopSnapshot::default()).0,
+            )) as Arc<dyn LoopState>,
+        )?;
+        Ok(())
     }
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -257,18 +250,20 @@ async fn a_branch_failing_after_its_root_is_built_rolls_it_back_before_releasing
         .require_feature(
             Feature::new("TimelineTree")
                 .session("TimelineTree", |names| {
-                    names.part(
+                    Ok(Box::new(
                         dim_agent_capabilities::timeline_tree::TimelineTreePlugin::new(names)?,
-                    )
+                    ))
                 })
                 .branch("TreeTimeline", |names| {
-                    names.part(dim_agent_capabilities::timeline_tree::TreeTimelinePlugin)
+                    Ok(Box::new(
+                        dim_agent_capabilities::timeline_tree::TreeTimelinePlugin::new(names)?,
+                    ))
                 }),
         )
         .require_feature(
             Feature::new("review.extension-controls")
                 .branch("review.extension-controls", move |names| {
-                    names.part(ExtensionControls(resources.clone(), names.key()?))
+                    Ok(Box::new(ExtensionControls(resources.clone(), names.key()?)))
                 }),
         );
     let agent = builder.build();

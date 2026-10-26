@@ -5,7 +5,7 @@ use crate::{
     protocol::{Empty, canonical_cwd, optional_non_null},
 };
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
-use rutis::{CordisError, Ctx};
+use rutis::{Ctx, Error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -99,7 +99,7 @@ pub(super) fn provide(
     ctx: &Ctx,
     methods: &ManagementMethods,
     provider: Arc<ProviderService>,
-) -> Result<(), CordisError> {
+) -> Result<(), Error> {
     methods.register(
         ctx,
         "provider",

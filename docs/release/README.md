@@ -42,6 +42,59 @@ Cross-built executables are inspected for their ELF, Mach-O or PE target archite
 
 `ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. It receives no private plugin credentials. Pushes to `main` and manual runs do all of it; a pull request runs only the groups its changed paths need, as decided by `scripts/ci-changes.mjs` (documentation-only changes skip every group, and unrecognized paths run all of them). `ci-ok` passes when every selected job passed, so it is the check to require. CI builds without debug info (`CARGO_PROFILE_DEV_DEBUG=0`).
 
+### Rust dependency checks
+
+The `dependencies` job installs the fixed `cargo-deny` version declared in
+[`ci.yml`](../../.github/workflows/ci.yml) and runs:
+
+```sh
+cargo deny --locked check advisories licenses
+```
+
+Install that same tool version to run the check locally. The job runs for Rust
+check groups and dependency-policy changes; `deny.toml` or root `LICENSE` edits
+alone do not trigger workspace compilation. Pushes to `main` and manual CI runs
+also scan. Its failure or cancellation fails the existing `ci-ok` check.
+
+[`deny.toml`](../../deny.toml) owns the policy. It enables all workspace features
+and includes development dependencies, unpublished workspace members and all
+target-specific dependencies. Known vulnerability advisories fail. Unsoundness
+advisories also fail, except for the two reviewed, unreachable APIs below.
+Maintenance-notice exceptions identify specific advisory IDs, with their
+existing dependency owners and reasons beside each entry. An unused advisory
+exception fails so it must be removed when the dependency disappears. License
+expressions must satisfy the explicit allow list or a crate-specific exception. The
+certificate datasets have their own narrowly scoped data-license exceptions.
+Crates whose licenses cannot be identified or do not satisfy that policy fail;
+manual clarifications require evidence from the actual license files.
+[cargo-deny policy reference](https://embarkstudios.github.io/cargo-deny/checks/index.html).
+
+`vendor/aimux` is checked as ordinary path dependencies, together with its
+transitive dependencies. Its packages inherit MIT from the vendored workspace
+and retain `vendor/aimux/LICENSE`; there is no vendor exclusion or blanket
+advisory exception. Vendored terminal packages are included by the same rule.
+
+The terminal stack's Ratatui 0.29 is the sole parent of `lru` 0.12.5. Its private
+layout cache only calls `new`, `resize` and `get_or_insert`; those paths do not
+use `IterMut` ([RUSTSEC-2026-0002](https://rustsec.org/advisories/RUSTSEC-2026-0002/))
+or `pop` ([RUSTSEC-2026-0253](https://rustsec.org/advisories/RUSTSEC-2026-0253/)).
+The `(Rect, Layout)` keys also have no potentially panicking destructor required
+by the latter advisory. These two specific exceptions depend on that call-path
+review; recheck them whenever the terminal dependencies change. They do not
+certify `lru` 0.12.5 for arbitrary use or suppress other advisories for it.
+
+Duplicate major versions are accepted for now (#296). Aimux and the App Server/MCP
+stack use different upstream dependency APIs, including the parallel `reqwest`,
+`sha2` and `base64` chains. Unification belongs with compatible upstream upgrades,
+not a forced major-version substitution in the scan gate.
+`cargo tree --locked --duplicates` remains the diagnostic command; duplicate versions do not bypass
+advisory or license checks. The job intentionally runs only `advisories` and
+`licenses`, without a second `cargo-audit` run or a duplicate-version ban.
+
+This gate checks the public Rust dependency graph. Node/Python dependencies,
+separately supplied private plugins, non-Cargo assets and distribution notices
+retain their own checks and ownership.
+
 ### CI trust model
 
 Every `ci.yml` job runs on a persistent self-hosted runner, and a pull request's checks build and run that pull request's code, so a job can read and change whatever the runner keeps between jobs. CI therefore verifies only code pushed by people with write access to `arcships/dim`:

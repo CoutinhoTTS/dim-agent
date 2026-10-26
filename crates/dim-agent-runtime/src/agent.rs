@@ -8,7 +8,7 @@ use crate::{
     lifecycle::{CloseOnce, guarded},
 };
 use dim_agent_types::{AgentEvent, InputMessageData, InputMode};
-use rutis::FiberView;
+use rutis::host::{CtxHost, FiberView};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex, Weak},
@@ -277,7 +277,7 @@ impl Agent {
         }
     }
     /// Snapshot of the tree hosting this Agent's Session subtrees.
-    pub fn diagnostics(&self) -> Option<rutis::RuntimeDiagnostics> {
+    pub fn diagnostics(&self) -> Option<rutis::host::diagnostics::RuntimeDiagnostics> {
         self.0
             .placed
             .get()
@@ -555,7 +555,7 @@ impl Session {
             .to_owned())
     }
     /// The Session scope and its capability plugins; branches are reported separately.
-    pub fn diagnostics(&self) -> Result<rutis::RuntimeDiagnostics> {
+    pub fn diagnostics(&self) -> Result<rutis::host::diagnostics::RuntimeDiagnostics> {
         let loaded = self.0.owner.loaded()?;
         Ok(scope_diagnostics(
             &loaded.ctx,
@@ -563,7 +563,10 @@ impl Session {
             &loaded.children,
         ))
     }
-    pub fn branch_diagnostics(&self, branch: &str) -> Result<rutis::RuntimeDiagnostics> {
+    pub fn branch_diagnostics(
+        &self,
+        branch: &str,
+    ) -> Result<rutis::host::diagnostics::RuntimeDiagnostics> {
         Ok(self.published(branch)?.diagnostics())
     }
     pub async fn trace(&self, branch: &str, sequence: u64) -> Result<Option<TimelineTrace>> {
@@ -587,14 +590,14 @@ impl Session {
         let loaded = self.0.owner.loaded()?;
         loaded
             .ctx
-            .get_as::<T>(loaded.scope.key::<T>())
+            .get_at::<T>(&loaded.scope.key::<T>())
             .ok_or_else(|| AgentError::Reloading(std::any::type_name::<T>().into()))
     }
     /// The instance of the loaded Session subtree, so a host can find the
     /// loader rows this Session runs. Keys under it stay readable only from
     /// inside the Session, so it opens no service beyond the
     /// [`PublicService`] reads above.
-    pub fn instance(&self) -> Result<rutis::InstanceId> {
+    pub fn instance(&self) -> Result<rutis::host::InstanceId> {
         Ok(self.0.owner.loaded()?.scope.instance)
     }
     pub fn on<S: Clone + Send + Sync + 'static>(

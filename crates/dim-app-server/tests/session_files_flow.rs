@@ -7,7 +7,8 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::SessionConfig;
 use dim_app_server::storage::{SessionStore, SessionStorePlugin, SqliteStoragePlugin};
 use rusqlite::Connection;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, TypedPlugin};
+use rutis::host::{CtxHost, FiberState};
+use rutis::{Ctx, Plugin};
 use std::{
     path::PathBuf,
     sync::{Arc, OnceLock},
@@ -65,26 +66,20 @@ impl Drop for Home {
 
 /// A process-scope consumer, as Attachments' enclosing-scope dependency is.
 struct Consumer(Arc<OnceLock<(Arc<SessionFilesHost>, Arc<SessionStore>)>>);
-impl TypedPlugin for Consumer {
+impl Plugin for Consumer {
     type Deps = (Arc<SessionFilesHost>, Arc<SessionStore>);
     fn name(&self) -> &str {
         "test.session-files-consumer"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        services: Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let _ = self.0.set(services);
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, _: &Ctx, services: Self::Deps) -> rutis::Result {
+        let _ = self.0.set(services);
+        Ok(())
     }
 }
 
 struct Store {
     root: Ctx,
-    consumer: rutis::FiberView,
+    consumer: rutis::host::FiberView,
     files: Arc<SessionFilesHost>,
     sessions: Arc<SessionStore>,
 }
@@ -95,16 +90,17 @@ impl Store {
         let root = Ctx::root().unwrap();
         if file_storage {
             // Nothing depends on FileStorage, so wait for it before a put.
-            (&root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-                home.0.clone(),
-            ]))))
+            (&root.plugin(FileStoragePlugin::new(vec![home.0.clone()])))
                 .await
                 .unwrap();
         }
-        root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(home.database())));
-        root.plugin(rutis::Typed::new(SessionStorePlugin::new(0)));
+        root.plugin(SqliteStoragePlugin::new(home.database()));
+        let catalog = dim_app_server::catalog();
+        let build = rutis_loader::resolve::Build::default();
+        let names = dim_agent_runtime::Names::copy(&catalog, &build);
+        root.plugin(SessionStorePlugin::new(&names, 0).unwrap());
         let captured = Arc::new(OnceLock::new());
-        let consumer = root.plugin(rutis::Typed::new(Consumer(captured.clone())));
+        let consumer = root.plugin(Consumer(captured.clone()));
         let mut status = consumer.watch();
         while status.borrow().state != FiberState::Active {
             assert_ne!(status.borrow().state, FiberState::Failed);
@@ -377,7 +373,7 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
     platform.home = home.0.clone();
     store
         .root
-        .provide_as(rutis::TypeKey::of::<HostPlatform>(), Arc::new(platform))
+        .provide_as::<HostPlatform>(Arc::new(platform))
         .unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(store.sessions.timeline_store());

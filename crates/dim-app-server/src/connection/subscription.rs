@@ -3,11 +3,14 @@
 //! and the end.
 use super::*;
 use crate::tree_protocol as wire;
-use dim_agent_capabilities::session_broadcast::{SessionBroadcastEvent, session_channel};
+use dim_agent_capabilities::session_broadcast::{
+    SessionBroadcast, SessionBroadcastEvent, session_channel,
+};
 use dim_agent_runtime::{BranchStatus, ModelProgress};
 use dim_agent_types::{AgentEvent, EventKind};
 use futures_util::{StreamExt, future::BoxFuture as Pending, stream::FuturesUnordered};
-use rutis::{Disposer, EventKey, Listener};
+use rutis::Disposer;
+use rutis::host::FiberStatusChanged;
 use std::{collections::HashMap, sync::atomic::AtomicBool};
 use tokio::sync::{mpsc, watch};
 
@@ -147,7 +150,7 @@ enum Signal {
 /// One subscription's observation progress, independent of Session execution.
 pub(super) struct Delivery {
     ctx: Ctx,
-    channel: EventKey<SessionBroadcastEvent>,
+    session_id: String,
     recipient: String,
     issued: Mutex<u64>,
     reached: watch::Sender<u64>,
@@ -167,14 +170,13 @@ impl Delivery {
                 return Err(subscription_changed());
             }
             *issued += 1;
-            let _ = self.ctx.events().emit(
-                &self.ctx,
-                &self.channel,
-                Arc::new(SessionBroadcastEvent::Fence {
+            let _ = self.ctx.emit(SessionBroadcast::new(
+                &self.session_id,
+                SessionBroadcastEvent::Fence {
                     recipient: self.recipient.clone(),
                     token: *issued,
-                }),
-            );
+                },
+            ));
             *issued
         };
         loop {
@@ -217,14 +219,9 @@ struct Forward {
     signals: mpsc::UnboundedSender<Signal>,
     delivery: Arc<Delivery>,
 }
-impl Listener<SessionBroadcastEvent> for Forward {
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        record: &'a SessionBroadcastEvent,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        match record {
+impl Forward {
+    async fn on_event(&self, event: &SessionBroadcast) -> Result<Option<()>, Error> {
+        match &event.record {
             SessionBroadcastEvent::Closed => {
                 self.ended.store(true, Ordering::Relaxed);
                 self.acknowledge(u64::MAX);
@@ -265,7 +262,7 @@ impl Listener<SessionBroadcastEvent> for Forward {
                 }
             }
         }
-        Box::pin(async { Ok(None) })
+        Ok(None)
     }
 }
 
@@ -427,37 +424,41 @@ impl Connection {
         let (signals, receiver) = mpsc::unbounded_channel();
         let delivery = Arc::new(Delivery {
             ctx: host.ctx.clone(),
-            channel: session_channel(&session_id),
+            session_id: session_id.clone(),
             recipient: uuid::Uuid::new_v4().to_string(),
             issued: Mutex::new(0),
             reached: watch::channel(0).0,
             cancel: cancel.clone(),
         });
+        let forward = Arc::new(Forward {
+            connection: Arc::downgrade(self),
+            session_id: session_id.clone(),
+            generation,
+            ended: AtomicBool::new(false),
+            watched: watched.clone(),
+            signals,
+            delivery: delivery.clone(),
+        });
         let listener = host
             .ctx
-            .events()
-            .on(
-                &host.ctx,
-                &session_channel(&session_id),
-                Forward {
-                    connection: Arc::downgrade(self),
-                    session_id: session_id.clone(),
-                    generation,
-                    ended: AtomicBool::new(false),
-                    watched: watched.clone(),
-                    signals,
-                    delivery: delivery.clone(),
-                },
-            )
+            .listen::<SessionBroadcast>()
+            .name(session_channel(&session_id))
+            .on(move |event, _| {
+                let forward = forward.clone();
+                async move { forward.on_event(&event).await }
+            })
             .map_err(|_| RpcError::closed())?;
         // Registered before any progress cell is read, so no activation is missed.
         let (signal, active) = watch::channel(());
         let availability = if version >= 3 {
-            match host
-                .ctx
-                .events()
-                .on(&host.ctx, &EventKey::of(), super::mcp::Availability(signal))
-            {
+            let availability = Arc::new(super::mcp::Availability(signal));
+            match host.ctx.on::<FiberStatusChanged>(move |event, call| {
+                let availability = availability.clone();
+                async move {
+                    let ctx = call.ctx().clone();
+                    availability.on_event(&ctx, &event, call).await
+                }
+            }) {
                 Ok(availability) => Some((availability, active)),
                 Err(_) => {
                     tokio::spawn(listener.dispose());

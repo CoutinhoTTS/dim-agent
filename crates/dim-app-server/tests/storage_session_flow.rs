@@ -1,4 +1,5 @@
 use dim_agent_capabilities::{defaults, timeline_tree::TreeCommands};
+use dim_agent_runtime::Names;
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, BranchOptions, Dispatcher, Feature, SessionConfig,
     Timeline, TimelineIdentity, TimelineKey, TimelineStore,
@@ -6,7 +7,8 @@ use dim_agent_runtime::{
 use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
 use rusqlite::Connection;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -15,19 +17,33 @@ use std::{
 
 struct CaptureTimeline {
     timelines: Arc<Mutex<BTreeMap<String, Timeline>>>,
+    timeline: Key<Timeline>,
+    identity: Key<TimelineIdentity>,
+}
+impl CaptureTimeline {
+    fn new(
+        names: &Names<'_>,
+        timelines: Arc<Mutex<BTreeMap<String, Timeline>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            timelines,
+            timeline: names.key()?,
+            identity: names.key()?,
+        })
+    }
 }
 
-impl TypedPlugin for CaptureTimeline {
-    type Deps = (Keyed<Timeline>, Keyed<TimelineIdentity>);
+impl DynPlugin for CaptureTimeline {
     fn name(&self) -> &str {
         "storage-session.capture-timeline"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(timeline), Keyed(identity)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase(), self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let identity = ctx.require_at(&self.identity)?;
             self.timelines
                 .lock()
                 .unwrap()
@@ -39,23 +55,40 @@ impl TypedPlugin for CaptureTimeline {
 
 struct GenericCleanupFault {
     tree: Arc<Mutex<Option<Arc<TreeCommands>>>>,
+    timeline: Key<Timeline>,
+    identity: Key<TimelineIdentity>,
+    dispatcher: Key<Dispatcher>,
+    commands: Key<TreeCommands>,
 }
-impl TypedPlugin for GenericCleanupFault {
-    type Deps = (
-        Keyed<Timeline>,
-        Keyed<TimelineIdentity>,
-        Keyed<Dispatcher>,
-        Keyed<TreeCommands>,
-    );
+impl GenericCleanupFault {
+    fn new(names: &Names<'_>, tree: Arc<Mutex<Option<Arc<TreeCommands>>>>) -> rutis::Result<Self> {
+        Ok(Self {
+            tree,
+            timeline: names.key()?,
+            identity: names.key()?,
+            dispatcher: names.key()?,
+            commands: names.key()?,
+        })
+    }
+}
+impl DynPlugin for GenericCleanupFault {
     fn name(&self) -> &str {
         "storage-session.generic-cleanup"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(identity), Keyed(dispatcher), Keyed(tree)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.timeline.erase(),
+            self.identity.erase(),
+            self.dispatcher.erase(),
+            self.commands.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let tree = ctx.require_at(&self.commands)?;
             if identity.branch_id != "main" {
                 return Ok(Effect::Done);
             }
@@ -74,16 +107,14 @@ impl TypedPlugin for GenericCleanupFault {
                     Ok(())
                 })
             })?;
-            ctx.effect(|| {
-                Effect::Disposer(Box::new(move || {
-                    timeline.append(EventDraft {
-                        tags: Some(vec!["cleanup".into()]),
-                        kind: EventKind::PermissionChanged(PermissionChangedData {
-                            policy: PermissionPolicy::default(),
-                        }),
-                    })?;
-                    Ok(())
-                }))
+            ctx.effect(|| async move {
+                timeline.append(EventDraft {
+                    tags: Some(vec!["cleanup".into()]),
+                    kind: EventKind::PermissionChanged(PermissionChangedData {
+                        policy: PermissionPolicy::default(),
+                    }),
+                })?;
+                Ok(())
             })?;
             Ok(Effect::Done)
         })
@@ -110,11 +141,11 @@ async fn storage_failure_during_generic_cleanup_supersedes_the_session_fault() {
             .timeline_store(store.clone())
             .require_feature(Feature::new("storage-session.capture-timeline").branch(
                 "storage-session.capture-timeline",
-                move |names| names.part(CaptureTimeline { timelines: captured.clone() }),
+                move |names| Ok(Box::new(CaptureTimeline::new(names, captured.clone())?)),
             ))
             .require_feature(Feature::new("storage-session.generic-cleanup").branch(
                 "storage-session.generic-cleanup",
-                move |names| names.part(GenericCleanupFault { tree: captured_tree.clone() }),
+                move |names| Ok(Box::new(GenericCleanupFault::new(names, captured_tree.clone())?)),
             ));
         let agent = builder.build();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
@@ -161,7 +192,7 @@ async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
             .timeline_store(store.clone())
             .require_feature(Feature::new("storage-session.capture-timeline").branch(
                 "storage-session.capture-timeline",
-                move |names| names.part(CaptureTimeline { timelines: captured.clone() }),
+                move |names| Ok(Box::new(CaptureTimeline::new(names, captured.clone())?)),
             ));
         let agent = builder.build();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
@@ -209,28 +240,34 @@ async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
     }).await.expect("SQLite sibling failure and cleanup completed");
 }
 
-struct RecordCleanup;
-impl TypedPlugin for RecordCleanup {
-    type Deps = Keyed<Timeline>;
+struct RecordCleanup {
+    timeline: Key<Timeline>,
+}
+impl RecordCleanup {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            timeline: names.key()?,
+        })
+    }
+}
+impl DynPlugin for RecordCleanup {
     fn name(&self) -> &str {
         "storage-session.record-cleanup"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        Keyed(timeline): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            ctx.effect(|| {
-                Effect::Disposer(Box::new(move || {
-                    timeline.append(EventDraft {
-                        tags: Some(vec!["finalizer".into()]),
-                        kind: EventKind::PermissionChanged(PermissionChangedData {
-                            policy: PermissionPolicy::default(),
-                        }),
-                    })?;
-                    Ok(())
-                }))
+            let timeline = ctx.require_at(&self.timeline)?;
+            ctx.effect(|| async move {
+                timeline.append(EventDraft {
+                    tags: Some(vec!["finalizer".into()]),
+                    kind: EventKind::PermissionChanged(PermissionChangedData {
+                        policy: PermissionPolicy::default(),
+                    }),
+                })?;
+                Ok(())
             })?;
             Ok(Effect::Done)
         })
@@ -254,7 +291,7 @@ async fn session_close_and_idle_unload_persist_finalizer_events() {
             builder.timeline_store(store.clone()).require_feature(
                 Feature::new("storage-session.record-cleanup")
                     .branch("storage-session.record-cleanup", |names| {
-                        names.part(RecordCleanup)
+                        Ok(Box::new(RecordCleanup::new(names)?))
                     }),
             );
             let agent = builder.build();

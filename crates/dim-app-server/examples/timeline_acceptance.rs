@@ -21,7 +21,7 @@ use dim_agent_runtime::*;
 use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
 use rusqlite::Connection;
-use rutis::{CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::host::CtxHost;
 use std::{
     io::{BufRead, Write},
     path::{Path, PathBuf},
@@ -83,20 +83,35 @@ fn quantile(values: &mut [f64], p: f64) -> f64 {
 
 struct CaptureTree {
     captured: Arc<Mutex<Option<Arc<TreeCommands>>>>,
+
+    tree: rutis::host::Key<TreeCommands>,
 }
-impl TypedPlugin for CaptureTree {
-    type Deps = Keyed<TreeCommands>;
+impl CaptureTree {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        captured: Arc<Mutex<Option<Arc<TreeCommands>>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            captured,
+            tree: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for CaptureTree {
     fn name(&self) -> &str {
         "measurement.tree"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.tree.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a Ctx,
-        Keyed(tree): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let tree = ctx.require_at(&self.tree)?;
             *self.captured.lock().unwrap() = Some(tree);
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -177,24 +192,39 @@ impl CompactionStrategy for FixedSummary {
 }
 struct CaptureStop {
     observed: Arc<Mutex<Vec<Instant>>>,
+
+    dispatcher: rutis::host::Key<Dispatcher>,
 }
-impl TypedPlugin for CaptureStop {
-    type Deps = Keyed<Dispatcher>;
+impl CaptureStop {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        observed: Arc<Mutex<Vec<Instant>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            observed,
+            dispatcher: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for CaptureStop {
     fn name(&self) -> &str {
         "measurement.stop"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.dispatcher.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        ctx: &'a Ctx,
-        Keyed(dispatcher): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
             let observed = self.observed.clone();
             dispatcher.subscribe(ctx, self.name(), &["stop/interrupt"], move |_| {
                 observed.lock().unwrap().push(Instant::now());
                 Box::pin(async { Ok(()) })
             })?;
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -224,17 +254,14 @@ async fn memory(steps: usize) -> std::result::Result<(), Error> {
         )))))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         )
-        .require_feature(Feature::new("measurement.tree").session(
-            "measurement.tree",
-            move |names| {
-                names.part(CaptureTree {
-                    captured: capture.clone(),
-                })
-            },
-        ));
+        .require_feature(
+            Feature::new("measurement.tree").session("measurement.tree", move |names| {
+                Ok(Box::new(CaptureTree::new(names, capture.clone())?))
+            }),
+        );
     defaults::install(&mut builder);
     let agent = builder.build();
     let session = agent
@@ -571,22 +598,16 @@ async fn reads() -> std::result::Result<(), Error> {
         defaults::install(&mut builder);
         builder
             .timeline_store(store.clone())
-            .require_feature(Feature::new("measurement.tree").session(
-                "measurement.tree",
-                move |names| {
-                    names.part(CaptureTree {
-                        captured: target.clone(),
-                    })
-                },
-            ))
-            .require_feature(Feature::new("measurement.stop").branch(
-                "measurement.stop",
-                move |names| {
-                    names.part(CaptureStop {
-                        observed: stop_target.clone(),
-                    })
-                },
-            ));
+            .require_feature(
+                Feature::new("measurement.tree").session("measurement.tree", move |names| {
+                    Ok(Box::new(CaptureTree::new(names, target.clone())?))
+                }),
+            )
+            .require_feature(
+                Feature::new("measurement.stop").branch("measurement.stop", move |names| {
+                    Ok(Box::new(CaptureStop::new(names, stop_target.clone())?))
+                }),
+            );
         let agent = builder.build();
         let session = agent.restore_session(name.into()).await?;
         session.idle("main").await?;

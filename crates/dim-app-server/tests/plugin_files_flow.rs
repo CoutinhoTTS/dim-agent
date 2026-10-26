@@ -2,7 +2,8 @@
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
 use dim_agent_runtime::Names;
 use dim_app_server::plugin_files::PluginFilesPlugin;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_bridge::session::{HostDispatch, Value};
 use serde_json::json;
 use std::{
@@ -57,39 +58,42 @@ async fn call(value: &Value, name: &str, args: Vec<Value>) -> Value {
     )
     .await
 }
-struct Capture(Arc<OnceLock<Arc<dyn HostDispatch>>>);
-impl TypedPlugin for Capture {
-    type Deps = Keyed<dyn HostDispatch>;
+struct Capture {
+    captured: Arc<OnceLock<Arc<dyn HostDispatch>>>,
+    files: Key<dyn HostDispatch>,
+}
+impl DynPlugin for Capture {
     fn name(&self) -> &str {
         "capture-plugin-files"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        Keyed(files): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.files.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let _ = self.0.set(files);
+            let files = ctx.require_at(&self.files)?;
+            let _ = self.captured.set(files);
             Ok(Effect::Done)
         })
     }
 }
 async fn mount(path: &Path) -> (Ctx, Value) {
     let root = Ctx::root().unwrap();
-    (&root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        path.to_path_buf(),
-    ]))))
+    (&root.plugin(FileStoragePlugin::new(vec![path.to_path_buf()])))
         .await
         .unwrap();
-    (&root.plugin(rutis::Typed::new(PluginFilesPlugin(0))))
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = Names::copy(&catalog, &build);
+    (&root.plugin(PluginFilesPlugin::new(&names, 0).unwrap()))
         .await
         .unwrap();
     let captured = Arc::new(OnceLock::new());
-    let catalog = dim_app_server::catalog();
-    let build = rutis_loader::Build::default();
-    let names = Names::copy(&catalog, &build);
     let key = names.named::<dyn HostDispatch>("pluginFiles").unwrap();
-    (&root.plugin(names.part_with(Capture(captured.clone()), key)))
+    (&root.plugin(Capture {
+        captured: captured.clone(),
+        files: key,
+    }))
         .await
         .unwrap();
     let files = captured.get().unwrap();

@@ -9,7 +9,9 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::service;
+use rutis::{Ctx, Error};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -76,7 +78,9 @@ pub struct TimelineTree {
 pub struct TreeCommands {
     tree: Weak<TimelineTree>,
 }
+#[service]
 impl TreeCommands {
+    #[service(skip)]
     pub fn get(&self, id: &str) -> Result<Branch> {
         self.tree
             .upgrade()
@@ -91,6 +95,7 @@ impl TreeCommands {
             .map(|tree| tree.list())
             .unwrap_or_default()
     }
+    #[service(skip)]
     pub async fn branch(
         &self,
         parent: String,
@@ -139,7 +144,7 @@ impl TreeCommands {
         at: u64,
         options: BranchOptions,
         cancelled: Arc<
-            dyn Fn() -> BoxFuture<'static, std::result::Result<(), CordisError>> + Send + Sync,
+            dyn Fn() -> BoxFuture<'static, std::result::Result<(), Error>> + Send + Sync,
         >,
     ) -> Result<String> {
         let admission = CancellationToken::new();
@@ -855,41 +860,51 @@ impl TimelineTreeControl for TimelineTree {
 }
 
 /// Starts the tree's build task for each final `branch/create` of its branch.
-pub struct TreeTimelinePlugin;
-impl TypedPlugin for TreeTimelinePlugin {
-    type Deps = (
-        rutis::Keyed<Timeline>,
-        rutis::Keyed<Dispatcher>,
-        rutis::Keyed<TreeCommands>,
-        rutis::Keyed<dim_agent_runtime::TimelineIdentity>,
-    );
+pub struct TreeTimelinePlugin {
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    commands: Key<TreeCommands>,
+    identity: Key<dim_agent_runtime::TimelineIdentity>,
+}
+impl TreeTimelinePlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            commands: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for TreeTimelinePlugin {
     fn name(&self) -> &str {
         "TreeTimeline"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            rutis::Keyed(timeline),
-            rutis::Keyed(dispatcher),
-            rutis::Keyed(commands),
-            rutis::Keyed(identity),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.commands.erase(),
+            self.identity.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let commands = ctx.require_at(&self.commands)?;
+            let identity = ctx.require_at(&self.identity)?;
             let cleanup = commands.clone();
             let parent = identity.branch_id.clone();
-            ctx.effect(move || {
-                Effect::Disposer(Box::new(move || {
-                    if let Some(tree) = cleanup.tree.upgrade() {
-                        let cancelled = TimelineTree::cancel_pending(
-                            &mut tree.state.lock().unwrap(),
-                            Some(&parent),
-                        );
-                        tree.settle_cancelled(cancelled);
-                    }
-                    Ok(())
-                }))
+            ctx.effect(move || async move {
+                if let Some(tree) = cleanup.tree.upgrade() {
+                    let cancelled = TimelineTree::cancel_pending(
+                        &mut tree.state.lock().unwrap(),
+                        Some(&parent),
+                    );
+                    tree.settle_cancelled(cancelled);
+                }
+                Ok(())
             })?;
             dispatcher.subscribe(ctx, "TreeTimeline", &["branch/create"], move |event| {
                 let result = commands
@@ -904,68 +919,79 @@ impl TypedPlugin for TreeTimelinePlugin {
     }
 }
 pub struct TimelineTreePlugin {
-    commands: rutis::DepKey<TreeCommands>,
-    tree: rutis::DepKey<TimelineTree>,
-    control: rutis::DepKey<dyn TimelineTreeControl>,
+    commands: Key<TreeCommands>,
+    tree: Key<TimelineTree>,
+    control: Key<dyn TimelineTreeControl>,
+    factory: Key<TimelineFactory>,
+    store: Key<dyn TimelineStore>,
+    identity: Key<SessionIdentity>,
 }
 impl TimelineTreePlugin {
-    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             commands: names.key()?,
             tree: names.key()?,
             control: names.key()?,
+            factory: names.key()?,
+            store: names.key()?,
+            identity: names.key()?,
         })
     }
 }
-impl TypedPlugin for TimelineTreePlugin {
-    type Deps = (
-        Keyed<TimelineFactory>,
-        Keyed<dyn TimelineStore>,
-        Keyed<SessionIdentity>,
-    );
+impl DynPlugin for TimelineTreePlugin {
     fn name(&self) -> &str {
         "TimelineTree"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(factory), Keyed(store), Keyed(identity)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.factory.erase(),
+            self.store.erase(),
+            self.identity.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let factory = ctx.require_at(&self.factory)?;
+            let store = ctx.require_at(&self.store)?;
+            let identity = ctx.require_at(&self.identity)?;
             let tree = TimelineTree::new(factory, store, identity.session_id.clone());
             let owner = tree.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move { owner.close().await.map_err(Into::into) })
-                }))
-            })?;
+            ctx.effect(move || async move { owner.close().await.map_err(Into::into) })?;
             let commands = Arc::new(TreeCommands {
                 tree: Arc::downgrade(&tree),
             });
-            ctx.provide_as(self.commands.key().clone(), commands)?;
-            ctx.provide_as(self.tree.key().clone(), tree.clone())?;
-            ctx.provide_as(
-                self.control.key().clone(),
-                tree as Arc<dyn TimelineTreeControl>,
-            )?;
+            ctx.provide_at(self.commands.clone(), commands)?;
+            ctx.provide_at(self.tree.clone(), tree.clone())?;
+            ctx.provide_at(self.control.clone(), tree as Arc<dyn TimelineTreeControl>)?;
             Ok(Effect::Done)
         })
     }
 }
 /// Session part: registers the `branch` tool, which forks the calling
 /// branch through the tree.
-pub struct BranchToolPlugin;
-impl TypedPlugin for BranchToolPlugin {
-    type Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>);
+pub struct BranchToolPlugin {
+    tree: Key<TreeCommands>,
+    tools: Key<ToolRegistry>,
+}
+impl BranchToolPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            tree: names.key()?,
+            tools: names.key()?,
+        })
+    }
+}
+impl DynPlugin for BranchToolPlugin {
     fn name(&self) -> &str {
         "BranchTool"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(tree), Keyed(tools)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.tree.erase(), self.tools.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let tree = ctx.require_at(&self.tree)?;
+            let tools = ctx.require_at(&self.tools)?;
             tools.register(
                 ctx,
                 ToolContribution {

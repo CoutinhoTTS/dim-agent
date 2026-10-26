@@ -357,7 +357,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
 
 今天的实际行为，依据 [permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs) 的 `decide` 和 [approval.rs](../../../../crates/dim-agent-capabilities/src/approval.rs) 的 `admit`：
 
-- **不询问。** Permission 按工具名和风险类别决定，看不到路径，所以工作目录以外的路径与目录内的路径决定方式相同。`read` 声明的风险是 `read_filesystem`，所有预设都允许；产品配置的默认预设是 `workspace-write`（[main.rs](../../../../crates/dim-app-server/src/main.rs)）。因此模型读取粘贴文件时不会弹出审批，符合 Attachments 的需要。把 `read` 列入 `disallowedTools` 的策略会拒绝它，与拒绝其他任何 `read` 一样。
+- **不询问。** 读取准入按工具名和风险类别决定，工作目录以外的读取与目录内的读取决定方式相同。`workspace-write` 的写入准入另行检查[工作区目标](../../../architecture/rust-agent/plugins/Permission.md#workspace-write-targets)。`read` 声明的风险是 `read_filesystem`，所有预设都允许；产品配置的默认预设是 `workspace-write`（[main.rs](../../../../crates/dim-app-server/src/main.rs)）。因此模型读取粘贴文件时不会弹出审批，符合 Attachments 的需要。把 `read` 列入 `disallowedTools` 的策略会拒绝它，与拒绝其他任何 `read` 一样。
 - **没有可以扩大的授权。** 审批的回答是对单次调用的 `allow` 或 `deny`，Dim 不记录"以后都允许"（[AcpGateway](../plugins/AcpGateway.md) 从不提供 `allow_always`）。策略变更（`session.permission.update`，写成 `permission/changed`）只包含预设和工具名，从不包含路径。记住的决定（`/approvals`）在计划中，尚未设计；从不询问的 `read` 不会产生它们，§11.2 保证这一点不变。读取 Session 文件不经审批请求就被允许，所以不会留下任何可能覆盖 `dimcode.sqlite`、数据库目录或 `~/.dimcode` 的东西。
 - **FileStorage 根不授予任何东西。** 把数据库目录登记为 FileStorage 根（§3.1），只是让 SessionStore 能通过 FileStorage 在那里写入。`read` 从不查询 FileStorage 根，文件根授权也不授予除此之外的任何东西（[ADR 003](../../adr/003-approval-scope.md) D5）。
 - **不是新情况。** WorkspaceTools 已经把超长的 `read` 结果和 `exec` 输出写到 `<数据库目录>/command-output/<sessionId>/`，并把路径交给模型（[read.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/files/read.rs) 的 `offload`）。在产品配置下，这两个目录都紧挨着 `dimcode.sqlite`。
@@ -372,7 +372,7 @@ Attachments（[A.2](../plugins/Attachments.md#a2-attachmentput)）在 `Deps` 中
        <fileId T owns>/notes.md         Session T's file
 ```
 
-**Permission 不做什么。** Permission 按工具和风险准入，不是隔离（[Permission](../../../architecture/rust-agent/plugins/Permission.md)，ADR 001 的 "Trust and cross-language calls" 一节）。在任何预设下，`read`、`glob` 和 `grep` 都能读到守护进程用户可读的任何文本文件：上图中 T 的文件、其他 Session 的命令输出、`~/.dimcode/auth.json`。`read` 拒绝 `dimcode.sqlite`，只是因为它的二进制防护拒绝 `.sqlite` 扩展名。S5a 不扩大这个边界，也不为自己的目录开例外去收窄它：那样只护住一个 App Server 目录，产品目录的其余部分照旧。S5a 在构造上保证的是：
+**Permission 不做什么。** Permission 的读取准入不按路径限定，不是隔离（[Permission](../../../architecture/rust-agent/plugins/Permission.md)，ADR 001 的 "Trust and cross-language calls" 一节）。在任何预设下，`read`、`glob` 和 `grep` 都能读到守护进程用户可读的任何文本文件：上图中 T 的文件、其他 Session 的命令输出、`~/.dimcode/auth.json`。`read` 拒绝 `dimcode.sqlite`，只是因为它的二进制防护拒绝 `.sqlite` 扩展名。S5a 不扩大这个边界，也不为自己的目录开例外去收窄它：那样只护住一个 App Server 目录，产品目录的其余部分照旧。S5a 在构造上保证的是：
 
 - `put` 返回的每个路径都是 `<db>.session-files/<fileId>/<name>`，其中 `fileId` 是随机 UUID v4，`name` 是一个经过校验的组成部分。返回的路径不会指向数据库、它的伴随文件或数据库目录中的其他条目。
 - SessionStore 只把路径返回给一次 `put`，该文件随即归这次 `put` 所针对的 Session 所有；分叉拥有源拥有的每个文件，所以它继承的历史中来自 `put` 的路径仍归它所有（§4）。

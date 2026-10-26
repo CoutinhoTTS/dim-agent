@@ -2,10 +2,11 @@
 //! design/appserver/session-notices.md §9).
 use super::*;
 use dim_agent_capabilities::session_broadcast::{
-    SessionBroadcastEvent, SessionNotice, notify, session_channel,
+    SessionBroadcast, SessionBroadcastEvent, SessionNotice, notify, session_channel,
 };
 use dim_agent_runtime::SessionIdentity;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Listener};
+use rutis::Ctx;
+use rutis::host::CtxHost;
 
 /// A Session-scoped stand-in for an owner of process-level state. Like
 /// SessionTitle's flow, it reacts to `input/applied` observed through the
@@ -14,13 +15,8 @@ struct Owner {
     ctx: Ctx,
     session_id: String,
 }
-impl Listener<SessionBroadcastEvent> for Owner {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        record: &'a SessionBroadcastEvent,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+impl Owner {
+    fn on_record(&self, record: &SessionBroadcastEvent) {
         if let SessionBroadcastEvent::Event { branch_id, event } = record
             && branch_id == "main"
             && matches!(event.kind, EventKind::InputApplied(_))
@@ -35,31 +31,43 @@ impl Listener<SessionBroadcastEvent> for Owner {
                 },
             );
         }
-        Box::pin(async { Ok(None) })
     }
 }
-struct OwnerPlugin;
-impl TypedPlugin for OwnerPlugin {
-    type Deps = Keyed<SessionIdentity>;
+struct OwnerPlugin {
+    identity: rutis::host::Key<SessionIdentity>,
+}
+impl OwnerPlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            identity: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for OwnerPlugin {
     fn name(&self) -> &str {
         "test.notice-owner"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.identity.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        ctx: &'a Ctx,
-        Keyed(identity): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let identity = ctx.require_at(&self.identity)?;
             // Removed with this plugin's context.
-            ctx.events().on(
-                ctx,
-                &session_channel(&identity.session_id),
-                Owner {
-                    ctx: ctx.clone(),
-                    session_id: identity.session_id.clone(),
-                },
-            )?;
-            Ok(Effect::Done)
+            let owner = Owner {
+                ctx: ctx.clone(),
+                session_id: identity.session_id.clone(),
+            };
+            ctx.listen::<SessionBroadcast>()
+                .name(session_channel(&identity.session_id))
+                .on(move |event, _| {
+                    owner.on_record(&event.record);
+                    async { Ok(None) }
+                })?;
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -106,8 +114,9 @@ async fn an_owner_notice_follows_its_observed_event_to_v3_clients_only() {
     for _ in 0..5 {
         let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
             builder.require_feature(
-                Feature::new("test.notice-owner")
-                    .session("test.notice-owner", |names| names.part(OwnerPlugin)),
+                Feature::new("test.notice-owner").session("test.notice-owner", |names| {
+                    Ok(Box::new(OwnerPlugin::new(names)?))
+                }),
             );
         })
         .await;

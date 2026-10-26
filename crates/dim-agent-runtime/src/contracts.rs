@@ -1,6 +1,6 @@
 use crate::{Branch, Result};
 use dim_agent_types::{ModelSelection, PromptScope};
-use rutis::BoxFuture;
+use rutis::host::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::watch;

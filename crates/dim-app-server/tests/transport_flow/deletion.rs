@@ -469,23 +469,17 @@ struct HeldBuild {
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
-impl TypedPlugin for HeldBuild {
+impl Plugin for HeldBuild {
     type Deps = ();
     fn name(&self) -> &str {
         "HeldBuild"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        (): (),
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            if self.armed.swap(false, Ordering::SeqCst) {
-                self.entered.notify_one();
-                self.release.notified().await;
-            }
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, _: &rutis::Ctx, (): ()) -> rutis::Result {
+        if self.armed.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        Ok(())
     }
 }
 
@@ -501,7 +495,7 @@ async fn a_delete_waits_for_a_building_session() {
     let plugin = held.clone();
     let (server, agent) = launch_with(Arc::new(MockTools), store.config(), move |builder| {
         builder.require_feature(
-            Feature::new("HeldBuild").session("HeldBuild", move |names| names.part(plugin.clone())),
+            Feature::new("HeldBuild").session("HeldBuild", move |_| Ok(Box::new(plugin.clone()))),
         );
     })
     .await;

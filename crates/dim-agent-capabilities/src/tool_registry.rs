@@ -10,10 +10,8 @@ use dim_agent_runtime::{
     SessionLifecycle,
 };
 use dim_agent_types::*;
-use rutis::{
-    BoxFuture, Call, CordisError, Ctx, DepKey, Effect, Event, EventKey, InstanceId, Keyed,
-    Listener, TypedPlugin,
-};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, InstanceId, Key, TypeKey};
+use rutis::{Ctx, Error, Event};
 use rutis_bridge::session::{
     Error as BridgeError, HostDispatch, Reference, Reply, Value, host_key_in, settle,
 };
@@ -28,21 +26,32 @@ use tokio_util::sync::CancellationToken;
 /// A provider updated its sets; emitted under its Session's
 /// [`tool_provider_changes`] name.
 #[derive(serde::Serialize, serde::Deserialize)]
-pub struct ToolProviderChanged;
+pub struct ToolProviderChanged {
+    /// The Session's [`tool_provider_changes`] name; picks the name only.
+    #[serde(skip)]
+    pub name: String,
+}
 impl Event for ToolProviderChanged {
     // Dispatched only under a Session's private name.
     const NAME: &'static str = "";
     type Value = ();
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// The private name a Session's tool providers announce changes under. The
 /// bus is flat, so the name carries the Session instance; callers use this
 /// constructor rather than spelling the name.
-pub fn tool_provider_changes(session: InstanceId) -> EventKey<ToolProviderChanged> {
-    EventKey::dynamic(format!("dim/tools/{session}/provider-changed"))
+pub fn tool_provider_changes(session: InstanceId) -> String {
+    format!("dim/tools/{session}/provider-changed")
 }
 
 pub trait ToolHandler: Send + Sync + 'static {
+    /// Resolve a filesystem write's target without effects before admission.
+    fn resolve_write(&self, call: ToolCall, _: CancellationToken) -> HostFuture<'_, ToolCall> {
+        Box::pin(async move { Ok(call) })
+    }
     fn execute(
         &self,
         call: ToolCall,
@@ -151,7 +160,7 @@ impl ToolRegistry {
     /// the Session has no mount list or its list names it (#364); Permission
     /// still admits each call. The name must follow the tool name grammar,
     /// and neither a host tool nor another registration may have it.
-    pub fn register(&self, ctx: &Ctx, tool: ToolContribution) -> Result<(), CordisError> {
+    pub fn register(&self, ctx: &Ctx, tool: ToolContribution) -> Result<(), Error> {
         let name = tool.definition.name.clone();
         if !valid_tool_name(&name) {
             return Err(invalid(format!("invalid tool name {name}")));
@@ -170,7 +179,7 @@ impl ToolRegistry {
         ctx: &Ctx,
         name: impl Into<String>,
         source: Arc<dyn ToolProvider>,
-    ) -> Result<(), CordisError> {
+    ) -> Result<(), Error> {
         let name = name.into();
         if !valid_tool_name(&name) {
             return Err(invalid(format!(
@@ -503,7 +512,7 @@ impl ToolRegistry {
         ctx: &Ctx,
         declaration: serde_json::Value,
         execute: Reference,
-    ) -> Result<(), CordisError> {
+    ) -> Result<(), Error> {
         let definition: ToolDefinition = serde_json::from_value(declaration)
             .map_err(|error| invalid(format!("invalid tool declaration: {error}")))?;
         if definition.risk.as_ref().is_none_or(|risk| risk.is_empty()) {
@@ -527,22 +536,8 @@ impl ToolRegistry {
     }
 }
 
-fn invalid(message: String) -> CordisError {
+fn invalid(message: String) -> Error {
     AgentError::InvalidInput(message).into()
-}
-
-impl Listener<ToolProviderChanged> for Arc<ToolRegistry> {
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        _: &'a ToolProviderChanged,
-        _call: Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            self.refresh();
-            Ok(None)
-        })
-    }
 }
 
 /// Whether a source key is a registered tool's. Like a host tool, it is
@@ -567,6 +562,9 @@ pub fn valid_tool_name(name: &str) -> bool {
 
 struct HostTool(Arc<ToolHost>);
 impl ToolHandler for HostTool {
+    fn resolve_write(&self, call: ToolCall, cancel: CancellationToken) -> HostFuture<'_, ToolCall> {
+        self.0.0.resolve_write(call, cancel)
+    }
     fn execute(
         &self,
         call: ToolCall,
@@ -646,8 +644,26 @@ impl HostDispatch for ForeignRegistry {
                 "toolRegistry has no method {method}"
             )));
         }
-        let caller = rutis_bridge::exports::caller_ctx("register")?;
-        let mut args = rutis_bridge::exports::arguments(args, 2)?;
+        let caller = rutis_bridge::session::caller_row()
+            .map(|row| row.ctx().clone())
+            .ok_or_else(|| {
+                BridgeError::Value(
+                    "register needs the calling row's context: only a row of a language runtime can call it"
+                        .into(),
+                )
+            })?;
+        let mut args = match args {
+            Value::Undefined => Vec::new(),
+            args => args.list()?,
+        };
+        if args.len() > 2 {
+            return Err(BridgeError::Value(format!(
+                "expected at most 2 arguments, received {}",
+                args.len()
+            )));
+        }
+        args.resize(2, Value::Undefined);
+        let mut args = args.into_iter();
         let declaration = args.next().expect("two arguments").json()?;
         let Some(Value::Reference(execute)) = args.next().filter(
             |execute| matches!(execute, Value::Reference(reference) if reference.is_function()),
@@ -681,34 +697,44 @@ pub fn definition(name: &str, description: &str, schema: serde_json::Value) -> T
 
 pub struct ToolRegistryPlugin {
     session: InstanceId,
-    registry: DepKey<ToolRegistry>,
-    view: DepKey<ToolSourcesView>,
+    registry: Key<ToolRegistry>,
+    view: Key<ToolSourcesView>,
+    host: Key<ToolHost>,
+    config: Key<SessionConfig>,
+    identity: Key<SessionIdentity>,
+    lifecycle: Key<SessionLifecycle>,
 }
 impl ToolRegistryPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
             session: names.instance(dim_agent_runtime::SESSION_GROUP)?,
             registry: names.key()?,
             view: names.key()?,
+            host: names.key()?,
+            config: names.key()?,
+            identity: names.key()?,
+            lifecycle: names.key()?,
         })
     }
 }
-impl TypedPlugin for ToolRegistryPlugin {
-    type Deps = (
-        Keyed<ToolHost>,
-        Keyed<SessionConfig>,
-        Keyed<SessionIdentity>,
-        Keyed<SessionLifecycle>,
-    );
+impl DynPlugin for ToolRegistryPlugin {
     fn name(&self) -> &str {
         "ToolRegistry"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(host), Keyed(config), Keyed(identity), Keyed(lifecycle)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.host.erase(),
+            self.config.erase(),
+            self.identity.erase(),
+            self.lifecycle.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let host = ctx.require_at(&self.host)?;
+            let config = ctx.require_at(&self.config)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let lifecycle = ctx.require_at(&self.lifecycle)?;
             let host_tools = host
                 .0
                 .definitions()
@@ -743,8 +769,16 @@ impl TypedPlugin for ToolRegistryPlugin {
                 state: watch::Sender::new(ToolSourcesState::default()),
             });
             // Subscribe before the first read; notifications carry no state.
-            ctx.events()
-                .on(ctx, &tool_provider_changes(self.session), registry.clone())?;
+            let listener = registry.clone();
+            ctx.listen::<ToolProviderChanged>()
+                .name(tool_provider_changes(self.session))
+                .on(move |_, _| {
+                    let registry = listener.clone();
+                    async move {
+                        registry.refresh();
+                        Ok(None)
+                    }
+                })?;
             // Taken before the first read, so no registration goes unseen.
             let mut tools = registry.tools.changes();
             let mut providers = registry.providers.changes();
@@ -769,33 +803,31 @@ impl TypedPlugin for ToolRegistryPlugin {
                 }
             });
             ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        // Aborting ends the task at its next wait; awaiting it
-                        // lets a refresh already running finish first.
-                        task.abort();
-                        let _ = task.await;
-                        Ok(())
-                    })
-                }))
+                async move {
+                    // Aborting ends the task at its next wait; awaiting it
+                    // lets a refresh already running finish first.
+                    task.abort();
+                    let _ = task.await;
+                    Ok(())
+                }
             })?;
             registry.refresh();
-            ctx.provide_as(
-                self.view.key().clone(),
+            ctx.provide_at(
+                self.view.clone(),
                 Arc::new(ToolSourcesView(registry.sources_state())),
             )?;
             // Other languages reach the registry at its dispatcher key (rutis
             // usage §3.5), provided with it: a row waiting for it starts
             // loading as the registry becomes active, while its Session is
             // created.
-            ctx.provide_as::<dyn HostDispatch>(
+            ctx.provide_at::<dyn HostDispatch>(
                 host_key_in(
                     &dim_agent_runtime::names::name_of::<ToolRegistry>(),
                     self.session,
                 ),
                 Arc::new(ForeignRegistry(registry.clone())),
             )?;
-            ctx.provide_as(self.registry.key().clone(), registry)?;
+            ctx.provide_at(self.registry.clone(), registry)?;
             Ok(Effect::Done)
         })
     }

@@ -12,6 +12,7 @@ use dim_agent_capabilities::{
         ModelChunk, ModelConnection, ModelHost, ModelStopReason, ProviderConnectionResolver,
     },
 };
+use dim_agent_runtime::{Names, names::ServiceCatalog};
 use dim_agent_types::{Message, ModelId, ModelRequest, Role};
 use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
@@ -23,12 +24,14 @@ use dim_app_server::{
     storage::SqliteStoragePlugin,
 };
 use futures_util::{StreamExt, stream};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, Keyed, Typed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, Key, TypeKey};
+use rutis::{Ctx, Plugin};
+use rutis_loader::resolve::Build;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, LazyLock, Mutex, OnceLock},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -109,31 +112,54 @@ async fn completion(
     })))
 }
 
-struct Capture(Arc<OnceLock<(Arc<ProviderService>, Arc<ProviderConnectionResolver>)>>);
-impl TypedPlugin for Capture {
-    type Deps = (Keyed<ProviderService>, Keyed<ProviderConnectionResolver>);
+struct Capture {
+    captured: Arc<OnceLock<(Arc<ProviderService>, Arc<ProviderConnectionResolver>)>>,
+    provider: Key<ProviderService>,
+    resolver: Key<ProviderConnectionResolver>,
+}
+impl Capture {
+    fn new(
+        names: &Names<'_>,
+        captured: Arc<OnceLock<(Arc<ProviderService>, Arc<ProviderConnectionResolver>)>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            captured,
+            provider: names.key()?,
+            resolver: names.key()?,
+        })
+    }
+}
+impl DynPlugin for Capture {
     fn name(&self) -> &str {
         "test.provider.capture"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(provider), Keyed(resolver)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.provider.erase(), self.resolver.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            self.0
-                .set((provider, resolver))
-                .map_err(|_| CordisError::PluginFailed("duplicate capture".into()))?;
+            let provider = ctx.require_at(&self.provider)?;
+            let resolver = ctx.require_at(&self.resolver)?;
+            self.captured.set((provider, resolver)).map_err(|_| {
+                rutis::Error::from(ErrorKind::PluginFailed("duplicate capture".into()))
+            })?;
             Ok(Effect::Done)
         })
     }
 }
+/// Process-level names from the App Server's catalog, for parts mounted on a
+/// test root.
+fn names() -> Names<'static> {
+    static CATALOG: LazyLock<ServiceCatalog> = LazyLock::new(dim_app_server::catalog);
+    static BUILD: LazyLock<Build> = LazyLock::new(Build::default);
+    Names::copy(&CATALOG, &BUILD)
+}
 /// Provider keyed from the App Server's catalog, mounted on a test root.
-fn provider_part(plugin: ProviderPlugin) -> Typed<ProviderPlugin> {
-    plugin.typed(&dim_app_server::catalog()).unwrap()
+fn provider_part(make: fn(&Names<'_>) -> rutis::Result<ProviderPlugin>) -> ProviderPlugin {
+    make(&names()).unwrap()
 }
 
-async fn active(view: &rutis::FiberView) {
+async fn active(view: &rutis::host::FiberView) {
     let mut status = view.watch();
     while status.borrow().state != FiberState::Active {
         assert_ne!(
@@ -250,21 +276,13 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
                 .unwrap(),
         );
-        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-            home.clone(),
-        ])));
-        root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-            home.join("native.sqlite"),
-        )));
-        root.plugin(Typed::new(ManagedProvidersPlugin));
-        root.plugin(Typed::new(
-            dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-        ));
-        root.plugin(Typed::new(
-            dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-        ));
-        active(&root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin))).await;
-        active(&root.plugin(provider_part(ProviderPlugin::default()))).await;
+        root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+        root.plugin(ManagedProvidersPlugin::new(&names()).unwrap());
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+        active(&root.plugin(dim_agent_aimux::AimuxPlugin)).await;
+        active(&root.plugin(provider_part(ProviderPlugin::new))).await;
         let provider = root.get::<ProviderService>().unwrap();
         let resolver = root.get::<ProviderConnectionResolver>().unwrap();
         let host = root.get::<ModelHost>().unwrap();
@@ -528,20 +546,14 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
             })
         }
     }
-    impl TypedPlugin for Secrets {
+    impl Plugin for Secrets {
         type Deps = ();
         fn name(&self) -> &str {
             "test.secrets"
         }
-        fn apply<'a>(
-            &'a self,
-            ctx: &'a Ctx,
-            (): Self::Deps,
-        ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-            Box::pin(async move {
-                ctx.provide(ProviderSecretHost(Arc::new(self.clone())))?;
-                Ok(Effect::Done)
-            })
+        async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+            ctx.provide(ProviderSecretHost(Arc::new(self.clone())))?;
+            Ok(())
         }
     }
 
@@ -565,21 +577,13 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
     );
-    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        home.clone(),
-    ])));
-    root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-        home.join("native.sqlite"),
-    )));
-    root.plugin(Typed::new(ManagedProvidersPlugin));
-    root.plugin(Typed::new(
-        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-    ));
-    root.plugin(Typed::new(
-        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-    ));
-    active(&root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin))).await;
-    let plain = root.plugin(provider_part(ProviderPlugin::default()));
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin::new(&names()).unwrap());
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    active(&root.plugin(dim_agent_aimux::AimuxPlugin)).await;
+    let plain = root.plugin(provider_part(ProviderPlugin::new));
     active(&plain).await;
     let provider = root.get::<ProviderService>().unwrap();
     let cancel = CancellationToken::new();
@@ -664,7 +668,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     ));
     plain.dispose().await.unwrap();
 
-    let view = root.plugin(provider_part(ProviderPlugin::with_secret_host()));
+    let view = root.plugin(provider_part(ProviderPlugin::with_secret_host));
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), active(&view))
             .await
@@ -672,7 +676,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     );
     assert!(root.get::<ProviderService>().is_none());
     let (send, mut lookups) = mpsc::channel::<Lookup>(8);
-    let secrets = root.plugin(Typed::new(Secrets(send)));
+    let secrets = root.plugin(Secrets(send));
     active(&secrets).await;
     tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
         .await
@@ -875,21 +879,13 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
     );
-    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        home.clone(),
-    ])));
-    root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-        home.join("native.sqlite"),
-    )));
-    root.plugin(Typed::new(ManagedProvidersPlugin));
-    root.plugin(Typed::new(
-        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-    ));
-    root.plugin(Typed::new(
-        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-    ));
-    root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin));
-    let view = root.plugin(provider_part(ProviderPlugin::default()));
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin::new(&names()).unwrap());
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
     tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
         .await
         .unwrap();
@@ -1630,23 +1626,15 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
     );
-    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        home.clone(),
-    ])));
-    root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-        home.join("native.sqlite"),
-    )));
-    root.plugin(Typed::new(ManagedProvidersPlugin));
-    root.plugin(Typed::new(
-        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-    ));
-    root.plugin(Typed::new(
-        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-    ));
-    root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin));
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin::new(&names()).unwrap());
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        active(&root.plugin(provider_part(ProviderPlugin::default()))),
+        active(&root.plugin(provider_part(ProviderPlugin::new))),
     )
     .await
     .unwrap();
@@ -1743,21 +1731,13 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
     );
-    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        home.clone(),
-    ])));
-    root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-        home.join("native.sqlite"),
-    )));
-    root.plugin(Typed::new(ManagedProvidersPlugin));
-    root.plugin(Typed::new(
-        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-    ));
-    root.plugin(Typed::new(
-        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-    ));
-    active(&root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin))).await;
-    active(&root.plugin(provider_part(ProviderPlugin::default()))).await;
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin::new(&names()).unwrap());
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    active(&root.plugin(dim_agent_aimux::AimuxPlugin)).await;
+    active(&root.plugin(provider_part(ProviderPlugin::new))).await;
     let provider = root.get::<ProviderService>().unwrap();
     let resolver = root.get::<ProviderConnectionResolver>().unwrap();
     let host = root.get::<ModelHost>().unwrap();
@@ -2117,21 +2097,13 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
             dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
                 .unwrap(),
         );
-        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-            home.clone(),
-        ])));
-        root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-            home.join("native.sqlite"),
-        )));
-        root.plugin(Typed::new(ManagedProvidersPlugin));
-        root.plugin(Typed::new(
-            dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-        ));
-        root.plugin(Typed::new(
-            dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-        ));
-        active(&root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin))).await;
-        active(&root.plugin(provider_part(ProviderPlugin::default()))).await;
+        root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+        root.plugin(ManagedProvidersPlugin::new(&names()).unwrap());
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+        active(&root.plugin(dim_agent_aimux::AimuxPlugin)).await;
+        active(&root.plugin(provider_part(ProviderPlugin::new))).await;
         let provider = root.get::<ProviderService>().unwrap();
         let resolver = root.get::<ProviderConnectionResolver>().unwrap();
         let host = root.get::<ModelHost>().unwrap();
@@ -2584,23 +2556,15 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
     );
-    let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        home.clone(),
-    ])));
-    let oauth = root.plugin(Typed::new(ManagedProvidersPlugin));
-    root.plugin(Typed::new(
-        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-    ));
-    root.plugin(Typed::new(
-        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-    ));
-    let sqlite = root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-        home.join("native.sqlite"),
-    )));
-    let provider_plugin = root.plugin(provider_part(ProviderPlugin::default()));
-    let aimux = root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin));
+    let files = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    let oauth = root.plugin(ManagedProvidersPlugin::new(&names()).unwrap());
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    let sqlite = root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    let provider_plugin = root.plugin(provider_part(ProviderPlugin::new));
+    let aimux = root.plugin(dim_agent_aimux::AimuxPlugin);
     let captured = Arc::new(OnceLock::new());
-    let capture = root.plugin(Typed::new(Capture(captured.clone())));
+    let capture = root.plugin(Capture::new(&names(), captured.clone()).unwrap());
     for plugin in [&files, &oauth, &sqlite, &provider_plugin, &aimux, &capture] {
         active(plugin).await;
     }
@@ -3574,21 +3538,14 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .unwrap(),
     );
     let plugins = [
-        restarted.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-            home.clone(),
-        ]))),
-        restarted.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-            home.join("native.sqlite"),
-        ))),
-        restarted.plugin(Typed::new(ManagedProvidersPlugin)),
-        restarted.plugin(Typed::new(
-            dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-        )),
-        restarted.plugin(Typed::new(
-            dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-        )),
-        restarted.plugin(provider_part(ProviderPlugin::default())),
-        restarted.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin)),
+        restarted.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        restarted.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        restarted.plugin(ManagedProvidersPlugin::new(&names()).unwrap()),
+        restarted
+            .plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        restarted.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        restarted.plugin(provider_part(ProviderPlugin::new)),
+        restarted.plugin(dim_agent_aimux::AimuxPlugin),
     ];
     for plugin in &plugins {
         active(plugin).await;
@@ -3723,21 +3680,14 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .unwrap(),
     );
     let plugins = [
-        isolated.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-            home.clone(),
-        ]))),
-        isolated.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-            home.join("native.sqlite"),
-        ))),
-        isolated.plugin(Typed::new(ManagedProvidersPlugin)),
-        isolated.plugin(Typed::new(
-            dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-        )),
-        isolated.plugin(Typed::new(
-            dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-        )),
-        isolated.plugin(provider_part(ProviderPlugin::default())),
-        isolated.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin)),
+        isolated.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        isolated.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        isolated.plugin(ManagedProvidersPlugin::new(&names()).unwrap()),
+        isolated
+            .plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        isolated.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        isolated.plugin(provider_part(ProviderPlugin::new)),
+        isolated.plugin(dim_agent_aimux::AimuxPlugin),
     ];
     for plugin in &plugins {
         active(plugin).await;
@@ -3844,7 +3794,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     assert_eq!(waiting.errors.len(), 1);
     assert!(waiting.errors[0].message.contains("restart"));
     plugins[5].dispose().await.unwrap();
-    let replacement = isolated.plugin(provider_part(ProviderPlugin::default()));
+    let replacement = isolated.plugin(provider_part(ProviderPlugin::new));
     active(&replacement).await;
     let replaced = isolated
         .get::<ProviderService>()
@@ -3964,21 +3914,13 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
             .unwrap(),
     );
     let plugins = [
-        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-            home.clone(),
-        ]))),
-        root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-            home.join("native.sqlite"),
-        ))),
-        root.plugin(rutis::Typed::new(ManagedProvidersPlugin)),
-        root.plugin(rutis::Typed::new(
-            dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-        )),
-        root.plugin(rutis::Typed::new(
-            dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-        )),
-        root.plugin(provider_part(ProviderPlugin::default())),
-        root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin)),
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(ManagedProvidersPlugin::new(&names()).unwrap()),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(provider_part(ProviderPlugin::new)),
+        root.plugin(dim_agent_aimux::AimuxPlugin),
     ];
     for plugin in &plugins {
         active(plugin).await;
@@ -4104,21 +4046,13 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
     );
-    root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        home.clone(),
-    ])));
-    root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-        home.join("native.sqlite"),
-    )));
-    root.plugin(Typed::new(ManagedProvidersPlugin));
-    root.plugin(Typed::new(
-        dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(0),
-    ));
-    root.plugin(Typed::new(
-        dim_app_server::grok_oauth::GrokOAuthPlugin::new(0),
-    ));
-    active(&root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin))).await;
-    let view = root.plugin(provider_part(ProviderPlugin::default()));
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin::new(&names()).unwrap());
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    active(&root.plugin(dim_agent_aimux::AimuxPlugin)).await;
+    let view = root.plugin(provider_part(ProviderPlugin::new));
     active(&view).await;
     let provider = root.get::<ProviderService>().unwrap();
     let auxiliary = root.get::<AuxiliaryModelHost>().unwrap();

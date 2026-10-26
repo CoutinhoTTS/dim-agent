@@ -7,7 +7,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory, TypeKey};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, PluginFactory, TypeKey};
+use rutis::{Ctx, Error};
 use rutis_bridge::{
     Described, Dial, Features, Identity, LinkConfig, LinkState, PeerPlugin, StaticCatalog,
     StaticIdentity, Transport,
@@ -77,16 +78,16 @@ pub(crate) struct LeafNode {
     state: LinkWatch,
 }
 
-impl Plugin for LeafNode {
+impl DynPlugin for LeafNode {
     fn name(&self) -> &str {
         "UiLeaf"
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
-            ctx.provide_as::<dyn Transport>(transport_key(LINKS), self.accept.clone())?;
+            ctx.provide_at::<dyn Transport>(transport_key(LINKS), self.accept.clone())?;
             let identity: Arc<dyn Identity> = Arc::new(StaticIdentity::new(self.peer.clone()));
-            ctx.provide_as::<dyn Identity>(rutis_bridge::identity_key(LINKS), identity)?;
+            ctx.provide_at::<dyn Identity>(rutis_bridge::identity_key(LINKS), identity)?;
             let catalog = StaticCatalog::new().with(
                 "Tui",
                 Described {
@@ -110,7 +111,7 @@ impl Plugin for LeafNode {
                     ..Features::default()
                 },
             )
-            .map_err(|error| CordisError::PluginFailed(error.into()))?;
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
             let handle = peer.handle();
             let node = ctx.plugin(peer);
             (&node).await.map_err(unwrap)?;
@@ -170,13 +171,16 @@ impl PluginFactory<serde_json::Value> for TuiFactory {
         "Tui"
     }
 
-    fn injects(&self) -> &[TypeKey] {
-        &[]
+    fn injects(&self) -> Vec<TypeKey> {
+        Vec::new()
     }
 
-    fn build(&self, config: &serde_json::Value) -> Result<Box<dyn Plugin>, CordisError> {
-        let config = LeafConfig::deserialize(config)
-            .map_err(|error| CordisError::PluginFailed(format!("Tui config: {error}").into()))?;
+    fn build(&self, config: &serde_json::Value) -> Result<Box<dyn DynPlugin>, Error> {
+        let config = LeafConfig::deserialize(config).map_err(|error| {
+            rutis::Error::from(ErrorKind::PluginFailed(
+                format!("Tui config: {error}").into(),
+            ))
+        })?;
         let mut options = self.options.clone();
         options.resume = Some(config.session_id);
         options.ui_identity = Some(UiIdentity {
@@ -197,25 +201,27 @@ struct HostedTui {
     leave: Arc<Mutex<Option<oneshot::Sender<Leave>>>>,
 }
 
-impl Plugin for HostedTui {
+impl DynPlugin for HostedTui {
     fn name(&self) -> &str {
         "Tui"
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
-            let link = ctx.plugin(rutis::Typed::new(DaemonLink {
+            let link = ctx.plugin(DaemonLink {
                 options: self.options.clone(),
                 // The daemon hosting this row is running.
                 start: false,
-            }));
+            });
             (&link).await.map_err(unwrap)?;
             let leave = self
                 .leave
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .take()
-                .ok_or_else(|| CordisError::PluginFailed("Tui was loaded twice".into()))?;
+                .ok_or_else(|| {
+                    rutis::Error::from(ErrorKind::PluginFailed("Tui was loaded twice".into()))
+                })?;
             let env = ui::Env {
                 home: self.options.home.clone(),
                 workspace: self.options.cwd.clone(),
@@ -224,19 +230,19 @@ impl Plugin for HostedTui {
                     .fullscreen
                     .unwrap_or_else(|| ui::config::saved_fullscreen(&self.options.home)),
             };
-            let tui = ctx.plugin(rutis::Typed::new(Tui {
+            let tui = ctx.plugin(Tui {
                 env,
                 options: self.options.clone(),
                 leave: Mutex::new(Some(leave)),
-            }));
+            });
             (&tui).await.map_err(unwrap)?;
             Ok(Effect::Done)
         })
     }
 }
 
-fn unwrap(error: Arc<CordisError>) -> CordisError {
-    CordisError::PluginFailed(error.to_string().into())
+fn unwrap(error: Arc<ErrorKind>) -> Error {
+    rutis::Error::from(ErrorKind::PluginFailed(error.to_string().into()))
 }
 
 /// The leaf's side of its link: a private address that accepts exactly one

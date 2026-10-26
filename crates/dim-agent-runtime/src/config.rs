@@ -1,6 +1,7 @@
 use crate::core::Opening;
 pub use dim_agent_types::ModelId;
 use dim_agent_types::ModelSelection;
+use rutis::service;
 use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc, Mutex,
@@ -70,6 +71,7 @@ pub enum CollaborationRole {
     Leader,
     Member,
 }
+#[service]
 impl SessionConfig {
     /// The creation-time configuration as data, for parts in other
     /// languages.
@@ -103,6 +105,7 @@ pub struct TimelineIdentity {
     pub session_id: String,
     pub branch_id: String,
 }
+#[service]
 impl TimelineIdentity {
     /// The identity as data, for parts in other languages.
     pub fn get(&self) -> TimelineIdentity {
@@ -119,6 +122,7 @@ pub struct SessionIdentity {
     /// True when this Session was loaded from storage rather than newly created.
     pub restored: bool,
 }
+#[service]
 impl SessionIdentity {
     /// The identity as data, `{sessionId, restored}`, for parts in other
     /// languages.
@@ -193,13 +197,16 @@ pub struct BranchLifecycle(
     // the start of close, or the rollback of a failed build).
     Arc<Mutex<Option<Arc<Opening>>>>,
 );
+#[service]
 impl BranchLifecycle {
     pub(crate) fn new() -> Self {
         Self(Phases::new(), Arc::default())
     }
+    #[service(skip)]
     pub fn phase(&self) -> BranchPhase {
         self.0.get()
     }
+    #[service(skip)]
     pub fn watch(&self) -> tokio::sync::watch::Receiver<BranchPhase> {
         self.0.watch()
     }
@@ -261,6 +268,7 @@ struct ForeignHolds {
 }
 /// Set in the hold count by the idle release decision; no hold follows it.
 const RELEASING: usize = 1 << (usize::BITS - 1);
+#[service]
 impl SessionLifecycle {
     pub(crate) fn new(closing: tokio_util::sync::CancellationToken) -> Self {
         Self {
@@ -270,6 +278,7 @@ impl SessionLifecycle {
             foreign: Arc::default(),
         }
     }
+    #[service(skip)]
     pub fn phase(&self) -> SessionPhase {
         let phase = self.phases.get();
         if phase < SessionPhase::Closing && self.closing.is_cancelled() {
@@ -306,6 +315,7 @@ impl SessionLifecycle {
     /// the Session is closing or an idle release has been decided. A hold
     /// reports and cancels nothing, and never delays or refuses a close.
     #[must_use = "dropping the hold releases it"]
+    #[service(skip)]
     pub fn take_hold(&self) -> Option<SessionHold> {
         if self.phase() >= SessionPhase::Closing {
             return None;
@@ -331,15 +341,14 @@ impl SessionLifecycle {
         foreign.next += 1;
         let id = foreign.next;
         let holds = Arc::downgrade(&self.foreign);
-        let cleanup = move || {
-            if let Some(holds) = holds.upgrade() {
-                holds.lock().unwrap().held.remove(&id);
-            }
-            Ok(())
-        };
         // An unloading row takes no hold: dropping `hold` releases it.
         let disposer = ctx
-            .effect(|| rutis::Effect::Disposer(Box::new(cleanup)))
+            .effect(move || async move {
+                if let Some(holds) = holds.upgrade() {
+                    holds.lock().unwrap().held.remove(&id);
+                }
+                Ok(())
+            })
             .ok()?;
         foreign.held.insert(id, (hold, disposer));
         Some(id)

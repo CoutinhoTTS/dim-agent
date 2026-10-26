@@ -22,7 +22,8 @@ use dim_agent_runtime::{Dispatcher, Names, Timeline};
 use dim_agent_types::{
     EventKind, ExecEndedData, ExecStartedData, ExecStatus, JsonObject, ToolContent, ToolResult,
 };
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, KeyedGate, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::json;
 use std::{
     collections::{HashMap, VecDeque},
@@ -1293,13 +1294,19 @@ fn advance_occupying(inner: &mut Inner) -> Option<Settlement> {
 
 /// The plugin.
 pub struct ShellSessionPlugin {
-    session: DepKey<ShellSession>,
-    stop: DepKey<dyn ExecStop>,
+    session: Key<ShellSession>,
+    stop: Key<dyn ExecStop>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    host: Key<HostPlatform>,
+    lifecycle: Key<dim_agent_runtime::BranchLifecycle>,
+    session_config: Key<dim_agent_runtime::SessionConfig>,
+    identity: Key<dim_agent_runtime::TimelineIdentity>,
     config: Option<ShellSessionConfig>,
 }
 
 impl ShellSessionPlugin {
-    pub fn new(names: &Names<'_>, config: ShellSessionConfig) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>, config: ShellSessionConfig) -> rutis::Result<Self> {
         Ok(Self {
             config: Some(config),
             ..Self::session(names)?
@@ -1307,40 +1314,42 @@ impl ShellSessionPlugin {
     }
 
     /// Derive execution settings from the owning Session.
-    pub fn session(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn session(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             session: names.key()?,
             stop: names.key()?,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            host: names.key()?,
+            lifecycle: names.key()?,
+            session_config: names.key()?,
+            identity: names.key()?,
             config: None,
         })
     }
 }
 
-impl TypedPlugin for ShellSessionPlugin {
-    type Deps = (
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-        Keyed<HostPlatform>,
-        KeyedGate<dim_agent_runtime::BranchLifecycle>,
-        Keyed<dim_agent_runtime::SessionConfig>,
-        Keyed<dim_agent_runtime::TimelineIdentity>,
-    );
+impl DynPlugin for ShellSessionPlugin {
     fn name(&self) -> &str {
         "ShellSession"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(timeline),
-            Keyed(dispatcher),
-            Keyed(host),
-            _,
-            Keyed(config),
-            Keyed(identity),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, rutis::CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.host.erase(),
+            self.lifecycle.erase(),
+            self.session_config.erase(),
+            self.identity.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let host = ctx.require_at(&self.host)?;
+            let config = ctx.require_at(&self.session_config)?;
+            let identity = ctx.require_at(&self.identity)?;
             let session = Arc::new(ShellSession::new(
                 self.config.clone().unwrap_or_else(|| ShellSessionConfig {
                     cwd: PathBuf::from(&config.cwd),
@@ -1358,42 +1367,40 @@ impl TypedPlugin for ShellSessionPlugin {
             ));
             let service = session.clone();
             ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        service.lifecycle.cancel();
-                        {
-                            let mut inner = service.inner.lock().await;
-                            if let Some(mut pty) = inner.pty.take() {
-                                let _ = pty.terminate().await;
-                            }
-                            for queued in inner.queue.drain(..) {
-                                let _ = queued.done.send(Err("shell session closed".into()));
-                            }
+                async move {
+                    service.lifecycle.cancel();
+                    {
+                        let mut inner = service.inner.lock().await;
+                        if let Some(mut pty) = inner.pty.take() {
+                            let _ = pty.terminate().await;
                         }
-                        let tasks = service.tasks.lock().await.clone();
-                        tasks.close();
-                        tasks.wait().await;
-                        let generation = service.inner.lock().await.generation;
-                        service.handle_shell_exit(generation, None).await;
-                        // PowerShell children survive the shell and have their
-                        // own result-file watcher, now joined above.
-                        let remaining = service
-                            .inner
-                            .lock()
-                            .await
-                            .background
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        for task in remaining {
-                            let _ = ShellSession::stop(&service, &task).await;
+                        for queued in inner.queue.drain(..) {
+                            let _ = queued.done.send(Err("shell session closed".into()));
                         }
-                        Ok(())
-                    })
-                }))
+                    }
+                    let tasks = service.tasks.lock().await.clone();
+                    tasks.close();
+                    tasks.wait().await;
+                    let generation = service.inner.lock().await.generation;
+                    service.handle_shell_exit(generation, None).await;
+                    // PowerShell children survive the shell and have their
+                    // own result-file watcher, now joined above.
+                    let remaining = service
+                        .inner
+                        .lock()
+                        .await
+                        .background
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    for task in remaining {
+                        let _ = ShellSession::stop(&service, &task).await;
+                    }
+                    Ok(())
+                }
             })?;
-            ctx.provide_as(self.session.key().clone(), session.clone())?;
-            ctx.provide_as::<dyn ExecStop>(self.stop.key().clone(), session)?;
+            ctx.provide_at(self.session.clone(), session.clone())?;
+            ctx.provide_at::<dyn ExecStop>(self.stop.clone(), session)?;
             Ok(Effect::Done)
         })
     }

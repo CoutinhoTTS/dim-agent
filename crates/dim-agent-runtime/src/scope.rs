@@ -1,5 +1,6 @@
 use crate::*;
-use rutis::{Ctx, InstanceId, TypeKey};
+use rutis::Ctx;
+use rutis::host::{InstanceId, Key};
 
 /// Explicit opt-in for services that are safe to obtain from a public Session handle.
 ///
@@ -59,7 +60,7 @@ impl SessionLoader {
     }
     /// Creates an instance of `group` where the configuration tree puts it
     /// inside this loader's instance.
-    pub fn create_instance(&self, group: &str) -> rutis_loader::CreateInstance<'_> {
+    pub fn create_instance(&self, group: &str) -> rutis_loader::edit::CreateInstance<'_> {
         self.loader.create_instance(&self.anchor, group)
     }
 }
@@ -69,8 +70,8 @@ pub(crate) struct SessionScope {
     pub instance: InstanceId,
 }
 impl SessionScope {
-    pub fn key<T: ?Sized + 'static>(&self) -> TypeKey {
-        TypeKey::instance::<T>(self.instance)
+    pub fn key<T: ?Sized + 'static>(&self) -> Key<T> {
+        Key::of().instance(self.instance)
     }
 }
 
@@ -81,8 +82,8 @@ pub(crate) struct BranchScope {
     pub instance: InstanceId,
 }
 impl BranchScope {
-    pub fn key<T: ?Sized + 'static>(&self) -> TypeKey {
-        TypeKey::instance::<T>(self.instance)
+    pub fn key<T: ?Sized + 'static>(&self) -> Key<T> {
+        Key::of().instance(self.instance)
     }
 }
 impl PublicService for SessionConfig {}

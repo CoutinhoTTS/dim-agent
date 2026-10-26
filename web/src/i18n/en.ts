@@ -41,6 +41,7 @@ const en = {
   "message.collapse": "Collapse message",
   "message.copy": "Copy entire message",
   "message.expand": "Show full message",
+  "message.quote": "Quote in the composer",
   "newThread.pathLabel": "Absolute directory path",
   "newThread.pathPlaceholder": "/path/to/project",
   "newThread.selectWorkspace": "Select workspace...",

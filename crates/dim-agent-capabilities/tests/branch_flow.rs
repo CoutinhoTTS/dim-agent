@@ -1,7 +1,8 @@
 use dim_agent_capabilities::{defaults, timeline_tree::TreeCommands};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
+use rutis::{Ctx, Error};
 use std::{
     sync::{
         Arc, Mutex,
@@ -67,24 +68,43 @@ async fn batch_reads(timeline: &Timeline) -> BatchReads {
         sequences(timeline.local(2..=2).await),
     ]
 }
-struct ProbePlugin(Arc<Probe>);
-impl TypedPlugin for ProbePlugin {
-    type Deps = (
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-        Keyed<TimelineIdentity>,
-        Keyed<TreeCommands>,
-    );
+struct ProbePlugin {
+    probe: Arc<Probe>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    identity: Key<TimelineIdentity>,
+    commands: Key<TreeCommands>,
+}
+impl ProbePlugin {
+    fn new(names: &Names<'_>, probe: Arc<Probe>) -> rutis::Result<Self> {
+        Ok(Self {
+            probe,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            identity: names.key()?,
+            commands: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ProbePlugin {
     fn name(&self) -> &str {
         "test.branch-probe"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(dispatcher), Keyed(identity), Keyed(commands)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.identity.erase(),
+            self.commands.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let probe = self.0.clone();
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let commands = ctx.require_at(&self.commands)?;
+            let probe = self.probe.clone();
             *probe.commands.lock().unwrap() = Some(commands);
             if identity.branch_id == "main" {
                 *probe.main_timeline.lock().unwrap() = Some(timeline.clone());
@@ -97,11 +117,9 @@ impl TypedPlugin for ProbePlugin {
             } else {
                 probe.child_builds.fetch_add(1, Ordering::SeqCst);
                 let cleanups = probe.child_cleanups.clone();
-                ctx.effect(|| {
-                    Effect::Disposer(Box::new(move || {
-                        cleanups.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
-                    }))
+                ctx.effect(|| async move {
+                    cleanups.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
                 })?;
                 probe.child_entered.notify_one();
                 if probe.delay_child.load(Ordering::SeqCst) {
@@ -113,9 +131,9 @@ impl TypedPlugin for ProbePlugin {
                 if probe.fail_child.load(Ordering::SeqCst) {
                     // Fail only once the cleanup writer is Active.
                     tokio::select! { _ = probe.writer_ready.notified() => {}, _ = ctx.cancelled() => {} }
-                    return Err(CordisError::ServiceNotFound(
+                    return Err(rutis::Error::from(ErrorKind::ServiceNotFound(
                         "/private/agent-secret/rejected-candidate".into(),
-                    ));
+                    )));
                 }
                 let observer = probe.clone();
                 let branch = identity.branch_id.clone();
@@ -180,31 +198,42 @@ impl TypedPlugin for ProbePlugin {
     }
 }
 /// Child-branch capability whose cleanup writes to the branch Timeline.
-struct CleanupWriter(Arc<Probe>);
-impl TypedPlugin for CleanupWriter {
-    type Deps = (Keyed<Timeline>, Keyed<TimelineIdentity>);
+struct CleanupWriter {
+    probe: Arc<Probe>,
+    timeline: Key<Timeline>,
+    identity: Key<TimelineIdentity>,
+}
+impl CleanupWriter {
+    fn new(names: &Names<'_>, probe: Arc<Probe>) -> rutis::Result<Self> {
+        Ok(Self {
+            probe,
+            timeline: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for CleanupWriter {
     fn name(&self) -> &str {
         "test.cleanup-writer"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(identity)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase(), self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let identity = ctx.require_at(&self.identity)?;
             // Only builds the flow is about to fail; other children close normally.
-            if identity.branch_id == "main" || !self.0.fail_child.load(Ordering::SeqCst) {
+            if identity.branch_id == "main" || !self.probe.fail_child.load(Ordering::SeqCst) {
                 return Ok(Effect::Done);
             }
-            let probe = self.0.clone();
-            ctx.effect(move || {
-                Effect::Disposer(Box::new(move || {
-                    let written = timeline.append(interrupt().into()).is_ok();
-                    *probe.cleanup_write.lock().unwrap() = Some(written);
-                    Ok(())
-                }))
+            let probe = self.probe.clone();
+            ctx.effect(move || async move {
+                let written = timeline.append(interrupt().into()).is_ok();
+                *probe.cleanup_write.lock().unwrap() = Some(written);
+                Ok(())
             })?;
-            self.0.writer_ready.notify_one();
+            self.probe.writer_ready.notify_one();
             Ok(Effect::Done)
         })
     }
@@ -221,13 +250,13 @@ fn builder(probe: &Arc<Probe>) -> AgentBuilder {
     let writer = probe.clone();
     builder.require_feature(
         Feature::new("test.cleanup-writer").branch("test.cleanup-writer", move |names| {
-            names.part(CleanupWriter(writer.clone()))
+            Ok(Box::new(CleanupWriter::new(names, writer.clone())?))
         }),
     );
     let probe = probe.clone();
     builder.require_feature(
         Feature::new("test.branch-probe").branch("test.branch-probe", move |names| {
-            names.part(ProbePlugin(probe.clone()))
+            Ok(Box::new(ProbePlugin::new(names, probe.clone())?))
         }),
     );
     builder
@@ -507,7 +536,7 @@ async fn data_creation_releases_its_cancellation_wait_when_the_caller_leaves() {
     let entered = Arc::new(Notify::new());
     let released = tokio_util::sync::CancellationToken::new();
     let cancelled: Arc<
-        dyn Fn() -> rutis::BoxFuture<'static, std::result::Result<(), CordisError>> + Send + Sync,
+        dyn Fn() -> rutis::host::BoxFuture<'static, std::result::Result<(), Error>> + Send + Sync,
     > = Arc::new({
         let entered = entered.clone();
         let released = released.clone();
@@ -1139,22 +1168,36 @@ type TreeDispatch = (
 );
 struct CaptureTreeDispatch {
     ports: Arc<Mutex<Option<TreeDispatch>>>,
+    tree: Key<dim_agent_capabilities::timeline_tree::TimelineTree>,
+    dispatcher: Key<Dispatcher>,
+    identity: Key<TimelineIdentity>,
 }
-impl TypedPlugin for CaptureTreeDispatch {
-    type Deps = (
-        Keyed<dim_agent_capabilities::timeline_tree::TimelineTree>,
-        Keyed<Dispatcher>,
-        Keyed<TimelineIdentity>,
-    );
+impl CaptureTreeDispatch {
+    fn new(names: &Names<'_>, ports: Arc<Mutex<Option<TreeDispatch>>>) -> rutis::Result<Self> {
+        Ok(Self {
+            ports,
+            tree: names.key()?,
+            dispatcher: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for CaptureTreeDispatch {
     fn name(&self) -> &str {
         "test.capture-tree-dispatch"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(tree), Keyed(dispatcher), Keyed(identity)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.tree.erase(),
+            self.dispatcher.erase(),
+            self.identity.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let tree = ctx.require_at(&self.tree)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let identity = ctx.require_at(&self.identity)?;
             if identity.branch_id == "main" {
                 *self.ports.lock().unwrap() = Some((tree, dispatcher, ctx.clone()));
             }
@@ -1170,14 +1213,12 @@ async fn closing_after_dispatch_before_the_build_first_poll_is_a_normal_cancella
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
-    builder.require_feature(Feature::new("test.capture-tree-dispatch").branch(
-        "test.capture-tree-dispatch",
-        move |names| {
-            names.part(CaptureTreeDispatch {
-                ports: captured.clone(),
-            })
-        },
-    ));
+    builder.require_feature(
+        Feature::new("test.capture-tree-dispatch")
+            .branch("test.capture-tree-dispatch", move |names| {
+                Ok(Box::new(CaptureTreeDispatch::new(names, captured.clone())?))
+            }),
+    );
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
