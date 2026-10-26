@@ -906,7 +906,7 @@ Device login prints the verification address and device code, then polls the att
 
 `models PROVIDER` reads the cached catalog; `--refresh` obtains and persists a fresh catalog through the provider. Each line contains the model ID, display name and `available`, `disabled` or `unavailable`, separated by tabs. Credential/account fields and private failure details are not printed. A missing cached catalog gives sign-in and refresh guidance. Select an available model with `--provider PROVIDER --model MODEL_ID` for a new session.
 
-An existing shared daemon is reused. Plugin paths apply when starting a new product daemon; use an isolated home when changing a plugin/runtime configuration. Explicit `--model-config` and account plugin options cannot be combined.
+An existing shared daemon of the CLI's own version is reused. A daemon of another version that this executable would start (one left running across an upgrade) is stopped with verified shutdown and replaced, which disconnects other clients attached to it; one without verified shutdown is reported for `dimcode daemon stop` from its matching CLI. A `--server PATH` daemon is reused whatever its version. Plugin paths apply when starting a new product daemon; use an isolated home when changing a plugin/runtime configuration. Explicit `--model-config` and account plugin options cannot be combined.
 
 The repository root `./dev` prepares the local provider package, builds incrementally and restarts only its development daemon. See [local development](../../docs/architecture/development.md) for setup and source selection.
 

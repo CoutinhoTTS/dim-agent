@@ -61,6 +61,11 @@ impl AgentRecords {
                         .map_err(|error| AgentError::Storage(format!("agent {id}: {error}")))?;
                     if stored == expected_profile && is_default == i64::from(default) {
                         Ok(())
+                    } else if default && is_default == 1 {
+                        // The default Agent follows the process default profile.
+                        connection.execute("UPDATE agents SET profile = ?1 WHERE agent_id = ?2",
+                            rusqlite::params![profile, id]).map_err(storage_error)?;
+                        Ok(())
                     } else {
                         Err(AgentError::Storage(format!("agent {id} differs from its stored profile")))
                     }
