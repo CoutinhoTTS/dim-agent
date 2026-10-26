@@ -44,17 +44,19 @@ Session / InputQueue / Loop / Approval / Questions / Attachments / ...
 
 每个稳定 v1 agent/client/protocol 方法、选定的 unstable 表面和 Lody 方法，分别在[计划 §4](../../../design/acp-gateway-implementation.md#4-稳定-acp-v1-方法逐项映射)、[§8](../../../design/acp-gateway-implementation.md#8-lody-方法和能力逐项决策) 判定。能力只来自已实现 handler 和真实 native availability，不复制历史能力对象。
 
-首版覆盖标准 Session create/list/load/resume、prompt/cancel、工具输出、审批、图片和文本资源。账户认证、mode/model、表单提问、close/delete、fork 按现有 native 接口的可用性提供。Lody 子集为 history、compaction 和终态 turn fork 锚点。精确 turn steering、Goal 控制、token 统计、额度、完整 task/subagent 事件、标题接管、项目归属及文件回滚不支持；计划区分原生合同缺失和尚未接入。
+首版覆盖标准 Session create/list/load/resume、prompt/cancel、工具输出、审批、图片和文本资源。账户认证、mode/model、表单提问、close/delete、fork 按现有 native 接口的可用性提供。Lody 子集为 history、compaction、终态 turn fork 锚点、新会话 startup model、detached exec task lifecycle 和双向协商的 snapshot-only subagent events。steering、Goal 控制、token 统计、额度、subagent 查询/输出/取消、scheduled tasks、session activity、标题接管、项目归属及文件回滚不在首版；计划区分原生合同缺口与交付取舍。
+
+Lody 方法和 metadata 按固定 Core DTO 及语义注释实现，不设连接级 Lody 总开关，不从一项推导整套支持。Subagent snapshot 可以如实声明无输出流、progress、read 或 cancel；最小投影不需要旧 SDK task API。准确协商、native fact 关联、startup config 和各项限制见[计划 §8](../../../design/acp-gateway-implementation.md#8-lody-方法和能力逐项决策)。Lody canonical tool ID 不能填任意 native 工具名。
 
 网关不调用 client fs/terminal，不启动客户端 MCP，不暴露任意账户管理、不注入 raw blocks。非空 mcpServers/additionalDirectories 在创建或 attach 前报错，不静默忽略。未知非控制 metadata 按 ACP 扩展规则处理；识别到尚不支持的控制字段，在提交输入前拒绝。
 
 socket/pipe 身份校验与模型账户认证分开。网关从现有 account.providers/status 发现 managed provider，并只发布真正可执行的 auth method。agent-type browser 方法通过 authenticate 调用现有 begin/complete/status/cancel；terminal 方法另开交互 helper，不能把其 methodId 发给 authenticate。OAuth、凭据交换和持久化仍归 provider。准确调用、callback 所有权、headless 限制和取消合同见[计划 §4.4](../../../design/acp-gateway-implementation.md#44-账户认证与现有-oauth-插件)。没有账户插件时不强制 configured/API-key 模型登录。
 
-Provider 管理已经归 daemon 的 ProviderPlugin 所有，CLI 使用其公开方法。Gateway 复用该所有者，不新建 Provider registry。[计划 §4.5](../../../design/acp-gateway-implementation.md#45-provider-管理与现有插件) 将 providers/list 接到 provider.management，set/disable 接到带版本的 provider.update，明确完整 headers 替换和 credential 归属。这些持久化、共享 home 的写入没有提供客户端宿主进程的临时覆盖，因此首版不启用 ACP 整组 providers capability；缺口是作用域与配置表达能力，不是原生没有 Provider 管理。
+Provider 管理已经归 daemon 的 ProviderPlugin 所有，CLI 使用其公开方法。Gateway 复用该所有者，不新建 Provider registry。[计划 §4.5](../../../design/acp-gateway-implementation.md#45-provider-管理与现有插件) 将 providers/list 接到 provider.management，set/disable 接到带版本的 provider.update，明确完整 headers 替换和 credential 归属。ACP 修改共享持久化设置还是临时 routing，仍待产品选择；持久化本身不禁止 capability，Core 也没有定义这组 Provider API。选择未定前不启用整组 capability。仅临时 routing 缺现成覆盖接口，共享管理已经存在。
 
 ## 3. 状态与生命周期
 
-内存只含连接协商/generation、Session 映射、操作槽位、两端请求关联、submission/input/turn ids、固定历史 cursor、流式 Unicode offsets 及本地 permission/question waiter。没有持久 store，runtime handle 不充当 durable identity。
+内存只含连接协商/generation、Session 映射、操作槽位、两端请求关联、submission/input/turn ids、固定历史 cursor、流式 Unicode offsets、本地 permission/question waiter 和 task/run 显示关联。task/run 投影从已提交 native history 重建，不由 Gateway 决定业务状态。没有持久 store，runtime handle 不充当 durable identity。
 
 [计划 §6](../../../design/acp-gateway-implementation.md#6-生命周期与连接管理) 定义 close-once、任务结算、队列上限、启动准入、重连、generation fencing 和多客户端。宿主提供独占 ACP I/O 与连接配置；先登记清理再启动 I/O。客户端树不使用 Dim Session/branch publication；mount、RPC hello 和 ACP initialize 分别控制其自身准入。
 
