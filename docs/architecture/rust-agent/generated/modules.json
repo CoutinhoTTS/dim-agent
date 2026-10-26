@@ -1865,7 +1865,9 @@
       "file": "crates/dim-app-server/src/session_typescript.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "panic",
+        "vec"
       ]
     },
     {
@@ -2154,6 +2156,7 @@
       "file": "crates/dim-cli/src/client.rs",
       "unexpandedMacros": [
         "cfg",
+        "env",
         "format",
         "json",
         "matches",
@@ -2431,6 +2434,7 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/plugins.rs",
       "unexpandedMacros": [
+        "eprintln",
         "format",
         "println",
         "serde_json::json",
@@ -3493,6 +3497,7 @@
         "assert",
         "assert_eq",
         "format",
+        "panic",
         "vec"
       ]
     },
@@ -3545,6 +3550,18 @@
         "assert",
         "assert_eq",
         "json"
+      ]
+    },
+    {
+      "id": "dim_cli::web_install",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/web_install.rs",
+      "unexpandedMacros": [
+        "env",
+        "format",
+        "matches",
+        "println"
       ]
     },
     {
@@ -11362,9 +11379,9 @@
         "mod collaboration",
         "path CollaborationPlugin::new",
         "path collaboration::Collaboration",
-        "path collaboration::CollaborationCapability",
         "path collaboration::CollaborationDirectory",
         "path collaboration::CollaborationDirectoryPlugin",
+        "path collaboration::CollaborationSession",
         "use collaboration::CollaborationPlugin"
       ]
     },
@@ -16487,8 +16504,12 @@
       "from": "dim_app_server::session_typescript::tests",
       "to": "dim_app_server::session_typescript",
       "references": [
+        "path Parts::new",
+        "path SessionTypeScriptConfig",
         "path super::crossing_instance_names",
-        "path super::share_names"
+        "path super::share_names",
+        "use super::Parts",
+        "use super::SessionTypeScriptConfig"
       ]
     },
     {
@@ -17790,6 +17811,7 @@
         "path Action::Tui",
         "path Action::Version",
         "path Action::Web",
+        "path Action::WebInstall",
         "path Options",
         "path Options::parse",
         "path args",
@@ -18026,6 +18048,14 @@
       "to": "dim_cli::usage",
       "references": [
         "mod usage"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::web_install",
+      "references": [
+        "mod web_install",
+        "path web_install::install"
       ]
     },
     {
@@ -18949,8 +18979,8 @@
       "references": [
         "path Client",
         "path client",
-        "path client::app_error",
         "path client::connect_inner",
+        "path client::web_hint",
         "use crate::client",
         "use crate::client::Client"
       ]
@@ -19521,6 +19551,7 @@
         "path client",
         "path client::RpcError",
         "path client::app_error",
+        "path client::web_hint",
         "use crate::client",
         "use crate::client::Client",
         "use crate::client::Message"
@@ -22152,13 +22183,6 @@
     },
     {
       "from": "dim_cli::ui::render::screen",
-      "to": "dim_cli::ui::render::panel",
-      "references": [
-        "path crate::ui::render::panel::visible_width"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::render::screen",
       "to": "dim_cli::ui::render::screen::tests",
       "references": [
         "mod tests"
@@ -24336,10 +24360,33 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path Command",
+        "path SessionPort",
+        "path Update"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::model::shell",
       "references": [
         "path ShellOutcome::Exited",
         "path ShellRun"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::question",
+      "references": [
+        "path crate::question::Call"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path AskUserPrompt::new"
       ]
     },
     {
@@ -24354,6 +24401,37 @@
       "to": "dim_cli::ui::render::panel",
       "references": [
         "path clip"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render::screen",
+      "references": [
+        "path Screen",
+        "path Screen::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render::testterm",
+      "references": [
+        "path crate::ui::render::testterm::Emu",
+        "path crate::ui::render::testterm::Emu::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path InputEvent::Key",
+        "path KeyCode",
+        "path KeyCode::BackTab",
+        "path KeyCode::Char",
+        "path KeyCode::Down",
+        "path KeyCode::Esc",
+        "path KeyCode::Tab",
+        "path Modifiers::NONE",
+        "path crate::ui::terminal::KeyEvent::new"
       ]
     },
     {
@@ -24385,10 +24463,16 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::tui",
       "references": [
+        "path App",
+        "path App::new",
+        "path Prompt::Ask",
+        "path WebOpened",
+        "path banner",
         "path boxed",
         "path chunk",
         "path goodbye_panel",
-        "path queue_strip"
+        "path queue_strip",
+        "path web_panel"
       ]
     },
     {
@@ -24479,6 +24563,27 @@
       "to": "dim_cli::usage",
       "references": [
         "path format_report"
+      ]
+    },
+    {
+      "from": "dim_cli::web_install",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::web_install",
+      "to": "dim_cli::client",
+      "references": [
+        "path crate::client::web_assets"
+      ]
+    },
+    {
+      "from": "dim_cli::web_install",
+      "to": "dim_cli::update",
+      "references": [
+        "path crate::update::registry"
       ]
     },
     {

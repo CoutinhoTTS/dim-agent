@@ -1052,6 +1052,64 @@ async fn interactive_is_stored_with_the_session_and_absence_means_interactive() 
     tokio::fs::remove_dir_all(directory).await.unwrap();
 }
 
+/// The process seeds the default Agent, so a stored default profile from an
+/// earlier version (a mount list frozen before tools were added) follows the
+/// current process default on the next start, and its row is rewritten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_stored_default_agent_follows_the_process_default_profile() {
+    let directory =
+        std::env::temp_dir().join(format!("dim-default-agent-{}", uuid::Uuid::new_v4()));
+    let database = directory.join("dimcode.sqlite");
+    let config = ServerConfig {
+        database_path: Some(database.clone()),
+        ..Default::default()
+    };
+    let process_tools = config.session_defaults.tools.clone();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    server.shutdown();
+    server.join().await.unwrap();
+    drop(agent);
+
+    let connection = Connection::open(&database).unwrap();
+    let stored = || -> Value {
+        let profile: String = connection
+            .query_row(
+                "SELECT profile FROM agents WHERE is_default = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&profile).unwrap()
+    };
+    let mut frozen = stored();
+    frozen["tools"] = json!(["echo"]);
+    connection
+        .execute(
+            "UPDATE agents SET profile = ?1 WHERE is_default = 1",
+            [frozen.to_string()],
+        )
+        .unwrap();
+
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc("session.create", json!({"cwd":std::env::temp_dir()}))
+        .await;
+    assert_ok(&created);
+    let session = created["result"]["sessionId"].as_str().unwrap();
+    assert_eq!(
+        agent.get_session(session).unwrap().config().tools,
+        process_tools
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    drop(agent);
+    assert_eq!(stored()["tools"], json!(process_tools));
+    drop(connection);
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stored_directories_outlive_idle_instances() {
     tokio::time::timeout(Duration::from_secs(15), async {

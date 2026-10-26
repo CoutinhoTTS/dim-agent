@@ -1706,6 +1706,7 @@ mod tests {
                             live,
                             cursor,
                             dock,
+                            anchor: dock,
                             overlay,
                         };
                         screen.render(&frame, size, &palette, &doc);

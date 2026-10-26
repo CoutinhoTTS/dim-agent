@@ -820,7 +820,15 @@ impl Worker {
                             url: state.url,
                         });
                     }
-                    Err(error) => self.send(Update::Notice(format!("Web: {error}"))),
+                    Err(error) => {
+                        let executable = std::env::current_exe().unwrap_or_default();
+                        self.send(Update::Notice(
+                            match client::web_hint(&error, &executable, &self.options.home) {
+                                Some((problem, fix)) => format!("{problem}. {fix}."),
+                                None => format!("Web: {error}"),
+                            },
+                        ));
+                    }
                 }
             }
             Command::ListModels => {

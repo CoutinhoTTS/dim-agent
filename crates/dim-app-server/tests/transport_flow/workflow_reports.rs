@@ -210,13 +210,7 @@ async fn node_workflow_report_crash_before_input_retries_after_the_original_row_
     phase(&mut client, request, "opened").await;
     assert_eq!(stored(&home)["runs"][0]["report"]["attempt_open"], true);
     assert_eq!(count(&target).await, 0);
-    assert!(
-        std::process::Command::new("kill")
-            .args(["-KILL", &before["pid"].as_u64().unwrap().to_string()])
-            .status()
-            .unwrap()
-            .success()
-    );
+    super::super::workflow::kill_node(before["pid"].as_u64().unwrap()).await;
     assert!(client.response(request).await.get("error").is_some());
     loader.restart("SessionNodeRuntime").await.unwrap();
     assert_ne!(ready(&mut client).await["pid"], before["pid"]);

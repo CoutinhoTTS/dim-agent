@@ -10,9 +10,9 @@
 - [ADR 003 — Approval scope](adr/003-approval-scope.md)（[中文](zh/adr/003-approval-scope.md)）
 - [ADR 004 — Session-owned MCP and business configuration](adr/004-loader-plugin-management.md)
 - [ADR 005 — Observe runs through the Timeline and process logs](adr/005-observability.md)
-- [ADR 006 — The plugin contract is concepts and conventions, not types](adr/006-plugin-contract.md) (accepted, not implemented)（[中文](zh/adr/006-plugin-contract.md)）
-- [Plugin contract](design/plugin-contract.md): Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability (accepted, not implemented; ADR 006)（[中文](zh/design/plugin-contract.md)）
-- [How Dim uses rutis](design/rutis-usage.md): parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, and the Rust/TypeScript bindings (accepted, not implemented; ADR 006)（[中文](zh/design/rutis-usage.md)）
+- [ADR 006 — The plugin contract is concepts and conventions, not types](adr/006-plugin-contract.md) (accepted; implemented, except R5's second form)（[中文](zh/adr/006-plugin-contract.md)）
+- [Plugin contract](design/plugin-contract.md): Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability (accepted; implemented, except R5's second form; ADR 006)（[中文](zh/design/plugin-contract.md)）
+- [How Dim uses rutis](design/rutis-usage.md): parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, and the Rust/TypeScript bindings (accepted; implemented, except R5's second form; ADR 006)（[中文](zh/design/rutis-usage.md)）
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)

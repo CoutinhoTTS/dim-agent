@@ -18,7 +18,7 @@ fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     config
 }
 
-async fn kill_node(pid: u64) {
+pub(super) async fn kill_node(pid: u64) {
     let pid = pid.to_string();
     assert!(
         std::process::Command::new("kill")
