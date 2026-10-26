@@ -3951,10 +3951,12 @@ fn loopback_port() -> u16 {
 fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidden_input() {
     for mode in ["ipv4", "ipv6", "busy", "paste", "noise", "cancel", "expiry"] {
         let home = Home::new();
-        let port = loopback_port();
         // The busy mode holds the port, so the CLI falls back to hidden input.
         let _reserve = (mode == "busy")
-            .then(|| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).unwrap());
+            .then(|| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap());
+        let port = _reserve.as_ref().map_or_else(loopback_port, |listener| {
+            listener.local_addr().unwrap().port()
+        });
         let redirect = format!("http://localhost:{port}/callback");
         let expected = format!("{redirect}?code=private-callback&state=fixture");
         let daemon = home.daemon(move |wire| {
