@@ -468,7 +468,9 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/permission.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "matches",
+        "tokio::select"
       ]
     },
     {
@@ -740,6 +742,7 @@
       "file": "crates/dim-agent-capabilities/src/workspace_tools/mod.rs",
       "unexpandedMacros": [
         "format",
+        "matches",
         "serde_json::json",
         "tokio::select",
         "vec"
@@ -6667,6 +6670,14 @@
     },
     {
       "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_capabilities::workspace_tools::files",
+      "references": [
+        "path canonical_prefix",
+        "use crate::workspace_tools::files::canonical_prefix"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
@@ -8706,6 +8717,7 @@
         "path FileTools::handles",
         "path FileTools::with_coordinator",
         "path FileWriteCoordinator",
+        "path files::resolve_path",
         "use files::FileTools",
         "use files::FileWriteCoordinator"
       ]

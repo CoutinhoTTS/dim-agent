@@ -313,8 +313,12 @@ reach once it runs, and neither one widens the other.
 | Preset | Reads | File writes | Commands, network, unclassified tools |
 | --- | --- | --- | --- |
 | `read-only` | run | denied | denied |
-| `workspace-write` (product default) | run | run | ask |
+| `workspace-write` (product default) | run | run inside the workspace; ask outside | ask |
 | `full-access` | run | run | run |
+
+Every outside file write asks for that call, even when its tool is explicitly
+allowed; no path grant is remembered. The server resolves symlinks and new-file
+parents before checking the [workspace boundary](../../docs/architecture/rust-agent/plugins/Permission.md#workspace-write-targets).
 
 `--permission read-only|workspace-write|full-access` works with `dimcode`, `tui`, `exec` and
 `exec resume`. A new Session receives it in `session.create`; a resumed Session's `main` branch
