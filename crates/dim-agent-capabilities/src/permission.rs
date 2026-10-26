@@ -1,9 +1,12 @@
-//! Branch permission: decides a tool call by tool name and risk category.
+//! Branch permission: decides a tool call by risk, workspace target and policy.
 //! The policy is `SessionConfig.permission_policy` folded with this branch's
 //! dispatched `permission/changed` events. The user's command rules, read
 //! through the Session's `CommandRulesHost` on each decision, deny or approve
 //! commands of process-starting calls.
-use crate::host::{HostError, HostFuture};
+use crate::{
+    host::{HostError, HostFuture},
+    workspace_tools::files::canonical_prefix,
+};
 use dim_agent_runtime::{
     AgentError, Delivery, Dispatcher, Names, SessionConfig, StateCell, Timeline,
 };
@@ -14,6 +17,7 @@ use dim_agent_types::{
 use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 use tokio::sync::oneshot;
@@ -73,17 +77,39 @@ pub struct Permission {
     timeline: Arc<Timeline>,
     state: Arc<StateCell<PermissionState>>,
     rules: Arc<CommandRulesHost>,
+    config: Arc<SessionConfig>,
     inner: Mutex<Inner>,
 }
 impl Permission {
     /// Decides with the policy dispatched when the decision is made and, for a
-    /// command call, the rules read now. Only a cancelled read is an error.
+    /// command call, the rules read now. Workspace writes resolve their target
+    /// before sampling that policy. Cancelled reads stop admission.
     pub async fn decide(
         &self,
         call: &ApprovalCallData,
         risk: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<Decision, HostError> {
+        let write_target = if matches!(Risk::of(risk), Risk::Write)
+            && self.state.get().policy.preset == PermissionPreset::WorkspaceWrite
+            && let Some(path) = call.input.get("path").and_then(|path| path.as_str())
+            && std::path::Path::new(path).is_absolute()
+        {
+            let cwd = PathBuf::from(&self.config.cwd);
+            let path = PathBuf::from(path);
+            let target = tokio::task::spawn_blocking(move || {
+                let workspace = std::fs::canonicalize(&cwd).map_err(|error| {
+                    format!("Failed to resolve workspace {}: {error}", cwd.display())
+                })?;
+                canonical_prefix(path).map(|target| (workspace, target))
+            });
+            Some(tokio::select! {
+                result = target => result.map_err(|error| HostError::failed(error.to_string()))?,
+                _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+            })
+        } else {
+            None
+        };
         let command = match (Risk::of(risk), call.input.get("command")) {
             (Risk::Execute, Some(serde_json::Value::String(command))) => Some(command.as_str()),
             _ => None,
@@ -101,6 +127,26 @@ impl Permission {
         if policy.disallowed_tools.contains(name) {
             return Ok(Decision::Deny {
                 reason: format!("Tool `{name}` is disallowed by the permission policy"),
+            });
+        }
+        if policy.preset == PermissionPreset::WorkspaceWrite
+            && matches!(Risk::of(risk), Risk::Write)
+        {
+            return Ok(match write_target {
+                Some(Ok((workspace, target))) if target.starts_with(&workspace) => {
+                    decide(&policy, name, risk)
+                }
+                Some(Ok((_, target))) => Decision::Ask {
+                    reason: format!(
+                        "Writing outside the session workspace requires approval: {}",
+                        target.display()
+                    ),
+                },
+                Some(Err(reason)) => Decision::Deny { reason },
+                None => Decision::Ask {
+                    reason: "A file write without a verified workspace target requires approval"
+                        .into(),
+                },
             });
         }
         let (Some(command), Some(rules)) = (command, rules) else {
@@ -339,6 +385,7 @@ impl TypedPlugin for PermissionPlugin {
                     policy: config.permission_policy.clone(),
                 })),
                 rules,
+                config,
                 inner: Mutex::new(Inner::default()),
             });
             let closing = service.clone();

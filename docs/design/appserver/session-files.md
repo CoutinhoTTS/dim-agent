@@ -500,8 +500,9 @@ WorkspaceTools stay unchanged.
 What happens today, from [permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)
 `decide` and [approval.rs](../../../crates/dim-agent-capabilities/src/approval.rs) `admit`:
 
-- **No prompt.** Permission decides by tool name and risk category and never sees the path, so
-  a path outside the working directory is decided like one inside it. `read` declares
+- **No prompt.** Read admission uses the tool name and risk category, so
+  a path outside the working directory is decided like one inside it. Write admission under
+  `workspace-write` separately checks the [workspace target](../../architecture/rust-agent/plugins/Permission.md#workspace-write-targets). `read` declares
   `read_filesystem`, which every preset allows; the product profile's default preset is
   `workspace-write` ([main.rs](../../../crates/dim-app-server/src/main.rs)). The model therefore
   reads a pasted file without an approval prompt, as Attachments needs. A policy that lists
@@ -531,7 +532,7 @@ What happens today, from [permission.rs](../../../crates/dim-agent-capabilities/
        <fileId T owns>/notes.md         Session T's file
 ```
 
-**What Permission does not do.** Permission admits by tool and risk; it is not isolation
+**What Permission does not do.** Permission's read admission is path-independent; it is not isolation
 ([Permission](../../architecture/rust-agent/plugins/Permission.md), ADR 001 "Trust and
 cross-language calls"). Under every preset, `read`, `glob` and `grep` reach any text file the
 daemon's user can read: T's file above, other Sessions' command output, `~/.dimcode/auth.json`.

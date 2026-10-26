@@ -25,7 +25,7 @@ pub const MODES: [(&str, &str, &str, &str); 3] = [
         "workspace-write",
         "Workspace write",
         "workspace write",
-        "Reads and file writes run; commands, network and unclassified tools ask",
+        "Reads and workspace file writes run; outside writes, commands, network and unclassified tools ask",
     ),
     (
         "read-only",

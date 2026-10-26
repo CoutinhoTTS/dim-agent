@@ -43,6 +43,10 @@ pub fn tool_provider_changes(session: InstanceId) -> EventKey<ToolProviderChange
 }
 
 pub trait ToolHandler: Send + Sync + 'static {
+    /// Resolve a filesystem write's target without effects before admission.
+    fn resolve_write(&self, call: ToolCall, _: CancellationToken) -> HostFuture<'_, ToolCall> {
+        Box::pin(async move { Ok(call) })
+    }
     fn execute(
         &self,
         call: ToolCall,
@@ -567,6 +571,9 @@ pub fn valid_tool_name(name: &str) -> bool {
 
 struct HostTool(Arc<ToolHost>);
 impl ToolHandler for HostTool {
+    fn resolve_write(&self, call: ToolCall, cancel: CancellationToken) -> HostFuture<'_, ToolCall> {
+        self.0.0.resolve_write(call, cancel)
+    }
     fn execute(
         &self,
         call: ToolCall,
