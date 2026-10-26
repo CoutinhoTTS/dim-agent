@@ -157,7 +157,8 @@ claim runs a loader-wide reconcile, which also rebuilds the copies whose build w
 required row that failed in a Session's assembly can be rebuilt during that Session's creation, and
 each Session or branch creation reconciles the whole loader. The App Server shares those names in
 their groups (`register_shared_instance`), and a test checks that each is shared in the group the
-Rust binding registers it in. The build script writes only the TypeScript declarations.
+Rust binding registers it in. `xtask types` writes their TypeScript declarations to
+`npm/branch-services.d.ts`, and `xtask check` fails when that file is stale.
 
 ### 3.5 How each runtime resolves a name
 
@@ -340,7 +341,7 @@ P3 deleted the old forms ([#375](https://github.com/arcships/dim/issues/375)); t
 | `SessionService`, `BranchService` markers | The group registered in the catalog (`names::register`) |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | A feature registers its parts with the part registry (`Feature`, added with `AgentBuilder::feature`, or its own plugin with `AgentBuilder::plugin`; a profile uses `require_feature`); `register_part` for an App Server process row |
 | `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` (removed) | The owner's `register`, called by the contributing part: `toolRegistry`, `promptRegistry`, `sessionMethods`, `managementMethods` (R6) |
-| `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type, Session and branch services included (§3.4); a type whose source cannot change is wrapped in a marked type of Dim's. `Exports` only writes TypeScript declarations |
+| `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type, Session and branch services included (§3.4); a type whose source cannot change is wrapped in a marked type of Dim's. `Exports` only writes TypeScript declarations, from `xtask types` |
 | `PublicService` | Unchanged (a facade rule) |
 
 ### A.2 The binding

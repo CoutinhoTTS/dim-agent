@@ -1,6 +1,4 @@
-//! Writes the TypeScript declarations of Dim's services marked
-//! `#[rutis::service]` (rutis usage §3.4). With
-//! the `embedded-web` feature it also builds the Web workspace (`web/`) and
+//! With the `embedded-web` feature, builds the Web workspace (`web/`) and
 //! embeds it, gzip-compressed, in the App Server binary; without it the
 //! frontend is the separate dimcode-web artifact and `web/` is not touched.
 //! See docs/design/web-workspace.md §2.4.
@@ -20,43 +18,6 @@ const STORED: &[&str] = &[
 ];
 
 fn main() {
-    // Services that cross languages are marked `#[rutis::service]` on their
-    // types and served once provided; this only writes their TypeScript
-    // declarations.
-    rutis_bridge::build::Exports::new()
-        // Native reads serialize every policy field; reuse the SDK's complete shape.
-        .declared(
-            "dim_agent_types::PermissionPolicy",
-            "import('./plugin.js').PermissionPolicy",
-        )
-        // Custom serde: reuse the SDK envelope with native bridge sequence values.
-        .declared(
-            "dim_agent_types::AgentEvent",
-            "import('./plugin.js').BranchEvent",
-        )
-        // The same envelope before the Timeline assigns identity and order.
-        .declared(
-            "dim_agent_types::EventDraft",
-            "{ type: string; name: string; data: unknown; tags?: string[] }",
-        )
-        // Reuse the identity envelope; the service keeps its own TypeScript name.
-        .declared(
-            "dim_agent_runtime::TimelineIdentity",
-            "import('./plugin.js').SessionRef",
-        )
-        // The identity as data; the service keeps its own TypeScript name.
-        .declared(
-            "dim_agent_runtime::SessionIdentity",
-            "{ sessionId: string; restored: boolean }",
-        )
-        // Provider-owned nested configuration stays JSON in the SDK.
-        .declared(
-            "dim_agent_runtime::SessionConfig",
-            "import('./plugin.js').SessionConfig",
-        )
-        .typescript("../../npm/branch-services.d.ts")
-        .generate()
-        .expect("generate the service declarations");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     println!("cargo::rerun-if-env-changed=CARGO_FEATURE_EMBEDDED_WEB");
     if std::env::var_os("CARGO_FEATURE_EMBEDDED_WEB").is_none() {

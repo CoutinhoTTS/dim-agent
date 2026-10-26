@@ -61,4 +61,3 @@ tokio-tungstenite.workspace = true
 
 [build-dependencies]
 flate2 = "1.1"
-rutis-bridge = { workspace = true, features = ["exports"] }

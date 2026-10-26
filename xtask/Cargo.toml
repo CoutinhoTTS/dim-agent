@@ -13,7 +13,7 @@ dim-agent-questions.workspace = true
 dim-app-server.workspace = true
 dim-agent-types.workspace = true
 rutis.workspace = true
-rutis-bridge.workspace = true
+rutis-bridge = { workspace = true, features = ["exports"] }
 rutis-loader.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
