@@ -852,9 +852,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
+checksum = "12218662ccac37d9714f2191252553d67585b97df8c839cbe49e0bde278dc865"
 dependencies = [
  "cmov",
 ]
@@ -1058,6 +1058,7 @@ dependencies = [
  "dim-agent-types",
  "futures-util",
  "rutis",
+ "rutis-bridge",
  "rutis-loader",
  "schemars",
  "serde",
@@ -3324,9 +3325,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.43"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
@@ -3388,9 +3389,9 @@ checksum = "eec689c0bc40ff2458a5977b6619cb718087084a18e02a131c599b62d05e1a5f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -3406,9 +3407,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutis"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2979977c416f20b5ca9315b94538dc94d7424084461ec56b2af42b7314849a3a"
+checksum = "f0bf23fa920f2cd6586e3f045b8fdb49cf361cd9c4552fa322c699ddbfdfa696"
 dependencies = [
  "erased-serde",
  "rutis-macros",
@@ -3422,9 +3423,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-bridge"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dcf8d930b1c200a05fca2166bab4ecf412c44d0d57b35d0c4916e13da6ed59c"
+checksum = "fe7b1a9e8f64881d4147a47c7880346fd0499aed1845484e3e48b767805fd74c"
 dependencies = [
  "getrandom 0.2.17",
  "libc",
@@ -3443,9 +3444,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-loader"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b66ad6bd4f41d2cb91f6773766c4eaaa91bb8867f0c4c40e75c9d04153451db"
+checksum = "327e057c335d3f723c0749e4d31003a34256747965034f44ab1df4cf7c4fab10"
 dependencies = [
  "libc",
  "rutis",
@@ -3460,9 +3461,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-macros"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4632181bfad5038d3c412f153711791f3a9e63aeab3bef74822c630b9e088eac"
+checksum = "f37b58c6c193266512cd7821c6368212798a2ccf1f5982bf857442ba6a182d68"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4247,9 +4248,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
@@ -4777,18 +4778,18 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

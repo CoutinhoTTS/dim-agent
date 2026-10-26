@@ -86,6 +86,12 @@ Owner: [tool_executor.rs](../../../../crates/dim-agent-capabilities/src/tool_exe
 Executes a committed tool batch against pinned handlers after approval, isolates
 individual call failures and publishes correlated results.
 
+Before admitting a `write_filesystem` call, the pinned handler's `resolve_write`
+may resolve its target using metadata only. Approval and execution receive that
+same resolved call; the committed model call is unchanged. A resolver cannot
+mutate files or start processes before approval. Permission's [workspace write
+contract](Permission.md#workspace-write-targets) decides whether the target asks.
+
 ### Dependencies
 
 | Service | Purpose |

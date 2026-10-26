@@ -10,11 +10,12 @@
 //! `check` builds the same assembly and fails when the file differs.
 use crate::app_server;
 use dim_agent_runtime::{Feature, SessionConfig, names::name_of_type};
-use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, InstanceId, RuntimeDiagnostics, TypeKey, TypedPlugin,
-};
+use rutis::host::diagnostics::RuntimeDiagnostics;
+use rutis::host::{CtxHost, InstanceId, TypeKey};
+use rutis::{Ctx, Plugin};
 use rutis_bridge::session::{HostDispatch, host_key};
-use rutis_loader::{Build, LoaderError, ServiceCatalog};
+use rutis_loader::resolve::Build;
+use rutis_loader::{LoaderError, ServiceCatalog};
 use std::{
     any::TypeId,
     collections::{BTreeMap, BTreeSet},
@@ -61,20 +62,14 @@ pub async fn check(root: &Path) -> Result<()> {
 /// assembly serves names with. It names and provides nothing.
 #[derive(Clone, Default)]
 struct Probe(Arc<Mutex<Option<Ctx>>>);
-impl TypedPlugin for Probe {
+impl Plugin for Probe {
     type Deps = ();
     fn name(&self) -> &str {
         "CatalogProbe"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): (),
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            *self.0.lock().unwrap() = Some(ctx.clone());
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        *self.0.lock().unwrap() = Some(ctx.clone());
+        Ok(())
     }
 }
 
@@ -87,7 +82,7 @@ async fn collect() -> Result<String> {
         let probe = probe.clone();
         builder.require_feature(
             Feature::new("CatalogProbe")
-                .branch("CatalogProbe", move |names| names.part(probe.clone())),
+                .branch("CatalogProbe", move |_| Ok(Box::new(probe.clone()))),
         );
     })
     .await?;
@@ -216,11 +211,11 @@ impl Table {
             service.crosses = catalog.is_shared(name);
             if service.crosses {
                 let key = match instances.get(service.group) {
-                    Some(instance) => host_key(name).with_instance(*instance),
+                    Some(instance) => host_key(name).instance(*instance),
                     None => host_key(name),
                 };
                 if let Some(methods) = ctx
-                    .get_as::<dyn HostDispatch>(key)
+                    .get_at::<dyn HostDispatch>(&key)
                     .and_then(|dispatch| dispatch.methods())
                 {
                     service.methods = serde_json::from_value(methods)?;
@@ -325,7 +320,7 @@ impl Names<'_> {
         let group = match self.catalog.key_in(&name, &Build::default()) {
             Ok(registered) => {
                 let rust = &registered == key;
-                let shared = registered == host_key(&name);
+                let shared = registered == host_key(&name).erase();
                 (key.instance_id().is_none() && (rust || shared)).then_some("process")?
             }
             Err(LoaderError::OutsideInstance { group, .. }) => {

@@ -1,7 +1,9 @@
 pub(crate) mod management;
 use crate::managed_oauth::{self, Service};
 use dim_agent_capabilities::file_storage::FileStorage;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
+use dim_agent_runtime::Names;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -49,13 +51,24 @@ impl GrokOAuthService {
 pub struct GrokOAuthPlugin {
     root: usize,
     config: GrokOAuthConfig,
+    files: Key<FileStorage>,
+    methods: Key<crate::methods::ManagementMethods>,
 }
 impl GrokOAuthPlugin {
-    pub fn new(root: usize) -> Self {
-        Self::with_config(root, production())
+    pub fn new(names: &Names<'_>, root: usize) -> rutis::Result<Self> {
+        Self::with_config(names, root, production())
     }
-    pub fn with_config(root: usize, config: GrokOAuthConfig) -> Self {
-        Self { root, config }
+    pub fn with_config(
+        names: &Names<'_>,
+        root: usize,
+        config: GrokOAuthConfig,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            root,
+            config,
+            files: names.key()?,
+            methods: names.key()?,
+        })
     }
 }
 pub(crate) fn production() -> GrokOAuthConfig {
@@ -70,17 +83,17 @@ pub(crate) fn production() -> GrokOAuthConfig {
         relay: Url::parse("https://api.x.ai/v1").unwrap(),
     }
 }
-impl TypedPlugin for GrokOAuthPlugin {
-    type Deps = (Keyed<FileStorage>, Keyed<crate::methods::ManagementMethods>);
+impl DynPlugin for GrokOAuthPlugin {
     fn name(&self) -> &str {
         "GrokOAuth"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(files), Keyed(methods)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.files.erase(), self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let files = ctx.require_at(&self.files)?;
+            let methods = ctx.require_at(&self.methods)?;
             let service = Service::new(
                 files,
                 self.root,
@@ -88,22 +101,18 @@ impl TypedPlugin for GrokOAuthPlugin {
                 self.config.clone(),
                 &production(),
             )
-            .map_err(|e| CordisError::PluginFailed(e.into()))?;
+            .map_err(|e| rutis::Error::from(ErrorKind::PluginFailed(e.into())))?;
             let closing = service.clone();
-            if let Err(error) = ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        closing.close().await;
-                        Ok(())
-                    })
-                }))
+            if let Err(error) = ctx.effect(move || async move {
+                closing.close().await;
+                Ok(())
             }) {
                 service.close().await;
                 return Err(error);
             }
             let service = Arc::new(GrokOAuthService(service));
             management::provide(ctx, &methods, service.clone())?;
-            ctx.provide_as(TypeKey::of::<GrokOAuthService>(), service)?;
+            ctx.provide_as::<GrokOAuthService>(service)?;
             Ok(Effect::Done)
         })
     }

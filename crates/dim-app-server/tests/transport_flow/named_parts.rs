@@ -5,7 +5,7 @@
 use super::session_typescript::{fixture, new_session, setup};
 use super::*;
 use dim_agent_runtime::{SESSION_GROUP, SessionIdentity, TimelineIdentity};
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::host::{CtxHost, Key};
 use rutis_bridge::session::{HostDispatch, Reply, Value as RpcValue};
 use std::sync::Mutex;
 
@@ -22,48 +22,71 @@ impl HostDispatch for Greeter {
         Some(json!({"hello":"sync"}))
     }
 }
-struct GreeterPart(DepKey<dyn HostDispatch>);
-impl TypedPlugin for GreeterPart {
-    type Deps = (Keyed<SessionIdentity>,);
+struct GreeterPart(Key<dyn HostDispatch>, rutis::host::Key<SessionIdentity>);
+impl GreeterPart {
+    fn new(names: &dim_agent_runtime::Names<'_>, a0: Key<dyn HostDispatch>) -> rutis::Result<Self> {
+        Ok(Self(a0, names.key()?))
+    }
+}
+impl rutis::host::DynPlugin for GreeterPart {
     fn name(&self) -> &str {
         "test.named-greeter"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.1.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        ctx: &'a Ctx,
-        (Keyed(identity),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
-            ctx.provide_as::<dyn HostDispatch>(
-                self.0.key().clone(),
+            let identity = ctx.require_at(&self.1)?;
+            ctx.provide_at::<dyn HostDispatch>(
+                self.0.clone(),
                 Arc::new(Greeter(identity.session_id.clone())),
             )?;
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
 
 /// Reads the TypeScript row's `namedGreeter` from each branch, at the
 /// name's catalog key.
-struct MethodsReader(Log);
-impl TypedPlugin for MethodsReader {
-    type Deps = (Keyed<dyn HostDispatch>, Keyed<TimelineIdentity>);
+struct MethodsReader {
+    log: Log,
+    methods: Key<dyn HostDispatch>,
+    branch: Key<TimelineIdentity>,
+}
+impl MethodsReader {
+    fn new(names: &dim_agent_runtime::Names<'_>, log: Log) -> rutis::Result<Self> {
+        Ok(Self {
+            log,
+            methods: names.named("namedGreeter")?,
+            branch: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for MethodsReader {
     fn name(&self) -> &str {
         "test.named-methods-reader"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.methods.erase(), self.branch.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a Ctx,
-        (Keyed(methods), Keyed(branch)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
-            self.0.lock().unwrap().push(format!(
+            let methods = ctx.require_at(&self.methods)?;
+            let branch = ctx.require_at(&self.branch)?;
+            self.log.lock().unwrap().push(format!(
                 "{} {} for {}",
                 methods.provider().unwrap_or_default(),
                 methods.methods().unwrap_or_default(),
                 branch.session_id
             ));
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -78,23 +101,21 @@ async fn node_named_parts_share_services_across_languages_per_session() {
         .register_shared_instance("testGreeter", SESSION_GROUP);
     let read = log.clone();
     builder
-        .require_feature(
-            Feature::new("test.named-greeter").session("test.named-greeter", |names| {
-                names.part(GreeterPart(names.named("testGreeter")?))
-            }),
-        )
-        .require_feature(Feature::new("test.named-methods-reader").branch(
-            "test.named-methods-reader",
-            move |names| {
-                Ok(names.part_with(
-                    MethodsReader(read.clone()),
-                    (
-                        names.named("namedGreeter")?,
-                        names.key::<TimelineIdentity>()?,
-                    ),
-                ))
+        .require_feature(Feature::new("test.named-greeter").session(
+            "test.named-greeter",
+            |names| {
+                Ok(Box::new(GreeterPart::new(
+                    names,
+                    names.named("testGreeter")?,
+                )?))
             },
-        ));
+        ))
+        .require_feature(
+            Feature::new("test.named-methods-reader")
+                .branch("test.named-methods-reader", move |names| {
+                    Ok(Box::new(MethodsReader::new(names, read.clone())?))
+                }),
+        );
     let mut parts = fixture();
     let root = parts.anchor.parent().unwrap().join("fixtures");
     parts.rows = vec![json!({

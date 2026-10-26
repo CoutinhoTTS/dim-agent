@@ -34,7 +34,7 @@ Timeline, Dispatcher, rutis, Settings or assembly.
 - No project-scope rules, no per-workspace rules, no patterns or regular expressions, no shell
   parser, no `ask` decision. Each is deferred ([§10](#10-decisions)).
 - No rules for other tools. `allowedTools`/`disallowedTools` in the Session policy already cover
-  whole tools.
+  whole tools; allowing a tool does not bypass [workspace write admission](../../architecture/rust-agent/plugins/Permission.md#workspace-write-targets).
 - No change to the execution shell setting. The feature list puts "execution Shell" next to
   command rules, but it is HostPlatform's business configuration (ADR 002, "Existing plugins").
 - Not a sandbox. Like presets, rules are admission logic; isolation is HostPlatform's separate work.

@@ -12,11 +12,12 @@ use crate::{
     prompt_state::PromptSnapshot,
 };
 use dim_agent_runtime::{
-    AgentBuilder, BranchLifecycle, ConfigureControl, ConfigureUpdate, PromptSourceTarget,
+    AgentBuilder, BranchLifecycle, ConfigureControl, ConfigureUpdate, Names, PromptSourceTarget,
     SessionConfig, StateCell,
 };
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
@@ -55,23 +56,19 @@ pub fn install_with_clock(builder: &mut AgentBuilder, today: Today, every: Durat
     builder.require_feature(
         dim_agent_runtime::Feature::new("PromptSources")
             .session("PromptRegistry", |names| {
-                names.part(PromptRegistryPlugin::new(names)?)
+                Ok(Box::new(PromptRegistryPlugin::new(names)?))
             })
             .session("PromptSources", move |names| {
-                names.part(PromptSourcesPlugin {
-                    today: today.clone(),
-                })
+                Ok(Box::new(PromptSourcesPlugin::new(names, today.clone())?))
             })
             .branch("PromptSourcesBranch", move |names| {
-                Ok(names.part_with(
-                    PromptSourcesBranchPlugin { every },
-                    (
-                        names.key()?,
-                        names.key()?,
-                        names.key()?,
-                        names.state_cell()?,
-                    ),
-                ))
+                Ok(Box::new(PromptSourcesBranchPlugin {
+                    branch: names.key()?,
+                    host: names.key()?,
+                    configure: names.key()?,
+                    prompts: names.state_cell()?,
+                    every,
+                }))
             }),
     );
 }
@@ -385,23 +382,37 @@ impl LoadPrompt for Sources {
 
 /// Session part: registers each of its sources with the prompt registry.
 pub struct PromptSourcesPlugin {
+    platform: Key<HostPlatform>,
+    config: Key<SessionConfig>,
+    registry: Key<PromptRegistry>,
     pub today: Today,
 }
-impl TypedPlugin for PromptSourcesPlugin {
-    type Deps = (
-        Keyed<HostPlatform>,
-        Keyed<SessionConfig>,
-        Keyed<PromptRegistry>,
-    );
+impl PromptSourcesPlugin {
+    pub fn new(names: &Names<'_>, today: Today) -> rutis::Result<Self> {
+        Ok(Self {
+            platform: names.key()?,
+            config: names.key()?,
+            registry: names.key()?,
+            today,
+        })
+    }
+}
+impl DynPlugin for PromptSourcesPlugin {
     fn name(&self) -> &str {
         "PromptSources"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(platform), Keyed(config), Keyed(registry)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.platform.erase(),
+            self.config.erase(),
+            self.registry.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let platform = ctx.require_at(&self.platform)?;
+            let config = ctx.require_at(&self.config)?;
+            let registry = ctx.require_at(&self.registry)?;
             let sources: Arc<dyn LoadPrompt> = Arc::new(Sources {
                 platform,
                 config,
@@ -423,24 +434,30 @@ impl TypedPlugin for PromptSourcesPlugin {
 /// or resumed branch receives first is Prompt's, at `branch/start` and
 /// `branch/resume`.
 pub struct PromptSourcesBranchPlugin {
+    branch: Key<BranchLifecycle>,
+    host: Key<PromptHost>,
+    configure: Key<dyn ConfigureControl>,
+    prompts: Key<StateCell<PromptSnapshot>>,
     every: Duration,
 }
-impl TypedPlugin for PromptSourcesBranchPlugin {
-    type Deps = (
-        Keyed<BranchLifecycle>,
-        Keyed<PromptHost>,
-        Keyed<dyn ConfigureControl>,
-        Keyed<StateCell<PromptSnapshot>>,
-    );
+impl DynPlugin for PromptSourcesBranchPlugin {
     fn name(&self) -> &str {
         "PromptSourcesBranch"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(branch), Keyed(host), Keyed(configure), Keyed(prompts)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.branch.erase(),
+            self.host.erase(),
+            self.configure.erase(),
+            self.prompts.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let branch = ctx.require_at(&self.branch)?;
+            let host = ctx.require_at(&self.host)?;
+            let configure = ctx.require_at(&self.configure)?;
+            let prompts = ctx.require_at(&self.prompts)?;
             let (every, lifecycle) = (self.every, ctx.cancellation_token());
             let tasks = TaskTracker::new();
             tasks.spawn(async move {
@@ -485,14 +502,10 @@ impl TypedPlugin for PromptSourcesBranchPlugin {
                     }
                 }
             });
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        tasks.close();
-                        tasks.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                tasks.close();
+                tasks.wait().await;
+                Ok(())
             })?;
             Ok(Effect::Done)
         })

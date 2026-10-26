@@ -1,12 +1,9 @@
 //! Per-call lookup, provider-owned calls and namespace ownership contracts.
 use super::*;
 use dim_agent_capabilities::methods::{Handler, Interruption};
-use dim_agent_runtime::{
-    names::{NamedDeps, register},
-    register_part, wait_active,
-};
-use rutis::{Keyed, KeyedGate, TypeKey};
-use rutis_loader::{Builtins, Layer, LoaderPlugin, Patch};
+use dim_agent_runtime::{Modules, Names, names::register, register_part, wait_active};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
+use rutis_loader::{Layer, LoaderPlugin, Patch};
 use serde_json::json;
 use std::{
     sync::atomic::{AtomicUsize, Ordering},
@@ -14,16 +11,21 @@ use std::{
 };
 
 /// Provides one namespace with a fixed handler.
-#[derive(Clone)]
 struct Owner {
     name: &'static str,
     namespace: &'static str,
     declarations: Vec<MethodDecl>,
     handler: Handler,
+    methods: Key<ManagementMethods>,
 }
 impl Owner {
-    fn new(name: &'static str, namespace: &'static str, declarations: &[&str]) -> Self {
-        Self {
+    fn new(
+        names: &Names<'_>,
+        name: &'static str,
+        namespace: &'static str,
+        declarations: &[&str],
+    ) -> rutis::Result<Self> {
+        Ok(Self {
             name,
             namespace,
             declarations: declarations
@@ -31,20 +33,20 @@ impl Owner {
                 .map(|method| decl(method, Interruption::Drain))
                 .collect(),
             handler: Arc::new(|_, _, _, _| Box::pin(async { Ok(json!({})) })),
-        }
+            methods: names.key()?,
+        })
     }
 }
-impl TypedPlugin for Owner {
-    type Deps = (Keyed<ManagementMethods>,);
+impl DynPlugin for Owner {
     fn name(&self) -> &str {
         self.name
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(methods),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let methods = ctx.require_at(&self.methods)?;
             methods.register(
                 ctx,
                 self.namespace,
@@ -58,18 +60,28 @@ impl TypedPlugin for Owner {
 
 /// A provider that stays Pending on a service nobody provides.
 struct Missing;
-struct Waiting;
-impl TypedPlugin for Waiting {
-    type Deps = (KeyedGate<Missing>, Keyed<ManagementMethods>);
+struct Waiting {
+    missing: Key<Missing>,
+    methods: Key<ManagementMethods>,
+}
+impl Waiting {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            missing: names.key()?,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for Waiting {
     fn name(&self) -> &str {
         "Waiting"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (_, Keyed(methods)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.missing.erase(), self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let methods = ctx.require_at(&self.methods)?;
             methods.register(
                 ctx,
                 "pending",
@@ -83,23 +95,27 @@ impl TypedPlugin for Waiting {
 
 /// A provider whose apply fails before it registers `broken`.
 struct Broken;
-impl TypedPlugin for Broken {
+impl Plugin for Broken {
     type Deps = ();
     fn name(&self) -> &str {
         "Broken"
     }
-    fn apply<'a>(&'a self, _: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async { Err(CordisError::PluginFailed("broken owner".into())) })
+    async fn apply(&self, _: &Ctx, (): ()) -> rutis::Result {
+        Err(rutis::Error::from(ErrorKind::PluginFailed(
+            "broken owner".into(),
+        )))
     }
 }
 
 /// Registers `make`'s part as a process row and returns its name.
-fn part<P>(builtins: &mut Builtins, make: impl Fn() -> P + Send + Sync + 'static) -> String
-where
-    P: TypedPlugin,
-    P::Deps: NamedDeps,
-{
-    register_part(builtins, &catalog(), move |names| names.part(make())).unwrap()
+fn part<P: DynPlugin + 'static>(
+    builtins: &mut Modules,
+    make: impl Fn(&Names<'_>) -> rutis::Result<P> + Send + Sync + 'static,
+) -> String {
+    register_part(builtins, &catalog(), move |names| {
+        Ok(Box::new(make(names)?))
+    })
+    .unwrap()
 }
 fn catalog() -> dim_agent_runtime::names::ServiceCatalog {
     let mut catalog = dim_agent_runtime::names::catalog();
@@ -124,11 +140,11 @@ struct Assembly {
 impl Assembly {
     /// `rows` registers each row and returns its loader rows; the table's
     /// row comes first.
-    async fn new(rows: impl FnOnce(&mut Builtins) -> Vec<Value>) -> Self {
+    async fn new(rows: impl FnOnce(&mut Modules) -> Vec<Value>) -> Self {
         let root = Ctx::root().unwrap();
-        let mut builtins = Builtins::new();
+        let mut builtins = Modules::new();
         let table = register_part(&mut builtins, &catalog(), |names| {
-            names.part(ManagementMethodsPlugin::new(names)?)
+            Ok(Box::new(ManagementMethodsPlugin::new(names)?))
         })
         .unwrap();
         let rows = std::iter::once(row(table))
@@ -154,7 +170,7 @@ impl Assembly {
         );
         loader.reconcile(vec![assembly], None).await.unwrap();
         let table = root
-            .get_as::<ManagementMethods>(TypeKey::of::<ManagementMethods>())
+            .get::<ManagementMethods>()
             .expect("the management table is active");
         Self {
             root,
@@ -212,23 +228,34 @@ struct State {
 }
 /// `fixture.*` with a blocking Drain write, a Report wait and a Drain read
 /// that returns the provider generation.
-#[derive(Clone)]
-struct Fixture(Arc<State>);
-impl TypedPlugin for Fixture {
-    type Deps = (Keyed<ManagementMethods>,);
+struct Fixture {
+    state: Arc<State>,
+    methods: Key<ManagementMethods>,
+}
+impl Fixture {
+    fn new(names: &Names<'_>, state: Arc<State>) -> rutis::Result<Self> {
+        Ok(Self {
+            state,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for Fixture {
     fn name(&self) -> &str {
         "Fixture"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(methods),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let state = self.0.clone();
+            let methods = ctx.require_at(&self.methods)?;
+            let state = self.state.clone();
             let generation = state.generation.fetch_add(1, Ordering::SeqCst);
             if generation > 0 && state.fail_again.load(Ordering::SeqCst) {
-                return Err(CordisError::PluginFailed("fixture fails again".into()));
+                return Err(rutis::Error::from(ErrorKind::PluginFailed(
+                    "fixture fails again".into(),
+                )));
             }
             methods.register(
                 ctx,
@@ -266,9 +293,13 @@ impl TypedPlugin for Fixture {
 async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let state = Arc::new(State::default());
-        let fixture = Fixture(state.clone());
-        let assembly =
-            Assembly::new(|builtins| vec![row(part(builtins, move || fixture.clone()))]).await;
+        let fixture = state.clone();
+        let assembly = Assembly::new(|builtins| {
+            vec![row(part(builtins, move |names| {
+                Fixture::new(names, fixture.clone())
+            }))]
+        })
+        .await;
         // It registers once the table it depends on is active, which the
         // loader's reconcile does not wait for.
         assembly.state("Fixture", FiberState::Active).await;
@@ -318,16 +349,20 @@ async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_isolated() {
     let state = Arc::new(State::default());
-    let fixture = Fixture(state.clone());
-    let off = Owner::new("Off", "off", &["off.read"]);
-    let other = Owner::new("Other", "other", &["other.read"]);
+    let fixture = state.clone();
     let assembly = Assembly::new(|builtins| {
         vec![
-            row(part(builtins, move || fixture.clone())),
-            row(part(builtins, || Waiting)),
-            row(part(builtins, || Broken)),
-            disabled(part(builtins, move || off.clone())),
-            row(part(builtins, move || other.clone())),
+            row(part(builtins, move |names| {
+                Fixture::new(names, fixture.clone())
+            })),
+            row(part(builtins, Waiting::new)),
+            row(part(builtins, |_| Ok(Broken))),
+            disabled(part(builtins, |names| {
+                Owner::new(names, "Off", "off", &["off.read"])
+            })),
+            row(part(builtins, |names| {
+                Owner::new(names, "Other", "other", &["other.read"])
+            })),
             // Names a module the loader cannot resolve.
             json!({"id": "Unresolvable", "name": "unregistered"}),
         ]
@@ -412,9 +447,7 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
 #[tokio::test]
 async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_namespace() {
     let root = Ctx::root().unwrap();
-    let table = root.plugin(rutis::Typed::new(ManagementMethodsPlugin {
-        table: DepKey::of(),
-    }));
+    let table = root.plugin(ManagementMethodsPlugin { table: Key::of() });
     let cancellation = CancellationToken::new();
     wait_active(&root, &[table], Duration::from_secs(5), &cancellation)
         .await
@@ -431,10 +464,10 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
         "session.create.extra",
     ] {
         let read = format!("{namespace}.read");
-        let invalid = root.plugin(rutis::Typed::with_keys(
-            Owner::new("Owner", namespace, &[read.as_str()]),
-            (DepKey::of(),),
-        ));
+        let catalog = catalog();
+        let names = Names::check(&catalog, &[], None);
+        let invalid =
+            root.plugin(Owner::new(&names, "Owner", namespace, &[read.as_str()]).unwrap());
         assert!(
             wait_active(&root, &[invalid], Duration::from_secs(5), &cancellation)
                 .await
@@ -444,19 +477,22 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
     }
     root.shutdown().await.unwrap();
 
-    let parent = Owner::new(
-        "Parent",
-        "fixture",
-        &["fixture.read", "fixture.nested.read"],
-    );
-    let child = Owner::new("Child", "fixture.nested", &["fixture.nested.other"]);
+    let parent = |names: &Names<'_>| {
+        Owner::new(
+            names,
+            "Parent",
+            "fixture",
+            &["fixture.read", "fixture.nested.read"],
+        )
+    };
+    let child =
+        |names: &Names<'_>| Owner::new(names, "Child", "fixture.nested", &["fixture.nested.other"]);
     let entry = CancellationToken::new();
     for child_enabled in [true, false] {
-        let (parent, child) = (parent.clone(), child.clone());
         let assembly = Assembly::new(|builtins| {
-            let child = part(builtins, move || child.clone());
+            let child = part(builtins, child);
             vec![
-                row(part(builtins, move || parent.clone())),
+                row(part(builtins, parent)),
                 if child_enabled {
                     row(child)
                 } else {

@@ -7,7 +7,8 @@
 //! writes no terminal and runs no UI-specific control protocol.
 
 use dim_agent_capabilities::methods::RpcError;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Plugin, TypeKey, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberView, Key, TypeKey};
+use rutis::{Ctx, Error, Plugin};
 use rutis_bridge::{
     Dial, Features, Identity, LinkConfig, LinkState, Peer, PeerPlugin, StaticIdentity, Transport,
     channel::{Channel, Closer, ConnectError, PeerId},
@@ -102,18 +103,18 @@ impl UiLeaf {
     }
 }
 
-impl Plugin for UiLeaf {
+impl DynPlugin for UiLeaf {
     fn name(&self) -> &str {
         &self.name
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
             let mut link = LinkConfig::dial(self.peer.clone(), LINKS, LINKS, &self.address);
             // A leaf accepts one connection: its link ends with it.
             link.reconnect = false;
             let peer = PeerPlugin::new(link, Features::default())
-                .map_err(|error| CordisError::PluginFailed(error.into()))?;
+                .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
             let handle = peer.handle();
             let link = ctx.plugin(peer);
             if let Err(error) = (&link).await {
@@ -122,16 +123,18 @@ impl Plugin for UiLeaf {
                 ))));
                 return Ok(Effect::Done);
             }
-            let mut state = handle
-                .link_state()
-                .ok_or_else(|| CordisError::PluginFailed("the leaf link did not start".into()))?;
+            let mut state = handle.link_state().ok_or_else(|| {
+                rutis::Error::from(ErrorKind::PluginFailed(
+                    "the leaf link did not start".into(),
+                ))
+            })?;
             if let Err(error) = ready(&mut state).await {
                 self.report(Err(error));
                 return Ok(Effect::Done);
             }
             let (loaded, settled) = oneshot::channel();
             ctx.plugin(TuiRow {
-                injects: [peer_key(&self.peer)],
+                peer: peer_key(&self.peer),
                 config: self.config.clone(),
                 loaded: Mutex::new(Some(loaded)),
             });
@@ -182,23 +185,23 @@ async fn ready(state: &mut tokio::sync::watch::Receiver<LinkState>) -> Result<()
 /// The loader's `peer:` row does the same; it is private, and loader rows
 /// are persistent configuration while a leaf exists per `ui.open`.
 struct TuiRow {
-    injects: [TypeKey; 1],
+    peer: Key<Peer>,
     config: Json,
     loaded: Mutex<Option<oneshot::Sender<Result<(), RpcError>>>>,
 }
 
-impl Plugin for TuiRow {
+impl DynPlugin for TuiRow {
     fn name(&self) -> &str {
         "UiLeaf/TuiRow"
     }
 
-    fn injects(&self) -> &[TypeKey] {
-        &self.injects
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.peer.erase()]
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
-            let peer = ctx.require_as::<Peer>(self.injects[0].clone())?;
+            let peer = ctx.require_at(&self.peer)?;
             let session = peer.connection().clone();
             let mut offers = peer.offers();
             let key = ctx.instance().to_string();
@@ -330,35 +333,26 @@ impl Closer for UnixCloser {
 #[derive(Default)]
 pub(crate) struct UiHostPlugin;
 
-impl TypedPlugin for UiHostPlugin {
+impl Plugin for UiHostPlugin {
     type Deps = ();
 
     fn name(&self) -> &str {
         "UiHost"
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as::<dyn Transport>(transport_key(LINKS), Arc::new(LeafDialer))?;
-            let identity: Arc<dyn Identity> = Arc::new(StaticIdentity::new(
-                PeerId::new(DAEMON_PEER).expect("valid daemon peer id"),
-            ));
-            ctx.provide_as::<dyn Identity>(rutis_bridge::identity_key(LINKS), identity)?;
-            let host = crate::ui_host::UiHost::new(UiLeaves { ctx: ctx.clone() });
-            ctx.provide_as::<crate::ui_host::UiHost>(
-                TypeKey::of::<crate::ui_host::UiHost>(),
-                host.clone(),
-            )?;
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        host.close_all().await;
-                        Ok(())
-                    })
-                }))
-            })?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        ctx.provide_at::<dyn Transport>(transport_key(LINKS), Arc::new(LeafDialer))?;
+        let identity: Arc<dyn Identity> = Arc::new(StaticIdentity::new(
+            PeerId::new(DAEMON_PEER).expect("valid daemon peer id"),
+        ));
+        ctx.provide_at::<dyn Identity>(rutis_bridge::identity_key(LINKS), identity)?;
+        let host = crate::ui_host::UiHost::new(UiLeaves { ctx: ctx.clone() });
+        ctx.provide_as::<crate::ui_host::UiHost>(host.clone())?;
+        ctx.effect(move || async move {
+            host.close_all().await;
+            Ok(())
+        })?;
+        Ok(())
     }
 }
 

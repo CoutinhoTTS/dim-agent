@@ -10,7 +10,7 @@ use dim_agent_capabilities::{
     model_provider::ModelProviderPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
-use dim_agent_runtime::{Feature, register_part};
+use dim_agent_runtime::Feature;
 use dim_app_server::{
     managed_provider::{
         AccountSnapshot, AccountView, CredentialLease, LeaseOwner, ManagedCatalog, ManagedError,
@@ -22,7 +22,8 @@ use dim_app_server::{
     },
     model_catalog::ModelEntry,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey};
+use rutis::Ctx;
+use rutis::host::BoxFuture;
 use std::sync::{Mutex as StdMutex, Weak};
 
 /// A signed-in managed account whose first credential the relay rejects.
@@ -134,19 +135,14 @@ impl ManagedProvider for Provider {
     }
 }
 struct FixturePlugin(Arc<Fixture>);
-impl TypedPlugin for FixturePlugin {
+impl Plugin for FixturePlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "ManagedFixture"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as::<dyn ManagedProvider>(
-                TypeKey::of::<dyn ManagedProvider>(),
-                Arc::new(Provider(self.0.clone())),
-            )?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        ctx.provide_as::<dyn ManagedProvider>(Arc::new(Provider(self.0.clone())))?;
+        Ok(())
     }
 }
 
@@ -214,7 +210,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     let config = ServerConfig {
@@ -223,10 +219,12 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         target_home: Some(home.join("rust")),
         managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
             let provider = provider.clone();
-            register_part(builtins, &dim_app_server::catalog(), move |names| {
-                names.part(FixturePlugin(provider.clone()))
-            })
-            .unwrap()
+            builtins
+                .builtins
+                .register::<Value, _, _>("ManagedFixture", move |_| {
+                    Ok(FixturePlugin(provider.clone()))
+                });
+            "ManagedFixture".to_owned()
         }))),
         session_defaults: dim_agent_runtime::SessionConfig {
             tools: Some(["read"].map(String::from).to_vec()),

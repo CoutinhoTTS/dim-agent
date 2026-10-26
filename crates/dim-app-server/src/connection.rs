@@ -11,12 +11,13 @@ use dim_agent_capabilities::{
     skills::{SkillsBranch, SkillsError},
     workspace_tools::background::{BackgroundExec, TaskError},
 };
-use dim_agent_runtime::{AgentError, Session};
+use dim_agent_runtime::{AgentError, Names, Session};
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
 mod mcp;
 mod subscription;
 mod tree;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, KeyedGate, TypeKey, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Error};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -1413,34 +1414,36 @@ impl ConnectionHub {
 
 pub(crate) struct ConnectionPlugin {
     config: Arc<ServerConfig>,
+    control: Key<ServerControl>,
+    ui: Key<crate::ui_host::UiHost>,
 }
 impl ConnectionPlugin {
-    pub fn new(config: Arc<ServerConfig>) -> Self {
-        Self { config }
+    pub fn new(names: &Names<'_>, config: Arc<ServerConfig>) -> rutis::Result<Self> {
+        Ok(Self {
+            config,
+            control: names.key()?,
+            ui: names.key()?,
+        })
     }
 }
-impl TypedPlugin for ConnectionPlugin {
-    type Deps = (Keyed<ServerControl>, Keyed<crate::ui_host::UiHost>);
+impl DynPlugin for ConnectionPlugin {
     fn name(&self) -> &str {
         "Connection"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(control), Keyed(ui)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.control.erase(), self.ui.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let control = ctx.require_at(&self.control)?;
+            let ui = ctx.require_at(&self.ui)?;
             let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, ui));
             let owner = hub.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owner.close().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                owner.close().await;
+                Ok(())
             })?;
-            ctx.provide_as(TypeKey::of::<ConnectionHub>(), hub)?;
+            ctx.provide_as::<ConnectionHub>(hub)?;
             Ok(Effect::Done)
         })
     }
@@ -1512,33 +1515,51 @@ impl RpcService {
 pub(crate) struct RpcPlugin {
     config: Arc<ServerConfig>,
     root: Ctx,
+    index: Key<AgentIndex>,
+    // Restore observers must outlive admitted RPC commands during reload.
+    collaboration: Key<crate::collaboration::Collaboration>,
+    hub: Key<ConnectionHub>,
+    control: Key<ServerControl>,
+    // Reads the status of the rows that registered method namespaces;
+    // the loader never reloads.
+    loader: Key<rutis_loader::Loader>,
+    management: Key<crate::methods::ManagementMethods>,
 }
 impl RpcPlugin {
-    pub fn new(config: Arc<ServerConfig>, root: Ctx) -> Self {
-        Self { config, root }
+    pub fn new(names: &Names<'_>, config: Arc<ServerConfig>, root: Ctx) -> rutis::Result<Self> {
+        Ok(Self {
+            config,
+            root,
+            index: names.key()?,
+            collaboration: names.key()?,
+            hub: names.key()?,
+            control: names.key()?,
+            loader: names.key()?,
+            management: names.key()?,
+        })
     }
 }
-impl TypedPlugin for RpcPlugin {
-    type Deps = (
-        Keyed<AgentIndex>,
-        // Restore observers must outlive admitted RPC commands during reload.
-        KeyedGate<crate::collaboration::Collaboration>,
-        Keyed<ConnectionHub>,
-        Keyed<ServerControl>,
-        // Reads the status of the rows that registered method namespaces;
-        // the loader never reloads.
-        Keyed<rutis_loader::Loader>,
-        Keyed<crate::methods::ManagementMethods>,
-    );
+impl DynPlugin for RpcPlugin {
     fn name(&self) -> &str {
         "Rpc"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(index), _, Keyed(hub), Keyed(control), Keyed(loader), Keyed(management)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.index.erase(),
+            self.collaboration.erase(),
+            self.hub.erase(),
+            self.control.erase(),
+            self.loader.erase(),
+            self.management.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let index = ctx.require_at(&self.index)?;
+            let hub = ctx.require_at(&self.hub)?;
+            let control = ctx.require_at(&self.control)?;
+            let loader = ctx.require_at(&self.loader)?;
+            let management = ctx.require_at(&self.management)?;
             let service = Arc::new(RpcService {
                 index,
                 ctx: self.root.clone(),
@@ -1553,24 +1574,20 @@ impl TypedPlugin for RpcPlugin {
             });
             let registered = service.clone();
             let handler = hub.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let mut handler = hub.rpc.write().expect("inbound handler");
-                            if handler
-                                .as_ref()
-                                .is_some_and(|current| Arc::ptr_eq(current, &service))
-                            {
-                                *handler = None;
-                            }
-                        }
-                        service.unloading.cancel();
-                        service.commands.close();
-                        service.commands.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                {
+                    let mut handler = hub.rpc.write().expect("inbound handler");
+                    if handler
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &service))
+                    {
+                        *handler = None;
+                    }
+                }
+                service.unloading.cancel();
+                service.commands.close();
+                service.commands.wait().await;
+                Ok(())
             })?;
             // Registered only after its cleanup is owned by this generation.
             handler.register(registered);

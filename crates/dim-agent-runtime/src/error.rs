@@ -22,7 +22,7 @@ pub enum AgentError {
     #[error("{component}: {message}")]
     Fault { component: String, message: String },
     #[error("framework: {0}")]
-    Framework(#[source] Arc<rutis::CordisError>),
+    Framework(#[source] Arc<rutis::host::ErrorKind>),
     #[error("multiple failures: {0:?}")]
     Multiple(Vec<AgentError>),
 }
@@ -41,7 +41,7 @@ impl AgentError {
         // Arcs that could reuse an address of an already expanded wrapper.
         fn collect(
             error: AgentError,
-            seen: &mut HashSet<*const rutis::CordisError>,
+            seen: &mut HashSet<*const rutis::host::ErrorKind>,
             out: &mut Vec<AgentError>,
         ) {
             match error {
@@ -55,15 +55,15 @@ impl AgentError {
                         return;
                     }
                     match error.as_ref() {
-                        rutis::CordisError::Aggregate { errors }
-                        | rutis::CordisError::ListenersFailed { errors, .. }
+                        rutis::host::ErrorKind::Aggregate { errors }
+                        | rutis::host::ErrorKind::ListenersFailed { errors, .. }
                             if !errors.is_empty() =>
                         {
                             for error in errors {
                                 collect(AgentError::Framework(error.clone()), seen, out);
                             }
                         }
-                        rutis::CordisError::PluginFailed(source) => {
+                        rutis::host::ErrorKind::PluginFailed(source) => {
                             match source.downcast_ref::<AgentError>() {
                                 Some(
                                     inner @ (AgentError::Multiple(_) | AgentError::Framework(_)),
@@ -104,18 +104,13 @@ pub fn panic_message(value: Box<dyn std::any::Any + Send>) -> String {
         "panic in managed operation".into()
     }
 }
-impl From<rutis::CordisError> for AgentError {
-    fn from(error: rutis::CordisError) -> Self {
-        Self::Framework(Arc::new(error))
+impl From<rutis::Error> for AgentError {
+    fn from(error: rutis::Error) -> Self {
+        Self::Framework(Arc::new(error.into_kind()))
     }
 }
-impl From<Arc<rutis::CordisError>> for AgentError {
-    fn from(error: Arc<rutis::CordisError>) -> Self {
+impl From<Arc<rutis::host::ErrorKind>> for AgentError {
+    fn from(error: Arc<rutis::host::ErrorKind>) -> Self {
         Self::Framework(error)
-    }
-}
-impl From<AgentError> for rutis::CordisError {
-    fn from(error: AgentError) -> Self {
-        Self::PluginFailed(Box::new(error))
     }
 }

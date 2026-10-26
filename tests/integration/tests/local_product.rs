@@ -13,7 +13,7 @@ use dim_agent_capabilities::{
         ExecShellRuntime, HostPlatform, OutputEncoding, ShellEdition, ShellSource, ShellStatus,
     },
     model_provider::ModelProviderPlugin,
-    permission::{CommandRulesHost, NoCommandRules},
+    permission::{CommandRulesHost, NoCommandRules, Permission},
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
     workspace_tools::WorkspaceToolsConfig,
@@ -21,7 +21,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
-use rutis::TypeKey;
+use rutis::host::CtxHost;
 use std::{path::Path, sync::Arc, time::Duration};
 
 struct Product {
@@ -40,12 +40,10 @@ async fn product(dirs: &Dirs) -> Product {
     }))
     .unwrap();
     platform.home = dirs.home.clone();
-    root.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(platform))
-        .unwrap();
-    root.provide_as(
-        TypeKey::of::<SkillSettingsHost>(),
-        Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
-    )
+    root.provide_as::<HostPlatform>(Arc::new(platform)).unwrap();
+    root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
+        MemorySkillSettings::default(),
+    ))))
     .unwrap();
     let model = Arc::new(ScriptedModel::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -58,7 +56,9 @@ async fn product(dirs: &Dirs) -> Product {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(
+                    dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?,
+                ))
             }),
         );
     defaults::install_local_execution(
@@ -69,7 +69,7 @@ async fn product(dirs: &Dirs) -> Product {
         },
     );
     // The Agent's own plugin: the catalog and the Skills parts.
-    builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
+    builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
     Product {
         agent: builder.build_in(&root),
         _root: root,
@@ -102,14 +102,12 @@ async fn session(product: &Product, cwd: &Path) -> Session {
 /// Waits for the first pending approval of the main branch.
 async fn approval_request(session: &Session) -> ApprovalRequestData {
     for _ in 0..400 {
-        let pending = session
-            .history("main", None)
-            .await
+        let mut pending = None;
+        session
+            .service::<Approval>("main")
             .unwrap()
-            .iter()
-            .find_map(|event| match &event.kind {
-                EventKind::ApprovalRequest(data) => Some(data.clone()),
-                _ => None,
+            .replay(|request| {
+                pending.get_or_insert_with(|| request.clone());
             });
         if let Some(data) = pending {
             return data;
@@ -132,6 +130,219 @@ async fn tool_results(session: &Session) -> Vec<ToolResult> {
         .flatten()
         .map(|call| call.result)
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_write_asks_for_each_external_mutation() {
+    let dirs = Dirs::new();
+    let cwd = dirs.dir("work");
+    let outside = dirs.dir("work-sibling");
+    let product = product(&dirs).await;
+    let session = session(&product, &cwd).await;
+    let permission = session.service::<Permission>("main").unwrap();
+    let version = permission
+        .update(
+            0,
+            PermissionPolicy {
+                preset: PermissionPreset::WorkspaceWrite,
+                allowed_tools: vec!["write".into(), "edit".into()],
+                disallowed_tools: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    #[allow(unused_mut)]
+    let mut targets = vec![
+        (
+            "../work-sibling/new/note.txt".to_owned(),
+            outside.join("new/note.txt"),
+        ),
+        ("~/note.txt".to_owned(), dirs.home.join("note.txt")),
+        (
+            dirs.root
+                .join("outputs")
+                .join(session.id())
+                .join("model.txt")
+                .to_string_lossy()
+                .into_owned(),
+            dirs.root
+                .join("outputs")
+                .join(session.id())
+                .join("model.txt"),
+        ),
+    ];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, cwd.join("escape")).unwrap();
+        targets.push((
+            "escape/linked/note.txt".into(),
+            outside.join("linked/note.txt"),
+        ));
+    }
+    for (input, target) in targets {
+        product.model.push(Step::Tool(
+            "write",
+            serde_json::json!({"path": input, "content": "before"}),
+        ));
+        product.model.push(Step::Text("done"));
+        session
+            .submit("write outside".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let first = approval_request(&session).await;
+        assert_eq!(first.call.name, "write");
+        assert!(
+            first.reason.contains(&target.to_string_lossy().to_string()),
+            "{}",
+            first.reason
+        );
+        assert!(!target.exists(), "an outside write must wait");
+        #[cfg(unix)]
+        if input == "escape/linked/note.txt" {
+            assert_eq!(first.call.input["path"], serde_json::json!(target));
+            std::fs::remove_file(cwd.join("escape")).unwrap();
+            std::os::unix::fs::symlink(&dirs.home, cwd.join("escape")).unwrap();
+        }
+        session
+            .service::<Approval>("main")
+            .unwrap()
+            .respond(&first.approval_id, ApprovalDecision::Allow)
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "before");
+        #[cfg(unix)]
+        if input == "escape/linked/note.txt" {
+            assert!(!dirs.home.join("linked/note.txt").exists());
+            std::fs::remove_file(cwd.join("escape")).unwrap();
+            std::os::unix::fs::symlink(&outside, cwd.join("escape")).unwrap();
+        }
+
+        for (decision, old, new) in [
+            (ApprovalDecision::Deny, "before", "after"),
+            (ApprovalDecision::Allow, "before", "after"),
+            (ApprovalDecision::Allow, "after", "again"),
+        ] {
+            product
+                .model
+                .push(Step::Tool("read", serde_json::json!({"path": input})));
+            product.model.push(Step::Tool(
+                "edit",
+                serde_json::json!({"path": input, "oldText": old, "newText": new}),
+            ));
+            product.model.push(Step::Text("done"));
+            session
+                .submit("edit outside".into(), InputMode::Queue, "main")
+                .await
+                .unwrap();
+            let request = approval_request(&session).await;
+            assert_eq!(
+                request.call.name, "edit",
+                "outside reads still run without asking"
+            );
+            assert_ne!(request.approval_id, first.approval_id);
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), old);
+            session
+                .service::<Approval>("main")
+                .unwrap()
+                .respond(&request.approval_id, decision)
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&target).unwrap(),
+                if decision == ApprovalDecision::Allow {
+                    new
+                } else {
+                    old
+                }
+            );
+        }
+    }
+    let state = session
+        .get::<dim_agent_capabilities::permission::PermissionState>("main")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        state.version, version,
+        "approvals must not change the policy"
+    );
+    for (preset, allowed) in [
+        (PermissionPreset::ReadOnly, false),
+        (PermissionPreset::FullAccess, true),
+    ] {
+        let version = session
+            .get::<dim_agent_capabilities::permission::PermissionState>("main")
+            .unwrap()
+            .unwrap()
+            .version;
+        permission
+            .update(
+                version,
+                PermissionPolicy {
+                    preset,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let target = outside.join(format!("{preset:?}.txt"));
+        product.model.push(Step::Tool(
+            "write",
+            serde_json::json!({"path": target, "content": "other preset"}),
+        ));
+        product.model.push(Step::Text("done"));
+        session
+            .submit("other preset".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        assert_eq!(target.exists(), allowed);
+        assert_eq!(
+            tool_results(&session).await.last().unwrap().is_error == Some(true),
+            !allowed
+        );
+    }
+    session.close().await.unwrap();
+    product.agent.close().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn unresolved_write_targets_fail_without_mutation() {
+    let dirs = Dirs::new();
+    let cwd = dirs.dir("work");
+    std::os::unix::fs::symlink(dirs.root.join("missing"), cwd.join("dangling")).unwrap();
+    std::os::unix::fs::symlink("loop", cwd.join("loop")).unwrap();
+    let product = product(&dirs).await;
+    let session = session(&product, &cwd).await;
+    for path in ["dangling/new/file.txt", "loop/file.txt"] {
+        product.model.push(Step::Tool(
+            "write",
+            serde_json::json!({"path": path, "content": "blocked"}),
+        ));
+        product.model.push(Step::Text("done"));
+        session
+            .submit("invalid target".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        assert_eq!(
+            tool_results(&session).await.last().unwrap().is_error,
+            Some(true)
+        );
+    }
+    assert!(!dirs.root.join("missing").exists());
+    assert!(
+        session
+            .history("main", None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| !matches!(event.kind, EventKind::ApprovalRequest(_)))
+    );
+    session.close().await.unwrap();
+    product.agent.close().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

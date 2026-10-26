@@ -11,20 +11,24 @@ use std::{
 /// `ctx` and end with it; register before the first read of the sources.
 pub(super) fn settings_changes(
     ctx: &rutis::Ctx,
-) -> std::result::Result<tokio::sync::watch::Receiver<()>, rutis::CordisError> {
-    let wake = crate::settings::Wake::new();
+) -> std::result::Result<tokio::sync::watch::Receiver<()>, rutis::Error> {
+    let wake = std::sync::Arc::new(tokio::sync::watch::Sender::new(()));
     for source in [McpSettings::NAMESPACE, McpProjectEnablement::NAMESPACE] {
-        ctx.events().on(
-            ctx,
-            &crate::settings::settings_changes(source),
-            wake.clone(),
-        )?;
+        let wake = wake.clone();
+        ctx.listen::<crate::settings::SettingsChanged>()
+            .name(crate::settings::settings_changes(source))
+            .on(move |_, _| {
+                wake.send_replace(());
+                async { Ok(None) }
+            })?;
     }
-    ctx.events().on(
-        ctx,
-        &crate::settings::project_authorizations(),
-        wake.clone(),
-    )?;
+    let authorized = wake.clone();
+    ctx.listen::<crate::settings::ProjectAuthorized>()
+        .name(crate::settings::project_authorizations())
+        .on(move |_, _| {
+            authorized.send_replace(());
+            async { Ok(None) }
+        })?;
     Ok(wake.subscribe())
 }
 

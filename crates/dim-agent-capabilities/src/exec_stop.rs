@@ -6,7 +6,7 @@
 //! `session.exec.stop` through this port.
 
 use dim_agent_types::ExecEndedData;
-use rutis::BoxFuture;
+use rutis::host::BoxFuture;
 use std::sync::Arc;
 
 /// Stop-path errors.

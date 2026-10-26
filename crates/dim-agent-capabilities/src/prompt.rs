@@ -8,7 +8,8 @@ use crate::{
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, TypeKey};
+use rutis::{Ctx, Error};
 use std::{
     collections::{BTreeMap, BTreeSet},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -608,48 +609,65 @@ impl ConfigureControl for Prompt {
 }
 
 pub struct PromptPlugin {
-    state: DepKey<StateCell<PromptSnapshot>>,
-    prompt: DepKey<Prompt>,
-    configure: DepKey<dyn ConfigureControl>,
+    timeline: rutis::host::Key<Timeline>,
+    dispatcher: rutis::host::Key<Dispatcher>,
+    host: rutis::host::Key<PromptHost>,
+    initial: rutis::host::Key<InitialPromptConfiguration>,
+    publisher: rutis::host::Key<ConfigurationPublisher>,
+    identity: rutis::host::Key<TimelineIdentity>,
+    faults: rutis::host::Key<FaultReporter>,
+    branch_phase: rutis::host::Key<BranchLifecycle>,
+    opening: rutis::host::Key<BranchOpening>,
+    state: rutis::host::Key<StateCell<PromptSnapshot>>,
+    prompt: rutis::host::Key<Prompt>,
+    configure: rutis::host::Key<dyn ConfigureControl>,
 }
 impl PromptPlugin {
-    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, Error> {
         Ok(Self {
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            host: names.key()?,
+            initial: names.key()?,
+            publisher: names.key()?,
+            identity: names.key()?,
+            faults: names.key()?,
+            branch_phase: names.key()?,
+            opening: names.key()?,
             state: names.state_cell()?,
             prompt: names.key()?,
             configure: names.key()?,
         })
     }
 }
-impl TypedPlugin for PromptPlugin {
-    type Deps = (
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-        Keyed<PromptHost>,
-        Keyed<InitialPromptConfiguration>,
-        Keyed<ConfigurationPublisher>,
-        Keyed<TimelineIdentity>,
-        Keyed<FaultReporter>,
-        (Keyed<BranchLifecycle>, Keyed<BranchOpening>),
-    );
+impl DynPlugin for PromptPlugin {
     fn name(&self) -> &str {
         "Prompt"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(timeline),
-            Keyed(dispatcher),
-            Keyed(host),
-            Keyed(initial),
-            Keyed(publisher),
-            Keyed(identity),
-            Keyed(faults),
-            (Keyed(branch_phase), Keyed(opening)),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.host.erase(),
+            self.initial.erase(),
+            self.publisher.erase(),
+            self.identity.erase(),
+            self.faults.erase(),
+            self.branch_phase.erase(),
+            self.opening.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let host = ctx.require_at(&self.host)?;
+            let initial = ctx.require_at(&self.initial)?;
+            let publisher = ctx.require_at(&self.publisher)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let faults = ctx.require_at(&self.faults)?;
+            let branch_phase = ctx.require_at(&self.branch_phase)?;
+            let opening = ctx.require_at(&self.opening)?;
             if ctx.cancellation_token().is_cancelled() {
                 return Ok(Effect::Done);
             }
@@ -671,32 +689,28 @@ impl TypedPlugin for PromptPlugin {
             });
 
             let owner = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let mut state = owner.state.lock().unwrap();
-                            state.closed = true;
-                            for pending in state.pending.values() {
-                                pending.cancel.cancel();
-                            }
-                        }
-                        owner.tasks.close();
-                        owner.tasks.wait().await;
-                        let ids = owner
-                            .state
-                            .lock()
-                            .unwrap()
-                            .pending
-                            .keys()
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        for id in ids {
-                            owner.finish(&id, Err(AgentError::Closed("Prompt".into())));
-                        }
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                {
+                    let mut state = owner.state.lock().unwrap();
+                    state.closed = true;
+                    for pending in state.pending.values() {
+                        pending.cancel.cancel();
+                    }
+                }
+                owner.tasks.close();
+                owner.tasks.wait().await;
+                let ids = owner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .pending
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for id in ids {
+                    owner.finish(&id, Err(AgentError::Closed("Prompt".into())));
+                }
+                Ok(())
             })?;
 
             let owner = service.clone();
@@ -869,9 +883,9 @@ impl TypedPlugin for PromptPlugin {
             state.set(PromptSnapshot::from_context(&context));
             *projecting = projected_through;
             drop(projecting);
-            ctx.provide_as(self.state.key().clone(), state)?;
-            ctx.provide_as::<Prompt>(self.prompt.key().clone(), service.clone())?;
-            ctx.provide_as::<dyn ConfigureControl>(self.configure.key().clone(), service)?;
+            ctx.provide_at(self.state.clone(), state)?;
+            ctx.provide_at::<Prompt>(self.prompt.clone(), service.clone())?;
+            ctx.provide_at::<dyn ConfigureControl>(self.configure.clone(), service)?;
             Ok(Effect::Done)
         })
     }

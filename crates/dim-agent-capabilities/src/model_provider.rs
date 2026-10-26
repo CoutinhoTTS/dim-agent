@@ -10,11 +10,12 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, ModelProgress, Names, StateCell,
-    Timeline, TimelineIdentity, When,
+    Timeline, TimelineIdentity,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
@@ -261,68 +262,66 @@ impl ModelProvider {
 }
 
 pub struct ModelProviderPlugin {
-    provider: DepKey<ModelProvider>,
-    progress: DepKey<StateCell<ModelProgress>>,
+    provider: Key<ModelProvider>,
+    progress: Key<StateCell<ModelProgress>>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    context: Key<ContextPreparation>,
+    host: Key<ModelHost>,
     /// Each request's connection comes from the process
     /// `ProviderConnectionResolver`; otherwise it is local.
-    resolves: bool,
+    resolver: Option<Key<ProviderConnectionResolver>>,
+    identity: Key<TimelineIdentity>,
 }
 impl ModelProviderPlugin {
     /// Requests run on the local connection.
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Self::with(names, false)
     }
     /// The network profile resolves each request's connection through the
     /// process `ProviderConnectionResolver`.
-    pub fn process(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn process(names: &Names<'_>) -> rutis::Result<Self> {
         Self::with(names, true)
     }
-    fn with(names: &Names<'_>, resolves: bool) -> Result<Self, CordisError> {
+    fn with(names: &Names<'_>, resolves: bool) -> rutis::Result<Self> {
         Ok(Self {
             provider: names.key()?,
             progress: names.state_cell()?,
-            resolves,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            context: names.key()?,
+            host: names.key()?,
+            resolver: resolves.then(|| names.key()).transpose()?,
+            identity: names.key()?,
         })
     }
-    /// This part with its keys for this copy.
-    pub fn part(self, names: &Names<'_>) -> Result<Box<dyn rutis::Plugin>, CordisError> {
-        let keys = (
-            names.key()?,
-            names.key()?,
-            names.key()?,
-            names.key()?,
-            names.when::<Keyed<ProviderConnectionResolver>>(self.resolves)?,
-            names.key()?,
-        );
-        Ok(names.part_with(self, keys))
-    }
 }
-impl TypedPlugin for ModelProviderPlugin {
-    type Deps = (
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-        Keyed<ContextPreparation>,
-        Keyed<ModelHost>,
-        When<Keyed<ProviderConnectionResolver>>,
-        Keyed<TimelineIdentity>,
-    );
+impl DynPlugin for ModelProviderPlugin {
     fn name(&self) -> &str {
         "ModelProvider"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(timeline),
-            Keyed(dispatcher),
-            Keyed(context),
-            Keyed(host),
-            When(resolver),
-            Keyed(identity),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        let mut keys = vec![
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.context.erase(),
+            self.host.erase(),
+        ];
+        keys.extend(self.resolver.as_ref().map(Key::erase));
+        keys.push(self.identity.erase());
+        keys
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let resolver = resolver.map(|Keyed(resolver)| resolver);
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let context = ctx.require_at(&self.context)?;
+            let host = ctx.require_at(&self.host)?;
+            let resolver = match &self.resolver {
+                Some(key) => Some(ctx.require_at(key)?),
+                None => None,
+            };
+            let identity = ctx.require_at(&self.identity)?;
             let service = Arc::new(ModelProvider {
                 state: Mutex::new(ModelState::default()),
                 tasks: TaskTracker::new(),
@@ -335,22 +334,17 @@ impl TypedPlugin for ModelProviderPlugin {
                 progress: Arc::new(StateCell::new(ModelProgress::default())),
             });
             let owner = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let mut state = owner.state.lock().unwrap();
-                            state.closed = true;
-                            if let Some(current) = &state.current {
-                                current.cancel.cancel();
-                            }
-                        }
-                        owner.tasks.close();
-                        owner.tasks.wait().await;
-                        AgentError::aggregate(owner.errors.lock().unwrap().clone())
-                            .map_err(Into::into)
-                    })
-                }))
+            ctx.effect(move || async move {
+                {
+                    let mut state = owner.state.lock().unwrap();
+                    state.closed = true;
+                    if let Some(current) = &state.current {
+                        current.cancel.cancel();
+                    }
+                }
+                owner.tasks.close();
+                owner.tasks.wait().await;
+                AgentError::aggregate(owner.errors.lock().unwrap().clone()).map_err(Into::into)
             })?;
             let owner = service.clone();
             let failures = dispatcher.clone();
@@ -470,8 +464,8 @@ impl TypedPlugin for ModelProviderPlugin {
                     },
                 )
                 .await?;
-            ctx.provide_as(self.progress.key().clone(), service.progress.clone())?;
-            ctx.provide_as(self.provider.key().clone(), service)?;
+            ctx.provide_at(self.progress.clone(), service.progress.clone())?;
+            ctx.provide_at(self.provider.clone(), service)?;
             Ok(Effect::Done)
         })
     }

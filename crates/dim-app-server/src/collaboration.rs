@@ -23,7 +23,8 @@ use futures_util::{
     FutureExt,
     future::{BoxFuture as WorkFuture, Shared},
 };
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, Listener, TypeKey, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Plugin};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -98,16 +99,14 @@ pub(crate) struct CollaborationDirectory {
 
 /// Provides collaboration records without depending on reloadable services.
 pub(crate) struct CollaborationDirectoryPlugin;
-impl TypedPlugin for CollaborationDirectoryPlugin {
+impl Plugin for CollaborationDirectoryPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "CollaborationDirectory"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, _: ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide(CollaborationDirectory::default())?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, _: ()) -> rutis::Result {
+        ctx.provide(CollaborationDirectory::default())?;
+        Ok(())
     }
 }
 
@@ -519,16 +518,11 @@ impl Collaboration {
     }
 }
 
-impl Listener<SessionRestored> for Arc<Collaboration> {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        event: &'a SessionRestored,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+impl Collaboration {
+    fn session_restored(self: &Arc<Self>, event: &SessionRestored) {
         // The restored Session is already in its Agent's entries.
         let Some((_, session)) = self.index.session(&event.session_id) else {
-            return Box::pin(async { Ok(None) });
+            return;
         };
         let participates = {
             let relations = self.directory.relations.lock().unwrap();
@@ -547,49 +541,49 @@ impl Listener<SessionRestored> for Arc<Collaboration> {
         {
             self.watch(&event.agent_id, session);
         }
-        Box::pin(async { Ok(None) })
     }
-}
-/// No close announces the end of an unloaded Session, and its watch ended
-/// with the unload, so Collaboration ends it here.
-impl Listener<UnloadedSessionDeleted> for Arc<Collaboration> {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        event: &'a UnloadedSessionDeleted,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+    /// No close announces the end of an unloaded Session, and its watch ended
+    /// with the unload, so Collaboration ends it here.
+    fn unloaded_session_deleted(self: &Arc<Self>, event: &UnloadedSessionDeleted) {
         let this = self.clone();
         let (agent_id, id) = (event.agent_id.clone(), event.session_id.clone());
         self.tasks
             .spawn(async move { this.session_ended(&agent_id, &id).await });
-        Box::pin(async { Ok(None) })
     }
 }
 
 /// The plugin: the process service, which loads after `Agents` and reloads
 /// with it, and the Session and branch parts it registers.
-pub(crate) struct CollaborationPlugin {}
+pub(crate) struct CollaborationPlugin {
+    index: Key<AgentIndex>,
+    directory: Key<CollaborationDirectory>,
+    parts: Key<dim_agent_runtime::PartRegistry>,
+}
 impl CollaborationPlugin {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            index: names.key()?,
+            directory: names.key()?,
+            parts: names.key()?,
+        })
     }
 }
-impl TypedPlugin for CollaborationPlugin {
-    type Deps = (
-        Keyed<AgentIndex>,
-        Keyed<CollaborationDirectory>,
-        Keyed<dim_agent_runtime::PartRegistry>,
-    );
+impl DynPlugin for CollaborationPlugin {
     fn name(&self) -> &str {
         "Collaboration"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(index), Keyed(directory), Keyed(parts)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.index.erase(),
+            self.directory.erase(),
+            self.parts.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let index = ctx.require_at(&self.index)?;
+            let directory = ctx.require_at(&self.directory)?;
+            let parts = ctx.require_at(&self.parts)?;
             let service = Arc::new(Collaboration {
                 index,
                 directory,
@@ -597,23 +591,22 @@ impl TypedPlugin for CollaborationPlugin {
                 stop: CancellationToken::new(),
             });
             let owner = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owner.stop.cancel();
-                        owner.tasks.close();
-                        owner.tasks.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                owner.stop.cancel();
+                owner.tasks.close();
+                owner.tasks.wait().await;
+                Ok(())
             })?;
-            ctx.events()
-                .on(ctx, &service.index.session_restored, service.clone())?;
-            ctx.events().on(
-                ctx,
-                &service.index.unloaded_session_deleted,
-                service.clone(),
-            )?;
+            let restored = service.clone();
+            ctx.on::<SessionRestored>(move |event, _| {
+                restored.session_restored(&event);
+                async { Ok(None) }
+            })?;
+            let deleted = service.clone();
+            ctx.on::<UnloadedSessionDeleted>(move |event, _| {
+                deleted.unloaded_session_deleted(&event);
+                async { Ok(None) }
+            })?;
             // Retain handles across the reload gap: even a Session that closed
             // while no observer ran must still clean up its relation/Agent.
             let watched: Vec<_> = service
@@ -630,21 +623,23 @@ impl TypedPlugin for CollaborationPlugin {
             // Before the service is provided, so no member is being
             // established meanwhile.
             service.reconcile().await;
-            ctx.provide_as(TypeKey::of::<Collaboration>(), service)?;
+            ctx.provide_as::<Collaboration>(service)?;
             use dim_agent_runtime::PartScope;
             parts.register(
                 ctx,
                 PartScope::Session,
                 "CollaborationCapability",
                 |mount| {
-                    mount
-                        .names
-                        .part(CollaborationCapabilityPlugin::new(mount.names)?)
-                        .map(Some)
+                    Ok(Some(
+                        Box::new(CollaborationCapabilityPlugin::new(mount.names)?)
+                            as Box<dyn DynPlugin>,
+                    ))
                 },
             )?;
             parts.register(ctx, PartScope::Branch, "CollaborationTimeline", |mount| {
-                mount.names.part(CollaborationTimelinePlugin).map(Some)
+                Ok(Some(
+                    Box::new(CollaborationTimelinePlugin::new(mount.names)?) as Box<dyn DynPlugin>,
+                ))
             })?;
             Ok(Effect::Done)
         })
@@ -2315,40 +2310,49 @@ impl ToolHandler for AgentTool {
 }
 
 struct CollaborationCapabilityPlugin {
-    service: DepKey<CollaborationCapability>,
+    collaboration: Key<Collaboration>,
+    identity: Key<SessionIdentity>,
+    config: Key<SessionConfig>,
+    tree: Key<TreeCommands>,
+    lifecycle: Key<SessionLifecycle>,
+    tools: Key<ToolRegistry>,
+    service: Key<CollaborationCapability>,
 }
 impl CollaborationCapabilityPlugin {
-    fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
-            service: names.key::<CollaborationCapability>()?,
+            collaboration: names.key()?,
+            identity: names.key()?,
+            config: names.key()?,
+            tree: names.key()?,
+            lifecycle: names.key()?,
+            tools: names.key()?,
+            service: names.key()?,
         })
     }
 }
-impl TypedPlugin for CollaborationCapabilityPlugin {
-    type Deps = (
-        Keyed<Collaboration>,
-        Keyed<SessionIdentity>,
-        Keyed<SessionConfig>,
-        Keyed<TreeCommands>,
-        Keyed<SessionLifecycle>,
-        Keyed<ToolRegistry>,
-    );
+impl DynPlugin for CollaborationCapabilityPlugin {
     fn name(&self) -> &str {
         "CollaborationCapability"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(collaboration),
-            Keyed(identity),
-            Keyed(config),
-            Keyed(tree),
-            Keyed(lifecycle),
-            Keyed(tools),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.collaboration.erase(),
+            self.identity.erase(),
+            self.config.erase(),
+            self.tree.erase(),
+            self.lifecycle.erase(),
+            self.tools.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let collaboration = ctx.require_at(&self.collaboration)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let config = ctx.require_at(&self.config)?;
+            let tree = ctx.require_at(&self.tree)?;
+            let lifecycle = ctx.require_at(&self.lifecycle)?;
+            let tools = ctx.require_at(&self.tools)?;
             let service = Arc::new(CollaborationCapability {
                 collaboration,
                 session_id: identity.session_id.clone(),
@@ -2367,47 +2371,57 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
                     }),
                 },
             )?;
-            ctx.provide_as(self.service.key().clone(), service)?;
+            ctx.provide_at(self.service.clone(), service)?;
             Ok(Effect::Done)
         })
     }
 }
 
 /// Binds one branch's collaboration events to the Session capability.
-struct CollaborationTimelinePlugin;
-impl TypedPlugin for CollaborationTimelinePlugin {
-    type Deps = (
-        Keyed<CollaborationCapability>,
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-        Keyed<TimelineIdentity>,
-        Keyed<BranchLifecycle>,
-    );
+struct CollaborationTimelinePlugin {
+    service: Key<CollaborationCapability>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    identity: Key<TimelineIdentity>,
+    phase: Key<BranchLifecycle>,
+}
+impl CollaborationTimelinePlugin {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            service: names.key()?,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            identity: names.key()?,
+            phase: names.key()?,
+        })
+    }
+}
+impl DynPlugin for CollaborationTimelinePlugin {
     fn name(&self) -> &str {
         "CollaborationTimeline"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(service),
-            Keyed(timeline),
-            Keyed(dispatcher),
-            Keyed(identity),
-            Keyed(phase),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.service.erase(),
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.identity.erase(),
+            self.phase.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let service = ctx.require_at(&self.service)?;
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let phase = ctx.require_at(&self.phase)?;
             let branch_id = identity.branch_id.clone();
             let owner = service.clone();
             let unloading = branch_id.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owner.unload(&unloading).await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                owner.unload(&unloading).await;
+                Ok(())
             })?;
             // Subscribe, then rebuild under the gate: see the capability
             // reload protocol. Handlers skip events the rebuild covered.

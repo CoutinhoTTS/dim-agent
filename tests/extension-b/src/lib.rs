@@ -1,5 +1,6 @@
-use dim_agent_runtime::{Dispatcher, Names, StateCell, When};
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, Plugin, TypedPlugin};
+use dim_agent_runtime::{Dispatcher, Names, StateCell};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::sync::Arc;
 use test_extension_a::Counter;
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
@@ -9,36 +10,39 @@ pub struct Snapshot {
 /// Declares the Counter only when `declare` is set; otherwise it reads the
 /// Counter undeclared, which the runtime must reject.
 pub struct Consumer {
-    counter: DepKey<Counter>,
-    state: DepKey<StateCell<Snapshot>>,
+    dispatcher: Key<Dispatcher>,
+    declared: Option<Key<Counter>>,
+    counter: Key<Counter>,
+    state: Key<StateCell<Snapshot>>,
 }
 impl Consumer {
-    pub fn part(names: &Names<'_>, declare: bool) -> Result<Box<dyn Plugin>, CordisError> {
-        let consumer = Self {
+    pub fn part(names: &Names<'_>, declare: bool) -> rutis::Result<Box<dyn DynPlugin>> {
+        Ok(Box::new(Self {
+            dispatcher: names.key()?,
+            declared: declare.then(|| names.key::<Counter>()).transpose()?,
             counter: names.key()?,
             state: names.state_cell()?,
-        };
-        let keys = (names.key()?, names.when::<Keyed<Counter>>(declare)?);
-        Ok(names.part_with(consumer, keys))
+        }))
     }
 }
-impl TypedPlugin for Consumer {
-    type Deps = (Keyed<Dispatcher>, When<Keyed<Counter>>);
+impl DynPlugin for Consumer {
     fn name(&self) -> &str {
         "ExternalConsumer"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher), When(counter)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        let mut keys = vec![self.dispatcher.erase()];
+        keys.extend(self.declared.as_ref().map(Key::erase));
+        keys
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let counter = match counter {
-                Some(Keyed(counter)) => counter,
-                None => ctx.require_as::<Counter>(self.counter.key().clone())?,
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let counter = match &self.declared {
+                Some(counter) => ctx.require_at(counter)?,
+                None => ctx.require_at(&self.counter)?,
             };
             let state = StateCell::new(Snapshot::default());
-            ctx.provide_as(self.state.key().clone(), Arc::new(state.clone()))?;
+            ctx.provide_at(self.state.clone(), Arc::new(state.clone()))?;
             dispatcher.subscribe(ctx, "ExternalConsumer", &["input/message"], move |_| {
                 let counter = counter.clone();
                 let state = state.clone();
