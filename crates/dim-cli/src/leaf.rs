@@ -182,6 +182,7 @@ impl PluginFactory<serde_json::Value> for TuiFactory {
             ))
         })?;
         let mut options = self.options.clone();
+        options.created_session = options.resume.is_none();
         options.resume = Some(config.session_id);
         options.ui_identity = Some(UiIdentity {
             ui_id: config.ui_id,

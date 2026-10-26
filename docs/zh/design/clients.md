@@ -70,7 +70,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | API-key Provider 的添加/编辑/测试/启用/禁用/切换 | 已实现；删除和模型列表编辑：CLI 中无（服务端已支持） | 只读的 `provider.*` | [Provider 管理](appserver/provider-management.md) |
 | 切换模型 | 已实现 | 已实现 | `session.model.update` |
 | 推理强度、快速模式 | 已实现（`/effort`、`/fast`）；在 `/models` 里调推理强度：无 | — | [模型配置](../../design/model-configuration.md) |
-| 子 agent 模型策略 | 已设计 | — | [子 agent 模型策略](../../design/subagent-model-policy.md)、[#263](https://github.com/arcships/dim/issues/263) |
+| 子 agent 模型策略 | 已完成（`/models` → Subagent models） | — | [子 agent 模型策略](../../design/subagent-model-policy.md)、[#263](https://github.com/arcships/dim/issues/263) |
 | 辅助模型 | 服务端已按所有者设计（例如 SessionTitle）；没有客户端界面 | — | [AuxiliaryModel](appserver/auxiliary-model.md) |
 
 ### 3.2 Session 管理
@@ -106,7 +106,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | 待办状态 | 不做 | 不做 | [总体设计](overview.md) §1 |
 | 后台任务：命令与成员（详情、停止单个、全部停止） | 已实现 | — | [后台任务列表](../../design/background-task-list.md)、[输出](../../design/background-task-output.md)、[成员会话](../../design/member-conversation.md) |
 | 后台任务：Workflow 运行 | 已完成 | 后续阶段 | [Workflow 任务视图](../../design/workflow-task-view.md)、[#264](https://github.com/arcships/dim/issues/264) |
-| 成员 transcript 卡片 | 已设计 | — | [成员会话](../../design/member-conversation.md) §7–9、[#263](https://github.com/arcships/dim/issues/263) |
+| 成员 transcript 卡片 | 已实现 | — | [成员会话](../../design/member-conversation.md) §7–9、[#263](https://github.com/arcships/dim/issues/263) |
 
 ### 3.4 系统管理
 

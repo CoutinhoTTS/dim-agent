@@ -4,6 +4,7 @@ mod approval;
 pub mod cli;
 pub mod codex_oauth;
 pub mod collaboration;
+mod collaboration_model_policy;
 mod connection;
 mod control;
 pub mod grok_oauth;
@@ -618,7 +619,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .reserve::<mcp::config::McpSettings>()
         .reserve::<mcp::config::McpProjectEnablement>()
         .reserve::<skills_management::SkillDocument>()
-        .reserve::<permission_rules::PermissionSettings>()
+        .reserve::<permission_rules::PermissionSettings>();
+        // Only local execution consumes the subagent model policy.
+        let settings = if config.local_execution() {
+            settings.reserve::<collaboration_model_policy::ModelPolicy>()
+        } else {
+            settings
+        }
         .declare(settings_sources);
         rows.push(register_part(
             &mut builtins,
@@ -671,6 +678,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             Ok(Box::new(permission_rules::PermissionRulesPlugin::new(
                 names,
             )?))
+        })?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(
+                collaboration_model_policy::CollaborationModelPolicyPlugin::new(names)?,
+            ))
         })?);
     }
     let session_parts = config
@@ -727,9 +739,14 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             },
         )?);
     }
-    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        Ok(Box::new(CollaborationPlugin::new(names)?))
-    })?);
+    {
+        let local_execution = config.local_execution();
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| Ok(Box::new(CollaborationPlugin::new(names, local_execution)?)),
+        )?);
+    }
     rows.push(register_part(&mut builtins, builder.catalog(), |_| {
         Ok(Box::new(ui_leaf::UiHostPlugin))
     })?);

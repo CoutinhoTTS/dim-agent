@@ -131,6 +131,12 @@ pub enum Effect {
         provider_id: String,
         model_id: String,
     },
+    /// Reread the subagent model policy before another save.
+    ReadModelPolicy,
+    SetModelPolicy {
+        expected_revision: String,
+        policy: crate::model::session::SubagentModelPolicy,
+    },
 }
 
 fn plain(key: KeyEvent) -> bool {

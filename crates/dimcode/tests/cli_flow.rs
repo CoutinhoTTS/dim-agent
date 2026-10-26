@@ -76,6 +76,13 @@ impl Wire {
         assert_eq!(value["method"], method);
         value
     }
+    /// The next request, whichever it is: for requests whose order the
+    /// flow does not fix.
+    fn read_any(&mut self) -> Value {
+        let mut line = String::new();
+        self.0.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
     fn send(&mut self, value: Value) {
         writeln!(self.0.get_mut(), "{value}").unwrap();
         self.0.get_mut().flush().unwrap();
@@ -5627,12 +5634,21 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-failed","sequence":19,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-failed","status":"error","error":"agent_not_found"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-other","sequence":20,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r4","call_id":"call-4","target":{"kind":"agent","agent_id":"writer"},"prompt":"Check the docs"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-other","sequence":21,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-other","status":"ok","agent_id":"writer","session_id":"other-member","input_event_id":"other-input"}}}));
-        let stop = wire.read("session.stop");
+        // The delivered members' cards observe them; those attaches stay
+        // unanswered, and stopping does not depend on them.
+        let past_observations = |wire: &mut Wire, method: &str| loop {
+            let request = wire.read_any();
+            if request["method"] != "session.attach" {
+                assert_eq!(request["method"], method);
+                break request;
+            }
+        };
+        let stop = past_observations(wire, "session.stop");
         assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"stopped by the user"}));
         wire.reply(&stop, json!({}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-1","sequence":22,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-1","agent_id":"reviewer","session_id":"member","text":"","status":"cancelled","reason":"stopped by the user"}}}));
         // The leader remains selected, and the other member completes normally.
-        let submit = wire.read("session.submit");
+        let submit = past_observations(wire, "session.submit");
         assert_eq!(submit["params"]["sessionId"], "session");
         wire.reply(&submit, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-other","sequence":23,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-other","agent_id":"writer","session_id":"other-member","text":"Other agent completed normally.","status":"completed"}}}));
@@ -5644,9 +5660,8 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"go\r");
-    // The transcript names the delegation by the leader's words.
-    terminal.until("Agent");
-    terminal.until("request · Survey the crates");
+    // The delegation's card names its Agent and the leader's words.
+    terminal.until("Agent: reviewer");
     terminal.write(b"/tasks\r");
     terminal.until("Background tasks");
     terminal.until("sleep 100");
@@ -6131,4 +6146,115 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
     release.send(()).unwrap();
     daemon.join().unwrap();
     assert!(status.success());
+}
+
+/// `/models` edits the subagent model policy through its own management
+/// methods only: a stale save rereads instead of overwriting, cancel writes
+/// nothing, and neither the Session's model nor the provider default moves.
+#[test]
+fn tui_models_picker_edits_only_the_subagent_model_policy() {
+    let home = Home::new();
+    let (calls, observed) = std::sync::mpsc::channel::<Value>();
+    let daemon = home.daemon(move |wire| {
+        let mut revision = 1;
+        let mut policy = json!({"mode":"agent"});
+        let mut conflicted = false;
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            line.clear();
+            calls.send(request.clone()).unwrap();
+            let result = match request["method"].as_str().unwrap() {
+                "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "provider.list","provider.catalog","collaboration.model_policy",
+                    "collaboration.set_model_policy"]}),
+                "session.create" => json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+                "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                "session.idle" => json!({"sequence":8}),
+                "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                    {"id":"model","name":"Model","capabilities":dim_agent_types::ModelCapabilities::default()},
+                    {"id":"other","name":"Other","capabilities":dim_agent_types::ModelCapabilities::default()}]}}),
+                "account.providers" => json!([]),
+                "collaboration.model_policy" => json!({"revision":revision.to_string(),"policy":policy}),
+                "collaboration.set_model_policy" => {
+                    // Another client writes first, once.
+                    if !conflicted {
+                        conflicted = true;
+                        revision += 1;
+                    }
+                    if request["params"]["expectedRevision"].as_str() != Some(&*revision.to_string()) {
+                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,
+                            "message":"conflict","data":{"appError":"collaboration_model_policy_conflict"}}}));
+                        continue;
+                    }
+                    revision += 1;
+                    policy = request["params"]["policy"].clone();
+                    json!({"revision":revision.to_string()})
+                }
+                _ => json!({}),
+            };
+            wire.reply(&request, result);
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/models\r");
+    terminal.until("Subagent models: Agent choice");
+    terminal.write(b"Subagent\r");
+    terminal.until("Inherit requesting branch");
+    terminal.until("Existing members keep their models.");
+    // Down to Inherit; the first save loses to another client.
+    terminal.raw(b"\x1b[B\r");
+    terminal.until("Subagent model policy changed elsewhere");
+    // The choice stays: the next Enter rereads, the one after saves.
+    terminal.write(b"\r");
+    thread::sleep(Duration::from_millis(300));
+    terminal.write(b"\r");
+    terminal.until("Subagent models: Inherit requesting branch");
+    terminal.until("Subagent model policy saved");
+    // Fixed reuses the model list; Esc on the policy list writes nothing.
+    terminal.write(b"\r");
+    terminal.until("Fixed model");
+    terminal.raw(b"\x1b");
+    thread::sleep(Duration::from_millis(300));
+    terminal.write(b"\r");
+    terminal.until("Fixed model");
+    terminal.raw(b"\x1b[B\r");
+    terminal.until("Fixed subagent model");
+    terminal.write(b"other\r");
+    terminal.until("Subagent models: Test / other");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    let calls: Vec<Value> = observed.try_iter().collect();
+    let methods: Vec<&str> = calls
+        .iter()
+        .map(|call| call["method"].as_str().unwrap())
+        .collect();
+    for forbidden in [
+        "session.model.update",
+        "provider.select",
+        "session.agent.update",
+    ] {
+        assert!(!methods.contains(&forbidden), "{methods:?}");
+    }
+    assert_eq!(
+        methods.iter().filter(|m| **m == "session.create").count(),
+        1
+    );
+    let saves: Vec<&Value> = calls
+        .iter()
+        .filter(|call| call["method"] == "collaboration.set_model_policy")
+        .map(|call| &call["params"])
+        .collect();
+    assert_eq!(
+        saves,
+        [
+            &json!({"expectedRevision":"1","policy":{"mode":"inherit"}}),
+            &json!({"expectedRevision":"2","policy":{"mode":"inherit"}}),
+            &json!({"expectedRevision":"3","policy":{"mode":"fixed","model":{"providerId":"test","modelId":"other"}}}),
+        ]
+    );
 }

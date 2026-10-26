@@ -66,6 +66,28 @@ pub struct ViewRow {
     pub diff: Option<String>,
     /// A finished command's exit code (the exec tool reports it).
     pub exit_code: Option<i64>,
+    /// An `agent` request call: the delegation it started, drawn as a card.
+    pub member: Option<Box<MemberCard>>,
+}
+
+/// A delegation in its leader's transcript, with what this client observed
+/// of its member. The outcome comes only from the leader's facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberCard {
+    pub task: TaskView,
+    /// The temporary profile's name, or a native Agent's name once
+    /// `agent.list` named it; its ID until then.
+    pub agent: String,
+    /// The native Agent `agent.list` can name; none for a temporary profile
+    /// or a provider member.
+    pub agent_id: Option<String>,
+    pub prompt: String,
+    /// Member activity, not a claim about the model that ran this task: an
+    /// ended card keeps the last observation made while it ran.
+    pub model: Option<String>,
+    pub activity: Option<String>,
+    /// None until this client observes the member.
+    pub observation: Option<MemberConversationState>,
 }
 
 /// A tool call that asks the user for permission.
@@ -140,10 +162,21 @@ pub enum MemberConversationState {
 pub enum TaskKind {
     /// Read and stopped on the originating branch.
     Command(TaskTarget),
-    /// The Session is known only after successful delivery of the request.
-    Member { session_id: Option<String> },
+    Member(MemberTarget),
     /// A run of the optional Workflow package, by its run ID.
     Workflow(Box<WorkflowView>),
+}
+
+/// Who carries out a delegation, as its delivery fact says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberTarget {
+    /// Requested; the actual member is known only after successful delivery.
+    Starting,
+    /// A native member Session: what attach, history and stop address.
+    Session(String),
+    /// A provider member (its Agent ID holds `:`): its member ID is opaque,
+    /// never a Session to observe or stop.
+    Provider,
 }
 
 /// The last stored run the owner returned for this Session.

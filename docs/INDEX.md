@@ -6,7 +6,7 @@
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
 - [Development plan and priorities](design/roadmap.md)（中文）
 - [Agent context: goals and requirements to define](design/agent-context.md)（中文；branches, compaction, model prompts; requirements, not design）
-- [Plugin management: goals and requirements to define](design/plugin-management.md)（中文；Dim plugins and Claude Code / Codex-style plugins; requirements, not design）
+- [Plugin management: requirements](design/plugin-management.md)（中文；one plugin concept, install, reload, replacement; requirements, not design）
 - [ADR 002 — Plugin scope](adr/002-plugin-scope.md)（[中文](zh/adr/002-plugin-scope.md)）
 - [ADR 003 — Approval scope](adr/003-approval-scope.md)（[中文](zh/adr/003-approval-scope.md)）
 - [ADR 004 — Session-owned MCP and business configuration](adr/004-loader-plugin-management.md)
@@ -25,8 +25,8 @@
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
-- [Read-only member conversations in the CLI](design/member-conversation.md) (accepted #300; implementation and acceptance in progress in #324, #263)
-- [Subagent model policy](design/subagent-model-policy.md) (proposal, #263; native new-member model choice)
+- [Read-only member conversations in the CLI](design/member-conversation.md) (accepted #300, #333; detail #324 and transcript cards #263 implemented)
+- [Subagent model policy](design/subagent-model-policy.md) (implemented, #263; native new-member model choice)
 - [CLI background command output](design/background-task-output.md) (native C1 read implemented; CLI detail and refresh in progress in #324)
 - [Commands and members in the background-task list](design/background-task-list.md) (command/member implementation in progress in #324; Workflow integration is separate)
 - [Workflows in the CLI task view](design/workflow-task-view.md) (implemented in the native CLI, #264; existing management reads/stops)

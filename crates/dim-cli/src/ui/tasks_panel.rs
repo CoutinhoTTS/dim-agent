@@ -4,8 +4,8 @@
 //! conversation; Workflow details show the owner's stored stages and logs.
 
 use crate::model::view::{
-    MemberConversationState, RowKind, TaskKind, TaskOutputState, TaskTarget, TaskView,
-    ViewSnapshot, WorkflowInventory, WorkflowView,
+    MemberConversationState, MemberTarget, RowKind, TaskKind, TaskOutputState, TaskTarget,
+    TaskView, ViewSnapshot, WorkflowInventory, WorkflowView,
 };
 use crate::sanitize::safe;
 use crate::ui::i18n::t;
@@ -37,6 +37,8 @@ pub struct TasksPanel {
     list: ListPanel,
     tasks: Vec<TaskView>,
     detail: Option<Box<Detail>>,
+    /// Opened from a transcript card: leaving the detail returns to it.
+    from_card: bool,
 }
 
 struct Detail {
@@ -54,6 +56,8 @@ enum DetailBody {
     Member {
         snapshot: Box<ViewSnapshot>,
         state: MemberConversationState,
+        /// The member's adopted model as observed now, not the task's.
+        model: Option<String>,
     },
     Result,
     Workflow,
@@ -79,6 +83,7 @@ impl TasksPanel {
             ),
             tasks: Vec::new(),
             detail: None,
+            from_card: false,
         };
         panel.set_tasks(snapshot);
         panel
@@ -147,7 +152,7 @@ impl TasksPanel {
         items.extend(self.tasks.iter().map(|task| {
             let kind = match &task.kind {
                 TaskKind::Command(_) => t("command"),
-                TaskKind::Member { .. } => t("agent"),
+                TaskKind::Member(_) => t("agent"),
                 TaskKind::Workflow(_) => t("workflow"),
             };
             let mut status = task
@@ -155,7 +160,7 @@ impl TasksPanel {
                 .as_ref()
                 .map_or_else(
                     || match &task.kind {
-                        TaskKind::Member { session_id: None } => t("Starting"),
+                        TaskKind::Member(MemberTarget::Starting) => t("Starting"),
                         TaskKind::Workflow(view) if view.run.state == WorkflowState::Stopping => {
                             t("Stopping")
                         }
@@ -242,16 +247,17 @@ impl TasksPanel {
                 projection_id: self.projection_id,
                 target: target.clone(),
             },
-            TaskKind::Member {
-                session_id: Some(member_id),
-            } => Effect::StopMember {
+            TaskKind::Member(MemberTarget::Session(member_id)) => Effect::StopMember {
                 session_id: self.session_id.clone(),
                 projection_id: self.projection_id,
                 member_id: member_id.clone(),
             },
-            TaskKind::Member { session_id: None } => {
+            TaskKind::Member(MemberTarget::Starting) => {
                 Effect::Notice(t("Agent is starting; no member Session to stop yet").into())
             }
+            TaskKind::Member(MemberTarget::Provider) => Effect::Notice(
+                t("Provider members are controlled by the leader; no stop here").into(),
+            ),
             TaskKind::Workflow(view) => match self.workflow_stoppable(view) {
                 Ok(()) => Effect::StopWorkflow {
                     session_id: self.session_id.clone(),
@@ -298,6 +304,7 @@ impl TasksPanel {
                 return self.stop(&detail.task);
             }
             match key.code {
+                KeyCode::Esc if self.from_card => return Effect::Close,
                 KeyCode::Esc => self.detail = None,
                 KeyCode::Up => detail.scroll.set(detail.scroll.get().saturating_add(1)),
                 KeyCode::Down => detail.scroll.set(detail.scroll.get().saturating_sub(1)),
@@ -340,46 +347,59 @@ impl TasksPanel {
                 let Some(task) = self.tasks.iter().find(|task| task.id == id).cloned() else {
                     return Effect::None;
                 };
-                let body =
-                    match &task.kind {
-                        TaskKind::Command(_) => DetailBody::Command {
-                            text: task
-                                .finished
-                                .as_ref()
-                                .map_or(String::new(), |finish| finish.text.clone()),
-                            state: task.finished.as_ref().map_or(
-                                TaskOutputState::Loading,
-                                |finish| TaskOutputState::Finished {
-                                    status: finish.status,
-                                    failed: finish.failed,
-                                },
-                            ),
-                        },
-                        TaskKind::Member {
-                            session_id: Some(_),
-                        } => DetailBody::Member {
-                            snapshot: Box::default(),
-                            state: MemberConversationState::Loading,
-                        },
-                        TaskKind::Member { session_id: None } if task.finished.is_some() => {
-                            DetailBody::Result
-                        }
-                        TaskKind::Member { session_id: None } => {
-                            return Effect::Notice(
-                                t("Agent is starting; no member Session to stop yet").into(),
-                            );
-                        }
-                        TaskKind::Workflow(_) => DetailBody::Workflow,
-                    };
-                self.detail = Some(Box::new(Detail {
-                    task,
-                    body,
-                    scroll: Cell::new(0),
-                    page: Cell::new(1),
-                }));
-                Effect::None
+                self.open(task)
             }
         }
+    }
+
+    /// A transcript card's delegation, which may have left the task list.
+    pub fn open_card(&mut self, task: TaskView) -> Effect {
+        self.from_card = true;
+        self.open(task)
+    }
+
+    fn open(&mut self, task: TaskView) -> Effect {
+        let body = match &task.kind {
+            TaskKind::Command(_) => DetailBody::Command {
+                text: task
+                    .finished
+                    .as_ref()
+                    .map_or(String::new(), |finish| finish.text.clone()),
+                state: task
+                    .finished
+                    .as_ref()
+                    .map_or(TaskOutputState::Loading, |finish| {
+                        TaskOutputState::Finished {
+                            status: finish.status,
+                            failed: finish.failed,
+                        }
+                    }),
+            },
+            TaskKind::Member(MemberTarget::Session(_)) => DetailBody::Member {
+                snapshot: Box::default(),
+                state: MemberConversationState::Loading,
+                model: None,
+            },
+            TaskKind::Member(_) if task.finished.is_some() => DetailBody::Result,
+            TaskKind::Member(MemberTarget::Starting) => {
+                return Effect::Notice(
+                    t("Agent is starting; no member Session to stop yet").into(),
+                );
+            }
+            TaskKind::Member(MemberTarget::Provider) => {
+                return Effect::Notice(
+                    t("Provider members have no conversation to open here").into(),
+                );
+            }
+            TaskKind::Workflow(_) => DetailBody::Workflow,
+        };
+        self.detail = Some(Box::new(Detail {
+            task,
+            body,
+            scroll: Cell::new(0),
+            page: Cell::new(1),
+        }));
+        Effect::None
     }
 
     pub fn cursor(&self, width: usize) -> Option<(usize, usize)> {
@@ -405,12 +425,7 @@ impl TasksPanel {
     pub fn member_target(&self) -> Option<&str> {
         let detail = self.detail.as_ref()?;
         match (&detail.task.kind, &detail.body) {
-            (
-                TaskKind::Member {
-                    session_id: Some(id),
-                },
-                DetailBody::Member { .. },
-            ) => Some(id),
+            (TaskKind::Member(MemberTarget::Session(id)), DetailBody::Member { .. }) => Some(id),
             _ => None,
         }
     }
@@ -443,20 +458,19 @@ impl TasksPanel {
         session_id: &str,
         snapshot: Box<ViewSnapshot>,
         state: MemberConversationState,
+        model: Option<String>,
     ) {
         if let Some(Detail {
             task:
                 TaskView {
-                    kind:
-                        TaskKind::Member {
-                            session_id: Some(id),
-                        },
+                    kind: TaskKind::Member(MemberTarget::Session(id)),
                     ..
                 },
             body:
                 DetailBody::Member {
                     snapshot: current,
                     state: status,
+                    model: observed,
                 },
             ..
         }) = self.detail.as_deref_mut()
@@ -464,6 +478,7 @@ impl TasksPanel {
         {
             *current = snapshot;
             *status = state;
+            *observed = model;
         }
     }
 
@@ -524,16 +539,24 @@ impl TasksPanel {
                     hint = "x stop command · Esc back";
                 }
             }
-            DetailBody::Member { snapshot, state } => {
+            DetailBody::Member {
+                snapshot,
+                state,
+                model,
+            } => {
                 title = format!("{} - {}", title, t("read-only"));
-                let TaskKind::Member {
-                    session_id: Some(id),
-                } = &detail.task.kind
-                else {
+                let TaskKind::Member(MemberTarget::Session(id)) = &detail.task.kind else {
                     unreachable!("member detail has a delivered identity")
                 };
                 content.push(fg(
                     &truncate_cells(&format!("{}: {}", t("Member Session"), safe(id)), inner),
+                    &p.muted,
+                ));
+                let model = model
+                    .as_deref()
+                    .map_or_else(|| t("No model observed").to_owned(), safe);
+                content.push(fg(
+                    &truncate_cells(&format!("{}: {model}", t("Member model")), inner),
                     &p.muted,
                 ));
                 let status = match state {

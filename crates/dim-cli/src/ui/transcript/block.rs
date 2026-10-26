@@ -132,6 +132,7 @@ mod tests {
             result_is_error: false,
             diff: None,
             exit_code: None,
+            member: None,
         }
     }
 

@@ -8,9 +8,12 @@
 //! An open request holds its leader (`SessionLifecycle::take_hold`) until its
 //! `result` is written, so an idle unload never ends it.
 use crate::agents::{AgentIndex, AgentProfile, SessionRestored, UnloadedSessionDeleted};
+use crate::collaboration_model_policy::ModelPolicy;
+use crate::settings::{SettingsScope, SettingsService};
 use dim_agent_capabilities::{
     context_block,
     host::{HostError, HostFuture, ToolExecutionContext},
+    prompt_state::PromptSnapshot,
     timeline_tree::TreeCommands,
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
@@ -116,6 +119,8 @@ impl Plugin for CollaborationDirectoryPlugin {
 pub struct Collaboration {
     index: Arc<AgentIndex>,
     directory: Arc<CollaborationDirectory>,
+    /// The subagent model policy's source; local execution only.
+    settings: Option<Arc<SettingsService>>,
     tasks: TaskTracker,
     stop: CancellationToken,
 }
@@ -137,13 +142,32 @@ struct Participant {
 }
 impl Collaboration {
     /// Creates a member Session under the target Agent (created first when
-    /// temporary) and records the relation.
+    /// temporary) and records the relation. `adopted` is the requesting
+    /// branch's model selection, captured when its request was consumed.
     async fn establish(
         self: &Arc<Self>,
         leader_id: &str,
         target: NewMember,
+        adopted: Option<ModelSelection>,
     ) -> Result<Peer, Failure> {
         let (leader_host, leader) = self.index.session(leader_id).ok_or(Refusal::Closed)?;
+        // One policy snapshot per creation, read before any Agent exists.
+        let policy = match &self.settings {
+            Some(settings) => {
+                settings
+                    .read::<ModelPolicy>(SettingsScope::User, &self.stop)
+                    .await
+                    .map_err(|error| member_create_failed(error.to_string()))?
+                    .document
+            }
+            None => ModelPolicy::Agent {},
+        };
+        let inherited = match policy {
+            ModelPolicy::Inherit {} => Some(adopted.ok_or_else(|| {
+                member_create_failed("the requesting branch has no adopted model".into())
+            })?),
+            _ => None,
+        };
         let (host, owned) = match target {
             // A temporary Agent belongs to the Team of the leader that created it.
             NewMember::Agent(id) if !self.visible(&id, leader_id) => {
@@ -181,15 +205,17 @@ impl Collaboration {
         config.cwd = leader.config().cwd.clone();
         config.permission_policy = leader.config().permission_policy.clone();
         config.collaboration_role = CollaborationRole::Member;
-        if self.index.selects_models() {
+        if let Some(model) = inherited {
+            config.model = model;
+        } else if self.index.selects_models() {
+            let explicit = match policy {
+                ModelPolicy::Fixed { model } => Some(model),
+                _ => host.profile.model.clone(),
+            };
             let selected = match self.index.model_selection() {
                 Some(selection) => selection
                     .0
-                    .resolve(
-                        host.profile.model.clone(),
-                        Some(config.cwd.clone().into()),
-                        self.stop.clone(),
-                    )
+                    .resolve(explicit, Some(config.cwd.clone().into()), self.stop.clone())
                     .await
                     .map_err(|error| error.to_string()),
                 None => Err("model selection is unavailable while its provider reloads".into()),
@@ -555,13 +581,18 @@ impl Collaboration {
 /// The plugin: the process service, which loads after `Agents` and reloads
 /// with it, and the Session and branch parts it registers.
 pub(crate) struct CollaborationPlugin {
+    /// The subagent model policy's source; local execution only, as Agents.
+    settings: Option<Key<SettingsService>>,
     index: Key<AgentIndex>,
     directory: Key<CollaborationDirectory>,
     parts: Key<dim_agent_runtime::PartRegistry>,
 }
 impl CollaborationPlugin {
-    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+    pub fn new(names: &Names<'_>, local_execution: bool) -> rutis::Result<Self> {
         Ok(Self {
+            settings: local_execution
+                .then(|| names.key::<SettingsService>())
+                .transpose()?,
             index: names.key()?,
             directory: names.key()?,
             parts: names.key()?,
@@ -573,20 +604,27 @@ impl DynPlugin for CollaborationPlugin {
         "Collaboration"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![
+        let mut injects: Vec<_> = self.settings.iter().map(Key::erase).collect();
+        injects.extend([
             self.index.erase(),
             self.directory.erase(),
             self.parts.erase(),
-        ]
+        ]);
+        injects
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let index = ctx.require_at(&self.index)?;
             let directory = ctx.require_at(&self.directory)?;
             let parts = ctx.require_at(&self.parts)?;
+            let settings = match &self.settings {
+                Some(settings) => Some(ctx.require_at(settings)?),
+                None => None,
+            };
             let service = Arc::new(Collaboration {
                 index,
                 directory,
+                settings,
                 tasks: TaskTracker::new(),
                 stop: CancellationToken::new(),
             });
@@ -1278,6 +1316,15 @@ impl CollaborationSession {
         turn_id: String,
         request: bool,
     ) {
+        // Captured here, at the request's position: a later adoption on the
+        // branch cannot be applied before this handler returns.
+        let adopted = match &event.kind {
+            EventKind::CollaborationRequest(CollaborationRequestData {
+                target: CollaborationTarget::Agent { .. } | CollaborationTarget::Temporary { .. },
+                ..
+            }) if self.collaboration.settings.is_some() => self.adopted_model(branch_id),
+            _ => None,
+        };
         let mut state = self.state.lock().unwrap();
         let Some(branch) = state.branches.get_mut(branch_id) else {
             return;
@@ -1340,7 +1387,7 @@ impl CollaborationSession {
             }
             let delivered = match refused {
                 Some(code) => Err(Failure::from(code)),
-                None => this.deliver(&branch_key, &event, cancel).await,
+                None => this.deliver(&branch_key, &event, cancel, adopted).await,
             };
             let (delivery, detail) = match delivered {
                 Ok(delivery) => (delivery, None),
@@ -1413,11 +1460,35 @@ impl CollaborationSession {
         }
     }
 
+    /// The model selection the branch has adopted, without the request
+    /// identities its own requests carried; the member produces its own.
+    fn adopted_model(&self, branch_id: &str) -> Option<ModelSelection> {
+        let (_, session) = self.collaboration.index.session(&self.session_id)?;
+        let adopted = session
+            .get::<PromptSnapshot>(branch_id)
+            .ok()??
+            .configuration?;
+        Some(ModelSelection {
+            provider_id: adopted.provider_id,
+            model_id: adopted.model_id,
+            capability_snapshot: adopted.capability_snapshot,
+            config: adopted.config,
+            metadata: adopted.metadata.map(|metadata| RequestMetadata {
+                session_id: None,
+                run_id: None,
+                trace_id: None,
+                turn_id: None,
+                extensions: metadata.extensions,
+            }),
+        })
+    }
+
     async fn deliver(
         self: &Arc<Self>,
         branch_id: &str,
         event: &AgentEvent,
         cancel: CollaborationCancelOutcome,
+        adopted: Option<ModelSelection>,
     ) -> Result<CollaborationDelivery, Failure> {
         let delivered = |peer: &Peer, input: Option<String>, outcome| CollaborationDelivery::Ok {
             agent_id: peer.agent_id.clone(),
@@ -1426,7 +1497,9 @@ impl CollaborationSession {
             outcome,
         };
         match &event.kind {
-            EventKind::CollaborationRequest(data) => self.request(branch_id, event, data).await,
+            EventKind::CollaborationRequest(data) => {
+                self.request(branch_id, event, data, adopted).await
+            }
             EventKind::CollaborationMessage(data) => {
                 let sender = self.sender()?;
                 let peer = self
@@ -1507,18 +1580,27 @@ impl CollaborationSession {
         branch_id: &str,
         event: &AgentEvent,
         data: &CollaborationRequestData,
+        adopted: Option<ModelSelection>,
     ) -> Result<CollaborationDelivery, Failure> {
         let sender = self.sender()?;
         let (peer, new) = match &data.target {
             CollaborationTarget::Agent { agent_id } => (
                 self.collaboration
-                    .establish(&self.session_id, NewMember::Agent(agent_id.clone()))
+                    .establish(
+                        &self.session_id,
+                        NewMember::Agent(agent_id.clone()),
+                        adopted,
+                    )
                     .await?,
                 true,
             ),
             CollaborationTarget::Temporary { profile } => (
                 self.collaboration
-                    .establish(&self.session_id, NewMember::Temporary(profile.clone()))
+                    .establish(
+                        &self.session_id,
+                        NewMember::Temporary(profile.clone()),
+                        adopted,
+                    )
                     .await?,
                 true,
             ),
@@ -2217,7 +2299,8 @@ enum Input {
 const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
 - request: give a task to a new member (agentId or profile) or to one of your members
   (agentId + sessionId). Returns immediately; the member's final result arrives later
-  as an input. One task per member at a time.
+  as an input. One task per member at a time. The user's subagent model policy may
+  override the model a new member's profile requests.
 - cancel / close: stop a member's current task / remove the member from your team.
 - message: send information to a team member. Default mode \"append\" adds context the
   receiver sees in its next step without interrupting it. Use mode \"steer\" only when the

@@ -21,8 +21,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, ProviderAction,
-    ProviderEntry, SessionItem, SessionPort, SwitchKind, Update,
+    Account, Command, DraftPart, ModelItem, ModelList, ModelPolicyUpdate, OauthEvent, OauthStart,
+    ProviderAction, ProviderEntry, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
+    Update,
 };
 use crate::model::view::{TaskOutputState, TaskTarget, WorkflowInventory};
 use crate::projection::Projection;
@@ -32,7 +33,7 @@ use crate::{configure, mcp, permission, update};
 mod member;
 mod tasks;
 mod workflow;
-use member::MemberObservation;
+use member::Members;
 use tasks::{BranchHistory, HistoryRequest, StopBatch};
 use workflow::WorkflowReads;
 
@@ -89,6 +90,11 @@ struct ManagementError {
     provider_id: String,
     message: String,
 }
+/// The subagent model policy's management methods (`/models`).
+const MODEL_POLICY_METHODS: [&str; 2] = [
+    "collaboration.model_policy",
+    "collaboration.set_model_policy",
+];
 const LOGIN_POLL: Duration = Duration::from_secs(1);
 const NO_SESSION: &str = "Sign in with /login or choose a model with /models to start a session.";
 const PLUGIN_MISSING: &str = "The DimAgent account plugin is not installed in this build";
@@ -176,8 +182,7 @@ struct Worker {
     task_history_request: Option<HistoryRequest>,
     task_stops: Option<StopBatch>,
     workflow: WorkflowReads,
-    member: Option<MemberObservation>,
-    desired_member: Option<(u64, String)>,
+    members: Members,
     output: Option<OutputWatch>,
     /// The admitted read can outlive its detail; false discards that old reply.
     output_request: Option<(u64, bool)>,
@@ -273,8 +278,7 @@ async fn run(
         task_history_request: None,
         task_stops: None,
         workflow: WorkflowReads::default(),
-        member: None,
-        desired_member: None,
+        members: Members::default(),
         output: None,
         output_request: None,
         publish_at: None,
@@ -460,7 +464,12 @@ impl Worker {
     /// Creates or resumes the session the process was started for.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
-            return self.attach(id, SwitchKind::Resumed).await;
+            let kind = if self.options.created_session {
+                SwitchKind::New
+            } else {
+                SwitchKind::Resumed
+            };
+            return self.attach(id, kind).await;
         }
         let attached_session = self.invalidate_projection();
         let mut params = self.create_params();
@@ -834,6 +843,32 @@ impl Worker {
             Command::ListModels => {
                 let models = self.models().await.map_err(|error| error.to_string());
                 self.send(Update::Models(models));
+                self.read_model_policy(false).await;
+            }
+            Command::ReadModelPolicy => self.read_model_policy(false).await,
+            Command::SetModelPolicy {
+                expected_revision,
+                policy,
+            } => {
+                let result = self
+                    .client
+                    .rpc(
+                        "collaboration.set_model_policy",
+                        json!({"expectedRevision": expected_revision, "policy": policy}),
+                    )
+                    .await;
+                match result {
+                    Ok(_) => self.read_model_policy(true).await,
+                    Err(error)
+                        if client::app_error(&error)
+                            == Some("collaboration_model_policy_conflict") =>
+                    {
+                        self.send(Update::ModelPolicy(ModelPolicyUpdate::Conflict));
+                    }
+                    Err(error) => self.send(Update::ModelPolicy(ModelPolicyUpdate::Failed(
+                        error.to_string(),
+                    ))),
+                }
             }
             Command::ClearModelPreferences {
                 provider_id,
@@ -1267,7 +1302,7 @@ impl Worker {
                 if notice.session_id == self.session_id {
                     self.task_event(&notice.branch_id, notice.event);
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
-                    self.member_notice(member::Notice::Event(notice.event));
+                    self.member_notice(&notice.session_id, member::Notice::Event(notice.event));
                 }
             }
             "session.model.progress" => {
@@ -1276,7 +1311,8 @@ impl Worker {
                     self.projection.progress(&notice);
                     self.changed();
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
-                    self.member_notice(member::Notice::Progress(notice));
+                    let session_id = notice.session_id.clone();
+                    self.member_notice(&session_id, member::Notice::Progress(notice));
                 }
             }
             "session.state" => {
@@ -1292,7 +1328,7 @@ impl Worker {
                     }
                     self.changed();
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
-                    self.member_notice(member::Notice::State(notice.running));
+                    self.member_notice(&notice.session_id, member::Notice::State(notice.running));
                 }
             }
             "approval.request" => {
@@ -1343,7 +1379,7 @@ impl Worker {
             "session.closed" => {
                 let notice: ClosedNotice = serde_json::from_value(params)?;
                 if self.observes_member(&notice.session_id) {
-                    self.member_closed();
+                    self.member_closed(&notice.session_id);
                 } else if notice.session_id == self.session_id {
                     return Err("Session closed while attached".into());
                 }
@@ -1836,6 +1872,31 @@ impl Worker {
         Ok(ModelList { models, current })
     }
 
+    /// Reports the subagent model policy, only to a daemon that manages it.
+    async fn read_model_policy(&mut self, saved: bool) {
+        #[derive(Deserialize)]
+        struct Read {
+            revision: String,
+            policy: SubagentModelPolicy,
+        }
+        if !self.client.supports(&MODEL_POLICY_METHODS) {
+            return;
+        }
+        let update = match self
+            .client
+            .typed::<Read>("collaboration.model_policy", json!({}))
+            .await
+        {
+            Ok(read) => ModelPolicyUpdate::Read {
+                revision: read.revision,
+                policy: read.policy,
+                saved,
+            },
+            Err(error) => ModelPolicyUpdate::Failed(error.to_string()),
+        };
+        self.send(Update::ModelPolicy(update));
+    }
+
     /// Switches the session's model, or starts a session on it when there is
     /// none yet, then makes it the default for new ones.
     async fn select_model(&mut self, provider_id: String, model_id: String) -> crate::Result<()> {
@@ -2234,12 +2295,8 @@ impl Worker {
             });
             return Ok(());
         }
-        if self
-            .member
-            .as_ref()
-            .is_some_and(|member| member.request_id() == Some(id))
-        {
-            self.member_reply(result);
+        if self.members.owns(id) {
+            self.member_reply(id, result);
             return Ok(());
         }
         if self
