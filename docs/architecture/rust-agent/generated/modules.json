@@ -24259,10 +24259,13 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::tui",
       "references": [
+        "path WebOpened",
+        "path banner",
         "path boxed",
         "path chunk",
         "path goodbye_panel",
-        "path queue_strip"
+        "path queue_strip",
+        "path web_panel"
       ]
     },
     {
