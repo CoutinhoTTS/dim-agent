@@ -16,8 +16,7 @@ use dim_agent_types::{
 };
 use futures_util::future::Either;
 use rutis::Ctx;
-use rutis::host::{CtxHost, Effect};
-use rutis::internal::CtxInternal;
+use rutis::host::CtxHost;
 use rutis_bridge::session::{HostDispatch, Reply, Value, caller_row};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -729,13 +728,9 @@ impl HostDispatch for SessionsService {
         let (finished, drain, row) = match caller {
             Some(caller) => {
                 let (finished, settled) = oneshot::channel::<()>();
-                let drain = caller.ctx().effect_named("sessions.input", move || {
-                    Effect::AsyncDisposer(Box::new(move || {
-                        Box::pin(async move {
-                            let _ = settled.await;
-                            Ok(())
-                        })
-                    }))
+                let drain = caller.ctx().effect(move || async move {
+                    let _ = settled.await;
+                    Ok(())
                 });
                 let drain = match drain {
                     Ok(drain) => drain,

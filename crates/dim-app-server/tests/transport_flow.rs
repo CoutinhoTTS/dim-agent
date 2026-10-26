@@ -27,6 +27,21 @@ use tokio::{
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 
+/// Whether `view` stays Unloading for a moment: a cleanup it owns, such as
+/// the drain of a native input still in flight, is waiting.
+async fn unload_held(view: &rutis::host::FiberView) -> bool {
+    let mut state = view.watch();
+    tokio::time::timeout(Duration::from_millis(200), async {
+        while state.borrow_and_update().state == rutis::host::FiberState::Unloading {
+            if state.changed().await.is_err() {
+                break;
+            }
+        }
+    })
+    .await
+    .is_err()
+}
+
 #[path = "transport_flow/approval.rs"]
 mod approval;
 

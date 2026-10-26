@@ -245,7 +245,6 @@ impl Processes {
                 self.required.contains(&entry.id)
                     && entry.parent.is_none()
                     && entry.instance.is_none()
-                    && entry.owner == rutis_loader::internal::Owner::Layer(0)
             })
             .filter_map(|entry| entry.view);
         std::iter::once(self.view.clone()).chain(rows).collect()

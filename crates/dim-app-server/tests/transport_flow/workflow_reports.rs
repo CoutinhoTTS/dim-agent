@@ -121,10 +121,7 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
         .await
         .unwrap();
         assert!(
-            owner
-                .effects()
-                .iter()
-                .any(|effect| effect.label == "sessions.input"),
+            super::unload_held(&owner).await,
             "the original admitted write still owns its drain while SQLite holds it"
         );
         connection.execute_batch("COMMIT").unwrap();

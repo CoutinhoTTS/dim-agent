@@ -194,10 +194,7 @@ async fn report_restart(kill_runtime: bool) {
         .await
         .unwrap();
         assert!(
-            owner
-                .effects()
-                .iter()
-                .any(|effect| effect.label == "sessions.input"),
+            super::unload_held(&owner).await,
             "the real background report retains its original-row native writer"
         );
         assert_eq!(stored(&home)["runs"][0]["report"]["attempt_open"], true);

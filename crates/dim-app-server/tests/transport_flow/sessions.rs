@@ -1727,12 +1727,8 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
     let (_, _, loader, _) = controls.recv().await.unwrap();
     let owner = loader.get("settlement-owner").unwrap().view.unwrap();
     let before = settlement_status(&mut client).await;
-    assert!(
-        owner
-            .effects()
-            .iter()
-            .all(|effect| effect.label != "sessions.input")
-    );
+    // The owner's cleanups while no native input is in flight.
+    let idle = owner.effects().len();
     let write = |id: &str| {
         let mut write = input(&target, id, json!([]));
         write["mode"] = json!("append");
@@ -1748,12 +1744,9 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
     assert_eq!(waiting.submission_id, "settlement:index:publication");
     assert!(target.publication("main").unwrap().sequence() < waiting.sequence);
     assert_eq!(
-        owner
-            .effects()
-            .iter()
-            .filter(|effect| effect.label == "sessions.input")
-            .count(),
-        1
+        owner.effects().len(),
+        idle + 1,
+        "one drain per native input in flight"
     );
     let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1785,12 +1778,7 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
         settlement_status(&mut client).await["generation"],
         before["generation"]
     );
-    assert!(
-        owner
-            .effects()
-            .iter()
-            .all(|effect| effect.label != "sessions.input")
-    );
+    assert_eq!(owner.effects().len(), idle);
     assert_ok(
         &client
             .rpc("settlement.arm", write("test:late-row-call"))
@@ -1813,12 +1801,7 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
         })
         .await
         .unwrap();
-        assert!(
-            owner
-                .effects()
-                .iter()
-                .any(|effect| effect.label == "sessions.input")
-        );
+        assert!(super::unload_held(&owner).await);
         waiting.release.send(()).unwrap();
     });
     restarted.unwrap();
@@ -1837,12 +1820,7 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
     for id in ["settlement:index:publication", "settlement:row:append"] {
         assert_eq!(history.iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(id))).count(), 1);
     }
-    assert!(
-        owner
-            .effects()
-            .iter()
-            .all(|effect| effect.label != "sessions.input")
-    );
+    assert_eq!(owner.effects().len(), idle);
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -1937,6 +1915,8 @@ async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
     let target = client_session(&mut client, &agent, host_policy()).await;
     let (_, _, loader, _) = controls.recv().await.unwrap();
     let owner = loader.get("settlement-owner").unwrap().view.unwrap();
+    // The owner's cleanups while no native input is in flight.
+    let idle = owner.effects().len();
     let before = settlement_status(&mut client).await;
     let request = input(&target, "test:retired-before-handoff", json!([]));
     assert!(target.unload_if_idle().await.unwrap());
@@ -1945,12 +1925,7 @@ async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
     tokio::time::timeout(Duration::from_secs(5), rules.held.notified())
         .await
         .unwrap();
-    assert!(
-        owner
-            .effects()
-            .iter()
-            .any(|effect| effect.label == "sessions.input")
-    );
+    assert_eq!(owner.effects().len(), idle + 1);
     let (restarted, ()) = tokio::join!(loader.restart("settlement-owner"), async {
         let mut changed = owner.watch();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -2003,6 +1978,8 @@ async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
     let target = client_session(&mut client, &agent, host_policy()).await;
     let (_, _, loader, _) = controls.recv().await.unwrap();
     let owner = loader.get("settlement-owner").unwrap().view.unwrap();
+    // The owner's cleanups while no native input is in flight.
+    let idle = owner.effects().len();
     let before = settlement_status(&mut client).await;
     let mut write = input(&target, "settlement:crash:append", json!([]));
     write["mode"] = json!("append");
@@ -2035,10 +2012,7 @@ async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
         .await
         .unwrap();
         assert!(
-            owner
-                .effects()
-                .iter()
-                .any(|effect| effect.label == "sessions.input"),
+            super::unload_held(&owner).await,
             "bridge failure is not native writer settlement"
         );
         waiting.release.send(()).unwrap();
@@ -2049,12 +2023,7 @@ async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
     let recovered = sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"settlement:crash:append"})).await;
     assert_eq!(recovered["status"], "accepted");
     assert_eq!(target.local("main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("settlement:crash:append"))).count(), 1);
-    assert!(
-        owner
-            .effects()
-            .iter()
-            .all(|effect| effect.label != "sessions.input")
-    );
+    assert_eq!(owner.effects().len(), idle);
     server.shutdown();
     server.join().await.unwrap();
 }

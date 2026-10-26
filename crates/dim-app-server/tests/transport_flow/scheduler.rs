@@ -2371,10 +2371,7 @@ async fn node_scheduler_reports_drain_native_writers_before_row_or_runtime_clean
                 .await
                 .unwrap();
                 assert!(
-                    owner
-                        .effects()
-                        .iter()
-                        .any(|effect| effect.label == "sessions.input"),
+                    super::unload_held(&owner).await,
                     "native writer remains owned during cleanup"
                 );
                 assert_eq!(stored(&home)["runs"][0]["run_id"], id);
