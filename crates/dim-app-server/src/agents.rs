@@ -1644,13 +1644,18 @@ struct AgentSpec {
     profile: AgentProfile,
 }
 
-/// Registers the module of the Agent instance's plugin.
-pub(crate) fn register(builtins: &mut Builtins) {
-    builtins.register_with::<NoConfig, _, _>("AgentScope", |build| {
+/// Registers the module of the Agent instance's plugin, keyed from `catalog`.
+pub(crate) fn register(builtins: &mut Builtins, catalog: &rutis_loader::ServiceCatalog) {
+    let catalog = catalog.clone();
+    builtins.register_with::<NoConfig, _, _>("AgentScope", move |build| {
         let spec = build.value::<AgentSpec>().ok_or_else(|| {
             CordisError::PluginFailed("Agent created without its specification".into())
         })?;
-        Ok(TypedFactory::new(AgentScopeFactory(spec)))
+        let names = Names::copy(&catalog, build);
+        Ok(TypedFactory::with_keys(
+            AgentScopeFactory(spec),
+            (names.key::<AgentDirectory>()?, names.key::<Loader>()?),
+        ))
     });
 }
 struct AgentScopeFactory(Arc<AgentSpec>);
@@ -1672,14 +1677,14 @@ impl TypedPluginFactory<NoConfig> for AgentScopeFactory {
 /// reverse order.
 struct AgentScopePlugin(Arc<AgentSpec>);
 impl TypedPlugin for AgentScopePlugin {
-    type Deps = (Arc<AgentDirectory>, Arc<Loader>);
+    type Deps = (Keyed<AgentDirectory>, Keyed<Loader>);
     fn name(&self) -> &str {
         "AgentScope"
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a Ctx,
-        (directory, loader): Self::Deps,
+        (Keyed(directory), Keyed(loader)): Self::Deps,
     ) -> BoxFuture<'a, Result<Effect, CordisError>> {
         Box::pin(async move {
             let spec = &self.0;

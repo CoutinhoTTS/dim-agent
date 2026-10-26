@@ -660,7 +660,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             )?);
         }
     }
-    agents::register(&mut builtins);
+    agents::register(&mut builtins, builder.catalog());
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         names.part(agents::AgentDirectoryPlugin)
     })?);
