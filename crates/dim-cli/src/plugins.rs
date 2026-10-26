@@ -172,9 +172,15 @@ impl Plugin for WebHold {
         // stop, so a Ctrl+C that follows it at once is ours.
         let signals = Signals::listen()
             .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
-        self.open(&mut client)
+        let opened = self
+            .open(&mut client)
             .await
             .map_err(ErrorKind::PluginFailed)?;
+        if !opened {
+            // The hint is printed; there is nothing to hold.
+            let _ = done.send(Ok(1));
+            return Ok(());
+        }
         // The entry stays open while this connection does: the task
         // owns it until a signal or the daemon's end, then reports.
         let wait = tokio::spawn(async move {
@@ -189,9 +195,10 @@ impl Plugin for WebHold {
 }
 
 impl WebHold {
-    /// Opens the entry and shows where it is. Only `dimcode web` loads this
-    /// holder; TUI `/web` uses the daemon switch.
-    async fn open(&self, client: &mut Client) -> crate::Result<()> {
+    /// Opens the entry and shows where it is; `false` when the daemon has no
+    /// Web workspace, after saying how to get it. Only `dimcode web` loads
+    /// this holder; TUI `/web` uses the daemon switch.
+    async fn open(&self, client: &mut Client) -> crate::Result<bool> {
         #[derive(serde::Deserialize)]
         struct Opened {
             url: String,
@@ -203,22 +210,16 @@ impl WebHold {
         };
         let opened: Opened = match client.typed("web.open", params).await {
             Ok(opened) => opened,
-            Err(error) if client::app_error(&error) == Some("web_assets_missing") => {
+            Err(error) => {
+                // A frontend that is missing or of another version is not
+                // an error of this command: say how to get it, exit 1.
                 let executable = std::env::current_exe().unwrap_or_default();
-                return Err(format!(
-                    "The Web workspace is not installed: {}",
-                    client::web_assets_hint(&executable, &self.home)
-                )
-                .into());
+                let Some((problem, fix)) = client::web_hint(&error, &executable, &self.home) else {
+                    return Err(error);
+                };
+                eprintln!("{problem}.\n{fix}.");
+                return Ok(false);
             }
-            Err(error) if client::app_error(&error) == Some("web_assets_incompatible") => {
-                return Err(format!(
-                    "{error}; install the dimcode-web package of version {}",
-                    env!("CARGO_PKG_VERSION")
-                )
-                .into());
-            }
-            Err(error) => return Err(error),
         };
         let fragment = opened.url.split_once('#').map_or("", |(_, f)| f);
         let url = format!("http://{}/", opened.address);
@@ -231,7 +232,7 @@ impl WebHold {
             sign_in: (!opened_browser).then_some(sign_in.as_str()),
             session_id: None,
         });
-        Ok(())
+        Ok(true)
     }
 }
 

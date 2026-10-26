@@ -4456,6 +4456,194 @@ fn web_off_clears_the_daemon_switch() {
 }
 
 #[test]
+fn web_without_the_web_workspace_says_how_to_get_it() {
+    // Not installed at all, then installed elsewhere after this daemon
+    // started: the command says what to do and exits 1, without an error.
+    for installed in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            let hello = wire.read("hello");
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+            let open = wire.read("web.open");
+            wire.send(json!({"jsonrpc":"2.0","id":open["id"],"error":{"code":-32000,"message":"This App Server has no Web workspace","data":{"appError":"web_assets_missing"}}}));
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command
+            .args(["web", "--no-open"])
+            .env_remove("DIMCODE_WEB_ASSETS");
+        if installed {
+            // A source the daemon was not started with, such as the npm
+            // package installed afterwards.
+            let assets = home.0.join("npm-web");
+            fs::create_dir_all(&assets).unwrap();
+            fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+            command.env("DIMCODE_WEB_ASSETS", assets);
+        }
+        let output = command.output().unwrap();
+        daemon.join().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(output.stdout.is_empty());
+        let expected = if installed {
+            "The Web workspace was installed after the daemon started.\nRestart the daemon with `dimcode daemon stop`, then try again.\n"
+        } else {
+            "The Web workspace is not installed.\nInstall it with `dimcode web install`.\n"
+        };
+        assert_eq!(stderr, expected);
+    }
+}
+
+/// A registry that serves `dimcode-web@<this version>` with `integrity`
+/// until the test ends; its base URL.
+fn web_registry(tarball: Vec<u8>, integrity: String) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let manifest =
+        json!({"dist":{"tarball":format!("{base}/dimcode-web.tgz"),"integrity":integrity}})
+            .to_string();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut wire = BufReader::new(stream.unwrap());
+            let mut request = String::new();
+            wire.read_line(&mut request).unwrap();
+            let mut line = String::new();
+            while wire.read_line(&mut line).unwrap() > 2 {
+                line.clear();
+            }
+            let body = if request
+                .starts_with(&format!("GET /dimcode-web/{} ", env!("CARGO_PKG_VERSION")))
+            {
+                manifest.as_bytes().to_vec()
+            } else {
+                assert!(request.starts_with("GET /dimcode-web.tgz "), "{request}");
+                tarball.clone()
+            };
+            let stream = wire.get_mut();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        }
+    });
+    base
+}
+
+#[test]
+fn web_install_puts_this_versions_frontend_in_the_home() {
+    use base64::Engine;
+    use sha2::Digest;
+    let home = Home::new();
+    // The npm package as `scripts/stage-web.mjs` packs it.
+    let package = home.0.join("pack/package");
+    fs::create_dir_all(package.join("web/assets")).unwrap();
+    fs::write(package.join("package.json"), "{}").unwrap();
+    fs::write(package.join("web/index.html"), "<!doctype html>").unwrap();
+    fs::write(package.join("web/assets/app-1.js"), "export {}").unwrap();
+    let archive = home.0.join("pack/dimcode-web.tgz");
+    assert!(
+        Command::new("tar")
+            .arg("-czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(home.0.join("pack"))
+            .arg("package")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let tarball = fs::read(&archive).unwrap();
+    let integrity = format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&tarball))
+    );
+    // A previous frontend is replaced as a whole.
+    fs::create_dir_all(home.0.join("web")).unwrap();
+    fs::write(home.0.join("web/stale.js"), "").unwrap();
+
+    let output = home
+        .command()
+        .args(["web", "install"])
+        .env(
+            "DIMCODE_NPM_REGISTRY",
+            web_registry(tarball.clone(), integrity.clone()),
+        )
+        .env_remove("DIMCODE_WEB_ASSETS")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        stdout,
+        format!(
+            "Downloading dimcode-web@{version}…\nWeb workspace {version} installed in {}.\n",
+            home.0.join("web").display()
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(home.0.join("web/assets/app-1.js")).unwrap(),
+        "export {}"
+    );
+    assert!(home.0.join("web/index.html").is_file());
+    assert!(!home.0.join("web/stale.js").exists());
+    assert!(!home.0.join("web/package.json").exists());
+    assert!(!home.0.join("web.partial").exists());
+
+    // A download that does not match the registry's integrity changes nothing.
+    let output = home
+        .command()
+        .args(["web", "install"])
+        .env(
+            "DIMCODE_NPM_REGISTRY",
+            web_registry(tarball.clone(), format!("sha512-{}", "A".repeat(88))),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&format!(
+            "dimcode-web@{version} does not match its registry integrity"
+        )),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(home.0.join("web/assets/app-1.js").is_file());
+
+    // A frontend in a source that comes first is named, since it, not this
+    // install, is what the daemon serves.
+    let first = home.0.join("npm-web");
+    fs::create_dir_all(&first).unwrap();
+    fs::write(first.join("index.html"), "<!doctype html>").unwrap();
+    let output = home
+        .command()
+        .args(["web", "install"])
+        .env("DIMCODE_NPM_REGISTRY", web_registry(tarball, integrity))
+        .env("DIMCODE_WEB_ASSETS", &first)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).ends_with(&format!(
+            "The Web workspace in {} is used instead; remove it to use this one.\n",
+            first.display()
+        )),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn tui_web_toggles_the_daemon_switch_without_leaving() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -4480,13 +4668,17 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
         );
         let toggle = wire.read("web.toggle");
         wire.reply(&toggle, json!({"enabled":false,"open":false}));
+        let toggle = wire.read("web.toggle");
+        wire.send(json!({"jsonrpc":"2.0","id":toggle["id"],"error":{"code":-32000,"message":"This App Server has no Web workspace","data":{"appError":"web_assets_missing"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
         }
     });
     let mut command = home.command();
-    command.env("DIMCODE_OAUTH_MANUAL", "1");
+    command
+        .env("DIMCODE_OAUTH_MANUAL", "1")
+        .env_remove("DIMCODE_WEB_ASSETS");
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     terminal.write(b"/web\r");
@@ -4494,6 +4686,10 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
     // The interface is still the same terminal client.
     terminal.write(b"/web\r");
     terminal.until("Web interface off");
+    // A daemon without the frontend gets a hint, not an RPC error.
+    terminal.write(b"/web\r");
+    terminal.until("The Web workspace is not installed. Install it with `dimcode web install`.");
+    assert!(!terminal.transcript.contains("RPC"));
     terminal.write(b"/exit\r");
     let status = terminal.wait();
     daemon.join().unwrap();

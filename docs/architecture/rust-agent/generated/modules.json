@@ -2433,6 +2433,7 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/plugins.rs",
       "unexpandedMacros": [
+        "eprintln",
         "format",
         "println",
         "serde_json::json",
@@ -3534,6 +3535,18 @@
         "assert",
         "assert_eq",
         "json"
+      ]
+    },
+    {
+      "id": "dim_cli::web_install",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/web_install.rs",
+      "unexpandedMacros": [
+        "env",
+        "format",
+        "matches",
+        "println"
       ]
     },
     {
@@ -17781,6 +17794,7 @@
         "path Action::Tui",
         "path Action::Version",
         "path Action::Web",
+        "path Action::WebInstall",
         "path Options",
         "path Options::parse",
         "path args",
@@ -18017,6 +18031,14 @@
       "to": "dim_cli::usage",
       "references": [
         "mod usage"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::web_install",
+      "references": [
+        "mod web_install",
+        "path web_install::install"
       ]
     },
     {
@@ -18933,8 +18955,8 @@
       "references": [
         "path Client",
         "path client",
-        "path client::app_error",
         "path client::connect_inner",
+        "path client::web_hint",
         "use crate::client",
         "use crate::client::Client"
       ]
@@ -19493,6 +19515,7 @@
         "path client",
         "path client::RpcError",
         "path client::app_error",
+        "path client::web_hint",
         "use crate::client",
         "use crate::client::Client",
         "use crate::client::Message"
@@ -24330,6 +24353,27 @@
       "to": "dim_cli::usage",
       "references": [
         "path format_report"
+      ]
+    },
+    {
+      "from": "dim_cli::web_install",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::web_install",
+      "to": "dim_cli::client",
+      "references": [
+        "path crate::client::web_assets"
+      ]
+    },
+    {
+      "from": "dim_cli::web_install",
+      "to": "dim_cli::update",
+      "references": [
+        "path crate::update::registry"
       ]
     },
     {
