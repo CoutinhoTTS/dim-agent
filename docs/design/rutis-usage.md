@@ -1,8 +1,8 @@
 # How Dim uses rutis
 
 Status: Accepted under [ADR 006](../adr/006-plugin-contract.md) (D2–D4). Implemented, except
-foreign plugins as one row (R5's second form, R7), which wait for rutis#642; each section says what
-holds today.
+foreign plugins as one row (R5's second form, #403), which rutis 0.17's plugin definitions (R7)
+unblock; each section says what holds today.
 [中文](../zh/design/rutis-usage.md)
 
 rutis owns the plugin machinery. This document states how Dim uses it: how a part is mounted, how it
@@ -70,13 +70,18 @@ besides the scope's own mechanisms.
   unmount a withdrawn one. A withdrawal finishes when every instance has unloaded its copy.
 - The instance closes its mounted parts with itself, through rutis's ownership of children.
 
-**What a generator returns.**
+**What a plugin registers.**
 
 - A Rust generator receives the names of the instance it is mounted in (appendix A) and returns a
   plugin, which may hold what the plugin prepared in its `apply`.
-- A plugin in another runtime registers its parts the same way once rutis lets a running row register
-  generators (R7). Until then, its Session and branch parts stay rows of their groups, as R5's first
-  form placed them; no interim declaration is added (R5).
+- A plugin in another runtime registers a plugin definition instead of a function (R7): a value made
+  with its runtime's `definePlugin`, which may close over what the plugin prepared in its `apply`.
+  Each instance mounts one copy of it with rutis's `Definition::at`; the copy runs in the plugin's
+  runtime, its `inject` resolved in that instance. When the registering generation unloads, rutis
+  ends every copy and then the definition (`Definition::ended`); the part registry drops the
+  registration once the definition has ended, so no later instance mounts it. A definition cannot return
+  nothing for an instance: a copy whose instance's business configuration turns the feature off does
+  no work.
 
 **Every plugin and part:**
 
@@ -106,7 +111,8 @@ name-bound (#391, #392, #396–#398, #400).
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).
 - Rows of other languages carry their group in the App Server's configuration (appendix B), one row per
-  part, until R5 ([#403](https://github.com/arcships/dim/issues/403)).
+  part, until R5's second form ([#403](https://github.com/arcships/dim/issues/403)). TypeScript plugins
+  hand definitions over since rutis 0.17.0 and Python plugins since 0.17.1, which Dim is on.
 
 ## 3. Services by name
 
@@ -254,13 +260,13 @@ These requirements concern how Dim uses rutis. They follow
 - **Existing mechanisms considered:** the runtime resolver already builds a copy of a module for the
   instances it runs in (`Resolved::scoped`), and the catalog rejects misplaced names.
 - **Needed:** a foreign plugin is one process row and registers its parts with the part registry from
-  its code, through the generators of R7. The Session and branch rows of other languages, and the
-  group they declare, are deleted. No interim package declaration is built: it would be removed when
-  R7 lands, and R6 removes most of the host's need to know names before the runtime starts.
+  its code, as plugin definitions (R7). The Session and branch rows of other languages, and the group
+  they declare, are deleted. No package declaration is built: a definition carries its own `inject`
+  and `provides`, and R6 removed most of the host's need to know names before the runtime starts.
 - **Effect:** none on the Timeline.
 - **Owner:** App Server and the SDKs, with the repository's plugins
-  ([#403](https://github.com/arcships/dim/issues/403)). It waits for R7
-  ([#405](https://github.com/arcships/dim/issues/405)).
+  ([#403](https://github.com/arcships/dim/issues/403)). R7 is delivered, so nothing outside Dim
+  blocks it.
 
 ### R6. Contributions register with their owner
 
@@ -308,20 +314,25 @@ These requirements concern how Dim uses rutis. They follow
   withdrawn one, so a call answers from that row's status
   ([methods contract A.1](contracts/session-boundary.md#a1-method-contributions)).
 
-### R7. A generator is a function in every runtime
+### R7. A part is a plugin definition in every runtime
 
-- **Blocked:** §2. A foreign generator returns a module name and configuration, because a host loads a
-  foreign plugin by name only. A part prepared from the plugin's own state must go through a shared
-  module or a service, which Rust parts do not need.
-- **Existing mechanisms considered:** module name and configuration cover every current part; this is
-  the interim form.
-- **Needed:** a running row registers named generators with their declarations, and the host builds a
-  factory for "generator G of row R" in a given instance. Each copy runs in the producer's runtime,
-  isolated by the instance's labels and gated by the generator's `inject`; it belongs to the host fiber
-  that mounted it; it ends when its generator is withdrawn.
+- **Blocked:** §2. A foreign plugin could hand the host only a module name and configuration, because a
+  host loaded a foreign plugin by name only. A part prepared from the plugin's own state had to go
+  through a shared module or a service, which Rust parts do not need.
+- **Existing mechanisms considered:** module name and configuration cover every current part; it was
+  the interim form, and it is removed.
+- **Needed:** a running row hands the host a part, with its declarations, and the host mounts copies
+  of it in given instances. Each copy runs in the producer's runtime, isolated by the instance's
+  labels and gated by its `inject`; it belongs to the host fiber that mounted it; it ends when the
+  producer's generation unloads.
 - **Effect:** none on the Timeline.
-- **Owner:** rutis, [arcships/rutis#642](https://github.com/arcships/rutis/issues/642). R5 waits on it;
-  [#405](https://github.com/arcships/dim/issues/405) follows it.
+- **Owner:** rutis, [arcships/rutis#642](https://github.com/arcships/rutis/issues/642). Delivered as
+  plugin definitions: rutis 0.17.0 for Node, 0.17.1 for Python. A `#[rutis::service]` parameter of
+  type `rutis::Definition` receives a definition another language hands over; `Definition::at` builds
+  a copy for `ctx.plugin`; a definition belongs to the row that handed it over, and its copies end
+  before that row's own cleanups run. A definition is a value, not a generator function, so the
+  per-instance choice a Rust generator makes by returning nothing moves into the copy (§2).
+  [#405](https://github.com/arcships/dim/issues/405) records the upgrade.
 
 ## Appendix A: Rust binding
 
