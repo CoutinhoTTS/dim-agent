@@ -1794,6 +1794,15 @@ impl App {
                 session_id,
                 projection_id,
             }),
+            Effect::StopWorkflow {
+                session_id,
+                projection_id,
+                run_id,
+            } => self.host.send(Command::StopWorkflow {
+                session_id,
+                projection_id,
+                run_id,
+            }),
             Effect::LanguagePreview(locale) => {
                 i18n::set(locale.unwrap_or_else(i18n::system_locale));
             }

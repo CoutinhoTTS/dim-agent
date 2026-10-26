@@ -1381,3 +1381,265 @@ fn tui_main_history_failure_is_visible_and_disables_submission() {
         daemon.join().unwrap();
     }
 }
+
+fn workflow_run(id: &str, name: &str, state: &str, started_by: Value, report_to: Value) -> Value {
+    let ended = !matches!(state, "running" | "stopping");
+    let mut run = json!({
+        "run_id":id,"name":name,"source":"user","definition":{"version":"dim.workflow/v1"},
+        "params":{},"cwd":"/work","started_by":started_by,
+        "created_at":"2026-10-26T10:00:00.000Z","state":state,
+        "stages":[
+            {"id":"analyze","step":0,"state":"completed","session_id":"stage-session","result_text":"analysis stored result"},
+            {"id":"tests","step":1,"state":if ended {"stopped"} else {"running"}},
+            {"id":"lint","step":1,"state":if ended {"skipped"} else {"waiting"}},
+        ],
+        "log":[{"at":"2026-10-26T10:00:01.000Z","message":"Run accepted"}],
+        "report":{"state":"none"},
+    });
+    if ended {
+        run["ended_at"] = json!("2026-10-26T10:02:00.000Z");
+    }
+    if !report_to.is_null() {
+        run["report_to"] = report_to;
+    }
+    run
+}
+
+fn tool_started(id: &str) -> Value {
+    workflow_run(
+        id,
+        "nightly-check",
+        "running",
+        json!({"kind":"tool","session_id":"session","branch_id":"main","call_id":"wf-call"}),
+        json!({"session_id":"session","branch_id":"main"}),
+    )
+}
+
+/// Answers per-run refreshes with `record` until another request arrives.
+fn next_request(wire: &mut Wire, record: &dyn Fn(&str) -> Value) -> Value {
+    loop {
+        let mut line = String::new();
+        wire.0.read_line(&mut line).unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        match request["params"]["run_id"].as_str() {
+            Some(id) if request["method"] == "workflow.status" => {
+                assert_eq!(id, "run-a", "a historic or unknown run was read");
+                wire.reply(&request, record(id));
+            }
+            _ => return request,
+        }
+    }
+}
+
+fn workflow_facts(wire: &mut Wire) {
+    event(
+        wire,
+        "main",
+        fact(
+            "wf-use",
+            2,
+            2000,
+            "step",
+            "tool-call",
+            json!({
+                "turn_id":"turn","request_id":"request",
+                "calls":[{"id":"wf-call","name":"workflow","input":{"action":"start","name":"nightly-check"}}],
+            }),
+        ),
+    );
+    event(
+        wire,
+        "main",
+        fact(
+            "wf-result",
+            3,
+            3000,
+            "step",
+            "tool-result",
+            json!({
+                "turn_id":"turn","request_id":"request","results":[{"call_id":"wf-call","result":{
+                    "content":"{\"run_id\":\"run-a\"}\nThe result arrives as a report input.",
+                    "structuredContent":{"run_id":"run-a","status":"running","stages":[]},
+                }}],
+            }),
+        ),
+    );
+}
+
+#[test]
+fn tui_workflow_runs_are_discovered_from_facts_and_stopped_through_their_owner() {
+    let home = Home::new();
+    let (stop_read, stop_seen) = std::sync::mpsc::channel();
+    let (repeat_sent, repeat) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["workflow.status", "workflow.stop"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        // A restored terminal report names a run without starting a read for it.
+        wire.reply(&history, json!({"events":[fact("old-report",1,1000,"input","message",json!({
+            "mode":"steer","blocks":[{"type":"raw","text":"<dim-workflow kind=\"report\" run=\"run-old\" status=\"completed\">Workflow run-old: completed.</dim-workflow>"}],
+        }))],"through":1,"nextAfter":1,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        workflow_facts(wire);
+        // The tool result's structured ID is read by itself; no full array
+        // goes out while the panel is closed.
+        let discovery = next_request(wire, &|_| tool_started("run-a"));
+        assert_eq!(discovery["method"], "workflow.status");
+        assert_eq!(discovery["params"], json!({}));
+        let management = json!("management");
+        wire.reply(&discovery, json!([
+            tool_started("run-a"),
+            workflow_run("run-managed","managed run","completed",management.clone(),json!({"session_id":"session","branch_id":"main"})),
+            workflow_run("run-other","unrelated run","running",management.clone(),json!({"session_id":"other","branch_id":"main"})),
+            workflow_run("run-loose","unaddressed run","running",management,Value::Null),
+            workflow_run("run-old","old nightly","completed",json!({"kind":"tool","session_id":"session","branch_id":"child","call_id":"c"}),json!({"session_id":"session","branch_id":"child"})),
+        ]));
+        let stop = next_request(wire, &|_| tool_started("run-a"));
+        assert_eq!(stop["method"], "workflow.stop");
+        assert_eq!(stop["params"], json!({"run_id":"run-a"}));
+        stop_read.send(()).unwrap();
+        repeat.recv_timeout(Duration::from_secs(10)).unwrap();
+        // A pending stop disables a repeated `x`; status reads continue.
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < deadline {
+            wire.0.get_ref().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+            let mut line = String::new();
+            if wire.0.read_line(&mut line).is_ok() {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], "workflow.status", "unexpected {line}");
+                assert_eq!(request["params"], json!({"run_id":"run-a"}));
+                wire.reply(&request, tool_started("run-a"));
+            }
+        }
+        wire.0.get_ref().set_read_timeout(None).unwrap();
+        let stopped = workflow_run("run-a","nightly-check","stopped",
+            json!({"kind":"tool","session_id":"session","branch_id":"main","call_id":"wf-call"}),
+            json!({"session_id":"session","branch_id":"main"}));
+        wire.reply(&stop, stopped);
+        // The terminal run is not refreshed again.
+        wire.quiet(Duration::from_millis(1500));
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("1 in background");
+    terminal.write(b"/tasks\r");
+    terminal.until("nightly-check");
+    terminal.until("workflow");
+    terminal.until("old nightly");
+    for hidden in ["unrelated run", "unaddressed run"] {
+        assert!(
+            !terminal.transcript.contains(hidden),
+            "{hidden} is not this Session's run"
+        );
+    }
+    assert!(terminal.transcript.contains("managed run"));
+    // Unfinished rows come first, so the running run is selected.
+    terminal.write(b"\r");
+    terminal.until("Run: run-a");
+    terminal.until("analysis stored result");
+    terminal.until("Run accepted");
+    terminal.until("Report: none");
+    terminal.until("stop workflow");
+    terminal.write(b"x");
+    stop_seen.recv_timeout(Duration::from_secs(10)).unwrap();
+    terminal.write(b"x");
+    repeat_sent.send(()).unwrap();
+    terminal.until("Stopped");
+    terminal.write(b"\x1b[27u");
+    terminal.until("Stopped");
+    daemon.join().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}
+
+#[test]
+fn tui_workflow_inventory_errors_block_stop_all_until_reopen_and_stops_follow_other_targets() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["workflow.status", "workflow.stop"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[command("main-command",1,1000,"main running command")],"through":1,"nextAfter":1,"done":true}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        workflow_facts(wire);
+        let discovery = next_request(wire, &|_| tool_started("run-a"));
+        assert_eq!(discovery["params"], json!({}));
+        wire.send(json!({"jsonrpc":"2.0","id":discovery["id"],"error":{"code":-32000,"message":"store busy","data":{"appError":"service_unavailable"}}}));
+        // A failure stops automatic reads: the next read is the reopened
+        // panel's discovery, sent after the refresh interval has passed.
+        let discovery = wire.read("workflow.status");
+        assert_eq!(discovery["params"], json!({}));
+        wire.reply(&discovery, json!([
+            tool_started("run-a"),
+            workflow_run("run-managed","managed run","completed",json!("management"),json!({"session_id":"session","branch_id":"main"})),
+        ]));
+        // Stop-all sends the command stop before the Workflow stop.
+        let command = next_request(wire, &|_| tool_started("run-a"));
+        assert_eq!(command["method"], "session.exec.stop");
+        assert_eq!(command["params"], json!({"sessionId":"session","branchId":"main","taskId":"main-command"}));
+        wire.reply(&command, json!({}));
+        // The held Workflow stop gates neither leader input nor status reads;
+        // they arrive in any order around it.
+        let (mut stop, mut refresh, mut submitted) = (None, None, false);
+        while stop.is_none() || refresh.is_none() || !submitted {
+            let mut line = String::new();
+            wire.0.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            match request["method"].as_str().unwrap() {
+                "session.submit" => {
+                    assert_eq!(request["params"]["text"], "leader stays usable");
+                    wire.reply(&request, json!({"event":{}}));
+                    submitted = true;
+                }
+                "workflow.stop" => {
+                    assert_eq!(request["params"], json!({"run_id":"run-a"}));
+                    assert!(stop.replace(request).is_none(), "a second stop went out");
+                }
+                "workflow.status" if stop.is_none() => wire.reply(&request, tool_started("run-a")),
+                method => {
+                    assert_eq!(method, "workflow.status");
+                    assert_eq!(request["params"], json!({"run_id":"run-a"}));
+                    assert!(refresh.replace(request).is_none(), "a second status read went out");
+                }
+            }
+        }
+        let (stop, refresh) = (stop.unwrap(), refresh.unwrap());
+        let stopped = workflow_run("run-a","nightly-check","stopped",
+            json!({"kind":"tool","session_id":"session","branch_id":"main","call_id":"wf-call"}),
+            json!({"session_id":"session","branch_id":"main"}));
+        wire.reply(&stop, stopped);
+        // The read sent before the stop settled cannot replace its result.
+        wire.reply(&refresh, tool_started("run-a"));
+        // A failed reopen shows the last observed rows, the stop's result.
+        let discovery = wire.read("workflow.status");
+        assert_eq!(discovery["params"], json!({}));
+        wire.send(json!({"jsonrpc":"2.0","id":discovery["id"],"error":{"code":-32000,"message":"store busy","data":{"appError":"service_unavailable"}}}));
+        wire.quiet(Duration::from_millis(1500));
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("2 in background");
+    terminal.write(b"/tasks\r");
+    terminal.until("Workflow: last observed; refresh failed");
+    terminal.until("store busy");
+    terminal.write(b"\x18");
+    terminal.until("Workflow inventory is incomplete");
+    std::thread::sleep(Duration::from_millis(1500));
+    terminal.write(b"\x1b[27u/tasks\r");
+    // The completed discovery, not the last observed rows.
+    terminal.until("managed run");
+    terminal.write(b"\x18");
+    terminal.write(b"\x1b[27uleader stays usable\r");
+    terminal.until("attempted 2, errors 0, unavailable 0");
+    terminal.write(b"/tasks\r");
+    terminal.until("refresh failed");
+    terminal.until("nightly-check");
+    terminal.until("Stopped");
+    daemon.join().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}

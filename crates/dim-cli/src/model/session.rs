@@ -85,6 +85,12 @@ pub enum Command {
         projection_id: u64,
         member_id: String,
     },
+    /// Ask Workflow to stop one run of the displayed Session.
+    StopWorkflow {
+        session_id: String,
+        projection_id: u64,
+        run_id: String,
+    },
     /// Start a fresh session in the same directory.
     NewSession,
     /// Switch to a stored session.

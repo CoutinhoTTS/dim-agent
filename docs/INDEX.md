@@ -28,7 +28,7 @@
 - [Subagent model policy](design/subagent-model-policy.md) (proposal, #263; native new-member model choice)
 - [CLI background command output](design/background-task-output.md) (native C1 read implemented; CLI detail and refresh in progress in #324)
 - [Commands and members in the background-task list](design/background-task-list.md) (command/member implementation in progress in #324; Workflow integration is separate)
-- [Workflows in the CLI task view](design/workflow-task-view.md) (proposal, #264; existing management reads/stops)
+- [Workflows in the CLI task view](design/workflow-task-view.md) (implemented in the native CLI, #264; existing management reads/stops)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
 - [Upgrading to rutis 0.16.0](design/rutis-0.16-upgrade.md) (implemented; plugin contract P1)（[中文](zh/design/rutis-0.16-upgrade.md)）

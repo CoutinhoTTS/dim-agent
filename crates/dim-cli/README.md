@@ -793,7 +793,47 @@ the leader.
 
 The implementation follows the [task-inventory contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-list.md)
 and the [member-conversation contract](../../docs/design/member-conversation.md).
-Workflow presentation remains separate package integration.
+
+### Workflow runs
+
+When the connection advertises `workflow.status`, the same list shows Workflow
+runs of the attached Session: runs its `workflow` tool started on any branch and
+management runs that report to it. Run IDs come from `workflow` tool results'
+structured fields and `dim-workflow kind="report"` inputs; the worker reads one
+known unfinished run at a time, at most once a second, and stops at its terminal
+state. Opening `/tasks` asks for the retained run array once; nothing reads the
+whole array while the panel is closed. One status read is outstanding at a time.
+
+```text
++-- Background tasks --------------------------------------------+
+| > nightly-check       workflow · Running · 133s                |
+|   cargo build         command · Running · 18s                  |
+|   managed run         workflow · Completed · 120s              |
+| Enter details · x stop selected · Ctrl+X stop all · Esc close  |
++----------------------------------------------------------------+
+
++-- nightly-check - workflow ------------------------------------+
+| Run: <run_id> · Source: user · Running                         |
+| Stages                                                         |
+| 1  analyze  completed  <stage session>                         |
+| 2  tests  running  -                                           |
+| analyze result                                                 |
+| <stored result text>                                           |
+| Log                                                            |
+| Report: none                                                   |
+| x stop workflow · Esc back                                     |
++----------------------------------------------------------------+
+```
+
+`x` sends `workflow.stop` for a `running` run and is disabled while that request
+is pending or the run is `stopping`; only the owner's returned run changes the
+row. Ctrl+X adds known running runs after the command and member stops, because
+a Workflow stop waits for its stages. A read sent before a stop reply cannot
+replace that reply's run. While discovery is loading or failed, stop-all is
+unavailable; a failure keeps the last observed rows and stops automatic reads
+until `/tasks` is reopened. Without `workflow.status` the panel shows no Workflow
+rows; without `workflow.stop` the runs are read-only. The contract is the
+[Workflow task view](../../docs/design/workflow-task-view.md).
 
 Native App Server flows verify restored child/nested branch discovery, local
 command histories, addressed stops and continued leader input. Built-in member
