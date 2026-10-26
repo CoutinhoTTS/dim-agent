@@ -1,8 +1,8 @@
 # How Dim uses rutis
 
 Status: Accepted under [ADR 006](../adr/006-plugin-contract.md) (D2–D4). Implemented, except
-foreign plugins as one row (R5's second form, R7), which wait for rutis#642; each section says what
-holds today.
+foreign plugins as one row (R5's second form, #403), which rutis 0.17's plugin definitions (R7)
+unblock; each section says what holds today.
 [中文](../zh/design/rutis-usage.md)
 
 rutis owns the plugin machinery. This document states how Dim uses it: how a part is mounted, how it
@@ -70,13 +70,18 @@ besides the scope's own mechanisms.
   unmount a withdrawn one. A withdrawal finishes when every instance has unloaded its copy.
 - The instance closes its mounted parts with itself, through rutis's ownership of children.
 
-**What a generator returns.**
+**What a plugin registers.**
 
 - A Rust generator receives the names of the instance it is mounted in (appendix A) and returns a
   plugin, which may hold what the plugin prepared in its `apply`.
-- A plugin in another runtime registers its parts the same way once rutis lets a running row register
-  generators (R7). Until then, its Session and branch parts stay rows of their groups, as R5's first
-  form placed them; no interim declaration is added (R5).
+- A plugin in another runtime registers a plugin definition instead of a function (R7): a value made
+  with its runtime's `definePlugin`, which may close over what the plugin prepared in its `apply`.
+  Each instance mounts one copy of it with rutis's `Definition::at`; the copy runs in the plugin's
+  runtime, its `inject` resolved in that instance. When the registering generation unloads, rutis
+  ends every copy and then the definition (`Definition::ended`); the part registry drops the
+  registration once the definition has ended, so no later instance mounts it. A definition cannot return
+  nothing for an instance: a copy whose instance's business configuration turns the feature off does
+  no work.
 
 **Every plugin and part:**
 
@@ -106,7 +111,8 @@ name-bound (#391, #392, #396–#398, #400).
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).
 - Rows of other languages carry their group in the App Server's configuration (appendix B), one row per
-  part, until R5 ([#403](https://github.com/arcships/dim/issues/403)).
+  part, until R5's second form ([#403](https://github.com/arcships/dim/issues/403)). TypeScript plugins
+  hand definitions over since rutis 0.17.0 and Python plugins since 0.17.1, which Dim is on.
 
 ## 3. Services by name
 
@@ -157,7 +163,8 @@ claim runs a loader-wide reconcile, which also rebuilds the copies whose build w
 required row that failed in a Session's assembly can be rebuilt during that Session's creation, and
 each Session or branch creation reconciles the whole loader. The App Server shares those names in
 their groups (`register_shared_instance`), and a test checks that each is shared in the group the
-Rust binding registers it in. The build script writes only the TypeScript declarations.
+Rust binding registers it in. `xtask types` writes their TypeScript declarations to
+`npm/branch-services.d.ts`, and `xtask check` fails when that file is stale.
 
 ### 3.5 How each runtime resolves a name
 
@@ -221,7 +228,7 @@ Since rutis 0.15.1 there is one flat bus per root.
 How Dim's parts consume bus events and which public bus events Dim defines are in the
 [plugin contract §5.3](plugin-contract.md#53-bus-events).
 
-*Today:* Dim is on rutis 0.17.0, and this section holds.
+*Today:* Dim is on rutis 0.17.1, and this section holds.
 
 ## 6. Requirements raised to mechanism owners
 
@@ -253,24 +260,25 @@ These requirements concern how Dim uses rutis. They follow
 - **Existing mechanisms considered:** the runtime resolver already builds a copy of a module for the
   instances it runs in (`Resolved::scoped`), and the catalog rejects misplaced names.
 - **Needed:** a foreign plugin is one process row and registers its parts with the part registry from
-  its code, through the generators of R7. The Session and branch rows of other languages, and the
-  group they declare, are deleted. No interim package declaration is built: it would be removed when
-  R7 lands, and R6 removes most of the host's need to know names before the runtime starts.
+  its code, as plugin definitions (R7). The Session and branch rows of other languages, and the group
+  they declare, are deleted. No package declaration is built: a definition carries its own `inject`
+  and `provides`, and R6 removed most of the host's need to know names before the runtime starts.
 - **Effect:** none on the Timeline.
 - **Owner:** App Server and the SDKs, with the repository's plugins
-  ([#403](https://github.com/arcships/dim/issues/403)). It waits for R7
-  ([#405](https://github.com/arcships/dim/issues/405)).
+  ([#403](https://github.com/arcships/dim/issues/403)). R7 is delivered, so nothing outside Dim
+  blocks it.
 
 ### R6. Contributions register with their owner
 
-- **Blocked:** [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
-  ("Registration: declared by the plugin … not by host-side `AgentBuilder` calls"). The host
-  pre-registers contribution names (`session_tool`, `session_methods`, `session_prompt_source`,
-  `session_tool_source`, `host_tools`) and translates a foreign row's `provides` into the same calls.
-  A native tool contribution and a foreign one have different keys, so ToolRegistry reads both and
-  detects a retiring foreign generation through a sidecar token found by the same string
-  (`tool_registry.rs:486-509`); Rpc keeps the same split for method namespaces. Prompt and tool
-  sources are closed to foreign parts.
+- **Before R6:** [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
+  ("Registration: declared by the plugin … not by host-side `AgentBuilder` calls") was blocked: the
+  host pre-registered contribution names (`session_tool`, `session_methods`,
+  `session_prompt_source`, `session_tool_source`, `host_tools`) and translated a foreign row's
+  `provides` into the same calls. A native tool contribution and a foreign one had different keys,
+  so ToolRegistry read both and detected a retiring foreign generation through a sidecar token
+  found by the same string (`tool_registry.rs:486-509`); Rpc kept the same split for method
+  namespaces. Prompt and tool sources were closed to foreign parts. The `Needed` and `Owner`
+  bullets below describe what replaced it.
 - **Existing mechanisms considered:**
   - Finding contributions by name in the instance, from `rutis/service` events or a catalog listing.
     Rejected: the owner would learn from framework internals (which rows provide which names) what
@@ -306,20 +314,25 @@ These requirements concern how Dim uses rutis. They follow
   withdrawn one, so a call answers from that row's status
   ([methods contract A.1](contracts/session-boundary.md#a1-method-contributions)).
 
-### R7. A generator is a function in every runtime
+### R7. A part is a plugin definition in every runtime
 
-- **Blocked:** §2. A foreign generator returns a module name and configuration, because a host loads a
-  foreign plugin by name only. A part prepared from the plugin's own state must go through a shared
-  module or a service, which Rust parts do not need.
-- **Existing mechanisms considered:** module name and configuration cover every current part; this is
-  the interim form.
-- **Needed:** a running row registers named generators with their declarations, and the host builds a
-  factory for "generator G of row R" in a given instance. Each copy runs in the producer's runtime,
-  isolated by the instance's labels and gated by the generator's `inject`; it belongs to the host fiber
-  that mounted it; it ends when its generator is withdrawn.
+- **Blocked:** §2. A foreign plugin could hand the host only a module name and configuration, because a
+  host loaded a foreign plugin by name only. A part prepared from the plugin's own state had to go
+  through a shared module or a service, which Rust parts do not need.
+- **Existing mechanisms considered:** module name and configuration cover every current part; it was
+  the interim form, and it is removed.
+- **Needed:** a running row hands the host a part, with its declarations, and the host mounts copies
+  of it in given instances. Each copy runs in the producer's runtime, isolated by the instance's
+  labels and gated by its `inject`; it belongs to the host fiber that mounted it; it ends when the
+  producer's generation unloads.
 - **Effect:** none on the Timeline.
-- **Owner:** rutis, [arcships/rutis#642](https://github.com/arcships/rutis/issues/642). R5 waits on it;
-  [#405](https://github.com/arcships/dim/issues/405) follows it.
+- **Owner:** rutis, [arcships/rutis#642](https://github.com/arcships/rutis/issues/642). Delivered as
+  plugin definitions: rutis 0.17.0 for Node, 0.17.1 for Python. A `#[rutis::service]` parameter of
+  type `rutis::Definition` receives a definition another language hands over; `Definition::at` builds
+  a copy for `ctx.plugin`; a definition belongs to the row that handed it over, and its copies end
+  before that row's own cleanups run. A definition is a value, not a generator function, so the
+  per-instance choice a Rust generator makes by returning nothing moves into the copy (§2).
+  [#405](https://github.com/arcships/dim/issues/405) records the upgrade.
 
 ## Appendix A: Rust binding
 
@@ -339,7 +352,7 @@ P3 deleted the old forms ([#375](https://github.com/arcships/dim/issues/375)); t
 | `SessionService`, `BranchService` markers | The group registered in the catalog (`names::register`) |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | A feature registers its parts with the part registry (`Feature`, added with `AgentBuilder::feature`, or its own plugin with `AgentBuilder::plugin`; a profile uses `require_feature`); `register_part` for an App Server process row |
 | `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` (removed) | The owner's `register`, called by the contributing part: `toolRegistry`, `promptRegistry`, `sessionMethods`, `managementMethods` (R6) |
-| `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type, Session and branch services included (§3.4); a type whose source cannot change is wrapped in a marked type of Dim's. `Exports` only writes TypeScript declarations |
+| `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type, Session and branch services included (§3.4); a type whose source cannot change is wrapped in a marked type of Dim's. `Exports` only writes TypeScript declarations, from `xtask types` |
 | `PublicService` | Unchanged (a facade rule) |
 
 ### A.2 The binding

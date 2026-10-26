@@ -1,12 +1,12 @@
 # Workflows in the CLI task view
 
-Status: **Proposal; not Ready or implemented**. This is the Workflow slice of
+Status: **Accepted ([#332](https://github.com/arcships/dim/pull/332)); implemented
+in the native CLI**, with the delivery notes in §6. This is the Workflow slice of
 [#264](https://github.com/arcships/dim/issues/264). It extends the accepted
-[command/member task list](background-task-list.md), implemented separately in
+[command/member task list](background-task-list.md), implemented in
 [#324](https://github.com/arcships/dim/pull/324). The optional
 [Workflow package](../../runtime/plugins/workflow/README.md) is delivered by
-[#306](https://github.com/arcships/dim/pull/306). Approve this view contract before
-implementation; integrate on the command/member implementation when available.
+[#306](https://github.com/arcships/dim/pull/306).
 This does not complete #263's other transcript/model-policy work.
 
 ## 1. Scope and existing interfaces
@@ -303,8 +303,29 @@ no new test harness, backend hook or mock call-order suite is needed.
   releases only owned client resources; it neither cancels unrelated runs nor
   changes optional package installation, persisted format or native ownership.
 
-These are future implementation gates. This documentation provides no passing
-Workflow UI/runtime evidence and does not close #264.
+### Delivery
+
+The CLI implements this contract in its existing Session worker
+(`session_host/workflow.rs`), task projection and panel. Public PTY flows in
+`crates/dimcode/tests/cli_flow/tasks.rs` drive a mock App Server that advertises
+`workflow.status` and `workflow.stop`:
+
+- A restored terminal report starts no read; a live tool result's structured
+  `run_id` is read alone, with no full array while the panel is closed. Opening
+  the panel discovers tool-started and report-addressed management runs and
+  omits another Session's and an unaddressed management run. Detail shows
+  stages, stored results, log and report; `x` sends one `workflow.stop`, a
+  repeated `x` while it is pending sends nothing, and the terminal run is not
+  refreshed again.
+- A failed discovery shows the error, blocks Ctrl+X and stops automatic reads
+  until reopening. Stop-all sends the command stop before the Workflow stop; the
+  held Workflow stop gates neither leader input nor a status read, and that read,
+  answered after the stop, cannot replace the stop's stored result.
+
+Not covered by these flows: the real optional-package App Server flow, the
+48-column layout, `launching`/`lost` stages, per-ID not-found/pruning and an
+oversized reply. Opening terminal detail does not request an extra read; detail
+shows the last stored record. These remain open #264 verification items.
 
 ## 7. Impact, rule check and ablation
 

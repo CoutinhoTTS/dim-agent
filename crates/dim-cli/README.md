@@ -611,7 +611,7 @@ Interactive recovery displays main-branch history. Noninteractive recovery emits
 
 ## Terminal UI modes
 
-The interactive terminal UI has two modes over the same session. Scrollback (the default) commits the transcript into the terminal's native scrollback and repaints only the composer region at the bottom. Its ground rule: a committed row is never taken back. Nothing above the live region is erased, shortened or redrawn to fewer rows, because the composer sits at the bottom of the screen and the terminal would pull it up by every row removed; corrections append or rewrite a row in place, never shrink. When the live region itself gets shorter it keeps its bottom row and gives back its top rows, so the composer stays put. Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves. A transcript shorter than the viewport sits on the dock and grows upwards, as in Amp:
+The interactive terminal UI has two modes over the same session. Scrollback (the default) commits the transcript into the terminal's native scrollback and repaints only the composer region at the bottom. Its ground rule: a committed row is never taken back. Nothing above the live region is erased, shortened or redrawn to fewer rows, because the composer sits at the bottom of the screen and the terminal would pull it up by every row removed; corrections append or rewrite a row in place, never shrink. Inside the live region the composer (or the question or approval in its place) is the anchor and never moves up while the region has room below: fewer rows above it (the live tail, the queue strip) give back the region's top rows, blank, as a gap above it, and fewer rows below it (a menu or picker closing, a question changing tab or answered) give back its bottom rows, blank, under the status row. Scrolling the screen cannot be undone, so the region grows into those blank rows first, below or back up into the gap, and scrolls only for rows that fit nowhere; a menu or question opened and closed again and again scrolls history once, the first time. The next commit fills the gap, so no blank rows are left in history. No row is ever blanked and then drawn again in the same frame: rows are written over in place, a row wider than the screen is written once and wrapped by the terminal over the rows below it, and a row exactly as wide as the screen gets no trailing erase (it would blank its last cell). Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves. A transcript shorter than the viewport sits on the dock and grows upwards, as in Amp:
 
 ```text
  answer row                                                     ▁   scrollbar: last column,
@@ -793,7 +793,47 @@ the leader.
 
 The implementation follows the [task-inventory contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-list.md)
 and the [member-conversation contract](../../docs/design/member-conversation.md).
-Workflow presentation remains separate package integration.
+
+### Workflow runs
+
+When the connection advertises `workflow.status`, the same list shows Workflow
+runs of the attached Session: runs its `workflow` tool started on any branch and
+management runs that report to it. Run IDs come from `workflow` tool results'
+structured fields and `dim-workflow kind="report"` inputs; the worker reads one
+known unfinished run at a time, at most once a second, and stops at its terminal
+state. Opening `/tasks` asks for the retained run array once; nothing reads the
+whole array while the panel is closed. One status read is outstanding at a time.
+
+```text
++-- Background tasks --------------------------------------------+
+| > nightly-check       workflow · Running · 133s                |
+|   cargo build         command · Running · 18s                  |
+|   managed run         workflow · Completed · 120s              |
+| Enter details · x stop selected · Ctrl+X stop all · Esc close  |
++----------------------------------------------------------------+
+
++-- nightly-check - workflow ------------------------------------+
+| Run: <run_id> · Source: user · Running                         |
+| Stages                                                         |
+| 1  analyze  completed  <stage session>                         |
+| 2  tests  running  -                                           |
+| analyze result                                                 |
+| <stored result text>                                           |
+| Log                                                            |
+| Report: none                                                   |
+| x stop workflow · Esc back                                     |
++----------------------------------------------------------------+
+```
+
+`x` sends `workflow.stop` for a `running` run and is disabled while that request
+is pending or the run is `stopping`; only the owner's returned run changes the
+row. Ctrl+X adds known running runs after the command and member stops, because
+a Workflow stop waits for its stages. A read sent before a stop reply cannot
+replace that reply's run. While discovery is loading or failed, stop-all is
+unavailable; a failure keeps the last observed rows and stops automatic reads
+until `/tasks` is reopened. Without `workflow.status` the panel shows no Workflow
+rows; without `workflow.stop` the runs are read-only. The contract is the
+[Workflow task view](../../docs/design/workflow-task-view.md).
 
 Native App Server flows verify restored child/nested branch discovery, local
 command histories, addressed stops and continued leader input. Built-in member
@@ -906,7 +946,7 @@ Device login prints the verification address and device code, then polls the att
 
 `models PROVIDER` reads the cached catalog; `--refresh` obtains and persists a fresh catalog through the provider. Each line contains the model ID, display name and `available`, `disabled` or `unavailable`, separated by tabs. Credential/account fields and private failure details are not printed. A missing cached catalog gives sign-in and refresh guidance. Select an available model with `--provider PROVIDER --model MODEL_ID` for a new session.
 
-An existing shared daemon is reused. Plugin paths apply when starting a new product daemon; use an isolated home when changing a plugin/runtime configuration. Explicit `--model-config` and account plugin options cannot be combined.
+An existing shared daemon of the CLI's own version is reused. A daemon of another version that this executable would start (one left running across an upgrade) is stopped with verified shutdown and replaced, which disconnects other clients attached to it; one without verified shutdown is reported for `dimcode daemon stop` from its matching CLI. A `--server PATH` daemon is reused whatever its version. Plugin paths apply when starting a new product daemon; use an isolated home when changing a plugin/runtime configuration. Explicit `--model-config` and account plugin options cannot be combined.
 
 The repository root `./dev` prepares the local provider package, builds incrementally and restarts only its development daemon. See [local development](../../docs/architecture/development.md) for setup and source selection.
 
@@ -918,7 +958,7 @@ dimcode --home /path/to/plugin-home daemon stop
 
 ## Web workspace
 
-`dimcode web` holds the daemon's local web entry open, `/web` toggles the daemon-owned switch, and both serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. `dimcode web --off` clears the switch without disconnecting a foreground holder. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
+`dimcode web` holds the daemon's local web entry open, `/web` toggles the daemon-owned switch, and both serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. `dimcode web --off` clears the switch without disconnecting a foreground holder. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. `dimcode web install` downloads this version's `dimcode-web` from the npm registry (`DIMCODE_NPM_REGISTRY` names a mirror), checks it against the registry's integrity and puts it in `<home>/web`, which a running daemon started without another source serves from its next open; running it again after an upgrade installs the matching frontend, and it names a frontend in an earlier source that still comes first. Without one, `dimcode web` (exit status 1) and `/web` say to run it; a daemon started before a frontend appeared in another source is restarted with `dimcode daemon stop`; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`, and the CLI says to run `dimcode web install`.
 
 When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session. When the daemon offers `ui.leaf`, interactive `dimcode` is itself a UI leaf (`crate::leaf`): it creates or resumes the Session, mounts a rutis node in its client tree (a socket `ui-<8 hex>` in the private native home, as long as `daemon.sock`, that accepts one connection, and `PeerPlugin` with `host { Tui }`) and calls the internal `ui.open`; the daemon links to it and hosts `Tui` there with this invocation's options. The process ends when the `Tui` leaves (its exit code, or a restart) or when the daemon closes the link (exit 0). An older daemon without `ui.leaf` keeps the direct TUI. Initial product setup without a usable model also uses the existing direct TUI, so `/connect` and `/login` remain available before a Session exists; explicit model targets, `--model-config`, resume and other error codes keep their errors ([Tui §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-and-ui-leaves)).
 

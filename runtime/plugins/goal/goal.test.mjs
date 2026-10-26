@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { load } from '@arcships/rutis/testing'
 import goalBranch from './branch.ts'
-import { Fold, changes, decideInterrupt, decideTurnEnd, writes } from './goal.ts'
+import { Fold, changes, conclusionOf, decideConclusion, decideEvaluatedContinuation, decideEvaluation, decideInterrupt, decideTurnEnd, evaluatorPrompt, replyConclusion, truncate, writes } from './goal.ts'
 
 const B = 'main'
 
@@ -67,10 +67,19 @@ function started(objective = 'ship it') {
 const settingsDocument = maxContinuations => ({ ok: true, value: { document: { maxContinuations } } })
 const flush = () => new Promise(resolve => setImmediate(resolve))
 
-/** The branch plugin across its declared Dispatcher, Settings and input ports. */
-async function loadGoalBranch(read) {
+/**
+ * The branch plugin across its declared Dispatcher, Settings, input and
+ * creation ports. `options.branchId` is the branch the part serves,
+ * `options.before` commits events it replays, and `options.create` replaces the
+ * tree's creation (it receives the default one as its fourth argument).
+ */
+async function loadGoalBranch(read, options = {}) {
+  const branchId = options.branchId ?? B
   const branch = new Branch()
+  if (options.before) options.before(branch)
   const writes = []
+  const sent = []
+  const creates = []
   const closing = Promise.withResolvers()
   let listener
   const emit = async (type, name, data) => {
@@ -78,8 +87,18 @@ async function loadGoalBranch(read) {
     await listener(event)
     return event
   }
+  const create = options.create ?? defaultCreate
+  async function defaultCreate(parent, at, createOptions, id) {
+    await emit('branch', 'create', {
+      at: { kind: 'sequence', sequence: Number(at) },
+      source: createOptions.source,
+      branch: id,
+      prompt: createOptions.prompt,
+    })
+    return id
+  }
   const loaded = await load(goalBranch, { services: {
-    timelineIdentity: { get: async () => ({ branchId: B }) },
+    timelineIdentity: { get: async () => ({ branchId }) },
     branchLifecycle: { activated: async () => true, closing: () => closing.promise },
     dispatcher: {
       consume: async (_name, _keys, handler) => {
@@ -88,19 +107,33 @@ async function loadGoalBranch(read) {
       },
       local: async (start, through) => branch.events.filter(event => event.sequence >= BigInt(start) && event.sequence <= BigInt(through)),
       history: async through => branch.events.filter(event => event.sequence <= BigInt(through)),
+      committed: async () => branch.sequence,
     },
     settings: { read },
-    treeCommands: { input: async (_branchId, input) => {
-      const event = await emit('input', 'message', input)
-      writes.push(event)
-      return event
-    } },
+    treeCommands: {
+      input: async (id, input) => {
+        // A write to another branch is a fact on that branch, not on this one.
+        if (id !== branchId) {
+          sent.push({ branch: id, input })
+          return { id: 'remote', sequence: 0, type: 'input', name: 'message', data: input }
+        }
+        const event = await emit('input', 'message', input)
+        writes.push(event)
+        return event
+      },
+      create: async (parent, at, createOptions) => {
+        const id = `E${creates.length + 1}`
+        creates.push({ parent, at, options: createOptions, branch: id })
+        return create(parent, at, createOptions, id, defaultCreate)
+      },
+    },
   } })
-  return { unload: async () => { closing.resolve(); await loaded.unload() }, emit, writes, turn: async input => {
-    await emit('turn', 'start', {})
-    await emit('input', 'consumed', { input_id: input.id })
-    return emit('turn', 'end', { status: 'completed' })
-  } }
+  return { unload: async () => { closing.resolve(); await loaded.unload() }, branch, emit, writes, sent, creates,
+    turn: async input => {
+      await emit('turn', 'start', {})
+      await emit('input', 'consumed', { input_id: input.id })
+      return emit('turn', 'end', { status: 'completed' })
+    } }
 }
 
 test('Goal reads current Settings without change events and stops decisions on read failure', async t => {
@@ -376,4 +409,531 @@ test('D12: set, completed, blocked: the current status is blocked with the secon
   branch.input(changes.report(B, 'completed', 'shipped'))
   branch.input(changes.report(B, 'blocked', 'needs credentials'))
   assert.deepEqual(branch.fold.status, { status: 'blocked', summary: 'needs credentials' })
+})
+
+test('Pursuit 1: set records the judge, edit keeps it, and a completion is a request under it', () => {
+  const branch = new Branch()
+  const set = branch.input(changes.set(B, 'ship it', 'evaluator'))
+  assert.match(set.data.blocks[0].text, /^<dim-goal kind="goal" op="set" judge="evaluator" branch="main">/)
+  assert.equal(branch.fold.judge, 'evaluator')
+  branch.input(changes.edit(B, 'ship it twice'))
+  assert.equal(branch.fold.judge, 'evaluator', 'edit keeps the judge')
+  // Goal's continuations are unchanged under the evaluator judge.
+  branch.turn([set])
+  assert.deepEqual(decideTurnEnd(branch.fold, 20), { write: 'continuation', count: 1 })
+  const continuation = branch.write(decideTurnEnd(branch.fold, 20), branch.fold.turnEnd.sequence, 20)
+  // A turn whose worker reports completion keeps the status active, and the
+  // request moves neither `A` nor the count.
+  branch.commit('turn', 'start', {})
+  branch.consume(continuation)
+  const request = branch.input(changes.report(B, 'completed', 'all tests pass'))
+  const end = branch.commit('turn', 'end', { status: 'completed' })
+  assert.equal(branch.fold.status.status, 'active')
+  assert.equal(branch.fold.running, true)
+  assert.deepEqual(branch.fold.requests, [{ sequence: request.sequence, summary: 'all tests pass' }])
+  assert.equal(branch.fold.count, 1)
+  assert.equal(decideEvaluation(branch.fold, end.sequence), true)
+  // The refold of the same history takes the same decision (Pursuit 6).
+  const refold = new Fold()
+  for (const event of branch.events) refold.apply(event)
+  assert.equal(refold.judge, 'evaluator')
+  assert.equal(decideEvaluation(refold, end.sequence), true)
+  // A later turn carries no request: its end creates no evaluator.
+  assert.equal(decideEvaluation(branch.fold, branch.turn([]).sequence), false)
+  // `clear` retires the judge with the goal, and a later `set` chooses again.
+  branch.input(changes.clear(B))
+  assert.equal(branch.fold.judge, 'model')
+  branch.input(changes.set(B, 'again', 'evaluator'))
+  branch.input(changes.set(B, 'again'))
+  assert.equal(branch.fold.judge, 'model')
+})
+
+test('Pursuit 3: a worker blocked, an interrupt, a user pause and a limit pause create no evaluator', () => {
+  // A worker's `blocked` stands: the goal is blocked and its turn end decides nothing.
+  let branch = new Branch()
+  branch.input(changes.set(B, 'ship it', 'evaluator'))
+  branch.commit('turn', 'start', {})
+  branch.input(changes.report(B, 'blocked', 'needs credentials'))
+  let end = branch.commit('turn', 'end', { status: 'completed' })
+  assert.equal(branch.fold.running, false)
+  assert.equal(decideEvaluation(branch.fold, end.sequence), false)
+  assert.equal(decideTurnEnd(branch.fold, 20), undefined)
+  // An interrupt before the turn end pauses the goal; its pause decides the turn.
+  branch = new Branch()
+  branch.input(changes.set(B, 'ship it', 'evaluator'))
+  branch.commit('turn', 'start', {})
+  const interrupt = branch.interrupt()
+  branch.input(changes.report(B, 'completed', 'done'))
+  end = branch.commit('turn', 'end', { status: 'cancelled' })
+  assert.equal(decideEvaluation(branch.fold, end.sequence), false)
+  assert.deepEqual(decideInterrupt(branch.fold, interrupt.sequence), { write: 'pause', reason: 'interrupted' })
+  // A user pause before the turn end leaves nothing to evaluate.
+  branch = new Branch()
+  branch.input(changes.set(B, 'ship it', 'evaluator'))
+  branch.commit('turn', 'start', {})
+  branch.input(changes.pause(B))
+  branch.input(changes.report(B, 'completed', 'done'))
+  end = branch.commit('turn', 'end', { status: 'completed' })
+  assert.equal(decideEvaluation(branch.fold, end.sequence), false)
+  // A limit pause is Goal's; a request in a later turn does not revive it.
+  branch = new Branch()
+  branch.input(changes.set(B, 'ship it', 'evaluator'))
+  branch.input(writes.pause(B, 'limit', 1n))
+  branch.commit('turn', 'start', {})
+  branch.input(changes.report(B, 'completed', 'done'))
+  end = branch.commit('turn', 'end', { status: 'completed' })
+  assert.deepEqual(branch.fold.status, { status: 'paused', reason: 'limit' })
+  assert.equal(decideEvaluation(branch.fold, end.sequence), false)
+})
+
+test('Pursuit 9: the model judge is unchanged: a completion is the status, not a request', () => {
+  const branch = started()
+  const set = branch.events[0]
+  assert.match(set.data.blocks[0].text, /^<dim-goal kind="goal" op="set" branch="main">/)
+  branch.commit('turn', 'start', {})
+  branch.input(changes.report(B, 'completed', 'done'))
+  const end = branch.commit('turn', 'end', { status: 'completed' })
+  assert.deepEqual(branch.fold.status, { status: 'completed', summary: 'done' })
+  assert.deepEqual(branch.fold.requests, [])
+  assert.equal(branch.fold.judge, 'model')
+  assert.equal(decideEvaluation(branch.fold, end.sequence), false)
+  assert.equal(decideTurnEnd(branch.fold, 20), undefined)
+})
+
+test('Pursuit 1: a steer input before the prompt takes neither the role nor its slot', () => {
+  const prompt = evaluatorPrompt(B, '7', 'ship it', 'all tests pass')
+  const branch = new Branch()
+  branch.commit('branch', 'start', { parent: B })
+  // The role is the branch's first Queue input (§4.2); a steer is not one.
+  branch.user(prompt, 'steer')
+  assert.equal(branch.fold.evaluate, undefined)
+  branch.user(prompt, 'queue')
+  assert.deepEqual(branch.fold.evaluate, { branch: B, evaluation: '7' })
+})
+
+test('Pursuit 1/5: an evaluation that is not a sequence names no role and no evaluator', () => {
+  // Both the role and a `branch/create` name their evaluation by a marker or
+  // an operation id, so both take the decimal form of §5 and nothing else.
+  const branch = new Branch()
+  branch.commit('branch', 'start', { parent: B })
+  branch.user(evaluatorPrompt(B, 'abc', 'ship it', 'all tests pass'), 'queue')
+  assert.equal(branch.fold.evaluate, undefined)
+  branch.commit('branch', 'create', {
+    at: { kind: 'sequence', sequence: 1 },
+    source: { kind: 'host', operation_id: 'goal:evaluate:abc' },
+    branch: 'E',
+    prompt: 'x',
+  })
+  assert.deepEqual([...branch.fold.evaluations], [])
+})
+
+test('Pursuit 1: the evaluator role survives the refold of a deleted input', () => {
+  const branch = new Branch()
+  branch.commit('branch', 'start', { parent: B })
+  branch.user(evaluatorPrompt(B, '7', 'ship it', 'all tests pass'), 'queue')
+  branch.delete(branch.user('and check the logs', 'queue'))
+  assert.deepEqual(branch.fold.evaluate, { branch: B, evaluation: '7' })
+})
+
+/** A branch under the evaluator judge, the worker's completion, and the evaluator created at its end. */
+function evaluated() {
+  const branch = new Branch()
+  const set = branch.input(changes.set(B, 'ship it', 'evaluator'))
+  branch.turn([set])
+  branch.commit('turn', 'start', {})
+  branch.input(changes.report(B, 'completed', 'all tests pass'))
+  const end = branch.commit('turn', 'end', { status: 'completed' })
+  const evaluation = String(end.sequence)
+  branch.commit('branch', 'create', {
+    at: { kind: 'sequence', sequence: end.sequence },
+    source: { kind: 'host', operation_id: `goal:evaluate:${evaluation}` },
+    branch: 'E',
+    prompt: 'x',
+  })
+  return {
+    branch, evaluation,
+    report: (evaluator, result, text) => branch.input(writes.conclusion(B, evaluator, evaluation, result, text)),
+  }
+}
+
+test('Pursuit 2/7/10: a conclusion decides once, from its own evaluator, while its evaluation is current', () => {
+  const decide = (branch, event) => decideConclusion(branch.fold, event.sequence, conclusionOf(event.data.blocks[0].text))
+  // DONE completes the goal with the result the evaluator verified.
+  let state = evaluated()
+  assert.deepEqual(decide(state.branch, state.report('E', 'done', 'DONE: all 3 tests pass')), { write: 'completed', text: 'all 3 tests pass' })
+  // A later conclusion for the same evaluation decides nothing.
+  assert.equal(decide(state.branch, state.report('E', 'done', 'DONE: again')), undefined)
+  // Another branch's conclusion decides nothing, whatever it claims.
+  assert.equal(decide(state.branch, state.report('F', 'done', 'DONE: forged')), undefined)
+  // BLOCKED states what only the user can provide.
+  state = evaluated()
+  assert.deepEqual(decide(state.branch, state.report('E', 'blocked', 'BLOCKED: a deploy key')), { write: 'blocked', text: 'a deploy key' })
+  // CONTINUE is Goal's continuation, and Goal's limit pause at the limit.
+  state = evaluated()
+  assert.deepEqual(decide(state.branch, state.report('E', 'continue', 'CONTINUE:\n- two tests fail: <output>\n- the changelog')), { write: 'continue' })
+  assert.deepEqual(decideEvaluatedContinuation(state.branch.fold, 20), { write: 'continuation', count: 1 })
+  // The continuation drives the next turn, as at any turn end (C5).
+  const continuation = state.branch.input(writes.evaluatedContinuation(B, 1, 20, BigInt(state.evaluation), state.evaluation))
+  assert.equal(decideEvaluatedContinuation(state.branch.fold, 20), undefined)
+  state.branch.turn([continuation])
+  assert.deepEqual(decideEvaluatedContinuation(state.branch.fold, 20), { write: 'continuation', count: 2 })
+  assert.deepEqual(decideEvaluatedContinuation(state.branch.fold, 1), { write: 'pause', reason: 'limit' })
+  // A failed evaluation is Goal's own pause reason.
+  state = evaluated()
+  assert.deepEqual(decide(state.branch, state.report('E', 'failed', "the evaluator's turn did not complete")), { write: 'failed' })
+  // A goal change after the evaluation supersedes it: a late DONE decides nothing.
+  state = evaluated()
+  state.branch.input(changes.pause(B))
+  assert.equal(decide(state.branch, state.report('E', 'done', 'DONE: late')), undefined)
+  assert.equal(state.branch.fold.status.status, 'paused')
+})
+
+test('Pursuit 4/8: the reply ends with its last conclusion line, cut to 4000 characters', () => {
+  assert.deepEqual(replyConclusion('Checked the tree.\nDONE: all 3 tests pass'), { result: 'done', text: 'DONE: all 3 tests pass' })
+  assert.deepEqual(replyConclusion('x\nCONTINUE:\n- a: <out>\n- b'), { result: 'continue', text: 'CONTINUE:\n- a: <out>\n- b' })
+  // The last conclusion wins: what an earlier request said is not the reply.
+  assert.deepEqual(replyConclusion('DONE: early\nnot yet\nBLOCKED: the build host is offline'), { result: 'blocked', text: 'BLOCKED: the build host is offline' })
+  assert.equal(replyConclusion('no conclusion here'), undefined)
+  assert.equal(replyConclusion('Done: a lowercase prefix is not a conclusion'), undefined)
+  // A whole reply written as the report, like a conclusion, keeps 4000 characters.
+  assert.equal(truncate('x'.repeat(5000)).length, 4000)
+  assert.equal(replyConclusion(`DONE:${'x'.repeat(5000)}`).text.length, 4000)
+})
+
+/** A working branch whose worker's completion ended a turn: `writes[0]` is Goal's continuation. */
+async function completionRequested(goal) {
+  const set = await goal.emit('input', 'message', changes.set(B, 'ship it', 'evaluator'))
+  await goal.turn(set)
+  await flush()
+  const continuation = goal.writes[0]
+  await goal.emit('turn', 'start', {})
+  await goal.emit('input', 'consumed', { input_id: continuation.id })
+  await goal.emit('input', 'message', changes.report(B, 'completed', 'all tests pass'))
+  const end = await goal.emit('turn', 'end', { status: 'completed' })
+  await flush()
+  return end
+}
+
+/** An evaluator branch the working branch created for evaluation `7`. */
+function evaluatorBranch(read, before) {
+  return loadGoalBranch(read, {
+    branchId: 'E',
+    before: branch => {
+      branch.commit('branch', 'start', { parent: B })
+      branch.input({ user: { content: [{ type: 'text', text: evaluatorPrompt(B, '7', 'ship it', 'all tests pass') }] }, mode: 'queue' })
+      if (before) before(branch)
+    },
+  })
+}
+
+test('Pursuit 1: a completion request creates one evaluator at the turn end and continues nothing', async t => {
+  const goal = await loadGoalBranch(async () => settingsDocument(20))
+  t.after(() => goal.unload())
+  const end = await completionRequested(goal)
+  assert.equal(goal.creates.length, 1)
+  const [{ parent, at, options }] = goal.creates
+  assert.equal(parent, B)
+  assert.equal(at, end.sequence)
+  assert.deepEqual(options.source, { kind: 'host', operation_id: `goal:evaluate:${end.sequence}` })
+  assert.match(options.prompt, new RegExp(`^<dim-goal kind="evaluate" branch="main" evaluation="${end.sequence}">\\nYou are an evaluator\\.`))
+  assert.match(options.prompt, /\nObjective:\nship it\n\nReported result:\nall tests pass\n\n/)
+  // The creation is the turn's decision: no continuation follows it, and the
+  // worker's request left the goal active.
+  assert.equal(goal.writes.length, 1)
+  assert.match(goal.writes[0].data.blocks[0].text, /kind="continuation" count="1"/)
+  assert.equal(goal.branch.fold.status.status, 'active')
+})
+
+test('Pursuit 1: the evaluator DONE completes the goal by the evaluator', async t => {
+  const goal = await loadGoalBranch(async () => settingsDocument(20))
+  t.after(() => goal.unload())
+  const end = await completionRequested(goal)
+  const evaluator = goal.creates[0].branch
+  await goal.emit('input', 'message', writes.conclusion(B, evaluator, String(end.sequence), 'done', 'DONE: all 3 tests pass'))
+  await flush()
+  assert.equal(goal.writes.length, 2)
+  const done = goal.writes[1].data.blocks[0].text
+  assert.match(done, new RegExp(`^<dim-goal kind="goal" op="completed" by="evaluator" evaluation="${end.sequence}" branch="main">`))
+  assert.match(done, /\nResult:\nall 3 tests pass\n\nAn evaluator verified that the goal for branch main is completed\./)
+  assert.equal(goal.branch.fold.status.status, 'completed')
+})
+
+test('Pursuit 4/5: a report without a valid evaluation or evaluator decides nothing', async t => {
+  // A report marker is a persisted cross-plugin format, so a producer can
+  // leave an attribute out: only the complete marker is a conclusion (§5).
+  const rejections = []
+  const listener = reason => rejections.push(reason)
+  process.on('unhandledRejection', listener)
+  t.after(() => process.off('unhandledRejection', listener))
+  const goal = await loadGoalBranch(async () => settingsDocument(20))
+  t.after(() => goal.unload())
+  const end = await completionRequested(goal)
+  const evaluator = goal.creates[0].branch
+  for (const attrs of [
+    `result="done" evaluator="${evaluator}"`,
+    `result="done" evaluation="abc" evaluator="${evaluator}"`,
+    `result="done" evaluation="${end.sequence}"`,
+    'result="done"',
+  ]) {
+    const text = `<dim-goal kind="report" ${attrs} branch="main">\nEvaluator report:\nDONE: x\n</dim-goal>`
+    assert.equal(conclusionOf(text), undefined, attrs)
+    await goal.emit('input', 'message', { mode: 'append', blocks: [{ type: 'raw', text }] })
+    await flush()
+    assert.equal(goal.writes.length, 1, `no decision for ${attrs}`)
+  }
+  assert.deepEqual([...goal.branch.fold.conclusions], [], 'no malformed report is a conclusion')
+  assert.equal(goal.branch.fold.status.status, 'active')
+  // A valid conclusion afterwards still decides.
+  await goal.emit('input', 'message', writes.conclusion(B, evaluator, String(end.sequence), 'done', 'DONE: all 3 tests pass'))
+  await flush()
+  assert.equal(goal.writes.length, 2)
+  assert.match(goal.writes[1].data.blocks[0].text, /by="evaluator"/)
+  assert.deepEqual(rejections, [], 'no unhandled rejection')
+})
+
+test('Pursuit 4: a report outside the first block decides nothing', async t => {
+  // The conclusion input is one block, the report (§5): a report anywhere
+  // else is not a conclusion, so the goal stays active.
+  const goal = await loadGoalBranch(async () => settingsDocument(20))
+  t.after(() => goal.unload())
+  const end = await completionRequested(goal)
+  const evaluator = goal.creates[0].branch
+  const report = writes.conclusion(B, evaluator, String(end.sequence), 'done', 'DONE: later').blocks[0]
+  await goal.emit('input', 'message', {
+    submission_id: 'goal:two-blocks',
+    mode: 'append',
+    blocks: [{ type: 'raw', text: 'a note before the report' }, report],
+  })
+  await flush()
+  assert.equal(goal.writes.length, 1, 'no conclusion after the first block')
+  assert.deepEqual([...goal.branch.fold.conclusions], [])
+  assert.equal(goal.branch.fold.status.status, 'active')
+})
+
+test('Pursuit 2: a CONTINUE conclusion writes one Pursuit continuation, or Goal limit pause', async t => {
+  const goal = await loadGoalBranch(async () => settingsDocument(20))
+  t.after(() => goal.unload())
+  const end = await completionRequested(goal)
+  await goal.emit('input', 'message', writes.conclusion(B, goal.creates[0].branch, String(end.sequence), 'continue', 'CONTINUE:\n- two tests fail: <output>'))
+  await flush()
+  assert.equal(goal.writes.length, 2)
+  const continuation = goal.writes[1].data.blocks[0].text
+  assert.match(continuation, new RegExp(`^<dim-goal kind="continuation" count="2" limit="20" after="${end.sequence}" evaluation="${end.sequence}" branch="main">`))
+  assert.match(continuation, /\nAn evaluator checked your report that the goal for branch main is completed and found it is not achieved yet\./)
+
+  // At maxContinuations the same conclusion is Goal's limit pause.
+  const limited = await loadGoalBranch(async () => settingsDocument(1))
+  t.after(() => limited.unload())
+  const limitedEnd = await completionRequested(limited)
+  await limited.emit('input', 'message', writes.conclusion(B, limited.creates[0].branch, String(limitedEnd.sequence), 'continue', 'CONTINUE:\n- still missing'))
+  await flush()
+  assert.match(limited.writes.at(-1).data.blocks[0].text, new RegExp(`op="pause" reason="limit" after="${limitedEnd.sequence}"`))
+  assert.equal(limited.branch.fold.status.status, 'paused')
+})
+
+test('Pursuit 5: a failed conclusion, a failed creation and a throwing create give one pause', async t => {
+  // The evaluator's report says its turn did not complete.
+  let goal = await loadGoalBranch(async () => settingsDocument(20))
+  t.after(() => goal.unload())
+  let end = await completionRequested(goal)
+  await goal.emit('input', 'message', writes.conclusion(B, goal.creates[0].branch, String(end.sequence), 'failed', "the evaluator's turn did not complete"))
+  await flush()
+  assert.match(goal.writes.at(-1).data.blocks[0].text, new RegExp(`op="pause" reason="evaluation_failed" after="${end.sequence}"`))
+  assert.equal(goal.branch.fold.status.reason, 'evaluation_failed')
+
+  // The tree could not build the child: its `branch/create-failed` decides.
+  goal = await loadGoalBranch(async () => settingsDocument(20))
+  t.after(() => goal.unload())
+  end = await completionRequested(goal)
+  await goal.emit('branch', 'create-failed', { status: 'failed', branch: goal.creates[0].branch, createEvent: 1, error: 'branch creation failed' })
+  await flush()
+  assert.equal(goal.writes.length, 2)
+  assert.match(goal.writes[1].data.blocks[0].text, /op="pause" reason="evaluation_failed"/)
+
+  // A create that throws before any `branch/create` pauses the goal.
+  goal = await loadGoalBranch(async () => settingsDocument(20), { create: async () => { throw new Error('boom') } })
+  t.after(() => goal.unload())
+  end = await completionRequested(goal)
+  assert.equal(goal.writes.length, 2)
+  assert.match(goal.writes[1].data.blocks[0].text, new RegExp(`reason="evaluation_failed" after="${end.sequence}"`))
+
+  // One whose `branch/create` committed leaves the outcome to that fact.
+  goal = await loadGoalBranch(async () => settingsDocument(20), {
+    create: async (parent, at, options, id, create) => {
+      await create(parent, at, options, id)
+      throw new Error('stopped waiting; the branch creation continues')
+    },
+  })
+  t.after(() => goal.unload())
+  end = await completionRequested(goal)
+  assert.equal(goal.writes.length, 1, 'a committed creation is decided by its own outcome')
+  await goal.emit('branch', 'create-failed', { status: 'failed', branch: goal.creates[0].branch, createEvent: 1, error: 'x' })
+  await flush()
+  assert.equal(goal.writes.length, 2)
+  assert.match(goal.writes[1].data.blocks[0].text, /op="pause" reason="evaluation_failed"/)
+})
+
+test('Pursuit 5: a create that throws after the user changed the goal writes no pause', async t => {
+  // The user pauses the goal while `create` is pending: the evaluation is no
+  // longer current, so the throw decides nothing (Pursuit §4.1).
+  let change
+  const goal = await loadGoalBranch(async () => settingsDocument(20), {
+    create: async () => {
+      await change()
+      throw new Error('boom')
+    },
+  })
+  t.after(() => goal.unload())
+  change = () => goal.emit('input', 'message', changes.pause(B))
+  await completionRequested(goal)
+  await flush()
+  assert.equal(goal.writes.length, 1, 'the user pause is not followed by an evaluation_failed pause')
+  assert.equal(goal.branch.fold.status.reason, 'user')
+})
+
+test('Pursuit 8: the evaluator reports the streamed conclusion of its final request', async t => {
+  const evaluator = await evaluatorBranch(async () => settingsDocument(20))
+  t.after(() => evaluator.unload())
+  await evaluator.emit('turn', 'start', {})
+  await evaluator.emit('step', 'model-start', { turn_id: 't1', request_id: 'r1' })
+  await evaluator.emit('step', 'text', { turn_id: 't1', request_id: 'r1', delta: 'DONE: stale' })
+  await evaluator.emit('step', 'model-start', { turn_id: 't1', request_id: 'r2' })
+  // A line can span records, and the earlier request's conclusion is not the reply.
+  await evaluator.emit('step', 'text', { turn_id: 't1', request_id: 'r2', delta: 'checked the tree\nDONE' })
+  await evaluator.emit('step', 'text', { turn_id: 't1', request_id: 'r2', delta: ': all 3 tests pass' })
+  await evaluator.emit('turn', 'end', { turn_id: 't1', status: 'completed' })
+  await flush()
+  assert.equal(evaluator.sent.length, 1)
+  assert.equal(evaluator.sent[0].branch, B)
+  const report = evaluator.sent[0].input.blocks[0].text
+  assert.match(report, /^<dim-goal kind="report" result="done" evaluation="7" evaluator="E" branch="main">/)
+  assert.match(report, /\nEvaluator report:\nDONE: all 3 tests pass\n<\/dim-goal>$/)
+  assert.equal(evaluator.writes.length, 0)
+})
+
+test('Pursuit 4: the evaluator is asked once, then its whole reply is the report', async t => {
+  const evaluator = await evaluatorBranch(async () => settingsDocument(20))
+  t.after(() => evaluator.unload())
+  // The first reply has no conclusion: one follow-up on the evaluator branch.
+  await evaluator.emit('turn', 'start', {})
+  await evaluator.emit('step', 'model-start', { turn_id: 't1', request_id: 'r1' })
+  await evaluator.emit('step', 'text', { turn_id: 't1', request_id: 'r1', delta: 'not done yet' })
+  await evaluator.emit('turn', 'end', { turn_id: 't1', status: 'completed' })
+  await flush()
+  assert.equal(evaluator.writes.length, 1)
+  assert.equal(evaluator.writes[0].data.mode, 'queue')
+  assert.match(evaluator.writes[0].data.blocks[0].text, /^<dim-goal kind="evaluate-again" after="\d+" branch="E">/)
+  assert.equal(evaluator.sent.length, 0)
+  // The second reply has none either: the whole reply, cut to 4000 characters,
+  // is written as a continuation, and nothing asks a third time.
+  const whole = `still working ${'y'.repeat(5000)}`
+  await evaluator.emit('turn', 'start', {})
+  await evaluator.emit('step', 'model-start', { turn_id: 't2', request_id: 'r2' })
+  await evaluator.emit('step', 'text', { turn_id: 't2', request_id: 'r2', delta: whole.slice(0, 100) })
+  await evaluator.emit('step', 'text', { turn_id: 't2', request_id: 'r2', delta: whole.slice(100) })
+  await evaluator.emit('turn', 'end', { turn_id: 't2', status: 'completed' })
+  await flush()
+  assert.equal(evaluator.writes.length, 1)
+  assert.equal(evaluator.sent.length, 1)
+  const report = evaluator.sent[0].input.blocks[0].text
+  assert.match(report, /result="continue"/)
+  const body = report.slice(report.indexOf('Evaluator report:\n') + 'Evaluator report:\n'.length, -'\n</dim-goal>'.length)
+  assert.equal(body.length, 4000)
+  assert.ok(body.startsWith('still working y'), body.slice(0, 40))
+})
+
+test('Pursuit 5: a failed or cancelled evaluator turn reports failed', async t => {
+  for (const status of ['failed', 'cancelled']) {
+    const evaluator = await evaluatorBranch(async () => settingsDocument(20))
+    t.after(() => evaluator.unload())
+    await evaluator.emit('turn', 'start', {})
+    await evaluator.emit('turn', 'end', { turn_id: 't1', status })
+    await flush()
+    assert.equal(evaluator.sent.length, 1, status)
+    assert.match(evaluator.sent[0].input.blocks[0].text, /result="failed" evaluation="7"/)
+    assert.match(evaluator.sent[0].input.blocks[0].text, /the evaluator's turn did not complete/)
+  }
+})
+
+test('Pursuit 4: a restored evaluator that was already asked writes no further follow-up', async t => {
+  // Two turn ends in history: the first reply was asked for a conclusion and
+  // the second had none, so the evaluator was already asked once.
+  const evaluator = await evaluatorBranch(async () => settingsDocument(20), branch => {
+    for (const turn of ['t1', 't2']) {
+      branch.commit('turn', 'start', { turn_id: turn })
+      branch.commit('step', 'model-start', { turn_id: turn, request_id: `${turn}-r` })
+      branch.commit('step', 'text', { turn_id: turn, request_id: `${turn}-r`, delta: 'still checking' })
+      branch.commit('turn', 'end', { turn_id: turn, status: 'completed' })
+    }
+  })
+  t.after(() => evaluator.unload())
+  await flush()
+  // Its next live reply without a conclusion is reported, not asked again.
+  await evaluator.emit('turn', 'start', {})
+  await evaluator.emit('step', 'model-start', { turn_id: 't3', request_id: 't3-r' })
+  await evaluator.emit('step', 'text', { turn_id: 't3', request_id: 't3-r', delta: 'done, I think' })
+  await evaluator.emit('turn', 'end', { turn_id: 't3', status: 'completed' })
+  await flush()
+  assert.equal(evaluator.writes.length, 0, 'no further follow-up after a reload')
+  assert.equal(evaluator.sent.length, 1)
+  assert.match(evaluator.sent[0].input.blocks[0].text, /result="continue"/)
+  assert.match(evaluator.sent[0].input.blocks[0].text, /\nEvaluator report:\ndone, I think\n/)
+})
+
+test('Pursuit 6: a turn end already in the restored evaluator history reports nothing', async t => {
+  const evaluator = await evaluatorBranch(async () => settingsDocument(20), branch => {
+    branch.commit('turn', 'start', { turn_id: 't1' })
+    branch.commit('step', 'model-start', { turn_id: 't1', request_id: 'r1' })
+    branch.commit('step', 'text', { turn_id: 't1', request_id: 'r1', delta: 'Hmm' })
+    // The failed end Loop records for a turn a restart cut.
+    branch.commit('turn', 'end', { turn_id: 't1', status: 'failed' })
+  })
+  t.after(() => evaluator.unload())
+  await flush()
+  assert.equal(evaluator.sent.length, 0, 'a replayed turn end reports nothing')
+  assert.equal(evaluator.writes.length, 0)
+  // The restored part reports its next live turn end.
+  await evaluator.emit('turn', 'start', {})
+  await evaluator.emit('step', 'model-start', { turn_id: 't2', request_id: 'r2' })
+  await evaluator.emit('step', 'text', { turn_id: 't2', request_id: 'r2', delta: 'BLOCKED: a deploy key' })
+  await evaluator.emit('turn', 'end', { turn_id: 't2', status: 'completed' })
+  await flush()
+  assert.equal(evaluator.sent.length, 1)
+  assert.match(evaluator.sent[0].input.blocks[0].text, /result="blocked"/)
+})
+
+test('Pursuit 6/7/10: a reload creates no second evaluator, and foreign or stale conclusions decide nothing', async t => {
+  let evaluation
+  const restored = await loadGoalBranch(async () => settingsDocument(20), {
+    before: branch => {
+      const set = branch.input(changes.set(B, 'ship it', 'evaluator'))
+      branch.turn([set])
+      branch.commit('turn', 'start', {})
+      branch.input(changes.report(B, 'completed', 'all tests pass'))
+      const end = branch.commit('turn', 'end', { status: 'completed' })
+      evaluation = String(end.sequence)
+      branch.commit('branch', 'create', {
+        at: { kind: 'sequence', sequence: end.sequence },
+        source: { kind: 'host', operation_id: `goal:evaluate:${evaluation}` },
+        branch: 'E',
+        prompt: 'x',
+      })
+      branch.input(writes.conclusion(B, 'E', evaluation, 'done', 'DONE: verified'))
+    },
+  })
+  t.after(() => restored.unload())
+  await flush()
+  assert.equal(restored.creates.length, 0, 'the branch/create already decided the turn end')
+  assert.equal(restored.writes.length, 0, 'a conclusion folded at load is not decided again')
+  assert.equal(restored.branch.fold.status.status, 'active')
+  // A live conclusion from another branch decides nothing (Pursuit 8).
+  await restored.emit('input', 'message', writes.conclusion(B, 'F', evaluation, 'done', 'DONE: forged'))
+  await flush()
+  assert.equal(restored.writes.length, 0)
+  // A goal change after the evaluation supersedes it: a late DONE decides nothing.
+  await restored.emit('input', 'message', changes.pause(B))
+  await restored.emit('input', 'message', writes.conclusion(B, 'E', evaluation, 'done', 'DONE: late'))
+  await flush()
+  assert.equal(restored.writes.length, 0)
+  assert.equal(restored.branch.fold.status.status, 'paused')
 })

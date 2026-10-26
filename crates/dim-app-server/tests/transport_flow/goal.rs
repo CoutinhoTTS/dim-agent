@@ -1,7 +1,18 @@
 //! Goal (docs/design/plugins/Goal.md) as a TypeScript plugin: its Session
 //! part writes change inputs by branch id, and its branch part folds the
-//! branch's events and decides continuation.
+//! branch's events and decides continuation. Pursuit (Pursuit.md) adds the
+//! evaluator judge: a completion request creates an evaluator branch whose
+//! conclusion the working branch decides on.
 use super::*;
+use dim_agent_capabilities::{
+    adapters::DefaultPrepareModelPlugin,
+    history::HistoryRenderer,
+    host::{
+        CompactionStrategyHost, ContextModelHost, IdentityContext, ModelChunk, ModelConnection,
+        ModelDriver, ModelHost, ModelStopReason, ModelStream, PrepareContextHost,
+    },
+};
+use dim_agent_types::{BranchCreateData, BranchSource, MessageContent, ModelRequest};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use std::path::{Path, PathBuf};
 
@@ -334,10 +345,33 @@ async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
 
 async fn launch_goal(
     home: &Path,
+    builder: AgentBuilder,
+) -> (RunningServer, dim_agent_runtime::Agent) {
+    launch_goal_with(
+        home,
+        builder,
+        Arc::new(dim_agent_capabilities::adapters::EchoModel),
+    )
+    .await
+}
+
+async fn launch_goal_with(
+    home: &Path,
     mut builder: AgentBuilder,
+    model: Arc<dyn ModelDriver>,
 ) -> (RunningServer, dim_agent_runtime::Agent) {
     defaults::install(&mut builder);
-    defaults::mock_model_hosts(&mut builder);
+    builder
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(model)))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
     // Goal stays an ordinary optional row: its tool is adopted whenever it
     // becomes active (#241), with no dependency forcing it first (#223).
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
@@ -433,20 +467,24 @@ async fn node_goal_restore_refolds_without_repeating_decisions() {
     cleanup(&home);
 }
 
-/// Waits until a local event on `branch` matches.
+/// Waits until a local event on `branch` matches. A branch that is still
+/// loading has no published events yet.
 async fn wait_event(
     session: &dim_agent_runtime::Session,
     branch: &str,
     matches: impl Fn(&EventKind) -> bool,
 ) {
     for _ in 0..750 {
-        let events = session.local(branch, ..).await.unwrap();
+        let Ok(events) = session.local(branch, ..).await else {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        };
         if events.iter().any(|event| matches(&event.kind)) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let events = session.local(branch, ..).await.unwrap();
+    let events = session.local(branch, ..).await.unwrap_or_default();
     panic!(
         "event did not arrive: {:#?}",
         events
@@ -701,6 +739,348 @@ async fn node_goal_settings_resume_unload_and_fork() {
     assert_eq!(
         goal(&mut client, "set", json!({"sessionId":id,"objective":"x"})).await["error"]["data"]["appError"],
         "unknown_method"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    cleanup(&home);
+}
+
+/// Whether the request is the evaluator's: its prompt's first line is Goal's
+/// evaluate marker (Pursuit §5).
+fn is_evaluator(request: &ModelRequest) -> bool {
+    request.messages.iter().any(|message| {
+        matches!(&message.content, MessageContent::Text(text)
+            if text.contains("<dim-goal kind=\"evaluate\""))
+    })
+}
+
+/// Answers the evaluator's prompt with a DONE conclusion; echoes otherwise.
+struct EvaluatingModel;
+impl ModelDriver for EvaluatingModel {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        if !is_evaluator(&request) {
+            return dim_agent_capabilities::adapters::EchoModel.invoke(request, connection, cancel);
+        }
+        Box::pin(async move {
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "evaluation".into(),
+                }),
+                Ok(ModelChunk::Text(
+                    "Read the tests and ran them.\nDONE: all tests pass".into(),
+                )),
+                Ok(ModelChunk::TextEnd),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "evaluation".into(),
+                    reason: ModelStopReason::EndTurn,
+                }),
+            ])) as ModelStream)
+        })
+    }
+}
+
+/// Holds the evaluator's turn in a long tool wait; echoes otherwise.
+struct WaitingModel;
+impl ModelDriver for WaitingModel {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        if !is_evaluator(&request) {
+            return dim_agent_capabilities::adapters::EchoModel.invoke(request, connection, cancel);
+        }
+        Box::pin(async move {
+            let call = ToolCall {
+                id: "evaluation-wait".into(),
+                name: "wait".into(),
+                input: json!({"millis": 60000}).as_object().unwrap().clone(),
+            };
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "evaluation".into(),
+                }),
+                Ok(ModelChunk::ToolStart {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                }),
+                Ok(ModelChunk::ToolUse(call)),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "evaluation".into(),
+                    reason: ModelStopReason::ToolUse,
+                }),
+            ])) as ModelStream)
+        })
+    }
+}
+
+/// The `branch/create` events on `branch` in order, with their sequences.
+async fn branch_creates(
+    session: &dim_agent_runtime::Session,
+    branch: &str,
+) -> Vec<(u64, BranchCreateData)> {
+    session
+        .local(branch, ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchCreate(data) => Some((event.sequence, data.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The user text of the first input on `branch`. A branch that is still being
+/// built has no published events yet.
+async fn first_user_text(session: &dim_agent_runtime::Session, branch: &str) -> String {
+    for _ in 0..750 {
+        let Ok(events) = session.local(branch, ..).await else {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            continue;
+        };
+        for event in events {
+            if let EventKind::InputMessage(data) = &event.kind
+                && let Some(user) = &data.user
+                && let Some(dim_agent_types::ContentBlock::Text { text }) = user.content.first()
+            {
+                return text.clone();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("no user input on {branch}")
+}
+
+/// Submits the worker's `goal_update`.
+async fn submit_report(client: &mut Client, session: &str, status: &str, summary: &str) {
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":session,"branchId":"main",
+                    "text":format!("tool:goal_update {}", json!({"status":status,"summary":summary}))}),
+            )
+            .await,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() {
+    let home = product_home();
+    let (server, agent) = launch_goal_with(
+        &home,
+        AgentBuilder::new(AgentConfig::default()),
+        Arc::new(EvaluatingModel),
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    set_limit(&mut client, 5).await;
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    // Pursuit 1: the worker's completion is a request; that turn's end creates
+    // one evaluator at N and writes no continuation.
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"make the tests pass","judge":"evaluator"}),
+        )
+        .await,
+    );
+    submit_report(&mut client, &id, "completed", "all tests pass").await;
+    wait_event(&session, "main", |kind| {
+        matches!(kind, EventKind::BranchCreate(_))
+    })
+    .await;
+    idle(&mut client, &id, "main").await;
+    let creates = branch_creates(&session, "main").await;
+    assert_eq!(creates.len(), 1, "{creates:#?}");
+    let (created, creation) = &creates[0];
+    let evaluation = turn_ends(&session, "main")
+        .await
+        .last()
+        .copied()
+        .expect("a turn end");
+    assert_eq!(
+        creation.source,
+        BranchSource::Host {
+            operation_id: format!("goal:evaluate:{evaluation}")
+        },
+        "{creation:#?}"
+    );
+    let writes = goal_writes(&session, "main").await;
+    let (request, _) = writes
+        .iter()
+        .find(|(_, line)| line.contains(r#"op="completed""#) && !line.contains("by="))
+        .unwrap_or_else(|| panic!("the worker's request: {writes:#?}"));
+    assert!(
+        *request < *created,
+        "the request precedes the creation: {writes:#?}"
+    );
+    assert!(
+        writes
+            .iter()
+            .all(|(_, line)| !line.contains("continuation")),
+        "{writes:#?}"
+    );
+    // The evaluator is an ordinary child: its first input is the prompt, with
+    // the working branch, the evaluation and what the worker reported.
+    let child = &creation.branch;
+    let prompt = first_user_text(&session, child).await;
+    let marker = format!(r#"<dim-goal kind="evaluate" branch="main" evaluation="{evaluation}">"#);
+    assert!(prompt.starts_with(&marker), "{prompt}");
+    assert!(
+        prompt.contains("Objective:\nmake the tests pass"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Reported result:\nall tests pass"),
+        "{prompt}"
+    );
+    // Its DONE completes the goal, by the evaluator.
+    wait_for(&session, "main", r#"by="evaluator""#).await;
+    idle(&mut client, &id, "main").await;
+    let done = goal_block(&session, "main", r#"by="evaluator""#).await;
+    assert!(done.contains(r#"op="completed""#), "{done}");
+    assert_eq!(block_value(&done, "Result:"), "all tests pass");
+    // The conclusion it decides on is one input of one block, and that
+    // block's marker is the report of this evaluation and evaluator
+    // (Pursuit §5).
+    let (blocks, marker) = session
+        .local("main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
+                let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                text.starts_with(r#"<dim-goal kind="report""#)
+                    .then(|| (data.blocks.len(), text.lines().next().unwrap().to_owned()))
+            }),
+            _ => None,
+        })
+        .expect("the evaluator's conclusion input");
+    assert_eq!(blocks, 1, "the conclusion input carries the report alone");
+    assert_eq!(
+        marker,
+        format!(
+            r#"<dim-goal kind="report" result="done" evaluation="{evaluation}" evaluator="{child}" branch="main">"#
+        ),
+        "the conclusion marker"
+    );
+    assert_eq!(
+        turn_ends(&session, child).await.len(),
+        1,
+        "one evaluator turn"
+    );
+    let writes = goal_writes(&session, "main").await;
+    assert!(
+        writes
+            .iter()
+            .filter(|(_, line)| line.contains(r#"by="evaluator""#))
+            .count()
+            == 1,
+        "{writes:#?}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    cleanup(&home);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_goal_evaluator_restart_writes_no_second_result() {
+    let home = product_home();
+    let (server, agent) = launch_goal_with(
+        &home,
+        AgentBuilder::new(AgentConfig::default()),
+        Arc::new(WaitingModel),
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    set_limit(&mut client, 5).await;
+    let id = new_session(&mut client).await;
+    let session = agent.get_session(&id).unwrap();
+    assert_ok(
+        &goal(
+            &mut client,
+            "set",
+            json!({"sessionId":id,"objective":"ship it","judge":"evaluator"}),
+        )
+        .await,
+    );
+    submit_report(&mut client, &id, "completed", "done").await;
+    wait_event(&session, "main", |kind| {
+        matches!(kind, EventKind::BranchCreate(_))
+    })
+    .await;
+    let creates = branch_creates(&session, "main").await;
+    let child = creates[0].1.branch.clone();
+    // The evaluator's turn is in flight when the process stops.
+    wait_event(&session, &child, |kind| {
+        matches!(kind, EventKind::ToolCall(_))
+    })
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // Restored, the evaluator's part folds the failed end the restart recorded
+    // for the cut turn and reports nothing (Pursuit 6): the goal stays active
+    // with no second evaluator.
+    let (server, agent) = launch_goal_with(
+        &home,
+        AgentBuilder::new(AgentConfig::default()),
+        Arc::new(EvaluatingModel),
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    submit(&mut client, &id, "back again").await;
+    idle(&mut client, &id, "main").await;
+    let session = agent.get_session(&id).unwrap();
+    assert_eq!(branch_creates(&session, "main").await.len(), 1);
+    let writes = goal_writes(&session, "main").await;
+    assert!(
+        writes
+            .iter()
+            .all(|(_, line)| !line.contains(r#"by="evaluator""#)),
+        "a replayed turn end reports nothing: {writes:#?}"
+    );
+    assert!(
+        writes
+            .iter()
+            .all(|(_, line)| !line.contains(r#"reason="evaluation_failed""#)),
+        "{writes:#?}"
+    );
+    // The restored evaluator reports its next live turn end.
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":child,"text":"carry on"}),
+            )
+            .await,
+    );
+    wait_for(&session, "main", r#"by="evaluator""#).await;
+    idle(&mut client, &id, "main").await;
+    let writes = goal_writes(&session, "main").await;
+    assert!(
+        writes
+            .iter()
+            .filter(|(_, line)| line.contains(r#"by="evaluator""#))
+            .count()
+            == 1,
+        "{writes:#?}"
     );
     server.shutdown();
     server.join().await.unwrap();

@@ -502,9 +502,17 @@ impl AgentIndex {
                 .into_iter()
                 .filter(|record| !self.running(&record.id))
             {
+                // The process seeds the default Agent, so a readable stored
+                // default follows the current process default profile: tools
+                // added since it was stored are mounted. A damaged one stays
+                // unavailable rather than being replaced.
                 let profile = record
                     .profile
-                    .and_then(|profile| self.check_profile(&profile).map(|_| profile));
+                    .and_then(|profile| self.check_profile(&profile).map(|_| profile))
+                    .map(|profile| match record.default {
+                        true => process_default(&self.session_defaults),
+                        false => profile,
+                    });
                 let loaded = match profile {
                     Ok(profile) => self
                         .load(record.id.clone(), record.default, profile)

@@ -2,7 +2,7 @@
 
 [English](../../design/rutis-usage.md)
 
-状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)（D2–D4）。已实现，只剩外来插件作为一行（R5 的第二种形式、R7）等待 rutis#642；各节说明今天已成立的部分。
+状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)（D2–D4）。已实现，只剩外来插件作为一行（R5 的第二种形式，#403），rutis 0.17 的插件定义（R7）已为它扫清障碍；各节说明今天已成立的部分。
 
 插件机制归 rutis。本文说明 Dim 怎样使用它：部件如何装载，如何按名字提供和查找服务，服务如何跨语言，
 以及 rutis 的生命周期和事件总线提供什么。它适用于每个部件，不论用哪种语言编写；附录是 Rust 与
@@ -58,11 +58,14 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 - 实例打开期间，挂载器跟随登记处：新登记的就挂上，撤销的就卸下。所有实例都卸载完各自那一份，撤销才算结束。
 - 实例关闭时，挂上的部件随它一起关闭，由 rutis 对子节点的所有权保证。
 
-**生成器返回什么。**
+**插件登记什么。**
 
 - Rust 生成器拿到它所挂进的实例的名字（附录 A），返回一个插件。这个插件可以带着插件在 `apply` 里准备好的东西。
-- 其他运行时的插件等 rutis 允许运行中的行登记生成器（R7）后，用同样的方式登记部件。在那之前，它的 Session 部件和
-  分支部件仍是各自组里的行，保持 R5 最初形式的放置；不增加过渡用的声明（R5）。
+- 其他运行时的插件登记的不是函数，而是插件定义（R7）：用该运行时的 `definePlugin` 做出的一个值，可以闭包引用插件
+  在 `apply` 里准备好的东西。每个实例用 rutis 的 `Definition::at` 挂载它的一份副本；副本在插件的运行时里运行，
+  `inject` 在该实例里解析。登记它的那一代卸载时，rutis 先结束每一份副本，再结束这个定义（`Definition::ended`）；
+  定义结束后，部件登记处撤掉这条登记，之后打开的实例不再挂载它。定义不能对某个
+  实例什么都不返回：实例的业务配置关掉了这个功能时，副本不做任何工作。
 
 **每个插件和部件：**
 
@@ -81,7 +84,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
   选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。自己放置的 Agent 在
   第一个 Session 或 `Agent::start` 时启动自己的插件。
 - 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
-- 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5（[#403](https://github.com/arcships/dim/issues/403)）。
+- 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5 的第二种形式（[#403](https://github.com/arcships/dim/issues/403)）。TypeScript 插件从 rutis 0.17.0 起、Python 插件从 0.17.1 起能交出定义，Dim 已在 0.17.1 上。
 
 ## 3. 按名字的服务
 
@@ -124,7 +127,8 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 会在那里*认领*它的名字，而每次新的认领都运行一次覆盖整个 loader 的 reconcile，这也会重建那些构建被拒绝的
 副本：在某个 Session 的装配中失败的必需行可能在该 Session 创建期间被重建，每次创建 Session 或分支都会
 reconcile 整个 loader。App Server 把这些名字按各自的组共享（`register_shared_instance`），一个测试检查每个
-名字都在 Rust 绑定登记它的那个组中共享。构建脚本只生成 TypeScript 声明。
+名字都在 Rust 绑定登记它的那个组中共享。`xtask types` 把它们的 TypeScript 声明写到
+`npm/branch-services.d.ts`，该文件过期时 `xtask check` 失败。
 
 ### 3.5 各运行时如何解析名字
 
@@ -176,7 +180,7 @@ Dim 在此之上增加发布与关闭两个阶段（[插件契约 §7](plugin-co
 
 Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线事件，见[插件契约 §5.3](plugin-contract.md#53-总线事件)。
 
-*现状：*Dim 已在 rutis 0.17.0 上，本节成立。
+*现状：*Dim 已在 rutis 0.17.1 上，本节成立。
 
 ## 6. 向机制所有者提出的需求
 
@@ -199,21 +203,22 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
   （外来行声明自己的组，不再由 App Server 从 `inject` 推断）已在阶段 4 交付（[#376](https://github.com/arcships/dim/issues/376)），
   但插件仍然不是一行。
 - **考虑过的现有机制：**运行时解析器已经能为一个模块所在的实例构造副本（`Resolved::scoped`），服务目录拒绝放错位置的名称。
-- **所需机制：**外来插件是进程里的一行，在自己的代码里通过 R7 的生成器向部件登记处登记部件。其他语言的
-  Session 行和分支行，以及它们声明的组，都删除。不做过渡用的包声明：R7 落地时它就要删掉，而 R6 已经去掉了宿主
+- **所需机制：**外来插件是进程里的一行，在自己的代码里以插件定义（R7）向部件登记处登记部件。其他语言的
+  Session 行和分支行，以及它们声明的组，都删除。不做包声明：定义自带 `inject` 和 `provides`，而 R6 已经去掉了宿主
   在运行时启动前知道名字的大部分需要。
 - **影响：**对 Timeline 没有影响。
-- **所有者：**App Server 和各 SDK，仓库内的插件一起改（[#403](https://github.com/arcships/dim/issues/403)）。它等 R7
-  （[#405](https://github.com/arcships/dim/issues/405)）。
+- **所有者：**App Server 和各 SDK，仓库内的插件一起改（[#403](https://github.com/arcships/dim/issues/403)）。R7 已交付，
+  Dim 之外没有东西挡着它。
 
 ### R6. 贡献向所有者登记
 
-- **受阻：**[ADR 002 D5](../adr/002-plugin-scope.md#d5-合同语言中立)
-  （“注册：由插件声明……而非宿主侧的 `AgentBuilder` 调用”）。宿主预先注册贡献名称
+- **R6 之前：**[ADR 002 D5](../adr/002-plugin-scope.md#d5-合同语言中立)
+  （“注册：由插件声明……而非宿主侧的 `AgentBuilder` 调用”）曾受阻：宿主预先注册贡献名称
   （`session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`），
   并把外来行的 `provides` 翻译成同样的调用。原生工具贡献和外来工具贡献有不同的 key，因此 ToolRegistry
   两者都读，并通过以同一字符串找到的 sidecar 令牌检测正在退役的外来代次（`tool_registry.rs:486-509`）；
-  Rpc 对方法命名空间也有同样的拆分。提示词来源和工具来源不对外来部件开放。
+  Rpc 对方法命名空间也有同样的拆分。提示词来源和工具来源不对外来部件开放。下面“所需机制”和“所有者”两条
+  说明了取代它的做法。
 - **考虑过的现有机制：**
   - 在实例中按名字查找贡献，靠 `rutis/service` 事件或目录列表。不采用：所有者要从框架内部（哪些行提供了哪些名字）
     得知贡献方在调用时本来就知道的事。
@@ -240,16 +245,19 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
   方法表登记，即 Session 服务 `sessionMethods` 和进程服务 `managementMethods`。每张表在命名空间登记时检查它，并记住
   已撤下命名空间的行，因此调用按该行的状态作答（[方法合同 A.1](contracts/session-boundary.md#a1-方法贡献)）。
 
-### R7. 每个运行时的生成器都能是一个函数
+### R7. 每个运行时的部件都是插件定义
 
-- **受阻：**§2。外来生成器返回模块名和配置，因为宿主只能按名字加载外来插件。按插件自身状态准备的部件，必须经过
+- **受阻：**§2。外来插件只能交给宿主模块名和配置，因为宿主只能按名字加载外来插件。按插件自身状态准备的部件，必须经过
   共享模块或服务，Rust 部件则不需要。
-- **考虑过的现有机制：**模块名和配置覆盖了现有的每个部件，这是过渡形式。
-- **所需机制：**运行中的行登记带声明的具名生成器，宿主能在指定实例里为"行 R 的生成器 G"构造工厂。每一份副本在
-  生成者的运行时里运行，按实例的标签隔离，按生成器的 `inject` 门控；它属于挂载它的宿主 fiber；生成器撤销时结束。
+- **考虑过的现有机制：**模块名和配置覆盖了现有的每个部件；它是过渡形式，现在去掉。
+- **所需机制：**运行中的行把一个部件连同它的声明交给宿主，宿主在指定实例里挂载它的副本。每一份副本在生成者的运行时里
+  运行，按实例的标签隔离，按自己的 `inject` 门控；它属于挂载它的宿主 fiber；生成者的这一代卸载时结束。
 - **影响：**对 Timeline 没有影响。
-- **所有者：**rutis，[arcships/rutis#642](https://github.com/arcships/rutis/issues/642)。R5 等它；
-  [#405](https://github.com/arcships/dim/issues/405) 跟进它。
+- **所有者：**rutis，[arcships/rutis#642](https://github.com/arcships/rutis/issues/642)。已以插件定义的形式交付：
+  Node 在 rutis 0.17.0，Python 在 0.17.1。类型为 `rutis::Definition` 的 `#[rutis::service]` 参数接收其他语言交来的
+  定义；`Definition::at` 为 `ctx.plugin` 构造一份副本；定义属于交出它的行，它的副本在该行自己的清理之前结束。定义是
+  一个值，不是生成器函数，所以 Rust 生成器靠返回空值做的按实例选择，移到副本里做（§2）。
+  [#405](https://github.com/arcships/dim/issues/405) 记录这次升级。
 
 ## 附录 A. Rust 绑定
 
@@ -269,7 +277,7 @@ P3 删除了旧形式（[#375](https://github.com/arcships/dim/issues/375)）；
 | `SessionService`、`BranchService` 标记 | 注册在服务目录中的组（`names::register`） |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | 功能向部件登记处登记自己的部件（`Feature` 用 `AgentBuilder::feature` 添加，自己写的插件用 `AgentBuilder::plugin` 添加；profile 用 `require_feature`）；App Server 的进程行用 `register_part` |
 | `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`（已删除） | 所有者的 `register`，由提供贡献的部件调用：`toolRegistry`、`promptRegistry`、`sessionMethods`、`managementMethods`（R6） |
-| `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`，包括 Session 和分支级服务（§3.4）；源码无法修改的类型包进 Dim 自己的、带标记的类型。`Exports` 只生成 TypeScript 声明 |
+| `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`，包括 Session 和分支级服务（§3.4）；源码无法修改的类型包进 Dim 自己的、带标记的类型。`Exports` 只生成 TypeScript 声明，由 `xtask types` 调用 |
 | `PublicService` | 不变（门面规则） |
 
 ### A.2 绑定

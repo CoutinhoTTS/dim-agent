@@ -5,8 +5,12 @@ each runtime resolves a name, where a Rust key comes from, which names a part ma
 instance and how prefixed providers are found. D3 replaced the same day: a plugin is one row, and
 each Session and branch mounts the parts that plugins register for it. D3 and D4 amended on
 2026-10-25: where plugins run, contributions registering with their owner, and foreign plugins
-waiting for rutis#642. Implementation: P1, P2, P3 and R6 done, and the first form of P4; R5's second
-form waits for rutis#642 (#403, #405). The phases are in the
+waiting for rutis#642. Context and D4 amended on 2026-10-26: the Context is marked as the state
+before the migration and says which of its mechanisms the migration removed, and D4 states that
+removal as done; the notes on the layer-typed API and on `sessionLifecycle` state the current fact.
+D3 amended the same day: a foreign plugin registers its parts as rutis plugin definitions, which
+rutis 0.17 delivered for rutis#642. Implementation: P1, P2, P3 and R6 done, and the first form of
+P4; R5's second form is #403. The phases are in the
 [plugin contract design](../design/plugin-contract.md#10-migration).
 [中文](../zh/adr/006-plugin-contract.md)
 
@@ -25,10 +29,14 @@ Relation to other decisions:
 - Supersedes the layer-typed authoring API as the target: the `Capability` trait and its `keys`,
   `SessionScope`/`BranchScope`, `InSession`/`InBranch`/`SessionGate`/`BranchGate`,
   `SessionService`/`BranchService`, and `AgentBuilder::session_plugin`/`timeline_plugin`.
-  This API remains the implemented Rust binding until the migration replaces it.
+  The migration removed it; D4 lists what was removed.
 - Replaces the unmerged instance-mounting draft (#377) and the decisions of #370.
 
 ## Context
+
+This section records why the decision was made, so it describes `main` at `dd87f6af`, before the
+migration. The decision status above records what has been implemented since; [How Dim uses
+rutis](../design/rutis-usage.md) says what holds today.
 
 Dim's architecture rests on a small theory. The [time bus](../architecture/rust-agent/time-bus.md)
 fixes order by sequence, gives each state one owner, routes changes to an owner as commands, makes
@@ -92,6 +100,15 @@ The 0.15 upgrade design (#361) planned around scoped delivery, which rutis 0.15.
 `Service<T>` identity next to names. It also proposed a loader-enforced Capability role, an
 access check that [ADR 003](003-approval-scope.md) says trusted in-process plugins do not have.
 
+The mechanisms item 1 lists have since been removed: a row declares its own group instead of the App
+Server inferring it, each name and its group are declared once
+([How Dim uses rutis §3.4](../design/rutis-usage.md#34-the-catalog)), a tool contribution has one
+identity registered with its owner, contributions register from the part that offers them so the
+host pre-registers none and translates no `provides`, and rows of other languages get publication
+and closing from named services such as `sessionLifecycle` and read the bus directly instead of a
+relay. What remains is R5's second form: a foreign feature is still one configured row per part,
+each declaring its group, until #403, which rutis 0.17's plugin definitions unblock.
+
 ## Decisions
 
 ### D1. Separate layers, one authority each
@@ -153,14 +170,13 @@ an external dependency.
 - **Registrations follow the open instances.** A generator registered while instances are open is
   mounted into each of them. A withdrawn one is unmounted from each, and the withdrawal finishes once
   those parts have unloaded.
-- **What a generator returns.** In Rust, a plugin built for the instance from its keys (D4). A plugin
-  in another runtime registers its parts the same way once rutis lets a running row register
-  generators ([arcships/rutis#642](https://github.com/arcships/rutis/issues/642)); until then its
-  Session and branch parts stay rows of their groups, and no interim declaration is built
-  ([#403](https://github.com/arcships/dim/issues/403)). A generator may also return
-  nothing for an instance: it sees the instance's identity and configuration, and a Session whose
-  configuration turns a feature off gets no part of it at all. Choosing per instance goes through
-  business configuration such as `SessionConfig`, never through rows.
+- **What a plugin registers.** In Rust, a generator: it returns a plugin built for the instance from
+  its keys (D4), or nothing for an instance. It sees the instance's identity and configuration, and a
+  Session whose configuration turns a feature off gets no part of it at all. A plugin in another
+  runtime registers a rutis plugin definition, made with its runtime's `definePlugin`; each instance
+  mounts one copy of it, and the copy runs in the plugin's runtime. A definition cannot return
+  nothing, so a copy whose instance's configuration turns the feature off does no work. Choosing per
+  instance goes through business configuration such as `SessionConfig`, never through rows.
 - **Publication.** The host's assembly profile decides which parts a Session or branch waits for
   before publication ([single-tree](../architecture/rust-agent/single-tree.md#结构)). A required part
   must be Active, not merely loaded. A part mounted after publication does not publish the instance
@@ -238,14 +254,14 @@ facade, not feature parts. The details are
   - The owner reports a configured name that nothing has registered when it is used, as it reports
     any missing contribution; Session creation does not refuse it.
 
-The implementation removes: the `Capability` trait and its keys, `SessionScope`/`BranchScope`,
+The implementation removed: the `Capability` trait and its keys, `SessionScope`/`BranchScope`,
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`, `SessionService`/`BranchService`,
 `session_plugin`/`timeline_plugin`, the host-side name pre-registration, the `toolContribution:*`,
 `sessionMethods:*` and `managementMethods:*` names with their native/foreign split, the Session and
-branch rows (those of other languages once rutis#642 lands) and the App Server's inference of a
-row's group, and the per-prefix placement checks that the catalog's groups already express.
-`PublicService` stays. It limits which branch services the Session and branch facades expose to
-ordinary callers, which is a facade rule, not a plugin rule.
+branch rows, the App Server's inference of a row's group, and the per-prefix placement checks that
+the catalog's groups already express. The Session and branch rows of other languages remain until
+#403. `PublicService` stays. It limits which branch services the Session and branch
+facades expose to ordinary callers, which is a facade rule, not a plugin rule.
 
 The details are [How Dim uses rutis §3](../design/rutis-usage.md#3-services-by-name); the names Dim
 defines are listed in the [plugin contract §4](../design/plugin-contract.md#4-dims-services).
@@ -309,8 +325,8 @@ Review, the audit (D9) and flow tests check it.
 - **The Session and branch scopes each have a lifecycle service, in every language:**
   `sessionLifecycle` (`activated`, `closing`, `hold`) in `session` and `branchLifecycle`
   (`activated`, `closing`) in `branch`. The process scope has none; process parts follow the host's
-  start and shutdown through the rutis lifecycle. Today `sessionLifecycle` is Rust-only, and R2
-  exposes it.
+  start and shutdown through the rutis lifecycle. Both services are in the catalog in their groups,
+  so every language reads them (R2, delivered in phase 4).
 - **Rpc maps errors to the wire.** Errors of contributed methods are mapped at Rpc. A part rethrows
   the native error data it received.
 
@@ -340,7 +356,7 @@ sugar over the contract, but no semantics (D1).
    until this step has moved every part.
 4. Cross-language parity: the Session and branch scopes get their lifecycle services in every
    language and Rust services are exported through the catalog (done in #376); foreign plugins
-   register their parts as Rust ones do once rutis#642 lands (#403).
+   register their parts as plugin definitions (#403), which rutis 0.17 provides for rutis#642.
 5. The mechanism requirements of D8 (R2 and R3 done in #376, R1 in #380).
 6. Guidance and generated documents follow each step.
 
@@ -367,8 +383,9 @@ persisted or wire format.
   part owned by the instance that mounted it; isolation by the instance's labels. How they are put
   together, an instance pulling the generators registered for its scope, has no precedent in Cordis
   or Koishi, where one plugin with filtered contexts is the norm.
-- Until rutis#642 lands, a foreign feature keeps one row per part (#403, #405), while a Rust feature
-  becomes one row with #402.
+- Until #403, a foreign feature keeps one row per part, while a Rust feature became one row with
+  #402. A foreign part cannot skip an instance as a Rust generator can; its copy is mounted and does
+  no work there.
 - The 33 plugin pages under `docs/architecture/rust-agent/plugins/` are regrouped by plugin in step 3.
 
 ## Alternatives considered

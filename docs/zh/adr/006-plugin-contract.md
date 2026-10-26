@@ -5,7 +5,10 @@
 决策状态：已由仓库所有者接受（2026-10-24）；同日修订 D4，写明各运行时如何解析名字、Rust 的 key 从哪来、
 部件可以在实例内提供哪些名字，以及如何找到带前缀服务的提供者；同日改写 D3：插件是一行，每个 Session 和分支
 挂载插件为它登记的部件；2026-10-25 修订 D3 和 D4：插件在哪里运行、贡献向所有者登记、外来插件等待 rutis#642。
-实现：P1、P2、P3、R6 与 P4 的最初形式已完成；R5 的第二种形式等待 rutis#642（#403、#405）。各阶段见
+2026-10-26 修订背景、D4 与两处说明：背景标明它描述迁移之前的状态，并写明其中哪些机制已被迁移移除；
+D4 把移除写成已完成；按层 API 与 `sessionLifecycle` 的两处说明改为现状。同日修订 D3：外来插件以 rutis
+插件定义登记部件，rutis 0.17 以此交付了 rutis#642。
+实现：P1、P2、P3、R6 与 P4 的最初形式已完成；R5 的第二种形式见 #403。各阶段见
 [插件契约设计](../design/plugin-contract.md#10-迁移)。
 
 与其他决策的关系：
@@ -20,10 +23,13 @@
 - 取代按层划分类型的编写 API 作为目标：`Capability` trait 及其 `keys`、
   `SessionScope`/`BranchScope`、`InSession`/`InBranch`/`SessionGate`/`BranchGate`、
   `SessionService`/`BranchService`，以及 `AgentBuilder::session_plugin`/`timeline_plugin`。
-  在迁移替换它之前，这套 API 仍是已实现的 Rust 绑定。
+  迁移已移除它；D4 列出了移除的内容。
 - 替代未合并的实例挂载草案（#377）以及 #370 的决策。
 
 ## 背景
+
+本节记录作出决策的理由，因此它描述迁移之前的 `main`（dd87f6af）。此后实现了什么见开头的决策状态；
+今天成立的内容见 [Dim 如何使用 rutis](../design/rutis-usage.md)。
 
 Dim 的架构建立在一套小理论之上。[时间总线](../../architecture/rust-agent/time-bus.md)
 按序号确定顺序，让每份状态只有一个所有者，把变更作为指令交给所有者，让交接显式化，把 `before`
@@ -80,6 +86,12 @@ rutis 模型靠拢，但保留了本 ADR 拒绝的两样东西。它在名字之
 它还提出由 loader 强制的 Capability 角色，这是一种访问检查，而 [ADR 003](003-approval-scope.md)
 指出受信任的进程内插件没有这种检查。
 
+第 1 个后果列出的机制此后都已被移除：行自行声明所属组，App Server 不再推断；每个名字及其组只声明
+一次（[Dim 如何使用 rutis §3.4](../design/rutis-usage.md#34-服务目录)）；工具贡献只有一个标识，
+向所有者登记；贡献由提供它的部件登记，因此宿主不预注册任何贡献，也不翻译 `provides`；其他语言的行
+通过 `sessionLifecycle` 等命名服务取得发布与关闭，并直接监听总线，而不是经过中继。仍保留的是 R5 的
+第二种形式：外来功能仍是一个部件一行、各自声明所属组，直到 #403；rutis 0.17 的插件定义已为它扫清障碍。
+
 ## 决策
 
 ### D1. 分层，每层一个权威来源
@@ -131,12 +143,11 @@ rutis 仍是外部依赖。
   部件就在这个实例里：它的名字在这里解析（D4），并随实例关闭。插件从不伸进实例，实例也只往自己里面挂部件。
 - **登记跟随打开着的实例。** 有实例打开时新登记的生成器，会挂进其中每一个；撤销的生成器从每一个中卸下，
   这些部件都卸载完，撤销才算结束。
-- **生成器返回什么。** 在 Rust 中，返回一个按实例的 key（D4）构造的插件。其他运行时的插件等 rutis 允许运行中的行
-  登记生成器（[arcships/rutis#642](https://github.com/arcships/rutis/issues/642)）后用同样的方式登记部件；在那之前，
-  它的 Session 部件和分支部件仍是各自组里的行，也不做过渡用的声明（[#403](https://github.com/arcships/dim/issues/403)）。
-  生成器也可以对某个实例什么都
-  不返回：它看得到实例的标识和配置，配置里关掉了某个功能的 Session，就完全不挂这个功能的部件。按实例的选择
-  走 `SessionConfig` 这类业务配置，不走配置行。
+- **插件登记什么。** 在 Rust 中登记生成器：它返回一个按实例的 key（D4）构造的插件，也可以对某个实例什么都不返回。
+  它看得到实例的标识和配置，配置里关掉了某个功能的 Session，就完全不挂这个功能的部件。其他运行时的插件登记一个
+  rutis 插件定义，用该运行时的 `definePlugin` 做出；每个实例挂载它的一份副本，副本在插件的运行时里运行。定义不能
+  什么都不返回，所以实例的配置关掉了这个功能时，副本不做任何工作。按实例的选择走 `SessionConfig` 这类业务配置，
+  不走配置行。
 - **发布。** 宿主的装配 profile 决定 Session 或分支在发布前要等待哪些部件
   （[single-tree](../../architecture/rust-agent/single-tree.md#结构)）。必需的部件要处于 Active，而不只是已加载。
   发布后才挂上的部件不会让实例再发布一次；profile 之外的部件处于 Pending 或 Failed 时，只影响它自己的功能。
@@ -191,11 +202,12 @@ rutis 仍是外部依赖。
   - 登记撤下时，这个贡献的这一代就结束；没有旁路来标记正在退役的贡献。
   - 配置了却没有任何部件登记的名字，由所有者在用到时报告，与它报告任何缺失的贡献一样；创建 Session 时不拒绝它。
 
-实现将移除：`Capability` trait 及其 key、`SessionScope`/`BranchScope`、
+实现已移除：`Capability` trait 及其 key、`SessionScope`/`BranchScope`、
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`、`SessionService`/`BranchService`、
 `session_plugin`/`timeline_plugin`、宿主侧的名称预注册、`toolContribution:*`、`sessionMethods:*` 和
-`managementMethods:*` 这些名字及其原生/外来之分、Session 行和分支行（其他语言的这些行在 rutis#642 落地后）
-以及 App Server 对行所属组的推断，以及目录中的组已经表达的按前缀位置检查。`PublicService` 保留。它限制 Session 与分支门面向普通调用方暴露哪些分支服务，这是门面规则，不是插件规则。
+`managementMethods:*` 这些名字及其原生/外来之分、Session 行和分支行、App Server 对行所属组的推断，
+以及目录中的组已经表达的按前缀位置检查。其他语言的 Session 行和分支行在 #403 之前仍保留。
+`PublicService` 保留。它限制 Session 与分支门面向普通调用方暴露哪些分支服务，这是门面规则，不是插件规则。
 
 细节见 [Dim 如何使用 rutis §3](../design/rutis-usage.md#3-按名字的服务)；Dim 定义的名称列在
 [插件契约 §4](../design/plugin-contract.md#4-dim-的服务)。
@@ -251,7 +263,8 @@ Capability。能力重载协议（[single-tree](../../architecture/rust-agent/si
   再投递截点之后的实时事件，在每种语言中都如此。手写形式仍然有效。
 - **Session 作用域和分支作用域各有一个生命周期服务，面向每种语言：** `session` 中的 `sessionLifecycle`
   （`activated`、`closing`、`hold`）和 `branch` 中的 `branchLifecycle`（`activated`、`closing`）。进程作用域没有；
-  进程部件经 rutis 生命周期跟随宿主的启动与关闭。今天 `sessionLifecycle` 仅限 Rust，由 R2 暴露。
+  进程部件经 rutis 生命周期跟随宿主的启动与关闭。这两个服务都在各自组的服务目录中，因此每种语言都能读取
+  （R2，已在阶段 4 交付）。
 - **Rpc 把错误映射到 wire。** 贡献的方法的错误在 Rpc 处映射。部件重新抛出它收到的原生错误数据。
 
 这些以需求 R1–R3 的形式写在契约的[需求一节](../design/plugin-contract.md#9-向机制所有者提出的需求)，
@@ -275,7 +288,7 @@ Capability。能力重载协议（[single-tree](../../architecture/rust-agent/si
 3. 部件登记处与实例的挂载（D3）。每个插件变成一行并登记自己的 Session 部件和分支部件，每个部件按名称依赖，
    贡献向所有者登记，删除层类型与宿主侧的预注册。旧类型只存在到这一步迁完所有部件为止。
 4. 跨语言对齐：Session 作用域和分支作用域在每种语言中获得自己的生命周期服务，Rust 服务通过目录导出（已在 #376 完成）；
-   外来插件在 rutis#642 落地后像 Rust 插件一样登记部件（#403）。
+   外来插件以插件定义登记部件（#403），rutis 0.17 为 rutis#642 提供了它。
 5. D8 中的机制需求（R2 和 R3 已在 #376 完成，R1 在 #380）。
 6. 指引与生成的文档随每一步更新。
 
@@ -297,7 +310,7 @@ Dim 尚未发布，所以任何一步都不保留兼容路径：不为仓库外�
 - D3 的机制都是 Cordis 的：登记归调用方所有，和 `ctx.on` 一样；挂上的部件归挂载它的实例所有；按实例的标签隔离。
   组合方式（实例拉取为它的作用域登记的生成器）在 Cordis 和 Koishi 中没有先例，那里的常规做法是一个插件加按条件
   过滤的上下文。
-- 在 rutis#642 落地之前，外来功能仍是每个部件一行（#403、#405）；Rust 功能随 #402 变成一行。
+- 在 #403 之前，外来功能仍是每个部件一行；Rust 功能已随 #402 变成一行。外来部件不能像 Rust 生成器那样跳过某个实例；它的副本照样挂上，只是在那里不做任何工作。
 - `docs/architecture/rust-agent/plugins/` 下的 33 个插件页面在第 3 步按插件重新归组。
 
 ## 考虑过的替代方案
