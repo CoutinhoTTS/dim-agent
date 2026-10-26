@@ -130,6 +130,17 @@ impl Config {
                 .map(|method| method.name)
                 .collect();
         }
+        // Built-ins are advertised by hello, outside the contributed method table.
+        config.methods.extend(
+            [
+                "session.permission.get",
+                "session.permission.update",
+                "session.model.update",
+            ]
+            .into_iter()
+            .filter(|method| rpc.supports(method))
+            .map(str::to_owned),
+        );
         if config.methods.contains("session.permission.get")
             && config.methods.contains("session.permission.update")
         {

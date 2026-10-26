@@ -43,7 +43,8 @@ Run the native stdio gateway from an ACP client such as acpx:
 The gateway connects to the existing local App Server; it owns protocol I/O,
 session projection and connection recovery. Mode/model options and managed
 account login depend on the daemon's installed capabilities. Client-supplied MCP
-configuration is accepted and ignored; Sessions use their native tools.
+servers use disposable Session plugins alongside native tools; their configuration
+is never saved. Older daemons without that interface accept and ignore the list.
 Additional workspace roots are unsupported. See the
 [implementation contract](docs/design/acp-gateway-implementation.md) and
 [acceptance record](docs/design/acp-gateway-acceptance.md) for supported methods,

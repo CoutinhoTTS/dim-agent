@@ -8,6 +8,7 @@ pub use auth::testing;
 pub use auth::{McpAuth, McpAuthError};
 pub mod server;
 mod session;
+mod temporary;
 pub(crate) use publication::Publication;
 pub use publication::{McpApplication, McpOwner, McpPublication};
 pub use session::{McpSession, McpSessionPlugin, McpSessionState, McpSourceState, install};
@@ -87,10 +88,18 @@ pub enum McpChange {
 /// not a lookup into the directory's newest generation.
 pub struct McpConnection {
     service: Arc<McpServer>,
-    released: tokio::sync::watch::Sender<()>,
+    released: Option<tokio::sync::watch::Sender<()>>,
     withdrawn: Arc<AtomicBool>,
 }
 impl McpConnection {
+    // Temporary children belong directly to their binding, outside the directory.
+    fn temporary(service: Arc<McpServer>) -> Self {
+        Self {
+            service,
+            released: None,
+            withdrawn: Default::default(),
+        }
+    }
     pub fn state(&self) -> server::McpServerState {
         self.service.state()
     }
@@ -125,7 +134,9 @@ impl Drop for McpConnection {
     fn drop(&mut self) {
         // Release only a binding. The host publishes retirement eligibility;
         // only the loader can remove a configured generation's plugin.
-        self.released.send_replace(());
+        if let Some(released) = &self.released {
+            released.send_replace(());
+        }
     }
 }
 
@@ -497,6 +508,17 @@ impl TypedPlugin for McpPlugin {
                     mount
                         .names
                         .part(McpSessionPlugin::new(mount.names)?)
+                        .map(Some)
+                },
+            )?;
+            parts.register(
+                ctx,
+                dim_agent_runtime::PartScope::Session,
+                "TemporaryMcp",
+                |mount| {
+                    mount
+                        .names
+                        .part(temporary::TemporaryMcp::new(mount.names)?)
                         .map(Some)
                 },
             )?;

@@ -221,6 +221,65 @@ fn acp_stdio_does_not_repeat_creation_when_the_native_reply_is_lost() {
 }
 
 #[test]
+fn acp_stdio_temporary_mcp_rebinds_expired_resources_before_submission() {
+    let home = Home::new();
+    let (submitted, accepted) = std::sync::mpsc::sync_channel(0);
+    let (release, released) = std::sync::mpsc::sync_channel(0);
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.input_lookup", "session.methods", "mcp.temporary.capabilities"]);
+        wire.created();
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let history = wire.read("session.history"); wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let methods = wire.read("session.methods"); wire.reply(&methods,json!({"methods":[]}));
+        let bound = wire.read("session.mcp_temporary.attach");
+        assert_eq!(bound["params"]["servers"]["client"]["headers"]["x-fixture"],"temporary");
+        assert!(bound["params"]["bindingId"].as_str().is_some());
+        wire.reply(&bound,json!({}));
+        let renew = wire.read("session.mcp_temporary.renew");
+        assert_eq!(renew["params"]["bindingId"],bound["params"]["bindingId"]);
+        writeln!(wire.0.get_mut(),"{}",json!({"jsonrpc":"2.0","id":renew["id"],"error":{"code":-32000,"message":"Binding expired","data":{"appError":"mcp_binding_missing"}}})).unwrap();
+        wire.0.get_mut().flush().unwrap();
+        let rebound = wire.read("session.mcp_temporary.attach");
+        assert_eq!(rebound["params"],bound["params"],"resource reattachment must retain the binding identity and configuration");
+        wire.reply(&rebound,json!({}));
+        let submit = wire.read("session.submit");
+        wire.reply(&submit,json!({"event":event(9,"input","input","message",json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}))}));
+        submitted.send(()).unwrap();
+        released.recv_timeout(PATIENCE).unwrap();
+        for fact in [event(10,"turn","turn","start",json!({"turn_id":"turn"})),event(11,"consumed","input","consumed",json!({"input_id":"input"})),event(12,"end","turn","end",json!({"turn_id":"turn","status":"completed","reason":"end_turn"}))] { wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":fact})); }
+        let detached = wire.read("session.mcp_temporary.detach");
+        assert_eq!(detached["params"]["bindingId"],bound["params"]["bindingId"]);
+        wire.reply(&detached,json!({}));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.send(
+        1,
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    );
+    assert_eq!(
+        peer.response(1)["result"]["agentCapabilities"]["mcpCapabilities"],
+        json!({"http":true,"sse":true})
+    );
+    peer.send(2,"session/new",json!({"cwd":home.0,"mcpServers":[{"name":"client","type":"http","url":"http://127.0.0.1:9/mcp","headers":[{"name":"X-Fixture","value":"temporary"}]}]}));
+    let created = peer.response(2);
+    assert!(created.get("error").is_none(), "{created}");
+    peer.send(
+        3,
+        "session/prompt",
+        json!({"sessionId":"session","prompt":[{"type":"text","text":"Use the bound tools"}]}),
+    );
+    accepted.recv_timeout(PATIENCE).unwrap();
+    peer.send(4,"session/load",json!({"sessionId":"session","cwd":home.0,"mcpServers":[{"name":"other","type":"http","url":"http://127.0.0.1:9/other","headers":[]}]}));
+    assert_eq!(peer.response(4)["error"]["data"]["code"], "session_busy");
+    release.send(()).unwrap();
+    assert_eq!(peer.response(3)["result"]["stopReason"], "end_turn");
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
 fn acp_stdio_recovery_deadline_settles_cancel_without_claiming_native_stop() {
     let home = Home::new();
     let endpoint = home.0.join("rust/daemon.sock");
@@ -1050,6 +1109,169 @@ fn acp_stdio_lody_startup_model_is_selected_before_creation_without_shared_write
 }
 
 #[test]
+#[ignore = "requires Node and the workspace MCP SDK"]
+fn acp_stdio_temporary_mcp_calls_tools_and_settles_the_child_on_eof() {
+    let home = Home::new();
+    let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
+    let node = Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .unwrap();
+    assert!(node.status.success());
+    let node = String::from_utf8(node.stdout).unwrap().trim().to_owned();
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../dim-app-server/tests/fixtures/mcp-stdio.cjs")
+        .canonicalize()
+        .unwrap();
+    let pid_file = home.0.join("mcp.pid");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let model = thread::spawn(move || {
+        for index in 0..3 {
+            let deadline = Instant::now() + PATIENCE;
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "The model request did not arrive"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(PATIENCE)).unwrap();
+            let mut wire = BufReader::new(stream);
+            let mut line = String::new();
+            wire.read_line(&mut line).unwrap();
+            assert!(line.starts_with("POST /v1/chat/completions "));
+            let mut length = 0;
+            loop {
+                line.clear();
+                wire.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                let (name, value) = line.split_once(':').unwrap();
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            wire.read_exact(&mut body).unwrap();
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            let (delta, finish) = if index == 1 {
+                let messages = request["messages"].to_string();
+                assert!(
+                    messages.contains("1709") && messages.contains("fixture-env"),
+                    "The actual MCP result must reach the model"
+                );
+                (json!({"role":"assistant","content":"ACP_MCP_OK"}), "stop")
+            } else {
+                let tool = request["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|tool| {
+                        let function = &tool["function"];
+                        function["name"]
+                            .as_str()
+                            .is_some_and(|name| name.starts_with("mcp_temporary_"))
+                            && function["parameters"]["properties"].get("a").is_some()
+                                == (index == 0)
+                    })
+                    .expect("Temporary MCP tools must be present in the first model request");
+                (
+                    json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("call-{index}"),"type":"function","function":{"name":tool["function"]["name"],"arguments":if index==0 {"{\"a\":17,\"b\":9}"}else{"{}"}}}]}),
+                    "tool_calls",
+                )
+            };
+            let chunk = |delta: Value, finish: Value| {
+                json!({"id":"mcp-model","object":"chat.completion.chunk","model":"fixture-model","choices":[{"index":0,"delta":delta,"finish_reason":finish}]}).to_string()
+            };
+            let data = format!(
+                "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                chunk(delta, Value::Null),
+                chunk(json!({}), json!(finish))
+            );
+            write!(wire.get_mut(),"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}",data.len()).unwrap();
+            wire.get_mut().flush().unwrap();
+        }
+    });
+    let config = home.0.join("model.json");
+    fs::write(&config,json!({"defaultModel":{"providerId":"local","modelId":"fixture-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","config":{"maxTokens":256}}]}]}).to_string()).unwrap();
+    let mut child = home
+        .command()
+        .args(["acp", "--model-config", config.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut peer = Peer {
+        input: child.stdin.take().unwrap(),
+        output: BufReader::new(child.stdout.take().unwrap()),
+        child,
+        updates: Vec::new(),
+    };
+    peer.initialize();
+    peer.send(2,"session/new",json!({"cwd":home.0,"mcpServers":[{"name":"client","command":node,"args":[fixture,"normal","fixture-argument"],"env":[{"name":"MCP_PID_FILE","value":pid_file},{"name":"MCP_TEST_VALUE","value":"fixture-env"}]}]}));
+    let created = peer.response(2);
+    assert!(created.get("error").is_none(), "{created}");
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    peer.send(
+        3,
+        "session/set_mode",
+        json!({"sessionId":id,"modeId":"full-access"}),
+    );
+    let mode = peer.response(3);
+    assert!(mode.get("error").is_none(), "{mode}");
+    peer.send(
+        4,
+        "session/prompt",
+        json!({"sessionId":id,"prompt":[{"type":"text","text":"Call inspect"}]}),
+    );
+    let response = peer.response(4);
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    assert!(
+        peer.updates
+            .iter()
+            .any(|update| update["params"]["update"]["content"]["text"] == "ACP_MCP_OK")
+    );
+    peer.send(
+        5,
+        "session/prompt",
+        json!({"sessionId":id,"prompt":[{"type":"text","text":"Call slow"}]}),
+    );
+    let deadline = Instant::now() + PATIENCE;
+    while !pid_file.with_extension("pid.called").exists() {
+        assert!(Instant::now() < deadline, "The slow MCP call did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    peer.close();
+    model.join().unwrap();
+    assert!(
+        pid_file.with_extension("pid.cancelled").exists(),
+        "EOF must cancel the accepted MCP call before closing its server"
+    );
+    let pid: i32 = fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "Temporary MCP child outlived Gateway EOF"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!home.0.join("mcp.json").exists());
+    assert!(!home.0.join(".mcp.json").exists());
+}
+
+#[test]
 fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     let home = Home::new();
     let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
@@ -1132,7 +1354,7 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
         updates: Vec::new(),
     };
     peer.initialize();
-    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[{"type":"http","name":"client-http","url":"http://127.0.0.1:9/mcp","headers":[]},{"name":"client-stdio","command":"unused-client-mcp","args":[],"env":[]}]}));
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
     let created = peer.response(2);
     assert!(created.get("error").is_none(), "{created}");
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();

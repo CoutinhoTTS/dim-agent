@@ -39,7 +39,8 @@ pub fn install(builder: &mut AgentBuilder) {
             "McpServer",
             |names, value| names.part(super::publication::ConnectionPlugin::new(value)),
         )
-        .require_part("McpSession");
+        .require_part("McpSession")
+        .require_part("TemporaryMcp");
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -466,7 +467,7 @@ async fn credential_change(
     Ok(*credential.borrow_and_update())
 }
 
-fn contribution(
+pub(super) fn contribution(
     id: &str,
     tool: &McpTool,
     connection: Arc<McpConnection>,

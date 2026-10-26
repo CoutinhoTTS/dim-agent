@@ -5,7 +5,7 @@
 ## 1. 目标和固定边界
 
 1. `AcpGateway` 是接入方进程中的 rutis 插件。`dimcode acp` 装载它；其他宿主复用同一实现或启动同一命令。它不是 daemon 的 loader row，也不是分支 Capability。
-2. 首版不改 App Server、Agent runtime、Timeline 事件、存储格式或现有业务插件。只使用公开 RPC v3；不链接 App Server 的私有 `Connection` / `RpcService`，不新增 ACP 专用 RPC、反向调用通道或资源节点。
+2. Agent core、RPC 框架、内置 Session 协议、Timeline 事件和存储格式不变。MCP 业务模块注册独立的临时 Session 插件及通用 MCP 绑定方法；持久 MCP 管理不变。Gateway 只使用公开 RPC v3，不链接 App Server 的私有 `Connection` / `RpcService`，不新增 ACP 专用 RPC、反向调用通道或资源节点。
 3. Gateway 拥有 ACP 连接、RPC 连接、请求生命周期、订阅、回放和协议投影。Session、turn、审批、Goal、任务、账户和持久化继续由现有所有者管理。
 4. 现有接口不能保证的语义标为不支持；完成首版验收后再评估。不得用额外账本、状态预查、猜测字段或模拟成功补齐。
 5. 首版目标是 Lody 和 acpx 的 ACP **agent** 接入。Dim 调用其他 ACP agent 是 [ExternalAgent](plugins/ExternalAgent.md) / #145，独立交付。
@@ -42,7 +42,7 @@ dimcode acp / another native host
                  |
                  | existing protected socket / authenticated pipe, RPC v3
                  v
-App Server (unchanged)
+App Server (existing RPC; MCP business parts)
   session.* / approval.respond / contributed Session methods
   session.event / state / model.progress / notice / approval.*
                  |
@@ -88,7 +88,7 @@ parse CLI options (including isolated --home / --cwd / --server / --agent)
 
 必需：`hello`、`session.create`、`session.attach`、`session.detach`、`session.submit`、`session.input_lookup`、`session.history`、`session.stop`。先验证协议 v3 及执行 profile 的 create/history/input_lookup flags；缺失时 initialize 失败。hello.features 不是完整方法目录：attach/detach/submit/stop/list/close 属于已协商 v3 的基础调用，没有逐项重复列出，不能据其未列出而判断不支持。可选管理方法和新能力仍按实际 flags / Session methods 判断。
 
-可选：`session.list` / `session.summaries`、`session.close`、`session.delete`、`session.fork`、`session.permission.get/update`、`approval.respond`；每 Session 用 `session.methods` 发现 `session.input.withdraw`、`session.question.respond`、`session.context.usage` 和 `attachment.put`。缺少撤回时取消直接走现有 `session.stop`，并披露已接收输入可能保留的限制。
+可选：`session.list` / `session.summaries`、`session.close`、`session.delete`、`session.fork`、`session.permission.get/update`、`approval.respond`；临时 MCP 使用 `mcp.temporary.capabilities`、`session.mcp_temporary.attach/renew/detach`；每 Session 用 `session.methods` 发现 `session.input.withdraw`、`session.question.respond`、`session.context.usage` 和 `attachment.put`。缺少撤回时取消直接走现有 `session.stop`，并披露已接收输入可能保留的限制。
 
 模型选择只读取 `provider.list`、`provider.catalog`、`provider.selection` 的安全投影。Provider 管理已有独立插件和公开读写接口，接线及尚未满足的 ACP 合同见 §4.5；首版不通过这些接口写入共享产品配置。账户认证只允许 §4.4 列出的 `account.providers/status` 和属于当前连接的 login attempt 调用，不开放 `account.*` 代理、recover/logout/usage、settings、MCP 配置、插件管理或凭据接口。也不把 ACP 方法名直接转成原生 RPC 方法名。
 
@@ -103,7 +103,7 @@ parse CLI options (including isolated --home / --cwd / --server / --agent)
 | `initialize` | 可接 | 先 `hello {protocolVersion:3, clientKind:"other", clientName:"AcpGateway"}`。按 SDK 协商 ACP 1；记录 client capabilities；读取现有 account discovery/status，按 §4.4 生成真实可执行的 authMethods。initialize 不自动开始登录；无 managed provider 时不强制登录。重复 initialize 拒绝 |
 | `authenticate` | 条件可接 | 仅接受本连接已发布的 agent-type methodId；`account.status` 确认已登录则返回 `{}`，否则走现有 browser begin → 宿主 callback capture → browser complete → status。OAuth 和 token 交换由原插件完成，不由本地 RPC transport 的身份校验代替 |
 | `logout` | 不支持 | 不映射到账户登出，不声明 logout capability |
-| `session/new` | 可接 | 校验绝对 `cwd`，忽略 `mcpServers`，只接受空/缺失 additional directories；按 §8.3 验证 startup model 后，在同一 `session.create {cwd, agentId?, model?}` 中传入 → `session.attach {sessionId}` → 读取 main 固定历史头和 Session methods / permission / adopted model。先登记 runtime，再订阅和回放；初始化完成才返回 id、可用 modes/configOptions |
+| `session/new` | 可接 | 校验绝对 `cwd`，只接受空/缺失 additional directories；按 §8.3 验证 startup model 后，在同一 `session.create {cwd, agentId?, model?}` 中传入 → `session.attach {sessionId}` → 读取 main 固定历史头和 Session methods / permission / adopted model → 按 §4.6 绑定 mcpServers。初始化及初始工具注册完成才返回 id、可用 modes/configOptions |
 | `session/load` | 可接 | 从 `session.summaries` 或 `session.list` 获取真实 cwd，检查一致；attach → 固定头 main history 从 0 回放 → 接上 live → 返回。重复 load 复用 runtime，不重复建立订阅；在 prompt 中拒绝重放 |
 | `session/resume` | 可接 | 同 load 的准备和状态恢复，但历史只用于内部关联/去重，不向客户端发送旧消息；先返回，再发送准备期间缓存的真正 live updates |
 | `session/list` | 条件可接 | `session.summaries {agentId?}`；不存在时用 `session.list {agentId?}` 并省略不可得的 updatedAt。按 ACP cwd 在内存过滤；毫秒时间转 ISO 8601。返回完整的一页，不声明原生分页，不制造 nextCursor；非空未知 cursor 报错。原生全量响应超过 frame limit 就报错，不循环扫描凑页 |
@@ -116,7 +116,7 @@ parse CLI options (including isolated --home / --cwd / --server / --agent)
 
 mode 和 model 的选项来自当前 Session 的公开状态，不能用用户偏好默认值冒充已采用值。模型切换影响可用选项时重读 catalog；超时或连接丢失后的写入不能报告为未应用。effort、fast/service tier 的写入口虽然存在，但 RPC 未提供完整的 Session 当前值读取；首版不发布这些 config options。不同 Session 的可选方法逐个检查，不能因另一个 Session 安装了插件就假定可用。
 
-所有 new/load/resume/fork 入口接受并忽略 `mcpServers`；非空列表不阻塞会话操作。Gateway 不启动、连接、转发或持久化其中的服务器，也不据此声明 MCP transport capability。会话继续使用原生配置的工具。非空 `additionalDirectories` 仍在创建或 attach 前拒绝。客户端 MCP 的实际接入和资源生命周期不在首版，本次不修改 App Server 的 MCP 配置或 HostPlatform。
+new/load/resume/fork 通过独立的 [TemporaryMcp](plugins/TemporaryMcp.md) Session 插件接入 `mcpServers`，与原生工具并存，不写共享配置。只有旧 daemon 缺少 `mcp.temporary.capabilities` 时保留接受并忽略行为，且不声明 HTTP/SSE MCP 能力。非空 `additionalDirectories` 仍在创建或 attach 前拒绝。
 
 ### 4.2 Agent → client 及协议取消
 
@@ -234,6 +234,14 @@ CLI 的 Disconnect 是 `{credential:{action:"clear"},enabled:false}`，不适合
 参考实现 [CodexAcpClient](https://github.com/LodyAI/acp-extension-codex/blob/df464ab94e3028ce49a95ae0a9377957c54d8b93/src/CodexAcpClient.ts) 将 ACP set 保存为内存 `gatewayConfig`，通过 `mergeGatewayConfig` 合入原生 Session 建立参数；[CodexAcpServer](https://github.com/LodyAI/acp-extension-codex/blob/df464ab94e3028ce49a95ae0a9377957c54d8b93/src/CodexAcpServer.ts) 在必要时排空并替换其自有 app-server。Dim 不拥有共享 daemon，不能复制该重启路径。该适配器的 disable 清除 override、恢复 native routing，list 随后仍有 current；这与 RFD 所述禁用后 current:null 不一致，不能把参考实现的行为当成协议授权，或等同于 Dim 停用持久化 Provider。
 
 两种产品语义仍待选择；当前不发布 `agentCapabilities.providers`、不启用 SDK `unstable_llm_providers`，不是协议禁止持久化的裁定。无论选择哪种，都复用现有 Provider 所有者；临时覆盖需要在实际模型连接采用处具备合同，不新增第二个路由业务所有者。相关公开流程复用现有 Provider fixture，覆盖完整 headers 替换/省略清空、auth header 分离、协议不匹配、managed 记录拒绝、未知 id、disable 保留 credential、CAS 冲突和 Drain 回复丢失，并验证真实模型调用的路由。产品语义未确定前，先验证 capability 缺席、调用不支持方法不修改隔离 home 的 Provider 记录。
+
+### 4.6 临时 MCP 接线
+
+[TemporaryMcp](plugins/TemporaryMcp.md) 是 MCP 所有者的独立 Session 部件，定义完整的 attach/renew/detach、工具隔离、租约和子插件清理合同。Gateway 在 ACP 边界转换 stdio/HTTP/SSE 参数；native Session 建立、cwd 检查及历史准备之后，通过现有 contributed Session methods 完成初始绑定，成功后才响应建立请求。每个 Gateway/Session 持有一个 bindingId，重复建立复用，同一绑定的不同配置明确冲突，空列表不清空既有绑定。
+
+Gateway 每十秒续租；native 重连后用相同 bindingId 幂等恢复资源，prompt 前核验绑定，过期则重建；不重放工具调用或模型输入。EOF/卸载先尽力释放自己的 MCP 绑定，再 detach viewer。强杀或无法恢复连接时，原生三十秒租约结束后卸载资源。新方法属于 MCP 插件，RPC 框架、Agent core 和持久 MCP 配置不变。
+
+会话配置读取同时消费 hello 中的内置 permission/model 方法与 session.methods 中的贡献方法，二者不能互相替代。
 
 ## 5. Prompt、回放和响应关联
 
@@ -428,7 +436,7 @@ Steering 的 handoff 允许上游换 turn，并不允许脱离 ACP prompt 槽启
 | B. 插件与标准会话 | 已完成：dim-acp、CLI acp 入口、共享产品事件边界 | initialize/new/list/load/resume/prompt；3 个 ACP stdio flows 覆盖真实 daemon 与 loopback model、消费输入关联、emoji 去重、固定头空页和并发准备。受影响 CLI flows 共 97 通过，10 个额外环境用例未运行 |
 | C. 交互与结算 | 已完成：同一 Gateway 的 auth/permission/question/config/content | managed provider discovery、browser authenticate、terminal helper；输入撤回/stop、审批、form、mode/model、图片/文本资源和 close/delete。101 个 CLI flows 通过、10 个额外环境用例跳过；另有 2 个公共 Gateway 宿主流程验证真实 loopback callback、native exchange 和请求取消。RPC recovery 与输出/卸载结算在 E 验证 |
 | D. 有依据的 Lody 子集 | 已完成接线：history/forkAtTurn/compaction、startup model、后台 task、最小 subagent snapshots | 公开 stdio flows 覆盖固定头历史、真实终态锚点、task 与父工具独立、压缩取消、同 member 多次委派的 run 身份、startup model 优先级与非 new 覆盖拒绝，以及断线 unknown/恢复新 activation。Lody GUI 基本聊天通过；不能据协议流测试声明所有 GUI 扩展已验收 |
-| E. 连接恢复、宿主退出与实机 | 已完成：RPC recovery、dimcode 原生入口、文档和验收记录 | 110 个 CLI 回归通过、10 个既有环境用例 ignored；另一个真实 30 秒恢复截止流程通过。覆盖不重发不确定变更、请求取消、输出预算、卸载结算。macOS 的 acpx 和 Lody 基本聊天通过，Lody 注入的 MCP 配置被忽略；真实 OAuth、Windows/Linux 和发布包待验收。证据见验收记录 |
+| E. 连接恢复、宿主退出与实机 | 已完成：RPC recovery、dimcode 原生入口、文档和验收记录 | 本轮 CLI 回归 111 passed、11 ignored、1 个恢复截止用例 filtered；Node MCP stdio 流程单独通过。覆盖不重发不确定变更、请求取消、输出预算、卸载结算。macOS acpx 基本聊天通过；Lody GUI MCP 工具验收受登录页阻塞，真实 OAuth、Windows/Linux 和发布包待验收。证据见验收记录 |
 
 这是串行交付范围，不为每个字段建立独立任务或 agent。实际实现路径引入 crate/依赖时运行 xtask check；装配变化按项目规则生成 graph，禁止手写 generated 输出。
 
@@ -444,7 +452,7 @@ D 的消融复核：Lody 只是同一投影的 metadata 和受协商约束的通
 
 复用已有 mock-model daemon 和 transport/CLI fixture，在临时 workspace 和隔离 product home 内验证：
 
-1. ACP initialize/版本/能力与 handler 一致；new/load/resume/fork 忽略非空 MCP 配置并正常建立，不转发客户端配置；未知方法、非空 additionalDirectories、音频/二进制资源在写入前拒绝。
+1. ACP initialize/版本/能力与 handler 一致；new/load/resume/fork 接入临时 MCP；旧 daemon 缺少接口时接受并忽略且不声明 HTTP/SSE。验证真实工具调用、配置不落盘、显式释放、连接恢复和进程丢失后的租约清理。未知方法、非空 additionalDirectories、音频/二进制资源在写入前拒绝。
 2. new → prompt → text/thought/tool → end_turn；单连接多个 Session；同 Session 第二个 prompt 拒绝；另一 RPC 客户端可 attach 同一 Session。
 3. progress/committed/history 重复和乱序到达、Unicode scalar offsets、页内无可见事件和 nextAfter 前进、load/load 与 load/resume 单消费者、关闭期间迟到准备。
 4. cancel 在提交回复前、持有输入、采用后/消费前、消费后、turn/end 竞态；native 残留输入如实保留，不能断言已删除。
@@ -519,14 +527,14 @@ acpx --agent "$ACP_TEST_COMMAND" --cwd "$ACP_TEST_ROOT/workspace" \
 
 ## 12. 机制缺口与首版后的评估
 
-本版本向 App Server、runtime、Timeline、Dispatcher、rutis 提出的变更需求为 **零**。下面只记录未支持能力，交付后再决定是否提独立 issue；不是本版前置任务。
+本版本向 App Server RPC 框架、Agent core、Timeline、Dispatcher、rutis 提出的机制变更需求为 **零**。临时 MCP 由 MCP 业务模块的独立插件承接；下面记录其他未支持能力，不是本版前置任务。
 
 | 问题 / 为什么现有能力不足 | 将来可评估的通用合同 | 顺序影响 / 所有者 |
 | --- | --- | --- |
 | steer 没有预期 turn 条件；预查与 submit 之间会换 turn | 在输入所有者处明确“只向指定活跃行为投递”的原子语义，而不是 ACP 专用 if | 准入与写入必须同一决定；输入/Loop 所有者 |
 | Goal 方法只写输入，快照及跨轮 prompt 完成无现成合同 | 由 Goal 定义可观察状态和提交/终态关联；不在 Gateway 拥有第二个 Goal fold | 完成不能早于 owner 的决定；Goal，含 #422 的边界 |
 | usage 缺 reasoning 明细，费用可能未知 | 由 Usage/模型适配保留真实计数；累计显示仍从已有事实投影 | 持久化兼容需单独决定；ModelProvider/aimux/types |
-| 客户端 MCP / buffer / terminal 没有资源生命周期合同 | 沿既有 MCP/HostPlatform 方案明确资源所有权与启用方式 | 断线不能泄漏进程或赋予权限；MCP/HostPlatform/#5 |
+| 未保存 buffer / client terminal 没有资源生命周期合同 | 沿既有 HostPlatform 方案明确资源所有权与启用方式；客户端 MCP 已由 TemporaryMcp 承接 | 断线不能泄漏进程或赋予权限；HostPlatform/#5 |
 | Provider 共享设置与 ACP 临时覆盖的产品语义尚未选择；只有后者缺现成覆盖接口，driver/auth 也固定 | 选择共享设置时复用已有管理合同；选择临时覆盖时才需明确模型连接覆盖的作用域、认证归属、采用时点和关闭语义 | 在实际模型连接采用处生效，退出不能覆盖其他写入；Provider/ModelHost 所有者。首版不提出变更要求 |
 | 新建 Session 已有模型参数，load/resume/fork 没有同等建立前配置覆盖 | 若需要该行为，由 Session 建立/恢复所有者明确允许覆盖的配置及采用原子性，不能先启用旧配置后补 update | 配置须在 native establishment 前采用；Session/ModelHost 所有者。首版仅接 new 的 model 选择 |
 | 额度管理面的只读暴露未定义 | 明确已有安全 usage read 的访问范围与过滤语义 | 不扩展为任意管理透传；Provider 所有者 |

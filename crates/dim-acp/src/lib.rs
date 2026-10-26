@@ -6,6 +6,7 @@ mod content;
 mod gateway;
 mod interaction;
 mod lody;
+mod mcp;
 mod outbox;
 mod projection;
 mod rpc;
@@ -148,6 +149,8 @@ async fn serve(
         },
     );
     let (rpc, native) = rpc::Rpc::start(client, &native_tasks, native_stop.clone());
+    let mcp = mcp::Bindings::start(rpc.clone(), &tasks, stop.clone());
+    let gateway_mcp = mcp.clone();
     let (incoming, messages) = tokio::sync::mpsc::channel(128);
     let notifications = incoming.clone();
     let foreground = incoming.clone();
@@ -208,6 +211,7 @@ async fn serve(
                     agent_id,
                     login,
                     foreground_outbox,
+                    gateway_mcp,
                 )
                 .run(messages, native)
                 .await
@@ -219,6 +223,7 @@ async fn serve(
         () = outbox.failed() => Err(outbox.error().into()),
     };
     stop.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), mcp.close()).await;
     tasks.close();
     // Login waiters can cancel their owned pending attempts while RPC is live.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), tasks.wait()).await;

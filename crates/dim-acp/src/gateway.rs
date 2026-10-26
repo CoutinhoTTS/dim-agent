@@ -36,6 +36,7 @@ pub(crate) enum Work {
     Created {
         reply: Responder,
         cwd: String,
+        servers: crate::mcp::Servers,
         result: Result<Created, Error>,
     },
     Prepared {
@@ -135,6 +136,7 @@ enum Preparation {
 }
 struct Loading {
     preparation: u64,
+    mcp_added: bool,
     cwd: String,
     waiters: Vec<Waiter>,
     buffered: Vec<(String, Value)>,
@@ -226,6 +228,7 @@ pub(crate) struct Gateway {
     recovering_sessions: usize,
     outbox: Outbox,
     next_preparation: u64,
+    mcp: crate::mcp::Bindings,
 }
 
 fn busy() -> Error {
@@ -260,6 +263,7 @@ impl Gateway {
         agent_id: Option<String>,
         login: Option<crate::auth::Login>,
         outbox: Outbox,
+        mcp: crate::mcp::Bindings,
     ) -> Self {
         Self {
             rpc,
@@ -282,6 +286,7 @@ impl Gateway {
             recovering_sessions: 0,
             outbox,
             next_preparation: 0,
+            mcp,
         }
     }
 
@@ -312,11 +317,13 @@ impl Gateway {
         )
     }
 
-    fn prepare(&mut self, id: String, cwd: String, waiter: Waiter, attach: bool) {
+    fn prepare(&mut self, id: String, cwd: String, waiter: Waiter, attach: bool, mcp_added: bool) {
         self.next_preparation += 1;
         let preparation = self.next_preparation;
         let rpc = self.rpc.clone();
         let expected_cwd = (!matches!(waiter.kind, Preparation::New)).then(|| cwd.clone());
+        let mcp = self.mcp.clone();
+        let bind_mcp = !matches!(waiter.kind, Preparation::History);
         let previous = match self.sessions.remove(&id) {
             Some(Slot::Ready(session)) => Some(session),
             None => None,
@@ -326,6 +333,7 @@ impl Gateway {
             id.clone(),
             Slot::Loading(Loading {
                 preparation,
+                mcp_added,
                 cwd,
                 waiters: vec![waiter],
                 buffered: Vec::new(),
@@ -333,7 +341,14 @@ impl Gateway {
             }),
         );
         self.spawn(async move {
-            let result = read_history(&rpc, &id, attach, expected_cwd).await;
+            let result = async {
+                let prepared = read_history(&rpc, &id, attach, expected_cwd).await?;
+                if bind_mcp {
+                    mcp.ensure(&id).await?;
+                }
+                Ok(prepared)
+            }
+            .await;
             Work::Prepared {
                 id,
                 preparation,
@@ -449,6 +464,10 @@ impl Gateway {
                     Ok(value) => value,
                     Err(error) => return reply.respond_with_error(error),
                 };
+                let servers = match crate::mcp::servers(request.mcp_servers) {
+                    Ok(value) => value,
+                    Err(error) => return reply.respond_with_error(error),
+                };
                 if let Err(error) =
                     establishment(&request.cwd, request.additional_directories.len())
                 {
@@ -512,7 +531,12 @@ impl Gateway {
                         rpc.typed("session.create", args).await
                     }
                     .await;
-                    Work::Created { reply, cwd, result }
+                    Work::Created {
+                        reply,
+                        cwd,
+                        servers,
+                        result,
+                    }
                 });
             }
             "session/load" | "session/resume" => {
@@ -523,23 +547,25 @@ impl Gateway {
                     Preparation::Resume
                 };
                 let parsed = if replay {
-                    params::<acp::LoadSessionRequest>(request.params).map(|request| {
-                        (
+                    params::<acp::LoadSessionRequest>(request.params).and_then(|request| {
+                        Ok((
                             request.session_id,
                             request.cwd,
                             request.additional_directories.len(),
-                        )
+                            crate::mcp::servers(request.mcp_servers)?,
+                        ))
                     })
                 } else {
-                    params::<acp::ResumeSessionRequest>(request.params).map(|request| {
-                        (
+                    params::<acp::ResumeSessionRequest>(request.params).and_then(|request| {
+                        Ok((
                             request.session_id,
                             request.cwd,
                             request.additional_directories.len(),
-                        )
+                            crate::mcp::servers(request.mcp_servers)?,
+                        ))
                     })
                 };
-                let (session_id, cwd, roots) = match parsed {
+                let (session_id, cwd, roots, servers) = match parsed {
                     Ok(value) => value,
                     Err(error) => return reply.respond_with_error(error),
                 };
@@ -553,7 +579,7 @@ impl Gateway {
                         if loading.cwd != cwd {
                             return reply.respond_with_error(Error::invalid_params());
                         }
-                        if loading.waiters.len() >= 128 {
+                        if loading.waiters.len() >= 128 || !self.mcp.can_coalesce(&id, &servers) {
                             return reply.respond_with_error(busy());
                         }
                         loading.waiters.push(Waiter { reply, kind });
@@ -566,16 +592,24 @@ impl Gateway {
                         {
                             return reply.respond_with_error(busy());
                         }
-                        if !replay && session.cwd == cwd {
+                        if !replay && session.cwd == cwd && !self.mcp.supported() {
                             return reply.respond(session.config.response());
                         }
-                        self.prepare(id, cwd, Waiter { reply, kind }, false);
+                        let added = match self.mcp.plan(&id, servers) {
+                            Ok(added) => added,
+                            Err(error) => return reply.respond_with_error(error),
+                        };
+                        self.prepare(id, cwd, Waiter { reply, kind }, false, added);
                     }
                     None => {
                         if self.sessions.len() >= 128 {
                             return reply.respond_with_error(busy());
                         }
-                        self.prepare(id, cwd, Waiter { reply, kind }, true);
+                        let added = match self.mcp.plan(&id, servers) {
+                            Ok(added) => added,
+                            Err(error) => return reply.respond_with_error(error),
+                        };
+                        self.prepare(id, cwd, Waiter { reply, kind }, true, added);
                     }
                 }
             }
@@ -609,11 +643,16 @@ impl Gateway {
                         kind: Preparation::History,
                     },
                     false,
+                    false,
                 );
             }
             "session/fork" if self.rpc.supports("session.fork") => {
                 let args: acp::ForkSessionRequest = match params(request.params) {
                     Ok(args) => args,
+                    Err(error) => return reply.respond_with_error(error),
+                };
+                let servers = match crate::mcp::servers(args.mcp_servers) {
+                    Ok(value) => value,
                     Err(error) => return reply.respond_with_error(error),
                 };
                 if let Err(error) = establishment(&args.cwd, args.additional_directories.len()) {
@@ -652,7 +691,12 @@ impl Gateway {
                             .await
                     }
                     .await;
-                    Work::Created { reply, cwd, result }
+                    Work::Created {
+                        reply,
+                        cwd,
+                        servers,
+                        result,
+                    }
                 });
             }
             "session/prompt" => {
@@ -700,9 +744,11 @@ impl Gateway {
                     ended: HashMap::new(),
                     deleted: HashSet::new(),
                 });
+                let mcp = self.mcp.clone();
                 self.spawn(async move {
                     let mut sent = false;
                     let result = async {
+                        mcp.ensure(&id).await?;
                         if let Some(provider) = provider { crate::auth::ensure(&rpc,&provider,&managed).await?; }
                         let user = tokio::select! {
                             () = uploading.cancelled() => return Err(Error::new(-32800, "Request cancelled before submission")),
@@ -967,6 +1013,9 @@ impl Gateway {
                         self.auth_methods = methods;
                         self.initialized = true;
                         let mut capabilities = json!({"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"sessionCapabilities":{"resume":{},"list":{},"close":{}},"_meta":{"lody":crate::lody::capabilities(self.rpc.supports("session.fork"))}});
+                        if self.mcp.supported() {
+                            capabilities["mcpCapabilities"] = json!({"http":true,"sse":true});
+                        }
                         if self.rpc.supports("session.fork") {
                             capabilities["sessionCapabilities"]["fork"] = json!({});
                         }
@@ -986,18 +1035,30 @@ impl Gateway {
                 self.authenticating.remove(&provider);
                 reply.respond_with_result(result)?;
             }
-            Work::Created { reply, cwd, result } => {
+            Work::Created {
+                reply,
+                cwd,
+                servers,
+                result,
+            } => {
                 self.creating -= 1;
                 match result {
-                    Ok(created) => self.prepare(
-                        created.session_id,
-                        cwd,
-                        Waiter {
-                            reply,
-                            kind: Preparation::New,
-                        },
-                        true,
-                    ),
+                    Ok(created) => {
+                        let added = match self.mcp.plan(&created.session_id, servers) {
+                            Ok(added) => added,
+                            Err(error) => return reply.respond_with_error(error),
+                        };
+                        self.prepare(
+                            created.session_id,
+                            cwd,
+                            Waiter {
+                                reply,
+                                kind: Preparation::New,
+                            },
+                            true,
+                            added,
+                        )
+                    }
                     Err(error) => reply.respond_with_error(error)?,
                 }
             }
@@ -1108,8 +1169,17 @@ impl Gateway {
                         self.questions(&id);
                         self.usage(&id);
                     }
-                    Err(error) => {
+                    Err(mut error) => {
                         let buffered = loading.buffered;
+                        if loading.mcp_added {
+                            let released = self.mcp.release(&id);
+                            self.tasks.spawn(released);
+                            if let Some(Value::Object(data)) = &mut error.data {
+                                data.insert("sessionId".into(), json!(id));
+                            } else {
+                                error.data = Some(json!({"sessionId":id}));
+                            }
+                        }
                         if let Some(previous) = loading.previous {
                             self.sessions.insert(id.clone(), Slot::Ready(previous));
                         } else {
@@ -1232,6 +1302,7 @@ impl Gateway {
             }
             Work::Removed { id, reply, result } => match result {
                 Ok(_) => {
+                    self.mcp.forget(&id);
                     self.release_interactions(&id);
                     if let Some(Slot::Ready(mut session)) = self.sessions.remove(&id)
                         && let Some(prompt) = session.prompt.take()
@@ -1510,6 +1581,7 @@ impl Gateway {
             }
             let closed: Closed = decode_native(params)?;
             self.release_interactions(&closed.session_id);
+            self.mcp.forget(&closed.session_id);
             match self.sessions.remove(&closed.session_id) {
                 Some(Slot::Ready(mut session)) => {
                     if let Some(prompt) = session.prompt.take() {
@@ -1675,6 +1747,9 @@ impl Gateway {
                     }
                 }
                 Slot::Loading(loading) => {
+                    if loading.mcp_added {
+                        self.mcp.forget(id);
+                    }
                     for waiter in std::mem::take(&mut loading.waiters) {
                         waiter.reply.respond_with_error(rpc::unavailable())?;
                     }
@@ -1722,10 +1797,14 @@ impl Gateway {
             let mut session = match slot {
                 Slot::Ready(session) => session,
                 Slot::Loading(loading) => {
+                    if loading.mcp_added {
+                        self.mcp.forget(&id);
+                    }
                     for waiter in loading.waiters {
                         waiter.reply.respond_with_error(rpc::unavailable())?;
                     }
                     let Some(previous) = loading.previous else {
+                        self.mcp.forget(&id);
                         continue;
                     };
                     previous
@@ -1780,6 +1859,7 @@ impl Gateway {
         }
         for (id, cwd, submission) in sessions {
             let rpc = self.rpc.clone();
+            let mcp = self.mcp.clone();
             self.spawn_generation(generation,async move {
                 let result = tokio::time::timeout_at(deadline,async {
                     let mut input = None;
@@ -1795,6 +1875,7 @@ impl Gateway {
                         }
                     }
                     let prepared = read_history(&rpc,&id,true,Some(cwd)).await?;
+                    mcp.ensure(&id).await?;
                     Ok((prepared,input))
                 }).await.unwrap_or_else(|_|Err(rpc::unavailable()));
                 Work::Recovered { id,result }

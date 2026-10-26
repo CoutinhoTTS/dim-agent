@@ -4,7 +4,7 @@
 
 `AcpGateway` 是将 Dim 作为 ACP agent 提供的可复用 rutis 插件。它拥有 ACP 连接和通往现有 App Server 的独立公开 RPC 连接。`dimcode acp` 是第一个宿主和 stdio 入口；其他宿主装载同一实现，或启动该命令。网关不依赖 TUI。Desktop 继续使用同一个 daemon 和持久 Session，无须另写 ACP 协议实现。
 
-首版不改 App Server、Agent runtime、Timeline、持久格式或业务插件。现有公开方法和事实不能表达的协议能力明确不支持，不在 Gateway 中建立第二个业务状态机。Dim 调用外部 ACP agent 仍属于 [ExternalAgent](ExternalAgent.md)，方向和生命周期独立。
+Agent core、RPC 框架、内置 Session 协议、Timeline 和持久格式不变。MCP 业务模块注册独立的 [TemporaryMcp](../../../design/plugins/TemporaryMcp.md) Session 部件承接临时服务器，持久 MCP 管理不变。现有公开方法和事实不能表达的协议能力明确不支持，不在 Gateway 中建立第二个业务状态机。Dim 调用外部 ACP agent 仍属于 [ExternalAgent](ExternalAgent.md)，方向和生命周期独立。
 
 ## 1. 结构与所有权
 
@@ -22,7 +22,7 @@ client host's rutis tree
              |
              | existing protected local RPC v3
              v
-App Server (unchanged)
+App Server (existing RPC; MCP business parts)
   existing methods and notifications
              |
 Session / InputQueue / Loop / Approval / Questions / Attachments / ...
@@ -48,7 +48,7 @@ Gateway 实现位于 `crates/dim-acp`。公开 RPC 引擎、产品事件边界�
 
 Lody 方法和 metadata 按固定 Core DTO 及语义注释实现，不设连接级 Lody 总开关，不从一项推导整套支持。Subagent snapshot 可以如实声明无输出流、progress、read 或 cancel；最小投影不需要旧 SDK task API。准确协商、native fact 关联、startup config 和各项限制见[计划 §8](../../../design/acp-gateway-implementation.md#8-lody-方法和能力逐项决策)。Lody canonical tool ID 不能填任意 native 工具名。
 
-网关不调用 client fs/terminal，不启动客户端 MCP，不暴露任意账户管理、不注入 raw blocks。new/load/resume/fork 接受并忽略 mcpServers，不转发或持久化该配置，会话继续使用原生工具。非空 additionalDirectories 在创建或 attach 前报错。未知非控制 metadata 按 ACP 扩展规则处理；识别到尚不支持的控制字段，在提交输入前拒绝。
+网关不调用 client fs/terminal，不暴露任意账户管理、不注入 raw blocks。new/load/resume/fork 通过 TemporaryMcp 绑定 stdio/HTTP/SSE mcpServers；配置只在内存中，与原生工具并存。旧 daemon 缺少临时绑定接口时接受并忽略列表，且不声明 HTTP/SSE MCP 能力。非空 additionalDirectories 在创建或 attach 前报错。未知非控制 metadata 按 ACP 扩展规则处理；识别到尚不支持的控制字段，在提交输入前拒绝。
 
 socket/pipe 身份校验与模型账户认证分开。网关从现有 account.providers/status 发现 managed provider，并只发布真正可执行的 auth method。agent-type browser 方法通过 authenticate 调用现有 begin/complete/status/cancel；terminal 方法另开交互 helper，不能把其 methodId 发给 authenticate。OAuth、凭据交换和持久化仍归 provider。准确调用、callback 所有权、headless 限制和取消合同见[计划 §4.4](../../../design/acp-gateway-implementation.md#44-账户认证与现有-oauth-插件)。没有账户插件时不强制 configured/API-key 模型登录。
 
@@ -107,11 +107,11 @@ stdout 仅 ACP。诊断不泄漏凭据、账户 secret、完整 prompt 或无关
 
 | 规则 | 适用方式 |
 | --- | --- |
-| §1 Capability / server boundary | 一个客户端进程插件拥有真实 I/O 与请求，不是 branch 状态机，不在 App Server 放业务实现 |
+| §1 Capability / server boundary | 一个客户端进程插件拥有真实 I/O 与请求，不是 branch 状态机，RPC 不放 ACP 业务；临时 MCP 归原生 MCP 所有者 |
 | §4.1 指令与结果 | 只调现有 Session 入口，由 owner 决定并写结果，网关仅投影 |
 | §4.2 交接 | input/applied 后用 Loop 的 stop，不能假装 adopted 输入已撤回 |
 | §4.3 before | 不注册，只做 ACP 外部参数/内容边界校验 |
-| §4.4 机制通用 | 不改 Timeline/Dispatcher/runtime/App Server/rutis；不支持项保持不支持 |
+| §4.4 机制通用 | 不改 Timeline/Dispatcher/runtime/RPC 框架/rutis；不支持项保持不支持 |
 | §4.5 原子事实与顺序 | 读已提交事实及分支 sequence，不从本地协议队列制造执行决定或批次 |
 | §4.6 上下文 | 只提交普通输入和已有工具答案，无 runtime injection |
 | §4.7 公开合同 / 所有权 | 读 RPC/history/notice，不读内部状态，不复制 Goal/task/usage 业务状态 |
@@ -143,7 +143,7 @@ stdout 仅 ACP。诊断不泄漏凭据、账户 secret、完整 prompt 或无关
 
 ### A.4 验收
 
-[计划 §10](../../../design/acp-gateway-implementation.md#10-交付单元和验收顺序) 定义公开 flow 和隔离客户端命令。[验收记录](../../../design/acp-gateway-acceptance.md) 记录实际结果：acpx、Lody 基本聊天和 Lody initialize/new/close 探测通过；客户端 MCP 配置被忽略。Desktop UI、Dim 调用外部 ACP agent、资源节点和全量 Lody parity 不在本次交付中。
+[计划 §10](../../../design/acp-gateway-implementation.md#10-交付单元和验收顺序) 定义公开 flow 和隔离客户端命令。[验收记录](../../../design/acp-gateway-acceptance.md) 记录实际结果：acpx 基本聊天和公开 native MCP 工具流程通过；Lody 当前停在登录页，GUI MCP 工具验收未完成。客户端 MCP 配置由原生 Session 的临时绑定承接。Desktop UI、Dim 调用外部 ACP agent、资源节点和全量 Lody parity 不在本次交付中。
 
 ### A.5 Client label
 

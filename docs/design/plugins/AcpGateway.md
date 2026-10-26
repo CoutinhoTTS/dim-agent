@@ -4,7 +4,7 @@ Status: the supported first-delivery subset is implemented in [Draft PR #441](ht
 
 `AcpGateway` is a reusable rutis plugin that serves Dim as an ACP agent. It owns the ACP connection and its independent public-RPC connection to the existing App Server. `dimcode acp` is its first host and stdio entry; another host can mount the same implementation or launch that command. The gateway has no TUI dependency. Desktop continues to use the same daemon and persisted Sessions; it needs no separate ACP protocol implementation.
 
-The first delivery changes no App Server, Agent runtime, Timeline, persisted format or business plugin. A protocol feature that existing public methods and facts cannot express is explicitly unsupported. It is not implemented by a second business state machine in the gateway. Dim calling another ACP agent remains [ExternalAgent](ExternalAgent.md), a separate direction and lifecycle.
+Agent core, RPC dispatch, built-in Session protocol, Timeline and persistence formats are unchanged. The MCP business module registers the separate [TemporaryMcp](TemporaryMcp.md) Session part for disposable client servers; configured MCP management is unchanged. A protocol feature that existing public methods and facts cannot express is explicitly unsupported. It is not implemented by a second business state machine in the gateway. Dim calling another ACP agent remains [ExternalAgent](ExternalAgent.md), a separate direction and lifecycle.
 
 ## 1. Structure and ownership
 
@@ -22,7 +22,7 @@ client host's rutis tree
              |
              | existing protected local RPC v3
              v
-App Server (unchanged)
+App Server (existing RPC; MCP business parts)
   existing methods and notifications
              |
 Session / InputQueue / Loop / Approval / Questions / Attachments / ...
@@ -48,7 +48,7 @@ The first delivery covers standard Session creation/list/load/resume, prompts an
 
 Lody methods and metadata follow the pinned Core DTOs and their semantic comments. There is no connection-wide Lody switch or inferred support for the entire extension set. A subagent snapshot can truthfully advertise no output stream, progress, read or cancel; an old SDK task API is not a prerequisite for that minimal projection. The exact negotiation, native fact correlation, startup configuration and per-feature limits are [plan §8](../acp-gateway-implementation.md#8-lody-方法和能力逐项决策). Canonical Lody tool IDs must not be populated with arbitrary native tool names.
 
-The gateway does not call client `fs/*` or `terminal/*`, start client-supplied MCP servers, expose arbitrary account management, or inject raw blocks. It accepts and ignores `mcpServers` on new/load/resume/fork without forwarding or persisting that configuration; Sessions use their native tools. Non-empty `additionalDirectories` fail before Session creation or attachment. Unknown non-control metadata follows ACP extensibility; recognized unsupported control metadata fails before an input is submitted.
+The gateway does not call client `fs/*` or `terminal/*`, expose arbitrary account management, or inject raw blocks. It binds stdio/HTTP/SSE `mcpServers` through TemporaryMcp on new/load/resume/fork. Configurations stay volatile, alongside native tools. An older daemon without the temporary binding interface retains accept-and-ignore behavior and advertises no HTTP/SSE MCP capability. Non-empty `additionalDirectories` fail before Session creation or attachment. Unknown non-control metadata follows ACP extensibility; recognized unsupported control metadata fails before an input is submitted.
 
 Socket/pipe authentication is separate from model-account authentication. The gateway discovers existing `account.providers/status` and exposes executable auth methods for the managed-provider plugin. An agent-type browser method uses `authenticate` and the existing native begin/complete/status/cancel operations; a terminal method launches a separate interactive helper and must not be passed to `authenticate`. OAuth, credential exchange and persistence stay inside the provider. The exact calls, callback ownership, headless limits and cancellation contract are [plan §4.4](../acp-gateway-implementation.md#44-账户认证与现有-oauth-插件). No account plugin means no forced managed-account login for configured/API-key models.
 
@@ -107,11 +107,11 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 | Rule | Application |
 | --- | --- |
-| §1 Capability and server boundary | One client-process plugin owns actual I/O and requests; no branch state machine and no App Server business implementation. |
+| §1 Capability and server boundary | One client-process plugin owns actual I/O and requests; no branch state machine and no ACP business implementation in RPC; temporary MCP belongs to its native owner. |
 | §4.1 Commands change another owner's state | Calls existing Session entries; owners decide and write results. The gateway projects their outcomes only. |
 | §4.2 Handover is explicit | Withdrawal ends at input/applied; stopping uses the receiving owner's command. Adopted input is never pretended to be revoked. |
 | §4.3 before callbacks | None; external parameter/content validation is at the ACP boundary. |
-| §4.4 Mechanisms stay generic | No change to Timeline, Dispatcher, runtime, App Server or rutis; unsupported semantics stay unsupported. |
+| §4.4 Mechanisms stay generic | No change to Timeline, Dispatcher, runtime, RPC framework or rutis; unsupported semantics stay unsupported. |
 | §4.5 Atomic facts and order | Uses committed native facts in branch sequence order; local protocol queues do not invent a batch or execution decision. |
 | §4.6 Context after handover | Only normal input submission and existing tool answers contribute context; no runtime injection. |
 | §4.7 Public contracts and ownership | Reads RPC/history/notices, not other plugins' private state. No Goal, task or usage business replica. |
@@ -143,7 +143,7 @@ Content mappings are in plan §4.3; event projections are in §7. The existing C
 
 ### A.4 Acceptance
 
-[Plan §10](../acp-gateway-implementation.md#10-交付单元和验收顺序) defines public-flow checks and isolated client commands. The [acceptance record](../acp-gateway-acceptance.md) contains actual results: acpx and Lody basic chat pass, as does Lody's initialize/new/close probe. Client MCP configuration is ignored. Desktop UI, Dim consuming external ACP agents, resource nodes and full Lody parity are outside this delivery.
+[Plan §10](../acp-gateway-implementation.md#10-交付单元和验收顺序) defines public-flow checks and isolated client commands. The [acceptance record](../acp-gateway-acceptance.md) contains actual results: acpx basic chat and public native MCP-tool flows pass. Lody GUI MCP-tool verification is blocked by the current login screen and remains unverified. Client MCP configurations use disposable native Session bindings. Desktop UI, Dim consuming external ACP agents, resource nodes and full Lody parity are outside this delivery.
 
 ### A.5 Client labels
 

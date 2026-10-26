@@ -96,6 +96,17 @@
       ]
     },
     {
+      "id": "dim_acp::mcp",
+      "crate": "dim_acp",
+      "parent": "dim_acp",
+      "file": "crates/dim-acp/src/mcp.rs",
+      "unexpandedMacros": [
+        "json",
+        "matches",
+        "tokio::select"
+      ]
+    },
+    {
       "id": "dim_acp::outbox",
       "crate": "dim_acp",
       "parent": "dim_acp",
@@ -1663,6 +1674,7 @@
       "parent": "dim_app_server::mcp",
       "file": "crates/dim-app-server/src/mcp/management.rs",
       "unexpandedMacros": [
+        "matches",
         "serde_json::json",
         "unreachable"
       ]
@@ -1732,6 +1744,19 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "tokio::pin",
+        "tokio::select",
+        "tracing::warn"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::temporary",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp",
+      "file": "crates/dim-app-server/src/mcp/temporary.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
         "tokio::pin",
         "tokio::select",
         "tracing::warn"
@@ -3730,6 +3755,15 @@
     },
     {
       "from": "dim_acp",
+      "to": "dim_acp::mcp",
+      "references": [
+        "mod mcp",
+        "path mcp",
+        "path mcp::Bindings::start"
+      ]
+    },
+    {
+      "from": "dim_acp",
       "to": "dim_acp::outbox",
       "references": [
         "mod outbox",
@@ -3903,6 +3937,15 @@
     },
     {
       "from": "dim_acp::gateway",
+      "to": "dim_acp::mcp",
+      "references": [
+        "path crate::mcp::Bindings",
+        "path crate::mcp::Servers",
+        "path crate::mcp::servers"
+      ]
+    },
+    {
+      "from": "dim_acp::gateway",
       "to": "dim_acp::outbox",
       "references": [
         "path Outbox",
@@ -4040,6 +4083,16 @@
         "path EventContent::CollaborationResult",
         "use dim_client::wire::Event",
         "use dim_client::wire::EventContent"
+      ]
+    },
+    {
+      "from": "dim_acp::mcp",
+      "to": "dim_acp::rpc",
+      "references": [
+        "path Rpc",
+        "path rpc",
+        "use crate::rpc",
+        "use crate::rpc::Rpc"
       ]
     },
     {
@@ -14576,6 +14629,14 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::temporary",
+      "references": [
+        "mod temporary",
+        "path temporary::TemporaryMcp::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_app_server::methods",
       "references": [
         "path crate::methods::ManagementMethods"
@@ -15409,6 +15470,110 @@
         "use super::server::McpServerError",
         "use super::server::McpServerState",
         "use super::server::McpTool"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Interruption::Drain",
+        "path MethodDecl::new",
+        "path RpcError",
+        "path RpcError::invalid",
+        "path RpcError::service",
+        "path SessionMethods",
+        "path methods",
+        "path methods::params",
+        "use dim_agent_capabilities::methods",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolProvider",
+        "path ToolProviderChanged",
+        "path ToolRegistry",
+        "path ToolSourceSet",
+        "path tool_provider_changes",
+        "use dim_agent_capabilities::tool_registry::ToolProvider",
+        "use dim_agent_capabilities::tool_registry::ToolProviderChanged",
+        "use dim_agent_capabilities::tool_registry::ToolRegistry",
+        "use dim_agent_capabilities::tool_registry::ToolSourceSet",
+        "use dim_agent_capabilities::tool_registry::tool_provider_changes"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path SESSION_GROUP",
+        "use dim_agent_runtime::SESSION_GROUP"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "path SessionLifecycle",
+        "use dim_agent_runtime::SessionConfig",
+        "use dim_agent_runtime::SessionLifecycle"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
+      "to": "dim_app_server::mcp",
+      "references": [
+        "path McpConnection::temporary",
+        "use super::McpConnection"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
+      "to": "dim_app_server::mcp::auth",
+      "references": [
+        "path McpAuth",
+        "use super::McpAuth"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path McpServerSettings",
+        "path McpServerSettings::Stdio",
+        "use super::config::McpServerSettings"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
+      "to": "dim_app_server::mcp::server",
+      "references": [
+        "path McpServer",
+        "path McpServerPlugin::new",
+        "use super::server::McpServer",
+        "use super::server::McpServerPlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::temporary",
+      "to": "dim_app_server::mcp::session",
+      "references": [
+        "path contribution",
+        "use super::session::contribution"
       ]
     },
     {
