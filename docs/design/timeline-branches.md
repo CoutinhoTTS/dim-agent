@@ -25,7 +25,7 @@ Answers to #427:
 | 3 | When a branch finishes, who needs its result, and in what form | No line owes another a result. Lines tell each other what matters while they work (§6). A line the agent opened ends with a final message to main (§10). A plugin line follows its creator's protocol, for example Pursuit's conclusion |
 | 4 | When is a branch over, and is it visible afterwards | When it ends itself, its opener ends it, or the user ends it (§10). An ended line stays in the branch directory. Its history stays readable to clients and to main |
 | 5 | What users see and do | Follow any line, talk to it, answer its questions and approvals, and end it (§9, §14). Compare and adopt come with scenario 3 |
-| 6 | What "done" means | The acceptance flows (§20) pass. The evaluation scenarios (§12.3) have been run locally on real models and reported. The release demo ([#439](https://github.com/arcships/dim/issues/439)) shows main opening lines that talk with it and then end |
+| 6 | What "done" means | The acceptance flows (§20) pass, and the evaluation scenarios (§12.3) have been run locally on real models and reported in the implementing PR. The release demo ([#439](https://github.com/arcships/dim/issues/439)) can show it |
 
 ## 2. Branch, Collaboration member, fork
 
@@ -215,7 +215,7 @@ Lines differ only in their tails:
 
 ### 7.4 Goal and Pursuit
 
-**Rule.** A line's opening input is TimelineTree's write. Its first block is the `branch:line` marker, so under [Goal A5](plugins/Goal.md#appendix-e-assumptions) (operator input is "`user` content and no source marker as first raw block") it is a sourced input, not operator input, whatever `user` content the creator gave. Goal's conflict table records this ([Goal Appendix B](plugins/Goal.md#appendix-b-full-conflict-table)). Goal's code is unchanged.
+**Rule.** A line's opening input is TimelineTree's write. Its first block is the `branch:line` marker, so under [Goal A5](plugins/Goal.md#appendix-e-assumptions) (operator input is "`user` content and no source marker as first raw block") it is a sourced input, not operator input, whatever `user` content the creator gave. Goal's conflict table records this ([Goal Appendix B](plugins/Goal.md#appendix-b-full-conflict-table)). Goal's own rules are unchanged. Its code changes only through the [Pursuit amendment](plugins/Pursuit.md#13-ending-the-evaluator-with-427).
 
 Before this design, a host line's opening input (the creator's prompt as `user`, no block) counted as operator input. A tool line's did not: it had the `dim-branch-task` block and no `user`. Both are now sourced inputs.
 
@@ -367,7 +367,7 @@ The texts above are first versions, owned by TimelineTree's plugin. These items 
   - the continuation text (`goal.ts:131`);
   - "delegated work" in [Goal §3.4](plugins/Goal.md#34-a-new-branch-clears-the-inherited-goal) and in Goal §5's row for child branches.
 
-  The replacement is "on another line of this Session". This design does not change Goal's code.
+  The replacement is "on another line of this Session". This design does not change that text; Goal owns it.
 
 ### 12.3 Evaluation scenarios
 
@@ -390,7 +390,7 @@ These are run locally on real models, and the results are reported in the implem
 
 | Feature | Interaction |
 | --- | --- |
-| Goal | Code unchanged. A line's opening input is a sourced input under A5 (§7.4), and Goal's conflict table records it. A new line clears the inherited goal as before |
+| Goal | Goal's own rules are unchanged. A line's opening input is a sourced input under A5 (§7.4), and Goal's conflict table records it. A new line clears the inherited goal as before. Goal's code changes only through the Pursuit amendment: recognition from `info(own id).source`, ending its evaluator, and the `branch/ended` key ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)) |
 | Pursuit | The evaluator gets the host-line identity block. Goal recognizes its evaluator from the line's source and ends it once the evaluation is settled ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)) |
 | Fork, delete | Unchanged. Ended lines follow their facts (§10) |
 | Session close, idle unload | Not an end. Lines restore as open |

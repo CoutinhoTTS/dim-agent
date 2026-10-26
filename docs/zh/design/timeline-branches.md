@@ -25,7 +25,7 @@
 | 3 | 分支结束时，谁需要它的结果，以什么形式 | 没有哪条线欠另一条线结果。各线在工作过程中把要紧的事告诉对方（§6）。agent 开的线结束时给 main 一条最终消息（§10）。插件开的线按创建者的协议办，例如 Pursuit 的结论 |
 | 4 | 分支什么时候算结束，结束后还能看到吗 | 它自己结束、开它的一方结束它，或者用户结束它（§10）。结束的线留在分支目录里，客户端和 main 仍能读到它的历史 |
 | 5 | 用户能看到什么、做什么 | 跟随任一条线、与它对话、回答它的提问和审批、结束它（§9、§14）。比较和采纳随场景 3 一起做 |
-| 6 | 怎样算"完成" | 验收流程（§20）通过；评估场景（§12.3）已在本地用真实模型跑过并报告；发布演示（[#439](https://github.com/arcships/dim/issues/439)）展示 main 开出几条线，这些线和它对话，然后结束 |
+| 6 | 怎样算"完成" | 验收流程（§20）通过，评估场景（§12.3）已在本地用真实模型跑过，并在实现 PR 里报告。发布演示（[#439](https://github.com/arcships/dim/issues/439)）可以展示它 |
 
 ## 2. 分支、Collaboration 成员、fork
 
@@ -215,7 +215,7 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 
 ### 7.4 Goal 与 Pursuit
 
-**规则。** 一条线的开启输入由 TimelineTree 写入。它的第一个块是 `branch:line` 标记，所以按 [Goal A5](plugins/Goal.md#附录-e-假设)（操作者输入是"带 `user` 内容、且第一个原始块不是来源标记"），它是有来源的输入，不是操作者输入，不管创建者给了什么 `user` 内容。Goal 的冲突表记录了这一点（[Goal 附录 B](plugins/Goal.md#附录-b-完整冲突表)）。Goal 的代码不变。
+**规则。** 一条线的开启输入由 TimelineTree 写入。它的第一个块是 `branch:line` 标记，所以按 [Goal A5](plugins/Goal.md#附录-e-假设)（操作者输入是"带 `user` 内容、且第一个原始块不是来源标记"），它是有来源的输入，不是操作者输入，不管创建者给了什么 `user` 内容。Goal 的冲突表记录了这一点（[Goal 附录 B](plugins/Goal.md#附录-b-完整冲突表)）。Goal 自己的规则不变。它的代码只随 [Pursuit 修订](plugins/Pursuit.md#13-结束评审者随-427)改变。
 
 在本设计之前，host 线的开启输入（创建者的 prompt 作为 `user`，没有块）算操作者输入。工具线的不算：它带 `dim-branch-task` 块，没有 `user`。现在两者都是有来源的输入。
 
@@ -367,7 +367,7 @@ WorkspaceTools 不变。
   - 续跑文本（`goal.ts:131`）；
   - [Goal §3.4](plugins/Goal.md#34-新分支清除继承的目标) 和 Goal §5 子分支那一行里的 "delegated work"。
 
-  替换为 "on another line of this Session"。本设计不改 Goal 的代码。
+  替换为 "on another line of this Session"。本设计不改这些文本，它们归 Goal。
 
 ### 12.3 评估场景
 
@@ -390,7 +390,7 @@ WorkspaceTools 不变。
 
 | 功能 | 影响 |
 | --- | --- |
-| Goal | 代码不变。一条线的开启输入按 A5 是有来源的输入（§7.4），Goal 的冲突表记录了这一点。新线照旧清除继承的目标 |
+| Goal | Goal 自己的规则不变。一条线的开启输入按 A5 是有来源的输入（§7.4），Goal 的冲突表记录了这一点。新线照旧清除继承的目标。Goal 的代码只随 Pursuit 修订改变：从 `info(自己的 id).source` 识别评审者、结束它的评审者，以及 `branch/ended` 这个 key（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） |
 | Pursuit | 评审者得到 host 线的身份块。Goal 从线的来源识别它的评审者，并在评审了结之后结束它（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） |
 | Fork、删除 | 不变。已结束的线按它的事实处理（§10） |
 | Session 关闭、空闲卸载 | 不算结束。各线恢复后仍未结束 |
