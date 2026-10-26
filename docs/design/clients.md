@@ -1,0 +1,142 @@
+# Clients
+
+Status: Draft. This document is the overall view of Dim's clients: which clients exist, what they share, which capabilities each covers, and which gaps have no design yet. It does not restate lower-level contracts; each row links to the document that owns it. Overall design: [overview](overview.md); plan: [roadmap](roadmap.md) §3.7 (client lane).
+
+Client work has so far been designed per feature. This document collects those designs, records where they disagree with each other or with the code, and lists the decisions needed before the client lane can be planned (§6).
+
+## 1. Clients
+
+Every client is a protocol v3 client of the App Server daemon. The daemon is headless and shared: one per product home, one executor with many viewers ([Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves)). A client owns presentation and local interaction only; the App Server owns host configuration, external protocols and persisted Sessions ([feature list](../feature-list.md)).
+
+| Client | Where | Form | Status | Design |
+| --- | --- | --- | --- | --- |
+| Native CLI `dimcode` | `crates/dim-cli`, `crates/dimcode` | Three interfaces in one executable: the line client (`--no-tui` or no terminal), the scrollback terminal UI (default) and the fullscreen terminal UI; `/tui` switches the two terminal UIs in-process | Implemented | [Tui](plugins/Tui.md), [CLI commands](cli-commands.md), [native CLI contract](../../crates/dim-cli/README.md) |
+| Web workspace | `web/` (Vue 3), entry in `crates/dim-app-server/src/web_entry.rs` | Browser frontend over a loopback-only web entry, opened by `dimcode web` or `/web` | Phase 1 implemented | [Web workspace](web-workspace.md) |
+| Desktop | Its own repository | Desktop application | Outside this repository | This repository owns only the App Server contract it uses (§5) |
+| ACP | — | `dimcode acp`: ACP over stdio for editors, a v3 client like the CLI | Draft, P3, not implemented | [AcpGateway](plugins/AcpGateway.md) |
+| Remote devices | — | Paired devices through RemoteGateway; absorbs the phase-1 web entry | Draft, P3, not implemented | [RemoteGateway](plugins/RemoteGateway.md) |
+
+## 2. What clients share
+
+| Contract | Owner document |
+| --- | --- |
+| Wire protocol v3: framing, `hello` and feature advertisement, notifications | `crates/dim-app-server/src/protocol.rs` (no prose reference exists, §4 item 5); [App Server README](../../crates/dim-app-server/README.md) |
+| Session methods versus management methods, and which entry is served which | [Session boundary](contracts/session-boundary.md) (A.3 entries), [management methods](appserver/management-methods.md) |
+| Reading a Session: `session.attach`, then `session.history` up to a fixed head, then live `session.event`, `session.state`, `session.model.progress`; clients fold these themselves | [Session access](contracts/session-access.md), [CLI commands](cli-commands.md); triage of [#276](https://github.com/arcships/dim/issues/276) |
+| Broadcast notices that are not Timeline facts (`session.notice`, e.g. titles) | [Session notices](appserver/session-notices.md) |
+| Approvals and questions: `approval.request` / `cancelled` / `resolved`; a question is a pending `ask_user` call answered by `session.question.respond` | [ADR 003](../adr/003-approval-scope.md), [Questions](plugins/Questions.md) |
+| Interfaces viewing a Session: the UI registry, terminal UIs as UI leaves (`ui.open`, `ui.attach`, `ui.status`) | [Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves) |
+| Provider management for every client | [Provider management](appserver/provider-management.md) |
+
+The CLI requires protocol v3 and the `session.create` and `session.history` features; the web client and its assets require an exact protocol match ([web workspace §2.4](web-workspace.md)).
+
+## 3. Capability coverage
+
+Rows follow the sections of the [feature list](../feature-list.md), which describes target capabilities of `dimcode`; this table adds the other clients. Legend: **done** implemented; **partial** part implemented; **designed** design exists, not implemented; **none** neither designed nor implemented; **out** out of scope by decision; **—** not applicable or not planned for that client. Desktop is not tracked here (§5).
+
+### 3.1 Providers and models
+
+| Capability | CLI | Web | Source |
+| --- | --- | --- | --- |
+| Sign in, sign out (OAuth, Dim account) | done | — | `/login`, `dimcode login` |
+| API-key Providers, add/edit/test/enable/disable/switch | done; remove and model-list edits: none in the CLI (server supports them) | read-only `provider.*` | [Provider management](appserver/provider-management.md) |
+| Switch model | done | done | `session.model.update` |
+| Reasoning effort, fast mode | done (`/effort`, `/fast`); effort inside `/models`: none | — | [Model configuration](model-configuration.md) |
+| Subagent model policy | designed | — | [Subagent model policy](subagent-model-policy.md), [#263](https://github.com/arcships/dim/issues/263) |
+| Auxiliary models | designed server-side per owner (e.g. SessionTitle); no client UI | — | [AuxiliaryModel](appserver/auxiliary-model.md) |
+
+### 3.2 Session management
+
+| Capability | CLI | Web | Source |
+| --- | --- | --- | --- |
+| New, resume, Session list | done; project/all switch: none | done (grouped by directory) | |
+| Export conversation | done in the line client and `dimcode session export`; inside the terminal UIs: none | — | [CLI commands](cli-commands.md) |
+| `/timeline` and message actions | none | — | overview App. D assigns it to the CLI only |
+| `/history` | done | — | |
+| Titles | automatic: done (optional SessionTitle package); manual rename: designed | — | [SessionTitle](plugins/SessionTitle.md) |
+| Fork | designed in the CLI (server `session.fork` done) | later phase | [Session deletion and fork](appserver/session-deletion-and-fork.md) |
+| Deletion and cleanup | designed in the CLI (server `session.delete` done) | later phase | same |
+| File rollback, file and conversation rollback | out | out | [overview](overview.md) App. A |
+| Request snapshot export | done (`dimcode export`); filters: designed | — | [Timeline export](appserver/timeline-export.md) |
+
+### 3.3 In-session interaction
+
+| Capability | CLI | Web | Source |
+| --- | --- | --- | --- |
+| Send, queue, automatic sending, steer (`Ctrl+S`), interrupt | done | send and stop: done; queue: later phase | InputQueue (S1) |
+| `/queue` panel and queue deletion | none (only Up-withdraw) | — | server contract done (S1) |
+| Retrieve a queued message for editing | done; a message with attachments loses them (§4 item 4) | — | |
+| Multiline, paste, large paste, images, mixed attachments, `@` files, `!` / `!!` | done | attachments: later phase | [CLI attachment input](cli-attachment-input.md), [ShellInput](plugins/ShellInput.md) |
+| Skill references (`$`, `/`, `@`) | partial: palette code exists, no Skills are listed | — | none |
+| Clipboard text, images, files; selection copy; OSC 52 | done | browser | |
+| Message copying through message actions | none | — | |
+| Open links, tool groups, `/tools` | done | done (rendering) | |
+| Streaming output, run status, terminal status and progress | done | done | |
+| File change feedback | done | done | |
+| Tool approvals | done | done | [ADR 003](../adr/003-approval-scope.md) |
+| User questions (`ask_user`) | done (line client and terminal UIs) | none | [Questions](plugins/Questions.md) (implemented in #269, #336, #351) |
+| Todo status | out | out | [overview](overview.md) §1 |
+| Background tasks: commands and members (detail, stop one, stop all) | done | — | [Background-task list](background-task-list.md), [output](background-task-output.md), [member conversation](member-conversation.md) |
+| Background tasks: Workflow runs | designed (proposal) | later phase | [Workflow task view](workflow-task-view.md), [#264](https://github.com/arcships/dim/issues/264) |
+| Member transcript cards | designed | — | [Member conversation](member-conversation.md) §7–9, [#263](https://github.com/arcships/dim/issues/263) |
+
+### 3.4 System management
+
+| Capability | CLI | Web | Source |
+| --- | --- | --- | --- |
+| `/settings`: theme, language, startup form, mouse, notifications, approvals, model | done | later phase (needs a decision on management methods, §6) | |
+| `/settings`: subagent model, auxiliary model, default multimodal model, execution shell, sandbox, prompt language | designed elsewhere, no client UI | — | overview B.1, [Modality](plugins/Modality.md) |
+| `/settings`: VS Code focus, resource monitoring, plan usage display | none | — | |
+| `/settings`: ACP Session display | deferred with AcpGateway | — | [AcpGateway](plugins/AcpGateway.md) A15 |
+| `/usage` | context usage: done; plan quota is shown in the account view, not in `/usage` | — | |
+| `/stats` | out | — | [overview](overview.md) App. A |
+| `/debug`, debug-log configuration | none (only the daemon's `daemon.log`) | — | |
+| `/tui` mode switch | done | — | [Tui](plugins/Tui.md) |
+| Version and upgrade | done (upgrade dialog); `dimcode upgrade` subcommand: none | — | |
+| Web access (`/web`, `dimcode web`) | done | — | [Web workspace](web-workspace.md) |
+
+## 4. Gaps and conflicts
+
+Undesigned capabilities from §3, in feature-list order:
+
+1. `/timeline` and message actions, including message copying.
+2. The `/queue` panel and queue deletion (the server contract exists).
+3. Skill references through `$`, `/`, `@` (the palette code exists, nothing feeds it).
+4. Retrieving a queued message that has attachments: `QueuedInput` keeps only text, so the attachments are lost. Either the client refuses it, as the feature list says, or the queue keeps the attachments.
+5. A prose reference for protocol v3: the wire is defined only in `protocol.rs`, and its description is spread over the App Server README and per-feature designs.
+6. Questions in the Web workspace: it handles approvals but not `ask_user`, and web-workspace §4 does not list it as deferred.
+7. Session list project/all switch, `/debug`, the remaining `/settings` items, export inside the terminal UIs, `dimcode upgrade`.
+
+Documents that disagree with the code or with each other:
+
+| Statement | Where | Fact |
+| --- | --- | --- |
+| Only scrollback is designed; fullscreen-only items (rollback, mouse, `/stats`) are out of scope | [overview](overview.md) line 15, App. A | The fullscreen terminal UI, its mouse mode and `/tui` are implemented and documented in the [native CLI contract](../../crates/dim-cli/README.md); rollback and `/stats` are not |
+| F6 does not implement a fullscreen interface | [CLI commands](cli-commands.md) | Same as above |
+| `/web` is new work for RemoteGateway | [overview](overview.md) App. A | Delivered by the phase-1 web entry |
+| Remote entries never get management methods; no web entry in the entries table | [Session boundary](contracts/session-boundary.md) A.3, [RemoteGateway](plugins/RemoteGateway.md) | The web entry serves read-only `provider.list`, `provider.catalog`, `provider.selection` ([web workspace §2.5](web-workspace.md)) |
+| RemoteGateway does not reference the web entry that implements part of it | [RemoteGateway](plugins/RemoteGateway.md) | [Web workspace](web-workspace.md) §2.6 lists the differences |
+
+## 5. This repository and Desktop
+
+Desktop lives in its own repository. This repository owns the App Server contract that Desktop uses and nothing of its UI. The rule from the Desktop triage ([#276](https://github.com/arcships/dim/issues/276)–[#281](https://github.com/arcships/dim/issues/281)) is that the App Server changes only where existing facts and mechanisms cannot back a capability; the triage answered each gap without a protocol change:
+
+| Desktop need | Answer |
+| --- | --- |
+| Current turn, branch head, live Session list | Derived from history and polling `session.summaries` ([#276](https://github.com/arcships/dim/issues/276)) |
+| Rename and goal on the stock daemon | `--session-rows` installs SessionTitle and Goal ([#277](https://github.com/arcships/dim/issues/277), #290) |
+| Approval outcome, pending question | `approval.resolved` (#289); a pending question is read from history ([#278](https://github.com/arcships/dim/issues/278)) |
+| Attachment read, archive, file history | Attachment path from `attachment.put`; archive is client-local; rewind is `session.fork` ([#279](https://github.com/arcships/dim/issues/279)) |
+| Branch metadata, rename, per-branch model | From `branch/*` facts; rename client-local; per-branch model not built ([#280](https://github.com/arcships/dim/issues/280)) |
+| Local tools, edit/retry, usage, subagent relations | Client-run MCP server; `session.fork` + `session.submit`; client-side usage; `collaboration/*` facts ([#281](https://github.com/arcships/dim/issues/281)) |
+
+Desktop's own feature coverage and UI acceptance are tracked in its repository. A capability that this repository's contracts cannot back becomes an issue here, under the same rule.
+
+## 6. Decisions for the maintainer
+
+1. **Fullscreen terminal UI.** The code ships it; the overview says it is out of scope. Either accept it in scope (update the overview and CLI commands, and decide whether rollback and `/stats` stay out) or freeze it.
+2. **Web phase 2 scope**, including whether the loopback web entry may carry management methods for settings pages (web-workspace Q2), and whether Questions is required in the Web workspace.
+3. **Which §4 gaps get designs**, and in which milestone: `/timeline` and message actions, `/queue`, Skill references, queued attachments.
+4. **A protocol v3 reference** (§4 item 5): write one, or keep the code as the reference.
+5. **Milestones for the open client issues**: [#263](https://github.com/arcships/dim/issues/263) (member transcript cards, subagent model policy runtime), [#264](https://github.com/arcships/dim/issues/264) (Workflow view), [#386](https://github.com/arcships/dim/issues/386) (UI events toward the agent).
+6. **Owner of the client lane** in the roadmap.
