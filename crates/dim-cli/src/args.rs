@@ -136,6 +136,9 @@ pub struct Options {
     pub device: bool,
     /// Set only for a hosted leaf `Tui`.
     pub ui_identity: Option<UiIdentity>,
+    /// The hosted leaf's Session was created by this invocation, so `resume`
+    /// names a new Session rather than one the user chose to resume.
+    pub created_session: bool,
     /// Use the scrollback client instead of the full terminal UI.
     pub no_tui: bool,
     /// Terminal UI mode for this run; `None` uses the saved default.
@@ -165,6 +168,7 @@ impl Options {
             directory: None,
             device: false,
             ui_identity: None,
+            created_session: false,
             no_tui: false,
             fullscreen: None,
             refresh: false,

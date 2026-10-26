@@ -460,7 +460,12 @@ impl Worker {
     /// Creates or resumes the session the process was started for.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
-            return self.attach(id, SwitchKind::Resumed).await;
+            let kind = if self.options.created_session {
+                SwitchKind::New
+            } else {
+                SwitchKind::Resumed
+            };
+            return self.attach(id, kind).await;
         }
         let attached_session = self.invalidate_projection();
         let mut params = self.create_params();
