@@ -307,7 +307,8 @@ impl Client {
         serde_json::from_value(value).map_err(|_| format!("Invalid {method} response").into())
     }
 
-    async fn hello(&mut self, profile: Option<&DaemonProfile>) -> Result<()> {
+    /// Checks the daemon can serve this CLI and returns its version.
+    async fn hello(&mut self, profile: Option<&DaemonProfile>) -> Result<String> {
         let hello: Hello = tokio::time::timeout(Duration::from_secs(5), self.typed("hello", json!({"protocolVersion":PROTOCOL_VERSION,"clientKind":"cli","clientName":"dimcode"}))).await??;
         if hello.protocol_version != PROTOCOL_VERSION
             || hello.instance_id.is_empty()
@@ -331,7 +332,7 @@ impl Client {
             .iter()
             .any(|feature| feature == "daemon.shutdown.completed");
         self.features = hello.features;
-        Ok(())
+        Ok(hello.server_version)
     }
 
     /// Whether the server's hello offered `feature` (a method name, or a
@@ -548,8 +549,14 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     let binary = &server.program;
     match Client::open(&endpoint, &server, false).await {
         Ok(mut client) => {
-            client.hello(profile.as_ref()).await?;
-            return Ok(Some(client));
+            let version = client.hello(profile.as_ref()).await?;
+            // A daemon this executable would start but of another version
+            // (left running across an upgrade) is replaced: it would serve
+            // that version's tools and behavior to this CLI.
+            if !(start && server.embedded && version != env!("CARGO_PKG_VERSION")) {
+                return Ok(Some(client));
+            }
+            shutdown(client).await?;
         }
         Err(error) if missing(&error) => {}
         Err(error) => return Err(error.into()),
