@@ -7,10 +7,10 @@
 | 项目 | 验收值 |
 | --- | --- |
 | 日期 / 平台 | 2026-10-26，macOS arm64 |
-| 实现源码 commit | `d48751723ece05b976dc6dd3590a54559f91873f` |
-| Native executable | `dimcode 0.1.0-alpha.5`，本仓库 `cargo build --locked -p dimcode`，Mach-O arm64 |
-| Executable SHA-256 | `f81009194865a2e6f580fcada8e316db43e1ac49aa5a559646b298bc2b600b81` |
-| Cargo.lock SHA-256 | `70db7931ea58e9ffd0e90dcf4c3062923620dcd4a1e1a3cc4dde84de3042b811` |
+| 实现源码 commit | `0c3f12d75f0c62af45d1cb9f6ee6f248d535570b` |
+| Native executable | `dimcode 0.1.0-alpha.6`，本仓库 `cargo build --locked -p dimcode`，Mach-O arm64 |
+| Executable SHA-256 | `e449baef8ec14ba108d767a2bbb841b7b440b79664b8b1f6193296c1cfb4efe1` |
+| Cargo.lock SHA-256 | `41ce54e8ffcddcfb2d9c7994be37779b538d1fc37b3a7a9c07ba9def0a366fd5` |
 | ACP | protocol v1；Rust SDK 3.5.0，schema 1.12.0；源协议及 Lody Core 固定版本见合同 §2 |
 | acpx | 0.7.0 |
 | Lody | Nightly 0.109.0-nightly.0，build 1.1.39 |
@@ -21,14 +21,14 @@
 
 | 范围 | 结果 / 证据 |
 | --- | --- |
-| CLI compatibility | `cli_flow -- --skip acp_stdio_recovery_deadline`：111 passed，11 ignored，1 filtered；本轮没有复跑被过滤的恢复截止用例 |
+| CLI compatibility | `cli_flow -- --skip acp_stdio_recovery_deadline`：120 passed，11 ignored，1 filtered；包括当前 CLI 的旧 daemon 替换行为。本轮没有复跑被过滤的恢复截止用例 |
 | ACP stdio | 回归覆盖现有 ACP 和 terminal-auth helper；两个临时 MCP stdio flows（含 Node opt-in）另行执行通过 |
 | 临时 MCP | native MCP Session suite 13 passed，含真实 30 秒租约过期、失败清理、Session 隔离、无设置写入和真实工具调用；工具列表变更另行复核通过 |
 | 既有 MCP | `mcp_flow` 5 passed；`mcp_http_flow` 7 passed、4 ignored。原有配置、连接代际、HTTP/SSE、取消和关闭行为回归通过 |
 | 共享传输 | `dim-client` 两个公共连接/callback 测试通过；身份/profile 校验、交错响应、半帧取消和受限 loopback callback |
 | Browser authentication | `dim-acp` 三个公共宿主 flow 通过：真实 callback listener/native complete、请求取消、EOF 时先取消自己的 pending attempt 再释放 RPC |
 | 静态检查 | 受影响 crate 的 all-target Clippy、格式和 whitespace 检查通过 |
-| 架构 | xtask source/crate boundaries、20 个 plugin documents、service catalog 通过；355 modules / 2067 edges；graph 由 xtask 生成 |
+| 架构 | xtask source/crate boundaries、20 个 plugin documents、service catalog 与 service declarations 通过；357 modules / 2122 edges；graph 由 xtask 生成 |
 
 流程使用真实 `dimcode acp` stdio 和公开 RPC socket，而不是替代 App Server trait。production flow 连接本次构建的 App Server 和 loopback HTTP 模型，得到 `ACP_REAL_OK`。
 
