@@ -1,9 +1,11 @@
-//! The `/tasks` panel: what runs apart from the turn, a background command
-//! or a member agent, from the session's snapshot. Command details show the
-//! existing tail preview; members have a separate read-only conversation.
+//! The `/tasks` panel: what runs apart from the turn, a background command,
+//! a member agent or a Workflow run, from the session's snapshot. Command
+//! details show the existing tail preview; members have a separate read-only
+//! conversation; Workflow details show the owner's stored stages and logs.
 
 use crate::model::view::{
-    MemberConversationState, RowKind, TaskKind, TaskOutputState, TaskTarget, TaskView, ViewSnapshot,
+    MemberConversationState, RowKind, TaskKind, TaskOutputState, TaskTarget, TaskView,
+    ViewSnapshot, WorkflowInventory, WorkflowView,
 };
 use crate::sanitize::safe;
 use crate::ui::i18n::t;
@@ -18,6 +20,7 @@ use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
 use crate::ui::transcript::block::{opens_group, project_row};
 use crate::ui::transcript::tool_group::Detail as ToolDetail;
+use crate::wire::{StageState, WorkflowReport, WorkflowState};
 use std::cell::Cell;
 
 const HINT: &str = "Enter details · x stop selected · Ctrl+X stop all · Esc close";
@@ -26,6 +29,10 @@ pub struct TasksPanel {
     session_id: String,
     pub projection_id: u64,
     history_incomplete: bool,
+    workflow_incomplete: bool,
+    workflow_stop: bool,
+    /// The opened Workflow detail left the inventory.
+    gone: bool,
     updated_second: u64,
     list: ListPanel,
     tasks: Vec<TaskView>,
@@ -49,6 +56,7 @@ enum DetailBody {
         state: MemberConversationState,
     },
     Result,
+    Workflow,
 }
 
 impl TasksPanel {
@@ -57,6 +65,9 @@ impl TasksPanel {
             session_id: snapshot.session_id.clone(),
             projection_id: snapshot.projection_id,
             history_incomplete: false,
+            workflow_incomplete: false,
+            workflow_stop: false,
+            gone: false,
             updated_second: 0,
             list: ListPanel::new(
                 "Background tasks",
@@ -78,6 +89,11 @@ impl TasksPanel {
         self.tasks = snapshot.tasks.clone();
         self.history_incomplete =
             snapshot.task_history_loading != 0 || !snapshot.task_history_errors.is_empty();
+        self.workflow_incomplete = matches!(
+            snapshot.workflow,
+            WorkflowInventory::Loading | WorkflowInventory::Failed { .. }
+        );
+        self.workflow_stop = snapshot.workflow_stop;
         let mut items = Vec::new();
         if snapshot.task_history_loading != 0 {
             let mut item = Item::heading(t("Loading branch history... Stop-all unavailable"));
@@ -93,6 +109,36 @@ impl TasksPanel {
             item.sticky = true;
             items.push(item);
         }
+        let workflow = match &snapshot.workflow {
+            WorkflowInventory::Absent | WorkflowInventory::Ready => None,
+            WorkflowInventory::Loading => {
+                Some(t("Loading Workflow runs... Stop-all unavailable").to_owned())
+            }
+            WorkflowInventory::Failed {
+                error,
+                observed: true,
+            } => Some(format!(
+                "{}: {}",
+                t("Workflow: last observed; refresh failed, reopen to retry"),
+                safe(error)
+            )),
+            WorkflowInventory::Failed {
+                error,
+                observed: false,
+            } => Some(format!(
+                "{}: {}",
+                t("Workflow runs unavailable; reopen to retry"),
+                safe(error)
+            )),
+        };
+        let gone = self
+            .gone
+            .then(|| t("The selected Workflow run is no longer available").to_owned());
+        for text in workflow.into_iter().chain(gone) {
+            let mut item = Item::heading(text);
+            item.sticky = true;
+            items.push(item);
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -102,14 +148,27 @@ impl TasksPanel {
             let kind = match &task.kind {
                 TaskKind::Command(_) => t("command"),
                 TaskKind::Member { .. } => t("agent"),
+                TaskKind::Workflow(_) => t("workflow"),
             };
-            let status = task.finished.as_ref().map_or_else(
-                || match &task.kind {
-                    TaskKind::Member { session_id: None } => t("Starting"),
-                    _ => t("Running"),
-                },
-                |finish| t(finish.status),
-            );
+            let mut status = task
+                .finished
+                .as_ref()
+                .map_or_else(
+                    || match &task.kind {
+                        TaskKind::Member { session_id: None } => t("Starting"),
+                        TaskKind::Workflow(view) if view.run.state == WorkflowState::Stopping => {
+                            t("Stopping")
+                        }
+                        _ => t("Running"),
+                    },
+                    |finish| t(finish.status),
+                )
+                .to_owned();
+            if let TaskKind::Workflow(view) = &task.kind
+                && view.unavailable
+            {
+                status = format!("{status} · {}", t("last observed"));
+            }
             let elapsed = task
                 .finished
                 .as_ref()
@@ -128,11 +187,24 @@ impl TasksPanel {
             )
         }));
         self.list.set_items(Ok(items), selected.as_deref());
-        if let Some(detail) = &mut self.detail
-            && let Some(task) = self
+        if let Some(detail) = &self.detail
+            && matches!(detail.body, DetailBody::Workflow)
+            && !self
                 .tasks
                 .iter()
-                .find(|task| task.id == detail.task.id && task.branch_id == detail.task.branch_id)
+                .any(|task| matches!(task.kind, TaskKind::Workflow(_)) && task.id == detail.task.id)
+        {
+            self.detail = None;
+            self.gone = true;
+            self.set_tasks(snapshot);
+            return;
+        }
+        if let Some(detail) = &mut self.detail
+            && let Some(task) = self.tasks.iter().find(|task| {
+                task.id == detail.task.id
+                    && (task.branch_id == detail.task.branch_id
+                        || matches!(task.kind, TaskKind::Workflow(_)))
+            })
         {
             detail.task = task.clone();
             if let DetailBody::Command { text, state } = &mut detail.body
@@ -180,6 +252,26 @@ impl TasksPanel {
             TaskKind::Member { session_id: None } => {
                 Effect::Notice(t("Agent is starting; no member Session to stop yet").into())
             }
+            TaskKind::Workflow(view) => match self.workflow_stoppable(view) {
+                Ok(()) => Effect::StopWorkflow {
+                    session_id: self.session_id.clone(),
+                    projection_id: self.projection_id,
+                    run_id: view.run.run_id.clone(),
+                },
+                Err(Some(notice)) => Effect::Notice(notice.into()),
+                Err(None) => Effect::None,
+            },
+        }
+    }
+
+    /// Only a running run without a pending stop can be stopped again.
+    fn workflow_stoppable(&self, view: &WorkflowView) -> Result<(), Option<&'static str>> {
+        if !self.workflow_stop {
+            Err(Some(t("Workflow stop unavailable")))
+        } else if view.run.state == WorkflowState::Running && !view.stop_pending {
+            Ok(())
+        } else {
+            Err(None)
         }
     }
 
@@ -191,6 +283,7 @@ impl TasksPanel {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        self.gone = false;
         if let Some(detail) = &self.detail {
             if key.code == KeyCode::Char('x') && key.mods == Modifiers::NONE {
                 if matches!(
@@ -223,6 +316,8 @@ impl TasksPanel {
         if key.code == KeyCode::Char('x') && key.mods == Modifiers::CTRL {
             return if self.history_incomplete {
                 Effect::Notice(t("Branch history is incomplete; stop-all unavailable").into())
+            } else if self.workflow_incomplete {
+                Effect::Notice(t("Workflow inventory is incomplete; stop-all unavailable").into())
             } else {
                 Effect::StopTasks {
                     session_id: self.session_id.clone(),
@@ -274,6 +369,7 @@ impl TasksPanel {
                                 t("Agent is starting; no member Session to stop yet").into(),
                             );
                         }
+                        TaskKind::Workflow(_) => DetailBody::Workflow,
                     };
                 self.detail = Some(Box::new(Detail {
                     task,
@@ -489,6 +585,37 @@ impl TasksPanel {
                     hint = "x interrupt member · Esc back";
                 }
             }
+            DetailBody::Workflow => {
+                let TaskKind::Workflow(view) = &detail.task.kind else {
+                    unreachable!("workflow detail has a run")
+                };
+                title = format!("{title} - {}", t("workflow"));
+                content.extend(
+                    wrap_cells(
+                        &format!(
+                            "{}: {} · {}: {} · {}",
+                            t("Run"),
+                            safe(&view.run.run_id),
+                            t("Source"),
+                            safe(&view.run.source),
+                            t(workflow_state(view.run.state)),
+                        ),
+                        inner,
+                    )
+                    .into_iter()
+                    .map(|line| fg(&line, &p.muted)),
+                );
+                if view.unavailable {
+                    content.push(fg(
+                        &truncate_cells(t("Run no longer available; last observed record"), inner),
+                        &p.danger,
+                    ));
+                }
+                lines.extend(workflow_lines(view, inner, p));
+                if self.workflow_stoppable(view).is_ok() {
+                    hint = "x stop workflow · Esc back";
+                }
+            }
             DetailBody::Result => {
                 let finish = detail
                     .task
@@ -522,4 +649,72 @@ impl TasksPanel {
             Some(&key_hints(t(hint), p)),
         )
     }
+}
+
+fn workflow_state(state: WorkflowState) -> &'static str {
+    match state {
+        WorkflowState::Running => "Running",
+        WorkflowState::Stopping => "Stopping",
+        WorkflowState::Completed => "Completed",
+        WorkflowState::Failed => "Failed",
+        WorkflowState::Stopped => "Stopped",
+        WorkflowState::Interrupted => "Interrupted",
+    }
+}
+
+fn stage_state(state: StageState) -> &'static str {
+    match state {
+        StageState::Waiting => "waiting",
+        StageState::Launching => "launching",
+        StageState::Running => "running",
+        StageState::Completed => "completed",
+        StageState::Failed => "failed",
+        StageState::Stopped => "stopped",
+        StageState::Skipped => "skipped",
+        StageState::Lost => "lost",
+    }
+}
+
+/// The stored stages, their results, the log and the report settlement.
+fn workflow_lines(view: &WorkflowView, width: usize, p: &Palette) -> Vec<String> {
+    let run = &view.run;
+    let text = |text: &str| {
+        wrap_cells(&safe(text), width)
+            .into_iter()
+            .map(|line| fg(&line, &p.text))
+    };
+    let mut lines = vec![fg(t("Stages"), &p.muted)];
+    for stage in &run.stages {
+        lines.extend(text(&format!(
+            "{}  {}  {}  {}",
+            stage.step + 1,
+            stage.id,
+            t(stage_state(stage.state)),
+            stage.session_id.as_deref().unwrap_or("-"),
+        )));
+    }
+    for stage in &run.stages {
+        if let Some(result) = stage.result_text.as_ref().or(stage.reason.as_ref()) {
+            lines.push(String::new());
+            lines.push(fg(
+                &truncate_cells(&format!("{} {}", safe(&stage.id), t("result")), width),
+                &p.muted,
+            ));
+            lines.extend(text(result));
+        }
+    }
+    lines.push(String::new());
+    lines.push(fg(t("Log"), &p.muted));
+    lines.extend(run.log.iter().flat_map(|entry| text(&entry.message)));
+    lines.push(String::new());
+    let report = match &run.report {
+        WorkflowReport::None {} => t("none").to_owned(),
+        WorkflowReport::Pending {} => t("pending").to_owned(),
+        WorkflowReport::Delivered {} => t("delivered").to_owned(),
+        WorkflowReport::Undeliverable { reason } => {
+            format!("{}: {reason}", t("undeliverable"))
+        }
+    };
+    lines.extend(text(&format!("{}: {report}", t("Report"))));
+    lines
 }

@@ -24,15 +24,17 @@ use crate::model::session::{
     Account, Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, ProviderAction,
     ProviderEntry, SessionItem, SessionPort, SwitchKind, Update,
 };
-use crate::model::view::{TaskOutputState, TaskTarget};
+use crate::model::view::{TaskOutputState, TaskTarget, WorkflowInventory};
 use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
 use crate::{configure, mcp, permission, update};
 
 mod member;
 mod tasks;
+mod workflow;
 use member::MemberObservation;
 use tasks::{BranchHistory, HistoryRequest, StopBatch};
+use workflow::WorkflowReads;
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
@@ -173,6 +175,7 @@ struct Worker {
     /// A stale request still occupies this slot until its reply arrives.
     task_history_request: Option<HistoryRequest>,
     task_stops: Option<StopBatch>,
+    workflow: WorkflowReads,
     member: Option<MemberObservation>,
     desired_member: Option<(u64, String)>,
     output: Option<OutputWatch>,
@@ -269,6 +272,7 @@ async fn run(
         task_history_queue: Default::default(),
         task_history_request: None,
         task_stops: None,
+        workflow: WorkflowReads::default(),
         member: None,
         desired_member: None,
         output: None,
@@ -309,6 +313,11 @@ async fn run(
             break;
         }
         worker.poll_task_stops().await;
+        worker.poll_workflow().await;
+        let workflow_poll = worker
+            .workflow
+            .next_at
+            .filter(|_| worker.workflow.request.is_none());
         let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
         let output_poll = worker
             .output
@@ -347,6 +356,9 @@ async fn run(
                 },
             _ = tokio::time::sleep_until(login_poll.unwrap_or_else(tokio::time::Instant::now)),
                 if login_poll.is_some() => worker.poll_login().await,
+            // The next pass sends the due status read.
+            _ = tokio::time::sleep_until(workflow_poll.unwrap_or_else(tokio::time::Instant::now)),
+                if workflow_poll.is_some() => {},
             // The deadline is set by the first change and kept: a sleep made
             // afresh on every pass would restart with each event and hold the
             // snapshot back until the stream paused.
@@ -1046,8 +1058,14 @@ impl Worker {
             Command::TaskHistory { projection_id } => {
                 if projection_id == self.projection_id {
                     self.retry_task_history();
+                    self.discover_workflows();
                 }
             }
+            Command::StopWorkflow {
+                session_id,
+                projection_id,
+                run_id,
+            } => self.stop_workflow(session_id, projection_id, run_id).await,
             Command::StopTasks {
                 session_id,
                 projection_id,
@@ -2235,9 +2253,22 @@ impl Worker {
             batch
                 .request
                 .as_ref()
-                .is_some_and(|(request, _)| *request == id)
+                .is_some_and(|(request, _, _)| *request == id)
         }) {
             self.task_stop_reply(result);
+            return Ok(());
+        }
+        if self
+            .workflow
+            .request
+            .as_ref()
+            .is_some_and(|request| request.id == id)
+        {
+            self.workflow_reply(result);
+            return Ok(());
+        }
+        if let Some(index) = self.workflow.stops.iter().position(|stop| stop.id == id) {
+            self.workflow_stop_reply(index, result);
             return Ok(());
         }
         if self
@@ -2317,6 +2348,7 @@ impl Worker {
             return;
         }
         *cursor = event.sequence;
+        self.discover_workflow(&event);
         if branch_id == "main"
             && let EventContent::Configuration(configuration) = &event.content
         {
@@ -2399,6 +2431,10 @@ impl Worker {
             .filter_map(|(id, branch)| branch.error.as_ref().map(|error| format!("{id}: {error}")))
             .collect();
         snapshot.task_history_errors.sort();
+        snapshot.workflow = self
+            .workflow
+            .inventory(self.client.supports(&["workflow.status"]));
+        snapshot.workflow_stop = self.client.supports(&["workflow.stop"]);
         self.send(Update::Snapshot(Box::new(snapshot)));
         self.publish_member();
     }

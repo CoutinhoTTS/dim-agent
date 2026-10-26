@@ -36,6 +36,40 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Completed" => "已完成",
         "Failed" => "失败",
         "Cancelled" => "已取消",
+        "workflow" => "工作流",
+        "Stopping" => "正在停止",
+        "Stopped" => "已停止",
+        "Interrupted" => "已中断",
+        "last observed" => "最后观测",
+        "Loading Workflow runs... Stop-all unavailable" => "正在读取工作流运行… 暂不能停止全部",
+        "Workflow: last observed; refresh failed, reopen to retry" => {
+            "工作流：显示最后观测结果；刷新失败，重新打开重试"
+        }
+        "Workflow runs unavailable; reopen to retry" => "工作流运行不可用；重新打开重试",
+        "The selected Workflow run is no longer available" => "所选工作流运行已不可用",
+        "Workflow inventory is incomplete; stop-all unavailable" => {
+            "工作流列表尚未读完，暂不能停止全部"
+        }
+        "Workflow stop unavailable" => "无法停止工作流",
+        "Run no longer available; last observed record" => "运行已不可用；显示最后观测记录",
+        "x stop workflow · Esc back" => "x 停止工作流 · Esc 返回",
+        "Run" => "运行",
+        "Source" => "来源",
+        "Stages" => "阶段",
+        "result" => "结果",
+        "Log" => "日志",
+        "Report" => "报告",
+        "waiting" => "等待中",
+        "launching" => "启动中",
+        "completed" => "已完成",
+        "failed" => "失败",
+        "stopped" => "已停止",
+        "skipped" => "已跳过",
+        "lost" => "已丢失",
+        "none" => "无",
+        "pending" => "待发送",
+        "delivered" => "已送达",
+        "undeliverable" => "无法送达",
         "Agent is starting; no member Session to stop yet" => {
             "智能体正在启动，尚无可停止的成员会话"
         }

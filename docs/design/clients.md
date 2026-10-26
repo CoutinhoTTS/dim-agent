@@ -105,7 +105,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | User questions (`ask_user`) | done (line client and terminal UIs) | none | [Questions](plugins/Questions.md) (implemented in #269, #336, #351) |
 | Todo status | out | out | [overview](overview.md) §1 |
 | Background tasks: commands and members (detail, stop one, stop all) | done | — | [Background-task list](background-task-list.md), [output](background-task-output.md), [member conversation](member-conversation.md) |
-| Background tasks: Workflow runs | designed (proposal) | later phase | [Workflow task view](workflow-task-view.md), [#264](https://github.com/arcships/dim/issues/264) |
+| Background tasks: Workflow runs | done | later phase | [Workflow task view](workflow-task-view.md), [#264](https://github.com/arcships/dim/issues/264) |
 | Member transcript cards | designed | — | [Member conversation](member-conversation.md) §7–9, [#263](https://github.com/arcships/dim/issues/263) |
 
 ### 3.4 System management

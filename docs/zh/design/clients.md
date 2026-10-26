@@ -105,7 +105,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | 用户提问（`ask_user`） | 已实现（行模式客户端与终端界面） | 无 | [Questions](plugins/Questions.md)（由 #269、#336、#351 实现） |
 | 待办状态 | 不做 | 不做 | [总体设计](overview.md) §1 |
 | 后台任务：命令与成员（详情、停止单个、全部停止） | 已实现 | — | [后台任务列表](../../design/background-task-list.md)、[输出](../../design/background-task-output.md)、[成员会话](../../design/member-conversation.md) |
-| 后台任务：Workflow 运行 | 已设计（提案） | 后续阶段 | [Workflow 任务视图](../../design/workflow-task-view.md)、[#264](https://github.com/arcships/dim/issues/264) |
+| 后台任务：Workflow 运行 | 已完成 | 后续阶段 | [Workflow 任务视图](../../design/workflow-task-view.md)、[#264](https://github.com/arcships/dim/issues/264) |
 | 成员 transcript 卡片 | 已设计 | — | [成员会话](../../design/member-conversation.md) §7–9、[#263](https://github.com/arcships/dim/issues/263) |
 
 ### 3.4 系统管理

@@ -2156,6 +2156,7 @@
       "file": "crates/dim-cli/src/client.rs",
       "unexpandedMacros": [
         "cfg",
+        "env",
         "format",
         "json",
         "matches",
@@ -2447,7 +2448,8 @@
       "file": "crates/dim-cli/src/projection.rs",
       "unexpandedMacros": [
         "format",
-        "matches"
+        "matches",
+        "unreachable"
       ]
     },
     {
@@ -2540,6 +2542,17 @@
         "format",
         "json",
         "unreachable"
+      ]
+    },
+    {
+      "id": "dim_cli::session_host::workflow",
+      "crate": "dim_cli",
+      "parent": "dim_cli::session_host",
+      "file": "crates/dim-cli/src/session_host/workflow.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches"
       ]
     },
     {
@@ -3106,7 +3119,8 @@
       "unexpandedMacros": [
         "format",
         "matches",
-        "unreachable"
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -3483,6 +3497,7 @@
         "assert",
         "assert_eq",
         "format",
+        "panic",
         "vec"
       ]
     },
@@ -3554,7 +3569,9 @@
       "crate": "dim_cli",
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/wire.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "matches"
+      ]
     }
   ],
   "edges": [
@@ -18790,6 +18807,13 @@
       ]
     },
     {
+      "from": "dim_cli::model::view",
+      "to": "dim_cli::wire",
+      "references": [
+        "path crate::wire::WorkflowRun"
+      ]
+    },
+    {
       "from": "dim_cli::permission",
       "to": "dim_agent_types::events",
       "references": [
@@ -19081,6 +19105,7 @@
         "path TaskFinish",
         "path TaskKind::Command",
         "path TaskKind::Member",
+        "path TaskKind::Workflow",
         "path TaskTarget",
         "path TaskView",
         "path TurnEnd",
@@ -19090,6 +19115,7 @@
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default",
+        "path WorkflowView",
         "use crate::model::view::ApprovalView",
         "use crate::model::view::QueuedInput",
         "use crate::model::view::RowKind",
@@ -19100,7 +19126,8 @@
         "use crate::model::view::TaskView",
         "use crate::model::view::TurnEnd",
         "use crate::model::view::ViewRow",
-        "use crate::model::view::ViewSnapshot"
+        "use crate::model::view::ViewSnapshot",
+        "use crate::model::view::WorkflowView"
       ]
     },
     {
@@ -19147,9 +19174,18 @@
         "path EventContent::ToolUse",
         "path EventContent::TurnEnd",
         "path Progress",
+        "path WorkflowRun",
+        "path WorkflowState::Completed",
+        "path WorkflowState::Failed",
+        "path WorkflowState::Interrupted",
+        "path WorkflowState::Running",
+        "path WorkflowState::Stopped",
+        "path WorkflowState::Stopping",
         "use crate::wire::Event",
         "use crate::wire::EventContent",
-        "use crate::wire::Progress"
+        "use crate::wire::Progress",
+        "use crate::wire::WorkflowRun",
+        "use crate::wire::WorkflowState"
       ]
     },
     {
@@ -19577,6 +19613,7 @@
         "path Command::StopQuestion",
         "path Command::StopTask",
         "path Command::StopTasks",
+        "path Command::StopWorkflow",
         "path Command::Submit",
         "path Command::SubmitDraft",
         "path Command::TaskHistory",
@@ -19656,7 +19693,8 @@
         "path TaskOutputState::Unsupported",
         "path TaskTarget",
         "use crate::model::view::TaskOutputState",
-        "use crate::model::view::TaskTarget"
+        "use crate::model::view::TaskTarget",
+        "use crate::model::view::WorkflowInventory"
       ]
     },
     {
@@ -19730,6 +19768,16 @@
         "use tasks::BranchHistory",
         "use tasks::HistoryRequest",
         "use tasks::StopBatch"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::session_host::workflow",
+      "references": [
+        "mod workflow",
+        "path WorkflowReads",
+        "path WorkflowReads::default",
+        "use workflow::WorkflowReads"
       ]
     },
     {
@@ -19854,6 +19902,7 @@
         "path TaskKind",
         "path TaskKind::Command",
         "path TaskKind::Member",
+        "path TaskKind::Workflow",
         "use crate::model::view::TaskKind"
       ]
     },
@@ -19874,12 +19923,80 @@
     },
     {
       "from": "dim_cli::session_host::tasks",
+      "to": "dim_cli::session_host::workflow",
+      "references": [
+        "path workflow"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
       "to": "dim_cli::wire",
       "references": [
         "path Event",
         "path EventContent::BranchCreate",
         "path EventContent::BranchCreateFailed",
-        "path EventContent::BranchStart"
+        "path EventContent::BranchStart",
+        "path crate::wire::WorkflowState::Running"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::workflow",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::InputBlock::Raw"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::workflow",
+      "to": "dim_cli::client",
+      "references": [
+        "path client::RpcError"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::workflow",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path Update::Notice"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::workflow",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path WorkflowInventory",
+        "path WorkflowInventory::Absent",
+        "path WorkflowInventory::Failed",
+        "path WorkflowInventory::Loading",
+        "path WorkflowInventory::Ready"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::workflow",
+      "to": "dim_cli::session_host",
+      "references": [
+        "path Worker",
+        "path app_error",
+        "path run"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::workflow",
+      "to": "dim_cli::wire",
+      "references": [
+        "path Event",
+        "path EventContent::Input",
+        "path EventContent::ToolCall",
+        "path EventContent::ToolCompleted",
+        "path EventContent::ToolResult",
+        "path WorkflowRun",
+        "path WorkflowState::Running",
+        "path workflow_report",
+        "path workflow_tool_run",
+        "use crate::wire::WorkflowRun",
+        "use crate::wire::WorkflowState",
+        "use crate::wire::workflow_report",
+        "use crate::wire::workflow_tool_run"
       ]
     },
     {
@@ -22066,13 +22183,6 @@
     },
     {
       "from": "dim_cli::ui::render::screen",
-      "to": "dim_cli::ui::render::panel",
-      "references": [
-        "path crate::ui::render::panel::visible_width"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::render::screen",
       "to": "dim_cli::ui::render::screen::tests",
       "references": [
         "mod tests"
@@ -22420,6 +22530,7 @@
         "path RowKind::ToolCall",
         "path TaskKind::Command",
         "path TaskKind::Member",
+        "path TaskKind::Workflow",
         "path TaskOutputState",
         "path TaskOutputState::Finished",
         "path TaskOutputState::Live",
@@ -22430,13 +22541,20 @@
         "path TaskTarget",
         "path TaskView",
         "path ViewSnapshot",
+        "path WorkflowInventory::Absent",
+        "path WorkflowInventory::Failed",
+        "path WorkflowInventory::Loading",
+        "path WorkflowInventory::Ready",
+        "path WorkflowView",
         "use crate::model::view::MemberConversationState",
         "use crate::model::view::RowKind",
         "use crate::model::view::TaskKind",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::TaskView",
-        "use crate::model::view::ViewSnapshot"
+        "use crate::model::view::ViewSnapshot",
+        "use crate::model::view::WorkflowInventory",
+        "use crate::model::view::WorkflowView"
       ]
     },
     {
@@ -22483,6 +22601,7 @@
         "path Effect::StopMember",
         "path Effect::StopTask",
         "path Effect::StopTasks",
+        "path Effect::StopWorkflow",
         "use crate::ui::prompts::Effect"
       ]
     },
@@ -22581,6 +22700,35 @@
       "references": [
         "path ToolDetail::Expanded",
         "use crate::ui::transcript::tool_group::Detail"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_cli::wire",
+      "references": [
+        "path StageState",
+        "path StageState::Completed",
+        "path StageState::Failed",
+        "path StageState::Launching",
+        "path StageState::Lost",
+        "path StageState::Running",
+        "path StageState::Skipped",
+        "path StageState::Stopped",
+        "path StageState::Waiting",
+        "path WorkflowReport::Delivered",
+        "path WorkflowReport::None",
+        "path WorkflowReport::Pending",
+        "path WorkflowReport::Undeliverable",
+        "path WorkflowState",
+        "path WorkflowState::Completed",
+        "path WorkflowState::Failed",
+        "path WorkflowState::Interrupted",
+        "path WorkflowState::Running",
+        "path WorkflowState::Stopped",
+        "path WorkflowState::Stopping",
+        "use crate::wire::StageState",
+        "use crate::wire::WorkflowReport",
+        "use crate::wire::WorkflowState"
       ]
     },
     {
@@ -23568,6 +23716,7 @@
         "path Command::StopQuestion",
         "path Command::StopTask",
         "path Command::StopTasks",
+        "path Command::StopWorkflow",
         "path Command::SubmitDraft",
         "path Command::TaskHistory",
         "path Command::ToggleWeb",
@@ -23836,6 +23985,7 @@
         "path Effect::StopMember",
         "path Effect::StopTask",
         "path Effect::StopTasks",
+        "path Effect::StopWorkflow",
         "path Effect::ThemeApply",
         "path Effect::ThemePreview",
         "path Effect::ThemeRestore",
@@ -24210,10 +24360,33 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path Command",
+        "path SessionPort",
+        "path Update"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::model::shell",
       "references": [
         "path ShellOutcome::Exited",
         "path ShellRun"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::question",
+      "references": [
+        "path crate::question::Call"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path AskUserPrompt::new"
       ]
     },
     {
@@ -24228,6 +24401,37 @@
       "to": "dim_cli::ui::render::panel",
       "references": [
         "path clip"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render::screen",
+      "references": [
+        "path Screen",
+        "path Screen::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::render::testterm",
+      "references": [
+        "path crate::ui::render::testterm::Emu",
+        "path crate::ui::render::testterm::Emu::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path InputEvent::Key",
+        "path KeyCode",
+        "path KeyCode::BackTab",
+        "path KeyCode::Char",
+        "path KeyCode::Down",
+        "path KeyCode::Esc",
+        "path KeyCode::Tab",
+        "path Modifiers::NONE",
+        "path crate::ui::terminal::KeyEvent::new"
       ]
     },
     {
@@ -24259,6 +24463,9 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::tui",
       "references": [
+        "path App",
+        "path App::new",
+        "path Prompt::Ask",
         "path WebOpened",
         "path banner",
         "path boxed",
@@ -24424,6 +24631,20 @@
       "to": "dim_agent_types::permission",
       "references": [
         "path PermissionChangedData"
+      ]
+    },
+    {
+      "from": "dim_cli::wire",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolResult"
+      ]
+    },
+    {
+      "from": "dim_cli::wire",
+      "to": "dim_cli::usage",
+      "references": [
+        "path crate::usage::parse_rfc3339_ms"
       ]
     }
   ],
@@ -25147,6 +25368,14 @@
     {
       "module": "dim_cli::wire",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_cli::wire",
+      "path": "Reply::Record"
+    },
+    {
+      "module": "dim_cli::wire",
+      "path": "Reply::Start"
     },
     {
       "module": "dim_cli::wire",
