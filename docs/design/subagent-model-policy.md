@@ -45,7 +45,7 @@ decision by an LLM. `agent` means the existing request/profile selection behavio
 | Need | Existing mechanism |
 | --- | --- |
 | Own the decision | `Collaboration::establish`, reached for both named and temporary new members |
-| Identify the requesting branch | `CollaborationCapability::request` already receives `branch_id`; pass it within Collaboration, without changing an event or tool request |
+| Identify the requesting branch | `CollaborationSession::request` already receives `branch_id`; pass it within Collaboration, without changing an event or tool request |
 | Read the adopted leader model | `Session::get<PromptSnapshot>(branch_id)` while consuming `collaboration/request`, before starting its delivery task |
 | Resolve an explicit model | The existing `AgentIndex` model-selection host and configured/non-catalog profile paths |
 | Persist and edit policy | Native `BusinessDocument`, `SettingsService::read/update`, source CAS and owner management methods, as used by `permission_rules.rs` |

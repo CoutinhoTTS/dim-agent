@@ -939,7 +939,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<mcp::McpAuth>(catalog, None);
     register::<mcp::Publication>(catalog, None);
     register::<methods::ManagementMethods>(catalog, None);
-    register::<collaboration::CollaborationCapability>(catalog, Some(SESSION_GROUP));
+    register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
     register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
     for name in [
         "pluginFiles",
