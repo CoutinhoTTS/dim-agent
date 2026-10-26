@@ -157,7 +157,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "steer with the next queued message" => "用下一条队列消息 steer",
         "scroll to the top" => "滚动到顶部",
         "scroll to the bottom" => "滚动到底部",
-        "pick an earlier message to edit" => "选择较早的消息进行编辑",
+        "pick an earlier message to edit or quote" => "选择较早的消息进行编辑或引用",
         "collapse or expand tool details and thoughts" => "折叠或展开工具详情与思考",
         "switch between fullscreen and scrollback" => "在全屏和回滚界面之间切换",
         "switch theme" => "切换主题",
@@ -261,8 +261,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C 清空，连按两次退出 · 草稿为空时 Ctrl+D 退出"
         }
         "Fullscreen" => "全屏",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it" => {
-            "PageUp/PageDown 滚动 · Home/End 到顶部或底部 · Tab 选择消息，e 编辑"
+        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown 滚动 · Home/End 到顶部或底部 · Tab 选择消息，e 编辑，q 引用"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "滚轮滚动 · 拖动选择并复制 · 点击链接打开，点击工具组展开"

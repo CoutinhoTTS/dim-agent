@@ -449,8 +449,9 @@ fn run_terminal(
             }
             // Amp's message navigation: Tab (or Up while a message is
             // picked) goes to older user messages, Shift+Tab or Down to newer
-            // ones and back to the composer past the newest; Esc ends it and
-            // `e` takes the message into the composer.
+            // ones and back to the composer past the newest; Esc ends it,
+            // `e` takes the message into the composer and `q` quotes it
+            // at the end of the draft.
             Wait::Event(InputEvent::Key(key))
                 if full.is_some()
                     && app.keyboard_free()
@@ -467,6 +468,13 @@ fn run_terminal(
                     KeyCode::Char('e') if key.mods.0 == 0 => {
                         if let Some(text) = full.focused_text(&app) {
                             app.composer.set_draft(&text);
+                        }
+                        full.clear_focus();
+                        full.follow();
+                    }
+                    KeyCode::Char('q') if key.mods.0 == 0 => {
+                        if let Some(text) = full.focused_text(&app) {
+                            app.composer.quote(&text);
                         }
                         full.clear_focus();
                         full.follow();

@@ -83,8 +83,21 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
+/** Appends `message` to the draft as a Markdown quote and a blank line, keeping the draft. */
+async function quote(message: string): Promise<void> {
+  const lines = message.split("\n").map((line) => (line === "" ? ">" : `> ${line}`))
+  const draft = text.value
+  const gap = draft === "" || draft.endsWith("\n\n") ? "" : draft.endsWith("\n") ? "\n" : "\n\n"
+  text.value = `${draft}${gap}${lines.join("\n")}\n\n`
+  await nextTick()
+  resize()
+  const element = field.value
+  element?.focus()
+  element?.setSelectionRange(text.value.length, text.value.length)
+}
+
 onMounted(() => field.value?.focus())
-defineExpose({ focus: () => field.value?.focus() })
+defineExpose({ focus: () => field.value?.focus(), quote })
 </script>
 
 <template>

@@ -410,8 +410,9 @@ In fullscreen mode, add member cards to the existing transcript keyboard focus
 order alongside user messages. Tab/Up selects older items, Shift+Tab/Down newer;
 Esc returns to the composer without modifying its draft. Enter on a focused
 Session-member card opens the base read-only detail; a provider card has no such
-action. Editing a selected user message with `e` keeps its current behavior;
-a member card cannot be copied into the composer by that action. Ordinary text
+action. Editing a selected user message with `e` keeps its current behavior,
+and `q` appends it to the draft as a Markdown quote; a member card cannot be
+copied into the composer by either action. Ordinary text
 ends focus and returns to existing
 composer input rather than controlling a member.
 

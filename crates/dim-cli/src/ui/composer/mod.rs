@@ -161,6 +161,29 @@ impl Composer {
         self.area.set_cursor(text.len());
     }
 
+    /// Appends `text` to the draft as a Markdown quote and a blank line,
+    /// keeping what is already there; the cursor goes to the end.
+    pub fn quote(&mut self, text: &str) {
+        let quote: String = text
+            .lines()
+            .map(|line| match line {
+                "" => ">\n".to_owned(),
+                line => format!("> {line}\n"),
+            })
+            .collect();
+        let draft = self.area.text();
+        let gap = if draft.is_empty() || draft.ends_with("\n\n") {
+            ""
+        } else if draft.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        let end = draft.len();
+        self.area.set_cursor(end);
+        self.area.insert_str(&format!("{gap}{quote}\n"));
+    }
+
     /// Skills the palette offers as `$skill:` mentions.
     #[allow(dead_code)] // Set once the App Server lists skills.
     pub fn set_skills(&mut self, skills: Vec<palette::Skill>) {
@@ -958,6 +981,34 @@ mod tests {
         assert_eq!(
             short.handle_key(key(KeyCode::Enter)),
             Outcome::Submit("one\ntwo\nthree".into())
+        );
+    }
+
+    #[test]
+    fn a_quoted_message_joins_the_draft_and_submits_with_it() {
+        let mut c = Composer::new(Vec::new());
+        c.quote("first\n\nsecond");
+        typed(&mut c, "why?");
+        assert_eq!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::Submit("> first\n>\n> second\n\nwhy?".into())
+        );
+        // A draft keeps its text and pasted parts; the quote goes after them.
+        let block = (1..=12)
+            .map(|n| format!("pasted line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        c.paste(&block);
+        c.quote("earlier");
+        assert_eq!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::SubmitDraft {
+                text: format!("{block}\n\n> earlier\n\n"),
+                parts: vec![
+                    DraftPart::Paste(block),
+                    DraftPart::Text("\n\n> earlier\n\n".into()),
+                ],
+            }
         );
     }
 

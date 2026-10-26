@@ -173,7 +173,7 @@ pub const COMMANDS: &[Command] = &[
     action(
         "pick-message",
         "view",
-        "pick an earlier message to edit",
+        "pick an earlier message to edit or quote",
         "Tab",
         Needs::Fullscreen,
     ),
