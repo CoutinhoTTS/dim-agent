@@ -191,7 +191,7 @@ Only plugins in the control node's process hold `sessions`, and it is never expo
 | --- | --- |
 | Blocked by | ADR 002 D5: non-Rust parts (SessionTitle, Goal, Web, the Scheduler and Workflow Session parts, ExternalAgent, PluginManager) must use the runtime's typed services (Timeline, Dispatcher, InputQueue, Session broadcast) without a hand-written Rust binding. App Server services they also use (SessionStore metadata, Settings, `AuxiliaryModel`) are named by their owners' supplements ([overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). |
 | Existing mechanisms considered | rutis named services (`TypeKey::named`, `host_key`): work only for services registered by name, and the runtime registers these by Rust type. Hand-written bindings per plugin: rejected by D5. Starting in Rust: the fallback until this lands. |
-| Generic capability | The runtime registers each public typed service also under a stable service name with a data-only method shape, at the same scope and key. A part already loading when its Session is created is settled before publication; one that never settles fails creation at the deadline. |
+| Generic capability | The runtime registers each public typed service also under a stable service name with a data-only method shape, at the same scope and key. |
 | Effect on sequence, batch, interrupt, reload | None: calls by name keep the typed service's ordering, batch and interrupt rules; a named service reloads with its owner. |
 | Owner and issue | Runtime; [#4](https://github.com/arcships/dim/issues/4). |
 
