@@ -26,6 +26,7 @@ jobs:
       xtask: ${{ steps.groups.outputs.xtask }}
       web: ${{ steps.groups.outputs.web }}
       scripts: ${{ steps.groups.outputs.scripts }}
+      dependencies: ${{ steps.groups.outputs.dependencies }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -39,6 +40,22 @@ jobs:
       - name: Select check groups
         id: groups
         run: node scripts/ci-changes.mjs
+  dependencies:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.dependencies == 'true'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 15
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny --version '=0.20.2'
+      - name: Check dependency advisories and licenses
+        run: cargo deny --locked check advisories licenses
   windows-cli:
     needs: changes
     if: needs.changes.outputs.windows == 'true'
@@ -141,7 +158,7 @@ jobs:
           cargo test --locked -p dim-app-server --test transport_flow --test mcp_http_flow node_ -- --ignored
   ci-ok:
     # The one check to require: it passes when every selected job passed and skipped jobs were not needed.
-    needs: [changes, windows-cli, verify]
+    needs: [changes, dependencies, windows-cli, verify]
     if: always()
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 5
