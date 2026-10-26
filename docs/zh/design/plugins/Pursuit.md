@@ -1,6 +1,6 @@
 # Pursuit
 
-状态：草案，Ready 候选（[#146](https://github.com/arcships/dim/issues/146)，里程碑 M2；没有待定的产品决策，见 [§12](#12-进入-ready-还差什么)）。作用域：对 [Goal](Goal.md) 的 Session 部分与分支部分的修订，不新增 Capability（[ADR 002](../../adr/002-plugin-scope.md)）。语言：TypeScript，放在 Goal 的包 `runtime/plugins/goal` 里（[Goal §10](Goal.md#10-实现)）。依赖：Goal（P5，已由 [#199](https://github.com/arcships/dim/pull/199) 实现）、C5（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）；都已交付。里程碑 M2，不在当前计划内（[路线图](../../../design/roadmap.md) D3）。
+状态：Ready，未实现（[#146](https://github.com/arcships/dim/issues/146)，里程碑 M2；维护者的确认记录在 [§12](#12-ready-确认)）。作用域：对 [Goal](Goal.md) 的 Session 部分与分支部分的修订，不新增 Capability（[ADR 002](../../adr/002-plugin-scope.md)）。语言：TypeScript，放在 Goal 的包 `runtime/plugins/goal` 里（[Goal §10](Goal.md#10-实现)）。依赖：Goal（P5，已由 [#199](https://github.com/arcships/dim/pull/199) 实现）、C5（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）；都已交付。里程碑 M2，不在当前计划内（[路线图](../../../design/roadmap.md) D3）。
 
 需求（[功能列表](../../../feature-list.md)，Agent 行为）：朝明确的目标持续工作，记录完成或受阻，**并且由评审者而不是干活的模型判断是否完成**。
 
@@ -161,6 +161,6 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 
 相对上一版删除了：声明和重新打开状态、截止时间与 `evaluationTimeoutSeconds`、`goal/evaluation-reported` 记录、评审期间针对用户输入的特殊规则，以及停止和退役分支的需求。
 
-## 12. 进入 Ready 还差什么
+## 12. Ready 确认
 
-没有待定的产品决策；本设计等待维护者确认。
+没有待定的产品决策。维护者已于 2026-10-26 确认本设计 Ready（[#146](https://github.com/arcships/dim/issues/146)），包括 [Goal](Goal.md#附录-e-假设) 中 A16 的折叠例外（2026-10-22 决定）。Goal 描述已实现的模型裁判，本设计实现时再修订 Goal。

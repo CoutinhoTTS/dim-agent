@@ -68,7 +68,7 @@ flowchart TB
 
 Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事件起至今已消费的本地事件的纯函数：开场事件是它的 `branch/start`，分叉 Session 的 `main` 则是分叉在复制来的事实之后写的 `session/forked`（A11）。继承的祖先前缀（子分支）或复制来的事实（分叉 Session 的 `main`）位于该开场事件之前，从不贡献目标。分支部分在加载时折叠本地事件，并在每次 Dispatcher 投递时推进折叠结果。压缩不会改变它，因为折叠结果由事件而非模型上下文构建。压缩（[ContextCompaction](ContextCompaction.md)，F1，已由 #108 实现）是 Loop 的一个步骤，不是一个轮次：在轮次内它是该轮的一个步骤，轮次继续；没有轮次运行时的手动压缩只写 `context/compact`、`context/compaction-start` 和 `context/compaction`，不写 `turn/start` 或 `turn/end`。因此它从不触发 Goal 的决策（§4.3）。
 
-变更在其 `input/message` 的序号处生效。之后被 InputQueue 删除（`input/deleted`）的变更被移除，折叠结果去掉它重新计算，因为被删除的输入从不生效（[session access](../contracts/session-access.md)）。固定折叠规则按序号顺序应用于 `B` 的本地事件，没有例外；Pursuit（草案）为其评审裁判提议了一个（A16）：当前目标文本是最新的存活本地 `goal:objective` 块，当前状态是最新的存活本地 `goal:status` 块，新分支的继承 key 被其起始 `clear` 退役后（§3.4），这正是任何压缩之后模型上下文中每个 key 最新的那个块（[§5](#5-上下文映射)），因此重放与折叠结果一致（A16）。只有 `goal:objective` 存活时目标才存在。没有存活目标文本时写入的状态块仍成为当前状态，但此时没有目标，C1 不成立，直到目标文本再次存活：
+变更在其 `input/message` 的序号处生效。之后被 InputQueue 删除（`input/deleted`）的变更被移除，折叠结果去掉它重新计算，因为被删除的输入从不生效（[session access](../contracts/session-access.md)）。固定折叠规则按序号顺序应用于 `B` 的本地事件，没有例外；Pursuit（Ready，未实现）为其评审裁判规定了一个（A16）：当前目标文本是最新的存活本地 `goal:objective` 块，当前状态是最新的存活本地 `goal:status` 块，新分支的继承 key 被其起始 `clear` 退役后（§3.4），这正是任何压缩之后模型上下文中每个 key 最新的那个块（[§5](#5-上下文映射)），因此重放与折叠结果一致（A16）。只有 `goal:objective` 存活时目标才存在。没有存活目标文本时写入的状态块仍成为当前状态，但此时没有目标，C1 不成立，直到目标文本再次存活：
 
 | 变更（标记中的 `op`） | 写入方 | Key | 对折叠结果的影响 |
 | --- | --- | --- | --- |
@@ -510,14 +510,14 @@ Settings 读取失败时只记录错误码，turn/end 任务不写入。客户�
 | A13 | `branchId` 默认为 `main`；任何分支都可以持有自己的目标 | 判断 | Goal 限于 `main` |
 | A14 | 变更在其 `input/message` 序号处生效，被 InputQueue 删除时从折叠中移除 | 判断：轮次中写入的暂停必须在 Append 被应用之前就阻止该轮的续跑 | 变更改为在 `input/applied` 处生效，轮次中写入的暂停将无法阻止该轮的续跑 |
 | A15 | 第二次 `goal_update`，或没有 active 目标时的 `goal_update`，返回写入确认而不是错误，其块成为当前状态（A16；在 Pursuit 提议的评审裁判下，干活模型的 `completed` 是请求） | 决定 G1（行为变化；去掉调用方的判断，以此回应 PR 评审"Goal 调用要看到之前已提交的写入"） | 工具需要读取并等待折叠结果，重新引入调用方判断 |
-| A16 | 折叠规则：每个 key 最新的存活本地块就是当前目标文本与状态，只有本地 `goal:objective` 块存活时目标才存在。提议的例外，在 [Pursuit](Pursuit.md)（草案）被接受时生效：在其评审裁判下，干活模型的 `completed` 块（不带 `by="evaluator"`）是请求，不改变状态；状态仍由最新的其他 `goal:status` 块给出（目标运行时为 `active`），直到评审者的结局或变更取代它，所以重放出的最新块可能读作 `completed`，目标却是 active | 用户决定（回应 PR 评审"Keep replayed Goal status consistent with the fold"）；提议的 Pursuit 例外是针对该草案设计的维护者决定（2026-10-22） | 压缩后重放的状态可能与折叠结果不一致 |
+| A16 | 折叠规则：每个 key 最新的存活本地块就是当前目标文本与状态，只有本地 `goal:objective` 块存活时目标才存在。提议的例外，在 [Pursuit](Pursuit.md)（Ready，未实现）实现时生效：在其评审裁判下，干活模型的 `completed` 块（不带 `by="evaluator"`）是请求，不改变状态；状态仍由最新的其他 `goal:status` 块给出（目标运行时为 `active`），直到评审者的结局或变更取代它，所以重放出的最新块可能读作 `completed`，目标却是 active | 用户决定（回应 PR 评审"Keep replayed Goal status consistent with the fold"）；提议的 Pursuit 例外是针对该设计的维护者决定（2026-10-22） | 压缩后重放的状态可能与折叠结果不一致 |
 
 ## 附录 F. 待对齐问题
 
 | 问题 | 说明 |
 | --- | --- |
 | 对 active 的空闲目标 `edit` | `edit` 是 Append（A1），在空闲分支上不开始工作；用户用 resume 重新开始。如果用户需要，可以加一条规则：Goal 消费 `edit` 时开始续跑 |
-| 评审裁判 | [Pursuit](Pursuit.md)（#146，草案）提议在 `set` 上加 `judge: "evaluator"`：此时 `goal_update completed` 是一个请求，由评审分支决定；在此期间目标保持 active，这是 A16 中提议的例外。本文档其余部分描述模型裁判，即唯一已实现的裁判，该设计被接受后再修订 |
+| 评审裁判 | [Pursuit](Pursuit.md)（#146，Ready，未实现）规定在 `set` 上加 `judge: "evaluator"`：此时 `goal_update completed` 是一个请求，由评审分支决定；在此期间目标保持 active，这是 A16 中提议的例外。本文档其余部分描述模型裁判，即唯一已实现的裁判，该设计实现后再修订 |
 | ~~A11 与 fork 设计~~ | 已解决：分叉在复制来的事实之后写 `session/forked`，Goal 从它之后折叠（A11） |
 
 ## 附录 G. Rust 绑定
