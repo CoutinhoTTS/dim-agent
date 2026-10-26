@@ -647,10 +647,9 @@ per-branch service: it writes input by branch id, the branch owner decides, and 
 results as Timeline facts. See the
 [branch binding](design/branch-typescript.md) and [real Node part](../runtime/fixtures/branch-part.ts).
 The services and signatures come from the Rust types: process services are marked
-`#[rutis::service]`, and the Session and branch services are listed in
-[build.rs](../crates/dim-app-server/build.rs). Regenerate with `cargo check --locked -p dim-app-server`.
-The build script intentionally writes the tracked `npm/branch-services.d.ts` so the Rust services
-and packed SDK share one contract. CI verifies that the committed SDK declarations
+`#[rutis::service]`, the Session and branch services included. Regenerate the tracked
+`npm/branch-services.d.ts` with `cargo run --locked -p xtask -- types`, so the Rust services and
+packed SDK share one contract. `xtask check` fails when the committed SDK declarations do not
 match the generator and compiles this example from the actual packed archive.
 
 ### Extension events

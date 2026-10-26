@@ -124,7 +124,8 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 会在那里*认领*它的名字，而每次新的认领都运行一次覆盖整个 loader 的 reconcile，这也会重建那些构建被拒绝的
 副本：在某个 Session 的装配中失败的必需行可能在该 Session 创建期间被重建，每次创建 Session 或分支都会
 reconcile 整个 loader。App Server 把这些名字按各自的组共享（`register_shared_instance`），一个测试检查每个
-名字都在 Rust 绑定登记它的那个组中共享。构建脚本只生成 TypeScript 声明。
+名字都在 Rust 绑定登记它的那个组中共享。`xtask types` 把它们的 TypeScript 声明写到
+`npm/branch-services.d.ts`，该文件过期时 `xtask check` 失败。
 
 ### 3.5 各运行时如何解析名字
 
@@ -269,7 +270,7 @@ P3 删除了旧形式（[#375](https://github.com/arcships/dim/issues/375)）；
 | `SessionService`、`BranchService` 标记 | 注册在服务目录中的组（`names::register`） |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | 功能向部件登记处登记自己的部件（`Feature` 用 `AgentBuilder::feature` 添加，自己写的插件用 `AgentBuilder::plugin` 添加；profile 用 `require_feature`）；App Server 的进程行用 `register_part` |
 | `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`（已删除） | 所有者的 `register`，由提供贡献的部件调用：`toolRegistry`、`promptRegistry`、`sessionMethods`、`managementMethods`（R6） |
-| `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`，包括 Session 和分支级服务（§3.4）；源码无法修改的类型包进 Dim 自己的、带标记的类型。`Exports` 只生成 TypeScript 声明 |
+| `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`，包括 Session 和分支级服务（§3.4）；源码无法修改的类型包进 Dim 自己的、带标记的类型。`Exports` 只生成 TypeScript 声明，由 `xtask types` 调用 |
 | `PublicService` | 不变（门面规则） |
 
 ### A.2 绑定

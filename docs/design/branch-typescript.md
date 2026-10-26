@@ -10,17 +10,17 @@ its Session part writes input by branch id and the branch owner decides (§Open)
 A TypeScript branch part consumes its own branch's committed events through the existing
 Dispatcher, rebuilds from the branch's committed history, and submits validated input through
 `Branch::input`. It uses the existing Rust services by name, as a Rust part injects them: there is
-no binding layer, branch handle, registry or setup service of Dim's own. App Server lists the
-services to export with their group in `crates/dim-app-server/build.rs`; rutis generates their
-dispatch and TypeScript declarations from the Rust definitions.
+no binding layer, branch handle, registry or setup service of Dim's own. The exported services are
+marked `#[rutis::service]` on their Rust types; rutis generates their dispatch and TypeScript
+declarations from the Rust definitions.
 
 The generated declarations are published in `npm/branch-services.d.ts` and re-exported as
 `Services` and the service types by `dimcode/plugin`. The SDK's `BranchEvent` reuses the
 existing event envelope with native bridge sequences and owner-defined data. The
 [authoring guide](../typescript-plugin-authoring.md#ordered-branch-consumption) shows the row,
-subscription and rebuild. Regenerate with `cargo check --locked -p dim-app-server`; CI checks
-the generated file before compiling the packed SDK. Writing the tracked npm declaration from
-`build.rs` is intentional: the Rust build and packed SDK share the same export contract.
+subscription and rebuild. Regenerate with `cargo run --locked -p xtask -- types`; `xtask check`
+fails when the tracked file is stale, so the Rust services and packed SDK share the same export
+contract.
 
 This is distinct from [C4 Session observation](session-typescript.md): a Session notification can
 be queued independently of native delivery, while a Dispatcher callback is part of the branch's
@@ -82,7 +82,7 @@ closures stay as they are for Rust callers:
   part write, so the branch `Timeline` is exported as is.
 
 Native serde forms stay authoritative (`InputMessageData`, `BranchOptions`, `TimelineInfo`,
-`AgentEvent`). `AgentEvent`'s TypeScript is declared in `build.rs` with the `npm/plugin.d.ts` shape,
+`AgentEvent`). `AgentEvent`'s TypeScript is declared in [`xtask types`](../../xtask/src/types.rs) with the `npm/plugin.d.ts` shape,
 because its sequence fields use custom serde. Sequences cross as `number | bigint`; do not coerce
 them through `Number`.
 
@@ -200,5 +200,5 @@ Existing C4 tools, methods, observation and Settings flows keep their own `node_
 - [Dispatcher](../../crates/dim-agent-runtime/src/core/dispatcher.rs), [Timeline](../../crates/dim-agent-runtime/src/core/timeline.rs), [TimelineIdentity and BranchLifecycle](../../crates/dim-agent-runtime/src/config.rs)
 - [TimelineTree / TreeCommands](../../crates/dim-agent-capabilities/src/timeline_tree.rs)
 - [InputQueue rebuild](../../crates/dim-agent-capabilities/src/input_queue.rs)
-- [Export list](../../crates/dim-app-server/build.rs) and [row placement](../../crates/dim-app-server/src/session_typescript.rs)
+- [Declaration generator](../../xtask/src/types.rs) and [row placement](../../crates/dim-app-server/src/session_typescript.rs)
 - [Goal consumer contracts](plugins/Goal.md)
