@@ -103,7 +103,7 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 - **标记。** `<dim-branch-message from="C" to="P">`。接收方凭这个标记把消息和用户的话区分开。RPC 只接收操作者内容、不接收块，所以客户端无法伪造消息。
 - **允许的两端。** `main` 和它每条未结束的工具线之间，双向都可以。其他任何组合都由工具结果拒绝，什么也不写：兄弟分支、host 线、已结束的线。
 - **读取。** `read {branch, after?, limit?}` 让 `main` 读它的一条工具线，未结束或已结束都可以。它经 `TreeCommands.page` 从存储读取已提交的完整批次，按 Collaboration 的 `read` 渲染成员页面的方式呈现：输入、文本、工具调用与结果、每轮结束，带 `nextCursor`。线不读 `main`。切点之后一条线对 `main` 的了解，就是 `main` 发给它的内容，所以由 `main` 决定每条线需要知道什么，也不会有哪条线把另一条线的整个事件流拉进自己的上下文。
-- **不设上限。** 线的数量、消息数、steer 数都不设上限。消息往复由提示词规则（§12）、某条线自行结束，或用户（中断或结束）来终止。
+- **不设上限。** 线的数量、消息数、steer 数都不设上限。消息往复由提示词规则（§12）、某条线自行结束，或用户（中断或结束）来终止。为什么这样是安全的，以及需要时由谁负责限制，见 §6.1。
 - **空闲通知。** 一条工具线的一轮结束时，这条线上的 BranchLine 给 `main` 写一条 steer（`<dim-branch-idle>`，§12.1），除非下列之一成立：
   - 这一轮已经给 `main` 发过 steer 消息；
   - 这一轮调用了 `end`；
@@ -111,6 +111,31 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 
   这样，一条线一声不响地停下时，`main` 不会一直等下去；已经 steer 过 `main` 的线，也不会重复通知它。通知带这一轮的状态（`completed`、`failed` 或 `cancelled`）。
 - **等待。** `main` 用现有的 `wait` 工具等它的线。steer 消息、空闲通知或结束通知都会唤醒它（[wait.rs](../../../crates/dim-agent-capabilities/src/wait.rs)）。
+
+### 6.1 资源与限制
+
+不设上限是安全的，因为线没有带来新的资源类别：
+
+- 一条线的工作就是同一个 Session 的普通轮次，使用同一个 provider，受同样的 Permission 和 Approval 约束。
+- 一条线同一时间最多运行一轮：Loop 每条线只持有一轮（[agent_loop.rs:106](../../../crates/dim-agent-capabilities/src/agent_loop.rs)）。
+- 一条消息是由一次工具调用写入的一条有界的 `input/message`，大小受模型自己的输出约束。
+- RPC 准入按连接设有上限（[架构](../../architecture/README.md)）。
+- Collaboration 的成员也没有数量上限。
+
+如果以后需要限制，每一项都已有归属，而且都不需要改机制：
+
+| 限制 | 归属 |
+| --- | --- |
+| 开着的线数 | BranchTool 依据 main 的名册（由 BranchLine 折叠）拒绝 `create` |
+| steer 频率 | 发送方的 BranchLine 统计它自己 Timeline 上的 steer 消息 |
+| 整个 Session 的模型成本或并发 | 归模型调用层。这不是分支特有的限制：它同样适用于成员和 fork |
+
+在那之前，保护措施是：
+
+- 提示词规则；
+- 已结束的线拒收消息；
+- 用户的结束和中断；
+- §12.3 中的刷屏、过度拆分和来回空转场景，在本地测量并在实现 PR 里报告，从不作为 CI 阈值。
 
 ## 7. 身份与上下文
 
@@ -164,18 +189,21 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 - 身份块是子分支自己的第一个事件，紧跟在继承的前缀之后。所以子分支的第一次请求能复用父分支到切点为止的前缀。
 - 名册更新是追加在 `main` 历史末尾的 Append。
 
-### 7.4 Goal 与 Pursuit（已在 main 上核实）
+### 7.4 Goal 与 Pursuit
 
-- **评审者识别不变。** Pursuit 靠第一条 Queue 输入的 `user` 文本第一行识别评审者（`runtime/plugins/goal/goal.ts:377-384`）。
-  - 身份放在 `blocks` 里，创建者的 prompt 仍是 `user`。
-  - `render_input` 先渲染原始块，再渲染操作者的话（[history.rs:181](../../../crates/dim-agent-capabilities/src/history.rs)）。
+**规则。** 一条线的开启输入由 TimelineTree 写入。它的第一个块是 `branch:line` 标记，所以按 [Goal A5](plugins/Goal.md#附录-e-假设)（操作者输入是"带 `user` 内容、且第一个原始块不是来源标记"），它是有来源的输入，不是操作者输入，不管创建者给了什么 `user` 内容。Goal 的冲突表记录了这一点（[Goal 附录 B](plugins/Goal.md#附录-b-完整冲突表)）。Goal 的代码不变。
 
-  所以模型先看到身份，再看到 prompt，Goal 读取的 `user` 文本也没有变。
-- **host 线上的操作者输入。** 一条输入带 `user`、且第一个块不以 `<dim-` 开头时，Goal 把它算作操作者输入（`goal.ts:373`）。身份块排在最前之后，host 线的开启输入不再算操作者输入。这没有影响：
-  - Goal 在每个子分支开始时清除继承的目标（[Goal §3.4](plugins/Goal.md#34-新分支清除继承的目标)）。
-  - 开启输入早于这条线上的任何 `set`。
+在本设计之前，host 线的开启输入（创建者的 prompt 作为 `user`，没有块）算操作者输入。工具线的不算：它带 `dim-branch-task` 块，没有 `user`。现在两者都是有来源的输入。
 
-  所以这条线上的 `lastOperator` 从不参与计数。
+为什么这不改变 Goal 的任何行为（已在 main 上核实，`runtime/plugins/goal/goal.ts`）：
+
+| Goal 的决定 | 身份块的影响 |
+| --- | --- |
+| 基于块的决定：已决定集合（`first?.after`，:386）、续跑列表（:387）、`conclusionOf`（:390），以及带 key 的目标和状态折叠（:394-396） | 没有影响。`marker()` 只匹配 `^<dim-goal `（:251），折叠还要求 `goal:*` key，所以这些决定都看不到身份块 |
+| 操作者判断（:373） | 它唯一改变的字段：开启输入不再设置 `lastOperator` |
+| `count`（:460-461） | `lastOperator` 只在这里使用：`since = max(active, lastOperator)` |
+| 计数窗口 | 折叠只看本线的事件，并在这条线自己的开启处从头开始（:282、:335）。子分支开始时没有目标，Goal 会写入开始时的 `clear`（[Goal §3.4](plugins/Goal.md#34-新分支清除继承的目标)）。`active` 只在之后的本地 `set` 或 `resume` 时移动，而这两者总在开启输入之后。所以开启输入从不改变 `since`，计数保持不变 |
+| 评审者识别（:376-384） | 不变。Goal 读取第一条 Queue 输入 `user` 文本的第一行。身份放在 `blocks` 里，`render_input` 先渲染原始块，再渲染操作者的话（[history.rs:181](../../../crates/dim-agent-capabilities/src/history.rs)），所以模型先看到身份，再看到 prompt |
 
 ## 8. 工作区
 
@@ -331,7 +359,7 @@ WorkspaceTools 不变。
 
 | 功能 | 影响 |
 | --- | --- |
-| Goal | 不变（§7.4）。新线照旧清除继承的目标 |
+| Goal | 代码不变。一条线的开启输入按 A5 是有来源的输入（§7.4），Goal 的冲突表记录了这一点。新线照旧清除继承的目标 |
 | Pursuit | 评审者得到 host 线的身份块。识别、结论和决定都不变。自行结束以后再做（§10） |
 | Fork、删除 | 不变。已结束的线按它的事实处理（§10） |
 | Session 关闭、空闲卸载 | 不算结束。各线恢复后仍未结束 |
@@ -390,15 +418,14 @@ BranchLine 的服务只由同一插件里的工具读取。
 
 ## 16. 格式
 
-`branch/end` 和 `branch/ended` 加入核心的 `branch` 领域。v19 读取器对保留领域只按类型解码，所以 v19 守护进程解码不了 `branch/end` 行。而从 v17 起，能打开某个库的守护进程都能解码库里的每一行（[#2 v18 格式决定](../../design/appserver/native-storage-format.md#2-v18-格式决定)）。
+`branch/end` 和 `branch/ended` 是 `branch` 领域的核心事件：
 
-因此格式随实现升到 **v20**：
+| 事件 | 数据 |
+| --- | --- |
+| `branch/end` | `{by: "self" \| "user" \| "ancestor"}` |
+| `branch/ended` | `{branch, endEvent, by}`。`endEvent` 是 `branch/end` 在结束的那条线上的序号 |
 
-- 从 v19 原地升级；
-- SQL 除 `CHECK (version = 20)` 外不变；
-- 不改写任何行。
-
-这一决定在实现时记入存储格式文档。
+它们的格式决定记录在存储合同里：[#427 v20 格式决定](../../design/appserver/native-storage-format.md#427-v20-格式决定)，随本设计的实现生效。
 
 ## 17. 向机制所有者提出的需求
 
@@ -448,7 +475,7 @@ BranchLine 的服务只由同一插件里的工具读取。
 | §4.4 核心不带业务含义 | Timeline、Dispatcher、`before` 和批次不变。身份文本属于 TimelineTree 自己的领域，即一个 Session 的各条线。工具线的协议写在 `first_input` 现在写工具专用文本的地方，也就是拥有该工具的模块里 |
 | §4.5 批次 | `branch/end` 单独一个批次。`branch/ended` 在关闭之后最后写入。名册和结束通知是同一条输入 |
 | §4.6 上下文 | 身份、名册、消息和通知都是被采用的输入。`read` 返回工具结果。没有别的东西进入上下文 |
-| §4.7 公开事件与服务 | BranchLine 折叠的是它自己那条线的公开事件。工具读 BranchLine（同一插件）和 TreeCommands。`read` 像 Collaboration 的 `read` 一样，把已提交的事件作为工具结果返回，没有哪个部件折叠另一条线的事实 |
+| §4.7 公开事件与服务 | BranchLine 折叠的是它自己那条线的公开事件。工具读 BranchLine（同一插件）和 TreeCommands。`read` 像 Collaboration 的 `read` 一样，把已提交的事件作为工具结果返回，没有哪个部件折叠另一条线的事实。Goal 按它自己公开的 A5 约定判定开启输入（§7.4） |
 | §4.8 基础设施 | 门面和格式的改动即 R1（§17）。需求来自线的生命周期本身，在运行时内闭环 |
 | §4.9 只有后续决定要用的事实才进 Timeline | `branch/end` 决定关闭和恢复。`branch/ended` 决定恢复时是否活跃，以及名册。没有只给 UI 用的事件 |
 | ADR 002 D1 作用域 | 见 §5 |
@@ -472,6 +499,12 @@ BranchLine 的服务只由同一插件里的工具读取。
 8. Pursuit 的评审者得到 host 线的身份块，现有的 Pursuit 流程照常通过。
 9. 两条线编辑同一个文件：后编辑的那条得到 `file_modified_since_read`（已有行为）。
 10. v1、v2 客户端看不到新事件。v3 历史包含它们，`hello.features` 列出 `session.branch_end`。
+
+Goal 流程，放在 `goal.test.mjs` 和 `transport_flow/goal.rs` 中（§7.4）：
+
+11. 用 `session.branch_create` 开出的线，开启输入带身份块，表现与 `main` 完全相同：在这条线上 `set`、它的续跑，以及之后一次重置计数的操作者输入。
+12. 在新的开启输入下创建的 Pursuit 评审者能被识别，它的结论会被应用。工作线的计数不变。
+13. 身份块不改变目标和状态折叠、已决定集合或续跑列表中的任何内容。
 
 ## 21. 消融审查
 

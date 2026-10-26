@@ -421,6 +421,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 | Goal 自己的续跑在被持有时被用户撤回 | 续跑 < `input/deleted` | 从未被应用或消费，不算待处理，从折叠中移除（N 不再是 `decided`）；下一次决策可以再次续跑 | Goal |
 | 变更在被持有时被用户撤回（如 `pause`） | 变更 < `input/deleted` | 去掉它重新折叠；最新的 `turn/end` 若不是 `decided` 则重新决策 | InputQueue；Goal |
 | 同一 `turn/end` 之后另一来源的 Queue 后续输入（如 Hooks） | 都在 N 之后 | 按顺序两轮；每个 `turn/end` 最多一次续跑；该输入除非是操作者输入，否则不重置计数 | InputQueue；Goal |
+| 一条线的开启输入（TimelineTree 写入，第一个块是 `branch:line`；[Timeline 分支 §7.4](../timeline-branches.md#74-goal-与-pursuit)） | 在任何本地目标之前 | 不是操作者输入（A5）；它早于 `set`，所以从不影响计数 | TimelineTree；Goal |
 | N 之前中断 | 中断 < N | C2：暂停（`interrupted`），不续跑 | Goal |
 | N 与续跑之间中断 | N < 中断 < 续跑 | 多一轮；然后暂停（E18） | Loop；Goal |
 | 续跑开始其轮次后中断 | 已消费 < 中断 | 轮次取消；暂停 | Loop；Goal |

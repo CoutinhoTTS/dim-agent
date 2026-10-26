@@ -103,7 +103,7 @@ These are Collaboration's message modes and words (`append`, `steer`), with the 
 - **Marker.** `<dim-branch-message from="C" to="P">`. The receiver tells a message from the user's words by its marker. RPC accepts only operator content, never blocks, so a client cannot forge a message.
 - **Allowed pairs.** `main` and each of its open tool lines, in both directions. Any other pair is refused through the tool result, with nothing written: siblings, host lines, ended lines.
 - **Read.** `read {branch, after?, limit?}` lets `main` read one of its tool lines, open or ended. It reads complete committed batches from the store through `TreeCommands.page`, and renders them the way Collaboration's `read` renders a member's page: inputs, text, tool calls and results, and turn ends, with `nextCursor`. A line does not read `main`. What a line knows of `main` after the cut is what `main` sends it, so `main` decides what each line needs, and no line pulls another line's whole stream into its own context.
-- **No caps.** There is no limit on the number of lines, messages or steers. A message loop ends through the prompt rules (§12), through a line ending itself, or through the user (interrupt or end).
+- **No caps.** There is no limit on the number of lines, messages or steers. A message loop ends through the prompt rules (§12), through a line ending itself, or through the user (interrupt or end). Why this is safe, and who would own limits, is in §6.1.
 - **Idle notice.** When a tool line's turn ends, BranchLine on that line writes one steer to `main` (`<dim-branch-idle>`, §12.1), unless one of the following holds:
   - the turn already sent `main` a steer message;
   - the turn called `end`;
@@ -111,6 +111,31 @@ These are Collaboration's message modes and words (`append`, `steer`), with the 
 
   This way a line that stops without telling `main` never leaves `main` waiting on silence, and a line that already steered `main` does not notify it twice. The notice carries the turn's status (`completed`, `failed` or `cancelled`).
 - **Waiting.** `main` waits for its lines with the existing `wait` tool. A steer message, an idle notice or an ended notice wakes it ([wait.rs](../../crates/dim-agent-capabilities/src/wait.rs)).
+
+### 6.1 Resources and limits
+
+Leaving caps out is safe because a line adds no new kind of resource:
+
+- A line's work is ordinary turns of the same Session, under the same provider, Permission and Approval.
+- A line runs at most one turn at a time. Loop holds one turn per line ([agent_loop.rs:106](../../crates/dim-agent-capabilities/src/agent_loop.rs)).
+- A message is one bounded `input/message` written by a tool call, so the model's own output bounds it.
+- RPC admission is bounded per connection ([architecture](../architecture/README.md)).
+- Collaboration has no member cap either.
+
+If limits are ever needed, each one already has an owner, and none of them needs a mechanism change:
+
+| Limit | Owner |
+| --- | --- |
+| Open lines | BranchTool refuses `create` based on main's roster, which BranchLine folds |
+| Steer frequency | BranchLine on the sender counts the steer messages on its own Timeline |
+| Model cost or concurrency across a Session | The model-call layer. This limit is not specific to branches: it applies equally to members and forks |
+
+Until then, the safeguards are:
+
+- the prompt rules;
+- ended lines refusing messages;
+- the user's end and interrupt;
+- the flooding, over-splitting and ping-pong scenarios in §12.3, measured locally and reported in the implementing PR, never as CI thresholds.
 
 ## 7. Identity and context
 
@@ -164,18 +189,21 @@ Lines differ only in their tails:
 - The identity block is the child's first event of its own, directly after the inherited prefix. A child's first request therefore reuses the parent's prefix up to the cut.
 - Roster updates are Appends at the end of `main`'s history.
 
-### 7.4 Goal and Pursuit (verified on main)
+### 7.4 Goal and Pursuit
 
-- **Evaluator recognition is unchanged.** Pursuit recognizes the evaluator by the first line of the `user` text of the first Queue input (`runtime/plugins/goal/goal.ts:377-384`).
-  - The identity goes in `blocks`, and the creator's prompt stays `user`.
-  - `render_input` renders raw blocks first, then the operator's words ([history.rs:181](../../crates/dim-agent-capabilities/src/history.rs)).
+**Rule.** A line's opening input is TimelineTree's write. Its first block is the `branch:line` marker, so under [Goal A5](plugins/Goal.md#appendix-e-assumptions) (operator input is "`user` content and no source marker as first raw block") it is a sourced input, not operator input, whatever `user` content the creator gave. Goal's conflict table records this ([Goal Appendix B](plugins/Goal.md#appendix-b-full-conflict-table)). Goal's code is unchanged.
 
-  So the model sees the identity before the prompt, and the `user` text Goal reads is unchanged.
-- **Operator input on a host line.** Goal counts an input as operator input when it has `user` and its first block does not start with `<dim-` (`goal.ts:373`). With the identity block first, a host line's opening input no longer counts as operator input. That has no effect:
-  - Goal clears the inherited goal on every child at its start ([Goal §3.4](plugins/Goal.md#34-a-new-branch-clears-the-inherited-goal)).
-  - The opening input comes before any `set` on that line.
+Before this design, a host line's opening input (the creator's prompt as `user`, no block) counted as operator input. A tool line's did not: it had the `dim-branch-task` block and no `user`. Both are now sourced inputs.
 
-  So `lastOperator` on that line never feeds a count.
+Why this changes no Goal behavior (verified on main, `runtime/plugins/goal/goal.ts`):
+
+| Goal decision | Effect of the identity block |
+| --- | --- |
+| The block-based decisions: the decided set (`first?.after`, :386), the continuation list (:387), `conclusionOf` (:390) and the keyed objective and status fold (:394-396) | None. `marker()` matches only `^<dim-goal ` (:251), and the fold also requires the `goal:*` keys, so the identity block is invisible to all of them |
+| The operator test (:373) | This is the one field it changes: the opening input no longer sets `lastOperator` |
+| `count` (:460-461) | `lastOperator` is used only here: `since = max(active, lastOperator)` |
+| The count window | The fold is local and starts over at the line's own opening (:282, :335). A child starts with no goal, and Goal writes the start `clear` ([Goal §3.4](plugins/Goal.md#34-a-new-branch-clears-the-inherited-goal)). `active` moves only on a later local `set` or `resume`, and both always come after the opening input. So the opening input never changes `since`, and the count stays the same |
+| Evaluator recognition (:376-384) | Unchanged. Goal reads the first line of the first Queue input's `user` text. The identity goes in `blocks`, and `render_input` renders raw blocks before the operator's words ([history.rs:181](../../crates/dim-agent-capabilities/src/history.rs)), so the model sees the identity before the prompt |
 
 ## 8. Workspace
 
@@ -331,7 +359,7 @@ These are run locally on real models, and the results are reported in the implem
 
 | Feature | Interaction |
 | --- | --- |
-| Goal | Unchanged (§7.4). A new line clears the inherited goal as before |
+| Goal | Code unchanged. A line's opening input is a sourced input under A5 (§7.4), and Goal's conflict table records it. A new line clears the inherited goal as before |
 | Pursuit | The evaluator gets the host-line identity block. Recognition, conclusion and decisions are unchanged. Self end comes later (§10) |
 | Fork, delete | Unchanged. Ended lines follow their facts (§10) |
 | Session close, idle unload | Not an end. Lines restore as open |
@@ -390,15 +418,14 @@ BranchLine's service is read only by the tool, inside the same plugin.
 
 ## 16. Format
 
-`branch/end` and `branch/ended` join the core `branch` domain. A v19 reader decodes reserved domains by type only, so a v19 daemon cannot decode a `branch/end` row. Since v17, a daemon that opens a store decodes every row of it ([#2 v18 decision](appserver/native-storage-format.md#2-v18-格式决定)).
+`branch/end` and `branch/ended` are core events in the `branch` domain:
 
-The format therefore moves to **v20** with the implementation:
+| Event | Data |
+| --- | --- |
+| `branch/end` | `{by: "self" \| "user" \| "ancestor"}` |
+| `branch/ended` | `{branch, endEvent, by}`. `endEvent` is the sequence of `branch/end` on the ended line |
 
-- an in-place upgrade from v19;
-- the SQL unchanged except `CHECK (version = 20)`;
-- no row rewritten.
-
-The decision is recorded in the storage format document when it is implemented.
+The format decision for them is recorded in the storage contract: [#427 v20 decision](appserver/native-storage-format.md#427-v20-格式决定). It takes effect with this design's implementation.
 
 ## 17. Requirements raised to mechanism owners
 
@@ -448,7 +475,7 @@ Rules: [design rules §1, §2 and §4](../architecture/rust-agent/principles.md)
 | §4.4 No business meaning in core | Timeline, Dispatcher, `before` and batches are unchanged. The identity text is TimelineTree's own domain, the lines of a Session. A tool line's protocol is written where `first_input` already writes tool-specific text, in the module that owns the tool |
 | §4.5 Batches | `branch/end` stands alone. `branch/ended` comes last, after the close. The roster and the ended notice are one input |
 | §4.6 Context | Identity, roster, messages and notices are adopted inputs. `read` returns a tool result. Nothing else enters the context |
-| §4.7 Public events and services | BranchLine folds its own line's public events. The tool reads BranchLine (same plugin) and TreeCommands. `read` returns committed events as a tool result, the way Collaboration's `read` does, and no part folds another line's facts |
+| §4.7 Public events and services | BranchLine folds its own line's public events. The tool reads BranchLine (same plugin) and TreeCommands. `read` returns committed events as a tool result, the way Collaboration's `read` does, and no part folds another line's facts. Goal classifies the opening input by its own published A5 convention (§7.4) |
 | §4.8 Infrastructure | The facade and format changes are R1 (§17). They come from the line lifecycle itself and close within the runtime |
 | §4.9 Only facts later decisions use | `branch/end` decides the close and the restore. `branch/ended` decides restore inactivity and the roster. No UI-only event |
 | ADR 002 D1 Scope | As in §5 |
@@ -472,6 +499,12 @@ These are flows with a fake model, in `branch_flow.rs`, `flows.rs` and the App S
 8. A Pursuit evaluator gets the host-line identity, and the existing Pursuit flows pass unchanged.
 9. Two lines edit the same file: the second gets `file_modified_since_read` (existing behavior).
 10. v1 and v2 clients do not see the new kinds. v3 history includes them, and `hello.features` lists `session.branch_end`.
+
+Goal flows, in `goal.test.mjs` and `transport_flow/goal.rs` (§7.4):
+
+11. A line opened with `session.branch_create`, whose opening input carries the identity block, behaves exactly as `main` does: `set` on that line, its continuations, and a later operator input that resets the count.
+12. A Pursuit evaluator created under the new opening input is recognized and its conclusion is applied. The working line's count is unchanged.
+13. The identity block changes nothing in the objective and status fold, the decided set or the continuation list.
 
 ## 21. Ablation review
 
