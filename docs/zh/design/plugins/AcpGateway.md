@@ -36,7 +36,7 @@ Session / InputQueue / Loop / Approval / Questions / Attachments / ...
 
 只有一个 Gateway 部件，没有 daemon、Session 或 branch 部件。它不是 Capability：不拥有分支 Timeline 上的状态机。真实连接资源和在途操作使其成为有自身职责的插件，宿主直接完成装配，不加接线部件。
 
-计划的实现路径是 `crates/dim-acp`；既有 RPC 引擎提取至 `crates/dim-client`，避免 CLI/Gateway 复制。两者尚不存在。提取和宿主边界见[实施计划 §3](../../../design/acp-gateway-implementation.md#3-模块宿主与接线)。不假定存在 `AcpHost`、新 daemon endpoint、exported rutis link 或可依赖的私有 `RpcService`。
+Gateway 计划路径是 `crates/dim-acp`。既有 RPC 引擎和 loopback callback I/O 已提取至 `crates/dim-client`，供 CLI 使用；Gateway 尚未交付。提取和宿主边界见[实施计划 §3](../../../design/acp-gateway-implementation.md#3-模块宿主与接线)。不假定存在 `AcpHost`、新 daemon endpoint、exported rutis link 或可依赖的私有 `RpcService`。
 
 ## 2. 协议边界
 
@@ -65,7 +65,7 @@ Provider 管理已经归 daemon 的 ProviderPlugin 所有，CLI 使用其公开�
 - RPC 丢失时暂停变更，通过现有 endpoint/handshake 恢复、attach、读事实；不盲重发变更。
 - 已结束 generation 不能登记迟到的 new/load/fork 结果、发迟到回答或写入下一连接。
 
-不加 loader、生命周期注册表或每 Session daemon relay。[#434 U3](https://github.com/arcships/dim/issues/434) 的客户端 binding 问题在首个实现单元确认；不宣称现有 `AgentBuilder` 已是客户端宿主。
+不加 loader、生命周期注册表或每 Session daemon relay。宿主在构造时交出独占 I/O、连接及其重连配置；Gateway 不读取外部服务，声明 Deps = ()。既有 CLI 插件在 [#434 U3](https://github.com/arcships/dim/issues/434) 的依赖迁移另行讨论，不引入 AgentBuilder client host 或 raw service-key 依赖。
 
 ## 4. Session 与 prompt 流程
 

@@ -1128,6 +1128,7 @@ dependencies = [
  "base64 0.22.1",
  "crossterm",
  "dim-agent-types",
+ "dim-client",
  "flate2",
  "ignore",
  "image",
@@ -1153,6 +1154,18 @@ dependencies = [
  "xai-grok-markdown",
  "xai-ratatui-inline",
  "xai-ratatui-textarea",
+]
+
+[[package]]
+name = "dim-client"
+version = "0.1.0-alpha.5"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "url",
 ]
 
 [[package]]

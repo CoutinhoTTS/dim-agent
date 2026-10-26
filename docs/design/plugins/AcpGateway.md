@@ -36,7 +36,7 @@ Session / InputQueue / Loop / Approval / Questions / Attachments / ...
 
 There is one gateway part and no daemon, Session or branch part. It is not a Capability: it does not own a state machine on a branch Timeline. Its connection resources and in-flight operations make it a real plugin, rather than a row whose only purpose is wiring other plugins.
 
-The proposed implementation is `crates/dim-acp`; the existing RPC engine is extracted into `crates/dim-client` so the CLI and gateway do not duplicate it. These packages do not exist yet. The concrete extraction and host boundary are [plan §3](../acp-gateway-implementation.md#3-模块宿主与接线). No `AcpHost`, new daemon endpoint, exported rutis link or private `RpcService` dependency is assumed.
+The proposed gateway implementation is `crates/dim-acp`. The existing RPC engine and loopback callback I/O now live in `crates/dim-client`, used by the CLI; the gateway is not yet delivered. The extraction and host boundary are [plan §3](../acp-gateway-implementation.md#3-模块宿主与接线). No `AcpHost`, new daemon endpoint, exported rutis link or private `RpcService` dependency is assumed.
 
 ## 2. Protocol boundary
 
@@ -65,7 +65,7 @@ Gateway memory contains only connection negotiation and generation, mapped Sessi
 - RPC loss pauses mutations and recovers through the existing endpoint and handshake. The gateway reattaches and reads facts, never blindly replays mutations.
 - A disposed generation cannot register a late new/load/fork result, emit a late answer or write to the next connection.
 
-No plugin loader, lifecycle registry or per-Session daemon relay is added. The client binding question in [#434 U3](https://github.com/arcships/dim/issues/434) must be resolved in the first implementation unit; this design does not claim an `AgentBuilder` client host already exists.
+No plugin loader, lifecycle registry or per-Session daemon relay is added. The host transfers owned I/O, a connection and its reconnect configuration through construction; the gateway reads no external service and declares `Deps = ()`. Existing CLI dependency migration in [#434 U3](https://github.com/arcships/dim/issues/434) stays separate. No `AgentBuilder` client host or raw service-key dependency is introduced.
 
 ## 4. Session and prompt flows
 

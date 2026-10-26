@@ -1,6 +1,6 @@
 # AcpGateway 首版实施计划
 
-状态：Draft，尚未实现。需求入口：[ACP #436](https://github.com/arcships/dim/issues/436)。设计合同：[AcpGateway](plugins/AcpGateway.md)。本计划定义首版交付范围、每个协议方法的现有调用路径、接线和验收；不把计划能力写成当前产品能力。
+状态：实施中；共享 RPC 与 callback I/O 已提取，Gateway 尚未交付。需求入口：[ACP #436](https://github.com/arcships/dim/issues/436)。设计合同：[AcpGateway](plugins/AcpGateway.md)。本计划定义首版交付范围、每个协议方法的现有调用路径、接线和验收；不把计划能力写成当前产品能力。
 
 ## 1. 目标和固定边界
 
@@ -52,7 +52,7 @@ existing Session and business owners
 
 ### 3.1 实施路径
 
-以下 crate 和模块是计划新增，不是当前可调用 API。
+dim-client 已提供共享 RPC 和 callback I/O；dim-acp 和 acp 命令尚未交付。下表区分这项公共基础与后续 Gateway 目标。
 
 | 路径 | 职责和输入输出 | 调用者 / 依赖 |
 | --- | --- | --- |
@@ -69,7 +69,7 @@ existing Session and business owners
 
 宿主提供两个明确的进程级输入：独占的 ACP reader/writer；App Server endpoint、server executable 和预期 model profile 等连接配置。可选登录输入复用现有宿主账户登录配置与 browser/terminal 能力，见 §4.4；不把实际账户 realm、client ID 或 token 流程写入 Gateway。I/O 只交出一次。宿主提供自己的错误报告/退出入口，协议正文只写 ACP writer。上述为本地宿主输入，不是 daemon 新服务、loader 配置或跨语言 API。
 
-实现时使用 rutis 现有依赖声明和 effect，不新建插件容器。客户端树没有 Dim 的 Session/branch group；不得直接照搬 `AgentBuilder` 装配或声称不存在的 `AcpHost` 服务已经可用。#434 U3 对 CLI binding 的范围仍待维护者确认：在首个实现单元中确认并记录具体 named-dependency 写法，不把 daemon migration 或 #403/#405 当成运行前置，也不扩散当前 CLI 的 raw `Arc<Connection>` 写法。
+实现使用 rutis 现有 TypedPlugin 和 effect，不新建插件容器。客户端树没有 Dim 的 Session/branch group，也不需要 AgentBuilder。AcpGateway 的连接、连接配置和 ACP I/O 都由宿主在构造时一次性交出，插件不读取外部服务，因此 Deps 为 `()`；不存在以 raw Arc 或手工 key 绕过 catalog 的服务依赖。#434 U3 中既有 CLI 插件是否迁移的讨论仍独立，不在此重写 TUI、引入 AcpHost 服务或等待 #403/#405。
 
 ```text
 parse CLI options (including isolated --home / --cwd / --server / --agent)
@@ -422,13 +422,15 @@ Steering 的 handoff 允许上游换 turn，并不允许脱离 ACP prompt 槽启
 
 | 单元 | 交付路径 | 接线和验收，完成条件 |
 | --- | --- | --- |
-| A. 共享 RPC 与宿主 | dim-client、现有 CLI client 调用者 | 保留 socket/pipe/profile/frame/security 行为；确认 #434 U3 的 binding；既有 CLI flow 仍通过。无 ACP handler，无 daemon diff |
+| A. 共享 RPC 与宿主 | 已完成：dim-client、现有 CLI client/MCP callback 调用者 | 保留 socket/pipe/profile/frame/security 行为；Gateway 构造接收自有输入且 Deps=()，不迁移既有 CLI 插件。2 个公共传输/callback 边界测试、94 个现有 CLI flows、受影响 crate 全 target Clippy、xtask check 通过；10 个需额外环境的既有 CLI flows 未运行。无 ACP handler，无 daemon diff |
 | B. 插件与标准会话 | dim-acp、CLI acp 入口 | 真实 stdio → Gateway → 既有 daemon；initialize/new/list/load/resume/prompt，含并发准备、固定头、emoji 去重。不能只有 mock AppServer trait |
 | C. 交互与结算 | 同一 Gateway 的 auth/permission/question/config/content | managed provider discovery、agent browser authenticate、terminal helper、登录取消/到期及交换不确定性；allow/deny、另一客户端先回答、form accept/decline/cancel、模式冲突、图片/文本资源、cancel 各交接点、close/delete、EOF 和 RPC recovery |
 | D. 有依据的 Lody 子集 | history/forkAtTurn/compaction、startup model、后台 task、最小 subagent snapshots | 普通 acpx 无未协商的自定义通知；Lody 真实消费；只声明已实现字段和 run support，含 prompt 外 task 终态、双向协商和断线 unknown；不支持控制在 native 变更前拒绝 |
 | E. 发布入口与实机 | dimcode 包、文档和验收记录 | 正确架构二进制启动 ACP；Lody/acpx 启动的是本次构建，不是历史 npx 缓存；隔离 home；至少完成 macOS，其他平台记录待验收 |
 
 这是串行交付范围，不为每个字段建立独立任务或 agent。实际实现路径引入 crate/依赖时运行 xtask check；装配变化按项目规则生成 graph，禁止手写 generated 输出。
+
+A 的消融复核：传输只保留一份，CLI 继续拥有 daemon 启动策略；删除了可由 hello features 直接判断的重复 shutdown flag。ConnectionConfig 是连接身份、profile 校验和重连所需的实际边界输入；callback 模块只拥有 I/O，没有账户业务。未发现可进一步删除且不损害既有行为的结构。
 
 ### 10.1 自动化公开流程
 

@@ -80,7 +80,8 @@ pub fn generate(workspace: &Path, out: &Path) -> Result<()> {
         .iter()
         .filter(|p| {
             p["name"].as_str().is_some_and(|name| {
-                name.starts_with("dim-agent-") || matches!(name, "dim-app-server" | "dim-cli")
+                name.starts_with("dim-agent-")
+                    || matches!(name, "dim-app-server" | "dim-client" | "dim-cli")
             })
         })
         .collect();

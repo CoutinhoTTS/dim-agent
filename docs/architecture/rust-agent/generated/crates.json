@@ -117,6 +117,10 @@
   },
   {
     "from": "dim-cli",
+    "to": "dim-client"
+  },
+  {
+    "from": "dim-cli",
     "to": "rutis"
   },
   {

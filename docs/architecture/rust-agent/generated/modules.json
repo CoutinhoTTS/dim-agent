@@ -2147,9 +2147,7 @@
         "format",
         "json",
         "matches",
-        "println",
-        "unreachable",
-        "write"
+        "println"
       ]
     },
     {
@@ -2330,8 +2328,6 @@
       "unexpandedMacros": [
         "format",
         "json",
-        "matches",
-        "tokio::select",
         "vec"
       ]
     },
@@ -3529,6 +3525,30 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/wire.rs",
       "unexpandedMacros": []
+    },
+    {
+      "id": "dim_client",
+      "crate": "dim_client",
+      "parent": null,
+      "file": "crates/dim-client/src/lib.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "unreachable",
+        "write"
+      ]
+    },
+    {
+      "id": "dim_client::callback",
+      "crate": "dim_client",
+      "parent": "dim_client",
+      "file": "crates/dim-client/src/callback.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "tokio::select"
+      ]
     }
   ],
   "edges": [
@@ -17652,8 +17672,6 @@
       "references": [
         "mod client",
         "path client",
-        "path client::RpcError",
-        "path client::app_error",
         "path client::shutdown",
         "path client::stop"
       ]
@@ -17871,6 +17889,14 @@
       ]
     },
     {
+      "from": "dim_cli",
+      "to": "dim_client",
+      "references": [
+        "path client::RpcError",
+        "path client::app_error"
+      ]
+    },
+    {
       "from": "dim_cli::args",
       "to": "dim_agent_types::permission",
       "references": [
@@ -17946,6 +17972,26 @@
       "to": "dim_cli::client::web_assets_tests",
       "references": [
         "mod web_assets_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path Client::open",
+        "path ConnectionConfig",
+        "path DaemonProfile::Configured",
+        "path DaemonProfile::Product",
+        "path Server",
+        "use dim_client::Client",
+        "use dim_client::ConnectionConfig",
+        "use dim_client::DaemonProfile",
+        "use dim_client::Message",
+        "use dim_client::RequestTooLarge",
+        "use dim_client::RpcError",
+        "use dim_client::Server",
+        "use dim_client::app_error"
       ]
     },
     {
@@ -18080,18 +18126,6 @@
     },
     {
       "from": "dim_cli::composer",
-      "to": "dim_cli::client",
-      "references": [
-        "path Client",
-        "path RequestTooLarge",
-        "path RpcError",
-        "use crate::client::Client",
-        "use crate::client::RequestTooLarge",
-        "use crate::client::RpcError"
-      ]
-    },
-    {
-      "from": "dim_cli::composer",
       "to": "dim_cli::clipboard",
       "references": [
         "path Source",
@@ -18121,6 +18155,18 @@
       ]
     },
     {
+      "from": "dim_cli::composer",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path RequestTooLarge",
+        "path RpcError",
+        "use crate::client::Client",
+        "use crate::client::RequestTooLarge",
+        "use crate::client::RpcError"
+      ]
+    },
+    {
       "from": "dim_cli::configure",
       "to": "dim_agent_types::model",
       "references": [
@@ -18142,18 +18188,18 @@
     },
     {
       "from": "dim_cli::configure",
-      "to": "dim_cli::client",
-      "references": [
-        "path Client",
-        "use crate::client::Client"
-      ]
-    },
-    {
-      "from": "dim_cli::configure",
       "to": "dim_cli::wire",
       "references": [
         "path Configuration",
         "use crate::wire::Configuration"
+      ]
+    },
+    {
+      "from": "dim_cli::configure",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
       ]
     },
     {
@@ -18260,11 +18306,9 @@
       "from": "dim_cli::export",
       "to": "dim_cli::client",
       "references": [
-        "path Client",
         "path client",
         "path client::server",
-        "use crate::client",
-        "use crate::client::Client"
+        "use crate::client"
       ]
     },
     {
@@ -18273,6 +18317,14 @@
       "references": [
         "path session::read_history",
         "use crate::session"
+      ]
+    },
+    {
+      "from": "dim_cli::export",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
       ]
     },
     {
@@ -18396,14 +18448,6 @@
     },
     {
       "from": "dim_cli::login",
-      "to": "dim_cli::client",
-      "references": [
-        "path Client",
-        "use crate::client::Client"
-      ]
-    },
-    {
-      "from": "dim_cli::login",
       "to": "dim_cli::input",
       "references": [
         "path Input::new",
@@ -18415,6 +18459,14 @@
       "to": "dim_cli::sanitize",
       "references": [
         "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::login",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
       ]
     },
     {
@@ -18436,7 +18488,14 @@
     },
     {
       "from": "dim_cli::mcp",
-      "to": "dim_cli::client",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::mcp",
+      "to": "dim_client",
       "references": [
         "path Client",
         "path crate::client::RpcError",
@@ -18445,9 +18504,9 @@
     },
     {
       "from": "dim_cli::mcp",
-      "to": "dim_cli::sanitize",
+      "to": "dim_client::callback",
       "references": [
-        "use crate::sanitize::safe"
+        "use dim_client::callback::Capture"
       ]
     },
     {
@@ -18464,15 +18523,6 @@
       "references": [
         "path Options",
         "use crate::args::Options"
-      ]
-    },
-    {
-      "from": "dim_cli::mcp_command",
-      "to": "dim_cli::client",
-      "references": [
-        "path Client",
-        "path crate::client::RpcError",
-        "use crate::client::Client"
       ]
     },
     {
@@ -18495,14 +18545,12 @@
       "from": "dim_cli::mcp_command",
       "to": "dim_cli::mcp",
       "references": [
-        "path Capture::bind",
         "path Started",
         "path catalog_report",
         "path error",
         "path self::error",
         "path session_report",
         "path target",
-        "use crate::mcp::Capture",
         "use crate::mcp::Started",
         "use crate::mcp::catalog_report",
         "use crate::mcp::error",
@@ -18515,6 +18563,23 @@
       "to": "dim_cli::sanitize",
       "references": [
         "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::mcp_command",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path crate::client::RpcError",
+        "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::mcp_command",
+      "to": "dim_client::callback",
+      "references": [
+        "path Capture::bind",
+        "use crate::mcp::Capture"
       ]
     },
     {
@@ -18658,10 +18723,16 @@
       "from": "dim_cli::permission",
       "to": "dim_cli::client",
       "references": [
-        "path Client",
         "path client",
+        "use crate::client"
+      ]
+    },
+    {
+      "from": "dim_cli::permission",
+      "to": "dim_client",
+      "references": [
+        "path Client",
         "path client::app_error",
-        "use crate::client",
         "use crate::client::Client"
       ]
     },
@@ -18686,14 +18757,6 @@
       "references": [
         "path Result",
         "use crate::Result"
-      ]
-    },
-    {
-      "from": "dim_cli::permission_command",
-      "to": "dim_cli::client",
-      "references": [
-        "path Client",
-        "use crate::client::Client"
       ]
     },
     {
@@ -18749,6 +18812,14 @@
       ]
     },
     {
+      "from": "dim_cli::permission_command",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use crate::client::Client"
+      ]
+    },
+    {
       "from": "dim_cli::plugins",
       "to": "dim_cli",
       "references": [
@@ -18775,12 +18846,9 @@
       "from": "dim_cli::plugins",
       "to": "dim_cli::client",
       "references": [
-        "path Client",
         "path client",
-        "path client::app_error",
         "path client::connect_inner",
-        "use crate::client",
-        "use crate::client::Client"
+        "use crate::client"
       ]
     },
     {
@@ -18816,6 +18884,15 @@
         "path ui::tui::run",
         "use crate::ui::tui::Leave",
         "use crate::ui::tui::WebOpened"
+      ]
+    },
+    {
+      "from": "dim_cli::plugins",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path client::app_error",
+        "use crate::client::Client"
       ]
     },
     {
@@ -19002,17 +19079,17 @@
     },
     {
       "from": "dim_cli::question",
-      "to": "dim_cli::client",
+      "to": "dim_cli::question::line",
       "references": [
-        "path RpcError",
-        "use crate::client::RpcError"
+        "mod line"
       ]
     },
     {
       "from": "dim_cli::question",
-      "to": "dim_cli::question::line",
+      "to": "dim_client",
       "references": [
-        "mod line"
+        "path RpcError",
+        "use crate::client::RpcError"
       ]
     },
     {
@@ -19021,16 +19098,6 @@
       "references": [
         "path Result",
         "use crate::Result"
-      ]
-    },
-    {
-      "from": "dim_cli::question::line",
-      "to": "dim_cli::client",
-      "references": [
-        "path Client",
-        "path RpcError",
-        "use crate::client::Client",
-        "use crate::client::RpcError"
       ]
     },
     {
@@ -19091,6 +19158,16 @@
       ]
     },
     {
+      "from": "dim_cli::question::line",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path RpcError",
+        "use crate::client::Client",
+        "use crate::client::RpcError"
+      ]
+    },
+    {
       "from": "dim_cli::session",
       "to": "dim_agent_types",
       "references": [
@@ -19139,20 +19216,6 @@
         "path Options",
         "use crate::args::Action",
         "use crate::args::Options"
-      ]
-    },
-    {
-      "from": "dim_cli::session",
-      "to": "dim_cli::client",
-      "references": [
-        "path Client",
-        "path Message",
-        "path Message::Notice",
-        "path Message::Response",
-        "path RequestTooLarge",
-        "use crate::client::Client",
-        "use crate::client::Message",
-        "use crate::client::RequestTooLarge"
       ]
     },
     {
@@ -19270,6 +19333,20 @@
       ]
     },
     {
+      "from": "dim_cli::session",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path Message",
+        "path Message::Notice",
+        "path Message::Response",
+        "path RequestTooLarge",
+        "use crate::client::Client",
+        "use crate::client::Message",
+        "use crate::client::RequestTooLarge"
+      ]
+    },
+    {
       "from": "dim_cli::session_host",
       "to": "dim_agent_types",
       "references": [
@@ -19330,16 +19407,8 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::client",
       "references": [
-        "path Client",
-        "path Message",
-        "path Message::Notice",
-        "path Message::Response",
         "path client",
-        "path client::RpcError",
-        "path client::app_error",
-        "use crate::client",
-        "use crate::client::Client",
-        "use crate::client::Message"
+        "use crate::client"
       ]
     },
     {
@@ -19354,7 +19423,6 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::mcp",
       "references": [
-        "path mcp::Capture::bind",
         "path mcp::Started",
         "path mcp::State",
         "path mcp::catalog_report",
@@ -19581,17 +19649,31 @@
       ]
     },
     {
-      "from": "dim_cli::session_host::member",
-      "to": "dim_cli",
+      "from": "dim_cli::session_host",
+      "to": "dim_client",
       "references": [
-        "path crate::Result"
+        "path Client",
+        "path Message",
+        "path Message::Notice",
+        "path Message::Response",
+        "path client::RpcError",
+        "path client::app_error",
+        "use crate::client::Client",
+        "use crate::client::Message"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_client::callback",
+      "references": [
+        "path mcp::Capture::bind"
       ]
     },
     {
       "from": "dim_cli::session_host::member",
-      "to": "dim_cli::client",
+      "to": "dim_cli",
       "references": [
-        "path client::RpcError"
+        "path crate::Result"
       ]
     },
     {
@@ -19639,6 +19721,13 @@
       ]
     },
     {
+      "from": "dim_cli::session_host::member",
+      "to": "dim_client",
+      "references": [
+        "path client::RpcError"
+      ]
+    },
+    {
       "from": "dim_cli::session_host::tasks",
       "to": "dim_agent_types::events",
       "references": [
@@ -19652,13 +19741,6 @@
       "to": "dim_cli",
       "references": [
         "path crate::Result"
-      ]
-    },
-    {
-      "from": "dim_cli::session_host::tasks",
-      "to": "dim_cli::client",
-      "references": [
-        "path client::RpcError"
       ]
     },
     {
@@ -19701,6 +19783,13 @@
         "path EventContent::BranchCreate",
         "path EventContent::BranchCreateFailed",
         "path EventContent::BranchStart"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
+      "to": "dim_client",
+      "references": [
+        "path client::RpcError"
       ]
     },
     {
@@ -24221,6 +24310,22 @@
       "to": "dim_agent_types::permission",
       "references": [
         "path PermissionChangedData"
+      ]
+    },
+    {
+      "from": "dim_client",
+      "to": "dim_client::callback",
+      "references": [
+        "mod callback"
+      ]
+    },
+    {
+      "from": "dim_client::callback",
+      "to": "dim_client",
+      "references": [
+        "path Result",
+        "path crate::Error",
+        "use crate::Result"
       ]
     }
   ],
