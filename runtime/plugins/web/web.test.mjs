@@ -12,7 +12,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { load } from '@arcships/rutis/testing';
-import web from './index.ts';
+import { part as web } from './index.ts';
 
 async function listen(t, server) {
   server.listen(0, '127.0.0.1');

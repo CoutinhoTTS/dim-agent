@@ -1,4 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import provides from './settings-owner.json' with { type: 'json' }
 import type { SessionMethods } from '../../npm/plugin.js'
 
@@ -9,7 +10,7 @@ type MethodCall = { method: string; params: { sessionId: string; [key: string]: 
 // The owner of source `example` (settings-service §11): it reads and writes
 // its document through `settings`; each method returns the envelope unchanged.
 // It also records the Settings events it listens to on the bus (§4.5).
-export default definePlugin({
+export const part = definePlugin({
   name: 'SettingsOwnerFixture',
   provides,
   inject: ['settings', 'sessionMethods'],
@@ -33,3 +34,5 @@ export default definePlugin({
     )
   },
 })
+
+export default partRow('session', part)

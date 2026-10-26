@@ -1,17 +1,14 @@
-//! Workflow's actual process/Session rows through Settings, files, S2 and C1.
+//! Workflow's actual row, which registers its Session part, through Settings,
+//! files, S2 and C1.
 use super::*;
 use std::path::{Path, PathBuf};
 
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut config = session_typescript::fixture();
-    // The process row first: tests address it as `rows[0]`.
+    // Tests address the row as `rows[0]`.
     config.rows = vec![
         serde_json::from_str(include_str!(
             "../../../../runtime/plugins/workflow/process.json"
-        ))
-        .unwrap(),
-        serde_json::from_str(include_str!(
-            "../../../../runtime/plugins/workflow/session.json"
         ))
         .unwrap(),
     ];

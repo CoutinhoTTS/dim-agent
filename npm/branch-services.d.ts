@@ -251,6 +251,28 @@ export interface Timeline {
   trace(sequence: number | bigint): Promise<TimelineTrace | null>
 }
 
+/** The scope a part is registered for. */
+export type PartScope = "session" | "branch"
+
+/**
+ * The parts plugins register for Sessions and branches. One registry serves
+ * every Agent built from an [`AgentBuilder`](crate::AgentBuilder); the host
+ * hands it to its process plugins ([`AgentBuilder::parts`](crate::AgentBuilder::parts)).
+ * Plugins of other languages reach it by the process name `partRegistry`.
+ */
+export interface PartRegistry {
+  /**
+   * Registers a plugin definition for `scope`: every open instance of the
+   * scope mounts one copy of it, and so does every later one, each in the
+   * runtime that defined it with its `inject` resolved in that instance.
+   * `name` is the part's name, as for a generator.
+   *
+   * The definition belongs to the row that handed it over. When that row
+   * unloads, rutis ends every copy first; the registration then goes.
+   */
+  registerDefinition(scope: PartScope, name: string, definition: import('@arcships/rutis').Plugin | ((ctx: any, config: any) => unknown) | { apply(ctx: any, config: any): unknown }): Promise<void>
+}
+
 /** A branch of a Session. */
 export interface SessionRef {
   sessionId: string
@@ -377,6 +399,7 @@ export interface Services {
   sessionLifecycle: SessionLifecycle
   dispatcher: Dispatcher
   timeline: Timeline
+  partRegistry: PartRegistry
   sessionPermissions: SessionPermissions
   workflowFiles: WorkflowFiles
 }

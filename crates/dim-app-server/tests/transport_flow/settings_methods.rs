@@ -24,8 +24,7 @@ fn owner_row(id: &str) -> Value {
     json!({
         "id": id,
         "name": repository().join("runtime/fixtures/settings-owner.ts"),
-        "group": "session",
-        "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.json")).unwrap(),
+        "provides": {},
         "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.settings.json")).unwrap(),
     })
 }

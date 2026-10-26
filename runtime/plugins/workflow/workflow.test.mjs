@@ -4,7 +4,6 @@ import { setTimeout as delay } from 'node:timers/promises'
 import test from 'node:test'
 import { load } from '@arcships/rutis/testing'
 import plugin from './index.ts'
-import sessionPlugin from './session.ts'
 
 const ok = value => ({ ok: true, value })
 const error = code => ({ ok: false, error: { code, message: code, retryable: code === 'reloading' } })
@@ -160,12 +159,16 @@ async function fixture(t, options = {}) {
   let tool
   let contribution
   let methods
+  let part
   const open = async () => {
     loaded = await load(plugin, { config: { packages: options.packages ?? [] }, services: {
       ...services,
       managementMethods: { async register(namespace, declarations, call) { methods = call } },
+      // The row registers its Session part; the test mounts that copy.
+      partRegistry: { async registerDefinition(scope, name, definition) { part = { scope, name, definition } } },
     } })
-    tool = await load(sessionPlugin, { services: {
+    assert.equal(part.scope, 'session')
+    tool = await load(part.definition, { services: {
       workflowRuns: loaded.service('workflowRuns'),
       toolRegistry: { async register(declaration, execute) { contribution = { declaration, execute } } },
     } })

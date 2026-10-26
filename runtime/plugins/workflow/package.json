@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "exports": { ".": "./index.ts", "./session": "./session.ts" },
+  "exports": "./index.ts",
   "dependencies": {
     "@arcships/rutis": "0.17.0",
     "yaml": "2.9.1",

@@ -1,5 +1,6 @@
 import { appendFileSync } from 'node:fs'
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import type { Services, SessionMethods } from '../../npm/plugin.js'
 import provides from './session-observer.json' with { type: 'json' }
 
@@ -8,7 +9,7 @@ import provides from './session-observer.json' with { type: 'json' }
 // the Session's channel from `apply` on. Its methods are `namespace`'s.
 export function observer(namespace: string, declaration: Record<string, Record<string, string>>) {
   return definePlugin({
-    name: 'SessionObserverFixture',
+    name: `SessionObserverFixture(${namespace})`,
     provides: declaration,
     inject: ['sessionIdentity', 'sessionConfig', 'sessionLifecycle', 'sessionMethods'],
     async apply(ctx, options: { lifecycleFile?: string }) {
@@ -87,4 +88,4 @@ export function observer(namespace: string, declaration: Record<string, Record<s
   })
 }
 
-export default observer('session.observer', provides)
+export default partRow('session', observer('session.observer', provides))

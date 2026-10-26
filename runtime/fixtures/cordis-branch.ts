@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 
 // A plugin for rutis's Cordis 4 as written for Cordis, with no rutis or Dim
-// SDK, mounted as a branch row. The names it injects resolve to its own
+// SDK, registered as a branch part by `cordis-branch-row.ts`. The names it injects resolve to its own
 // branch's copies, so the marker it writes names its own Session and branch.
 export const name = 'cordis-branch-fixture'
 export const inject = ['dispatcher', 'timelineIdentity', 'treeCommands']

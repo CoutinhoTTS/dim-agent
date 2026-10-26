@@ -1,9 +1,10 @@
 //! The part registry and the instances' mounters
 //! ([ADR 006 D3](../../../docs/adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)).
 //!
-//! A plugin registers part generators for the Session or branch scope while
-//! it runs; the registration is an effect of the caller, withdrawn when the
-//! caller unloads. Every Session and branch holds two mounters. The required
+//! A plugin registers parts for the Session or branch scope while it runs:
+//! a Rust plugin a generator, whose registration is an effect of the caller
+//! and is withdrawn when the caller unloads; a plugin of another language a
+//! rutis plugin definition, which ends with the row that handed it over. Every Session and branch holds two mounters. The required
 //! one mounts the parts the assembly profile requires and hands them to the
 //! instance, which publishes only once they are Active. The optional one
 //! mounts every other registered part, which nothing waits for. Both
@@ -13,7 +14,8 @@ use crate::{Names, SessionConfig};
 use rutis::host::{
     BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key, TypeKey,
 };
-use rutis::{Ctx, Error, Plugin};
+use rutis::{Ctx, Definition, Error, Plugin, service};
+use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -21,7 +23,8 @@ use std::{
 use tokio::sync::watch;
 
 /// The scope a part is registered for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PartScope {
     Session,
     Branch,
@@ -45,11 +48,33 @@ pub struct Mount<'a> {
 pub type Generator =
     Arc<dyn Fn(&Mount<'_>) -> Result<Option<Box<dyn DynPlugin>>, Error> + Send + Sync>;
 
+/// What an instance mounts a registered part from.
+enum Source {
+    /// A Rust plugin's generator.
+    Generator(Generator),
+    /// A plugin definition another language handed over: each instance
+    /// mounts one copy, in that language's runtime.
+    Definition(Definition),
+}
+
 struct Entry {
     id: u64,
     scope: PartScope,
     name: String,
-    generator: Generator,
+    source: Source,
+}
+
+impl Entry {
+    /// The part for the instance of `site`, mounted on `ctx`, or nothing
+    /// when the generator builds none there.
+    fn build(&self, ctx: &Ctx, site: &MountSite) -> Result<Option<Box<dyn DynPlugin>>, Error> {
+        match &self.source {
+            Source::Generator(generator) => site.with_mount(|mount| generator(mount)),
+            Source::Definition(definition) => {
+                Ok(Some(Box::new(definition.at(ctx, serde_json::json!({}))?)))
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -64,7 +89,12 @@ struct State {
 /// The parts plugins register for Sessions and branches. One registry serves
 /// every Agent built from an [`AgentBuilder`](crate::AgentBuilder); the host
 /// hands it to its process plugins ([`AgentBuilder::parts`](crate::AgentBuilder::parts)).
+/// Plugins of other languages reach it by the process name `partRegistry`.
 pub struct PartRegistry {
+    shared: Arc<Shared>,
+}
+
+struct Shared {
     state: Mutex<State>,
     version: watch::Sender<u64>,
 }
@@ -72,15 +102,17 @@ pub struct PartRegistry {
 impl Default for PartRegistry {
     fn default() -> Self {
         Self {
-            state: Mutex::default(),
-            version: watch::channel(0).0,
+            shared: Arc::new(Shared {
+                state: Mutex::default(),
+                version: watch::channel(0).0,
+            }),
         }
     }
 }
 
 impl std::fmt::Debug for PartRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = self.state.lock().unwrap();
+        let state = self.shared.state.lock().unwrap();
         let entries: Vec<_> = state
             .entries
             .iter()
@@ -111,21 +143,46 @@ impl PartRegistry {
         + Sync
         + 'static,
     ) -> Result<(), Error> {
-        let registry = self.clone();
-        let id = self.add(scope, name.into(), Arc::new(generator));
+        let id = self
+            .shared
+            .add(scope, name.into(), Source::Generator(Arc::new(generator)));
+        let shared = self.shared.clone();
         let registered = ctx.effect(move || async move {
-            registry.withdraw(id).await;
+            shared.withdraw(id).await;
             Ok(())
         });
         if registered.is_err() {
             // The caller is already unloading: nothing of it may stay.
-            let registry = self.clone();
-            tokio::spawn(async move { registry.withdraw(id).await });
+            let shared = self.shared.clone();
+            tokio::spawn(async move { shared.withdraw(id).await });
         }
         registered.map(|_| ())
     }
+}
 
-    fn add(&self, scope: PartScope, name: String, generator: Generator) -> u64 {
+/// The part registry as other languages call it.
+#[service]
+impl PartRegistry {
+    /// Registers a plugin definition for `scope`: every open instance of the
+    /// scope mounts one copy of it, and so does every later one, each in the
+    /// runtime that defined it with its `inject` resolved in that instance.
+    /// `name` is the part's name, as for a generator.
+    ///
+    /// The definition belongs to the row that handed it over. When that row
+    /// unloads, rutis ends every copy first; the registration then goes.
+    pub fn register_definition(&self, scope: PartScope, name: String, definition: Definition) {
+        let ended = definition.ended();
+        let id = self.shared.add(scope, name, Source::Definition(definition));
+        let shared = self.shared.clone();
+        tokio::spawn(async move {
+            ended.await;
+            shared.withdraw(id).await;
+        });
+    }
+}
+
+impl Shared {
+    fn add(&self, scope: PartScope, name: String, source: Source) -> u64 {
         let id = {
             let mut state = self.state.lock().unwrap();
             state.next_entry += 1;
@@ -134,7 +191,7 @@ impl PartRegistry {
                 id,
                 scope,
                 name,
-                generator,
+                source,
             }));
             id
         };
@@ -300,7 +357,7 @@ impl PartMounter {
             if !self.owns(&entry) || seen.contains_key(&entry.id) {
                 continue;
             }
-            let part = match site.with_mount(|mount| (entry.generator)(mount)) {
+            let part = match entry.build(ctx, site) {
                 Ok(part) => part,
                 Err(error) if self.required => return Err(error),
                 Err(error) => {
@@ -314,7 +371,7 @@ impl PartMounter {
                 continue;
             };
             let view = mount(ctx, part, &site.copies)?;
-            if !site.registry.attach(entry.id, id, view.clone()) {
+            if !site.registry.shared.attach(entry.id, id, view.clone()) {
                 tokio::spawn(async move {
                     let _ = view.dispose().await;
                 });
@@ -376,9 +433,9 @@ impl DynPlugin for PartMounter {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
             let site = self.site.clone();
-            let id = site.registry.mounter();
+            let id = site.registry.shared.mounter();
             let mut waiting = vec![];
-            let mut changes = site.registry.version.subscribe();
+            let mut changes = site.registry.shared.version.subscribe();
             changes.mark_unchanged();
             let mut seen = HashMap::new();
             let cancel = ctx.cancellation_token();
@@ -388,7 +445,7 @@ impl DynPlugin for PartMounter {
             // a registration between the check and the mounting cannot be
             // left out of what the instance waits for.
             let snapshot = loop {
-                let snapshot = site.registry.snapshot();
+                let snapshot = site.registry.shared.snapshot();
                 let missing = if self.required {
                     self.missing(&snapshot)
                 } else {
@@ -421,7 +478,7 @@ impl DynPlugin for PartMounter {
                             _ = cancel.cancelled() => return,
                         }
                         // After publication a late part never fails the instance.
-                        let snapshot = this.site.registry.snapshot();
+                        let snapshot = this.site.registry.shared.snapshot();
                         if let Err(error) = this.reconcile(&ctx, id, &mut seen, &snapshot) {
                             tracing::warn!(%error, "a registered part failed to build");
                         }
@@ -432,7 +489,7 @@ impl DynPlugin for PartMounter {
             ctx.effect(move || async move {
                 cancel.cancel();
                 let _ = follow.await;
-                registry.detach(id);
+                registry.shared.detach(id);
                 Ok(())
             })?;
             if self.required {

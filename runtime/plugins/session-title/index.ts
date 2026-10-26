@@ -1,7 +1,7 @@
 import { definePlugin, type Plugin } from '@arcships/rutis'
 import type {
   AgentEvent, AuxiliaryModel, ModelId, Services, SessionBroadcast, SessionMetadata,
-  SessionMethods, SessionMethodReply, Sessions, Settings, SettingsResult,
+  PartRegistry, SessionMethods, SessionMethodReply, Sessions, Settings, SettingsResult,
 } from '../../../npm/plugin.d.ts'
 import type { UserInput } from '../../../npm/branch-services.d.ts'
 import row from './session-title.json' with { type: 'json' }
@@ -45,8 +45,10 @@ async function prefix(sessions: Sessions, sessionId: string, sequence: number, i
   return { first, model, operator }
 }
 
-export default definePlugin({
-  name: 'SessionTitle', inject: row.inject, provides: row.provides as Plugin['provides'],
+// The Session part: each Session mounts one copy.
+export const part = definePlugin({
+  name: 'SessionTitle',
+  inject: ['sessions', 'settings', 'sessionMetadata', 'auxiliaryModel', 'sessionIdentity', 'sessionConfig', 'sessionLifecycle', 'sessionMethods'],
   async apply(ctx) {
     const sessions = ctx.use<Sessions>('sessions')
     const settings = ctx.use<TitleSettings>('settings')
@@ -168,5 +170,13 @@ export default definePlugin({
         return failure('service_reloading', 'Title changed during rename')
       },
     )
+  },
+})
+
+// The plugin's one row registers the Session part (rutis usage §2).
+export default definePlugin({
+  name: 'SessionTitle', inject: row.inject, provides: row.provides as Plugin['provides'],
+  async apply(ctx) {
+    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'SessionTitle', part)
   },
 })

@@ -1,13 +1,16 @@
-//! Rows of other languages (Node, Python) in the process, `session` or
-//! `branch` group. Each row declares its group (rutis usage §2); the
-//! runtime and native bindings share each row's owner.
+//! Rows of other languages (Node, Python). A TypeScript row is a process
+//! row: its plugin registers its Session and branch parts with
+//! `partRegistry` as plugin definitions, and the row lists the names those
+//! parts provide in their instances (`instanceNames`), which the catalog
+//! needs before the runtime starts. A Python row still declares its group,
+//! one row per part, until Dim takes rutis 0.17.1 (rutis usage §2).
 use crate::{
     Result, ServerError,
     methods::ManagementMethods,
     settings::{SourceDeclaration, WorkflowPackages},
 };
 use dim_agent_capabilities::{methods::SessionMethods, tool_registry::ToolRegistry};
-use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, SESSION_GROUP, names::name_of};
+use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, PartRegistry, SESSION_GROUP, names::name_of};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, PluginFactory, TypeKey};
 use rutis::{Ctx, Error};
 use rutis_bridge::{
@@ -55,10 +58,11 @@ fn crossing_instance_names() -> [(String, &'static str); 8] {
 }
 
 /// The names a host of foreign parts shares across languages beyond those
-/// the catalog already shares: the marked Session and branch services, and
-/// the tool and method registries, with which a part of any language
-/// registers its contributions. The generated catalog (`xtask graph`)
-/// shares them the same way.
+/// the catalog already shares: the marked Session and branch services, the
+/// tool and method registries, with which a part of any language registers
+/// its contributions, and the part registry, with which a plugin registers
+/// its parts. The generated catalog (`xtask graph`) shares them the same
+/// way.
 pub fn share_names(catalog: &mut ServiceCatalog) {
     for (name, group) in crossing_instance_names() {
         catalog.register_shared_instance(name, group);
@@ -66,7 +70,8 @@ pub fn share_names(catalog: &mut ServiceCatalog) {
     catalog
         .register_shared_instance(name_of::<ToolRegistry>(), SESSION_GROUP)
         .register_shared_instance(name_of::<SessionMethods>(), SESSION_GROUP)
-        .register_shared(name_of::<ManagementMethods>());
+        .register_shared(name_of::<ManagementMethods>())
+        .register_shared(name_of::<PartRegistry>());
 }
 
 /// The runtimes of other languages and their loader rows, each with a
@@ -78,8 +83,10 @@ pub struct SessionTypeScriptConfig {
     pub anchor: PathBuf,
     /// The Python runtime of rows named `py:<module>`, if any.
     pub python: Option<PythonConfig>,
-    /// Loader rows: a row's `group` is `"session"` or `"branch"`; a process
-    /// row has none.
+    /// Loader rows. A TypeScript row is a process row and may list
+    /// `instanceNames`, the names its parts provide in each Session or
+    /// branch, as `{"name": "session" | "branch"}`. A `py:` row's `group` is
+    /// `"session"` or `"branch"`; a process row has none.
     pub rows: Vec<Value>,
 }
 
@@ -186,8 +193,16 @@ impl Parts {
             if !matches!(row.get("disabled"), None | Some(Value::Bool(_))) {
                 return Err(invalid("row disabled must be boolean"));
             }
+            let python = name.starts_with("py:");
             let group = match row.get("group") {
                 None => None,
+                // A TypeScript plugin registers its parts (rutis usage R5).
+                Some(_) if !python => {
+                    return Err(invalid(
+                        "a TypeScript row is a process row and has no group: its plugin \
+                         registers its Session and branch parts with partRegistry",
+                    ));
+                }
                 Some(Value::String(group)) if [SESSION_GROUP, BRANCH_GROUP].contains(&&**group) => {
                     Some(group.as_str())
                 }
@@ -197,6 +212,42 @@ impl Parts {
                     ));
                 }
             };
+            // The names the plugin's parts provide in their instances: the
+            // catalog is fixed before the runtime starts, so the row says
+            // which group each belongs to (rutis usage §2).
+            let instance_names = match row.get("instanceNames") {
+                None => Map::new(),
+                Some(_) if python => {
+                    return Err(invalid(
+                        "instanceNames is for a TypeScript row; a py: row declares its group",
+                    ));
+                }
+                Some(Value::Object(names)) => names.clone(),
+                Some(_) => return Err(invalid("instanceNames must be an object")),
+            };
+            for (service, group) in &instance_names {
+                let group = match group {
+                    Value::String(group) if [SESSION_GROUP, BRANCH_GROUP].contains(&&**group) => {
+                        group.as_str()
+                    }
+                    _ => {
+                        return Err(invalid(
+                            "an instanceNames entry must be \"session\" or \"branch\"",
+                        ));
+                    }
+                };
+                if !matches!(
+                    builder.catalog().key_in(service, &Build::default()),
+                    Err(LoaderError::UnknownService(_))
+                ) {
+                    return Err(ServerError::Configuration(format!(
+                        "instanceNames of row {id}: {service} is already a service"
+                    )));
+                }
+                builder
+                    .catalog_mut()
+                    .register_shared_instance(service, group);
+            }
             let provides = row
                 .get("provides")
                 .and_then(Value::as_object)
@@ -224,12 +275,14 @@ impl Parts {
                 }
             }
             snapshots.insert(name.to_owned(), provides.clone());
-            // `settings` is the host's input to Settings and `group` says
-            // where the row goes: neither is a loader field.
+            // `settings` is the host's input to Settings, `group` says
+            // where the row goes and `instanceNames` went to the catalog:
+            // none is a loader field.
             let mut row = row.clone();
             if let Value::Object(fields) = &mut row {
                 fields.remove("settings");
                 fields.remove("group");
+                fields.remove("instanceNames");
             }
             match group {
                 None => process_rows.push(row),

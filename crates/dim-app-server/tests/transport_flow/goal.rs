@@ -1,6 +1,6 @@
-//! Goal (docs/design/plugins/Goal.md) as a TypeScript plugin: its Session
-//! part writes change inputs by branch id, and its branch part folds the
-//! branch's events and decides continuation.
+//! Goal (docs/design/plugins/Goal.md) as a TypeScript plugin, one row: its
+//! Session part writes change inputs by branch id, and its branch part folds
+//! the branch's events and decides continuation.
 use super::*;
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use std::path::{Path, PathBuf};
@@ -22,25 +22,13 @@ fn goal_rows() -> SessionTypeScriptConfig {
             .expect("DIM_TEST_JS_RUNTIME")
             .into(),
         anchor: repository().join("runtime/package.json"),
-        rows: vec![
-            json!({
-                "id": "goal-session",
-                "name": goal.join("session.ts"),
-                "group": "session",
-                "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/plugins/goal/session.json")).unwrap(),
-                "inject": ["treeCommands", "toolRegistry", "sessionMethods"],
-                "config": {},
-            }),
-            json!({
-                "id": "goal-branch",
-                "name": goal.join("branch.ts"),
-                "group": "branch",
-                "provides": {},
-                "inject": ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"],
-                "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/plugins/goal/settings.json")).unwrap(),
-                "config": {},
-            }),
-        ],
+        rows: vec![json!({
+            "id": "goal",
+            "name": goal.join("index.ts"),
+            "provides": {},
+            "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/plugins/goal/settings.json")).unwrap(),
+            "config": {},
+        })],
     }
 }
 fn product_home() -> PathBuf {
