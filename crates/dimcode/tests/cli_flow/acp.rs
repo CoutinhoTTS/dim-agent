@@ -13,6 +13,387 @@ fn event(sequence: u64, id: &str, kind: &str, name: &str, data: Value) -> Value 
     json!({"id":id,"sequence":sequence,"create_at":1,"type":kind,"name":name,"data":data})
 }
 
+fn detached_eof(wire: &mut Wire) {
+    loop {
+        let mut line = String::new();
+        if wire.0.read_line(&mut line).unwrap() == 0 {
+            return;
+        }
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            request["method"], "session.detach",
+            "EOF can only detach the native connection: {request}"
+        );
+        wire.reply(&request, json!({}));
+    }
+}
+
+fn accept_native(listener: &UnixListener) -> Wire {
+    let (stream, _) = listener.accept().unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    Wire(BufReader::new(stream))
+}
+fn recovery_hello(wire: &mut Wire, instance: &str) {
+    let hello = wire.read("hello");
+    assert_eq!(hello["params"]["clientName"], "AcpGateway");
+    wire.reply(&hello,json!({"instanceId":instance,"serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.input_lookup"]}));
+}
+
+#[test]
+fn acp_stdio_recovers_accepted_input_without_resubmitting_and_resets_subagent_observation() {
+    for restarted in [false, true] {
+        let home = Home::new();
+        let cwd = fs::canonicalize(&home.0).unwrap();
+        let endpoint = home.0.join("rust/daemon.sock");
+        let listener = UnixListener::bind(&endpoint).unwrap();
+        fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)).unwrap();
+        let daemon = thread::spawn(move || {
+            let mut wire = accept_native(&listener);
+            recovery_hello(&mut wire, "first");
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":7,"nextAfter":7,"done":true}),
+            );
+            let submit = wire.read("session.submit");
+            let delegation = event(
+                8,
+                "delegation",
+                "collaboration",
+                "request",
+                json!({"turn_id":"previous","request_id":"previous","call_id":"member","target":{"kind":"member","agent_id":"agent","session_id":"member"},"prompt":"Work"}),
+            );
+            wire.notice(
+                "session.event",
+                json!({"sessionId":"session","branchId":"main","event":delegation}),
+            );
+            let input = event(
+                9,
+                "accepted-input",
+                "input",
+                "message",
+                json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}),
+            );
+            drop(wire);
+            let mut wire = accept_native(&listener);
+            recovery_hello(&mut wire, if restarted { "second" } else { "first" });
+            let lookup = wire.read("session.input_lookup");
+            assert_eq!(
+                lookup["params"]["submissionId"],
+                submit["params"]["submissionId"]
+            );
+            wire.reply(&lookup, json!({"status":"accepted","event":input}));
+            let list = wire.read("session.list");
+            wire.reply(&list, json!([{"sessionId":"session","cwd":cwd}]));
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            let facts = vec![
+                delegation,
+                input,
+                event(10, "start", "turn", "start", json!({"turn_id":"owned"})),
+                event(
+                    11,
+                    "consumed",
+                    "input",
+                    "consumed",
+                    json!({"input_id":"accepted-input"}),
+                ),
+                event(
+                    12,
+                    "answer",
+                    "step",
+                    "text",
+                    json!({"turn_id":"owned","request_id":"model","delta":"Recovered once"}),
+                ),
+                event(
+                    13,
+                    "end",
+                    "turn",
+                    "end",
+                    json!({"turn_id":"owned","status":if restarted {"cancelled"} else {"completed"},"reason":if restarted {"server_restarted"} else {"end_turn"}}),
+                ),
+            ];
+            wire.reply(
+                &history,
+                json!({"events":facts,"through":13,"nextAfter":13,"done":true}),
+            );
+            detached_eof(&mut wire);
+        });
+        let mut peer = Peer::start(&home);
+        peer.send(1,"initialize",json!({"protocolVersion":1,"clientCapabilities":{"_meta":{"lody":{"subagentEvents":{"version":1}}}}}));
+        peer.response(1);
+        peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+        peer.response(2);
+        peer.send(
+            3,
+            "session/prompt",
+            json!({"sessionId":"session","prompt":[{"type":"text","text":"Once"}]}),
+        );
+        let completed = peer.response(3);
+        assert_eq!(
+            completed["result"]["stopReason"],
+            if restarted { "cancelled" } else { "end_turn" },
+            "{completed}"
+        );
+        let text: String = peer
+            .updates
+            .iter()
+            .filter(|frame| frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
+            .map(|frame| {
+                frame["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(text, "Recovered once");
+        let snapshots: Vec<_> = peer
+            .updates
+            .iter()
+            .filter(|frame| frame["method"] == "_lody/subagents/event")
+            .collect();
+        assert_eq!(snapshots.len(), 3, "{snapshots:?}");
+        assert_eq!(snapshots[1]["params"]["snapshot"]["state"], "unknown");
+        assert_eq!(snapshots[1]["params"]["snapshot"]["outputIncomplete"], true);
+        assert_ne!(
+            snapshots[0]["params"]["runId"],
+            snapshots[2]["params"]["runId"]
+        );
+        peer.close();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn acp_stdio_does_not_repeat_creation_when_the_native_reply_is_lost() {
+    let home = Home::new();
+    let cwd = fs::canonicalize(&home.0).unwrap();
+    let endpoint = home.0.join("rust/daemon.sock");
+    let listener = UnixListener::bind(&endpoint).unwrap();
+    fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)).unwrap();
+    let (restored, ready) = std::sync::mpsc::sync_channel(0);
+    let daemon = thread::spawn(move || {
+        let mut wire = accept_native(&listener);
+        recovery_hello(&mut wire, "first");
+        wire.read("session.create");
+        drop(wire);
+        let mut wire = accept_native(&listener);
+        recovery_hello(&mut wire, "first");
+        restored.send(()).unwrap();
+        let list = wire.read("session.list");
+        wire.reply(
+            &list,
+            json!([{"sessionId":"created-without-reply","cwd":cwd}]),
+        );
+        detached_eof(&mut wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert_eq!(
+        peer.response(2)["error"]["data"]["code"],
+        "daemon_unavailable"
+    );
+    ready.recv_timeout(PATIENCE).unwrap();
+    // Wait for the native restoration fact to enter the same foreground actor.
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "Native restoration did not become ready"
+        );
+        peer.send(3, "session/list", json!({}));
+        let list = peer.response(3);
+        if list.get("error").is_none() {
+            assert_eq!(
+                list["result"]["sessions"][0]["sessionId"],
+                "created-without-reply"
+            );
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_a_closed_preparation_cannot_publish_over_a_later_load() {
+    let home = Home::new();
+    let cwd = fs::canonicalize(&home.0).unwrap();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        let list = wire.read("session.list"); wire.reply(&list,json!([{"sessionId":"saved","cwd":cwd}]));
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let old = wire.read("session.history");
+        wire.notice("session.closed",json!({"sessionId":"saved"}));
+        let list = wire.read("session.list");
+        wire.reply(&old,json!({"events":[event(8,"old","step","text",json!({"turn_id":"old","request_id":"old","delta":"must not leak"}))],"through":8,"nextAfter":8,"done":true}));
+        wire.reply(&list,json!([{"sessionId":"saved","cwd":cwd}]));
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let fresh = wire.read("session.history");
+        wire.reply(&fresh,json!({"events":[event(9,"fresh","step","text",json!({"turn_id":"fresh","request_id":"fresh","delta":"fresh runtime"}))],"through":9,"nextAfter":9,"done":true}));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(
+        2,
+        "session/load",
+        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[]}),
+    );
+    assert!(peer.response(2).get("error").is_some());
+    peer.send(
+        3,
+        "session/load",
+        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[]}),
+    );
+    assert!(peer.response(3).get("error").is_none());
+    assert_eq!(peer.updates.len(), 1);
+    assert_eq!(
+        peer.updates[0]["params"]["update"]["content"]["text"],
+        "fresh runtime"
+    );
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_cancelling_one_load_waiter_does_not_cancel_the_shared_preparation() {
+    let home = Home::new();
+    let cwd = fs::canonicalize(&home.0).unwrap();
+    let (waiting, ready) = std::sync::mpsc::sync_channel(0);
+    let (release, delayed) = std::sync::mpsc::sync_channel(0);
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        let list = wire.read("session.list"); wire.reply(&list,json!([{"sessionId":"saved","cwd":cwd}]));
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let history = wire.read("session.history"); waiting.send(()).unwrap(); delayed.recv_timeout(PATIENCE).unwrap();
+        wire.reply(&history,json!({"events":[event(8,"answer","step","text",json!({"turn_id":"turn","request_id":"model","delta":"one replay"}))],"through":8,"nextAfter":8,"done":true}));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(
+        2,
+        "session/load",
+        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[]}),
+    );
+    ready.recv_timeout(PATIENCE).unwrap();
+    peer.send(
+        3,
+        "session/load",
+        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[]}),
+    );
+    writeln!(
+        peer.input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":2}})
+    )
+    .unwrap();
+    peer.input.flush().unwrap();
+    assert_eq!(peer.response(2)["error"]["code"], -32800);
+    release.send(()).unwrap();
+    assert!(peer.response(3).get("error").is_none());
+    assert_eq!(peer.updates.len(), 1);
+    assert_eq!(
+        peer.updates[0]["params"]["update"]["content"]["text"],
+        "one replay"
+    );
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_bounds_in_flight_reads_and_releases_completed_requests() {
+    let home = Home::new();
+    let (waiting, ready) = std::sync::mpsc::sync_channel(0);
+    let (release, delayed) = std::sync::mpsc::sync_channel(0);
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        let calls: Vec<_> = (0..128).map(|_| wire.read("session.list")).collect();
+        waiting.send(()).unwrap();
+        delayed.recv_timeout(PATIENCE).unwrap();
+        for call in calls {
+            wire.reply(&call, json!([]));
+        }
+        let next = wire.read("session.list");
+        wire.reply(&next, json!([]));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    for id in 2..130 {
+        peer.send(id, "session/list", json!({}));
+    }
+    ready.recv_timeout(PATIENCE).unwrap();
+    peer.send(130, "session/list", json!({}));
+    assert_eq!(peer.response(130)["error"]["code"], -32001);
+    release.send(()).unwrap();
+    let mut ids = std::collections::HashSet::new();
+    for _ in 0..128 {
+        let frame = peer.frame();
+        assert_eq!(frame["result"]["sessions"], json!([]));
+        assert!(ids.insert(frame["id"].as_i64().unwrap()));
+    }
+    peer.send(131, "session/list", json!({}));
+    assert_eq!(peer.response(131)["result"]["sessions"], json!([]));
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_slow_output_fails_explicitly_without_stopping_native_execution() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(METHODS); wire.created();
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let history = wire.read("session.history"); wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let submit = wire.read("session.submit"); wire.reply(&submit,json!({"event":event(9,"input","input","message",json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}))}));
+        wire.0.get_ref().set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        let text = "x".repeat(1024*1024);
+        for sequence in 10..30 {
+            let frame = json!({"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session","branchId":"main","event":event(sequence,&format!("text-{sequence}"),"step","text",json!({"turn_id":"turn","request_id":"model","delta":text}))}});
+            if writeln!(wire.0.get_mut(),"{frame}").is_err() { break; }
+        }
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|size|size > 0) {
+            let frame: Value = serde_json::from_str(&line).unwrap(); assert_eq!(frame["method"],"session.detach");
+            if writeln!(wire.0.get_mut(),"{}",json!({"jsonrpc":"2.0","id":frame["id"],"result":{}})).is_err() { break; }
+            line.clear();
+        }
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    peer.response(2);
+    peer.send(
+        3,
+        "session/prompt",
+        json!({"sessionId":"session","prompt":[{"type":"text","text":"Backpressure"}]}),
+    );
+    let Peer {
+        child,
+        input,
+        output,
+        ..
+    } = peer;
+    let failed = wait(child);
+    drop(input);
+    drop(output);
+    assert!(!failed.status.success());
+    let diagnostic = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        diagnostic.contains("reliable output exceeds")
+            || diagnostic.contains("writer did not make progress"),
+        "{diagnostic}"
+    );
+    daemon.join().unwrap();
+}
+
 struct Peer {
     child: Child,
     input: std::process::ChildStdin,
@@ -152,7 +533,7 @@ fn acp_stdio_cancels_a_held_input_after_a_late_submit_reply() {
         wire.reply(&stop,json!({}));
         let close = wire.read("session.close");
         wire.reply(&close,json!({}));
-        let mut eof = String::new(); assert_eq!(wire.0.read_line(&mut eof).unwrap(),0);
+        detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
     peer.initialize();
@@ -206,6 +587,10 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
         wire.reply(&update,json!({"version":5,"policy":update["params"]["policy"]}));
         let get = wire.read("session.permission.get");
         wire.reply(&get,json!({"version":5,"policy":update["params"]["policy"]}));
+        let get = wire.read("session.permission.get"); wire.reply(&get,json!({"version":5,"policy":update["params"]["policy"]}));
+        let conflict = wire.read("session.permission.update"); assert_eq!(conflict["params"]["expectedVersion"],5);
+        wire.send(json!({"jsonrpc":"2.0","id":conflict["id"],"error":{"code":-32000,"message":"Concurrent policy change","data":{"appError":"permission_conflict"}}}));
+        let refresh = wire.read("session.permission.get"); wire.reply(&refresh,json!({"version":6,"policy":{"preset":"read-only","allowedTools":["fixture"],"disallowedTools":["danger"]}}));
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["user"]["content"][0]["source"]["mediaType"],"image/png");
         let input = event(9,"input","input","message",json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}));
@@ -226,7 +611,7 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
         wire.reply(&answer,json!({}));
         fact(wire,event(13,"result","step","tool-result",json!({"turn_id":"turn","request_id":"model","call_event_id":"ask","results":[{"call_id":"question","result":{"content":"answered"}}]})));
         fact(wire,event(14,"end","turn","end",json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
-        let mut eof = String::new(); let _ = wire.0.read_line(&mut eof);
+        detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
     peer.send(
@@ -246,6 +631,15 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
         json!({"sessionId":"session","modeId":"workspace-write"}),
     );
     assert!(peer.response(3).get("error").is_none());
+    peer.send(
+        30,
+        "session/set_config_option",
+        json!({"sessionId":"session","configId":"mode","value":"full-access"}),
+    );
+    assert_eq!(
+        peer.response(30)["error"]["data"]["nativeAppError"],
+        "permission_conflict"
+    );
     peer.send(4,"session/prompt",json!({"sessionId":"session","prompt":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="},{"type":"resource","resource":{"uri":"test://text","text":"inline"}}]}));
     loop {
         let frame = peer.frame();
@@ -264,7 +658,8 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
                     json!({"action":"accept","content":{"q0":["A","B"],"custom0":"C"}}),
                 );
             }
-            Some("session/update") | Some("$/cancel_request") => {}
+            Some("session/update") => peer.updates.push(frame),
+            Some("$/cancel_request") => {}
             _ => {
                 assert_eq!(frame["id"], 4, "{frame}");
                 assert_eq!(frame["result"]["stopReason"], "end_turn", "{frame}");
@@ -272,6 +667,11 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
             }
         }
     }
+    assert!(
+        peer.updates.iter().any(
+            |frame| frame["params"]["update"]["configOptions"][0]["currentValue"] == "read-only"
+        )
+    );
     peer.close();
     daemon.join().unwrap();
 }
@@ -285,7 +685,7 @@ fn acp_stdio_discovers_managed_auth_without_starting_an_existing_login() {
         wire.reply(&providers,json!([{"providerId":"managed-fixture","displayName":"Fixture","loginMethods":["browser","device"]}]));
         let status = wire.read("account.status"); wire.reply(&status,json!({"account":{"displayName":"fixture"}}));
         let status = wire.read("account.status"); wire.reply(&status,json!({"account":{"displayName":"fixture"}}));
-        let mut eof = String::new(); assert_eq!(wire.0.read_line(&mut eof).unwrap(),0,"{eof}");
+        detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
     peer.send(
@@ -314,6 +714,71 @@ fn acp_stdio_discovers_managed_auth_without_starting_an_existing_login() {
 }
 
 #[test]
+fn acp_terminal_auth_helper_rediscovers_the_method_and_uses_the_same_home() {
+    let home = Home::new();
+    let endpoint = home.0.join("rust/daemon.sock");
+    let listener = UnixListener::bind(&endpoint).unwrap();
+    fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)).unwrap();
+    let daemon = thread::spawn(move || {
+        let providers = |wire: &mut Wire| {
+            let request = wire.read("account.providers");
+            wire.reply(
+                &request,
+                json!([{"providerId":"fixture","displayName":"Fixture","loginMethods":["device"]}]),
+            );
+        };
+        let mut wire = accept_native(&listener);
+        let mut methods = METHODS.to_vec();
+        methods.push("account.providers");
+        wire.hello(&methods);
+        providers(&mut wire);
+        let status = wire.read("account.status");
+        wire.reply(&status, json!({"account":null}));
+        detached_eof(&mut wire);
+        drop(wire);
+        let mut wire = accept_native(&listener);
+        wire.hello(&methods);
+        providers(&mut wire);
+        providers(&mut wire);
+        let begin = wire.read("account.login.begin");
+        assert_eq!(begin["params"]["providerId"], "fixture");
+        wire.reply(&begin,json!({"attemptId":"terminal-attempt","verificationUri":"https://fixture.invalid/device","userCode":"FIXTURE-CODE"}));
+        let status = wire.read("account.login.status");
+        assert_eq!(status["params"]["attemptId"], "terminal-attempt");
+        wire.reply(&status, json!({"status":"completed"}));
+        detached_eof(&mut wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.send(
+        1,
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{"auth":{"terminal":true}}}),
+    );
+    let initialized = peer.response(1);
+    let method = initialized["result"]["authMethods"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        initialized["result"]["authMethods"][0]["args"],
+        json!(["--auth-setup", method])
+    );
+    peer.close();
+    let result = home
+        .command()
+        .args(["acp", "--auth-setup", &method])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("Signed in."));
+    daemon.join().unwrap();
+}
+
+#[test]
 fn acp_stdio_model_choices_keep_the_catalog_provider_and_adopted_result() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -335,7 +800,7 @@ fn acp_stdio_model_choices_keep_the_catalog_provider_and_adopted_result() {
         assert_eq!(update["params"]["modelId"],"next/model");
         wire.reply(&update,json!({"outcome":"adopted","model":{"providerId":"provider/with/slashes","modelId":"next/model"}}));
         catalog(wire);
-        let mut eof = String::new(); assert_eq!(wire.0.read_line(&mut eof).unwrap(),0);
+        detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
     peer.initialize();
@@ -393,7 +858,7 @@ fn lody_projection(version: u32) {
         let fork = wire.read("session.fork"); assert_eq!(fork["params"]["at"],15); wire.reply(&fork,json!({"sessionId":"forked","sequence":15}));
         let attach = wire.read("session.attach"); assert_eq!(attach["params"]["sessionId"],"forked"); wire.reply(&attach,json!({}));
         let history = wire.read("session.history"); wire.reply(&history,json!({"events":[],"through":15,"nextAfter":15,"done":true}));
-        let mut eof = String::new(); assert_eq!(wire.0.read_line(&mut eof).unwrap(),0);
+        detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
     let capabilities = if version == 0 {
@@ -488,8 +953,7 @@ fn acp_stdio_lody_startup_model_is_selected_before_creation_without_shared_write
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
-        let mut eof = String::new();
-        assert_eq!(wire.0.read_line(&mut eof).unwrap(), 0);
+        detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
     peer.initialize();
@@ -614,8 +1078,11 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     peer.send(4, "session/resume", json!({"sessionId":id,"cwd":home.0}));
     assert!(peer.response(4).get("error").is_none());
     assert!(
-        peer.updates.is_empty(),
-        "resume must rebuild without replaying output"
+        !peer.updates.iter().any(|frame| matches!(
+            frame["params"]["update"]["sessionUpdate"].as_str(),
+            Some("agent_message_chunk" | "agent_thought_chunk" | "user_message_chunk")
+        )),
+        "resume may refresh metadata but cannot replay old messages"
     );
     peer.close();
     model.join().unwrap();
@@ -659,8 +1126,7 @@ fn acp_stdio_correlates_the_consumed_input_and_deduplicates_unicode_progress() {
         wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"main","requestId":"model","text":"🦀B","textOffset":1,"thinking":"","thinkingOffset":0}));
         notice(wire, event(15,"text-b","step","text",json!({"turn_id":"owned","request_id":"model","delta":"🦀B"})));
         notice(wire, event(16,"owned-end","turn","end",json!({"turn_id":"owned","status":"completed","reason":"end_turn"})));
-        let mut extra = String::new();
-        assert_eq!(wire.0.read_line(&mut extra).unwrap(), 0, "EOF must detach, not stop a Session or daemon: {extra}");
+        detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
     peer.initialize();
@@ -701,7 +1167,10 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
     let daemon = home.daemon(move |wire| {
         wire.hello(METHODS);
         let list = wire.read("session.list");
-        wire.reply(&list, json!([{"sessionId":"saved","cwd":cwd}]));
+        wire.reply(
+            &list,
+            json!([{"sessionId":"saved","cwd":cwd,"title":"Saved title","titleRevision":2}]),
+        );
         let attach = wire.read("session.attach");
         wire.reply(&attach, json!({}));
         let first = wire.read("session.history");
@@ -728,12 +1197,7 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
             &second,
             json!({"events":[text],"through":8,"nextAfter":8,"done":true}),
         );
-        let mut extra = String::new();
-        assert_eq!(
-            wire.0.read_line(&mut extra).unwrap(),
-            0,
-            "unexpected native mutation: {extra}"
-        );
+        detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
     peer.initialize();
@@ -753,13 +1217,14 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
     assert!(peer.response(4).get("error").is_none());
     assert_eq!(
         peer.updates.len(),
-        1,
+        2,
         "live copy of replayed fact must be suppressed"
     );
     assert_eq!(
         peer.updates[0]["params"]["update"]["content"]["text"],
         "saved answer"
     );
+    assert_eq!(peer.updates[1]["params"]["update"]["title"], "Saved title");
     peer.send(5, "session/prompt", json!({"sessionId":"saved","prompt":[{"type":"audio","data":"AA==","mimeType":"audio/wav"}]}));
     assert!(peer.response(5).get("error").is_some());
     peer.close();

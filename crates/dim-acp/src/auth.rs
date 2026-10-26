@@ -171,7 +171,11 @@ pub(crate) async fn authenticate(
                 callback = &mut callback => {
                     let (url,mut stream) = callback.map_err(|_|failed("Cannot capture the login callback"))?;
                     completing = true;
-                    let result = rpc.call("account.login.browser.complete",json!({"providerId":provider,"attemptId":browser.attempt_id,"callbackUrl":url})).await;
+                    let result = tokio::select! {
+                        () = cancel.cancelled()=>Err(Error::request_cancelled()),
+                        () = stop.cancelled()=>Err(Error::request_cancelled()),
+                        result = rpc.call("account.login.browser.complete",json!({"providerId":provider,"attemptId":browser.attempt_id,"callbackUrl":url}))=>result,
+                    };
                     let response = if result.is_ok() { b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice() } else { b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice() };
                     let _ = stream.write_all(response).await;
                     result?;
@@ -179,7 +183,12 @@ pub(crate) async fn authenticate(
                     return if account.account.is_some() { Ok(json!({})) } else { Err(failed("Login did not produce an authenticated account")) };
                 }
                 () = tokio::time::sleep(Duration::from_secs(1)) => {
-                    let state = rpc.call("account.login.status",json!({"providerId":provider,"attemptId":browser.attempt_id})).await?;
+                    let state = tokio::select! {
+                        () = cancel.cancelled()=>return Err(Error::request_cancelled()),
+                        () = stop.cancelled()=>return Err(Error::request_cancelled()),
+                        () = &mut deadline=>return Err(failed("Login expired")),
+                        state = rpc.call("account.login.status",json!({"providerId":provider,"attemptId":browser.attempt_id}))=>state?,
+                    };
                     match state["status"].as_str() {
                         Some("pending")=>{},
                         Some("completed") => {

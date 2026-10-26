@@ -1,23 +1,26 @@
+use crate::outbox::{Outbox, Reply as Responder};
 use crate::{
     config::Config,
     projection::Projection,
     rpc::{self, Native, Rpc},
 };
-use agent_client_protocol::{
-    Client, ConnectionTo, Error, Responder, UntypedMessage, schema::v1 as acp,
-};
+use agent_client_protocol::{Client, ConnectionTo, Error, UntypedMessage, schema::v1 as acp};
 use dim_agent_types::TurnOutcome;
 use dim_client::wire::{Event, EventContent, History, Progress};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, future::Future, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    path::Path,
+};
 use tokio::sync::mpsc;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub(crate) enum Incoming {
-    Request(UntypedMessage, Responder),
+    Request(UntypedMessage, Box<Responder>),
     Notification(UntypedMessage),
-    Work(Work),
+    Work(u64, Box<Work>),
 }
 
 pub(crate) enum Work {
@@ -37,12 +40,14 @@ pub(crate) enum Work {
     },
     Prepared {
         id: String,
+        preparation: u64,
         result: Result<Prepared, Error>,
     },
     Submitted {
         id: String,
         submission: String,
         result: Result<Submitted, Error>,
+        sent: bool,
     },
     Cancelled {
         id: String,
@@ -60,6 +65,7 @@ pub(crate) enum Work {
         mode: bool,
         revision: u64,
         result: Result<Config, Error>,
+        refreshed: Option<Config>,
     },
     Answer {
         key: String,
@@ -69,6 +75,10 @@ pub(crate) enum Work {
     Usage {
         id: String,
         result: Result<Value, Error>,
+    },
+    Recovered {
+        id: String,
+        result: Result<(Prepared, Option<Event>), Error>,
     },
     Listed {
         reply: Responder,
@@ -94,6 +104,7 @@ pub(crate) struct SessionInfo {
     cwd: String,
     title: Option<String>,
     updated_at: Option<u64>,
+    title_revision: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +119,7 @@ pub(crate) struct Prepared {
     history: Vec<Event>,
     through: u64,
     config: Config,
+    metadata: Option<SessionInfo>,
 }
 
 struct Waiter {
@@ -122,6 +134,7 @@ enum Preparation {
     History,
 }
 struct Loading {
+    preparation: u64,
     cwd: String,
     waiters: Vec<Waiter>,
     buffered: Vec<(String, Value)>,
@@ -136,6 +149,40 @@ struct Prompt {
     cancelling: bool,
     terminal: Option<Result<Value, Error>>,
     uploading: CancellationToken,
+    cancel_uncertain: bool,
+    consumed: HashMap<String, String>,
+    ended: HashMap<String, TurnOutcome>,
+    deleted: HashSet<String>,
+}
+impl Prompt {
+    fn accepted(&mut self, input: String) -> Option<Result<Value, Error>> {
+        let deleted = self.deleted.remove(&input);
+        self.deleted.clear();
+        if self.turn.is_none() {
+            self.turn = self.consumed.remove(&input);
+        }
+        self.input = Some(input);
+        self.consumed.clear();
+        let outcome = self.turn.as_ref().and_then(|turn| self.ended.remove(turn));
+        self.ended.clear();
+        if deleted {
+            Some(Ok(json!({"stopReason":"cancelled"})))
+        } else {
+            outcome.map(|outcome| prompt_outcome(self.cancelled, &outcome))
+        }
+    }
+}
+fn prompt_outcome(cancelled: bool, outcome: &TurnOutcome) -> Result<Value, Error> {
+    if cancelled {
+        return Ok(json!({"stopReason":"cancelled"}));
+    }
+    match outcome {
+        TurnOutcome::Completed { .. } => Ok(json!({"stopReason":"end_turn"})),
+        TurnOutcome::Cancelled { .. } => Ok(json!({"stopReason":"cancelled"})),
+        TurnOutcome::Failed { error } => {
+            Err(Error::new(-32001, error.clone()).data(json!({"code":"turn_failed"})))
+        }
+    }
 }
 struct Session {
     cwd: String,
@@ -146,11 +193,12 @@ struct Session {
     config_revision: u64,
     questions: dim_client::question::Pending,
     usage_pending: bool,
-    title_revision: u64,
+    title_revision: Option<u64>,
     subagents: crate::lody::Subagents,
     stopping: bool,
     removing: bool,
     pending_remove: Option<(&'static str, Responder)>,
+    recovery: Option<Vec<(String, Value)>>,
 }
 enum Slot {
     Loading(Loading),
@@ -168,12 +216,16 @@ pub(crate) struct Gateway {
     initializing: bool,
     creating: usize,
     sessions: HashMap<String, Slot>,
-    interactions: HashMap<String, CancellationToken>,
+    interactions: HashMap<String, (String, CancellationToken)>,
     form: bool,
     login: Option<crate::auth::Login>,
     auth_methods: Vec<crate::auth::Method>,
     authenticating: std::collections::HashSet<String>,
     subagent_events: bool,
+    recovering: bool,
+    recovering_sessions: usize,
+    outbox: Outbox,
+    next_preparation: u64,
 }
 
 fn busy() -> Error {
@@ -184,13 +236,28 @@ fn params<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, Error> {
 }
 
 fn establishment(cwd: &Path, servers: usize, roots: usize) -> Result<(), Error> {
-    if !cwd.is_absolute() || servers != 0 || roots != 0 {
+    if !cwd.is_absolute() {
         return Err(Error::invalid_params());
+    }
+    if servers != 0 {
+        return Err(Error::new(
+            -32602,
+            "Client-supplied MCP servers are unsupported; disable them in the ACP client",
+        )
+        .data(json!({"code":"unsupported_mcp_servers"})));
+    }
+    if roots != 0 {
+        return Err(
+            Error::new(-32602, "Additional workspace directories are unsupported")
+                .data(json!({"code":"unsupported_additional_directories"})),
+        );
     }
     Ok(())
 }
 
 impl Gateway {
+    // Keep the owned connection, task and host inputs explicit at composition.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         rpc: Rpc,
         cx: ConnectionTo<Client>,
@@ -199,6 +266,7 @@ impl Gateway {
         stop: CancellationToken,
         agent_id: Option<String>,
         login: Option<crate::auth::Login>,
+        outbox: Outbox,
     ) -> Self {
         Self {
             rpc,
@@ -217,28 +285,36 @@ impl Gateway {
             auth_methods: Vec::new(),
             authenticating: std::collections::HashSet::new(),
             subagent_events: false,
+            recovering: false,
+            recovering_sessions: 0,
+            outbox,
+            next_preparation: 0,
         }
     }
 
     fn spawn(&self, future: impl Future<Output = Work> + Send + 'static) {
         let incoming = self.incoming.clone();
         let stop = self.stop.clone();
+        let generation = self.rpc.generation();
         self.tasks.spawn(async move {
             tokio::select! {
                 () = stop.cancelled() => {},
-                result = future => { let _ = incoming.send(Incoming::Work(result)).await; },
+                result = future => { let _ = incoming.send(Incoming::Work(generation,Box::new(result))).await; },
             }
         });
     }
 
     fn update(&self, id: &str, update: Value) -> Result<(), Error> {
-        self.cx.send_notification(UntypedMessage::new(
+        self.outbox.notify(
+            &self.cx,
             "session/update",
             json!({"sessionId":id,"update":update}),
-        )?)
+        )
     }
 
     fn prepare(&mut self, id: String, cwd: String, waiter: Waiter, attach: bool) {
+        self.next_preparation += 1;
+        let preparation = self.next_preparation;
         let rpc = self.rpc.clone();
         let expected_cwd = (!matches!(waiter.kind, Preparation::New)).then(|| cwd.clone());
         let previous = match self.sessions.remove(&id) {
@@ -249,6 +325,7 @@ impl Gateway {
         self.sessions.insert(
             id.clone(),
             Slot::Loading(Loading {
+                preparation,
                 cwd,
                 waiters: vec![waiter],
                 buffered: Vec::new(),
@@ -257,11 +334,18 @@ impl Gateway {
         );
         self.spawn(async move {
             let result = read_history(&rpc, &id, attach, expected_cwd).await;
-            Work::Prepared { id, result }
+            Work::Prepared {
+                id,
+                preparation,
+                result,
+            }
         });
     }
 
     fn request(&mut self, request: UntypedMessage, reply: Responder) -> Result<(), Error> {
+        if self.recovering || !self.rpc.ready() {
+            return reply.respond_with_error(rpc::unavailable());
+        }
         if request.method == "initialize" {
             if self.initialized || self.initializing {
                 return reply.respond_with_error(Error::invalid_request());
@@ -344,15 +428,19 @@ impl Gateway {
                 let cancel = reply.cancellation();
                 let stop = self.stop.clone();
                 let incoming = self.incoming.clone();
+                let generation = self.rpc.generation();
                 self.tasks.spawn(async move {
                     let provider = method.provider.clone();
                     let result = crate::auth::authenticate(rpc, login, method, cancel, stop).await;
                     let _ = incoming
-                        .send(Incoming::Work(Work::Authenticated {
-                            reply,
-                            provider,
-                            result,
-                        }))
+                        .send(Incoming::Work(
+                            generation,
+                            Box::new(Work::Authenticated {
+                                reply,
+                                provider,
+                                result,
+                            }),
+                        ))
                         .await;
                 });
             }
@@ -615,8 +703,13 @@ impl Gateway {
                     cancelling: false,
                     terminal: None,
                     uploading: uploading.clone(),
+                    cancel_uncertain: false,
+                    consumed: HashMap::new(),
+                    ended: HashMap::new(),
+                    deleted: HashSet::new(),
                 });
                 self.spawn(async move {
+                    let mut sent = false;
                     let result = async {
                         if let Some(provider) = provider { crate::auth::ensure(&rpc,&provider,&managed).await?; }
                         let user = tokio::select! {
@@ -624,9 +717,10 @@ impl Gateway {
                             user = crate::content::upload(&rpc, &id, parts) => user?,
                         };
                         if uploading.is_cancelled() { return Err(Error::new(-32800, "Request cancelled before submission")); }
+                        sent = true;
                         rpc.typed("session.submit", json!({"sessionId":id,"branchId":"main","submissionId":submission,"user":user,"mode":"queue"})).await
                     }.await;
-                    Work::Submitted { id, submission, result }
+                    Work::Submitted { id, submission, result,sent }
                 });
             }
             "session/close" | "session/delete" => {
@@ -694,13 +788,44 @@ impl Gateway {
                 let config = session.config.clone();
                 let revision = session.config_revision;
                 self.spawn(async move {
-                    let result = config.set(&rpc, &id, &key, &value).await;
+                    let result = config.clone().set(&rpc, &id, &key, &value).await;
+                    let refreshed = if let Err(error) = &result {
+                        match error
+                            .data
+                            .as_ref()
+                            .and_then(|data| data["nativeAppError"].as_str())
+                        {
+                            Some("permission_conflict") => {
+                                let current = rpc
+                                    .typed(
+                                        "session.permission.get",
+                                        json!({"sessionId":id,"branchId":"main"}),
+                                    )
+                                    .await;
+                                current.ok().map(|policy| {
+                                    let mut config = config;
+                                    config.policy = Some(policy);
+                                    config
+                                })
+                            }
+                            Some("configuration_superseded") => {
+                                read_history(&rpc, &id, false, None)
+                                    .await
+                                    .ok()
+                                    .map(|prepared| prepared.config)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     Work::Configured {
                         id,
                         reply,
                         mode,
                         revision,
                         result,
+                        refreshed,
                     }
                 });
             }
@@ -764,6 +889,9 @@ impl Gateway {
                 return Ok(());
             }
         }
+        if self.recovering || !self.rpc.ready() {
+            return Ok(());
+        }
         self.cancel_input(id);
         Ok(())
     }
@@ -807,7 +935,38 @@ impl Gateway {
         });
     }
 
-    fn work(&mut self, work: Work) -> Result<(), Error> {
+    async fn work(&mut self, generation: u64, work: Work) -> Result<(), Error> {
+        if generation != self.rpc.generation() {
+            match work {
+                Work::Submitted { .. } => {}
+                Work::Created { reply, result, .. } => {
+                    self.creating -= 1;
+                    let mut error = rpc::unavailable();
+                    if let Ok(created) = result {
+                        error = error.data(
+                            json!({"code":"daemon_unavailable","sessionId":created.session_id}),
+                        );
+                    }
+                    return reply.respond_with_error(error);
+                }
+                Work::Initialized { reply, .. } => {
+                    self.initializing = false;
+                    return reply.respond_with_error(rpc::unavailable());
+                }
+                Work::Authenticated {
+                    reply, provider, ..
+                } => {
+                    self.authenticating.remove(&provider);
+                    return reply.respond_with_error(rpc::unavailable());
+                }
+                Work::Listed { reply, .. }
+                | Work::Removed { reply, .. }
+                | Work::Configured { reply, .. } => {
+                    return reply.respond_with_error(rpc::unavailable());
+                }
+                _ => return Ok(()),
+            }
+        }
         match work {
             Work::Initialized { reply, result } => {
                 self.initializing = false;
@@ -850,14 +1009,31 @@ impl Gateway {
                     Err(error) => reply.respond_with_error(error)?,
                 }
             }
-            Work::Prepared { id, result } => {
+            Work::Prepared {
+                id,
+                preparation,
+                result,
+            } => {
+                if !matches!(self.sessions.get(&id),Some(Slot::Loading(loading)) if loading.preparation == preparation)
+                {
+                    return Ok(());
+                }
                 let Some(Slot::Loading(mut loading)) = self.sessions.remove(&id) else {
                     return Ok(());
+                };
+                let result = if loading.waiters.iter().all(|waiter| {
+                    !matches!(waiter.kind, Preparation::New)
+                        && waiter.reply.cancellation().is_cancelled()
+                }) {
+                    Err(Error::request_cancelled())
+                } else {
+                    result
                 };
                 match result {
                     Ok(prepared) => {
                         let replay = loading.waiters.iter().any(|waiter| {
                             matches!(waiter.kind, Preparation::Load | Preparation::History)
+                                && !waiter.reply.cancellation().is_cancelled()
                         });
                         let mut session = Session {
                             cwd: loading.cwd,
@@ -868,29 +1044,39 @@ impl Gateway {
                             config_revision: 0,
                             questions: dim_client::question::Pending::default(),
                             usage_pending: false,
-                            title_revision: 0,
+                            title_revision: None,
                             stopping: false,
                             removing: false,
                             pending_remove: None,
+                            recovery: None,
                             subagents: loading
                                 .previous
                                 .as_mut()
                                 .map(|previous| std::mem::take(&mut previous.subagents))
                                 .unwrap_or_default(),
                         };
-                        for event in prepared.history {
+                        for (index, event) in prepared.history.into_iter().enumerate() {
+                            if index % 32 == 0 {
+                                tokio::task::yield_now().await;
+                            }
                             fold_questions(&mut session.questions, "main", &event);
                             let updates = session.projection.event(&event);
                             let snapshots = session.subagents.event(&id, &event);
                             if self.subagent_events {
                                 for snapshot in snapshots {
-                                    self.cx.send_notification(UntypedMessage::new(
+                                    self.outbox.notify(
+                                        &self.cx,
                                         "_lody/subagents/event",
                                         snapshot,
-                                    )?)?;
+                                    )?;
                                 }
                             }
-                            if replay {
+                            if replay
+                                && loading
+                                    .waiters
+                                    .iter()
+                                    .any(|waiter| !waiter.reply.cancellation().is_cancelled())
+                            {
                                 for update in updates {
                                     self.update(&id, update)?;
                                 }
@@ -900,7 +1086,20 @@ impl Gateway {
                         let state = session.config.response();
                         self.sessions
                             .insert(id.clone(), Slot::Ready(Box::new(session)));
+                        if let Some(metadata) = prepared.metadata
+                            && let Some(revision) = metadata.title_revision
+                        {
+                            self.title(&id, metadata.title, revision)?;
+                        }
                         for waiter in loading.waiters {
+                            if !matches!(waiter.kind, Preparation::New)
+                                && waiter.reply.cancellation().is_cancelled()
+                            {
+                                waiter
+                                    .reply
+                                    .respond_with_error(Error::request_cancelled())?;
+                                continue;
+                            }
                             let mut response = if matches!(waiter.kind, Preparation::History) {
                                 json!({})
                             } else {
@@ -943,6 +1142,7 @@ impl Gateway {
                 id,
                 submission,
                 result,
+                sent,
             } => {
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return Ok(());
@@ -954,20 +1154,47 @@ impl Gateway {
                 {
                     match result {
                         Ok(result) => {
-                            session
-                                .projection
-                                .silent_inputs
-                                .insert(result.event.id.clone());
-                            session.prompt.as_mut().unwrap().input = Some(result.event.id);
-                            if session
-                                .prompt
-                                .as_ref()
-                                .is_some_and(|prompt| prompt.cancelled && !prompt.cancelling)
+                            let prompt = session.prompt.as_mut().unwrap();
+                            if prompt.turn.is_none()
+                                && !prompt.consumed.contains_key(&result.event.id)
+                                && !prompt.deleted.contains(&result.event.id)
+                            {
+                                session
+                                    .projection
+                                    .silent_inputs
+                                    .insert(result.event.id.clone());
+                            }
+                            if let Some(finish) = prompt.accepted(result.event.id) {
+                                if prompt.cancelling {
+                                    prompt.terminal = Some(finish);
+                                } else {
+                                    session
+                                        .prompt
+                                        .take()
+                                        .unwrap()
+                                        .reply
+                                        .respond_with_result(finish)?;
+                                }
+                            }
+                            if !self.recovering
+                                && self.rpc.ready()
+                                && session
+                                    .prompt
+                                    .as_ref()
+                                    .is_some_and(|prompt| prompt.cancelled && !prompt.cancelling)
                             {
                                 self.cancel_input(id);
                             }
                         }
                         Err(error) => {
+                            if sent
+                                && error
+                                    .data
+                                    .as_ref()
+                                    .is_some_and(|data| data["code"] == "daemon_unavailable")
+                            {
+                                return Ok(());
+                            }
                             let prompt = session.prompt.take().unwrap();
                             if prompt.cancelled {
                                 prompt.reply.respond(json!({"stopReason":"cancelled"}))?;
@@ -1013,6 +1240,7 @@ impl Gateway {
             }
             Work::Removed { id, reply, result } => match result {
                 Ok(_) => {
+                    self.release_interactions(&id);
                     if let Some(Slot::Ready(mut session)) = self.sessions.remove(&id)
                         && let Some(prompt) = session.prompt.take()
                     {
@@ -1033,6 +1261,7 @@ impl Gateway {
                 mode,
                 revision,
                 result,
+                refreshed,
             } => {
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
@@ -1072,11 +1301,28 @@ impl Gateway {
                             )?;
                         }
                     }
-                    Err(error) => reply.respond_with_error(error)?,
+                    Err(error) => {
+                        if let Some(mut config) = refreshed {
+                            if revision != session.config_revision {
+                                config.model.clone_from(&session.config.model);
+                                if let (Some(policy), Some(current)) =
+                                    (&mut config.policy, &session.config.policy)
+                                {
+                                    policy.policy = current.policy.clone();
+                                }
+                            }
+                            session.config = config;
+                            let options = session.config.options();
+                            reply.respond_with_error(error)?;
+                            self.update(&id,json!({"sessionUpdate":"config_option_update","configOptions":options}))?;
+                        } else {
+                            reply.respond_with_error(error)?;
+                        }
+                    }
                 }
             }
             Work::Answer { key, method, args } => {
-                if let Some(token) = self.interactions.get(&key)
+                if let Some((_, token)) = self.interactions.get(&key)
                     && !token.is_cancelled()
                     && let Some(args) = args
                 {
@@ -1107,6 +1353,120 @@ impl Gateway {
                         && usage.context_window > 0.0
                     {
                         self.update(&id,json!({"sessionUpdate":"usage_update","used":usage.estimated_input_tokens.ceil(),"size":usage.context_window.floor()}))?;
+                    }
+                }
+            }
+            Work::Recovered { id, result } => {
+                self.recovering_sessions -= 1;
+                if self.recovering_sessions == 0 {
+                    self.recovering = false;
+                }
+                let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
+                    return Ok(());
+                };
+                let buffered = session.recovery.take().unwrap_or_default();
+                match result {
+                    Ok((prepared, input)) => {
+                        let metadata = prepared.metadata;
+                        session.config = prepared.config;
+                        if let Some(prompt) = &mut session.prompt
+                            && let Some(input) = input
+                        {
+                            if prompt.turn.is_none()
+                                && !prompt.consumed.contains_key(&input.id)
+                                && !prompt.deleted.contains(&input.id)
+                            {
+                                session.projection.silent_inputs.insert(input.id.clone());
+                            }
+                            if let Some(finish) = prompt.accepted(input.id.clone()) {
+                                prompt.terminal = Some(finish);
+                            }
+                        }
+                        let mut snapshots = Vec::new();
+                        for event in &prepared.history {
+                            snapshots.extend(session.subagents.event(&id, event));
+                        }
+                        if self.subagent_events {
+                            for snapshot in snapshots {
+                                self.outbox
+                                    .notify(&self.cx, "_lody/subagents/event", snapshot)?;
+                            }
+                        }
+                        for event in prepared.history {
+                            self.event_notice(EventNotice {
+                                session_id: id.clone(),
+                                branch_id: "main".into(),
+                                event,
+                            })?;
+                        }
+                        if let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) {
+                            session.projection.through = prepared.through;
+                            if session.prompt.as_ref().is_some_and(|prompt| {
+                                prompt.terminal.is_some() && !prompt.cancelling
+                            }) {
+                                let mut prompt = session.prompt.take().unwrap();
+                                prompt
+                                    .reply
+                                    .respond_with_result(prompt.terminal.take().unwrap())?;
+                            } else if session
+                                .prompt
+                                .as_ref()
+                                .is_some_and(|prompt| prompt.input.is_none())
+                            {
+                                let prompt = session.prompt.take().unwrap();
+                                if prompt.cancelled {
+                                    prompt.reply.respond(json!({"stopReason":"cancelled","_meta":{"dim":{"nativeCancellation":"unconfirmed"}}}))?;
+                                } else {
+                                    prompt.reply.respond_with_error(Error::new(-32001,"Submission outcome is unknown; load this Session before sending again").data(json!({"code":"submission_unknown","sessionId":id,"submissionId":prompt.submission})))?;
+                                }
+                            } else if session
+                                .prompt
+                                .as_ref()
+                                .is_some_and(|prompt| prompt.cancel_uncertain)
+                            {
+                                let prompt = session.prompt.take().unwrap();
+                                prompt.reply.respond(json!({"stopReason":"cancelled","_meta":{"dim":{"nativeCancellation":"unconfirmed"}}}))?;
+                            }
+                        }
+                        if let Some(metadata) = metadata
+                            && let Some(revision) = metadata.title_revision
+                        {
+                            self.title(&id, metadata.title, revision)?;
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(prompt) = session.prompt.take() {
+                            if prompt.cancelled {
+                                prompt.reply.respond(json!({"stopReason":"cancelled","_meta":{"dim":{"nativeCancellation":"unconfirmed"}}}))?;
+                            } else {
+                                prompt.reply.respond_with_error(error)?;
+                            }
+                        }
+                        self.sessions.remove(&id);
+                        self.release_interactions(&id);
+                    }
+                }
+                for (method, params) in buffered {
+                    self.notice(method, params)?;
+                }
+                if self.recovering_sessions == 0 {
+                    self.recovering = false;
+                    let cancelled: Vec<_> = self
+                        .sessions
+                        .iter()
+                        .filter_map(|(id, slot)| match slot {
+                            Slot::Ready(session)
+                                if session.prompt.as_ref().is_some_and(|prompt| {
+                                    prompt.cancelled && !prompt.cancel_uncertain
+                                }) =>
+                            {
+                                Some(id.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    for id in cancelled {
+                        self.cancel_input(id);
                     }
                 }
             }
@@ -1141,6 +1501,45 @@ impl Gateway {
     }
 
     fn notice(&mut self, method: String, params: Value) -> Result<(), Error> {
+        if method == "session.closed" {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Closed {
+                session_id: String,
+                reason: Option<String>,
+            }
+            let closed: Closed = decode_native(params)?;
+            self.release_interactions(&closed.session_id);
+            match self.sessions.remove(&closed.session_id) {
+                Some(Slot::Ready(mut session)) => {
+                    if let Some(prompt) = session.prompt.take() {
+                        if !prompt.cancelled
+                            && let Some(reason) = closed.reason
+                        {
+                            prompt.reply.respond_with_error(
+                                Error::new(-32001, reason).data(json!({"code":"session_closed"})),
+                            )?;
+                        } else {
+                            prompt.reply.respond(json!({"stopReason":"cancelled"}))?;
+                        }
+                    }
+                    if let Some((_, reply)) = session.pending_remove.take() {
+                        reply.respond(json!({}))?;
+                    }
+                }
+                Some(Slot::Loading(loading)) => {
+                    for waiter in loading.waiters {
+                        waiter
+                            .reply
+                            .respond_with_error(Error::resource_not_found(Some(
+                                closed.session_id.clone(),
+                            )))?;
+                    }
+                }
+                None => {}
+            }
+            return Ok(());
+        }
         let id = params
             .get("sessionId")
             .and_then(Value::as_str)
@@ -1152,131 +1551,17 @@ impl Gateway {
             loading.buffered.push((method, params));
             return Ok(());
         }
-        match method.as_str() {
-            "session.event" => {
-                let notice: EventNotice = decode_native(params)?;
-                if let Some(Slot::Ready(session)) = self.sessions.get_mut(&notice.session_id) {
-                    for settled in
-                        fold_questions(&mut session.questions, &notice.branch_id, &notice.event)
-                    {
-                        let call = settled.call;
-                        let key = crate::interaction::key(
-                            "question",
-                            &notice.session_id,
-                            &call.branch_id,
-                            &call.request_id,
-                            &call.call_id,
-                        );
-                        if let Some(token) = self.interactions.remove(&key) {
-                            token.cancel();
-                        }
-                    }
-                    self.questions(&notice.session_id);
-                }
-                if notice.branch_id != "main" {
-                    return Ok(());
-                }
-                let Some(Slot::Ready(session)) = self.sessions.get_mut(&notice.session_id) else {
-                    return Ok(());
-                };
-                if notice.event.sequence <= session.projection.through {
-                    return Ok(());
-                }
-                let mut finish = None;
-                if let Some(prompt) = &mut session.prompt {
-                    match &notice.event.content {
-                        EventContent::Input(data)
-                            if data.submission_id.as_deref() == Some(&prompt.submission) =>
-                        {
-                            prompt.input = Some(notice.event.id.clone());
-                            session
-                                .projection
-                                .silent_inputs
-                                .insert(notice.event.id.clone());
-                        }
-                        EventContent::InputConsumed(data)
-                            if prompt.input.as_deref() == Some(&data.input_id) =>
-                        {
-                            prompt.turn.clone_from(&session.projection.turn)
-                        }
-                        EventContent::InputDeleted(data)
-                            if prompt.input.as_deref() == Some(&data.input_id) =>
-                        {
-                            finish = Some(Ok(json!({"stopReason":"cancelled"})))
-                        }
-                        EventContent::TurnEnd(data)
-                            if prompt.turn.as_deref() == Some(&data.turn_id) =>
-                        {
-                            finish = Some(if prompt.cancelled {
-                                Ok(json!({"stopReason":"cancelled"}))
-                            } else {
-                                match &data.outcome {
-                                    TurnOutcome::Completed { .. } => {
-                                        Ok(json!({"stopReason":"end_turn"}))
-                                    }
-                                    TurnOutcome::Cancelled { .. } => {
-                                        Ok(json!({"stopReason":"cancelled"}))
-                                    }
-                                    TurnOutcome::Failed { error } => {
-                                        Err(Error::new(-32001, error.clone())
-                                            .data(json!({"code":"turn_failed"})))
-                                    }
-                                }
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-                let updates = session.projection.event(&notice.event);
-                let snapshots = session.subagents.event(&notice.session_id, &notice.event);
-                if matches!(
-                    &notice.event.content,
-                    EventContent::Configuration(_) | EventContent::PermissionChanged(_)
-                ) {
-                    session.config.event(&notice.event);
-                    session.config_revision += 1;
-                }
-                let config_update = matches!(
-                    &notice.event.content,
-                    EventContent::Configuration(_) | EventContent::PermissionChanged(_)
-                )
-                .then(|| session.config.options());
-                if session
-                    .prompt
-                    .as_ref()
-                    .is_some_and(|prompt| prompt.cancelling)
-                {
-                    session.prompt.as_mut().unwrap().terminal = finish.take();
-                }
-                let completed = finish
-                    .and_then(|result| session.prompt.take().map(|prompt| (prompt.reply, result)));
-                for update in updates {
-                    self.update(&notice.session_id, update)?;
-                }
-                if self.subagent_events {
-                    for snapshot in snapshots {
-                        self.cx.send_notification(UntypedMessage::new(
-                            "_lody/subagents/event",
-                            snapshot,
-                        )?)?;
-                    }
-                }
-                if let Some(options) = config_update {
-                    self.update(
-                        &notice.session_id,
-                        json!({"sessionUpdate":"config_option_update","configOptions":options}),
-                    )?;
-                }
-                if let Some((reply, result)) = completed {
-                    reply.respond_with_result(result)?;
-                }
-                if matches!(
-                    &notice.event.content,
-                    EventContent::TurnEnd(_) | EventContent::Configuration(_)
-                ) {
-                    self.usage(&notice.session_id);
-                }
+        if let Some(Slot::Ready(session)) = id.as_ref().and_then(|id| self.sessions.get_mut(id))
+            && let Some(buffered) = &mut session.recovery
+        {
+            if buffered.len() >= 256 {
+                return Err(Error::new(-32001, "Native recovery buffer overflow"));
             }
+            buffered.push((method, params));
+            return Ok(());
+        }
+        match method.as_str() {
+            "session.event" => self.event_notice(decode_native(params)?)?,
             "session.model.progress" => {
                 let progress: Progress = decode_native(params)?;
                 if progress.branch_id != "main" {
@@ -1309,13 +1594,15 @@ impl Gateway {
                     return Ok(());
                 }
                 let token = self.stop.child_token();
-                self.interactions.insert(key.clone(), token.clone());
+                self.interactions
+                    .insert(key.clone(), (approval.session_id.clone(), token.clone()));
                 let cx = self.cx.clone();
+                let outbox = self.outbox.clone();
                 self.spawn(async move {
                     Work::Answer {
                         key,
                         method: "approval.respond",
-                        args: crate::interaction::approval(cx, token, approval).await,
+                        args: crate::interaction::approval(cx, outbox, token, approval).await,
                     }
                 });
             }
@@ -1335,7 +1622,7 @@ impl Gateway {
                     &settled.request_id,
                     "",
                 );
-                if let Some(token) = self.interactions.remove(&key) {
+                if let Some((_, token)) = self.interactions.remove(&key) {
                     token.cancel();
                 }
             }
@@ -1357,18 +1644,255 @@ impl Gateway {
                 let notice: Notice = decode_native(params)?;
                 if notice.source == "SessionStore" && notice.kind == "title" {
                     let title: Title = decode_native(notice.data)?;
-                    if let Some(Slot::Ready(session)) = self.sessions.get_mut(&notice.session_id)
-                        && title.title_revision > session.title_revision
-                    {
-                        session.title_revision = title.title_revision;
-                        self.update(
-                            &notice.session_id,
-                            json!({"sessionUpdate":"session_info_update","title":title.title}),
-                        )?;
-                    }
+                    self.title(&notice.session_id, title.title, title.title_revision)?;
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn title(&mut self, id: &str, title: Option<String>, revision: u64) -> Result<(), Error> {
+        if let Some(Slot::Ready(session)) = self.sessions.get_mut(id)
+            && session.title_revision.is_none_or(|old| revision > old)
+        {
+            session.title_revision = Some(revision);
+            self.update(
+                id,
+                json!({"sessionUpdate":"session_info_update","title":title}),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn release_interactions(&mut self, id: &str) {
+        self.interactions.retain(|_, (session, token)| {
+            if session == id {
+                token.cancel();
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn lost(&mut self) -> Result<(), Error> {
+        self.recovering = true;
+        self.recovering_sessions = 0;
+        for token in self.interactions.drain().map(|(_, (_, token))| token) {
+            token.cancel();
+        }
+        let slots = std::mem::take(&mut self.sessions);
+        for (id, slot) in slots {
+            let mut session = match slot {
+                Slot::Ready(session) => session,
+                Slot::Loading(loading) => {
+                    for waiter in loading.waiters {
+                        waiter.reply.respond_with_error(rpc::unavailable())?;
+                    }
+                    let Some(previous) = loading.previous else {
+                        continue;
+                    };
+                    previous
+                }
+            };
+            if let Some(prompt) = &mut session.prompt {
+                prompt.cancel_uncertain |= prompt.cancelling;
+                prompt.cancelling = false;
+            }
+            if let Some((_, reply)) = session.pending_remove.take() {
+                reply.respond_with_error(rpc::unavailable())?;
+            }
+            session.stopping = false;
+            session.removing = false;
+            session.configuring = false;
+            session.usage_pending = false;
+            session.recovery = Some(Vec::new());
+            for snapshot in session.subagents.disconnected(&id) {
+                if self.subagent_events {
+                    self.outbox
+                        .notify(&self.cx, "_lody/subagents/event", snapshot)?;
+                }
+            }
+            self.sessions.insert(id, Slot::Ready(session));
+        }
+        Ok(())
+    }
+
+    fn restore(&mut self, same_instance: bool) {
+        if !same_instance {
+            eprintln!("ACP reconnected to a new App Server instance; restoring persisted sessions");
+        }
+        let sessions: Vec<_> = self
+            .sessions
+            .iter()
+            .filter_map(|(id, slot)| match slot {
+                Slot::Ready(session) => Some((
+                    id.clone(),
+                    session.cwd.clone(),
+                    session
+                        .prompt
+                        .as_ref()
+                        .filter(|prompt| prompt.input.is_none())
+                        .map(|prompt| prompt.submission.clone()),
+                )),
+                _ => None,
+            })
+            .collect();
+        self.recovering_sessions = sessions.len();
+        if sessions.is_empty() {
+            self.recovering = false;
+        }
+        for (id, cwd, submission) in sessions {
+            let rpc = self.rpc.clone();
+            self.spawn(async move {
+                let result = async {
+                    let mut input = None;
+                    if let Some(submission) = submission {
+                        #[derive(Deserialize)] #[serde(tag="status",rename_all="lowercase")]
+                        enum Lookup { Accepted { event: Box<Event> },Unknown }
+                        let deadline = tokio::time::Instant::now()+std::time::Duration::from_secs(30);
+                        loop {
+                            match rpc.typed("session.input_lookup",json!({"sessionId":id,"branchId":"main","submissionId":submission})).await? {
+                                Lookup::Accepted { event }=>{ input = Some(*event); break; }
+                                Lookup::Unknown if tokio::time::Instant::now() < deadline=>tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+                                Lookup::Unknown=>break,
+                            }
+                        }
+                    }
+                    let prepared = read_history(&rpc,&id,true,Some(cwd)).await?;
+                    Ok((prepared,input))
+                }.await;
+                Work::Recovered { id,result }
+            });
+        }
+    }
+
+    fn event_notice(&mut self, notice: EventNotice) -> Result<(), Error> {
+        if let Some(Slot::Ready(session)) = self.sessions.get_mut(&notice.session_id) {
+            for settled in fold_questions(&mut session.questions, &notice.branch_id, &notice.event)
+            {
+                let call = settled.call;
+                let key = crate::interaction::key(
+                    "question",
+                    &notice.session_id,
+                    &call.branch_id,
+                    &call.request_id,
+                    &call.call_id,
+                );
+                if let Some((_, token)) = self.interactions.remove(&key) {
+                    token.cancel();
+                }
+            }
+            self.questions(&notice.session_id);
+        }
+        if notice.branch_id != "main" {
+            return Ok(());
+        }
+        let Some(Slot::Ready(session)) = self.sessions.get_mut(&notice.session_id) else {
+            return Ok(());
+        };
+        if notice.event.sequence <= session.projection.through {
+            return Ok(());
+        }
+        let mut finish = None;
+        if let Some(prompt) = &mut session.prompt {
+            match &notice.event.content {
+                EventContent::Input(data)
+                    if data.submission_id.as_deref() == Some(&prompt.submission) =>
+                {
+                    finish = prompt.accepted(notice.event.id.clone());
+                    session
+                        .projection
+                        .silent_inputs
+                        .insert(notice.event.id.clone());
+                }
+                EventContent::InputConsumed(data)
+                    if prompt.input.as_deref() == Some(&data.input_id) =>
+                {
+                    prompt.turn.clone_from(&session.projection.turn)
+                }
+                EventContent::InputConsumed(data) if prompt.input.is_none() => {
+                    if let Some(turn) = &session.projection.turn {
+                        prompt.consumed.insert(data.input_id.clone(), turn.clone());
+                    }
+                }
+                EventContent::InputDeleted(data)
+                    if prompt.input.as_deref() == Some(&data.input_id) =>
+                {
+                    finish = Some(Ok(json!({"stopReason":"cancelled"})))
+                }
+                EventContent::InputDeleted(data) if prompt.input.is_none() => {
+                    prompt.deleted.insert(data.input_id.clone());
+                }
+                EventContent::TurnEnd(data) if prompt.turn.as_deref() == Some(&data.turn_id) => {
+                    finish = Some(prompt_outcome(prompt.cancelled, &data.outcome));
+                }
+                EventContent::TurnEnd(data) if prompt.input.is_none() => {
+                    prompt
+                        .ended
+                        .insert(data.turn_id.clone(), data.outcome.clone());
+                }
+                _ => {}
+            }
+        }
+        let updates = session.projection.event(&notice.event);
+        let snapshots = session.subagents.event(&notice.session_id, &notice.event);
+        if matches!(
+            &notice.event.content,
+            EventContent::Configuration(_) | EventContent::PermissionChanged(_)
+        ) {
+            session.config.event(&notice.event);
+            session.config_revision += 1;
+        }
+        let config_update = matches!(
+            &notice.event.content,
+            EventContent::Configuration(_) | EventContent::PermissionChanged(_)
+        )
+        .then(|| session.config.options());
+        let mode_update = match &notice.event.content {
+            EventContent::PermissionChanged(data) => Some(data.policy.preset),
+            _ => None,
+        };
+        if finish.is_some()
+            && session
+                .prompt
+                .as_ref()
+                .is_some_and(|prompt| prompt.cancelling)
+        {
+            session.prompt.as_mut().unwrap().terminal = finish.take();
+        }
+        let completed =
+            finish.and_then(|result| session.prompt.take().map(|prompt| (prompt.reply, result)));
+        for update in updates {
+            self.update(&notice.session_id, update)?;
+        }
+        if self.subagent_events {
+            for snapshot in snapshots {
+                self.outbox
+                    .notify(&self.cx, "_lody/subagents/event", snapshot)?;
+            }
+        }
+        if let Some(options) = config_update {
+            self.update(
+                &notice.session_id,
+                json!({"sessionUpdate":"config_option_update","configOptions":options}),
+            )?;
+        }
+        if let Some(mode) = mode_update {
+            self.update(
+                &notice.session_id,
+                json!({"sessionUpdate":"current_mode_update","currentModeId":mode}),
+            )?;
+        }
+        if let Some((reply, result)) = completed {
+            reply.respond_with_result(result)?;
+        }
+        if matches!(
+            &notice.event.content,
+            EventContent::TurnEnd(_) | EventContent::Configuration(_)
+        ) {
+            self.usage(&notice.session_id);
         }
         Ok(())
     }
@@ -1414,14 +1938,16 @@ impl Gateway {
                 continue;
             }
             let token = self.stop.child_token();
-            self.interactions.insert(key.clone(), token.clone());
+            self.interactions
+                .insert(key.clone(), (id.to_owned(), token.clone()));
             let cx = self.cx.clone();
+            let outbox = self.outbox.clone();
             let id = id.to_owned();
             self.spawn(async move {
                 Work::Answer {
                     key,
                     method: "session.question.respond",
-                    args: crate::interaction::question(cx, token, &id, &call).await,
+                    args: crate::interaction::question(cx, outbox, token, &id, &call).await,
                 }
             });
         }
@@ -1460,16 +1986,24 @@ impl Gateway {
                 () = self.cx.incoming_closed() => return Ok(()),
                 () = self.stop.cancelled() => return Ok(()),
                 message = incoming.recv() => match message {
-                    Some(Incoming::Request(request, reply)) => self.request(request, reply)?,
+                    Some(Incoming::Request(request, reply)) => self.request(request, *reply)?,
                     Some(Incoming::Notification(notification)) => self.cancel(notification)?,
-                    Some(Incoming::Work(work)) => self.work(work)?,
+                    Some(Incoming::Work(generation,work)) => self.work(generation,*work).await?,
                     None => return Ok(()),
                 },
                 message = native.recv() => match message {
                     Some(Native::Notice { method, params }) => self.notice(method, params)?,
+                    Some(Native::Lost) => self.lost()?,
+                    Some(Native::Restored { same_instance }) => self.restore(same_instance),
                     Some(Native::Closed) | None => {
                         for (id,slot) in &mut self.sessions {
-                            if let Slot::Ready(session) = slot { for snapshot in session.subagents.disconnected(id) { if self.subagent_events { self.cx.send_notification(UntypedMessage::new("_lody/subagents/event",snapshot)?)?; } } }
+                            if let Slot::Ready(session) = slot {
+                                for snapshot in session.subagents.disconnected(id) { if self.subagent_events { self.outbox.notify(&self.cx,"_lody/subagents/event",snapshot)?; } }
+                                if let Some(prompt) = session.prompt.take() {
+                                    if prompt.cancelled { prompt.reply.respond(json!({"stopReason":"cancelled","_meta":{"dim":{"nativeCancellation":"unconfirmed"}}}))?; }
+                                    else { prompt.reply.respond_with_error(rpc::unavailable())?; }
+                                }
+                            }
                         }
                         return Err(rpc::unavailable());
                     },
@@ -1507,7 +2041,7 @@ async fn read_history(
     attach: bool,
     expected_cwd: Option<String>,
 ) -> Result<Prepared, Error> {
-    if let Some(cwd) = expected_cwd {
+    let metadata = if let Some(cwd) = expected_cwd {
         let method = if rpc.supports("session.summaries") {
             "session.summaries"
         } else {
@@ -1524,7 +2058,10 @@ async fn read_history(
         if Path::new(&session.cwd) != requested {
             return Err(Error::invalid_params());
         }
-    }
+        Some(session)
+    } else {
+        None
+    };
     if attach {
         rpc.call("session.attach", json!({"sessionId":id})).await?;
     }
@@ -1552,6 +2089,7 @@ async fn read_history(
                 history,
                 through: page.through,
                 config,
+                metadata,
             });
         }
     }

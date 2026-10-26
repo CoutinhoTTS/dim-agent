@@ -26,7 +26,7 @@ async fn send(writer: &mut (impl AsyncWriteExt + Unpin), value: Value) {
     writer.flush().await.unwrap();
 }
 
-async fn browser_flow(cancel: bool) {
+async fn browser_flow(cancel: bool, eof: bool) {
     let home = tempfile::tempdir_in("/tmp").unwrap();
     let endpoint = home.path().join("daemon.sock");
     let listener = UnixListener::bind(&endpoint).unwrap();
@@ -128,7 +128,9 @@ async fn browser_flow(cancel: bool) {
     )
     .await;
     ready.await.unwrap();
-    if cancel {
+    if eof {
+        write.shutdown().await.unwrap();
+    } else if cancel {
         send(
             &mut write,
             json!({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":2}}),
@@ -138,14 +140,16 @@ async fn browser_flow(cancel: bool) {
         let mut callback = TcpStream::connect(address).await.unwrap();
         callback.write_all(b"GET /callback?code=fixture&state=owned-attempt HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
     }
-    let response = frame(&mut read).await;
-    assert_eq!(response["id"], 2, "{response}");
-    if cancel {
-        assert_eq!(response["error"]["code"], -32800, "{response}");
-    } else {
-        assert_eq!(response["result"], json!({}), "{response}");
+    if !eof {
+        let response = frame(&mut read).await;
+        assert_eq!(response["id"], 2, "{response}");
+        if cancel {
+            assert_eq!(response["error"]["code"], -32800, "{response}");
+        } else {
+            assert_eq!(response["result"], json!({}), "{response}");
+        }
+        write.shutdown().await.unwrap();
     }
-    write.shutdown().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), finished)
         .await
         .unwrap()
@@ -158,9 +162,14 @@ async fn browser_flow(cancel: bool) {
 
 #[tokio::test]
 async fn browser_auth_uses_the_owned_callback_and_native_exchange() {
-    browser_flow(false).await;
+    browser_flow(false, false).await;
 }
 #[tokio::test]
 async fn cancelling_browser_auth_cancels_only_the_owned_pending_attempt() {
-    browser_flow(true).await;
+    browser_flow(true, false).await;
+}
+
+#[tokio::test]
+async fn eof_releases_callback_and_cancels_the_owned_pending_login_before_rpc_closes() {
+    browser_flow(true, true).await;
 }

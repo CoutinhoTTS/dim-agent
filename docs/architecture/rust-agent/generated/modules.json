@@ -65,6 +65,7 @@
       "parent": "dim_acp",
       "file": "crates/dim-acp/src/gateway.rs",
       "unexpandedMacros": [
+        "eprintln",
         "json",
         "matches",
         "tokio::select",
@@ -95,6 +96,18 @@
       ]
     },
     {
+      "id": "dim_acp::outbox",
+      "crate": "dim_acp",
+      "parent": "dim_acp",
+      "file": "crates/dim-acp/src/outbox.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "tokio::select"
+      ]
+    },
+    {
       "id": "dim_acp::projection",
       "crate": "dim_acp",
       "parent": "dim_acp",
@@ -113,6 +126,7 @@
       "unexpandedMacros": [
         "json",
         "matches",
+        "tokio::pin",
         "tokio::select"
       ]
     },
@@ -3716,6 +3730,16 @@
     },
     {
       "from": "dim_acp",
+      "to": "dim_acp::outbox",
+      "references": [
+        "mod outbox",
+        "path outbox",
+        "path outbox::Outbox::default",
+        "path outbox::Reply::new"
+      ]
+    },
+    {
+      "from": "dim_acp",
       "to": "dim_acp::projection",
       "references": [
         "mod projection"
@@ -3879,6 +3903,16 @@
     },
     {
       "from": "dim_acp::gateway",
+      "to": "dim_acp::outbox",
+      "references": [
+        "path Outbox",
+        "path Responder",
+        "use crate::outbox::Outbox",
+        "use crate::outbox::Reply"
+      ]
+    },
+    {
+      "from": "dim_acp::gateway",
       "to": "dim_acp::projection",
       "references": [
         "path Projection",
@@ -3893,6 +3927,7 @@
         "path Native",
         "path Rpc",
         "path rpc",
+        "path rpc::unavailable",
         "use crate::rpc",
         "use crate::rpc::Native",
         "use crate::rpc::Rpc"
@@ -3902,6 +3937,7 @@
       "from": "dim_acp::gateway",
       "to": "dim_agent_types::events",
       "references": [
+        "path TurnOutcome",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
@@ -3926,6 +3962,7 @@
         "path EventContent::Input",
         "path EventContent::InputConsumed",
         "path EventContent::InputDeleted",
+        "path EventContent::PermissionChanged",
         "path EventContent::ToolCall",
         "path EventContent::ToolResult",
         "path EventContent::TurnEnd",
@@ -3935,6 +3972,13 @@
         "use dim_client::wire::EventContent",
         "use dim_client::wire::History",
         "use dim_client::wire::Progress"
+      ]
+    },
+    {
+      "from": "dim_acp::interaction",
+      "to": "dim_acp::outbox",
+      "references": [
+        "path crate::outbox::Outbox"
       ]
     },
     {
@@ -3999,6 +4043,13 @@
       ]
     },
     {
+      "from": "dim_acp::outbox",
+      "to": "dim_acp",
+      "references": [
+        "path super::FRAME_LIMIT"
+      ]
+    },
+    {
       "from": "dim_acp::projection",
       "to": "dim_agent_types::content",
       "references": [
@@ -4044,6 +4095,7 @@
         "path EventContent::Input",
         "path EventContent::InputConsumed",
         "path EventContent::InputDeleted",
+        "path EventContent::ModelEnd",
         "path EventContent::Text",
         "path EventContent::Thinking",
         "path EventContent::ToolCall",
@@ -4065,6 +4117,7 @@
       "to": "dim_client",
       "references": [
         "path Client",
+        "path Client::connect",
         "path dim_client::Error",
         "path dim_client::RpcError",
         "use dim_client::Client",
@@ -24904,6 +24957,14 @@
     }
   ],
   "unresolved": [
+    {
+      "module": "dim_acp::gateway",
+      "path": "Lookup::Accepted"
+    },
+    {
+      "module": "dim_acp::gateway",
+      "path": "Lookup::Unknown"
+    },
     {
       "module": "dim_acp::lody",
       "path": "OptionValue::Boolean"

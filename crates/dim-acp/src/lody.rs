@@ -56,8 +56,7 @@ pub(crate) fn controls(method: &str, value: &Value) -> Result<Controls, Error> {
             Some(model) => Some(model),
             None => match startup.config_option_values.get("model") {
                 Some(OptionValue::Text(model)) => Some(model.clone()),
-                Some(OptionValue::Boolean(value)) => {
-                    let _ = value;
+                Some(OptionValue::Boolean(true | false)) => {
                     return Err(Error::invalid_params());
                 }
                 None => None,

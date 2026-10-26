@@ -22,13 +22,14 @@ pub(crate) fn key(kind: &str, session: &str, branch: &str, request: &str, call: 
 
 pub(crate) async fn approval(
     cx: ConnectionTo<Client>,
+    outbox: crate::outbox::Outbox,
     stop: CancellationToken,
     approval: Approval,
 ) -> Option<Value> {
     let message = UntypedMessage::new("session/request_permission",json!({"sessionId":approval.session_id,"toolCall":{"toolCallId":key("approval",&approval.session_id,&approval.branch_id,&approval.request_id,""),"title":approval.reason,"kind":"other","status":"pending","rawInput":approval.call.input},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Reject once","kind":"reject_once"}]})).ok()?;
     let result: Value = tokio::select! {
         () = stop.cancelled() => return None,
-        result = cx.send_request(message).block_task() => result.ok()?,
+        result = outbox.request(&cx,&message.method,message.params) => result.ok()?,
     };
     let option = result.get("outcome")?;
     if option["outcome"] != "selected" {
@@ -46,6 +47,7 @@ pub(crate) async fn approval(
 
 pub(crate) async fn question(
     cx: ConnectionTo<Client>,
+    outbox: crate::outbox::Outbox,
     stop: CancellationToken,
     session: &str,
     call: &Call,
@@ -75,7 +77,7 @@ pub(crate) async fn question(
     let message = UntypedMessage::new("elicitation/create",json!({"mode":"form","sessionId":session,"toolCallId":tool_id(&call.branch_id,&call.request_id,&call.call_id),"message":"Answer the agent's questions","requestedSchema":{"type":"object","properties":properties,"required":required}})).ok()?;
     let result: Value = tokio::select! {
         () = stop.cancelled() => return None,
-        result = cx.send_request(message).block_task() => result.ok()?,
+        result = outbox.request(&cx,&message.method,message.params) => result.ok()?,
     };
     match result["action"].as_str()? {
         "decline" => Some(question::respond(session, call, None)),

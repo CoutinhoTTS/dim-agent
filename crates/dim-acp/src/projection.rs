@@ -59,6 +59,7 @@ pub(crate) struct Projection {
     thoughts: HashMap<String, TextCursor>,
     tools: HashSet<String>,
     compactions: HashMap<u64, bool>,
+    closed_requests: HashSet<String>,
 }
 
 pub(crate) fn tool_id(branch: &str, request: &str, call: &str) -> String {
@@ -114,6 +115,17 @@ impl Projection {
         let mut updates = Vec::new();
         let turn = match &event.content {
             EventContent::TurnStart(data) => Some(data.turn_id.clone()),
+            EventContent::Text(data) => Some(data.turn_id.clone()),
+            EventContent::Thinking(data) => Some(data.turn_id.clone()),
+            EventContent::ToolUseStart(data) => Some(data.turn_id.clone()),
+            EventContent::ToolUse(data) => Some(data.turn_id.clone()),
+            EventContent::ToolCall(data) => Some(data.turn_id.clone()),
+            EventContent::ToolStart(data) => Some(data.turn_id.clone()),
+            EventContent::ToolCompleted(data) => Some(data.turn_id.clone()),
+            EventContent::ToolResult(data) => Some(data.turn_id.clone()),
+            EventContent::ExecStarted(data) => Some(data.turn_id.clone()),
+            EventContent::CompactionStart(data) => data.turn_id.clone(),
+            EventContent::Compaction(data) => data.turn_id.clone(),
             _ => self.turn.clone(),
         };
         match &event.content {
@@ -199,6 +211,7 @@ impl Projection {
                 }
             }
             EventContent::TurnEnd(_) => self.turn = None,
+            EventContent::ModelEnd(data) => { self.closed_requests.insert(data.request_id.clone()); }
             _ => {}
         }
         if let Some(turn) = turn {
@@ -213,6 +226,9 @@ impl Projection {
     pub(crate) fn progress(&mut self, progress: Progress) -> Vec<Value> {
         let mut updates = Vec::new();
         if let Some(id) = progress.request_id {
+            if self.closed_requests.contains(&id) {
+                return updates;
+            }
             chunk(
                 "agent_message_chunk",
                 self.texts

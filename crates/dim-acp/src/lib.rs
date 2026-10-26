@@ -6,6 +6,7 @@ mod content;
 mod gateway;
 mod interaction;
 mod lody;
+mod outbox;
 mod projection;
 mod rpc;
 
@@ -94,7 +95,6 @@ impl TypedPlugin for AcpGateway {
                     })
                 }))
             })?;
-            let owned_tasks = tasks.clone();
             tasks.spawn(async move {
                 let Inputs {
                     client,
@@ -103,7 +103,7 @@ impl TypedPlugin for AcpGateway {
                     done,
                     login,
                 } = inputs;
-                let result = serve(client, io, agent_id, login, stop, owned_tasks).await;
+                let result = serve(client, io, agent_id, login, stop).await;
                 let _ = done.send(result);
             });
             Ok(Effect::Done)
@@ -117,35 +117,70 @@ async fn serve(
     agent_id: Option<String>,
     login: Option<auth::Login>,
     stop: CancellationToken,
-    tasks: TaskTracker,
 ) -> dim_client::Result<()> {
+    let tasks = TaskTracker::new();
+    let native_tasks = TaskTracker::new();
+    let native_stop = CancellationToken::new();
     let incoming_frames = FramedRead::new(io.reader, LinesCodec::new_with_max_length(FRAME_LIMIT))
         .map(|line| line.map_err(io::Error::other));
-    let outgoing = SinkExt::<String>::sink_map_err(
+    let outbox = outbox::Outbox::default();
+    let flushed = outbox.clone();
+    let outgoing = futures_util::sink::unfold(
         FramedWrite::new(io.writer, LinesCodec::new()),
-        io::Error::other,
-    )
-    .with(async |line: String| {
-        if line.len() > FRAME_LIMIT {
-            return Err(io::Error::other("ACP frame exceeds 16 MiB"));
-        }
-        Ok(line)
-    });
-    let (rpc, native) = rpc::Rpc::start(client, &tasks, stop.clone());
+        move |mut writer, line: String| {
+            let flushed = flushed.clone();
+            async move {
+                if line.len() > FRAME_LIMIT {
+                    return Err(io::Error::other("ACP frame exceeds 16 MiB"));
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(5), writer.send(line.clone()))
+                    .await
+                    .map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "ACP writer did not make progress for five seconds",
+                        )
+                    })?
+                    .map_err(io::Error::other)?;
+                flushed.flushed(&line);
+                Ok(writer)
+            }
+        },
+    );
+    let (rpc, native) = rpc::Rpc::start(client, &native_tasks, native_stop.clone());
     let (incoming, messages) = tokio::sync::mpsc::channel(128);
     let notifications = incoming.clone();
     let foreground = incoming.clone();
     let foreground_stop = stop.clone();
+    let replies = outbox.clone();
+    let foreground_outbox = outbox.clone();
+    let foreground_tasks = tasks.clone();
+    let reply_tasks = tasks.clone();
+    let reply_stop = stop.clone();
+    let requests = std::sync::Arc::new(tokio::sync::Semaphore::new(128));
     let connection = Agent
         .builder()
         .name("Dim ACP Gateway")
         .on_receive_request(
             async move |request: UntypedMessage, responder, _cx| {
+                let permit = requests.clone().try_acquire_owned().ok();
+                let admitted = permit.is_some();
+                let responder = outbox::Reply::new(
+                    responder,
+                    replies.clone(),
+                    &reply_tasks,
+                    reply_stop.clone(),
+                    permit,
+                );
+                if !admitted {
+                    return responder
+                        .respond_with_error(Error::new(-32001, "ACP has 128 requests in flight"));
+                }
                 if let Err(error) =
-                    incoming.try_send(gateway::Incoming::Request(request, responder))
+                    incoming.try_send(gateway::Incoming::Request(request, Box::new(responder)))
                     && let gateway::Incoming::Request(_, responder) = error.into_inner()
                 {
-                    responder
+                    (*responder)
                         .respond_with_error(Error::new(-32001, "ACP request queue is full"))?;
                 }
                 Ok(())
@@ -162,15 +197,34 @@ async fn serve(
             agent_client_protocol::on_receive_notification!(),
         )
         .connect_with(
-            agent_client_protocol::Lines::new(outgoing, incoming_frames),
+            agent_client_protocol::Lines::new(Box::pin(outgoing), incoming_frames),
             async move |cx| {
-                gateway::Gateway::new(rpc, cx, foreground, tasks, foreground_stop, agent_id, login)
-                    .run(messages, native)
-                    .await
+                gateway::Gateway::new(
+                    rpc,
+                    cx,
+                    foreground,
+                    foreground_tasks,
+                    foreground_stop,
+                    agent_id,
+                    login,
+                    foreground_outbox,
+                )
+                .run(messages, native)
+                .await
             },
         );
-    tokio::select! {
+    let result = tokio::select! {
         result = connection => result.map_err(Into::into),
         () = stop.cancelled() => Ok(()),
-    }
+        () = outbox.failed() => Err(outbox.error().into()),
+    };
+    stop.cancel();
+    tasks.close();
+    // Login waiters can cancel their owned pending attempts while RPC is live.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), tasks.wait()).await;
+    native_stop.cancel();
+    native_tasks.close();
+    native_tasks.wait().await;
+    tasks.wait().await;
+    result
 }

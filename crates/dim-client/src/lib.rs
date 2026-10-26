@@ -108,6 +108,7 @@ pub struct Client {
     features: Vec<String>,
     #[cfg(windows)]
     _bridge: tokio::process::Child,
+    instance_id: String,
 }
 impl Client {
     /// Opens the protected transport. Only a host that just started its daemon
@@ -197,6 +198,7 @@ impl Client {
             frame: Vec::new(),
             notices: VecDeque::new(),
             features: Vec::new(),
+            instance_id: String::new(),
             #[cfg(windows)]
             _bridge: bridge,
         })
@@ -221,7 +223,7 @@ impl Client {
         loop {
             let buffer = self.read.fill_buf().await?;
             if buffer.is_empty() {
-                return Err("App Server connection closed; the submitted input may have been accepted. Resume the session instead of resending automatically".into());
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof,"App Server connection closed; the submitted input may have been accepted. Resume the session instead of resending automatically").into());
             }
             let end = buffer.iter().position(|byte| *byte == b'\n');
             let size = end.map_or(buffer.len(), |index| index + 1);
@@ -347,6 +349,7 @@ impl Client {
             return Err("Existing daemon uses a different model profile; use a separate --home for --model-config".into());
         }
         self.features = hello.features;
+        self.instance_id = hello.instance_id;
         Ok(())
     }
 
@@ -358,6 +361,9 @@ impl Client {
 
     pub fn features(&self) -> &[String] {
         &self.features
+    }
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
     /// Reconnects without starting or replacing a daemon.
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {

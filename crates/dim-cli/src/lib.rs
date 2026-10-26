@@ -40,10 +40,22 @@ type Result<T> = std::result::Result<T, Error>;
 pub fn run_cli() -> i32 {
     let result = prepare().and_then(|options| {
         let Some(options) = options else { return Ok(0) };
+        let acp = matches!(
+            options.action,
+            Action::Acp {
+                auth_setup: None,
+                ..
+            }
+        );
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        runtime.block_on(run(options))
+        let result = runtime.block_on(run(options));
+        // Owned plugin work has drained; blocked OS stdio must not hold CLI exit.
+        if acp {
+            runtime.shutdown_background();
+        }
+        result
     });
     match result {
         Ok(code) => code,

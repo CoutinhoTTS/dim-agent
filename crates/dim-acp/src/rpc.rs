@@ -4,12 +4,18 @@ use agent_client_protocol::Error;
 use dim_client::{Client, Message};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub(crate) enum Native {
     Notice { method: String, params: Value },
+    Lost,
+    Restored { same_instance: bool },
     Closed,
 }
 
@@ -22,7 +28,12 @@ struct Call {
 #[derive(Clone)]
 pub(crate) struct Rpc {
     calls: mpsc::Sender<Call>,
-    features: Arc<Vec<String>>,
+    state: Arc<RwLock<State>>,
+}
+struct State {
+    generation: u64,
+    ready: bool,
+    features: Vec<String>,
 }
 
 pub(crate) fn unavailable() -> Error {
@@ -57,11 +68,15 @@ impl Rpc {
         tasks: &TaskTracker,
         stop: CancellationToken,
     ) -> (Self, mpsc::Receiver<Native>) {
-        let features = Arc::new(client.features().to_vec());
+        let state = Arc::new(RwLock::new(State {
+            generation: 0,
+            ready: true,
+            features: client.features().to_vec(),
+        }));
         let (calls, incoming) = mpsc::channel(128);
         let (notices, events) = mpsc::channel(256);
-        tasks.spawn(drive(client, incoming, notices, stop));
-        (Self { calls, features }, events)
+        tasks.spawn(drive(client, incoming, notices, stop, state.clone()));
+        (Self { calls, state }, events)
     }
 
     pub(crate) fn supports(&self, method: &str) -> bool {
@@ -74,10 +89,19 @@ impl Rpc {
                 | "session.stop"
                 | "session.list"
                 | "session.close"
-        ) || self.features.iter().any(|feature| feature == method)
+        ) || self
+            .state
+            .read()
+            .unwrap()
+            .features
+            .iter()
+            .any(|feature| feature == method)
     }
 
     pub(crate) async fn call(&self, method: &'static str, params: Value) -> Result<Value, Error> {
+        if !self.ready() {
+            return Err(unavailable());
+        }
         let (reply, result) = oneshot::channel();
         self.calls
             .send(Call {
@@ -88,6 +112,12 @@ impl Rpc {
             .await
             .map_err(|_| unavailable())?;
         result.await.map_err(|_| unavailable())?
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.state.read().unwrap().generation
+    }
+    pub(crate) fn ready(&self) -> bool {
+        self.state.read().unwrap().ready
     }
 
     pub(crate) async fn typed<T: DeserializeOwned>(
@@ -107,33 +137,101 @@ async fn drive(
     mut calls: mpsc::Receiver<Call>,
     notices: mpsc::Sender<Native>,
     stop: CancellationToken,
+    state: Arc<RwLock<State>>,
 ) {
+    let config = client.connection_config().clone();
+    let mut attached = HashSet::new();
+    let mut usable = true;
     let mut pending: HashMap<u64, oneshot::Sender<Result<Value, Error>>> = HashMap::new();
-    loop {
-        tokio::select! {
-            () = stop.cancelled() => break,
-            call = calls.recv(), if pending.len() < 128 => {
-                let Some(call) = call else { break };
-                match client.send(call.method, call.params).await {
-                    Ok(id) => { pending.insert(id, call.reply); }
-                    Err(error) => { let _ = call.reply.send(Err(boundary(error))); break; }
-                }
-            }
-            message = client.next() => match message {
-                Ok(Message::Response { id, result }) => {
-                    if let Some(reply) = pending.remove(&id) {
-                        let _ = reply.send(result.map_err(|error| boundary(Box::new(error))));
+    'connection: loop {
+        loop {
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => break 'connection,
+                call = calls.recv(), if pending.len() < 128 => {
+                    let Some(call) = call else { break 'connection };
+                    if let Some(id) = call.params.get("sessionId").and_then(Value::as_str) {
+                        if call.method == "session.attach" { attached.insert(id.to_owned()); }
+                        if call.method == "session.detach" { attached.remove(id); }
+                    }
+                let sent = tokio::select! {
+                    biased;
+                    () = stop.cancelled()=>{ usable = false; let _ = call.reply.send(Err(unavailable())); break 'connection; },
+                    sent = client.send(call.method, call.params)=>sent,
+                };
+                match sent {
+                        Ok(id) => { pending.insert(id, call.reply); }
+                        Err(error) => { let _ = call.reply.send(Err(boundary(error))); break; }
                     }
                 }
-                Ok(Message::Notice { method, params }) => {
-                    if notices.try_send(Native::Notice { method, params }).is_err() { break; }
+                message = client.next() => match message {
+                    Ok(Message::Response { id, result }) => {
+                        let Some(reply) = pending.remove(&id) else { break 'connection; };
+                        let _ = reply.send(result.map_err(|error| boundary(Box::new(error))));
+                    }
+                    Ok(Message::Notice { method, params }) => {
+                        if notices.try_send(Native::Notice { method, params }).is_err() { break 'connection; }
+                    }
+                    Err(error) if error.downcast_ref::<std::io::Error>().is_some() => break,
+                    Err(_) => break 'connection,
                 }
-                Err(_) => break,
+            }
+        }
+        {
+            let mut state = state.write().unwrap();
+            state.ready = false;
+            state.generation += 1;
+        }
+        usable = false;
+        for (_, reply) in pending.drain() {
+            let _ = reply.send(Err(unavailable()));
+        }
+        if notices.try_send(Native::Lost).is_err() {
+            break;
+        }
+        let instance = client.instance_id().to_owned();
+        attached.clear();
+        let reconnect = async {
+            let mut delay = Duration::from_millis(250);
+            loop {
+                tokio::time::sleep(delay).await;
+                if let Ok(client) = Client::connect(&config).await {
+                    return client;
+                }
+                delay = (delay * 2).min(Duration::from_secs(2));
+            }
+        };
+        tokio::pin!(reconnect);
+        let timeout = tokio::time::sleep(Duration::from_secs(30));
+        tokio::pin!(timeout);
+        loop {
+            tokio::select! {
+                () = stop.cancelled()=>break 'connection,
+                () = &mut timeout=>break 'connection,
+                restored = &mut reconnect=>{
+                    client = restored;
+                    usable = true;
+                    { let mut state = state.write().unwrap(); state.ready = true; state.features = client.features().to_vec(); }
+                    if notices.try_send(Native::Restored { same_instance:client.instance_id() == instance }).is_err() { break 'connection; }
+                    break;
+                }
+                call = calls.recv()=>{
+                    let Some(call) = call else { break 'connection; }; let _ = call.reply.send(Err(unavailable()));
+                }
             }
         }
     }
+    state.write().unwrap().ready = false;
     for reply in pending.into_values() {
         let _ = reply.send(Err(unavailable()));
+    }
+    if stop.is_cancelled() && usable {
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            for id in attached {
+                let _ = client.rpc("session.detach", json!({"sessionId":id})).await;
+            }
+        })
+        .await;
     }
     let _ = notices.try_send(Native::Closed);
 }
