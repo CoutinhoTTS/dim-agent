@@ -4,17 +4,53 @@ use crate::model_catalog::{ModelEntry, NewApiEndpoint};
 use dim_agent_capabilities::host::{HostError, HttpModelConnection, ModelProtocol};
 use std::collections::{BTreeMap, HashMap};
 
+const DRIVERS: &[(&str, Option<ModelProtocol>)] = &[
+    ("openai-compatible", Some(ModelProtocol::OpenaiCompatible)),
+    ("custom", Some(ModelProtocol::OpenaiCompatible)),
+    ("xai-grok-build", Some(ModelProtocol::OpenaiCompatible)),
+    ("deepseek", Some(ModelProtocol::OpenaiCompatible)),
+    ("moonshotai", Some(ModelProtocol::OpenaiCompatible)),
+    ("aihubmix", Some(ModelProtocol::OpenaiCompatible)),
+    ("zenmux", Some(ModelProtocol::OpenaiCompatible)),
+    ("openai-responses", Some(ModelProtocol::OpenaiResponses)),
+    ("openai-codex", Some(ModelProtocol::OpenaiResponses)),
+    ("aihubmix-responses", Some(ModelProtocol::OpenaiResponses)),
+    ("azure-openai", Some(ModelProtocol::OpenaiResponses)),
+    ("xai", Some(ModelProtocol::Xai)),
+    ("xai-responses", Some(ModelProtocol::XaiResponses)),
+    ("anthropic", Some(ModelProtocol::Anthropic)),
+    ("gemini", Some(ModelProtocol::Gemini)),
+    ("amazon-bedrock", Some(ModelProtocol::Bedrock)),
+    ("new-api-router", None),
+];
+
 pub(super) fn supported(driver: &str) -> bool {
-    driver == "new-api-router" || protocol(driver, "").is_some()
+    DRIVERS.iter().any(|(name, _)| *name == driver)
+}
+
+pub(super) fn custom_drivers() -> impl Iterator<Item = &'static str> {
+    DRIVERS
+        .iter()
+        .map(|(driver, _)| *driver)
+        .filter(|driver| !matches!(*driver, "openai-codex" | "xai-grok-build"))
+}
+
+pub(super) fn remote_model_list(driver: &str) -> bool {
+    supported(driver)
+        && !matches!(
+            driver,
+            "amazon-bedrock" | "azure-openai" | "openai-codex" | "xai-grok-build"
+        )
 }
 
 pub(super) fn routes(
     driver: &str,
     models: &[ModelEntry],
     configured: &BTreeMap<String, NewApiEndpoint>,
+    overrides: &BTreeMap<String, NewApiEndpoint>,
 ) -> Result<HashMap<String, ModelProtocol>, HostError> {
     if driver == "new-api-router" {
-        return new_api::routes(models, configured);
+        return new_api::routes(models, configured, overrides);
     }
     Ok(models
         .iter()
@@ -25,21 +61,16 @@ pub(super) fn routes(
 }
 
 fn protocol(driver: &str, model_id: &str) -> Option<ModelProtocol> {
-    Some(match driver {
-        "aihubmix" if model_id.starts_with("anthropic/") => ModelProtocol::OpenaiResponses,
-        "zenmux" if model_id.starts_with("anthropic/") => ModelProtocol::Anthropic,
-        "openai-compatible" | "custom" | "xai-grok-build" | "deepseek" | "moonshotai"
-        | "aihubmix" | "zenmux" => ModelProtocol::OpenaiCompatible,
-        "openai-responses" | "openai-codex" | "aihubmix-responses" | "azure-openai" => {
-            ModelProtocol::OpenaiResponses
-        }
-        "xai" => ModelProtocol::Xai,
-        "xai-responses" => ModelProtocol::XaiResponses,
-        "anthropic" => ModelProtocol::Anthropic,
-        "gemini" => ModelProtocol::Gemini,
-        "amazon-bedrock" => ModelProtocol::Bedrock,
-        _ => return None,
-    })
+    if driver == "aihubmix" && model_id.starts_with("anthropic/") {
+        return Some(ModelProtocol::OpenaiResponses);
+    }
+    if driver == "zenmux" && model_id.starts_with("anthropic/") {
+        return Some(ModelProtocol::Anthropic);
+    }
+    DRIVERS
+        .iter()
+        .find(|(name, _)| *name == driver)
+        .and_then(|(_, protocol)| *protocol)
 }
 
 pub(super) fn connection(

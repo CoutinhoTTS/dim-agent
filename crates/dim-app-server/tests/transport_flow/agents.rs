@@ -697,15 +697,12 @@ async fn product_session_model_priority_is_request_then_profile_then_default() {
     let models = ["alpha", "beta"].map(
         |id| json!({"modelId":id,"displayName":id,"status":"active","capabilities":capabilities}),
     );
-    assert_ok(&client.rpc("provider.save", json!({"provider":{
-        "providerId":"profile-fixture","displayName":"Fixture","driverKind":"openai-compatible",
-        "baseUrl":"http://localhost/v1","auth":{"type":"anonymous"},"models":models,"enabled":true
-    }})).await);
+    assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000002","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":models,"enabled":true})).await);
     assert_ok(
         &client
             .rpc(
                 "provider.select",
-                json!({"providerId":"profile-fixture","modelId":"alpha"}),
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000002","modelId":"alpha"}),
             )
             .await,
     );
@@ -714,7 +711,7 @@ async fn product_session_model_priority_is_request_then_profile_then_default() {
             "agent.create",
             json!({"profile":{
                 "name":"profiled","description":"fixture","systemPrompt":"work","tools":[],
-                "model":{"providerId":"profile-fixture","modelId":"beta"}
+                "model":{"providerId":"018ec73f-0000-7000-8000-000000000002","modelId":"beta"}
             }}),
         )
         .await;
@@ -733,7 +730,8 @@ async fn product_session_model_priority_is_request_then_profile_then_default() {
             params["agentId"] = agent;
         }
         if let Some(model) = explicit {
-            params["model"] = json!({"provider":"profile-fixture","modelId":model});
+            params["model"] =
+                json!({"provider":"018ec73f-0000-7000-8000-000000000002","modelId":model});
         }
         let created = client.rpc("session.create", params).await;
         assert_ok(&created);

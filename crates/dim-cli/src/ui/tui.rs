@@ -1236,9 +1236,10 @@ impl App {
                 };
                 self.apply_effect(effect);
             }
-            Update::ProviderResult(result) => {
+            Update::ProviderResult { result, providers } => {
                 if let Some(Prompt::Providers(panel)) = &mut self.prompt {
                     panel.set_result(result);
+                    panel.set_providers(providers);
                 }
             }
             Update::Models(models) => {
@@ -1715,7 +1716,14 @@ impl App {
                 self.composer.clear();
                 self.host.send(Command::Resume(id));
             }
-            Effect::Refresh => self.host.send(Command::ListSessions),
+            Effect::Refresh => {
+                self.host
+                    .send(if matches!(self.prompt, Some(Prompt::Providers(_))) {
+                        Command::ListProviders
+                    } else {
+                        Command::ListSessions
+                    })
+            }
             Effect::FullAccess {
                 request_id,
                 branch_id,
@@ -1842,6 +1850,17 @@ impl App {
             Effect::OpenUrl(url) => {
                 crate::login::open_browser(&url);
                 self.set_notice(tf("Opened {url}", &[("url", &url)]));
+            }
+            Effect::ClearModelPreferences {
+                provider_id,
+                model_id,
+                expected_version,
+            } => {
+                self.host.send(Command::ClearModelPreferences {
+                    provider_id,
+                    model_id,
+                    expected_version,
+                });
             }
             Effect::SelectModel {
                 provider_id,

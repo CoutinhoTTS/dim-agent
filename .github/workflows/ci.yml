@@ -111,14 +111,17 @@ jobs:
           npm ci --prefix runtime --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/web --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/session-title --ignore-scripts --registry=https://registry.npmjs.org
+          npm ci --prefix runtime/plugins/scheduler --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/workflow --ignore-scripts --registry=https://registry.npmjs.org
-          (cd runtime && npm install --no-save --ignore-scripts --install-links ./plugins/web ./plugins/session-title ./plugins/workflow)
+          (cd runtime && npm install --no-save --ignore-scripts --install-links ./plugins/web ./plugins/session-title ./plugins/scheduler ./plugins/workflow)
           node --test runtime/plugin-sdk.test.mjs
           node --test runtime/plugins/goal/goal.test.mjs
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/web/tsconfig.json
           node --test runtime/plugins/web/web.test.mjs
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/session-title/tsconfig.json
           node --test runtime/plugins/session-title/session-title.test.mjs
+          node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/scheduler/tsconfig.json
+          node --test runtime/plugins/scheduler/scheduler.test.mjs
           node runtime/node_modules/typescript/bin/tsc -p runtime/plugins/workflow/tsconfig.json
           node --test runtime/plugins/workflow/workflow.test.mjs
           # The Python of `py:` rows: a relocatable CPython, pinned by hash, so the

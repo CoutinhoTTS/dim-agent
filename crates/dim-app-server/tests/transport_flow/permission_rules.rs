@@ -75,14 +75,14 @@ async fn command_rules_written_by_the_client_apply_to_the_next_call() {
     };
     let entry =
         json!({"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps});
-    assert_ok(&client.rpc("provider.save",json!({"provider":{"providerId":"public-fixture","displayName":"Fixture","driverKind":"openai-compatible","baseUrl":"https://model.example/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"},"models":[entry],"enabled":true}})).await);
+    assert_ok(&client.rpc("provider.create",json!({"providerId":"018ec73f-0000-7000-8000-000000000001","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"https://model.example/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"}},"models":[entry],"enabled":true})).await);
     // Select the model as a user would; the no-selection fallback costs
     // seconds in a debug build and is covered by provider_flow.
     assert_ok(
         &client
             .rpc(
                 "provider.select",
-                json!({"providerId":"public-fixture","modelId":"alpha"}),
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000001","modelId":"alpha"}),
             )
             .await,
     );

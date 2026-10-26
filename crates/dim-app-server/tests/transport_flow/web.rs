@@ -165,17 +165,13 @@ async fn node_web_settings_permission_cancellation_and_restore() {
         let (server, _model_requests, _) = super::session_typescript::start(config.clone()).await;
         let mut client = Client::new_version(&server, false, 3).await;
         if !restoring {
-            assert_ok(&client.rpc("provider.save", json!({"provider":{
-                "providerId":"web-fixture","displayName":"Fixture","driverKind":"openai-compatible",
-                "baseUrl":"http://localhost/v1","auth":{"type":"anonymous"},"enabled":true,
-                "models":[{"modelId":"fixture","displayName":"fixture","status":"active",
-                    "capabilities":dim_agent_types::ModelCapabilities::default()}]
-            }})).await);
+            assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":[{"modelId":"fixture","displayName":"fixture","status":"active",
+                    "capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true})).await);
             assert_ok(
                 &client
                     .rpc(
                         "provider.select",
-                        json!({"providerId":"web-fixture","modelId":"fixture"}),
+                        json!({"providerId":"018ec73f-0000-7000-8000-000000000011","modelId":"fixture"}),
                     )
                     .await,
             );

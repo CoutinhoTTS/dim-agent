@@ -195,15 +195,10 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
             max_output_tokens: 200,
             ..Default::default()
         };
-        assert_ok(&client.rpc("provider.save", json!({"provider":{
-            "providerId":"window","displayName":"Window","driverKind":"openai-compatible",
-            "baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"},
-            "models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],
-            "enabled":true
-        }})).await);
+        assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000004","displayName":"Window","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],"enabled":true})).await);
         assert_ok(
             &client
-                .rpc("provider.select", json!({"providerId":"window","modelId":"small"}))
+                .rpc("provider.select", json!({"providerId":"018ec73f-0000-7000-8000-000000000004","modelId":"small"}))
                 .await,
         );
         let created = client

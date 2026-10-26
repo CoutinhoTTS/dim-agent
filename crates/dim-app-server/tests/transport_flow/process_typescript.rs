@@ -78,18 +78,15 @@ async fn available(client: &mut Client, server: &RunningServer) -> Value {
 }
 
 pub(super) async fn select_model(client: &mut Client) {
-    assert_ok(&client.rpc("provider.save", json!({"provider":{
-        "providerId":"process-fixture", "displayName":"Fixture", "driverKind":"openai-compatible",
-        "baseUrl":"http://localhost/v1", "auth":{"type":"anonymous"}, "models":[{
+    assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000007","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":[{
             "modelId":"fixture", "displayName":"Fixture", "status":"active",
             "capabilities":dim_agent_types::ModelCapabilities::default()
-        }], "enabled":true
-    }})).await);
+        }],"enabled":true})).await);
     assert_ok(
         &client
             .rpc(
                 "provider.select",
-                json!({"providerId":"process-fixture","modelId":"fixture"}),
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000007","modelId":"fixture"}),
             )
             .await,
     );

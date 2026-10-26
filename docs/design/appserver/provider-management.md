@@ -1,28 +1,26 @@
 # Provider management
 
-Status: **Proposal; not Ready and not implemented**. Extends the existing process
-`ProviderPlugin` for [#329](https://github.com/arcships/dim/issues/329).
+Status: **Implemented**. Process-owned Provider management for
+[#329](https://github.com/arcships/dim/issues/329).
 [中文](../../zh/design/appserver/provider-management.md).
-The implemented [S4 auxiliaryModel](auxiliary-model.md) remains unchanged.
-New methods and fields below require implementation and client acceptance before use.
+The [S4 auxiliaryModel](auxiliary-model.md) contract remains unchanged.
 
-## 1. Scope and current implementation
+## 1. Scope
 
-Desktop and CLI need one App Server contract for the
-[Providers and models](../../feature-list.md#providers-and-models) flows. At
-`main` @ `78dd8c5e`:
+Desktop and CLI use one App Server contract for
+[Providers and models](../../feature-list.md#providers-and-models).
 
-| Flow | Implemented | Proposed completion |
-| --- | --- | --- |
-| List/edit | `provider.list`, `account.providers`, `provider.catalog` | One safe management snapshot, including connection fields and editable model descriptors |
-| Connection | `provider.save` writes complete records | Create and partial update replace save; preserve secrets the client cannot read |
-| Disconnect/delete | Custom delete removes a record; builtin delete disables it | Disconnect atomically clears static credentials and disables; account logout stays with its owner |
-| Discovery | `provider.refresh` needs a saved record | Probe an unsaved draft without creating or modifying a Provider |
-| Models | Refresh, enable, edit and reset default models | Separate user-added models, persistent overrides and explicit New API routes |
-| Preferences | F3 accepts `ModelPreferences` on Session adoption | Persist per-model preferences for clients to pass explicitly |
-| Accounts/usage | Native login and optional `account.usage` already exist | Reuse those contracts and their actual errors; no static-provider usage settings |
-| Multiple clients | Replies and record CAS | Reread on view open and after own writes; no pushed notices |
-| Legacy import | Explicit read-only import with per-entry results | Specify field mapping, preserve source bytes and reject unsupported nonempty fields |
+| Flow | Contract |
+| --- | --- |
+| List/edit | Safe management snapshots include connection fields, record versions and complete model descriptors |
+| Connection | UUID creation and partial updates preserve secrets the client cannot read |
+| Disconnect/delete | Disconnect clears credentials and disables atomically; custom deletion removes owned selections |
+| Discovery | Probe tests a draft without storing a Provider, catalog, credential or selection |
+| Models | Distinct defaults and user models, persistent descriptor overrides and explicit New API routes |
+| Preferences | Clients read per-model preferences and pass them with an exact target at explicit adoption |
+| Accounts/usage | Existing login/logout/usage owners and errors; no static-provider usage settings |
+| Multiple clients | Record CAS and rereads on open or after own writes; no pushed notices |
+| Legacy import | Explicit read-only import with origin mapping, per-entry results and unchanged source bytes |
 
 Source contracts: [Provider owner](../../../crates/dim-app-server/src/provider.rs),
 [management methods](../../../crates/dim-app-server/src/provider/management.rs),
@@ -60,10 +58,10 @@ continues to exclude private account implementations and credentials from this r
 
 | Method | Request | Reply | mutating | interruption |
 | --- | --- | --- | --- | --- |
-| `provider.management` (new) | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}` | false | `Drain` |
-| `provider.list` (existing) | `{}` | Existing `{providers, errors}` summary; retained unchanged for compatibility | false | `Drain` |
-| `provider.selection` (existing) | `{cwd?}` | Existing `{selection}` and its separate scope/version | false | `Drain` |
-| `provider.catalog` (existing) | `{providerId}` | Existing `{catalog}` with `ProviderModel`; **unchanged** | false | `Drain` |
+| `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}` | false | `Drain` |
+| `provider.list` | `{}` | Existing `{providers, errors}` summary; retained unchanged for compatibility | false | `Drain` |
+| `provider.selection` | `{cwd?}` | Existing `{selection}` and its separate scope/version | false | `Drain` |
+| `provider.catalog` | `{providerId}` | Existing `{catalog}` with `ProviderModel`; **unchanged** | false | `Drain` |
 
 Without an ID, management returns all known entries, including signed-out accounts.
 With an ID, it returns that entry or a typed error. It is the sole edit-view read:
@@ -109,6 +107,8 @@ including remote-model substitution, so they cannot disagree about the candidate
 Do not persist another status or disable the entry.
 Actions describe current availability, not authorization or a promise that a later
 write succeeds. Model origin is derived from the distinct persisted lists in §6.
+An account's existing catalog retains its version and descriptors while signed out
+or changed; its models are unavailable and model writes wait for a current refresh.
 A disappeared default's override cannot become a user-added model.
 `source:"override"` means a default model with a stored descriptor override;
 an edited user model remains `source:"user"`.
@@ -121,12 +121,12 @@ typed errors in §3.4. Existing writes retain `mutating:true`, `interruption:Dra
 
 | Method | Request | Reply / behavior | mutating | interruption |
 | --- | --- | --- | --- | --- |
-| `provider.create` (new) | `{providerId, displayName, connection, models: ModelEntry[], enabled}` | `ManagementProvider`; create-only, caller-generated fresh UUID, existing ID conflicts | true | `Drain` |
-| `provider.update` (new) | `{providerId, expectedVersion, patch}` | `ManagementProvider`; validate and commit one partial update transaction | true | `Drain` |
-| `provider.probe` (new) | `{providerId?, connection}` | `{models: ModelEntry[]}`; §3.3, no record writes or version check | false | `Drain` |
-| `provider.models.create` (new) | `{providerId, expectedVersion, model: ModelEntry}` | Existing catalog; separate user-added list; duplicate default or user ID rejected; add enabled and remove any stale `modelConfigOverrides`, `disabledModelIds`, `modelPreferences` and `endpointOverrides` entries for that ID in the same transaction | true | `Drain` |
-| `provider.models.delete` (new) | `{providerId, expectedVersion, modelId}` | Existing catalog; only user-added items; remove that ID from `disabledModelIds` and clean owned preferences/routes/selections in the same transaction | true | `Drain` |
-| `provider.preferences.update` (new) | `{providerId, expectedVersion, modelId, patch}` | `ManagementProvider`; effort/tier independently set/clear, validated against the model | true | `Drain` |
+| `provider.create`  | `{providerId, displayName, connection, models: ModelEntry[], enabled}` | `ManagementProvider`; create-only, caller-generated fresh UUID, existing ID conflicts | true | `Drain` |
+| `provider.update`  | `{providerId, expectedVersion, patch}` | `ManagementProvider`; validate and commit one partial update transaction | true | `Drain` |
+| `provider.probe`  | `{providerId, connection}` | `{models: ModelEntry[]}`; §3.3, no record writes or version check | false | `Drain` |
+| `provider.models.create`  | `{providerId, expectedVersion, model: ModelEntry}` | Existing catalog; separate user-added list; duplicate default or user ID rejected; add enabled and remove any stale `modelConfigOverrides`, `disabledModelIds`, `modelPreferences` and `endpointOverrides` entries for that ID in the same transaction | true | `Drain` |
+| `provider.models.delete`  | `{providerId, expectedVersion, modelId}` | Existing catalog; only user-added items; remove that ID from `disabledModelIds` and clean owned preferences/routes/selections in the same transaction | true | `Drain` |
+| `provider.preferences.update`  | `{providerId, expectedVersion, modelId, patch}` | `ManagementProvider`; effort/tier independently set/clear, validated against the model | true | `Drain` |
 
 The client generates and retains the UUID before sending. `create` accepts only
 a canonical lowercase hyphenated UUID; another value returns
@@ -162,7 +162,9 @@ bundled catalog. Clients never reconstruct descriptors from `ProviderModel`.
 
 Omitted fields keep their value; null, unsupported fields, duplicate/conflicting
 header names and invalid operations fail at the input boundary. Header names are
-case-insensitive there. Proxy and timeout update independently; replacing a proxy
+case-insensitive there. An empty `provider.update` patch returns
+`provider_invalid_config` without changing the record or version.
+Proxy and timeout update independently; replacing a proxy
 URL explicitly replaces its authentication. Builtin identity/name/driver/auth and
 default descriptors remain readonly. Custom `driverKind` and `auth` are fixed at
 creation too; changing them requires a new Provider and explicit selection.
@@ -172,7 +174,12 @@ The preference patch is
 Reject an empty patch or a value the model does not support with
 `provider_invalid_config`. Unknown fields and malformed operations fail at the
 input boundary (§3.4). Clear means the catalog default at subsequent
-explicit adoption; each field changes independently.
+explicit adoption; each field changes independently. Validate only values set by
+this patch, not retained values in the other field. Saved preferences are user
+choices (including imported user configuration); discovery supplies supported
+options, not those choices. Descriptor edits, route changes and refresh never
+automatically delete unsupported saved fields. Explicit adoption reports the
+rejected saved preferences; the user can set or clear each field explicitly.
 
 Existing `delete` keeps its builtin-disable/custom-delete behavior. `models.edit`
 keeps `ModelEdit` and adds `endpoint: {action:"set",value:NewApiEndpoint} |
@@ -194,7 +201,9 @@ from both defaults and user models. These operations update the effective catalo
 and routes from the same record; endpoint overrides remain their separate map.
 Managed account catalogs do not gain user-added routes/models through these methods.
 
-Deleting a Provider clears only Provider-owned selections in its transaction.
+Deleting a custom Provider clears its Provider-owned selections in the same transaction.
+Builtin delete disables its record and retains its scoped choice; unavailable choices
+are skipped during subsequent default resolution.
 Deleting a user model likewise clears its owned selection/preferences/route and
 its `disabledModelIds` entry. Creating a user model starts enabled, with no
 descriptor override, preferences or endpoint override, and drops stale entries
@@ -206,9 +215,13 @@ and does not rebind those references.
 
 ### 3.3 Probe, preference adoption and usage
 
-Probe omits the ID for a new complete connection, or supplies the ID for an
-existing record with `connection` as the §3.2 patch. Provider reads the current
-record once, merges it in memory and obtains credentials through the original
+For a new connection, probe carries the client's fresh canonical UUID and the
+complete creation `connection`. The UUID supplies the existing secret host's
+Provider context without creating a record. The complete connection shape selects
+the new-draft probe even when its ID already exists; `credential:keep` then has no
+stored credential to keep. For an existing connection, probe
+carries its ID with `connection` as the §3.2 patch. Provider reads the current
+record once for that patch, merges it in memory and obtains credentials through the original
 authority. Probe has no version check; it writes nothing and its result does not
 establish a version for a later write. Apply the same
 URL/header/network validation as create/update **before** any request. A changed
@@ -220,8 +233,8 @@ errors disclose no secrets or raw response body. A stale draft probe continues t
 its request timeout; the client discards its reply. Disconnect/navigation cannot
 cancel it. Owner unload uses the existing cancellation token and drains the call.
 
-Provider persists the existing `ModelPreferences` for clients only, superseding
-[F3's](../model-configuration.md) no-persisted-preference scope. The client sends
+Provider persists the existing `ModelPreferences` for clients only. The
+[F3 client](../model-configuration.md) sends
 the exact `{providerId, modelId}` with preferences read for that pair to
 `session.create` or `session.model.update`. An unavailable explicit target fails;
 report it and do not retry without the target or fall back to another model.
@@ -254,6 +267,9 @@ Management-facing Provider operations return a Provider-local error enum in
 codes below. The shared `HostErrorKind` is not extended, and generic host-error
 strings are not parsed to recover business types.
 
+An update containing only empty `headers:[]` and/or `network:{}` is an empty
+patch and fails without advancing the record version.
+
 Provider business errors use JSON-RPC code `-32000`, a safe message and
 `data.appError`: `provider_not_found`, `provider_conflict`,
 `provider_invalid_config`, `provider_unsupported`, `provider_auth_required`,
@@ -272,6 +288,10 @@ Rpc retains `service_reloading`/`service_unavailable` and ordinary admission.
 All accepted calls remain owner-tracked and drain on unload. Disconnect only loses
 the reply; it never rolls back committed writes. Reread uncertain writes rather
 than replaying them. Provider updates do not reload the loader row.
+
+The legacy native `ProviderInput`/`save_static` upsert remains public for existing
+integration fixtures. Its removal is tracked in [#360](https://github.com/arcships/dim/issues/360);
+it is not exposed by RPC or used as a client fallback.
 
 ## 4. Client integration
 
@@ -302,6 +322,27 @@ for recovery, and never saves then refreshes as a test. Connection edits probe a
 draft when requested, then update changed fields. Disconnect sends credential
 clear **and** `enabled:false` atomically, fixing the enabled-key-required rejection
 of clear alone. Enable/disable use update; account login/logout retain their owners.
+When listing is unsupported, connection edits still save and explicitly report
+that the key could not be tested. Failed writes retain drafts; the subsequent
+reread refreshes the record version and safe status, and the user confirms before
+retrying. A repeated create whose UUID already exists opens that existing record
+with its current version and the retained draft; it requires Apply instead of
+reporting the draft as saved. `Ctrl+R` rereads a form after a failed list request
+without discarding it.
+
+The `/models` picker clears both saved preferences for its selected model with
+`Ctrl+X`, using the displayed catalog version for CAS. It keeps the picker open;
+Enter separately adopts catalog defaults. On conflict it refreshes the list and
+the user retries. The native `dimcode models PROVIDER --clear-preferences MODEL`
+command rereads the management version and performs the same partial update.
+Neither action changes an adopted Session model. Discovery and adoption errors
+keep historical preferences until this explicit user action.
+
+```text
+Select a model
+> Provider / model
+Enter select · Ctrl+X clear saved · Esc clear/close
+```
 
 ```text
 Providers                         Provider detail
@@ -327,8 +368,8 @@ separate decision covering Settings too, not a prerequisite here.
 
 ## 6. Persistence, existing Sessions and migration
 
-**Format decision: v19, unchanged SQL schema.** Add only these optional top-level
-fields; missing maps/lists mean no corresponding user data:
+**Format decision: v19, unchanged SQL schema.** These optional top-level
+fields carry user configuration; missing maps/lists mean no corresponding user data:
 
 | Struct / JSON field | Stored value and use |
 | --- | --- |
@@ -337,8 +378,8 @@ fields; missing maps/lists mean no corresponding user data:
 | `ProviderRecord.model_preferences` / `modelPreferences` | Same preference map for managed catalogs |
 | `StaticProviderRecord.endpoint_overrides` / `endpointOverrides` | Map of model ID to the existing `NewApiEndpoint`; only `openai`, `openai-response`, `anthropic` and `gemini` are executable overrides here; separate from discovered `endpointTypes` |
 
-The [storage contract](native-storage-format.md#329-格式决定提案) records this
-proposal and its downgrade loss. No fields are added to `ModelMetadata`,
+The [storage contract](native-storage-format.md#329-格式决定) records this
+decision and its downgrade loss. No fields are added to `ModelMetadata`,
 `ModelNetwork`, `StaticCredential` or the closed endpoint enum: old v19 readers
 reject unknown nested fields there. `ModelPreferences` also denies unknown fields,
 and `NewApiEndpoint` stays closed. Binaries supporting these new top-level maps
@@ -361,7 +402,8 @@ replacement candidate: a record with `remoteModels` retains its remote defaults.
 Expose the collision through §3.1's existing per-entry error list, keeping the
 Provider and `provider.models.delete` usable. After explicit deletion, the next
 startup can apply the bundled definition. Other validation failures retain their
-existing failure behavior. Recreating a user model requires a distinct ID; no
+existing failure behavior. A replacement user model needs an ID distinct from
+the incoming bundled defaults; no
 automatic rename, overwrite, persistent warning or new migration service.
 
 Old v19 binaries can read these records but drop new top-level fields on rewrite,
@@ -402,17 +444,33 @@ Legacy TypeScript import stays explicit, read-only and per-entry:
 user models, disables, preferences and scoped selections explicitly. `activeModelId`
 is only a hint and cannot overwrite an existing scoped choice. Nonempty static
 usage settings, unsupported `retryConfig`/`capabilityDefaults` and other unmapped
-fields reject the entry and preserve its source; freeze the mapping before Ready.
+fields reject the entry and preserve its source; use the frozen mapping below.
 Never overwrite an existing target, copy OAuth grants or resurrect deletion on
 repeated import. Drafts, templates, usage replies and resolved credentials are not
 persisted. Register cleanup at acquisition, close admission, cancel owned I/O,
 release leases and settle accepted calls before removing services.
 
+The frozen legacy schema uses `modelsSource` to distinguish model origins:
+
+| Legacy field | Native record |
+| --- | --- |
+| `modelsSource: bundled/remote`, `models` | Default descriptors; only `remote` sets `remoteModels` |
+| `modelsSource: user`, `models` | `userModels`; an existing builtin keeps its native bundled defaults, and collisions reject the entry |
+| `modelConfigOverrides` | Matching user descriptors replace that user entry; remaining items stay descriptor overrides, including disappeared defaults, and never become user models |
+| `metadata.enabledModelIds/disabledModelIds` | Explicit disables over defaults and user models; conflicting lists reject the entry |
+| `metadata.modelPreferences` | The strict existing `ModelPreferences` map |
+| `activeModelId` | A per-Provider hint; no authority to create or overwrite a scoped selection |
+| `provider_selections` | Explicit scoped choices, subject to existing target and import-ledger checks |
+
+Null or empty objects/arrays in unsupported usage/retry/capability settings carry
+no configuration; nonempty values reject the entry. Other metadata keys and
+unknown descriptor fields also reject it. Source bytes remain unchanged.
+
 ## 7. Acceptance and delivery
 
 | Gate | Required observable evidence |
 | --- | --- |
-| Ready | DTOs, client migration, explicit preference targets, route handling and legacy mapping accepted; proposal is not implementation |
+| Contract | Typed DTOs, client migration, explicit preference targets, route handling and frozen legacy mapping |
 | Secrets/patches | Header edit preserves others, timeout edit preserves proxy auth, keep/set/clear/ref and authority boundaries, no secret in RPC/log/errors |
 | Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; an endpoint-only edit of an unmodified default keeps `source:"default"` and its descriptor follows refresh; any existing descriptor override is unchanged; reset keeps the route override and clear keeps the descriptor override; explicit/profile/default selections get stamps, untargeted F3 and Collaboration inherit preserve absence; inherit copies without creation-time resolution and checks a present stamp at the first request; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
 | Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
@@ -422,9 +480,13 @@ release leases and settle accepted calls before removing services.
 | Storage/import | New record read and rewritten by old v19 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
 | Client flow | Actual source-built App Server and Desktop/CLI: draft → probe → create → model/select → call → edit → call → restart → disconnect/delete; no fake-daemon-only evidence |
 
-Reuse existing Provider, transport, account and CLI flow tests for implementation.
-This documentation change checks references/consistency only; no runtime acceptance
-is claimed. Tests use isolated homes, never an existing user's store.
+Provider, transport, managed-account and source-built native CLI flows exercise
+these contracts with isolated homes and actual HTTP requests. The native CLI flow
+covers saved preference adoption, credential replacement, daemon restart and
+disconnect/delete; the RPC flow covers CAS and recovery after a lost create reply.
+Desktop UI acceptance remains with that client. Old-v19 read, write and automatic
+reseed behavior is verified with a binary built from the accepted baseline and a
+disposable database; see [the storage contract](native-storage-format.md#329-格式决定).
 
 ## 8. Rule check
 

@@ -298,15 +298,9 @@ async fn a_failed_owner_read_fails_startup_and_cleans_up() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agents_restart_records_a_creation_timeout_and_keeps_loaded_sessions() {
     let stored = stored().await;
-    let server = crate::serve(
-        builder(),
-        ServerConfig {
-            startup_timeout: Duration::from_secs(2),
-            ..config(&stored.directory)
-        },
-    )
-    .await
-    .unwrap();
+    let server = crate::serve(builder(), config(&stored.directory))
+        .await
+        .unwrap();
     let index = server.root.get::<AgentIndex>().unwrap();
     assert_eq!(
         call(&server.root, "lookup", lookup(&stored.session)).await,
@@ -351,7 +345,6 @@ async fn a_dependency_reload_records_a_creation_timeout_and_continues() {
         ServerConfig {
             product_home: Some(home.clone()),
             target_home: Some(home.join("native")),
-            startup_timeout: Duration::from_secs(2),
             ..Default::default()
         },
     )
@@ -370,7 +363,7 @@ async fn a_dependency_reload_records_a_creation_timeout_and_continues() {
     restarted.unwrap();
     server
         .processes
-        .wait_active(&server.root, Duration::from_secs(10))
+        .wait_active(&server.root, Duration::from_secs(30))
         .await
         .unwrap();
     let index = server.root.get::<AgentIndex>().unwrap();

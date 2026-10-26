@@ -33,7 +33,7 @@
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [C4 Session TypeScript binding design](design/session-typescript.md)
 - [TypeScript process rows and management binding](design/process-typescript.md)
-- [Scheduler/Workflow native access](design/p6-p7-bindings.md) (policy reads, definition files and native input settlement implemented; business acceptance pending)
+- [Scheduler/Workflow native access](design/p6-p7-bindings.md) (native bindings implemented; Scheduler package and acceptance in [#317](https://github.com/arcships/dim/pull/317); Workflow delivery follows its owner design)
 - [C5 branch TypeScript binding](design/branch-typescript.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Compaction trigger point and verbatim retention (research, #128)](design/research/compaction-trigger.md)（[中文](zh/design/research/compaction-trigger.md)）
@@ -41,7 +41,7 @@
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
-- [Provider management for Desktop and CLI](design/appserver/provider-management.md)（[中文](zh/design/appserver/provider-management.md)） (proposal #329; rereads/CAS and client preferences; S4 remains implemented)
+- [Provider management for Desktop and CLI](design/appserver/provider-management.md)（[中文](zh/design/appserver/provider-management.md)） (implemented, #329; snapshots, partial writes, user models and explicit client preferences)
 - [Settings service](design/appserver/settings-service.md) (S8b owner read/write and events implemented)（[中文](zh/design/appserver/settings-service.md)）
 - [MCP OAuth](design/appserver/mcp-oauth.md) (implemented on the daemon side, F4)（[中文](zh/design/appserver/mcp-oauth.md)）
 - [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）

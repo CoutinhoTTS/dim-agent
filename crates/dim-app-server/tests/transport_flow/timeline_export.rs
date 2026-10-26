@@ -218,16 +218,10 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             max_output_tokens: 200,
             ..Default::default()
         };
-        assert_ok(&client.rpc("provider.save", json!({"provider":{
-            "providerId":"window","displayName":"Window","driverKind":"openai-compatible",
-            "baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"bearer"},
-            "credential":{"action":"set","value":CREDENTIAL},
-            "models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],
-            "enabled":true
-        }})).await);
+        assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000004","displayName":"Window","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"bearer"},"credential":{"action":"set","value":CREDENTIAL}},"models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],"enabled":true})).await);
         assert_ok(
             &client
-                .rpc("provider.select", json!({"providerId":"window","modelId":"small"}))
+                .rpc("provider.select", json!({"providerId":"018ec73f-0000-7000-8000-000000000004","modelId":"small"}))
                 .await,
         );
         let catalog = client.rpc("mcp.catalog", json!({})).await;

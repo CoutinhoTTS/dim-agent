@@ -18,7 +18,7 @@ Commands:\n\
   login PROVIDER [--directory URL] [--device] [--redirect-uri URI]\n\
   account PROVIDER                 Show non-secret account status\n\
   logout PROVIDER                  Sign out of an account provider\n\
-  models PROVIDER [--refresh]       List model IDs and availability\n\
+  models PROVIDER [--refresh | --clear-preferences MODEL]\n\
   mcp list                         List MCP servers and their enablement\n\
   mcp login ID [--no-browser] [--client-secret]\n\
                                    Sign in; secrets use hidden terminal input\n\
@@ -138,6 +138,7 @@ pub struct Options {
     /// Terminal UI mode for this run; `None` uses the saved default.
     pub fullscreen: Option<bool>,
     pub refresh: bool,
+    pub clear_preferences: Option<String>,
     pub redirect_uri: String,
     pub no_browser: bool,
     pub client_secret: bool,
@@ -164,6 +165,7 @@ impl Options {
             no_tui: false,
             fullscreen: None,
             refresh: false,
+            clear_preferences: None,
             // The redirect address registered for Dim account sign-in.
             redirect_uri: "http://localhost:54321/auth/callback".into(),
             no_browser: false,
@@ -251,6 +253,15 @@ impl Options {
                     }
                 }
                 "--refresh" => options.refresh = true,
+                "--clear-preferences" => {
+                    if options
+                        .clear_preferences
+                        .replace(value(&mut args)?)
+                        .is_some()
+                    {
+                        return Err("Supply the model to clear only once".into());
+                    }
+                }
                 "--no-browser" => options.no_browser = true,
                 "--client-secret" => options.client_secret = true,
                 value if value.starts_with("--client-secret=") => {
@@ -407,6 +418,11 @@ impl Options {
         }
         if matches!(options.action, Action::Export { .. }) && !export_format {
             return Err("session export requires --format markdown|json".into());
+        }
+        if options.clear_preferences.is_some()
+            && (!matches!(options.action, Action::Models(_)) || options.refresh)
+        {
+            return Err("--clear-preferences requires models PROVIDER and cannot be combined with --refresh".into());
         }
         if options.refresh && !matches!(options.action, Action::Models(_)) {
             return Err("--refresh requires the models command".into());

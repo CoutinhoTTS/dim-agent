@@ -116,6 +116,9 @@ mod session_title;
 #[path = "transport_flow/workflow.rs"]
 mod workflow;
 
+#[path = "transport_flow/scheduler.rs"]
+mod scheduler;
+
 #[path = "transport_flow/questions.rs"]
 mod questions;
 
@@ -2225,7 +2228,13 @@ fn contributed_management_methods_decode_with_unvalidated_raw_params() {
         "provider.selection",
         "provider.select",
         "provider.list",
-        "provider.save",
+        "provider.management",
+        "provider.create",
+        "provider.update",
+        "provider.probe",
+        "provider.models.create",
+        "provider.models.delete",
+        "provider.preferences.update",
         "provider.delete",
         "provider.import_legacy",
         "mcp.catalog",
@@ -2239,7 +2248,7 @@ fn contributed_management_methods_decode_with_unvalidated_raw_params() {
         "skills.set_enabled",
         "skills.refresh",
     ];
-    assert_eq!(methods.len(), 44);
+    assert_eq!(methods.len(), 50);
     for method in methods {
         for params in [json!({"unexpected":true}), json!([1]), Value::Null] {
             let request = decode(
@@ -2270,7 +2279,7 @@ async fn unmounted_management_preserves_mock_sessions_and_wire_admission() {
         let mut client = Client::new_version(&server, false, version).await;
         for method in [
             "account.providers",
-            "provider.save",
+            "provider.create",
             "mcp.save",
             "skills.set_enabled",
         ] {

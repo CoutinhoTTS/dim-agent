@@ -33,7 +33,7 @@ pub(super) async fn read_body(
     loop {
         let chunk = tokio::select! {
             _ = cancel.cancelled() => return Err(HostError::Cancelled("Catalog request cancelled".into())),
-            chunk = response.chunk() => chunk.map_err(|_| failure("Model catalog response failed"))?,
+            chunk = response.chunk() => chunk.map_err(|_| HostError::classified(HostErrorKind::Transport, "Model catalog response failed"))?,
         };
         let Some(chunk) = chunk else { break };
         *total_bytes += chunk.len();
@@ -46,118 +46,189 @@ pub(super) async fn read_body(
 }
 
 impl ProviderService {
+    pub(super) async fn discover(
+        self: &Arc<Self>,
+        provider_id: &str,
+        record: &StaticProviderRecord,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ModelEntry>, ProviderError> {
+        if !self.remote_model_list(provider_id, record) {
+            return Err(ProviderError::Unsupported(
+                "Provider does not support remote model listing".into(),
+            ));
+        }
+        if record.auth != StaticAuth::Anonymous && record.credential.is_none() {
+            return Err(ProviderError::AuthRequired);
+        }
+        let credential = self
+            .credential(provider_id, &record.credential, &record.auth, cancel)
+            .await?;
+        let (mut url, headers) = request(record, credential.as_ref())?;
+        let client = if record.network.proxy.is_none() && record.network.timeout_ms.is_none() {
+            self.client.clone()
+        } else {
+            client(&record.network)?
+        };
+        let projection = ProviderProjection {
+            provider_id: provider_id.to_owned(),
+            source: Some(if record.kind == StaticRecordKind::Builtin {
+                ModelSource::Builtin
+            } else {
+                ModelSource::Custom
+            }),
+            models: record.models.clone(),
+            ..Default::default()
+        };
+        let mut models = Vec::new();
+        let mut ids = HashSet::new();
+        let mut cursors = HashSet::new();
+        let mut total_bytes = 0;
+        loop {
+            self.check(cancel)?;
+            let response = tokio::select! {
+                _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
+                response = client.get(url.clone()).headers(headers.clone()).send() =>
+                    response.map_err(|_| HostError::classified(HostErrorKind::Transport, "Model catalog request failed"))?,
+            };
+            if !response.status().is_success() {
+                return Err(HostError::classified(
+                    HostErrorKind::Http {
+                        status: Some(response.status().as_u16()),
+                        code: None,
+                    },
+                    "Model catalog request rejected",
+                )
+                .into());
+            }
+            let body = read_body(response, cancel, &mut total_bytes).await?;
+            let (first, second) = if record.driver_kind == "gemini" {
+                ("models", "data")
+            } else {
+                ("data", "models")
+            };
+            let items = body
+                .get(first)
+                .and_then(Value::as_array)
+                .or_else(|| body.get(second).and_then(Value::as_array))
+                .ok_or_else(|| failure("Model catalog must contain a model array"))?;
+            for item in items {
+                let model = project(&self.bundled, &projection, &record.driver_kind, item)?;
+                if ids.insert(model.model_id.clone()) {
+                    models.push(model);
+                }
+            }
+            let cursor = if record.driver_kind == "gemini" {
+                match body.get("nextPageToken") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(value)) if value.is_empty() => None,
+                    Some(Value::String(value)) => Some(("pageToken", value.clone())),
+                    _ => return Err(ProviderError::Failed),
+                }
+            } else if record.driver_kind == "anthropic" {
+                match body.get("has_more") {
+                    None | Some(Value::Bool(false)) => None,
+                    Some(Value::Bool(true)) => Some((
+                        "after_id",
+                        body.get("last_id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .ok_or_else(|| failure("Model catalog is missing its page cursor"))?
+                            .to_owned(),
+                    )),
+                    _ => return Err(ProviderError::Failed),
+                }
+            } else {
+                None
+            };
+            let Some((key, cursor)) = cursor else { break };
+            if !cursors.insert(cursor.clone()) || cursors.len() >= 100 {
+                return Err(ProviderError::Failed);
+            }
+            url.set_query(None);
+            url.query_pairs_mut().append_pair(key, &cursor);
+        }
+
+        Ok(models)
+    }
+
     pub async fn refresh_for(
         self: &Arc<Self>,
         provider_id: String,
         cancel: &CancellationToken,
-    ) -> Result<ProviderCatalog, HostError> {
+    ) -> Result<ProviderCatalog, ProviderError> {
         if self
             .oauth
             .contains(&provider_id, cancel)
             .await
-            .map_err(failure)?
+            .map_err(ProviderError::from)?
         {
             return self.refresh(provider_id, cancel).await;
         }
         let owner = self.clone();
-        self.owned(cancel, move |cancel| Box::pin(async move {
-            let id = provider_id.clone();
-            let mut record = owner.db.run(move |db| read_static(db, &id)).await
-                .map_err(failure)?.ok_or_else(|| failure("Provider not found"))?;
-            if !record.enabled {
-                return Err(failure("Provider is disabled"));
-            }
-            if record.credential_authority != CredentialAuthority::Static
-                || matches!(record.driver_kind.as_str(), "amazon-bedrock" | "azure-openai")
-                || owner.bundled.provider(&provider_id)
-                    .and_then(|p| p.metadata.as_ref())
-                    .is_some_and(|m| m.remote_model_list == Some(false))
-            {
-                return Err(HostError::classified(HostErrorKind::InvalidRequest,
-                    "Provider does not support remote model listing"));
-            }
-            // Version alone can repeat after delete + recreate. Compare the
-            // admitted configuration as well before committing a late response.
-            let expected = serde_json::to_value(&record).map_err(failure)?;
-            let credential = owner.credential(&provider_id, &record.credential, &record.auth, &cancel).await?;
-            let (mut url, headers) = request(&record, credential.as_ref())?;
-            let client = if record.network.proxy.is_none() && record.network.timeout_ms.is_none() {
-                owner.client.clone()
-            } else { client(&record.network)? };
-            let projection = ProviderProjection {
-                provider_id: provider_id.clone(),
-                source: Some(if record.kind == StaticRecordKind::Builtin { ModelSource::Builtin } else { ModelSource::Custom }),
-                models: record.models.clone(),
-                ..Default::default()
-            };
-            let mut models = Vec::new();
-            let mut ids = HashSet::new();
-            let mut cursors = HashSet::new();
-            let mut total_bytes = 0;
-            loop {
+        self.owned(cancel, move |cancel| {
+            Box::pin(async move {
+                let id = provider_id.clone();
+                let mut record = owner
+                    .db
+                    .run(move |db| read_static(db, &id))
+                    .await
+                    .map_err(ProviderError::from)?
+                    .ok_or(ProviderError::NotFound)?;
+                if !record.enabled {
+                    return Err(ProviderError::InvalidConfig("Provider is disabled".into()));
+                }
+                // Version alone can repeat after delete + recreate. Compare the
+                // admitted configuration as well before committing a late response.
+                let expected = serde_json::to_value(&record).map_err(ProviderError::from)?;
+                let models = owner.discover(&provider_id, &record, &cancel).await?;
+                let version = record.version;
+                if models.iter().any(|model| {
+                    record
+                        .user_models
+                        .iter()
+                        .any(|user| user.model_id == model.model_id)
+                }) {
+                    return Err(ProviderError::Conflict(
+                        "Discovered models conflict with user-added model IDs".into(),
+                    ));
+                }
+                record.models = models;
+                record.remote_models = true;
+                record.version = version
+                    .checked_add(1)
+                    .ok_or_else(|| failure("Provider version overflow"))?;
+                validate_static_record(&provider_id, &mut record)?;
                 owner.check(&cancel)?;
-                let response = tokio::select! {
-                    _ = cancel.cancelled() => return Err(HostError::Cancelled("Catalog request cancelled".into())),
-                    response = client.get(url.clone()).headers(headers.clone()).send() =>
-                        response.map_err(|_| HostError::classified(HostErrorKind::Transport, "Model catalog request failed"))?,
-                };
-                if !response.status().is_success() {
-                    return Err(HostError::classified(HostErrorKind::Http {
-                        status: Some(response.status().as_u16()), code: None,
-                    }, "Model catalog request rejected"));
-                }
-                let body = read_body(response, &cancel, &mut total_bytes).await?;
-                let (first, second) = if record.driver_kind == "gemini" { ("models", "data") } else { ("data", "models") };
-                let items = body.get(first).and_then(Value::as_array)
-                    .or_else(|| body.get(second).and_then(Value::as_array))
-                    .ok_or_else(|| failure("Model catalog must contain a model array"))?;
-                for item in items {
-                    let model = project(&owner.bundled, &projection, &record.driver_kind, item)?;
-                    if ids.insert(model.model_id.clone()) { models.push(model); }
-                }
-                let cursor = if record.driver_kind == "gemini" {
-                    match body.get("nextPageToken") {
-                        None | Some(Value::Null) => None,
-                        Some(Value::String(value)) if value.is_empty() => None,
-                        Some(Value::String(value)) => Some(("pageToken", value.clone())),
-                        _ => return Err(failure("Invalid model catalog page token")),
-                    }
-                } else if record.driver_kind == "anthropic" {
-                    match body.get("has_more") {
-                        None | Some(Value::Bool(false)) => None,
-                        Some(Value::Bool(true)) => Some(("after_id", body.get("last_id")
-                            .and_then(Value::as_str).filter(|id| !id.is_empty())
-                            .ok_or_else(|| failure("Model catalog is missing its page cursor"))?.to_owned())),
-                        _ => return Err(failure("Invalid model catalog pagination")),
-                    }
-                } else { None };
-                let Some((key, cursor)) = cursor else { break };
-                if !cursors.insert(cursor.clone()) || cursors.len() >= 100 {
-                    return Err(failure("Model catalog pagination did not terminate"));
-                }
-                url.set_query(None);
-                url.query_pairs_mut().append_pair(key, &cursor);
-            }
-            let version = record.version;
-            record.models = models;
-            record.remote_models = true;
-            record.version = version.checked_add(1).ok_or_else(|| failure("Provider version overflow"))?;
-            validate_static_record(&provider_id, &mut record)?;
-            owner.check(&cancel)?;
-            let bundled = owner.bundled.clone();
-            owner.db.run(move |db| {
-                let tx = db.transaction().map_err(storage)?;
-                let current = read_static(&tx, &provider_id)?
-                    .map(serde_json::to_value).transpose().map_err(storage)?;
-                if current.as_ref() != Some(&expected) {
-                    return Err(storage("Provider version conflict"));
-                }
-                tx.execute("UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
-                    params![provider_id, record.version, serde_json::to_string(&record).map_err(storage)?]).map_err(storage)?;
-                tx.commit().map_err(storage)?;
-                Ok(static_catalog(&bundled, &provider_id, &record, true))
-            }).await.map_err(failure)
-        })).await
+                let bundled = owner.bundled.clone();
+                owner
+                    .db
+                    .run(move |db| {
+                        Ok((|| -> Result<_, ProviderError> {
+                            let tx = db.transaction()?;
+                            let current = read_static(&tx, &provider_id)?
+                                .map(serde_json::to_value)
+                                .transpose()?;
+                            if current.as_ref() != Some(&expected) {
+                                return Err(ProviderError::Conflict(
+                                    "Provider version or admitted configuration changed".into(),
+                                ));
+                            }
+                            tx.execute(
+                                "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
+                                params![
+                                    provider_id,
+                                    record.version,
+                                    serde_json::to_string(&record)?
+                                ],
+                            )?;
+                            tx.commit()?;
+                            Ok(static_catalog(&bundled, &provider_id, &record, true))
+                        })())
+                    })
+                    .await?
+            })
+        })
+        .await
     }
 }
 

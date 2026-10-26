@@ -84,20 +84,15 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
     )
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
-    assert_ok(&client.rpc("provider.save", json!({"provider":{
-        "providerId":"aux", "displayName":"Auxiliary fixture", "driverKind":"openai-compatible",
-        "baseUrl":format!("http://{address}/v1"), "auth":{"type":"bearer"},
-        "credential":{"action":"set","value":"auxiliary-fixture-secret"},
-        "models":[{"modelId":"title", "displayName":"Title", "status":"active",
+    assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000009","displayName":"Auxiliary fixture","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"bearer"},"credential":{"action":"set","value":"auxiliary-fixture-secret"}},"models":[{"modelId":"title", "displayName":"Title", "status":"active",
             "capabilities":dim_agent_types::ModelCapabilities::default()},
             {"modelId":"hang", "displayName":"Hang", "status":"active",
-            "capabilities":dim_agent_types::ModelCapabilities::default()}], "enabled":true
-    }})).await);
+            "capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true})).await);
     assert_ok(
         &client
             .rpc(
                 "provider.select",
-                json!({"providerId":"aux","modelId":"title"}),
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000009","modelId":"title"}),
             )
             .await,
     );
@@ -108,7 +103,7 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
     let sid = created["result"]["sessionId"].as_str().unwrap();
     let session = agent.get_session(sid).unwrap();
     let before = session.history("main", None).await.unwrap();
-    let request = json!({"model":{"providerId":"aux","modelId":"title"}, "request":{
+    let request = json!({"model":{"providerId":"018ec73f-0000-7000-8000-000000000009","modelId":"title"}, "request":{
         "system":"Write a title", "messages":[{"role":"user","content":"hello"}], "maxOutputTokens":32
     }});
     let reply = client
@@ -130,7 +125,7 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
 
     for (request, code) in [
         (
-            json!({"model":{"providerId":"aux","modelId":"title"},"request":{"messages":[]}}),
+            json!({"model":{"providerId":"018ec73f-0000-7000-8000-000000000009","modelId":"title"},"request":{"messages":[]}}),
             "invalid_request",
         ),
         (
@@ -138,15 +133,15 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
             "model_unavailable",
         ),
         (
-            json!({"model":{"providerId":"aux","modelId":"title"},"request":{"messages":[{"role":"user","content":"hello"}],"maxOutputTokens":0}}),
+            json!({"model":{"providerId":"018ec73f-0000-7000-8000-000000000009","modelId":"title"},"request":{"messages":[{"role":"user","content":"hello"}],"maxOutputTokens":0}}),
             "invalid_request",
         ),
         (
-            json!({"model":{"providerId":"aux","modelId":"title"},"request":{"messages":[{"role":"user","content":"hello"}]},"unexpected":true}),
+            json!({"model":{"providerId":"018ec73f-0000-7000-8000-000000000009","modelId":"title"},"request":{"messages":[{"role":"user","content":"hello"}]},"unexpected":true}),
             "invalid_request",
         ),
         (
-            json!({"model":{"providerId":"aux","modelId":"title","extra":1},"request":{"messages":[{"role":"user","content":"hello"}]}}),
+            json!({"model":{"providerId":"018ec73f-0000-7000-8000-000000000009","modelId":"title","extra":1},"request":{"messages":[{"role":"user","content":"hello"}]}}),
             "invalid_request",
         ),
     ] {
@@ -175,7 +170,7 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
         .send(
             "session.auxiliary.complete",
             json!({"sessionId":sid,"cancellable":true,"request":{
-                "model":{"providerId":"aux","modelId":"hang"},
+                "model":{"providerId":"018ec73f-0000-7000-8000-000000000009","modelId":"hang"},
                 "request":{"messages":[{"role":"user","content":"wait"}]}
             }}),
         )
