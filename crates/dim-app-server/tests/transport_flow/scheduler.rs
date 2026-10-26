@@ -731,23 +731,24 @@ async fn node_scheduler_reports_preserve_the_first_adopted_operator_title() {
     let mut client = Client::new_version(&server, false, 3).await;
     process_typescript::select_model(&mut client).await;
     process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+    let provider_id = "018ec73f-0000-7000-8000-000000000009";
     assert_ok(
         &client
             .rpc(
-                "provider.save",
-                json!({"provider":{
-                    "providerId":"scheduler-title-fixture","displayName":"Scheduler title fixture",
-                    "driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),
-                    "auth":{"type":"anonymous"},"enabled":true,
+                "provider.create",
+                json!({
+                    "providerId":provider_id,"displayName":"Scheduler title fixture",
+                    "connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),
+                        "auth":{"type":"anonymous"}},"enabled":true,
                     "models":[{"modelId":"title","displayName":"Title","status":"active",
                         "capabilities":dim_agent_types::ModelCapabilities::default()}]
-                }}),
+                }),
             )
             .await,
     );
     // Keep the leader untitled until its scheduled report has been adopted.
     let mut settings = json!({"enabled":false,"maxLength":80,
-        "model":{"providerId":"scheduler-title-fixture","modelId":"title"}});
+        "model":{"providerId":provider_id,"modelId":"title"}});
     session_title::configure(&mut client, settings.clone()).await;
     let created = client
         .rpc("session.create", json!({"cwd":home,"interactive":true}))
