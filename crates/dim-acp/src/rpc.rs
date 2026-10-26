@@ -13,13 +13,21 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub(crate) enum Native {
-    Notice { method: String, params: Value },
+    Notice {
+        method: String,
+        params: Value,
+    },
     Lost,
-    Restored { same_instance: bool },
+    Restored {
+        same_instance: bool,
+        generation: u64,
+        deadline: tokio::time::Instant,
+    },
     Closed,
 }
 
 struct Call {
+    generation: u64,
     method: &'static str,
     params: Value,
     reply: oneshot::Sender<Result<Value, Error>>,
@@ -99,12 +107,17 @@ impl Rpc {
     }
 
     pub(crate) async fn call(&self, method: &'static str, params: Value) -> Result<Value, Error> {
-        if !self.ready() {
-            return Err(unavailable());
-        }
+        let generation = {
+            let state = self.state.read().unwrap();
+            if !state.ready {
+                return Err(unavailable());
+            }
+            state.generation
+        };
         let (reply, result) = oneshot::channel();
         self.calls
             .send(Call {
+                generation,
                 method,
                 params,
                 reply,
@@ -150,6 +163,7 @@ async fn drive(
                 () = stop.cancelled() => break 'connection,
                 call = calls.recv(), if pending.len() < 128 => {
                     let Some(call) = call else { break 'connection };
+                if call.generation != state.read().unwrap().generation { let _ = call.reply.send(Err(unavailable())); continue; }
                     if let Some(id) = call.params.get("sessionId").and_then(Value::as_str) {
                         if call.method == "session.attach" { attached.insert(id.to_owned()); }
                         if call.method == "session.detach" { attached.remove(id); }
@@ -191,6 +205,7 @@ async fn drive(
         }
         let instance = client.instance_id().to_owned();
         attached.clear();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let reconnect = async {
             let mut delay = Duration::from_millis(250);
             loop {
@@ -202,7 +217,7 @@ async fn drive(
             }
         };
         tokio::pin!(reconnect);
-        let timeout = tokio::time::sleep(Duration::from_secs(30));
+        let timeout = tokio::time::sleep_until(deadline);
         tokio::pin!(timeout);
         loop {
             tokio::select! {
@@ -212,7 +227,7 @@ async fn drive(
                     client = restored;
                     usable = true;
                     { let mut state = state.write().unwrap(); state.ready = true; state.features = client.features().to_vec(); }
-                    if notices.try_send(Native::Restored { same_instance:client.instance_id() == instance }).is_err() { break 'connection; }
+                    if notices.try_send(Native::Restored { same_instance:client.instance_id() == instance,generation:state.read().unwrap().generation,deadline }).is_err() { break 'connection; }
                     break;
                 }
                 call = calls.recv()=>{

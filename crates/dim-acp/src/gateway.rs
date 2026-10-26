@@ -293,9 +293,16 @@ impl Gateway {
     }
 
     fn spawn(&self, future: impl Future<Output = Work> + Send + 'static) {
+        self.spawn_generation(self.rpc.generation(), future);
+    }
+
+    fn spawn_generation(
+        &self,
+        generation: u64,
+        future: impl Future<Output = Work> + Send + 'static,
+    ) {
         let incoming = self.incoming.clone();
         let stop = self.stop.clone();
-        let generation = self.rpc.generation();
         self.tasks.spawn(async move {
             tokio::select! {
                 () = stop.cancelled() => {},
@@ -1357,6 +1364,14 @@ impl Gateway {
                 }
             }
             Work::Recovered { id, result } => {
+                if result.as_ref().err().is_some_and(|error| {
+                    error
+                        .data
+                        .as_ref()
+                        .is_some_and(|data| data["code"] == "daemon_unavailable")
+                }) {
+                    return self.fail_connection();
+                }
                 self.recovering_sessions -= 1;
                 if self.recovering_sessions == 0 {
                     self.recovering = false;
@@ -1652,6 +1667,34 @@ impl Gateway {
         Ok(())
     }
 
+    fn fail_connection(&mut self) -> Result<(), Error> {
+        for (id, slot) in &mut self.sessions {
+            match slot {
+                Slot::Ready(session) => {
+                    for snapshot in session.subagents.disconnected(id) {
+                        if self.subagent_events {
+                            self.outbox
+                                .notify(&self.cx, "_lody/subagents/event", snapshot)?;
+                        }
+                    }
+                    if let Some(prompt) = session.prompt.take() {
+                        if prompt.cancelled {
+                            prompt.reply.respond(json!({"stopReason":"cancelled","_meta":{"dim":{"nativeCancellation":"unconfirmed"}}}))?;
+                        } else {
+                            prompt.reply.respond_with_error(rpc::unavailable())?;
+                        }
+                    }
+                }
+                Slot::Loading(loading) => {
+                    for waiter in std::mem::take(&mut loading.waiters) {
+                        waiter.reply.respond_with_error(rpc::unavailable())?;
+                    }
+                }
+            }
+        }
+        Err(rpc::unavailable())
+    }
+
     fn title(&mut self, id: &str, title: Option<String>, revision: u64) -> Result<(), Error> {
         if let Some(Slot::Ready(session)) = self.sessions.get_mut(id)
             && session.title_revision.is_none_or(|old| revision > old)
@@ -1719,7 +1762,7 @@ impl Gateway {
         Ok(())
     }
 
-    fn restore(&mut self, same_instance: bool) {
+    fn restore(&mut self, same_instance: bool, generation: u64, deadline: tokio::time::Instant) {
         if !same_instance {
             eprintln!("ACP reconnected to a new App Server instance; restoring persisted sessions");
         }
@@ -1745,24 +1788,23 @@ impl Gateway {
         }
         for (id, cwd, submission) in sessions {
             let rpc = self.rpc.clone();
-            self.spawn(async move {
-                let result = async {
+            self.spawn_generation(generation,async move {
+                let result = tokio::time::timeout_at(deadline,async {
                     let mut input = None;
                     if let Some(submission) = submission {
                         #[derive(Deserialize)] #[serde(tag="status",rename_all="lowercase")]
                         enum Lookup { Accepted { event: Box<Event> },Unknown }
-                        let deadline = tokio::time::Instant::now()+std::time::Duration::from_secs(30);
                         loop {
                             match rpc.typed("session.input_lookup",json!({"sessionId":id,"branchId":"main","submissionId":submission})).await? {
                                 Lookup::Accepted { event }=>{ input = Some(*event); break; }
-                                Lookup::Unknown if tokio::time::Instant::now() < deadline=>tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+                                Lookup::Unknown if tokio::time::Instant::now()+std::time::Duration::from_millis(250) < deadline=>tokio::time::sleep(std::time::Duration::from_millis(250)).await,
                                 Lookup::Unknown=>break,
                             }
                         }
                     }
                     let prepared = read_history(&rpc,&id,true,Some(cwd)).await?;
                     Ok((prepared,input))
-                }.await;
+                }).await.unwrap_or_else(|_|Err(rpc::unavailable()));
                 Work::Recovered { id,result }
             });
         }
@@ -1994,19 +2036,9 @@ impl Gateway {
                 message = native.recv() => match message {
                     Some(Native::Notice { method, params }) => self.notice(method, params)?,
                     Some(Native::Lost) => self.lost()?,
-                    Some(Native::Restored { same_instance }) => self.restore(same_instance),
-                    Some(Native::Closed) | None => {
-                        for (id,slot) in &mut self.sessions {
-                            if let Slot::Ready(session) = slot {
-                                for snapshot in session.subagents.disconnected(id) { if self.subagent_events { self.outbox.notify(&self.cx,"_lody/subagents/event",snapshot)?; } }
-                                if let Some(prompt) = session.prompt.take() {
-                                    if prompt.cancelled { prompt.reply.respond(json!({"stopReason":"cancelled","_meta":{"dim":{"nativeCancellation":"unconfirmed"}}}))?; }
-                                    else { prompt.reply.respond_with_error(rpc::unavailable())?; }
-                                }
-                            }
-                        }
-                        return Err(rpc::unavailable());
-                    },
+                    Some(Native::Restored { same_instance,generation,deadline }) if generation == self.rpc.generation() && self.rpc.ready() => self.restore(same_instance,generation,deadline),
+                    Some(Native::Restored { .. })=>{},
+                    Some(Native::Closed) | None => return self.fail_connection(),
                 },
             }
         }
