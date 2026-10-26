@@ -23,7 +23,7 @@ Dim 是一个编程 agent。它的上下文工作只有一个总目标：**模�
 5. 用户需要在界面上看到分支的哪些东西、能对它做什么（跟进、比较、采用、丢弃）？
 6. 怎样算这件事做成了？
 
-**现有基础。** [设计规则](../architecture/rust-agent/principles.md)（分支是平等、并行的行为线）、[TimelineTree](../architecture/rust-agent/plugins/TimelineTree.md)、[Pursuit](plugins/Pursuit.md)、[Session 删除与 fork](appserver/session-deletion-and-fork.md)、[客户端](clients.md)。需求跟踪：[#427](https://github.com/arcships/dim/issues/427)。
+**现有基础。** [设计规则](../architecture/rust-agent/principles.md)（分支是平等、并行的行为线）、[TimelineTree](../architecture/rust-agent/plugins/TimelineTree.md)、[Pursuit](plugins/Pursuit.md)、[Session 删除与 fork](appserver/session-deletion-and-fork.md)、[客户端总体设计](https://github.com/arcships/dim/pull/424)（#424，未合并）。需求跟踪：[#427](https://github.com/arcships/dim/issues/427)。
 
 ## 2. 压缩
 
