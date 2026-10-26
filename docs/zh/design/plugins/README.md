@@ -9,7 +9,7 @@
 | 插件 | 进程部件 | Session 部件 | 分支部件 | 阶段 |
 | --- | --- | --- | --- | --- |
 | [Provider 管理](../appserver/provider-management.md) | 现有 Provider：配置、目录、客户端偏好与管理方法 | — | — | 补充提案（#329），无机制前置；S4 已实现 |
-| [Questions](Questions.md) | — | `ask_user` 工具、`session.question.respond`、运行中 `ask_user` 调用的等待者；没有事件 | — | M2（Ready） |
+| [Questions](Questions.md) | — | `ask_user` 工具、`session.question.respond`、运行中 `ask_user` 调用的等待者；没有事件 | — | M2（已实现，#262） |
 | [ShellInput](ShellInput.md) | — | `shell.*` 方法、命令执行 | — | P1（已实现） |
 | [Attachments](Attachments.md) | — | `attachment.put`、Session 文件 | — | P1（已实现） |
 | [SessionTitle](SessionTitle.md) | — | 观察首条用户输入的采纳、`session.rename` | — | P1 |

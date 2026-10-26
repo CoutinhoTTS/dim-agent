@@ -19,6 +19,7 @@
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
+- [Clients](design/clients.md): which clients exist, what they share, capability coverage per client, gaps and open decisions (draft)（[中文](zh/design/clients.md)）
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
