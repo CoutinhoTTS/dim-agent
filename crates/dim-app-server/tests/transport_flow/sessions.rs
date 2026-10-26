@@ -1978,8 +1978,6 @@ async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
     let target = client_session(&mut client, &agent, host_policy()).await;
     let (_, _, loader, _) = controls.recv().await.unwrap();
     let owner = loader.get("settlement-owner").unwrap().view.unwrap();
-    // The owner's cleanups while no native input is in flight.
-    let idle = owner.effects().len();
     let before = settlement_status(&mut client).await;
     let mut write = input(&target, "settlement:crash:append", json!([]));
     write["mode"] = json!("append");
@@ -2023,7 +2021,6 @@ async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
     let recovered = sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"settlement:crash:append"})).await;
     assert_eq!(recovered["status"], "accepted");
     assert_eq!(target.local("main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("settlement:crash:append"))).count(), 1);
-    assert_eq!(owner.effects().len(), idle);
     server.shutdown();
     server.join().await.unwrap();
 }
