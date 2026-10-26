@@ -437,7 +437,11 @@ impl Session {
         if self.0.owner.closing.is_cancelled() {
             return Err(AgentError::Closed(self.id().into()));
         }
-        self.published(branch)?.input(data)
+        self.published(branch)?.input(data).await
+    }
+    /// See [`Branch::lookup`].
+    pub async fn lookup(&self, branch: &str, id: &str) -> Result<Option<Arc<AgentEvent>>> {
+        self.published(branch)?.lookup(id).await
     }
     pub async fn configure(
         &self,

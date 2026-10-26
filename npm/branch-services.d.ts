@@ -63,7 +63,8 @@ export interface TreeCommands {
   info(id: string): Promise<TimelineInfo>
   /**
    * Commits `input` to branch `id` through its validating `Branch::input`
-   * and returns the committed event.
+   * and returns the committed event, or the input already committed with
+   * its submission id.
    * @throws {AgentErrorThrown}
    */
   input(id: string, input: InputMessageData): Promise<import('./plugin.js').BranchEvent>
@@ -381,7 +382,7 @@ export interface WorkflowFiles {
 }
 
 /** What a method returning `Err(AgentError)` throws. */
-export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "Storage" | "Build" | "Cancelled" | "Reloading" | "Fault" | "Framework" | "Multiple", undefined>
+export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "Storage" | "Build" | "Cancelled" | "Reloading" | "AmbiguousSubmission" | "Fault" | "Framework" | "Multiple", undefined>
 
 /** What a method returning `Err(SessionsError)` throws. */
 export type SessionsErrorThrown = RustError<"SessionsError", "rejected" | "agent_unknown" | "session_closed" | "branch_missing" | "reloading" | "future_sequence" | "ambiguous" | "publication_unknown" | "failed", SessionsError>

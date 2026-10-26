@@ -36,7 +36,6 @@ pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
 
 mod sessions;
 pub use sessions::SessionPermissions;
-pub(crate) use sessions::{Lookup, find_input};
 
 /// The process default profile carries the process Session defaults.
 fn process_default(defaults: &SessionConfig) -> AgentProfile {

@@ -7,7 +7,9 @@
 //! rutis plugin definition, which ends with the row that handed it over. Every Session and branch holds two mounters. The required
 //! one mounts the parts the assembly profile requires and hands them to the
 //! instance, which publishes only once they are Active. The optional one
-//! mounts every other registered part, which nothing waits for. Both
+//! mounts every other registered part; the instance lets the copies it
+//! mounted when it opened settle before it publishes, as it does its optional
+//! rows, and a failed or Pending one affects only its own features. Both
 //! follow registrations and withdrawals while the instance is open, and a
 //! mounted part closes with its instance.
 use crate::{Names, SessionConfig};
@@ -252,6 +254,16 @@ impl Shared {
 /// already failed as it counts a failed row ([`crate::assembly`]).
 pub(crate) type Copies = Arc<Mutex<Vec<FiberView>>>;
 
+/// The copies an instance's mounters mounted when it opened. Its creation
+/// waits for the required ones to be Active, as for its required rows, and
+/// lets the others settle, as its optional rows; a part registered later
+/// never holds publication.
+#[derive(Clone, Default)]
+pub(crate) struct Opened {
+    pub required: Vec<FiberView>,
+    pub optional: Vec<FiberView>,
+}
+
 /// What a mounter knows of its instance.
 pub(crate) struct MountSite {
     pub scope: PartScope,
@@ -264,9 +276,9 @@ pub(crate) struct MountSite {
     pub session_id: String,
     pub restored: bool,
     pub branch_id: Option<String>,
-    /// Where the required mounter hands its required parts: the instance
-    /// publishes only once they are Active, as its required rows.
-    pub mounted: Arc<Mutex<Vec<FiberView>>>,
+    /// Where the mounters hand the copies they mounted when the instance
+    /// opened, which its creation waits for before it publishes.
+    pub mounted: Arc<Mutex<Opened>>,
     pub copies: Copies,
 }
 
@@ -492,10 +504,13 @@ impl DynPlugin for PartMounter {
                 registry.shared.detach(id);
                 Ok(())
             })?;
+            // Not awaited here: the loader waits for a Loading row, so the
+            // instance's creation waits for these instead.
+            let mut opened = site.mounted.lock().unwrap();
             if self.required {
-                // Not awaited here: the loader waits for a Loading row, so
-                // the instance's creation waits for these instead.
-                site.mounted.lock().unwrap().extend(waiting);
+                opened.required.extend(waiting);
+            } else {
+                opened.optional.extend(waiting);
             }
             Ok(Effect::Done)
         })

@@ -105,7 +105,7 @@ cargo run --locked -p xtask -- graph
 cargo run --locked -p xtask -- check
 ```
 
-Graphs are generated from actual runtime bindings and Cargo/syn analysis into `docs/architecture/rust-agent/generated/`. Do not edit generated graphs by hand. `tests/extension-a`, `tests/extension-b` and `tests/integration` verify that independent external capabilities can participate without depending on internal implementation details.
+Graphs are generated from actual runtime bindings and Cargo/syn analysis into `docs/architecture/rust-agent/generated/`. Do not edit generated graphs by hand. `graph` is the only command that writes them; `check` renders `crates.*` and `modules.*` in memory and fails, naming the stale files, when they differ from the committed ones. `tests/extension-a`, `tests/extension-b` and `tests/integration` verify that independent external capabilities can participate without depending on internal implementation details.
 
 ## Daemon profile identity
 

@@ -18,7 +18,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("graph") => graph().await?,
         Some("measure") => measure().await?,
         Some("check") => {
-            boundaries()?;
+            boundaries(false)?;
             catalog::check(&root()).await?;
             types::check(&root())?;
         }
@@ -249,11 +249,12 @@ async fn graph() -> std::result::Result<(), Box<dyn std::error::Error>> {
         app_server::write(&root(), app_server::graph().await?)?;
         catalog::write(&root()).await?;
     }
-    boundaries()?;
+    boundaries(true)?;
     println!("generated {}", out.display());
     Ok(())
 }
-fn boundaries() -> std::result::Result<(), Box<dyn std::error::Error>> {
+/// `graph` writes the generated architecture files; `check` renders them again and fails when the committed bytes differ.
+fn boundaries(write: bool) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let output = std::process::Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version", "1"])
         .current_dir(root())
@@ -290,13 +291,32 @@ fn boundaries() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     }
     let out = root().join("docs/architecture/rust-agent/generated");
-    std::fs::create_dir_all(&out)?;
-    std::fs::write(
-        out.join("crates.json"),
-        serde_json::to_string_pretty(&edges)? + "\n",
-    )?;
-    std::fs::write(out.join("crates.mmd"), graph)?;
-    modules::generate(&root(), &out)?;
+    let mut files = vec![
+        ("crates.json", serde_json::to_string_pretty(&edges)? + "\n"),
+        ("crates.mmd", graph),
+    ];
+    files.extend(modules::generate(&root())?);
+    if write {
+        std::fs::create_dir_all(&out)?;
+        for (name, text) in &files {
+            std::fs::write(out.join(name), text)?;
+        }
+    } else {
+        let stale: Vec<_> = files
+            .iter()
+            .filter(|(name, text)| {
+                std::fs::read_to_string(out.join(name)).ok().as_ref() != Some(text)
+            })
+            .map(|(name, _)| out.join(name).display().to_string())
+            .collect();
+        if !stale.is_empty() {
+            return Err(format!(
+                "generated architecture files are stale: {}; run `cargo run -p xtask -- graph`",
+                stale.join(", ")
+            )
+            .into());
+        }
+    }
     println!("crate and module boundaries passed");
     plugins::check(&root())?;
     Ok(())

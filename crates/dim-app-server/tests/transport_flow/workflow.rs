@@ -172,7 +172,6 @@ async fn report_restart(kill_runtime: bool) {
     })
     .await
     .unwrap();
-    let owner = loader.get("workflow").unwrap().view.unwrap();
     if kill_runtime {
         kill_node(before["result"]["pid"].as_u64().unwrap()).await;
     }
@@ -181,20 +180,10 @@ async fn report_restart(kill_runtime: bool) {
     } else {
         "workflow"
     };
+    // Workflow's cleanup joins its own report call, so SQLite commits while
+    // the row restarts; a replacement generation resubmits the same id.
     let (restarted, ()) = tokio::join!(loader.restart(name), async {
-        let mut state = owner.watch();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while state.borrow_and_update().state != rutis::host::FiberState::Unloading {
-                state.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
-        assert!(
-            super::unload_held(&owner).await,
-            "the real background report retains its original-row native writer"
-        );
-        assert_eq!(stored(&home)["runs"][0]["report"]["attempt_open"], true);
+        tokio::time::sleep(Duration::from_millis(200)).await;
         connection.execute_batch("COMMIT").unwrap();
     });
     restarted.unwrap();
@@ -217,7 +206,7 @@ async fn report_restart(kill_runtime: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_workflow_background_report_drains_on_row_and_runtime_replacement() {
+async fn node_workflow_background_report_resubmits_after_row_and_runtime_replacement() {
     report_restart(false).await;
     report_restart(true).await;
 }
@@ -226,7 +215,7 @@ async fn node_workflow_background_report_drains_on_row_and_runtime_replacement()
 enum ReportFault {
     Crash,
     FailedReplacement,
-    Duplicate,
+    Resubmitted,
 }
 
 async fn report_crash(phase: &str, fault: ReportFault) {
@@ -307,7 +296,7 @@ async fn report_crash(phase: &str, fault: ReportFault) {
         report_count(&target, run).await,
         usize::from(phase == "reply_write")
     );
-    if matches!(fault, ReportFault::Duplicate) {
+    if matches!(fault, ReportFault::Resubmitted) {
         let persisted = stored(&home);
         let submission = persisted["runs"][0]["report"]["submission_id"].as_str();
         let report = target
@@ -315,27 +304,20 @@ async fn report_crash(phase: &str, fault: ReportFault) {
             .await
             .unwrap()
             .iter()
-            .find_map(|event| {
-                if let EventKind::InputMessage(data) = &event.kind
-                    && data.submission_id.as_deref() == submission
-                {
-                    Some(data.clone())
-                } else {
-                    None
-                }
+            .find(|event| {
+                matches!(&event.kind, EventKind::InputMessage(data)
+                    if data.submission_id.as_deref() == submission)
             })
-            .unwrap();
-        let duplicate = target.input(report, "main").await.unwrap();
-        let publication = target.publication("main").unwrap();
-        let mut changed = publication.watch();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while publication.sequence() < duplicate.sequence {
-                changed.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(report_count(&target, run).await, 2);
+            .unwrap()
+            .clone();
+        let EventKind::InputMessage(data) = &report.kind else {
+            unreachable!()
+        };
+        // The branch holds this submission id: a resubmission writes nothing
+        // and returns the committed report.
+        let resubmitted = target.input(data.clone(), "main").await.unwrap();
+        assert_eq!(resubmitted.id, report.id);
+        assert_eq!(report_count(&target, run).await, 1);
     }
     if matches!(fault, ReportFault::FailedReplacement) {
         let directory = home.join("workflow");
@@ -379,23 +361,10 @@ async fn report_crash(phase: &str, fault: ReportFault) {
     })
     .await
     .unwrap();
-    let expected = 1 + usize::from(matches!(fault, ReportFault::Duplicate));
-    assert_eq!(report_count(&target, run).await, expected);
-    if matches!(fault, ReportFault::Duplicate) {
-        assert!(
-            stored(&home)["runs"][0]["log"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Duplicate report violation"))
-        );
-    }
+    assert_eq!(report_count(&target, run).await, 1);
     loader.restart("workflow").await.unwrap();
     ready(&mut client).await;
-    assert_eq!(report_count(&target, run).await, expected);
+    assert_eq!(report_count(&target, run).await, 1);
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
@@ -403,11 +372,11 @@ async fn report_crash(phase: &str, fault: ReportFault) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_workflow_reconciles_crashes_failed_records_and_ambiguous_reports() {
+async fn node_workflow_reconciles_crashes_failed_records_and_resubmitted_reports() {
     report_crash("before_input", ReportFault::Crash).await;
     report_crash("reply_write", ReportFault::Crash).await;
     report_crash("reply_write", ReportFault::FailedReplacement).await;
-    report_crash("reply_write", ReportFault::Duplicate).await;
+    report_crash("reply_write", ReportFault::Resubmitted).await;
 }
 
 async fn host(home: &Path) -> (tokio::process::Child, Client) {

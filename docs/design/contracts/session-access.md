@@ -92,7 +92,7 @@ sequenceDiagram
   C->>C: record outcome in process storage
 ```
 
-The caller holds no lock. Facts committed after its read are ordered before its write and are resolved by the input owners. A caller that may retry after an uncertain outcome calls `lookup` with its `submissionId` first.
+The caller holds no lock. Facts committed after its read are ordered before its write and are resolved by the input owners. A caller that may retry after an uncertain outcome resubmits with the same `submissionId`: the branch accepts each id once and replies the first input's receipt.
 
 ### 3.2 Withdrawal
 
@@ -209,7 +209,7 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 | --- | --- |
 | Blocked by | ADR 002 consequences: optional Session and branch parts are installed only when enabled. |
 | Existing mechanisms considered | Installing every part and checking inside it: placeholders the ADR rejects. Host-side `AgentBuilder` calls that install each plugin's parts: not language-neutral (D5); a plugin registers its own parts, and the profile only names the parts it requires. |
-| Generic capability | Every plugin is one process row that registers its Session and branch parts with the part registry while it runs ([ADR 006 D3](../../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)). A plugin installed but disabled has no running row and registers nothing, so its parts are not mounted. The profile requires the parts the Session waits for (`AgentBuilder::require_part`); any other registered part is optional: the Session does not wait for it, and only that plugin's features are unavailable while it is missing, Pending or Failed. For tools, a part registers them with ToolRegistry when it applies, and ToolRegistry follows the registrations: a tool registered later is offered from the next request and one withdrawn when its part unloads is no longer offered, without a Session reload (session-boundary A.5, ADR 002 D3, #34, #241). No generator chooses its part by `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). A part already loading when its Session is created is settled before publication; one that never settles fails creation at the deadline. |
+| Generic capability | Every plugin is one process row that registers its Session and branch parts with the part registry while it runs ([ADR 006 D3](../../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)). A plugin installed but disabled has no running row and registers nothing, so its parts are not mounted. The profile requires the parts the Session waits for (`AgentBuilder::require_part`); any other registered part is optional: the Session lets one registered when it opens settle before publication but does not require it to be Active, and only that plugin's features are unavailable while it is missing, Pending or Failed. For tools, a part registers them with ToolRegistry when it applies, and ToolRegistry follows the registrations: a tool registered later is offered from the next request and one withdrawn when its part unloads is no longer offered, without a Session reload (session-boundary A.5, ADR 002 D3, #34, #241). No generator chooses its part by `SessionConfig` fields such as `interactive`, so the tool set and prompt prefix stay the same across a fork (#30). A part already loading when its Session is created is settled before publication; one that never settles fails creation at the deadline. |
 | Effect on sequence, batch, interrupt, reload | The first registry read during branch initialization fixes the first request's tools before Session publication. Later activation or retirement of a part changes the tools of later requests only; a bound request keeps its snapshot, and a configuration with a tool part records the change as an adoption. A plugin enabled or disabled while Sessions are open has its parts mounted into or unmounted from each of them, with the same effect on later requests. |
 | Owner and issue | Runtime (part registry and mounters); implemented in [#402](https://github.com/arcships/dim/issues/402). |
 
@@ -224,7 +224,7 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 | Method | Mode | Request | Reply | Errors |
 | --- | --- | --- | --- | --- |
 | `launch` | async | `LaunchRequest` | `{sessionId, policy}` | `rejected`, `agent_unknown`, `session_closed`, `branch_missing` (the starter), `reloading`, `failed` |
-| `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`, `session_closed`, `branch_missing`, `reloading`, `publication_unknown`, `failed` |
+| `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`, `ambiguous`, `session_closed`, `branch_missing`, `reloading`, `publication_unknown`, `failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`, `session_closed`, `branch_missing`, `reloading` |
 | `history` | async | `HistoryRequest` | `HistoryPage` | `rejected`, `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
 | `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`, `session_closed`, `branch_missing`, `reloading`, `publication_unknown` |
@@ -282,7 +282,7 @@ Implemented: every method above, served by Agents' directory part (S2, [#98](htt
 | --- | --- |
 | Marker | The first raw block is the element `<dim-<source> kind="..." ...>body</dim-<source>>` in the existing context-block format. It is model-facing text written by the producing plugin; shared components never parse it, and only the producing plugin may interpret its own content (for example Goal folding its own blocks) |
 | Keys | `RawBlock.key` with `use: live` or `retire`, per branch Timeline. The writer chooses the full key; by convention it starts with the writer's own prefix (overview constraint 14), and nothing checks it |
-| Submission identity | `<source>:<uuid>`, generated per logical submission. Writes do not deduplicate; `sessions.lookup` (same semantics as `session.input_lookup`) finds a committed input (`accepted`, `unknown`, error `ambiguous`). The identity is the `submission_id` field of the committed `input/message`, so it commits, forks and is deleted with the input; no separate record exists ([sessions service §6.3](../appserver/sessions-service.md#where-the-submission-identity-lives), #32) |
+| Submission identity | `<source>:<uuid>`, generated per logical submission. A branch accepts each identity once: a resubmission writes nothing and replies the first input's receipt, also after the input is consumed or withdrawn. `sessions.lookup` (same semantics as `session.input_lookup`) finds a committed input (`accepted`, `unknown`) without writing. Error `ambiguous` (from `input` or `lookup`) means several inputs share the identity, written before branches accepted each once. The identity is the `submission_id` field of the committed `input/message`, so it commits, forks and is deleted with the input; no separate record exists ([sessions service §6.3](../appserver/sessions-service.md#where-the-submission-identity-lives), #32) |
 | Never possible | Writing events other than `input/message`, `input/withdraw` through `withdraw` and `stop/interrupt` through `stop`; writing `input/deleted`; editing history |
 
 ### A.3 SessionConfig fields
@@ -335,22 +335,22 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 | --- | --- |
 | `session_closed`, `branch_missing` | Nothing written (for `launch`, the starter is closed or missing) |
 | `agent_unknown` | `launch` names no loaded Agent |
-| `reloading` | The Agents index, the model-selection host or the Session's capabilities are not active or are reloading; retryable after `lookup` |
+| `reloading` | The Agents index, the model-selection host or the Session's capabilities are not active or are reloading; retryable (an `input` with the same `submissionId`) |
 | `rejected` | Param shape and the method's boundary checks (input validation, a history cursor inside a batch, the withdrawal service's checks); nothing written |
 | `future_sequence` | Fixed-prefix read beyond the published head |
-| `ambiguous` | `lookup` matched more than one input |
-| `publication_unknown` | Committed (an `input`, or the `input/deleted` of a `withdraw`), publication failed; `lookup` or `history` after recovery |
+| `ambiguous` | More than one input has the `submissionId`, written before branches accepted each once; `input` writes nothing |
+| `publication_unknown` | Committed (an `input`, or the `input/deleted` of a `withdraw`), publication failed; resubmit, `lookup` or `history` after recovery |
 | `node_unavailable` | Not returned by `sessions`: calls on an offline resource node fail inside the Session's tools |
 | `failed` | Session fault, storage, model resolution, project authorization or Session build |
 
 **Input lifetime.** Under [S2 §6.2](../appserver/sessions-service.md#62-input),
-`reloading` caused by index stop or failed original-row effect registration before
-input admission means nothing was written. A row call also checks its captured
-generation token at final handoff: stopping during lease/restore preparation
-refuses input even after effect registration. After admission, typed Rust and named
-callers await the task's actual outcome across index reload. Only an original
-runtime row supplies the additional drain in S2 §8.4. Losing a reply is not
-writer-termination proof. `publication_unknown` and lost replies still require lookup.
+`reloading` caused by index stop, or by the calling row having stopped, before input
+admission means nothing was written.
+After admission, typed Rust and named callers await the task's actual outcome
+across index reload. The caller's own lifetime is not tied to the write: a calling
+row reloads without waiting for it, and a lost reply is an accepted loss. The next
+generation resubmits with the same `submissionId` and gets the same receipt, also
+while the first write is still unpublished.
 
 ## Appendix B. Full conflict table
 
@@ -402,8 +402,8 @@ writer-termination proof. `publication_unknown` and lost replies still require l
 | `sessions` | Typed `AgentIndex` methods (Agents) over the `Session` facade ([agent.rs](../../../crates/dim-agent-runtime/src/agent.rs), [branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)); Agents' directory part exposes them by name ([sessions service, Appendix A](../appserver/sessions-service.md#appendix-a-rust-binding)) |
 | `launch` | `AgentIndex::launch(LaunchRequest) -> Result<LaunchReply, SessionsError>` |
 | per-call acquire | `AgentIndex::acquire(id)` (existing, crate-internal) returning a `SessionUse` lease |
-| `input` | `Session::input(InputMessageData, branch)` (existing); a key is `InputBlock::Raw { key: Some(name), retire }` |
-| `lookup` | One Agents lookup shared with `session.input_lookup`: wait for pending publication, then scan the published pages |
+| `input` | `Session::input(InputMessageData, branch)` (existing; returns the committed input for an id the branch already holds); a key is `InputBlock::Raw { key: Some(name), retire }` |
+| `lookup` | `Session::lookup(branch, submission_id)`, shared with `session.input_lookup`: the branch's index of submission ids; waits for the found input's publication |
 | `history` | `Session::sequence(branch)`, failing `future_sequence` below `at_least`, then `Session::local_page(branch, after, limit, through)` |
 | `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(InputWithdrawData { input_id, reason }, None) -> Result<(Withdrawal, Option<Arc<AgentEvent>>), AgentError>` (S1): appends `input/withdraw` and replies with InputQueue's decision once it is written; `Withdrawal::Deleted { sequence }` or `Withdrawal::NotHeld`. Agents replies `deleted` once that `input/deleted` is published |
 | `stop`, `idle` | `Session::stop`, `Session::idle` (existing) |

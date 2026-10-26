@@ -121,9 +121,10 @@ contains no jobs, policy defaults, credentials, timer settings or run state.
 Permission, a run Session, or the replaceable Agents index. Settings changes use
 the declared source and existing event delivery without reloading the process
 row. The owner settles accepted calls and native I/O before closing its existing
-`pluginFiles` scope. S2's admitted-input lifetime in
-[#267](https://github.com/arcships/dim/pull/267) is also required by A.6's drain;
-a bridge reply lost during index reload is not an early cleanup boundary.
+`pluginFiles` scope. Its cleanup joins its own admitted
+report calls (A.6), and S2's admitted-input lifetime in
+[#267](https://github.com/arcships/dim/pull/267) keeps such a write running across
+index reload; a bridge reply lost during index reload is not an early cleanup boundary.
 
 The tool uses host-supplied `ToolCall.sessionId`, `branchId` and `config.cwd`
 for the A.2 caller. Before dispatch, it refuses

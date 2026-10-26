@@ -64,7 +64,9 @@ besides the scope's own mechanisms.
     creation, which waits for them to be Active as it waits for its required rows; the instance
     publishes only then. It does not wait in its own `apply`, because the loader's instance creation
     waits for every Loading row.
-  - The optional mounter owns every other part. A failed or Pending optional part stays local.
+  - The optional mounter owns every other part. It hands the copies it mounts when the instance
+    opens to the instance's creation, which lets them settle before publishing, as it does its
+    optional rows. A failed or Pending optional part stays local.
 - While the instance is open, the mounters follow the registry: they mount a new registration and
   unmount a withdrawn one. A withdrawal finishes when every instance has unloaded its copy.
 - The instance closes its mounted parts with itself, through rutis's ownership of children.

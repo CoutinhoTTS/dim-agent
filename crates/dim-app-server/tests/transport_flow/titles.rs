@@ -617,7 +617,9 @@ async fn node_typescript_row_reads_and_sets_the_title_through_session_metadata()
             session_typescript: Some(rows),
             ..store.config()
         },
-        |_| {},
+        |builder| {
+            builder.require_part("SessionMetadataFixture");
+        },
     )
     .await;
     let mut client = Client::new_version(&server, false, 3).await;

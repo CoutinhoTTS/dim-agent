@@ -57,7 +57,8 @@ struct SourceGraph {
 
 /// Analyze production crate source, emit deterministic JSON/Mermaid and reject
 /// architectural violations. All edges come from source declarations/references.
-pub fn generate(workspace: &Path, out: &Path) -> Result<()> {
+/// Returns the rendered `modules.json` and `modules.mmd`; the caller writes or verifies them.
+pub fn generate(workspace: &Path) -> Result<Vec<(&'static str, String)>> {
     let output = Command::new("cargo")
         .args([
             "metadata",
@@ -164,7 +165,6 @@ pub fn generate(workspace: &Path, out: &Path) -> Result<()> {
     graph.resolve_symbols()?;
     graph.resolve_edges();
     graph.check_boundaries()?;
-    fs::create_dir_all(out)?;
     let nodes: Vec<_> = graph
         .modules
         .iter()
@@ -191,10 +191,7 @@ pub fn generate(workspace: &Path, out: &Path) -> Result<()> {
         "modules":nodes,"edges":edges,
         "unresolved":graph.unresolved.iter().map(|(module,path)|json!({"module":module,"path":path})).collect::<Vec<_>>(),
     });
-    fs::write(
-        out.join("modules.json"),
-        serde_json::to_string_pretty(&report)? + "\n",
-    )?;
+    let json = serde_json::to_string_pretty(&report)? + "\n";
     let ids: BTreeMap<_, _> = graph
         .modules
         .keys()
@@ -216,13 +213,12 @@ pub fn generate(workspace: &Path, out: &Path) -> Result<()> {
             ids[to]
         ));
     }
-    fs::write(out.join("modules.mmd"), mermaid)?;
     println!(
         "module source boundaries passed ({} modules, {} edges)",
         graph.modules.len(),
         graph.edges.len()
     );
-    Ok(())
+    Ok(vec![("modules.json", json), ("modules.mmd", mermaid)])
 }
 
 impl SourceGraph {
@@ -850,9 +846,9 @@ mod tests {
                 format!("{definitions}\n{source}"),
             )
             .unwrap();
-            let result = generate(&workspace, &workspace.join("graph"));
+            let result = generate(&workspace);
             match expected {
-                None => result.unwrap(),
+                None => drop(result.unwrap()),
                 Some(expected) => assert!(result.unwrap_err().to_string().contains(expected)),
             }
         }

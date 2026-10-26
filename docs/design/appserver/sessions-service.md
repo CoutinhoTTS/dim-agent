@@ -18,8 +18,9 @@ retains its existing envelope. See [native access §2](../p6-p7-bindings.md#2-re
 
 Input ownership in §5, §6.2 and §8.3–8.4 follows the accepted
 [native access contract](../p6-p7-bindings.md#4-native-report-settlement): admitted
-input retains its own append/publication outcome, and runtime-row calls drain
-before their original row is replaced.
+input retains its own append/publication outcome, and the branch accepts each
+`submissionId` once, so a caller that lost a reply resubmits instead of waiting
+for the old writer.
 
 ## 1. Summary
 
@@ -36,8 +37,9 @@ Each one maps onto Agents' existing Session creation and admission (`AgentIndex`
   starter branch's current policy, which is the `PermissionState` folded from `permission/changed` facts. Without a
   starter, the cap is the host's Session defaults. Agents applies the cap before creation, through
   `SessionConfig.permission_policy`.
-- **Input.** `input` writes `input/message` through `Session::input` and replies once the event is published. Writes
-  are not deduplicated; `lookup` by `submissionId` resolves an uncertain write.
+- **Input.** `input` writes `input/message` through `Session::input` and replies once the event is published. The
+  branch accepts each `submissionId` once: a resubmission writes nothing and replies the first input's receipt.
+  `lookup` by `submissionId` reads the same index without writing.
 - **Idle.** `idle` is the facade's `Session::idle`: Loop has no open turn, nothing waits for publication, and
   dispatch has reached the tail. A pending approval or question keeps a turn open, so a caller bounds its wait with
   `stop`.
@@ -133,15 +135,15 @@ The call path from a consumer to a Session (a call path, not an assembly graph):
 | Provider | Agents' directory part. Each call looks up the current `AgentIndex`; while there is none, the call fails `reloading`. Index reload ends cancellable calls, preserves own-outcome calls (§8.3), and never reloads a consumer (D1) |
 | Calls | All methods are async. Each takes one request object, carried as `[request]` by rutis, and returns one envelope: `{ok: true, value}` or `{ok: false, error: SessionsError}`. The error carries `retryable` beside its `code` and `message`. An unknown method, a missing or extra argument, an unknown field or a wrong type replies `rejected` |
 | Errors | `SessionsError {code, message, retryable}` (§9) |
-| Cancellation | The consumer drops the call. Dropping a Rust future ends cancellable work and releases its lease. A dropped `launch` still finishes creation (§6.1); admitted `input` retains its task and lease (§6.2). Runtime-row input drains as in §8.4 |
+| Cancellation | The consumer drops the call. Dropping a Rust future ends cancellable work and releases its lease. A dropped `launch` still finishes creation (§6.1); admitted `input` retains its task and lease (§6.2) |
 | Rust consumers | Look up `AgentIndex` on each use, as Rpc looks up Provider, and call the typed methods in Appendix A. They may also use the named service |
 | Core independence | Agents, Rpc and Session assembly never depend on a consumer of `sessions`. Rpc does not use `sessions` |
 | Exposure | Only plugins in the control node's process. `sessions` is not an Rpc method and is never served to a client or exported over a rutis link |
 
 **Input cancellation:** after §6.2 admission,
 dropping any caller's result does not stop the owned input task or release its
-lease early. Only a call with an original runtime row additionally has §8.4's
-row-drain effect; a native Rust caller receives no synthetic row lifetime.
+lease early. The caller's lifetime is not tied to that task: a runtime row
+unloads without waiting for it, and its next generation resubmits (§8.4).
 
 ## 6. Methods
 
@@ -230,53 +232,47 @@ Agents takes the branch's publication watch and calls `Session::input`, which va
 | The index stops before admission | `reloading`; nothing written |
 | The index unloads after admission | The admitted task's own outcome |
 
-Writes are not deduplicated (A.2). After `publication_unknown`, `reloading` or a lost reply, the caller calls
-`lookup` before writing again.
+**One input per `submissionId`.** The branch accepts each `submissionId` once (A.2). `Session::input` hands the
+input to the branch's Timeline, which checks the id and appends under its commit lock, so of concurrent inputs with one
+id exactly one is written. The check reads an index of the branch's own inputs by `submission_id`: the branch's build
+fills it from its restored history (the same copy of its own events the opening reads for its capabilities), and every
+later commit adds to it. A resubmission writes nothing; `Session::input` returns the committed input, and `input`
+replies its `{inputId, sequence}` once it is published, even while the first write is still unpublished. The id stays
+taken after the input is consumed or withdrawn. An id that several inputs share, written before branches accepted each
+id once, fails `ambiguous` and writes nothing. After `publication_unknown`, `reloading` or a lost reply, the caller
+resubmits with the same `submissionId`, or reads with `lookup`.
 
 **Input ownership.** Preparation validates the request,
 acquires the Session lease and obtains the publication watch. Admission is the
 synchronous handoff of that prepared input and lease to an owned task that calls
 `Session::input`. At the final admission check immediately before handoff, check
-index stopping and, for a row call, its captured original generation's
-`Ctx::cancellation_token()`, without an intervening await. A cancellation observed
-there refuses input, even if its drain effect was registered before lease/restore
-preparation. Cancellation after that decision cannot recall an admitted task.
-
-Preparation races index stop, not row retirement. A retiring row waits for an
-already-started Session restore to finish, then the final row-token check refuses
-input. A held restore can therefore delay that row's replacement; no input is
-written while waiting.
+index stopping and, for a call from a runtime row, that row's generation token
+(captured with `caller_row()` when the call is invoked), without an intervening await. Cancellation after that decision
+cannot recall an admitted task.
 
 | Reload outcome | Reply / ownership |
 | --- | --- |
 | No active index, or index stop observed before admission | `reloading` (`retryable:true`); nothing written |
-| Runtime row already unloading; its drain effect cannot be registered | Same `reloading` envelope; no task started and nothing written |
-| Effect registered, then original row stops during preparation | Final row-token check returns `reloading`; no input admitted or written |
+| The calling runtime row stopped before admission (including a call from its own cleanup) | `reloading`; nothing written |
 | Index unload after admission | Await the task's own append/publication outcome; do not substitute `reloading` |
-| Caller discards its result after admission | Task and lease remain until settlement; a lost reply is still uncertain |
+| Caller discards its result after admission, or its row unloads | Task and lease remain until settlement; the reply is lost, and a resubmission replies the same receipt |
 
-This own-outcome lifetime applies to typed Rust and named-service callers alike.
-The original-row drain in §8.4 applies only when `caller_row()` supplies a real
-runtime row. Validation, publication receipts and lookup are unchanged; an actual
-`publication_unknown` still needs lookup. A lost bridge result is not proof that
-the native writer ended.
+This own-outcome lifetime applies to typed Rust and named-service callers alike. A native Rust caller has no row
+and no row check.
 
 ### 6.3 lookup
 
 `{sessionId, branchId, submissionId}` → `{status: "accepted", inputId, sequence}` or `{status: "unknown"}`; error
 `ambiguous`.
 
-Agents first waits until the branch has nothing committed and unpublished (`Publication::has_pending` is false), or
-until the branch closes; a Timeline failure ends it with `failed`. Publication catches up after each batch, so on a
-quiet branch the wait is short. It waits for a moment with nothing pending, though, not only for what was committed
-before the call: on a branch that keeps committing, such as a long turn writing batch after batch to slow storage, it
-lasts until the commits pause. Waiting only for the sequence committed at the call would need that sequence from
-`Publication`, a facade addition; it is not raised, because callers look up only after an uncertain outcome. Agents then
-scans the published local pages for `input/message` with that `submission_id`. So `unknown` is final for every write
-that returned before the lookup began. After a restart it is also correct: the unpublished tail was lost with the
-process. Rpc's `session.input_lookup` calls the same code, and its boundary keeps parsing its own parameters. The scan
-is O(events on the branch); callers use it only after an uncertain outcome. The identity is a field of the input
-itself; no other record holds it ([below](#where-the-submission-identity-lives)).
+`Session::lookup` reads the branch's index of `submission_id`s (§6.2). For an input it holds, it waits until that
+input is published and replies it; a branch that closes or fails first ends the call with that error. Otherwise it
+replies `unknown`. Every input committed before the call is in the index, so `unknown` is final for every write that
+returned before the lookup began, without waiting for other pending events or scanning pages. After a restart it is
+also correct: the unpublished tail was lost with the process, and the index is rebuilt from the restored history.
+`ambiguous` answers only an id with several inputs written before branches accepted each id once. Rpc's
+`session.input_lookup` calls the same method, and its boundary keeps parsing its own parameters. The identity is a
+field of the input itself; no other record holds it ([below](#where-the-submission-identity-lives)).
 
 #### Where the submission identity lives
 
@@ -293,9 +289,9 @@ recovery from it:
 | --- | --- | --- |
 | Rpc `session.submit`, protocol v3 ([connection/tree.rs](../../../crates/dim-app-server/src/connection/tree.rs)) | An optional UUID | — |
 | Agents `sessions.input` (§6.2) | A required, non-empty id, `<source>:<uuid>` by convention | — |
-| Agents `find_input` ([agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs)), shared by `sessions.lookup` and Rpc's `session.input_lookup` | — | `accepted`, `unknown` or `ambiguous`, from the branch's committed inputs |
+| The branch Timeline ([core/timeline.rs](../../../crates/dim-agent-runtime/src/core/timeline.rs)), through `Session::input` and `Session::lookup` (`sessions.input`, `sessions.lookup`, Rpc's `session.submit` and `session.input_lookup`) | — | Accepts each id once per branch; `accepted`, `unknown` or `ambiguous` for lookup |
 | Goal branch parts ([goal.ts](../../../runtime/plugins/goal/goal.ts)) | `goal:<uuid>`, through `Branch::input` | Nothing |
-| Workflow ([engine.ts](../../../runtime/plugins/workflow/engine.ts)) | `workflow:<uuid>` for each stage input and report, stored in its run file before the write | After a reload or restart: write again only on `unknown`; otherwise settle the stage or the report |
+| Workflow ([engine.ts](../../../runtime/plugins/workflow/engine.ts)) | `workflow:<uuid>` for each stage input and report, stored in its run file before the write | A retry, by the same or a replacement generation, resubmits the same id and settles from the reply |
 | Scheduler ([A.5](../plugins/Scheduler.md#a5-timeline-and-capability-mechanics); runtime in draft [#317](https://github.com/arcships/dim/pull/317)) | `scheduler:<run_id>` and `scheduler-report:<run_id>` | `submitted` or `lost`, never a second write; a report is never written twice |
 | `dimcode` and the Rust TUI ([#312](https://github.com/arcships/dim/pull/312)) | A new UUID for each submit | Nothing yet: an uncertain submit is reported to the user, not looked up |
 | S5c fork ([§6.6](session-deletion-and-fork.md#66-identity-provenance-and-paths)) | Copies it with the event | — (lookup on the fork finds copied inputs) |
@@ -304,14 +300,15 @@ recovery from it:
 AcpGateway, RemoteGateway, Attachments and Hooks are designed to look up with `session.input_lookup` and retry with
 the same id. The field is therefore no longer client-protocol data.
 It belongs to the input contract ([session access A.2](../contracts/session-access.md#a2-source-input-conventions)):
-an opaque correlation key that the writer chooses, scoped to the branch, neither unique nor deduplicated.
+an opaque correlation key that the writer chooses, scoped to the branch. The branch accepts each id once (§6.2); an
+input without one is never deduplicated.
 
 Keeping it in the event meets the constraint #32 set, and needs no new mechanism:
 
 - **Atomic by construction.** The identity is part of the event that the append transaction commits, so it is
-  durable exactly when the input is. Publication follows the commit, and lookup first waits until nothing is pending.
-  After a restart, the restored history is the committed set, so `lookup` answers `accepted` or `unknown` with
-  certainty. Flow tests: `product_submit_acknowledges_only_a_committed_input` (held native writer, Rpc restart),
+  durable exactly when the input is. Publication follows the commit, and lookup waits for the input it finds.
+  After a restart, the restored history is the committed set and rebuilds the branch's index, so `input` and `lookup`
+  decide with certainty. Flow tests: `product_submit_acknowledges_only_a_committed_input` (held native writer, Rpc restart),
   `input_replies_after_publication_and_lookup_waits_for_committed_inputs`, and the Node-backed
   `node_workflow_reports_recover_after_complete_host_restart` and
   `node_workflow_reports_reconcile_after_host_process_restart`.
@@ -334,17 +331,15 @@ Keeping it in the event meets the constraint #32 set, and needs no new mechanism
 | A record kept by Agents or Rpc after the commit | A process table written after `Session::input` returns | Not atomic. After a crash between the commit and the record, lookup answers `unknown` for a written input, and the retry writes it twice |
 | A separate event in the input's batch | A new event that carries the id | It is still in the Timeline, and adds an event where a field is enough (rule 9) |
 | The id in the input's raw blocks | The writer puts the id in its marker block, and `input/message` loses the field | Lookup would have to parse raw blocks, which [session access A.2](../contracts/session-access.md#a2-source-input-conventions) reserves to the producing plugin. Rpc input has no marker block, and the event format still changes |
-| The caller chooses the event id | The Timeline accepts a caller's id for `input/message` | The Timeline allocates ids. Ids are unique within a Session, so a repeated id would be rejected, and `input` would change from not deduplicated to rejecting |
-| An index derived from the event body | An expression index on `json_extract(body, '$.record.event.data.submission_id')` over `input/message` rows, as `timeline_tool_use_starts` does. The SQL changes, so it needs its own format decision | Not needed now, because lookup runs only after an uncertain outcome. It is the reopen path for latency, and the field stays in the event |
+| The caller chooses the event id | The Timeline accepts a caller's id for `input/message` | The Timeline allocates ids. Ids are unique within a Session, so a repeated id would be rejected instead of replying the first input's receipt |
+| An index derived from the event body | An expression index on `json_extract(body, '$.record.event.data.submission_id')` over `input/message` rows, as `timeline_tool_use_starts` does. The SQL changes, so it needs its own format decision | Not needed now: the branch builds its in-memory index from the history it already reads when it opens. It is the reopen path if that read becomes costly, and the field stays in the event |
 
 Revisit when any of these becomes true:
 
-1. Lookup latency matters: callers look up routinely on long branches, as measured locally. Add the derived index
-   above; the field stays where it is.
-2. Committed events can be removed (retention or truncation). `unknown` would then no longer mean "never written", so
-   that design must say what survives the removal.
-3. A caller needs writes deduplicated. That changes `input` and `session.submit`, and is a contract decision of its
-   own.
+1. Opening a long branch costs too much, as measured locally, once it no longer reads its whole own history. Add the
+   derived index above; the field stays where it is.
+2. Committed events can be removed (retention or truncation). `unknown` would then no longer mean "never written", and
+   a removed id could be accepted again, so that design must say what survives the removal.
 
 ### 6.4 idle
 
@@ -510,27 +505,19 @@ would invite a retry while the first Session is still created (§6.1). Nor is a 
 (§6.8).
 
 Admitted `input` also replies its own outcome. All callers retain the admitted task and Session lease
-through actual append/publication settlement (§6.2). Index stop or original-row
-stop observed at the final admission check returns `reloading` without a write.
+through actual append/publication settlement (§6.2). Index stop observed at the
+final admission check returns `reloading` without a write.
 Index reload still does not reload consumers.
 
 ### 8.4 Consumer reload during a call
 
-A consumer's old generation unloads. An `idle` wait can continue to its own end
-(§6.4), holding its lease; a lost reply does not close its Session. A `launch` or
-admitted `input` completes even if its reply is lost. The new generation reads the state again with `lookup`, `idle` and
-`history`. A stale `idle` ends at the Session's next idle point, the same moment a
-new one would. Those reads do not prove an old input writer has ended.
-
-**Original-row input drain:** capture `caller_row()`
-synchronously in `HostDispatch::invoke`. Register a drain effect on that original
-row before starting the native call; a row already unloading replies `reloading`
-with no write. The result and effect await the same task, and completed effects
-are removed. Row retirement closes admission and waits for those effects before
-foreign cleanup and replacement. A dropped bridge reply cannot end the native
-work early. A typed Rust caller has the same §6.2 admitted-task lifetime, but no
-row drain; it must join its own work before transfer. A fresh Node process alone
-is not evidence that an earlier native writer settled.
+A consumer's old generation unloads without waiting for its `sessions` calls. An `idle` wait can continue to its own
+end (§6.4), holding its lease; a lost reply does not close its Session. A `launch` or admitted `input` completes even
+if its reply is lost. The new generation resubmits an input with the same `submissionId` and gets the first input's
+receipt, written or still in flight (§6.2); it reads other state again with `lookup`, `idle` and `history`. A stale
+`idle` ends at the Session's next idle point, the same moment a new one would. A part that awaits its own call while it
+unloads, such as a C1 `drain` method or a cleanup that joins its work, waits for that call's reply; that is the part's
+own work, not a `sessions` rule.
 
 ### 8.5 Delete (S5c)
 
@@ -596,10 +583,10 @@ job every five minutes adds about 288 a day. So the consumers delete them (D14):
 | `agent_unknown` | `launch` | No loaded Agent has that id | false |
 | `session_closed` | All but `delete` (for `launch`, the starter) | The Session is closed, deleted or unknown; nothing written | false |
 | `branch_missing` | All but `delete` (for `launch`, the starter) | No such branch; nothing written | false |
-| `reloading` | All | The Agents index, the model-selection host, the starter's Permission or S1's withdrawal service is not active (also when the Session closes after a `withdraw` wrote its command, §6.6), or the index unloaded during the call. For `input` and `withdraw` the outcome is uncertain: `lookup` or `history` first. A `delete` fails `reloading` only before it starts (§6.8) | true |
+| `reloading` | All | The Agents index, the model-selection host, the starter's Permission or S1's withdrawal service is not active (also when the Session closes after a `withdraw` wrote its command, §6.6), or the index unloaded during the call. For `input`, resubmit with the same `submissionId`; for `withdraw` the outcome is uncertain: `history` first. A `delete` fails `reloading` only before it starts (§6.8) | true |
 | `future_sequence` | `history` | `atLeast` or `through` beyond the published head | false |
-| `ambiguous` | `lookup` | More than one input has that `submissionId` | false |
-| `publication_unknown` | `input`, `withdraw` | Committed, publication not confirmed; `lookup` or `history` after recovery | true |
+| `ambiguous` | `input`, `lookup` | More than one input has that `submissionId`, written before branches accepted each id once; nothing written | false |
+| `publication_unknown` | `input`, `withdraw` | Committed, publication not confirmed; resubmit, `lookup` or `history` after recovery | true |
 | `failed` | All | Session fault, storage, model resolution, project authorization, Session build; for `delete`, the Session's command output or rows could not be removed (§6.8) | false |
 
 ## 10. Timing and conflicts
@@ -686,7 +673,7 @@ contract proposal is needed.
 | §4 rule 6 (model context) | No new context path; only consumed inputs reach the model |
 | §4 rule 7 (public events and services) | Uses only the Session facade, including `Session::get::<PermissionState>`, Permission's public read-only state, S1's public service and, for `delete`, Agents' own `AgentIndex::delete` (S5c) |
 | §4 rule 8 (infrastructure unchanged) | No change to the Timeline, Dispatcher, event format, rutis, assembly or the Session facade. The needs are raised to S1 (a capability) and C4 (the #4 bridge) in §14; none to rutis |
-| §4 rule 9 (only decision facts in the Timeline) | No new event. Leases, caller progress and launch provenance stay out of the Timeline. `submissionId` is a field of the required `input/message`, and callers decide their recovery from it through `lookup` (§6.3, #32) |
+| §4 rule 9 (only decision facts in the Timeline) | No new event. Leases, caller progress and launch provenance stay out of the Timeline. `submissionId` is a field of the required `input/message`; the branch accepts each id once, and callers recover by resubmitting it or through `lookup` (§6.2, §6.3, #32) |
 | §1 (App Server boundary) | Agents only exposes access; scheduling and workflow logic stay in their plugins |
 | ADR 002 D1 | Process scope: the service spans Sessions; it lives in Agents |
 | ADR 002 D2 | No new plugin; Agents' existing directory part provides the service |
@@ -769,8 +756,8 @@ was stubbed (roadmap §3.6).
 1. Done. Types and the seven `AgentIndex` methods in the Agents lane (Appendix A).
 2. Done. The directory part provides `sessions`; App Server `lib.rs` registers `register_shared("sessions")` (one line
    in the assembly lane).
-3. Done. The lookup moved into Agents (`agents::find_input`); Rpc's `session.input_lookup` calls it, so it now waits for
-   pending publication too.
+3. Done. Lookup is the branch's (`Session::lookup`, §6.3); `sessions.lookup` and Rpc's `session.input_lookup` both
+   call it.
 4. Done. `xtask graph` records the new module and the `sessions` binding; `xtask check` passes.
 5. Done. `sessions.delete` forwards to S5c's `AgentIndex::delete` ([#97](https://github.com/arcships/dim/pull/97))
    and has its row in A.1 (§6.8).
@@ -790,7 +777,8 @@ does) and the test calls it, exercising the neutral path. The plan's cases map t
    `rejected`, and a closed starter fails `session_closed`.
 3. **Input and lookup** (`input_replies_after_publication_and_lookup_waits_for_committed_inputs`). The marker comes
    first and the user content after it. `history {atLeast: sequence}` succeeds right after the reply. `lookup` returns
-   `accepted` for the written id, `unknown` for another, and `ambiguous` for a duplicate. With publication held by a
+   `accepted` for the written id and `unknown` for another. A resubmission with the same id replies the first receipt
+   and writes nothing; another id is written. With publication held by a
    locked native store, the `input` reply and a `lookup` started after the commit both wait, and the lookup then reads
    `accepted`.
 4. **Idle** (`idle_covers_written_turns_and_waits_on_a_pending_approval_until_stop`). The cutoff covers each input's
@@ -962,5 +950,6 @@ The named service decodes each request object (A.1) into its request type, calls
 `withdraw`, `stop` and `idle` replies are encoded there as `{status, sequence?}` and `{sequence}`. For `delete` it
 decodes `{sessionId}` into Rpc's `protocol::SessionId`, maps the `AgentError` as `From<AgentError>` does (§9) and
 replies `{}`. The cap is a function
-of two `PermissionPolicy` values next to `launch`. Each method's lease is a private `SessionUse` from `acquire`. The
-lookup Rpc shares is `agents::find_input`.
+of two `PermissionPolicy` values next to `launch`. Each method's lease is a private `SessionUse` from `acquire`. `input`
+and `lookup` call the facade's `Session::input` and `Session::lookup`, which Rpc's `session.submit` and
+`session.input_lookup` also call.

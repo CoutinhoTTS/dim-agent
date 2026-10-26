@@ -85,7 +85,7 @@ export class Workflow {
     })
     // Completing startup also schedules retention, even when no report is pending.
     this.own(Symbol('startup'), async () => {
-      for (const id of pending) this.own(id, () => this.report(id, true))
+      for (const id of pending) this.own(id, () => this.report(id))
     })
     this.maintenance = setInterval(() => {
       if (!this.closing) void this.retain().catch(error => console.error('Workflow', 'retention failed', error))
@@ -203,7 +203,7 @@ export class Workflow {
       for (const stage of run.stages) if (stage.state === 'waiting') stage.state = 'skipped'
       this.finish(run, this.closing ? 'interrupted' : run.state === 'stopping' ? 'stopped' : failed(run) ? 'failed' : 'completed')
     })
-    if (!this.closing) await this.report(id, false)
+    if (!this.closing) await this.report(id)
   }
 
   private async admit(id: string, definition: StageDefinition) {
@@ -289,7 +289,7 @@ export class Workflow {
             await this.store.update(runs => { need(runs, id).stages.find(stage => stage.id === stageId)!.state = 'stopped' })
             return
           }
-          // The actual reply settled the previous native writer; lookup found no input.
+          // Resubmitting is safe: the branch accepts the submission id once.
           await this.pause()
           receipt = await this.sessions.input(input)
           break
@@ -372,43 +372,15 @@ export class Workflow {
     return `<dim-workflow kind="report" run="${escaped(run.run_id)}" status="${run.state}">${escaped(text)}</dim-workflow>`
   }
 
-  private async report(id: string, replacement: boolean) {
-    let reconcile = replacement
+  /** Sends the pending report. A retry, including one by a replacement
+   * generation, resubmits the same submission id: the destination branch
+   * accepts it once and replies the first input's receipt. */
+  private async report(id: string) {
     while (!this.closing && !this.fault) {
-      let run = await this.current(id)
+      const run = await this.current(id)
       if (run.report.state !== 'pending') return
       const report = run.report
       const address = { sessionId: run.report_to!.session_id, branchId: run.report_to!.branch_id }
-      if (reconcile || report.attempt_open) {
-        const lookup = await this.sessions.lookup({ ...address, submissionId: report.submission_id })
-        if (!lookup.ok) {
-          if (lookup.error.code === 'reloading') { await this.pause(); continue }
-          if (lookup.error.code === 'ambiguous' || ['session_closed', 'branch_missing'].includes(lookup.error.code)) {
-            await this.store.update(runs => {
-              const run = need(runs, id)
-              run.report = lookup.error.code === 'ambiguous' ? { state: 'delivered' }
-                : { state: 'undeliverable', reason: lookup.error.code }
-              if (lookup.error.code === 'ambiguous') log(run, 'Duplicate report violation: lookup ambiguous')
-            })
-            return
-          }
-          await this.store.update(runs => { log(need(runs, id), `Report lookup failed: ${lookup.error.code}`) })
-          return
-        }
-        if (lookup.value.status === 'accepted') {
-          await this.store.update(runs => { need(runs, id).report = { state: 'delivered' } })
-          return
-        }
-        if (report.attempt_open) {
-          if (!replacement) { await this.pause(); continue }
-          // The fixed row's old native writers drained before this apply.
-          await this.store.update(runs => {
-            const pending = need(runs, id).report
-            if (pending.state === 'pending') pending.attempt_open = false
-          })
-        }
-      }
-      if (this.closing) return
       await this.store.update(runs => {
         const pending = need(runs, id).report
         if (pending.state === 'pending') pending.attempt_open = true
@@ -420,7 +392,11 @@ export class Workflow {
       await this.store.update(runs => {
         const run = need(runs, id)
         if (reply.ok) run.report = { state: 'delivered' }
-        else if (['session_closed', 'branch_missing', 'rejected'].includes(reply.error.code)) {
+        else if (reply.error.code === 'ambiguous') {
+          // Several inputs were written with this id before branches accepted each id once.
+          run.report = { state: 'delivered' }
+          log(run, 'Duplicate report violation: input ambiguous')
+        } else if (['session_closed', 'branch_missing', 'rejected'].includes(reply.error.code)) {
           run.report = { state: 'undeliverable', reason: reply.error.code }
           if (reply.error.code === 'rejected') log(run, 'Invalid report rejected')
         } else {
@@ -430,8 +406,6 @@ export class Workflow {
         }
       })
       if (reply.ok || !['publication_unknown', 'reloading'].includes(reply.error.code)) return
-      reconcile = true
-      replacement = false
       await this.pause()
     }
   }

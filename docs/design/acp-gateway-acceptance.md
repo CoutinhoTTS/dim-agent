@@ -30,7 +30,8 @@
 | 共享传输 | `dim-client` 两个公共连接/callback 测试通过；身份/profile 校验、交错响应、半帧取消和受限 loopback callback |
 | Browser authentication | `dim-acp` 三个公共宿主 flow 通过：真实 callback listener/native complete、请求取消、EOF 时先取消自己的 pending attempt 再释放 RPC |
 | 静态检查 | 受影响 crate 的 all-target Clippy、格式和 whitespace 检查通过 |
-| 架构 | xtask source/crate boundaries、20 个 plugin documents、service catalog 与 service declarations 通过；357 modules / 2122 edges；graph 由 xtask 生成 |
+| 架构 | xtask source/crate boundaries、20 个 plugin documents、service catalog 与 service declarations 通过；357 modules / 2120 edges；graph 由 xtask 生成 |
+| Node Session interop | rutis runtime/SDK 0.17.1 下，row reload 与 Session metadata 两条流程通过；测试 profile 将必须在创建前可用的 fixture part 声明为 required，不要求迟到的 optional 注册阻塞发布 |
 
 流程使用真实 `dimcode acp` stdio 和公开 RPC socket，而不是替代 App Server trait。production flow 连接本次构建的 App Server 和 loopback HTTP 模型，得到 `ACP_REAL_OK`。
 

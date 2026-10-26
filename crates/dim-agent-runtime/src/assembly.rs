@@ -1019,8 +1019,8 @@ pub(crate) struct SessionAssembly {
     pub closing: CancellationToken,
     pub lifecycle: SessionLifecycle,
     pub loaded: Mutex<Option<Arc<Loaded<SessionScope>>>>,
-    /// The required parts the Session's mounter mounted; published with the rows.
-    pub(crate) mounted: Arc<Mutex<Vec<FiberView>>>,
+    /// The parts the Session's mounters mounted when it opened.
+    pub(crate) mounted: Arc<Mutex<crate::parts::Opened>>,
     pub(crate) copies: crate::parts::Copies,
 }
 impl SessionAssembly {
@@ -1179,8 +1179,8 @@ pub(crate) struct BranchAssembly {
     ancestors: Mutex<Option<Vec<(String, u64)>>>,
     sequence: u64,
     loaded: Mutex<Option<Arc<LoadedBranch>>>,
-    /// The required parts the branch's mounter mounted.
-    mounted: Arc<Mutex<Vec<FiberView>>>,
+    /// The parts the branch's mounters mounted when it opened.
+    mounted: Arc<Mutex<crate::parts::Opened>>,
     copies: crate::parts::Copies,
 }
 struct LoadedBranch {
@@ -1361,6 +1361,9 @@ impl TimelineFactory {
                 let scope = branch.scope.scope;
                 // Publication requires Loop; the context looks it up per call.
                 required::<dyn LoopState>(ctx, scope.key::<dyn LoopState>())?;
+                // Input deduplication covers the restored history from the
+                // first input on.
+                branch.timeline.index_submissions().await?;
                 Ok(TimelineContext::start(
                     id,
                     ctx.clone(),
@@ -1441,7 +1444,7 @@ async fn create_instance(
     instance: impl Fn() -> (
         Option<rutis::host::InstanceId>,
         Option<Arc<[String]>>,
-        Vec<FiberView>,
+        crate::parts::Opened,
     ),
 ) -> std::result::Result<Created, (AgentError, Option<Created>)> {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -1516,7 +1519,7 @@ async fn create_instance(
     };
     // The required parts the mounter mounted are waited for like the rows.
     let mut waiting = rows(loader, &created.view, Some(&required));
-    waiting.extend(instance().2);
+    waiting.extend(instance().2.required);
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let ready = wait_active(ctx, &waiting, remaining, cancel).await;
     // A launcher may still be Pending when the loader returns. Once it is
@@ -1528,7 +1531,7 @@ async fn create_instance(
     }
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let mut waiting = rows(loader, &created.view, Some(&required));
-    waiting.extend(instance().2);
+    waiting.extend(instance().2.required);
     if let Err(error) = wait_active(ctx, &waiting, remaining, cancel)
         .await
         .and_then(|()| validate(ctx, created.view.id, &waiting))
@@ -1540,13 +1543,16 @@ async fn create_instance(
     // loading because a required part provided what it waited for is
     // settled before the instance is published; a row still Pending on a
     // name nothing here provides returns at once. Settling the required
-    // parts first lets each finish telling its dependents it is Active.
+    // parts first lets each finish telling its dependents it is Active. The
+    // optional parts mounted when the instance opened settle the same way,
+    // so what they register (tools, methods) exists once it is published.
     created.children = rows(loader, &created.view, None);
     let optional: Vec<FiberView> = created
         .children
         .iter()
         .filter(|view| !waiting.iter().any(|required| required.id == view.id))
         .cloned()
+        .chain(instance().2.optional)
         .collect();
     let settled = async {
         for view in waiting.iter().chain(&optional) {
