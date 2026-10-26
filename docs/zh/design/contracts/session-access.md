@@ -209,7 +209,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | --- | --- |
 | 被什么挡住 | ADR 002 后果：可选的 Session 与分支部分只在启用时安装。 |
 | 考虑过的现有机制 | 全部安装、在部分内部检查：这是 ADR 不允许的占位。在宿主侧调用 `AgentBuilder` 安装每个插件的部分：不是语言中立的（D5）；插件自己登记它的部分，profile 只列出它要求的部分。 |
-| 需要的通用能力 | 每个插件都是进程中的一行，在运行期间向部件登记处登记它的 Session 部分与分支部分（[ADR 006 D3](../../adr/006-plugin-contract.md#d3-插件是一行每个实例挂载为它登记的部件)）。已安装但停用的插件没有运行中的行，什么也不登记，所以它的部分不会挂载。Session 等待的部分由 profile 要求（`AgentBuilder::require_part`）；其他已登记的部分都是可选的：Session 不等它，它缺失、Pending 或 Failed 时只是该插件的功能不可用。对工具，部件在 apply 时把它们注册到 ToolRegistry，ToolRegistry 跟随这些注册：之后才注册的工具从下一个请求起提供，部件卸载时撤回的工具不再提供，都不需要重载 Session（session-boundary A.5，ADR 002 D3，#34，#241）。生成器不按 `interactive` 等 `SessionConfig` 字段选择部件，因此 fork 前后工具集合与提示词前缀保持一致（#30）。 |
+| 需要的通用能力 | 每个插件都是进程中的一行，在运行期间向部件登记处登记它的 Session 部分与分支部分（[ADR 006 D3](../../adr/006-plugin-contract.md#d3-插件是一行每个实例挂载为它登记的部件)）。已安装但停用的插件没有运行中的行，什么也不登记，所以它的部分不会挂载。Session 等待的部分由 profile 要求（`AgentBuilder::require_part`）；其他已登记的部分都是可选的：Session 不等它，它缺失、Pending 或 Failed 时只是该插件的功能不可用。对工具，部件在 apply 时把它们注册到 ToolRegistry，ToolRegistry 跟随这些注册：之后才注册的工具从下一个请求起提供，部件卸载时撤回的工具不再提供，都不需要重载 Session（session-boundary A.5，ADR 002 D3，#34，#241）。生成器不按 `interactive` 等 `SessionConfig` 字段选择部件，因此 fork 前后工具集合与提示词前缀保持一致（#30）。创建 Session 时已经开始装载的部件会在发布前稳定下来；始终无法稳定的部件使创建在截止时间失败。 |
 | 对序号、批次、中断、重载的影响 | 分支初始化中的首次注册表读取在 Session 发布前确定首个请求的工具。之后部件的激活或退役只改变后续请求的工具；已绑定的请求保留其快照，带工具部分的配置把变化记为一次采用。Session 打开期间启用的插件，其部分挂载进每个打开的 Session；停用的插件，其部分从中卸下；两者对之后请求的影响相同。 |
 | 由谁实现、对应 issue | 运行时（部件登记处与挂载器）；已在 [#402](https://github.com/arcships/dim/issues/402) 实现。 |
 

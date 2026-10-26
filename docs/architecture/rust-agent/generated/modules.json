@@ -1865,7 +1865,9 @@
       "file": "crates/dim-app-server/src/session_typescript.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "panic",
+        "vec"
       ]
     },
     {
@@ -2646,6 +2648,7 @@
         "assert_eq",
         "assert_ne",
         "format",
+        "include_str",
         "panic",
         "vec"
       ]
@@ -13835,6 +13838,13 @@
     },
     {
       "from": "dim_app_server::managed_provider",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path dim_agent_runtime::Modules"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider",
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
@@ -16464,8 +16474,12 @@
       "from": "dim_app_server::session_typescript::tests",
       "to": "dim_app_server::session_typescript",
       "references": [
+        "path Parts::new",
+        "path SessionTypeScriptConfig",
         "path super::crossing_instance_names",
-        "path super::share_names"
+        "path super::share_names",
+        "use super::Parts",
+        "use super::SessionTypeScriptConfig"
       ]
     },
     {
