@@ -4409,7 +4409,7 @@ fn web_without_the_web_workspace_says_how_to_get_it() {
         let home = Home::new();
         let daemon = home.daemon(|wire| {
             let hello = wire.read("hello");
-            wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
             let open = wire.read("web.open");
             wire.send(json!({"jsonrpc":"2.0","id":open["id"],"error":{"code":-32000,"message":"This App Server has no Web workspace","data":{"appError":"web_assets_missing"}}}));
             let mut line = String::new();
@@ -4518,8 +4518,9 @@ fn web_install_puts_this_versions_frontend_in_the_home() {
         .args(["web", "install"])
         .env(
             "DIMCODE_NPM_REGISTRY",
-            web_registry(tarball.clone(), integrity),
+            web_registry(tarball.clone(), integrity.clone()),
         )
+        .env_remove("DIMCODE_WEB_ASSETS")
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -4551,7 +4552,7 @@ fn web_install_puts_this_versions_frontend_in_the_home() {
         .args(["web", "install"])
         .env(
             "DIMCODE_NPM_REGISTRY",
-            web_registry(tarball, format!("sha512-{}", "A".repeat(88))),
+            web_registry(tarball.clone(), format!("sha512-{}", "A".repeat(88))),
         )
         .output()
         .unwrap();
@@ -4564,6 +4565,28 @@ fn web_install_puts_this_versions_frontend_in_the_home() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(home.0.join("web/assets/app-1.js").is_file());
+
+    // A frontend in a source that comes first is named, since it, not this
+    // install, is what the daemon serves.
+    let first = home.0.join("npm-web");
+    fs::create_dir_all(&first).unwrap();
+    fs::write(first.join("index.html"), "<!doctype html>").unwrap();
+    let output = home
+        .command()
+        .args(["web", "install"])
+        .env("DIMCODE_NPM_REGISTRY", web_registry(tarball, integrity))
+        .env("DIMCODE_WEB_ASSETS", &first)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).ends_with(&format!(
+            "The Web workspace in {} is used instead; remove it to use this one.\n",
+            first.display()
+        )),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]

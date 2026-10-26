@@ -77,6 +77,17 @@ pub async fn install(home: &Path) -> crate::Result<i32> {
     std::fs::rename(&partial, &target)?;
     let _ = std::fs::remove_dir_all(&previous);
     println!("Web workspace {version} installed in {}.", target.display());
+    // `DIMCODE_WEB_ASSETS` and `web/` beside `bin/` come first; the user
+    // replaces or removes the one that does.
+    let executable = std::env::current_exe().unwrap_or_default();
+    if let Some(other) = crate::client::web_assets(&executable, home)
+        .filter(|found| found.canonicalize().ok() != target.canonicalize().ok())
+    {
+        println!(
+            "The Web workspace in {} is used instead; remove it to use this one.",
+            other.display()
+        );
+    }
     Ok(0)
 }
 

@@ -24208,6 +24208,13 @@
     },
     {
       "from": "dim_cli::web_install",
+      "to": "dim_cli::client",
+      "references": [
+        "path crate::client::web_assets"
+      ]
+    },
+    {
+      "from": "dim_cli::web_install",
       "to": "dim_cli::update",
       "references": [
         "path crate::update::registry"
