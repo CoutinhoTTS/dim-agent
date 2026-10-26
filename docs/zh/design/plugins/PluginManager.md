@@ -12,7 +12,8 @@ PluginManager 保存一个宿主的插件配置：装了哪些插件，它们从
 | --- | --- | --- |
 | `plugins.json`、默认配置文件、启动层（§2、§3.1） | 是 | |
 | 从本地路径或 Git 安装、更新、移除、列出（§3.2–§3.6） | 是 | marketplace |
-| 插件代码：创建、打开/关闭、替换、重新加载 loader 行（§3） | 是，TypeScript | 从目录安装的 Python 插件（附录 D） |
+| 插件代码：创建、打开/关闭、替换、重新加载 loader 行（§3） | 是，TypeScript 和 Python | |
+| 启动后下载运行时（§2.5） | 是 | |
 | `plugin.*` 管理方法和 `dimcode plugin` 命令（§6、A.1） | 是 | 变更的客户端通知 |
 | 通过 Session 部件提供的 agent 工具（§6） | 是 | |
 | 默认 CLI 加载默认插件（goal、web、session-title、workflow、scheduler） | 是 | |
@@ -156,6 +157,14 @@ flowchart LR
 | 有哪些内置 rutis 插件 | App Server 的装配 | `Loader::entries()` 中 `assembly` 层的行；行 id 就是插件的名字 |
 | 从插件登记的 skill、MCP 服务器、hook | SkillsCatalog、Mcp、Hooks | 所有者自己的方法 |
 | 插件的业务配置 | 插件的 Settings 来源 | Settings |
+
+### 2.5 运行时
+
+发布包里有 Dim、默认配置文件和默认插件的目录，没有 Node 和 Python 运行时。正在使用的插件需要的运行时不存在时，App Server 在启动后把它下载到 `<home>/runtimes/`。启动不等下载完成：插件的行依赖它的运行时那一行，所以在运行时就绪之前保持 `Pending`，就绪后自己启动。`plugin.list` 会显示这样的行在等它的运行时（`Loader::waiting_for`）。
+
+- TypeScript：`code.entry` 是 `.ts` 或 `.js` 文件；Node 运行时按绝对路径导入它。
+- Python：`code.entry` 是 `.py` 文件；Python 运行时把插件目录放进导入路径，从那里导入入口模块。
+- 两种语言 reload 时都只重新导入入口模块（[需求第 3 条](../../../design/plugin-management.md)）。
 
 ## 3. 流程
 
@@ -344,8 +353,9 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 7. `disable PluginManager` 被拒绝，错误为 `plugin_locked`。
 8. 使用 `file://` URL 的 Git 安装被拒绝；失败的克隆不会在 `<home>/plugins` 下留下任何东西。
 9. 默认插件的 Settings 来源在它启动时出现，在它被关闭时消失。
+10. 在没有运行时的 home 上，`dimcode` 立即启动；默认插件显示为在等运行时，下载完成后自动启动。
+11. 从本地路径安装的 Python 插件能登记它的工具，reload 后入口模块的修改生效。
 
 ## 附录 D. 待对齐问题
 
-- 从目录安装的 Python 插件：现在一个 Python 行指定一个模块（`py:<module>`），从一个配置好的项目目录导入。从插件目录加载模块，需要在 Python 运行时设置中做出决定；放在 M1 之后。
-- 发布包如何附带默认插件和 TypeScript 运行时，以及如何找到 `node`，是 M1 的发布打包事项，随 #384 跟踪。
+无。

@@ -12,7 +12,8 @@ A plugin is a directory with a manifest. It may carry code (a rutis plugin in Ty
 | --- | --- | --- |
 | `plugins.json`, the default configuration file, the startup layer (§2, §3.1) | yes | |
 | Install from a local path or Git, update, remove, list (§3.2–§3.6) | yes | marketplace |
-| Plugin code: create, turn on/off, replace, reload loader rows (§3) | yes, TypeScript | Python plugins installed from a directory (Appendix D) |
+| Plugin code: create, turn on/off, replace, reload loader rows (§3) | yes, TypeScript and Python | |
+| Runtimes fetched after startup (§2.5) | yes | |
 | `plugin.*` management methods and `dimcode plugin` commands (§6, A.1) | yes | client notifications of changes |
 | Agent tools through a Session part (§6) | yes | |
 | The default CLI loads the default plugins (goal, web, session-title, workflow, scheduler) | yes | |
@@ -156,6 +157,14 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 | Which built-in rutis plugins exist | the App Server's assembly | rows of the `assembly` layer in `Loader::entries()`; the row id is the plugin's name |
 | Skills, MCP servers, hooks registered from a plugin | SkillsCatalog, Mcp, Hooks | the owner's own methods |
 | A plugin's business configuration | the plugin's Settings sources | Settings |
+
+### 2.5 Runtimes
+
+The release ships Dim, the default configuration file and the default plugins' directories; it does not ship the Node or Python runtime. When a runtime that a plugin in use needs is missing, the App Server downloads it into `<home>/runtimes/` after it starts. Startup does not wait for it: a plugin row gates on its runtime's row, so it stays `Pending` until the runtime is ready and then starts by itself. `plugin.list` shows such a row as waiting for its runtime (`Loader::waiting_for`).
+
+- TypeScript: `code.entry` is a `.ts` or `.js` file; the Node runtime imports it by its absolute path.
+- Python: `code.entry` is a `.py` file; the Python runtime has the plugin directory on its import path and imports the entry module from there.
+- Reload re-imports only the entry module, in both languages ([requirement 3](../plugin-management.md)).
 
 ## 3. Flows
 
@@ -344,8 +353,9 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 7. `disable PluginManager` is refused with `plugin_locked`.
 8. A Git install with a `file://` URL is refused; a failed clone leaves nothing under `<home>/plugins`.
 9. A default plugin's Settings source appears when it starts and disappears when it is turned off.
+10. On a home without runtimes, `dimcode` starts at once; the default plugins show as waiting for their runtime and start after the download.
+11. A Python plugin installed from a local path registers its tool, and reload picks up an edit to its entry module.
 
 ## Appendix D. Open questions
 
-- Python plugins installed from a directory: today a Python row names a module (`py:<module>`) imported from one configured project directory. Loading a module from a plugin directory needs a decision in the Python runtime setup; after M1.
-- How the release ships the default plugins and the TypeScript runtime, and how `node` is found, is a release packaging item of M1 tracked with #384.
+None.
