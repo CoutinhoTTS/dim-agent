@@ -436,7 +436,7 @@ async fn an_optional_part_settles_before_publication_and_its_failure_stays_local
         !creating.is_finished(),
         "published before an optional part it opened with settled"
     );
-    gate.notify_waiters();
+    gate.notify_one();
     let session = tokio::time::timeout(Duration::from_secs(5), creating)
         .await
         .expect("a settled optional part releases publication")
