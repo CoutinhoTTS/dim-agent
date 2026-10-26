@@ -377,7 +377,7 @@ export class Fold {
         if (!this.firstInput && mode === 'queue') {
           this.firstInput = true
           const line = data.user?.content.find(content => content.type === 'text')?.text?.split('\n')[0]
-          const role = line && marker(line)
+          const role = line ? marker(line) : undefined
           const evaluation = sequenceOf(role?.evaluation)
           if (role?.kind === 'evaluate' && role.branch === this.openingParent && evaluation !== undefined) {
             this.evaluate = { branch: role.branch, evaluation }

@@ -7,6 +7,9 @@ import {
 } from './goal.ts'
 
 type Delivery = { replay: AgentEvent[] } | { live: AgentEvent }
+// The payload of a `turn/end`, which the runtime decodes against its typed
+// contract (crates/dim-agent-types: `TurnEndData`).
+type TurnEnd = { turn_id: string; status: string }
 type Dispatcher = {
   consume(name: string, keys: string[], handler: (delivery: Delivery) => void | Promise<void>): Promise<void>
   local(start: number | bigint, through: number | bigint): Promise<AgentEvent[]>
@@ -38,11 +41,13 @@ export default definePlugin({
     const settings = ctx.use<Settings>('settings')
     const { branchId } = await ctx.use<{ get(): Promise<{ branchId: string }> }>('timelineIdentity').get()
     const lifecycle = ctx.use<{ activated(): Promise<boolean>; closing(): Promise<void> }>('branchLifecycle')
-    // The caller's cancellation for a branch creation, completed on cleanup.
-    const cancelled = Promise.withResolvers<void>()
+    // The caller's cancellation for a branch creation, completed on cleanup
+    // (the deferred form session-title builds for its auxiliary request).
+    let cancel = () => {}
+    const cancellation = new Promise<void>(resolve => { cancel = resolve })
     let stopped = false
-    ctx.effect(() => { stopped = true; cancelled.resolve() })
-    void lifecycle.closing().then(() => { stopped = true; cancelled.resolve() })
+    ctx.effect(() => { stopped = true; cancel() })
+    void lifecycle.closing().then(() => { stopped = true; cancel() })
 
     const fold = new Fold()
     let start: bigint | undefined
@@ -88,7 +93,7 @@ export default definePlugin({
           await tree.create(branchId, after, {
             prompt: evaluatorPrompt(branchId, evaluation, fold.objective ?? '', request.summary),
             source: { kind: 'host', operation_id: evaluationOperation(evaluation) },
-          }, () => cancelled.promise)
+          }, () => cancellation)
         } catch {
           // A creation that committed records its own child or failure; a
           // throw pauses only while the evaluation it started is current.
@@ -125,7 +130,7 @@ export default definePlugin({
         await tree.input(branchId, writes.pause(branchId, 'evaluation_failed', evaluation))
         return
       }
-      if (action.write !== 'continue') {
+      if (action.write === 'completed' || action.write === 'blocked') {
         await tree.input(branchId, writes.evaluated(branchId, action.write, conclusion.evaluation, action.text))
         return
       }
@@ -158,7 +163,7 @@ export default definePlugin({
     }
     // The evaluator role: report the turn's conclusion to the branch this
     // branch was created for, after asking once for a conclusion (§4.2).
-    const evaluated = (sequence: bigint, turnStart: bigint, end: { turn_id: string; status: string }) =>
+    const evaluated = (sequence: bigint, turnStart: bigint, end: TurnEnd) =>
       task(`evaluate:${sequence}`, async () => {
         const role = fold.evaluate
         if (!role || fold.turnEnd?.sequence !== sequence) return
@@ -217,7 +222,7 @@ export default definePlugin({
         const evaluation = fold.evaluationOf(event.data.branch)
         if (evaluation !== undefined) evaluationFailed(evaluation)
       } else if (fold.evaluate) {
-        if (event.type === 'turn' && event.name === 'end') evaluated(sequence, turnStart, event.data)
+        if (event.type === 'turn' && event.name === 'end') evaluated(sequence, turnStart, event.data as TurnEnd)
       } else if (event.type === 'turn' && event.name === 'end') {
         decideEnd()
       } else if (event.type === 'stop' && event.name === 'interrupt' && event.data.scope === 'turn') {
