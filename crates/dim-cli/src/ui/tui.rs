@@ -2399,6 +2399,9 @@ impl App {
                 live.extend(queue_strip(&queued, self.queue_rows, cols, &self.palette));
             }
         }
+        // The composer (or the prompt in its place) never moves up: the queue
+        // above it gives back its rows above it.
+        frame.anchor = live.len();
         // One blank row above the composer, always: the run status lives in
         // the composer's top border rather than on a row of its own, so the
         // composer does not hop when a run starts or ends.
@@ -3657,6 +3660,193 @@ mod tests {
         let row = live_thinking(&long, false, 40, p).remove(0);
         assert!(row.contains("thought."), "{row:?}");
         assert!(!row.contains("Paragraph 1 "), "{row:?}");
+    }
+
+    /// A session that never answers: the interface alone is under test.
+    struct Idle;
+
+    impl SessionPort for Idle {
+        fn send(&self, _: Command) {}
+        fn drain(&self) -> Vec<Update> {
+            Vec::new()
+        }
+        fn shutdown(self: Box<Self>) {}
+    }
+
+    /// The interface drawn into an emulated terminal, frame by frame.
+    struct Drawn {
+        app: App,
+        screen: Screen,
+        emu: crate::ui::render::testterm::Emu,
+        size: (u16, u16),
+        _home: tempfile::TempDir,
+    }
+
+    impl Drawn {
+        fn new(size: (u16, u16), origin: Option<u16>, synchronized: bool) -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let theme = test_theme();
+            let app = App::new(
+                Box::new(Idle),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                home.path().to_path_buf(),
+                "/work".into(),
+            );
+            let mut screen = Screen::new(size, synchronized);
+            if let Some(row) = origin {
+                screen.set_origin(row);
+            }
+            let emu = crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+            let mut drawn = Self {
+                app,
+                screen,
+                emu,
+                size,
+                _home: home,
+            };
+            drawn.draw();
+            drawn
+        }
+
+        fn draw(&mut self) {
+            let frame = self.app.frame(self.size);
+            let bytes = self.screen.render(&frame, self.size);
+            self.emu.feed(&bytes);
+        }
+
+        fn key(&mut self, code: KeyCode) {
+            let key = crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE);
+            let _ = self.app.handle(InputEvent::Key(key));
+            self.draw();
+        }
+
+        fn ask(&mut self, call: crate::question::Call) {
+            self.app.prompt = Some(Prompt::Ask(AskUserPrompt::new(call)));
+            self.draw();
+        }
+
+        fn answered(&mut self) {
+            self.app.prompt = None;
+            self.draw();
+        }
+
+        /// Screen row of the composer's top border, or the prompt's in its
+        /// place: the first box under the history.
+        fn anchor(&self) -> usize {
+            let rows = self.emu.rows_text();
+            let banner = rows
+                .iter()
+                .rposition(|r| r.contains("Git branch"))
+                .map_or(0, |b| b + 2);
+            rows.iter()
+                .enumerate()
+                .skip(banner)
+                .find(|(_, r)| r.trim_start().starts_with('╭'))
+                .map(|(y, _)| y)
+                .unwrap_or_else(|| panic!("no box on screen: {rows:#?}"))
+        }
+
+        fn scrolled(&self) -> usize {
+            self.emu.scrollback.len()
+        }
+    }
+
+    fn questions() -> crate::question::Call {
+        use crate::question::{Call, Choice, Question};
+        let choices = |n: usize| {
+            (0..n)
+                .map(|i| Choice {
+                    label: format!("option {i}"),
+                    description: (i % 2 == 0).then(|| format!("about option {i}")),
+                })
+                .collect()
+        };
+        let question = |id: &str, n: usize| Question {
+            id: id.into(),
+            header: Some(id.into()),
+            question: format!("Which {id}?"),
+            options: choices(n),
+            multi_select: false,
+            allow_custom: true,
+        };
+        Call {
+            branch_id: "main".into(),
+            request_id: "ask".into(),
+            call_id: "call".into(),
+            questions: vec![question("tall", 6), question("short", 2)],
+        }
+    }
+
+    /// The command menu and a question, opened and closed again and again,
+    /// at the bottom of the screen or with room below: the composer never
+    /// moves up while there is room, history scrolls at most once, and every
+    /// round after the first leaves the screen exactly as the first did.
+    #[test]
+    fn menus_and_questions_never_lift_the_composer_twice() {
+        for (origin, synchronized) in [
+            (None, true),
+            (None, false),
+            (Some(0), true),
+            (Some(3), false),
+        ] {
+            let mut drawn = Drawn::new((80, 40), origin, synchronized);
+            let start = drawn.anchor();
+            let round = |drawn: &mut Drawn| {
+                let scrolled = drawn.scrolled();
+                let mut last = drawn.anchor();
+                // Only a region that runs to the bottom row may lift it.
+                let mut check = |drawn: &Drawn, what: &str| {
+                    let at = drawn.anchor();
+                    let bottom = !drawn.emu.row(drawn.size.1 as usize - 1).is_empty();
+                    assert!(
+                        at >= last || bottom,
+                        "{what}: the composer moved up from {last} to {at}: {:#?}",
+                        drawn.emu.rows_text()
+                    );
+                    last = at;
+                };
+                drawn.key(KeyCode::Char('/'));
+                check(drawn, "menu opened");
+                drawn.key(KeyCode::Down);
+                drawn.key(KeyCode::Esc);
+                drawn.key(KeyCode::Esc);
+                check(drawn, "menu closed");
+                drawn.ask(questions());
+                check(drawn, "question asked");
+                drawn.key(KeyCode::Tab);
+                check(drawn, "short question");
+                drawn.key(KeyCode::Tab);
+                check(drawn, "review");
+                drawn.key(KeyCode::BackTab);
+                drawn.key(KeyCode::BackTab);
+                check(drawn, "tall question again");
+                drawn.answered();
+                check(drawn, "answered");
+                (
+                    drawn.scrolled() - scrolled,
+                    drawn.anchor(),
+                    drawn.emu.rows_text(),
+                )
+            };
+            let first = round(&mut drawn);
+            let label = format!("origin {origin:?} sync {synchronized}");
+            if origin.is_some() {
+                assert_eq!(first.0, 0, "{label}: room below, nothing scrolls");
+                assert_eq!(
+                    first.1, start,
+                    "{label}: the composer stayed: {:#?}",
+                    first.2
+                );
+            }
+            for _ in 0..4 {
+                let again = round(&mut drawn);
+                assert_eq!(again.0, 0, "{label}: scrolled again: {:#?}", again.2);
+                assert_eq!(again.1, first.1, "{label}");
+                assert_eq!(again.2, first.2, "{label}");
+            }
+            assert_eq!(drawn.emu.flickers, 0, "{label}");
+        }
     }
 
     /// The queue strip keeps the height it reached while messages leave.
