@@ -6,7 +6,8 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -309,18 +310,22 @@ enum ConfigurationTamper {
     ConfigurationRevision,
 }
 
-struct TamperConfiguration(ConfigurationTamper);
-impl TypedPlugin for TamperConfiguration {
-    type Deps = (Keyed<Timeline>,);
+struct TamperConfiguration(ConfigurationTamper, Key<Timeline>);
+impl TamperConfiguration {
+    fn new(names: &Names<'_>, tamper: ConfigurationTamper) -> rutis::Result<Self> {
+        Ok(Self(tamper, names.key()?))
+    }
+}
+impl DynPlugin for TamperConfiguration {
     fn name(&self) -> &str {
         "TamperConfiguration"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.1.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.1)?;
             let tamper = self.0;
             timeline.before(
                 ctx,
@@ -390,25 +395,29 @@ fn builder_with_context(host: Arc<Prompts>, prepare: Arc<dyn PrepareContext>) ->
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::install_with_prompt(&mut builder, host, None);
     builder
 }
 
-struct RejectSecondRequest(Arc<AtomicUsize>);
-impl TypedPlugin for RejectSecondRequest {
-    type Deps = (Keyed<Timeline>,);
+struct RejectSecondRequest(Arc<AtomicUsize>, Key<Timeline>);
+impl RejectSecondRequest {
+    fn new(names: &Names<'_>, calls: Arc<AtomicUsize>) -> rutis::Result<Self> {
+        Ok(Self(calls, names.key()?))
+    }
+}
+impl DynPlugin for RejectSecondRequest {
     fn name(&self) -> &str {
         "RejectSecondPromptRequest"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.1.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.1)?;
             let calls = self.0.clone();
             timeline.before(
                 ctx,
@@ -440,7 +449,7 @@ async fn configuration_publication_preserves_trusted_before_changes_atomically()
         let mut builder = builder(host);
         builder.require_feature(
             Feature::new("TamperConfiguration").branch("TamperConfiguration", move |names| {
-                names.part(TamperConfiguration(tamper))
+                Ok(Box::new(TamperConfiguration::new(names, tamper)?))
             }),
         );
         let agent = builder.build();
@@ -1137,18 +1146,26 @@ async fn initial_configuration_loads_before_start_and_failure_rolls_back() {
     );
 }
 
-struct OpeningObserved(Arc<Notify>, CancellationToken);
-impl TypedPlugin for OpeningObserved {
-    type Deps = Keyed<Dispatcher>;
+struct OpeningObserved(Arc<Notify>, CancellationToken, Key<Dispatcher>);
+impl OpeningObserved {
+    fn new(
+        names: &Names<'_>,
+        observed: Arc<Notify>,
+        cancelled: CancellationToken,
+    ) -> rutis::Result<Self> {
+        Ok(Self(observed, cancelled, names.key()?))
+    }
+}
+impl DynPlugin for OpeningObserved {
     fn name(&self) -> &str {
         "OpeningObserved"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        Keyed(dispatcher): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.2.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.2)?;
             let observed = self.0.clone();
             dispatcher.subscribe(
                 ctx,
@@ -1174,18 +1191,23 @@ impl TypedPlugin for OpeningObserved {
     }
 }
 
-struct OpeningFailure;
-impl TypedPlugin for OpeningFailure {
-    type Deps = (Keyed<Dispatcher>, Keyed<BranchOpening>);
+struct OpeningFailure(Key<Dispatcher>, Key<BranchOpening>);
+impl OpeningFailure {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self(names.key()?, names.key()?))
+    }
+}
+impl DynPlugin for OpeningFailure {
     fn name(&self) -> &str {
         "OpeningFailure"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher), Keyed(opening)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.0.erase(), self.1.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.0)?;
+            let opening = ctx.require_at(&self.1)?;
             dispatcher.subscribe(ctx, "OpeningFailure", &["branch/start"], move |_| {
                 let opening = opening.clone();
                 Box::pin(async move {
@@ -1206,7 +1228,9 @@ impl TypedPlugin for OpeningFailure {
 async fn opening_failure_is_not_hidden_by_an_earlier_pending_receipt() {
     let mut builder = builder(Arc::new(Prompts(Mutex::new(BTreeMap::new()))));
     builder.require_feature(
-        Feature::new("OpeningFailure").branch("OpeningFailure", |names| names.part(OpeningFailure)),
+        Feature::new("OpeningFailure").branch("OpeningFailure", |names| {
+            Ok(Box::new(OpeningFailure::new(names)?))
+        }),
     );
     let agent = builder.build();
     let result = tokio::time::timeout(
@@ -1292,11 +1316,16 @@ async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host()
                 });
                 let signal = observed.clone();
                 let cancel_signal = cancelled.clone();
-                builder.require_feature(
-                    Feature::new("OpeningObserved").branch("OpeningObserved", move |names| {
-                        names.part(OpeningObserved(signal.clone(), cancel_signal.clone()))
-                    }),
-                );
+                builder.require_feature(Feature::new("OpeningObserved").branch(
+                    "OpeningObserved",
+                    move |names| {
+                        Ok(Box::new(OpeningObserved::new(
+                            names,
+                            signal.clone(),
+                            cancel_signal.clone(),
+                        )?))
+                    },
+                ));
                 let agent = builder.build();
                 let creating = agent.clone();
                 let mut creation = tokio::spawn(async move {
@@ -1972,11 +2001,15 @@ async fn large_request_can_supersede_a_consumed_load_without_a_history_byte_budg
         Reply::Wait(release.clone(), entry("rules", "1", "valid")),
     )]))));
     let mut builder = builder(host);
-    builder.require_feature(
-        Feature::new("RejectSecondPromptRequest").branch("RejectSecondPromptRequest", |names| {
-            names.part(RejectSecondRequest(Arc::new(AtomicUsize::new(0))))
-        }),
-    );
+    builder.require_feature(Feature::new("RejectSecondPromptRequest").branch(
+        "RejectSecondPromptRequest",
+        |names| {
+            Ok(Box::new(RejectSecondRequest::new(
+                names,
+                Arc::new(AtomicUsize::new(0)),
+            )?))
+        },
+    ));
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())
@@ -2071,18 +2104,26 @@ async fn loader_panic_is_reported_to_the_agent_supervisor() {
 
 struct RetargetModel {
     replace_snapshot: bool,
+    timeline: Key<Timeline>,
 }
-impl TypedPlugin for RetargetModel {
-    type Deps = (Keyed<Timeline>,);
+impl RetargetModel {
+    fn new(names: &Names<'_>, replace_snapshot: bool) -> rutis::Result<Self> {
+        Ok(Self {
+            replace_snapshot,
+            timeline: names.key()?,
+        })
+    }
+}
+impl DynPlugin for RetargetModel {
     fn name(&self) -> &str {
         "RetargetModel"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
             let replace_snapshot = self.replace_snapshot;
             timeline.before(ctx, "retarget", &["model/call"], move |mut draft| {
                 if let EventKind::ModelCall(call) = &mut draft.kind {
@@ -2117,7 +2158,7 @@ async fn before_retargeting_requires_matching_capabilities_without_remerging_par
         );
         builder.require_feature(
             Feature::new("RetargetModel").branch("RetargetModel", move |names| {
-                names.part(RetargetModel { replace_snapshot })
+                Ok(Box::new(RetargetModel::new(names, replace_snapshot)?))
             }),
         );
         let agent = builder.build();

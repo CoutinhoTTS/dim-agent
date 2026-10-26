@@ -1,7 +1,9 @@
 //! Generic, host-owned file transactions for an explicitly authorized plugin root.
 //! No account formats or provider policy belong at this boundary.
 use dim_agent_capabilities::file_storage::{FileLease, FileStorage, FileStorageError};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use dim_agent_runtime::Names;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value, host_key};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -294,40 +296,49 @@ impl HostDispatch for Dispatch {
 
 /// The composition root chooses the authorized root; JS cannot register roots.
 #[derive(Clone)]
-pub struct PluginFilesPlugin(pub usize);
-impl TypedPlugin for PluginFilesPlugin {
-    type Deps = Keyed<FileStorage>;
+pub struct PluginFilesPlugin {
+    root: usize,
+    storage: Key<FileStorage>,
+}
+impl PluginFilesPlugin {
+    pub fn new(names: &Names<'_>, root: usize) -> rutis::Result<Self> {
+        Ok(Self {
+            root,
+            storage: names.key()?,
+        })
+    }
+}
+impl DynPlugin for PluginFilesPlugin {
     fn name(&self) -> &str {
         "PluginFiles"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        Keyed(storage): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.storage.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let storage = ctx.require_at(&self.storage)?;
             let files = Arc::new(Files {
                 storage,
-                root: self.0,
+                root: self.root,
                 admission: Mutex::new(()),
                 stopping: CancellationToken::new(),
                 tasks: TaskTracker::new(),
             });
             let owner = files.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let _admission = owner.admission.lock().unwrap();
-                            owner.stopping.cancel();
-                            owner.tasks.close();
-                        }
-                        owner.tasks.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                {
+                    let _admission = owner.admission.lock().unwrap();
+                    owner.stopping.cancel();
+                    owner.tasks.close();
+                }
+                owner.tasks.wait().await;
+                Ok(())
             })?;
-            ctx.provide_as::<dyn HostDispatch>(host_key("pluginFiles"), Arc::new(Dispatch(files)))?;
+            ctx.provide_at(
+                host_key("pluginFiles"),
+                Arc::new(Dispatch(files)) as Arc<dyn HostDispatch>,
+            )?;
             Ok(Effect::Done)
         })
     }

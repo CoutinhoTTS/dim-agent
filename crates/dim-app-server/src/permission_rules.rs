@@ -12,7 +12,8 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::{AgentBuilder, Names};
 use dim_agent_types::{COMMAND_SEPARATORS, CommandRule};
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -49,7 +50,7 @@ pub fn install(builder: &mut AgentBuilder) {
     crate::register_names(builder.catalog_mut());
     builder.require_feature(
         dim_agent_runtime::Feature::new("CommandRules").session("CommandRules", |names| {
-            names.part(CommandRulesPlugin::new(names)?)
+            Ok(Box::new(CommandRulesPlugin::new(names)?))
         }),
     );
 }
@@ -74,25 +75,30 @@ impl ReadCommandRules for SettingsRules {
     }
 }
 
-struct CommandRulesPlugin(DepKey<CommandRulesHost>);
+struct CommandRulesPlugin {
+    host: Key<CommandRulesHost>,
+    settings: Key<SettingsService>,
+}
 impl CommandRulesPlugin {
-    fn new(names: &Names<'_>) -> Result<Self, CordisError> {
-        Ok(Self(names.key()?))
+    fn new(names: &Names<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            host: names.key()?,
+            settings: names.key()?,
+        })
     }
 }
-impl TypedPlugin for CommandRulesPlugin {
-    type Deps = (Keyed<SettingsService>,);
+impl DynPlugin for CommandRulesPlugin {
     fn name(&self) -> &str {
         "CommandRules"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(settings),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.settings.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            ctx.provide_as(
-                self.0.key().clone(),
+            let settings = ctx.require_at(&self.settings)?;
+            ctx.provide_at(
+                self.host.clone(),
                 Arc::new(CommandRulesHost(Arc::new(SettingsRules(settings)))),
             )?;
             Ok(Effect::Done)
@@ -128,18 +134,29 @@ fn error(error: SettingsError) -> RpcError {
 }
 
 /// Process owner of the `permission` source and its management methods.
-pub struct PermissionRulesPlugin;
-impl TypedPlugin for PermissionRulesPlugin {
-    type Deps = (Keyed<SettingsService>, Keyed<ManagementMethods>);
+pub struct PermissionRulesPlugin {
+    settings: Key<SettingsService>,
+    methods: Key<ManagementMethods>,
+}
+impl PermissionRulesPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            settings: names.key()?,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for PermissionRulesPlugin {
     fn name(&self) -> &str {
         "PermissionRules"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(settings), Keyed(methods)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.settings.erase(), self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let settings = ctx.require_at(&self.settings)?;
+            let methods = ctx.require_at(&self.methods)?;
             methods.register(
                 ctx,
                 "permission",

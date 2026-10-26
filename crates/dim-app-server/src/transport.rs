@@ -16,12 +16,13 @@ use axum::{
     routing::get,
 };
 use dim_agent_capabilities::methods::RpcError;
-use dim_agent_runtime::{Names, When};
+use dim_agent_runtime::Names;
 use futures_util::{
     SinkExt, StreamExt,
     stream::{SplitSink, SplitStream},
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, KeyedGate, Plugin, TypeKey, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
+use rutis::{Ctx, Error};
 use std::{io, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf},
@@ -285,40 +286,42 @@ pub(crate) struct ListenAddresses {
 /// the process fault.
 pub(crate) struct TransportPlugin {
     config: Arc<ServerConfig>,
+    hub: Key<ConnectionHub>,
+    control: Key<ServerControl>,
+    /// With native storage, endpoints bind only once the database lock is held.
+    storage: Option<Key<SqliteStorage>>,
 }
 impl TransportPlugin {
-    pub fn new(config: Arc<ServerConfig>) -> Self {
-        Self { config }
-    }
-    /// This part with its keys: the database lock only with native storage.
-    pub fn part(self, names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
-        let keys = (
-            names.key::<ConnectionHub>()?,
-            names.key::<ServerControl>()?,
-            names.when::<KeyedGate<SqliteStorage>>(self.config.database_path.is_some())?,
-        );
-        Ok(names.part_with(self, keys))
+    /// The database lock is a dependency only with native storage.
+    pub fn new(names: &Names<'_>, config: Arc<ServerConfig>) -> rutis::Result<Self> {
+        Ok(Self {
+            hub: names.key()?,
+            control: names.key()?,
+            storage: config
+                .database_path
+                .is_some()
+                .then(|| names.key::<SqliteStorage>())
+                .transpose()?,
+            config,
+        })
     }
 }
-fn io_failure(error: io::Error) -> CordisError {
-    CordisError::PluginFailed(Box::new(error))
+fn io_failure(error: io::Error) -> Error {
+    rutis::Error::from(ErrorKind::PluginFailed(Box::new(error)))
 }
-impl TypedPlugin for TransportPlugin {
-    /// With native storage, endpoints bind only once the database lock is held.
-    type Deps = (
-        Keyed<ConnectionHub>,
-        Keyed<ServerControl>,
-        When<KeyedGate<SqliteStorage>>,
-    );
+impl DynPlugin for TransportPlugin {
     fn name(&self) -> &str {
         "Transport"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(hub), Keyed(control), _): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        let mut keys = vec![self.hub.erase(), self.control.erase()];
+        keys.extend(self.storage.as_ref().map(Key::erase));
+        keys
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let hub = ctx.require_at(&self.hub)?;
+            let control = ctx.require_at(&self.control)?;
             #[cfg(unix)]
             let unix = match &self.config.unix_path {
                 Some(path) => Some(
@@ -478,17 +481,11 @@ impl TypedPlugin for TransportPlugin {
                 watch_stop.cancel();
                 while listeners.join_next().await.is_some() {}
             });
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        stop.cancel();
-                        watcher
-                            .await
-                            .map_err(|error| CordisError::PluginFailed(Box::new(error)))
-                    })
-                }))
+            ctx.effect(move || async move {
+                stop.cancel();
+                Ok(watcher.await?)
             })?;
-            ctx.provide_as(TypeKey::of::<ListenAddresses>(), Arc::new(addresses))?;
+            ctx.provide_as::<ListenAddresses>(Arc::new(addresses))?;
             Ok(Effect::Done)
         })
     }

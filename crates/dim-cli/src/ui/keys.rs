@@ -76,7 +76,7 @@ pub fn report(fullscreen: bool, mouse: bool) -> Vec<String> {
         rows.push(t("Fullscreen").to_owned());
         rows.push(format!(
             "  {}",
-            t("PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it")
+            t("PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it")
         ));
         rows.push(format!(
             "  {}",

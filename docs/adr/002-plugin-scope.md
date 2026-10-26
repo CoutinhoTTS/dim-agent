@@ -4,7 +4,10 @@ Decision status: Proposed. Applies to the plugin designs in `docs/design/` and t
 
 Extended by [ADR 006](006-plugin-contract.md): D1–D4 stand. D5 is completed by the
 [plugin contract](../design/plugin-contract.md): Dim's runtime services join the named catalog, a
-part's placement is its loader row's group, and Rust is one binding of the contract.
+part's placement is its loader row's group, and Rust is one binding of the contract. D2 and D5
+amended on 2026-10-26 to name the tool mechanism as built: a part registers a tool with the Session's
+`toolRegistry` (ADR 006 D4), and `toolContribution`, `SessionToolSource` and `Contributions<T>` are
+gone.
 
 ## Context
 
@@ -44,7 +47,7 @@ own scope:
 
 | Need | Mechanism |
 | --- | --- |
-| Offer tools to a Session | Session-scoped `toolContribution` (named tool service) or `SessionToolSource` |
+| Offer tools to a Session | The contributing part registers the tool with the Session's `toolRegistry` (ADR 006 D4, R6) |
 | Offer instructions | PromptRegistry prompt sources |
 | Observe a Session's events | the existing Session broadcast, from a Session-scoped plugin |
 | Observe and act on a branch's events in order | the branch Dispatcher, from a branch-scoped plugin |
@@ -92,10 +95,10 @@ language-neutral form:
 | Errors | Data: `{code, message}` with documented codes |
 | Cancellation | A protocol action: a cancel request, or the consumer dropping the call |
 | Registration | Declared by the plugin (its `provides` and loader row), not by host-side `AgentBuilder` calls; consumers collect by service name and scope |
-| Rust specifics | Trait signatures, `TypeKey`, `Contributions<T>` and `AgentBuilder` calls are one binding, listed in a "Rust binding" appendix |
+| Rust specifics | Trait signatures, `TypeKey` and `AgentBuilder` calls are one binding, listed in a "Rust binding" appendix |
 
 Canonical services: `sessionMethods` (Session, per namespace), `managementMethods` (process, per
-namespace), `toolContribution` (Session, per tool name), `sessions` (process) and
+namespace), `toolRegistry` (Session, the tools a part registers), `sessions` (process) and
 `collaborationMembers` (process, per member kind). They are defined in the [contracts](../design/contracts/session-boundary.md)
 and the owning plugin documents. The runtime's existing typed services (Timeline, Dispatcher,
 ToolHost and others) are unchanged; exposing them by name to non-Rust capability parts is the work

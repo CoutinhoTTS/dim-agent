@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-aimux"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "aimux-core",
  "aimux-provider-utils",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-attachments"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-capabilities"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-integration-tests"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-questions"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",
@@ -1052,12 +1052,13 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-runtime"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "futures-util",
  "rutis",
+ "rutis-bridge",
  "rutis-loader",
  "schemars",
  "serde",
@@ -1079,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "dim-app-server"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -1122,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "dim-cli"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "anstyle",
  "base64 0.22.1",
@@ -1143,6 +1144,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "tokio",
  "unicode-segmentation",
@@ -1157,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "dimcode"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "base64 0.22.1",
  "dim-agent-types",
@@ -1166,6 +1168,7 @@ dependencies = [
  "image",
  "libc",
  "serde_json",
+ "sha2 0.10.9",
  "url",
  "uuid",
 ]
@@ -1326,6 +1329,16 @@ dependencies = [
  "libc",
  "thiserror 1.0.69",
  "winapi",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
@@ -3406,9 +3419,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutis"
-version = "0.16.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2979977c416f20b5ca9315b94538dc94d7424084461ec56b2af42b7314849a3a"
+checksum = "a639effcff303b19fca7eea4ad6deebc3814ce96f1c568db3c34a685d3074c40"
 dependencies = [
  "erased-serde",
  "rutis-macros",
@@ -3422,9 +3435,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-bridge"
-version = "0.16.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dcf8d930b1c200a05fca2166bab4ecf412c44d0d57b35d0c4916e13da6ed59c"
+checksum = "b2854909925c2e43d86ba9b8a104bc30dda10881edc4aee22d3a8c6e70bb4339"
 dependencies = [
  "getrandom 0.2.17",
  "libc",
@@ -3443,9 +3456,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-loader"
-version = "0.16.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b66ad6bd4f41d2cb91f6773766c4eaaa91bb8867f0c4c40e75c9d04153451db"
+checksum = "0b615d960b04759786cb48feee35825de746b7ce4d6835df9cebeb2bb099d5fe"
 dependencies = [
  "libc",
  "rutis",
@@ -3460,9 +3473,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-macros"
-version = "0.16.0"
+version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4632181bfad5038d3c412f153711791f3a9e63aeab3bef74822c630b9e088eac"
+checksum = "94362cc1d6366716bb85f658c613c678b3f26c49b416a73e924d944af28b2d38"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4077,6 +4090,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4100,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "test-extension-a"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "dim-agent-runtime",
  "rutis",
@@ -4108,7 +4131,7 @@ dependencies = [
 
 [[package]]
 name = "test-extension-b"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "dim-agent-runtime",
  "rutis",
@@ -5087,7 +5110,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 dependencies = [
  "dim-agent-aimux",
  "dim-agent-attachments",

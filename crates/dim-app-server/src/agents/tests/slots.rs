@@ -7,9 +7,10 @@
 //! so every count is exact.
 use super::{AgentIndex, builder, config};
 use crate::{RunningServer, ServerConfig, agents::SessionSlot};
-use dim_agent_runtime::{AgentBuilder, Feature, SessionIdentity};
+use dim_agent_runtime::{AgentBuilder, Feature, Names, SessionIdentity};
 use futures_util::{SinkExt, StreamExt};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -346,7 +347,7 @@ impl HeldRestore {
         let held = self.clone();
         builder.require_feature(
             Feature::new("test.held-restore").session("test.held-restore", move |names| {
-                names.part(HeldRestorePart(held.clone()))
+                Ok(Box::new(HeldRestorePart::new(names, held.clone())?))
             }),
         );
     }
@@ -362,19 +363,29 @@ impl HeldRestore {
         self.0.release.notify_one();
     }
 }
-struct HeldRestorePart(HeldRestore);
-impl TypedPlugin for HeldRestorePart {
-    type Deps = Keyed<SessionIdentity>;
+struct HeldRestorePart {
+    held: HeldRestore,
+    identity: Key<SessionIdentity>,
+}
+impl HeldRestorePart {
+    fn new(names: &Names<'_>, held: HeldRestore) -> rutis::Result<Self> {
+        Ok(Self {
+            held,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for HeldRestorePart {
     fn name(&self) -> &str {
         "test.held-restore"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        Keyed(identity): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let state = &self.0.0;
+            let identity = ctx.require_at(&self.identity)?;
+            let state = &self.held.0;
             let held = identity.restored
                 && state
                     .held

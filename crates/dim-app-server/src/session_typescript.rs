@@ -8,12 +8,15 @@ use crate::{
 };
 use dim_agent_capabilities::{methods::SessionMethods, tool_registry::ToolRegistry};
 use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, SESSION_GROUP, names::name_of};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, PluginFactory, TypeKey};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, PluginFactory, TypeKey};
+use rutis::{Ctx, Error};
 use rutis_bridge::{
     runtime::{LocalRuntime, Stdio},
     session::host_key,
 };
-use rutis_loader::{Build, LoaderError, Resolved, Resolver, RuntimeResolver, ServiceCatalog};
+use rutis_loader::resolve::{Build, Resolved};
+use rutis_loader::runtime::RuntimeResolver;
+use rutis_loader::{LoaderError, Resolver, ServiceCatalog};
 use serde_json::{Map, Value};
 use std::{
     collections::{HashMap, HashSet},
@@ -21,17 +24,46 @@ use std::{
     sync::Arc,
 };
 
-// The Session and branch services served by name (build.rs).
-rutis_bridge::include_exports!(mod exports);
+/// The Session and branch services marked `#[rutis::service]`: provided in
+/// their instance, each is served by name there.
+fn crossing_instance_names() -> [(String, &'static str); 8] {
+    [
+        (
+            name_of::<dim_agent_capabilities::timeline_tree::TreeCommands>(),
+            SESSION_GROUP,
+        ),
+        (
+            name_of::<dim_agent_runtime::SessionIdentity>(),
+            SESSION_GROUP,
+        ),
+        (
+            name_of::<dim_agent_runtime::SessionLifecycle>(),
+            SESSION_GROUP,
+        ),
+        (name_of::<dim_agent_runtime::SessionConfig>(), SESSION_GROUP),
+        (name_of::<dim_agent_runtime::Dispatcher>(), BRANCH_GROUP),
+        (
+            name_of::<dim_agent_runtime::BranchLifecycle>(),
+            BRANCH_GROUP,
+        ),
+        (name_of::<dim_agent_runtime::Timeline>(), BRANCH_GROUP),
+        (
+            name_of::<dim_agent_runtime::TimelineIdentity>(),
+            BRANCH_GROUP,
+        ),
+    ]
+}
 
 /// The names a host of foreign parts shares across languages beyond those
-/// the catalog already shares: the Session and branch services listed in
-/// build.rs, and the tool and method registries, with which a part of any
-/// language registers its contributions. The
-/// generated catalog (`xtask graph`) shares them the same way.
+/// the catalog already shares: the marked Session and branch services, and
+/// the tool and method registries, with which a part of any language
+/// registers its contributions. The generated catalog (`xtask graph`)
+/// shares them the same way.
 pub fn share_names(catalog: &mut ServiceCatalog) {
+    for (name, group) in crossing_instance_names() {
+        catalog.register_shared_instance(name, group);
+    }
     catalog
-        .export_all(exports::all())
         .register_shared_instance(name_of::<ToolRegistry>(), SESSION_GROUP)
         .register_shared_instance(name_of::<SessionMethods>(), SESSION_GROUP)
         .register_shared(name_of::<ManagementMethods>());
@@ -178,6 +210,21 @@ impl Parts {
                 ));
             }
             for service in provides.keys() {
+                // R6 registers contributions through their owner, not through
+                // a host-side name. A row still naming an old family would
+                // load with its contributions silently missing.
+                if let Some((family, owner)) = [
+                    ("toolContribution:", "toolRegistry"),
+                    ("sessionMethods:", "sessionMethods"),
+                    ("managementMethods:", "managementMethods"),
+                ]
+                .into_iter()
+                .find(|(family, _)| service.starts_with(family))
+                {
+                    return Err(invalid(&format!(
+                        "TypeScript row provides the removed {family} name {service}; register through {owner} instead"
+                    )));
+                }
                 // A name the catalog does not hold yet belongs to this row's
                 // group, so each instance has its own (rutis usage §3.5).
                 if let Err(LoaderError::UnknownService(_)) =
@@ -338,15 +385,15 @@ impl PluginFactory<Value> for BoundFactory {
     fn name(&self) -> &str {
         self.inner.name()
     }
-    fn injects(&self) -> &[TypeKey] {
+    fn injects(&self) -> Vec<TypeKey> {
         self.inner.injects()
     }
-    fn validate_config(&self, config: &Value) -> std::result::Result<(), CordisError> {
+    fn validate_config(&self, config: &Value) -> std::result::Result<(), Error> {
         self.inner.validate_config(config)
     }
-    fn build(&self, config: &Value) -> std::result::Result<Box<dyn Plugin>, CordisError> {
+    fn build(&self, config: &Value) -> std::result::Result<Box<dyn DynPlugin>, Error> {
         let packages = match self.process {
-            true if self.injects().contains(&host_key("workflowFiles")) => Some(Arc::new(
+            true if self.injects().contains(&host_key("workflowFiles").erase()) => Some(Arc::new(
                 WorkflowPackages::from_config(config, &self.file_roots)?,
             )),
             _ => None,
@@ -359,27 +406,24 @@ impl PluginFactory<Value> for BoundFactory {
 }
 
 struct BoundRow {
-    inner: Box<dyn Plugin>,
+    inner: Box<dyn DynPlugin>,
     packages: Option<Arc<WorkflowPackages>>,
 }
-impl Plugin for BoundRow {
+impl DynPlugin for BoundRow {
     fn name(&self) -> &str {
         self.inner.name()
     }
-    fn injects(&self) -> &[TypeKey] {
+    fn injects(&self) -> Vec<TypeKey> {
         self.inner.injects()
     }
-    fn validate(&self) -> std::result::Result<(), CordisError> {
+    fn validate(&self) -> std::result::Result<(), Error> {
         self.inner.validate()
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, std::result::Result<Effect, Error>> {
         Box::pin(async move {
             if let Some(packages) = &self.packages {
-                ctx.provide_as(
-                    TypeKey::instance::<WorkflowPackages>(ctx.instance()),
+                ctx.provide_at(
+                    Key::<WorkflowPackages>::of().instance(ctx.instance()),
                     packages.clone(),
                 )?;
             }
@@ -390,50 +434,65 @@ impl Plugin for BoundRow {
 
 #[cfg(test)]
 mod tests {
-    use super::exports;
+    use super::{Parts, SessionTypeScriptConfig};
     use dim_agent_runtime::{AgentBuilder, AgentConfig, names::name_of};
-    use rutis_loader::{Build, LoaderError};
+    use rutis_loader::resolve::Build;
+    use rutis_loader::{LoaderError, ServiceCatalog};
 
     /// A Rust part depends on a service that crosses languages by its
-    /// type's name: each listed export is named as the binding names its
-    /// type and grouped as the catalog groups that name, and the marked
-    /// process services are shared under their types' names.
+    /// type's name: each marked Session or branch service is shared in the
+    /// group the Rust binding registers it in, and the marked process
+    /// services are shared under their types' names.
     #[test]
     fn crossing_services_are_named_and_grouped_as_the_rust_binding_names_them() {
-        let listed = [
-            name_of::<dim_agent_capabilities::timeline_tree::TreeCommands>(),
-            name_of::<dim_agent_runtime::SessionIdentity>(),
-            name_of::<dim_agent_runtime::SessionLifecycle>(),
-            name_of::<dim_agent_runtime::SessionConfig>(),
-            name_of::<dim_agent_runtime::Dispatcher>(),
-            name_of::<dim_agent_runtime::BranchLifecycle>(),
-            name_of::<dim_agent_runtime::Timeline>(),
-            name_of::<dim_agent_runtime::TimelineIdentity>(),
-        ];
         let mut builder = AgentBuilder::new(AgentConfig::default());
         dim_agent_capabilities::register_names(&mut builder);
-        let catalog = builder.catalog().clone();
-        let exports = exports::all();
-        let mut exported: Vec<_> = exports.iter().map(|export| export.name()).collect();
-        exported.sort_unstable();
-        let mut expected: Vec<_> = listed.iter().map(String::as_str).collect();
-        expected.sort_unstable();
-        assert_eq!(exported, expected);
-        for export in &exports {
-            let registered = match catalog.key_in(export.name(), &Build::default()) {
+        let rust = builder.catalog().clone();
+        super::share_names(builder.catalog_mut());
+        for (name, group) in super::crossing_instance_names() {
+            let grouped = |catalog: &ServiceCatalog| match catalog.key_in(&name, &Build::default())
+            {
                 Err(LoaderError::OutsideInstance { group, .. }) => Some(group),
                 _ => None,
             };
-            assert_eq!(registered.as_deref(), export.group(), "{}", export.name());
+            assert_eq!(grouped(&rust).as_deref(), Some(group), "{name}");
+            assert_eq!(grouped(builder.catalog()).as_deref(), Some(group), "{name}");
+            assert!(builder.catalog().is_shared(&name), "{name}");
         }
-        builder.catalog_mut().export_all(exports);
         for name in [
             name_of::<crate::agents::SessionPermissions>(),
             name_of::<crate::settings::WorkflowFiles>(),
         ] {
-            assert!(rutis::service::is_exported(&name), "{name}");
             assert!(builder.catalog().is_shared(&name), "{name}");
             assert!(builder.catalog().key(&name).is_some(), "{name}");
         }
+    }
+
+    /// R6 replaced the host-side contribution names. A row that still
+    /// provides one must fail at configuration instead of losing the
+    /// contribution silently.
+    #[test]
+    fn a_row_providing_a_removed_contribution_family_is_refused() {
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        let config = SessionTypeScriptConfig {
+            node: "/nonexistent/node".into(),
+            js_runtime: "/nonexistent/runtime.js".into(),
+            anchor: "/nonexistent/package.json".into(),
+            python: None,
+            rows: vec![serde_json::json!({
+                "id": "legacy",
+                "name": "/nonexistent/legacy.js",
+                "group": "session",
+                "provides": {"toolContribution:ask_user": {}},
+            })],
+        };
+        let error = match Parts::new(&config, &mut builder, &[]) {
+            Ok(_) => panic!("a removed contribution family must be refused"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("removed toolContribution:"),
+            "{error}"
+        );
     }
 }

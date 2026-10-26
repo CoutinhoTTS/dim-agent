@@ -276,7 +276,11 @@ impl HostDispatch for Dispatch {
                 let projects: Vec<_> = service
                     .project_sources()
                     .into_iter()
-                    .map(|(root, cwd)| ProjectAuthorized { root, cwd })
+                    .map(|(root, cwd)| ProjectAuthorized {
+                        name: project_authorizations(),
+                        root,
+                        cwd,
+                    })
                     .collect();
                 Ok(envelope(Ok(json!({ "projects": projects }))))
             }
@@ -313,10 +317,10 @@ impl HostDispatch for Dispatch {
 }
 
 /// Provides the owner service `settings`.
-pub(super) fn provide(
-    ctx: &Ctx,
-    service: &Arc<SettingsService>,
-) -> std::result::Result<(), CordisError> {
-    ctx.provide_as::<dyn HostDispatch>(host_key("settings"), Arc::new(Dispatch(service.clone())))?;
+pub(super) fn provide(ctx: &Ctx, service: &Arc<SettingsService>) -> rutis::Result<()> {
+    ctx.provide_at(
+        host_key("settings"),
+        Arc::new(Dispatch(service.clone())) as Arc<dyn HostDispatch>,
+    )?;
     Ok(())
 }

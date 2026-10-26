@@ -35,10 +35,12 @@ use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};
 use dim_agent_runtime::{
-    Agent, AgentBuilder, AgentError, SessionConfig, register_part, wait_active,
+    Agent, AgentBuilder, AgentError, Modules, SessionConfig, register_part, wait_active,
 };
-use rutis::{Ctx, FiberView};
-use rutis_loader::RowsSource;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
+use rutis_loader::runtime::RowsSource;
+use rutis_loader::runtime::RuntimeRows;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -197,7 +199,7 @@ impl RunningServer {
             .map(|host| host.agent.clone())
     }
     /// Live diagnostics of the process tree.
-    pub fn diagnostics(&self) -> rutis::RuntimeDiagnostics {
+    pub fn diagnostics(&self) -> rutis::host::diagnostics::RuntimeDiagnostics {
         self.root.diagnostics()
     }
     /// Emits a Session notice from the process root, standing in for an
@@ -229,7 +231,7 @@ pub const RESTARTABLE: [&str; 5] = ["Rpc", "Connection", "Transport", "Agents", 
 struct Processes {
     loader: rutis_loader::Loader,
     view: FiberView,
-    runtime_rows: Vec<rutis::TypeKey>,
+    runtime_rows: Vec<Key<RuntimeRows>>,
     required: Vec<String>,
 }
 impl Processes {
@@ -243,7 +245,6 @@ impl Processes {
                 self.required.contains(&entry.id)
                     && entry.parent.is_none()
                     && entry.instance.is_none()
-                    && entry.owner == rutis_loader::Owner::Layer(0)
             })
             .filter_map(|entry| entry.view);
         std::iter::once(self.view.clone()).chain(rows).collect()
@@ -260,8 +261,8 @@ impl Processes {
             for view in &views {
                 let snapshot = view.watch().borrow().clone();
                 match snapshot.state {
-                    rutis::FiberState::Active => {}
-                    rutis::FiberState::Failed => {
+                    rutis::host::FiberState::Active => {}
+                    rutis::host::FiberState::Failed => {
                         return Err(snapshot.error.map(AgentError::from).unwrap_or_else(|| {
                             AgentError::Build(format!("{}: Failed", view.name()))
                         }));
@@ -270,10 +271,10 @@ impl Processes {
                 }
             }
             // RuntimeRows publishes its catalog after the process plugin's apply returns.
-            let unpublished = self.runtime_rows.iter().find(|key| {
-                root.get_as::<rutis_loader::RuntimeRows>((*key).clone())
-                    .is_none()
-            });
+            let unpublished = self
+                .runtime_rows
+                .iter()
+                .find(|key| root.get_at(key).is_none());
             ready &= unpublished.is_none();
             if ready {
                 return Ok(());
@@ -281,7 +282,8 @@ impl Processes {
             if tokio::time::Instant::now() >= deadline {
                 if let Some(key) = unpublished {
                     return Err(AgentError::Build(format!(
-                        "runtime row declarations were not published: {key:?}"
+                        "runtime row declarations were not published: {:?}",
+                        key.erase()
                     )));
                 }
                 return wait_active(root, &views, Duration::ZERO, &CancellationToken::new()).await;
@@ -476,7 +478,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // Process plugins are rows of one loader, the only plugin on the root.
     // Each load builds a new plugin; state that outlives a generation is
     // shared through the plugin the factory clones.
-    let mut builtins = rutis_loader::Builtins::new();
+    let mut builtins = Modules::new();
     // The assembly's one catalog: the builder's names, the names shared
     // across languages and, below, those the TypeScript rows provide. The
     // process parts below are the capabilities crate's, whatever the caller
@@ -495,7 +497,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut rows = vec![register_part(
         &mut builtins,
         builder.catalog(),
-        move |names| names.part(control.clone()),
+        move |_| Ok(Box::new(control.clone())),
     )?];
     // Account-only hosts do not consume user execution configuration.
     let native_home = execution_root.filter(|_| config.database_path.is_some());
@@ -504,11 +506,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     rows.push(register_part(
         &mut builtins,
         builder.catalog(),
-        move |names| names.part(files.clone()),
+        move |_| Ok(Box::new(files.clone())),
     )?);
     if config.model_catalog.is_some() || product_root.is_some() {
-        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            names.part(dim_agent_aimux::AimuxPlugin)
+        rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+            Ok(Box::new(dim_agent_aimux::AimuxPlugin))
         })?);
     }
     if let Some(models) = &config.model_catalog {
@@ -517,7 +519,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| names.part(dim_agent_aimux::ConfiguredModelsPlugin(models.clone())),
+            move |_| {
+                Ok(Box::new(dim_agent_aimux::ConfiguredModelsPlugin(
+                    models.clone(),
+                )))
+            },
         )?);
     }
     if let (Some(path), Some(files_root)) = (&config.database_path, session_files_root) {
@@ -525,45 +531,65 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| names.part(storage::SqliteStoragePlugin::new(path.clone())),
+            move |_| Ok(Box::new(storage::SqliteStoragePlugin::new(path.clone()))),
         )?);
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| names.part(storage::SessionStorePlugin::new(files_root)),
+            move |names| {
+                Ok(Box::new(storage::SessionStorePlugin::new(
+                    names, files_root,
+                )?))
+            },
         )?);
     }
     // Process plugins register their management namespaces here.
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        names.part(methods::ManagementMethodsPlugin::new(names)?)
+        Ok(Box::new(methods::ManagementMethodsPlugin::new(names)?))
     })?);
     if let Some(home_root) = product_root {
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| names.part(plugin_files::PluginFilesPlugin(home_root)),
+            move |names| {
+                Ok(Box::new(plugin_files::PluginFilesPlugin::new(
+                    names, home_root,
+                )?))
+            },
         )?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            names.part(managed_provider::ManagedProvidersPlugin)
+            Ok(Box::new(managed_provider::ManagedProvidersPlugin::new(
+                names,
+            )?))
         })?);
         if let Some(provider) = &config.managed_provider {
             rows.push((provider.0)(&mut builtins, home_root));
             rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-                names.part(managed_provider::ManagedProviderBinding)
+                Ok(Box::new(managed_provider::ManagedProviderBinding::new(
+                    names,
+                )?))
             })?);
         }
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| names.part(codex_oauth::OpenAICodexOAuthPlugin::new(home_root)),
+            move |names| {
+                Ok(Box::new(codex_oauth::OpenAICodexOAuthPlugin::new(
+                    names, home_root,
+                )?))
+            },
         )?);
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| names.part(grok_oauth::GrokOAuthPlugin::new(home_root)),
+            move |names| {
+                Ok(Box::new(grok_oauth::GrokOAuthPlugin::new(
+                    names, home_root,
+                )?))
+            },
         )?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            provider::ProviderPlugin::default().part(names)
+            Ok(Box::new(provider::ProviderPlugin::new(names)?))
         })?);
     }
     let settings_sources = config
@@ -579,11 +605,16 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         ));
     }
     if let Some(home_root) = settings_root {
+        // One template, cloned for each load: its copies share the authorized
+        // projects. Its dependencies are process names, the same for every copy.
+        let build = rutis_loader::resolve::Build::default();
+        let names = dim_agent_runtime::Names::copy(builder.catalog(), &build);
         let settings = if native_home.is_some() {
-            settings::SettingsPlugin::native(home_root, vec![])
+            settings::SettingsPlugin::native(&names, home_root, vec![])
         } else {
-            settings::SettingsPlugin::new(home_root, vec![])
+            settings::SettingsPlugin::new(&names, home_root, vec![])
         }
+        .map_err(|error| ServerError::Configuration(error.to_string()))?
         .reserve::<mcp::config::McpSettings>()
         .reserve::<mcp::config::McpProjectEnablement>()
         .reserve::<skills_management::SkillDocument>()
@@ -592,10 +623,12 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| settings.clone().part(names),
+            move |_| Ok(Box::new(settings.clone())),
         )?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            names.part(settings_methods::SettingsMethodsPlugin)
+            Ok(Box::new(settings_methods::SettingsMethodsPlugin::new(
+                names,
+            )?))
         })?);
     }
     if let Some(home_root) = execution_root {
@@ -612,26 +645,32 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| names.part(mcp::McpPlugin::new(home_root)),
+            move |names| Ok(Box::new(mcp::McpPlugin::new(names, home_root)?)),
         )?);
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
             move |names| {
-                dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
-                    dim_agent_capabilities::host_platform::HostPlatformConfig {
-                        exec_shell_file: Some((home_root, "exec-shell.json".into())),
-                        isolation_file: Some((home_root, "host-isolation.json".into())),
-                    },
-                )
-                .part(names)
+                Ok(Box::new(
+                    dim_agent_capabilities::host_platform::HostPlatformPlugin::new(
+                        names,
+                        dim_agent_capabilities::host_platform::HostPlatformConfig {
+                            exec_shell_file: Some((home_root, "exec-shell.json".into())),
+                            isolation_file: Some((home_root, "host-isolation.json".into())),
+                        },
+                    )?,
+                ))
             },
         )?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            names.part(skills_management::SkillsCatalogPlugin)
+            Ok(Box::new(skills_management::SkillsCatalogPlugin::new(
+                names,
+            )?))
         })?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            names.part(permission_rules::PermissionRulesPlugin)
+            Ok(Box::new(permission_rules::PermissionRulesPlugin::new(
+                names,
+            )?))
         })?);
     }
     let session_parts = config
@@ -649,23 +688,29 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             rows.push(register_part(
                 &mut builtins,
                 builder.catalog(),
-                move |names| names.part(NodeRuntime(runtime.clone(), runtime_row)),
+                move |_| Ok(Box::new(NodeRuntime(runtime.clone(), runtime_row))),
             )?);
             let resolver = foreign.rows.clone();
             let name = foreign.name;
             rows.push(register_part(
                 &mut builtins,
                 builder.catalog(),
-                move |names| Ok(NodeRows(resolver.clone(), name, rows_row).part(names)),
+                move |_| {
+                    Ok(Box::new(NodeRows {
+                        resolver: resolver.clone(),
+                        runtime: Key::dynamic(name),
+                        name: rows_row,
+                    }))
+                },
             )?);
         }
     }
     agents::register(&mut builtins);
-    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        names.part(agents::AgentDirectoryPlugin)
+    rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+        Ok(Box::new(agents::AgentDirectoryPlugin))
     })?);
-    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        names.part(collaboration::CollaborationDirectoryPlugin)
+    rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+        Ok(Box::new(collaboration::CollaborationDirectoryPlugin))
     })?);
     {
         let (assembly, config, root) = (builder.clone(), config.clone(), root.clone());
@@ -673,22 +718,27 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             &mut builtins,
             builder.catalog(),
             move |names| {
-                AgentsPlugin::new(assembly.clone(), config.clone(), root.clone()).part(names)
+                Ok(Box::new(AgentsPlugin::new(
+                    names,
+                    assembly.clone(),
+                    config.clone(),
+                    root.clone(),
+                )?))
             },
         )?);
     }
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        names.part(CollaborationPlugin::new())
+        Ok(Box::new(CollaborationPlugin::new(names)?))
     })?);
-    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        names.part(ui_leaf::UiHostPlugin)
+    rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+        Ok(Box::new(ui_leaf::UiHostPlugin))
     })?);
     {
         let config = config.clone();
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| names.part(ConnectionPlugin::new(config.clone())),
+            move |names| Ok(Box::new(ConnectionPlugin::new(names, config.clone())?)),
         )?);
     }
     {
@@ -697,7 +747,13 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| names.part(RpcPlugin::new(config.clone(), root.clone())),
+            move |names| {
+                Ok(Box::new(RpcPlugin::new(
+                    names,
+                    config.clone(),
+                    root.clone(),
+                )?))
+            },
         )?);
     }
     {
@@ -705,7 +761,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |names| TransportPlugin::new(config.clone()).part(names),
+            move |names| Ok(Box::new(TransportPlugin::new(names, config.clone())?)),
         )?);
     }
     // The builder's plugins are host rows too: each registers its Session
@@ -795,7 +851,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let runtime_rows = session_parts
         .iter()
         .flat_map(|parts| parts.runtimes())
-        .map(|foreign| rutis_loader::RuntimeRows::key(foreign.rows.runtime_name()))
+        .map(|foreign| Key::dynamic(foreign.rows.runtime_name().to_owned()))
         .collect();
     let mut resolver = rutis_loader::Chain::new().with(builtins);
     if let Some(parts) = session_parts {
@@ -939,7 +995,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<mcp::McpAuth>(catalog, None);
     register::<mcp::Publication>(catalog, None);
     register::<methods::ManagementMethods>(catalog, None);
-    register::<collaboration::CollaborationCapability>(catalog, Some(SESSION_GROUP));
+    register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
     register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
     for name in [
         "pluginFiles",
@@ -974,34 +1030,27 @@ fn create_private_directory(path: &Path) -> std::io::Result<()> {
 }
 
 /// A runtime's rows part. Its rows listen to the bus themselves.
-struct NodeRows(
-    Arc<rutis_loader::RuntimeResolver>,
-    &'static str,
-    &'static str,
-);
-impl rutis::TypedPlugin for NodeRows {
-    type Deps = (
-        rutis::Keyed<rutis_bridge::runtime::Runtime>,
-        Arc<rutis_loader::Loader>,
-    );
-    fn name(&self) -> &str {
-        self.2
-    }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        _: Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            rutis::Plugin::apply(&rutis_loader::RuntimeRowsPlugin::new(self.0.clone()), ctx).await
-        })
-    }
-}
-impl NodeRows {
+struct NodeRows {
+    resolver: Arc<rutis_loader::runtime::RuntimeResolver>,
     /// Gated on its runtime, which is registered under the runtime's name.
-    fn part(self, names: &dim_agent_runtime::Names<'_>) -> Box<dyn rutis::Plugin> {
-        let keys = (rutis::DepKey::dynamic(self.1), ());
-        names.part_with(self, keys)
+    runtime: Key<rutis_bridge::runtime::Runtime>,
+    name: &'static str,
+}
+impl DynPlugin for NodeRows {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.runtime.erase(), TypeKey::of::<rutis_loader::Loader>()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            DynPlugin::apply(
+                &rutis_loader::runtime::RuntimeRowsPlugin::new(self.resolver.clone()),
+                ctx,
+            )
+            .await
+        })
     }
 }
 
@@ -1064,16 +1113,11 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
 }
 
 struct NodeRuntime(Arc<rutis_bridge::runtime::LocalRuntime>, &'static str);
-impl rutis::TypedPlugin for NodeRuntime {
-    type Deps = ();
+impl DynPlugin for NodeRuntime {
     fn name(&self) -> &str {
         self.1
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): (),
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        rutis::Plugin::apply(self.0.as_ref(), ctx)
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        DynPlugin::apply(self.0.as_ref(), ctx)
     }
 }

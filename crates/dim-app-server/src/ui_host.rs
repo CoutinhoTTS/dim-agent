@@ -15,7 +15,7 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_capabilities::methods::RpcError;
-use rutis::FiberView;
+use rutis::host::FiberView;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,

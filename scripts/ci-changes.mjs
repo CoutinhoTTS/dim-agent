@@ -14,6 +14,8 @@ const rules=[
   [/^docs\//,[]],
   [/^deny\.toml$|^LICENSE$/,['dependencies']],
   [/^[^/]+\.md$/,[]],
+  // dim-cli's composer test reads the quote cases the Web composer checks.
+  [/^web\/src\/features\/chat\/quote-cases\.json$/,['web','rust','windows']],
   [/^web\//,['web']],
   // stage-web.mjs builds the Web workspace.
   [/^scripts\//,['scripts','web']],

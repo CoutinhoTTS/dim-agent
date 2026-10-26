@@ -48,7 +48,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `uiHost` | process | UiHost | Rust-only | — |
 | `workflowFiles` | process | Settings | yes | `createDirectory` async, `list` async, `read` async, `replace` async |
 | `agentConfig` | session | SessionScope | Rust-only | — |
-| `collaborationCapability` | session | CollaborationCapability | Rust-only | — |
+| `collaborationSession` | session | CollaborationSession | Rust-only | — |
 | `commandRulesHost` | session | CommandRules | Rust-only | — |
 | `compactionStrategyHost` | session | ProductSummaryStrategy | Rust-only | — |
 | `contextModelHost` | session | SessionScope | Rust-only | — |

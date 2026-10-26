@@ -2,66 +2,51 @@ use crate::{AimuxModels, driver::AimuxDriver};
 use dim_agent_capabilities::{host::*, tool_registry::ToolRegistry};
 use dim_agent_runtime::{Names, SessionConfig, SessionIdentity};
 use dim_agent_types::{Message, SystemPrompt};
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypeKey, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
+use rutis::{Ctx, Plugin};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Process-owned request execution; no catalog or Session dependencies.
 pub struct AimuxPlugin;
-impl TypedPlugin for AimuxPlugin {
+impl Plugin for AimuxPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "Aimux"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let driver = AimuxDriver::new(ctx.cancellation_token())
-                .map_err(|error| CordisError::PluginFailed(error.into()))?;
-            let owned = driver.clone();
-            if let Err(error) = ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owned.close().await;
-                        Ok(())
-                    })
-                }))
-            }) {
-                driver.close().await;
-                return Err(error);
-            }
-            ctx.provide(ModelHost(driver))?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        let driver = AimuxDriver::new(ctx.cancellation_token())
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
+        let owned = driver.clone();
+        if let Err(error) = ctx.effect(move || async move {
+            owned.close().await;
+            Ok(())
+        }) {
+            driver.close().await;
+            return Err(error);
+        }
+        ctx.provide(ModelHost(driver))?;
+        Ok(())
     }
 }
 
 /// The API-key profile supplies model selection and request-local connections;
 /// execution capabilities are independent of this provider choice.
 pub struct ConfiguredModelsPlugin(pub Arc<AimuxModels>);
-impl TypedPlugin for ConfiguredModelsPlugin {
+impl Plugin for ConfiguredModelsPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "ConfiguredModels"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(TypeKey::of::<AimuxModels>(), self.0.clone())?;
-            let resolver = Arc::new(ConfiguredConnection {
-                models: self.0.clone(),
-                generation: ctx.cancellation_token(),
-            });
-            ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
-            ctx.provide(ModelSelectionHost(resolver))?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.provide_as::<AimuxModels>(self.0.clone())?;
+        let resolver = Arc::new(ConfiguredConnection {
+            models: self.0.clone(),
+            generation: ctx.cancellation_token(),
+        });
+        ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
+        ctx.provide(ModelSelectionHost(resolver))?;
+        Ok(())
     }
 }
 struct ConfiguredConnection {
@@ -171,40 +156,52 @@ impl ResolveModelConnection for ConfiguredConnection {
 
 /// Request preparation stays on the calling side of the process adapter.
 pub struct ConfiguredModelPlugin {
-    prepare: DepKey<PrepareModelHost>,
+    prepare: Key<PrepareModelHost>,
+    models: Key<AimuxModels>,
+    config: Key<SessionConfig>,
+    identity: Key<SessionIdentity>,
+    tools: Key<ToolRegistry>,
 }
 impl ConfiguredModelPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             prepare: names.key()?,
+            models: names.key()?,
+            config: names.key()?,
+            identity: names.key()?,
+            tools: names.key()?,
         })
     }
 }
-impl TypedPlugin for ConfiguredModelPlugin {
-    type Deps = (
-        Keyed<AimuxModels>,
-        Keyed<SessionConfig>,
-        Keyed<SessionIdentity>,
-        Keyed<ToolRegistry>,
-    );
+impl DynPlugin for ConfiguredModelPlugin {
     fn name(&self) -> &str {
         "ConfiguredModel"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(models), Keyed(config), Keyed(identity), Keyed(tools)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.models.erase(),
+            self.config.erase(),
+            self.identity.erase(),
+            self.tools.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let models = ctx.require_at(&self.models)?;
+            let config = ctx.require_at(&self.config)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let tools = ctx.require_at(&self.tools)?;
             let defaults = models
                 .get(&config.model.provider_id, &config.model.model_id)
-                .map_err(|error| CordisError::Validation {
-                    issues: vec![error.to_string()],
+                .map_err(|error| {
+                    rutis::Error::from(ErrorKind::Validation {
+                        issues: vec![error.to_string()],
+                    })
                 })?
                 .defaults
                 .clone();
-            ctx.provide_as(
-                self.prepare.key().clone(),
+            ctx.provide_at(
+                self.prepare.clone(),
                 Arc::new(PrepareModelHost(Arc::new(Prepare {
                     config,
                     identity,

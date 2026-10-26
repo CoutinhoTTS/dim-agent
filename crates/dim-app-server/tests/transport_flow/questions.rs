@@ -290,7 +290,7 @@ async fn a_late_answer_from_another_client_never_reaches_a_reused_call_id() {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::tool_host(&mut builder, Arc::new(MockTools));

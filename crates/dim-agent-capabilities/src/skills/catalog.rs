@@ -1,17 +1,18 @@
 use super::{
     CatalogEntry, CatalogVersion, CatalogView, RefreshTarget, SkillIssue, SkillStatus, SkillsError,
-    Wake,
     discovery::{RootKind, RootSnapshot, scan_root},
 };
 use crate::{
     host_platform::HostPlatform,
-    settings::settings_changes,
+    settings::{SettingsChanged, settings_changes},
     skill_settings::{
         SOURCE, SettingsVersion, SkillSettings, SkillSettingsError, SkillSettingsHost,
         SkillSettingsSnapshot,
     },
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, TypeKey, TypedPlugin};
+use dim_agent_runtime::{Names, PartRegistry};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Error, Event};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -31,10 +32,13 @@ pub struct CatalogChanged {
 impl Event for CatalogChanged {
     const NAME: &'static str = "skills.catalog_changed";
     type Value = ();
+    fn name(&self) -> &str {
+        catalog_changes()
+    }
 }
 /// The rutis channel of catalog changes, in version order.
-pub fn catalog_changes() -> EventKey<CatalogChanged> {
-    EventKey::named("skills/catalog")
+pub fn catalog_changes() -> &'static str {
+    "skills/catalog"
 }
 
 struct CatalogState {
@@ -148,14 +152,10 @@ impl SkillsCatalog {
     /// announcements follow version order.
     fn advance(&self, state: &mut CatalogState) -> CatalogVersion {
         state.version += 1;
-        let changed = Arc::new(CatalogChanged {
+        let changed = CatalogChanged {
             version: state.version,
-        });
-        if let Err(error) = self
-            .events
-            .events()
-            .emit(&self.events, &catalog_changes(), changed)
-        {
+        };
+        if let Err(error) = self.events.emit(changed) {
             tracing::warn!(%error, "Skill catalog change was not announced");
         }
         state.version
@@ -269,34 +269,38 @@ impl SkillsCatalog {
 
 /// The Skills plugin: `SkillsCatalog` at the process, and the Session and
 /// branch parts it registers ([`super::register_parts`]).
-pub struct SkillsCatalogPlugin;
+pub struct SkillsCatalogPlugin {
+    platform: Key<HostPlatform>,
+    settings: Key<SkillSettingsHost>,
+    parts: Key<PartRegistry>,
+}
 impl SkillsCatalogPlugin {
-    pub fn new() -> Self {
-        Self
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            platform: names.key()?,
+            settings: names.key()?,
+            parts: names.key()?,
+        })
     }
 }
-impl Default for SkillsCatalogPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl TypedPlugin for SkillsCatalogPlugin {
-    type Deps = (
-        rutis::Keyed<HostPlatform>,
-        rutis::Keyed<SkillSettingsHost>,
-        rutis::Keyed<dim_agent_runtime::PartRegistry>,
-    );
+impl DynPlugin for SkillsCatalogPlugin {
     fn name(&self) -> &str {
         "SkillsCatalog"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (platform, settings, rutis::Keyed(parts)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.platform.erase(),
+            self.settings.erase(),
+            self.parts.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let platform = ctx.require_at(&self.platform)?;
+            let settings = ctx.require_at(&self.settings)?;
+            let parts = ctx.require_at(&self.parts)?;
             let catalog = Self::mount(ctx, (platform, settings)).await?;
-            ctx.provide_as(TypeKey::of::<SkillsCatalog>(), catalog)?;
+            ctx.provide_as::<SkillsCatalog>(catalog)?;
             super::register_parts(ctx, &parts)?;
             Ok(Effect::Done)
         })
@@ -308,17 +312,18 @@ impl SkillsCatalogPlugin {
     /// and registers the parts there too ([`super::register_parts`]).
     pub async fn mount(
         ctx: &Ctx,
-        (rutis::Keyed(platform), rutis::Keyed(settings)): (
-            rutis::Keyed<HostPlatform>,
-            rutis::Keyed<SkillSettingsHost>,
-        ),
-    ) -> Result<Arc<SkillsCatalog>, CordisError> {
+        (platform, settings): (Arc<HostPlatform>, Arc<SkillSettingsHost>),
+    ) -> Result<Arc<SkillsCatalog>, Error> {
         let settings = settings.0.clone();
         let lifecycle = ctx.cancellation_token();
         // Listen before the first read, so no later write goes unread.
         let (wake, mut changes) = watch::channel(());
-        ctx.events()
-            .on(ctx, &settings_changes(SOURCE), Wake(wake))?;
+        ctx.listen::<SettingsChanged>()
+            .name(settings_changes(SOURCE))
+            .on(move |_, _| {
+                wake.send_replace(());
+                async { Ok(None) }
+            })?;
         let initial = settings
             .skills(lifecycle.child_token())
             .await
@@ -338,14 +343,10 @@ impl SkillsCatalogPlugin {
         });
         let tasks = TaskTracker::new();
         let draining = tasks.clone();
-        ctx.effect(move || {
-            Effect::AsyncDisposer(Box::new(move || {
-                Box::pin(async move {
-                    draining.close();
-                    draining.wait().await;
-                    Ok(())
-                })
-            }))
+        ctx.effect(move || async move {
+            draining.close();
+            draining.wait().await;
+            Ok(())
         })?;
         let owner = catalog.clone();
         tasks.spawn(async move {

@@ -1,7 +1,8 @@
+use dim_agent_runtime::Modules;
 use dim_agent_runtime::wait_active;
 use dim_app_server::mcp::{McpConnection, McpOwner, McpPublication, McpService, Result};
 use rutis::Ctx;
-use rutis_loader::{Builtins, Layer, Loader, LoaderPlugin, Patch};
+use rutis_loader::{Layer, Loader, LoaderPlugin, Patch};
 use serde_json::json;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -39,14 +40,14 @@ impl std::ops::Deref for Directory {
 }
 
 pub struct Host {
-    view: rutis::FiberView,
+    view: rutis::host::FiberView,
 }
 impl Host {
     pub async fn start(root: &Ctx) -> (Self, Loader) {
         let catalog = dim_app_server::catalog();
-        let mut builtins = Builtins::new();
+        let mut builtins = Modules::new();
         let row = McpPublication::register(&mut builtins, &catalog).unwrap();
-        let template = McpPublication::standalone_template(&mut builtins, &catalog);
+        let template = McpPublication::standalone_template(&mut builtins);
         let plugin = LoaderPlugin::new(builtins, Default::default());
         let loader = plugin.handle();
         let view = root.plugin(plugin);

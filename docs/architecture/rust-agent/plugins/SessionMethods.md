@@ -33,7 +33,8 @@ withdrawn, the table keeps the row that registered it, so Rpc answers a call
 into it from that row's status (`service_reloading` or `service_unavailable`)
 rather than `unknown_method`. Each registration owns the calls it admitted: its
 part's unload interrupts `report` calls and waits for every admitted call.
-`session.methods` lists the methods of the namespaces registered now.
+`session.methods` lists the methods of the namespaces registered now that no
+management namespace holds.
 
 ## Tests
 

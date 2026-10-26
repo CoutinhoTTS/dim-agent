@@ -22,7 +22,7 @@ async fn active(server: &RunningServer, name: &str, expected: usize) {
             if rows.len() == expected
                 && rows
                     .iter()
-                    .all(|row| row.state == rutis::FiberState::Active)
+                    .all(|row| row.state == rutis::host::FiberState::Active)
             {
                 break;
             }
@@ -206,8 +206,8 @@ async fn node_cordis_plugin_in_a_branch_row_gets_its_own_branch() {
 fn entry(
     loader: &rutis_loader::Loader,
     id: &str,
-    instance: rutis::InstanceId,
-) -> rutis_loader::EntryInfo {
+    instance: rutis::host::InstanceId,
+) -> rutis_loader::report::EntryInfo {
     loader
         .entries()
         .into_iter()
@@ -267,7 +267,7 @@ async fn node_python_import_failure_is_local_to_its_row() {
     let (session_instance, _, loader, _) = controls.recv().await.unwrap();
     let status = entry(&loader, "python-missing", session_instance).status;
     assert!(
-        matches!(&status, rutis_loader::EntryStatus::Unresolved(error)
+        matches!(&status, rutis_loader::report::EntryStatus::Unresolved(error)
             if error.to_string().contains("no_such_fixture_module")),
         "{status:?}"
     );
@@ -311,7 +311,7 @@ async fn node_a_second_provider_of_a_name_in_one_instance_fails() {
                         let snapshot = state.borrow().clone();
                         if matches!(
                             snapshot.state,
-                            rutis::FiberState::Active | rutis::FiberState::Failed
+                            rutis::host::FiberState::Active | rutis::host::FiberState::Failed
                         ) {
                             break snapshot;
                         }
@@ -324,7 +324,7 @@ async fn node_a_second_provider_of_a_name_in_one_instance_fails() {
         }
         let failed: Vec<_> = settled
             .iter()
-            .filter(|snapshot| snapshot.state == rutis::FiberState::Failed)
+            .filter(|snapshot| snapshot.state == rutis::host::FiberState::Failed)
             .collect();
         assert_eq!(failed.len(), 1, "{settled:?}");
         let error = failed[0].error.as_ref().unwrap().to_string();

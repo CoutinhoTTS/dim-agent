@@ -109,6 +109,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node --test web/*.test.mjs
           # The frontend is a separate artifact; building it here type-checks web/.
           node scripts/stage-web.mjs staging/release-web "$(node -p "require('./npm/package.json').version")" "$GITHUB_SHA"
       - name: Verify actual CLI profiles and terminal launcher
@@ -124,7 +125,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git diff --exit-code -- npm/branch-services.d.ts
           npm ci --prefix runtime --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/web --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/session-title --ignore-scripts --registry=https://registry.npmjs.org

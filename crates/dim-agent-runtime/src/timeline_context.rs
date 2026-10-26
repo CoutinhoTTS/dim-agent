@@ -2,7 +2,8 @@ use crate::core::TailLock;
 use crate::lifecycle::{CloseOnce, guarded};
 use crate::*;
 use dim_agent_types::{AgentEvent, EventKind, InputMessageData, InterruptScope, StopInterruptData};
-use rutis::{Ctx, FiberView};
+use rutis::Ctx;
+use rutis::host::{CtxHost, FiberView};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
@@ -177,7 +178,7 @@ impl TimelineContext {
                 if phase.as_ref().is_none_or(|rx| rx.has_changed().is_err()) {
                     phase = inner
                         .ctx
-                        .get_as::<dyn LoopState>(inner.scope.key::<dyn LoopState>())
+                        .get_at::<dyn LoopState>(&inner.scope.key::<dyn LoopState>())
                         .map(|state| state.watch());
                 }
                 if signal || had != phase.is_some() {
@@ -278,11 +279,11 @@ impl TimelineContext {
     }
     pub(crate) fn port<T: ?Sized + Send + Sync + 'static>(&self, name: &str) -> Result<Arc<T>> {
         self.ctx
-            .get_as::<T>(self.scope.key::<T>())
+            .get_at::<T>(&self.scope.key::<T>())
             .ok_or_else(|| AgentError::Reloading(name.into()))
     }
     /// The branch scope and the capabilities it installed.
-    pub(crate) fn diagnostics(&self) -> rutis::RuntimeDiagnostics {
+    pub(crate) fn diagnostics(&self) -> rutis::host::diagnostics::RuntimeDiagnostics {
         let scope = self.view.id;
         let mut snapshot = self.ctx.diagnostics();
         let rows: std::collections::HashSet<_> = snapshot
@@ -296,7 +297,7 @@ impl TimelineContext {
     }
     pub(crate) fn state_cell<S: Clone + Send + Sync + 'static>(&self) -> Option<Arc<StateCell<S>>> {
         self.ctx
-            .get_as::<StateCell<S>>(self.scope.key::<StateCell<S>>())
+            .get_at::<StateCell<S>>(&self.scope.key::<StateCell<S>>())
     }
     pub(crate) async fn configure(&self, update: ConfigureUpdate) -> Result<ConfigureOutcome> {
         if self.close.started() {
@@ -304,7 +305,7 @@ impl TimelineContext {
         }
         let control = self
             .ctx
-            .get_as::<dyn ConfigureControl>(self.scope.key::<dyn ConfigureControl>())
+            .get_at::<dyn ConfigureControl>(&self.scope.key::<dyn ConfigureControl>())
             .ok_or_else(|| AgentError::Build("ConfigureControl is not installed".into()))?;
         control.configure(update).await
     }

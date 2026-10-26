@@ -2,7 +2,7 @@
 
 Status: tool/method and leaf broadcast bindings implemented for [C4 #63](https://github.com/arcships/dim/issues/63)
 and [#168](https://github.com/arcships/dim/issues/168), following the approved [#174 contract](https://github.com/arcships/dim/pull/174).
-The runtime uses rutis 0.16.0.
+The runtime uses rutis 0.17.1.
 The verification section distinguishes executable acceptance from platform limits.
 The [spike](session-typescript-spike.md) establishes transport feasibility;
 its private service names and combined fixture are not this API.
@@ -234,9 +234,9 @@ from the registering row's copy in that Session: `service_reloading` while it is
 Pending, Loading, Unloading or between generations, `service_unavailable` while it is Failed,
 Disposed, Unresolved or Stopped ([management methods](appserver/management-methods.md#dispatch-and-lifecycle)),
 and `service_reloading` when that copy is Active or absent. A name no namespace of the Session
-ever held is `unknown_method`. `session.methods` lists the namespaces registered now. Both read
-the native table through the existing Session facade. No arbitrary `HostDispatch` is made a public
-Session service.
+ever held is `unknown_method`. `session.methods` lists the namespaces registered now, minus the
+names a management namespace holds. Both read the native table through the existing Session
+facade. No arbitrary `HostDispatch` is made a public Session service.
 
 C1 owns call admission, progress closure, interruption and waiting for accepted work:
 

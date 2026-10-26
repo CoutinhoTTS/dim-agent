@@ -17,7 +17,7 @@ Terminal / npm launcher
 
 `dim-agent-types` owns serialized data. `dim-agent-runtime` owns instance construction, timeline ordering and close coordination. Capabilities own their work, cancellation and state. Model and tool adapters provide typed ports; transport and product configuration belong to the App Server. The CLI is a client, not another agent execution engine.
 
-Parts are rutis 0.16.0 `TypedPlugin`s that depend on services by name. Dependencies are declared once; the catalog keys each name for the instances a copy runs in. A managed provider is an optional Rust process plugin that an account build's own executable installs; without it, managed-provider requests fail explicitly while API-key providers remain available.
+Parts are rutis 0.17.1 plugins; a part that depends on services by name is a `host::DynPlugin` that keeps their keys ([How Dim uses rutis, appendix A](../design/rutis-usage.md#appendix-a-rust-binding)). Dependencies are declared once; the catalog keys each name for the instances a copy runs in. A managed provider is an optional Rust process plugin that an account build's own executable installs; without it, managed-provider requests fail explicitly while API-key providers remain available.
 
 Plugin and part factories are pure and preserve plugin names and dependency keys. Configuration that must survive reload belongs to the captured plugin configuration; each `apply` acquires fresh I/O resources and registers their cleanup. FileStorage clones share the append-only authorized-root identities, while directory handles, operations and leases belong to one service generation. Rebuilding from the initial root list would let a later project reuse an earlier project's index.
 
@@ -86,8 +86,8 @@ Detailed contracts live under [`rust-agent/`](rust-agent/) and are written in Ch
 | Document | Topic |
 | --- | --- |
 | [principles](rust-agent/principles.md) | Design rules: bounded, orthogonal capabilities and ownership |
-| [plugin contract](../design/plugin-contract.md) (English, accepted, not implemented) | Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability ([ADR 006](../adr/006-plugin-contract.md)) |
-| [How Dim uses rutis](../design/rutis-usage.md) (English, accepted, not implemented) | Parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, bindings |
+| [plugin contract](../design/plugin-contract.md) (English, accepted; implemented, except R5's second form) | Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability ([ADR 006](../adr/006-plugin-contract.md)) |
+| [How Dim uses rutis](../design/rutis-usage.md) (English, accepted; implemented, except R5's second form) | Parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, bindings |
 | [time-bus](rust-agent/time-bus.md) | Event and state-machine axioms (draft) |
 | [single-tree](rust-agent/single-tree.md) | rutis tree assembly, keys, visibility, startup, close and reload |
 | [lifecycle](rust-agent/lifecycle.md) | Scopes, cancellation, settlement and resource cleanup |

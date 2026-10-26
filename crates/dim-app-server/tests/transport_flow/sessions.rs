@@ -1,5 +1,5 @@
 //! The Agents `sessions` service (sessions service design §16), called by
-//! name through `Keyed<dyn HostDispatch>` as a process plugin calls it.
+//! name through its `dyn HostDispatch` key as a process plugin calls it.
 use super::*;
 use dim_agent_capabilities::permission::{
     CommandRulesHost, NoCommandRules, Permission, PermissionState,
@@ -7,7 +7,7 @@ use dim_agent_capabilities::permission::{
 use dim_agent_runtime::{Agent, Session};
 use dim_agent_types::{InputBlock, InputMessageData, PermissionPolicy, UserInput};
 use dim_app_server::methods::ManagementMethods;
-use rutis::{DepKey, Keyed};
+use rutis::host::{CtxHost, Key};
 use rutis_bridge::session::HostDispatch;
 use std::sync::OnceLock;
 
@@ -26,22 +26,35 @@ pub(super) struct Sessions {
     /// How often the consumer part applied; an index reload must not reload it.
     applied: Arc<AtomicUsize>,
 }
-struct SessionsConsumer(Sessions);
-impl TypedPlugin for SessionsConsumer {
-    type Deps = Keyed<dyn HostDispatch>;
+struct SessionsConsumer {
+    sessions: Sessions,
+    service: Key<dyn HostDispatch>,
+}
+impl SessionsConsumer {
+    fn new(names: &dim_agent_runtime::Names<'_>, sessions: Sessions) -> rutis::Result<Self> {
+        Ok(Self {
+            sessions,
+            service: names.named("sessions")?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for SessionsConsumer {
     fn name(&self) -> &str {
         "sessions-consumer"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.service.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        Keyed(service): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
-            self.0.applied.fetch_add(1, Ordering::SeqCst);
-            let _ = self.0.service.set(service);
-            let _ = self.0.context.set(ctx.clone());
-            Ok(rutis::Effect::Done)
+            let service = ctx.require_at(&self.service)?;
+            self.sessions.applied.fetch_add(1, Ordering::SeqCst);
+            let _ = self.sessions.service.set(service);
+            let _ = self.sessions.context.set(ctx.clone());
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -50,13 +63,11 @@ impl Sessions {
     /// `sessions` service for the test.
     pub(super) fn install(&self, builder: &mut AgentBuilder) {
         let consumer = self.clone();
-        builder.require_feature(Feature::new("sessions-consumer").session(
-            "sessions-consumer",
-            move |names| {
-                let service = names.named::<dyn HostDispatch>("sessions")?;
-                Ok(names.part_with(SessionsConsumer(consumer.clone()), service))
-            },
-        ));
+        builder.require_feature(
+            Feature::new("sessions-consumer").session("sessions-consumer", move |names| {
+                Ok(Box::new(SessionsConsumer::new(names, consumer.clone())?))
+            }),
+        );
     }
     /// One call with one request object; the reply envelope.
     pub(super) async fn call(&self, method: &str, request: Value) -> Value {
@@ -114,28 +125,42 @@ struct HeldRules {
     /// Notified when a held reload waits.
     held: Arc<tokio::sync::Notify>,
 }
-struct HeldRulesPart(HeldRules, DepKey<CommandRulesHost>);
-impl TypedPlugin for HeldRulesPart {
-    type Deps = (Keyed<dim_app_server::collaboration::Collaboration>,);
+struct HeldRulesPart(
+    HeldRules,
+    Key<CommandRulesHost>,
+    rutis::host::Key<dim_app_server::collaboration::Collaboration>,
+);
+impl HeldRulesPart {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        a0: HeldRules,
+        a1: Key<CommandRulesHost>,
+    ) -> rutis::Result<Self> {
+        Ok(Self(a0, a1, names.key()?))
+    }
+}
+impl rutis::host::DynPlugin for HeldRulesPart {
     fn name(&self) -> &str {
         "held-rules"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.2.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        _: Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
             let mut hold = self.0.hold.subscribe();
             if *hold.borrow_and_update() {
                 self.0.held.notify_one();
                 let _ = hold.wait_for(|held| !held).await;
             }
-            ctx.provide_as(
-                self.1.key().clone(),
+            ctx.provide_at(
+                self.1.clone(),
                 Arc::new(CommandRulesHost(Arc::new(NoCommandRules))),
             )?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -210,7 +235,11 @@ async fn serve_with(setup: Setup) -> Served {
                 .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
                 .require_feature(
                     Feature::new("held-rules").session("held-rules", move |names| {
-                        names.part(HeldRulesPart(rules.clone(), names.key()?))
+                        Ok(Box::new(HeldRulesPart::new(
+                            names,
+                            rules.clone(),
+                            names.key()?,
+                        )?))
                     }),
                 );
             defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
@@ -230,7 +259,7 @@ async fn serve_with(setup: Setup) -> Served {
                 .session_value(Arc::new(host::CompactionStrategyHost(None)))
                 .require_feature(
                     Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                        names.part(DefaultPrepareModelPlugin::new(names)?)
+                        Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                     }),
                 );
         }
@@ -1606,7 +1635,7 @@ async fn node_session_permissions_reads_live_policy_and_survives_index_reload() 
             .context
             .get()
             .unwrap()
-            .get_as::<ManagementMethods>(rutis::TypeKey::of::<ManagementMethods>())
+            .get::<ManagementMethods>()
             .unwrap()
             .provider("permissions.branch")
             .unwrap();
@@ -1698,12 +1727,8 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
     let (_, _, loader, _) = controls.recv().await.unwrap();
     let owner = loader.get("settlement-owner").unwrap().view.unwrap();
     let before = settlement_status(&mut client).await;
-    assert!(
-        owner
-            .effects()
-            .iter()
-            .all(|effect| effect.label != "sessions.input")
-    );
+    // The owner's cleanups while no native input is in flight.
+    let idle = owner.effects().len();
     let write = |id: &str| {
         let mut write = input(&target, id, json!([]));
         write["mode"] = json!("append");
@@ -1719,12 +1744,9 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
     assert_eq!(waiting.submission_id, "settlement:index:publication");
     assert!(target.publication("main").unwrap().sequence() < waiting.sequence);
     assert_eq!(
-        owner
-            .effects()
-            .iter()
-            .filter(|effect| effect.label == "sessions.input")
-            .count(),
-        1
+        owner.effects().len(),
+        idle + 1,
+        "one drain per native input in flight"
     );
     let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1756,12 +1778,7 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
         settlement_status(&mut client).await["generation"],
         before["generation"]
     );
-    assert!(
-        owner
-            .effects()
-            .iter()
-            .all(|effect| effect.label != "sessions.input")
-    );
+    assert_eq!(owner.effects().len(), idle);
     assert_ok(
         &client
             .rpc("settlement.arm", write("test:late-row-call"))
@@ -1778,18 +1795,13 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
     let (restarted, ()) = tokio::join!(loader.restart("settlement-owner"), async {
         let mut changed = owner.watch();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while changed.borrow_and_update().state != rutis::FiberState::Unloading {
+            while changed.borrow_and_update().state != rutis::host::FiberState::Unloading {
                 changed.changed().await.unwrap();
             }
         })
         .await
         .unwrap();
-        assert!(
-            owner
-                .effects()
-                .iter()
-                .any(|effect| effect.label == "sessions.input")
-        );
+        assert!(super::unload_held(&owner).await);
         waiting.release.send(()).unwrap();
     });
     restarted.unwrap();
@@ -1808,12 +1820,7 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
     for id in ["settlement:index:publication", "settlement:row:append"] {
         assert_eq!(history.iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(id))).count(), 1);
     }
-    assert!(
-        owner
-            .effects()
-            .iter()
-            .all(|effect| effect.label != "sessions.input")
-    );
+    assert_eq!(owner.effects().len(), idle);
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -1908,6 +1915,8 @@ async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
     let target = client_session(&mut client, &agent, host_policy()).await;
     let (_, _, loader, _) = controls.recv().await.unwrap();
     let owner = loader.get("settlement-owner").unwrap().view.unwrap();
+    // The owner's cleanups while no native input is in flight.
+    let idle = owner.effects().len();
     let before = settlement_status(&mut client).await;
     let request = input(&target, "test:retired-before-handoff", json!([]));
     assert!(target.unload_if_idle().await.unwrap());
@@ -1916,16 +1925,11 @@ async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
     tokio::time::timeout(Duration::from_secs(5), rules.held.notified())
         .await
         .unwrap();
-    assert!(
-        owner
-            .effects()
-            .iter()
-            .any(|effect| effect.label == "sessions.input")
-    );
+    assert_eq!(owner.effects().len(), idle + 1);
     let (restarted, ()) = tokio::join!(loader.restart("settlement-owner"), async {
         let mut changed = owner.watch();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while changed.borrow_and_update().state != rutis::FiberState::Unloading {
+            while changed.borrow_and_update().state != rutis::host::FiberState::Unloading {
                 changed.changed().await.unwrap();
             }
         })
@@ -1999,17 +2003,14 @@ async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
     let (restarted, ()) = tokio::join!(loader.restart("SessionNodeRuntime"), async {
         let mut changed = owner.watch();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while changed.borrow_and_update().state != rutis::FiberState::Unloading {
+            while changed.borrow_and_update().state != rutis::host::FiberState::Unloading {
                 changed.changed().await.unwrap();
             }
         })
         .await
         .unwrap();
         assert!(
-            owner
-                .effects()
-                .iter()
-                .any(|effect| effect.label == "sessions.input"),
+            super::unload_held(&owner).await,
             "bridge failure is not native writer settlement"
         );
         waiting.release.send(()).unwrap();
@@ -2020,12 +2021,6 @@ async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
     let recovered = sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"settlement:crash:append"})).await;
     assert_eq!(recovered["status"], "accepted");
     assert_eq!(target.local("main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("settlement:crash:append"))).count(), 1);
-    assert!(
-        owner
-            .effects()
-            .iter()
-            .all(|effect| effect.label != "sessions.input")
-    );
     server.shutdown();
     server.join().await.unwrap();
 }

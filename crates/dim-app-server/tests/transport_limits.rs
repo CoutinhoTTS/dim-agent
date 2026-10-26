@@ -1,8 +1,9 @@
 #![cfg(unix)]
 use dim_agent_capabilities::{adapters::MockTools, defaults};
-use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature, Names, SessionIdentity};
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use futures_util::{SinkExt, StreamExt};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -137,6 +138,20 @@ async fn boundary_frames_and_oversized_frames_on_both_transports() {
 struct HoldCleanup {
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
+    identity: Key<SessionIdentity>,
+}
+impl HoldCleanup {
+    fn new(
+        names: &Names<'_>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            entered,
+            release,
+            identity: names.key()?,
+        })
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -232,29 +247,24 @@ async fn outbound_size_limit_preserves_large_valid_replies() {
             .unwrap();
     }
 }
-impl rutis::TypedPlugin for HoldCleanup {
-    type Deps = rutis::Keyed<dim_agent_runtime::SessionIdentity>;
+impl DynPlugin for HoldCleanup {
     fn name(&self) -> &str {
         "test.transport-hold-cleanup"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        _: Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         let entered = self.entered.clone();
         let release = self.release.clone();
         Box::pin(async move {
-            ctx.effect(move || {
-                rutis::Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        entered.notify_one();
-                        release.notified().await;
-                        Ok(())
-                    })
-                }))
+            let _identity = ctx.require_at(&self.identity)?;
+            ctx.effect(move || async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(())
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(Effect::Done)
         })
     }
 }
@@ -270,10 +280,11 @@ async fn admission_reserves_cleanup_and_disconnect_settles_accepted_commands() {
             builder.require_feature(Feature::new("test.transport-hold-cleanup").session(
                 "test.transport-hold-cleanup",
                 move |names| {
-                    names.part(HoldCleanup {
-                        entered: start.clone(),
-                        release: finish.clone(),
-                    })
+                    Ok(Box::new(HoldCleanup::new(
+                        names,
+                        start.clone(),
+                        finish.clone(),
+                    )?))
                 },
             ));
         })

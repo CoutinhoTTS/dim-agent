@@ -4,29 +4,41 @@ use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
     InputMessageData, MessageContent, ToolContent,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed};
+use rutis::host::{BoxFuture, CtxHost};
 use std::ops::RangeInclusive;
 use std::sync::OnceLock;
 
 struct CaptureToolRegistry {
     registry: Arc<OnceLock<Arc<dim_agent_capabilities::tool_registry::ToolRegistry>>>,
+    tools: rutis::host::Key<dim_agent_capabilities::tool_registry::ToolRegistry>,
 }
 
-impl TypedPlugin for CaptureToolRegistry {
-    type Deps = Keyed<dim_agent_capabilities::tool_registry::ToolRegistry>;
-
+impl CaptureToolRegistry {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        registry: Arc<OnceLock<Arc<dim_agent_capabilities::tool_registry::ToolRegistry>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            registry,
+            tools: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for CaptureToolRegistry {
     fn name(&self) -> &str {
         "collaboration-test.capture-tool-registry"
     }
-
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.tools.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a Ctx,
-        Keyed(registry): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let registry = ctx.require_at(&self.tools)?;
             let _ = self.registry.set(registry);
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -133,20 +145,35 @@ async fn launch_team() -> (RunningServer, Agent) {
 
 struct CaptureMemberConfig {
     configs: Arc<std::sync::Mutex<Vec<Arc<dim_agent_runtime::SessionConfig>>>>,
+
+    config: rutis::host::Key<dim_agent_runtime::SessionConfig>,
 }
-impl TypedPlugin for CaptureMemberConfig {
-    type Deps = Keyed<dim_agent_runtime::SessionConfig>;
+impl CaptureMemberConfig {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        configs: Arc<std::sync::Mutex<Vec<Arc<dim_agent_runtime::SessionConfig>>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            configs,
+            config: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for CaptureMemberConfig {
     fn name(&self) -> &str {
         "capture-member-config"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.config.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a Ctx,
-        Keyed(config): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let config = ctx.require_at(&self.config)?;
             self.configs.lock().unwrap().push(config);
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -165,7 +192,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
         }, move |builder| {
             builder.require_feature(Feature::new("capture-member-config").session(
                 "capture-member-config",
-                move |names| names.part(CaptureMemberConfig { configs: observed.clone() }),
+                move |names| Ok(Box::new(CaptureMemberConfig::new(names, observed.clone())?)),
             ));
         }).await;
         let mut client = Client::new_version(&server, false, 3).await;
@@ -259,7 +286,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .session_value(Arc::new(CompactionStrategyHost(None)))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             );
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
@@ -270,9 +297,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             {
                 let captured_registry = captured_registry.clone();
                 move |names| {
-                    names.part(CaptureToolRegistry {
-                        registry: captured_registry.clone(),
-                    })
+                    Ok(Box::new(CaptureToolRegistry::new(names, captured_registry.clone())?))
                 }
             },
         ));
@@ -2354,7 +2379,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     dim_agent_capabilities::defaults::tool_host(
@@ -2726,22 +2751,40 @@ impl DispatchGate {
 }
 struct DispatchGatePlugin {
     gate: Arc<DispatchGate>,
+
+    dispatcher: rutis::host::Key<dim_agent_runtime::Dispatcher>,
+    timeline: rutis::host::Key<dim_agent_runtime::Timeline>,
+    identity: rutis::host::Key<dim_agent_runtime::SessionIdentity>,
 }
-impl TypedPlugin for DispatchGatePlugin {
-    type Deps = (
-        Keyed<dim_agent_runtime::Dispatcher>,
-        Keyed<dim_agent_runtime::Timeline>,
-        Keyed<dim_agent_runtime::SessionIdentity>,
-    );
+impl DispatchGatePlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>, gate: Arc<DispatchGate>) -> rutis::Result<Self> {
+        Ok(Self {
+            gate,
+            dispatcher: names.key()?,
+            timeline: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for DispatchGatePlugin {
     fn name(&self) -> &str {
         "collaboration-test.dispatch-gate"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![
+            self.dispatcher.erase(),
+            self.timeline.erase(),
+            self.identity.erase(),
+        ]
+    }
     fn apply<'a>(
         &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher), Keyed(timeline), Keyed(identity)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let timeline = ctx.require_at(&self.timeline)?;
+            let identity = ctx.require_at(&self.identity)?;
             let session = identity.session_id.clone();
             let gate = self.gate.clone();
             if gate.leader.get() == Some(&session) {
@@ -2757,12 +2800,17 @@ impl TypedPlugin for DispatchGatePlugin {
                     Ok(())
                 })
             })?;
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
 
-/// `launch_team` with the gate's listener ahead of Collaboration's.
+/// `launch_team` with a branch listener that can hold the leader's dispatch.
+/// Its place among the branch's listeners is not fixed: the gate is a
+/// required part and Collaboration's listener an optional one, mounted
+/// concurrently, so Collaboration may receive an event before the gate holds
+/// it. A hold delays every later event for every listener, because the
+/// Dispatcher hands an event to all its listeners before the next.
 async fn launch_gated(gate: Arc<DispatchGate>, config: ServerConfig) -> (RunningServer, Agent) {
     launch_gated_with(gate, config, |_| {}).await
 }
@@ -2778,18 +2826,30 @@ struct MemberHold {
 }
 struct MemberHoldPlugin {
     hold: Arc<MemberHold>,
+
+    identity: rutis::host::Key<dim_agent_runtime::SessionIdentity>,
 }
-impl TypedPlugin for MemberHoldPlugin {
-    type Deps = Keyed<dim_agent_runtime::SessionIdentity>;
+impl MemberHoldPlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>, hold: Arc<MemberHold>) -> rutis::Result<Self> {
+        Ok(Self {
+            hold,
+            identity: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for MemberHoldPlugin {
     fn name(&self) -> &str {
         "collaboration-test.member-hold"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.identity.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a Ctx,
-        Keyed(identity): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let identity = ctx.require_at(&self.identity)?;
             let session = identity.session_id.clone();
             if self
                 .hold
@@ -2801,7 +2861,7 @@ impl TypedPlugin for MemberHoldPlugin {
                 self.hold.entered.notify_one();
                 self.hold.release.notified().await;
             }
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -2823,7 +2883,7 @@ async fn launch_gated_with(
     builder.require_feature(
         Feature::new("collaboration-test.dispatch-gate")
             .branch("collaboration-test.dispatch-gate", move |names| {
-                names.part(DispatchGatePlugin { gate: gate.clone() })
+                Ok(Box::new(DispatchGatePlugin::new(names, gate.clone())?))
             }),
     );
     dim_app_server::collaboration::install(&mut builder);
@@ -2861,37 +2921,50 @@ async fn hold_until(timeline: &dim_agent_runtime::Timeline, kind: &str) {
 /// A turn stop committed before a request's `delivered` covers the request,
 /// even when the delivery's append returns before the stop is handled: the
 /// "delivered" mark follows the `delivered` event's position.
+///
+/// The order comes from the Timeline, not from the order of the branch's
+/// listeners: the member's creation is held until the stop has committed, and
+/// the gate holds an event of the test's own, committed after the request
+/// and before the stop, until `delivered` has committed. Collaboration has
+/// received the request by then and sees the stop only after `delivered`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled() {
-    let request_held = Arc::new(tokio::sync::Notify::new());
-    let request_release = Arc::new(tokio::sync::Notify::new());
+    // The leader's Timeline, from the first of its events the gate sees.
+    let leader_timeline = Arc::new(OnceLock::new());
     let gate = DispatchGate::new({
-        let (held, release) = (request_held.clone(), request_release.clone());
+        let leader_timeline = leader_timeline.clone();
         Arc::new(move |timeline, event| {
-            let (held, release) = (held.clone(), release.clone());
+            let _ = leader_timeline.set(timeline.clone());
             Box::pin(async move {
-                match &event.kind {
-                    EventKind::CollaborationRequest(_) => {
-                        held.notify_one();
-                        release.notified().await;
-                    }
-                    EventKind::StopInterrupt(_) => {
-                        hold_until(&timeline, "collaboration/delivered").await;
-                    }
-                    _ => {}
+                if event.kind.key() == "collaborationtest/barrier" {
+                    hold_until(&timeline, "collaboration/delivered").await;
                 }
             })
         })
     });
-    let (server, agent) = launch_gated(gate.clone(), ServerConfig::default()).await;
+    let hold = Arc::new(MemberHold::default());
+    let (server, agent) = launch_gated_with(gate.clone(), ServerConfig::default(), {
+        let hold = hold.clone();
+        move |builder| {
+            builder.require_feature(
+                Feature::new("collaboration-test.member-hold")
+                    .session("collaboration-test.member-hold", move |names| {
+                        Ok(Box::new(MemberHoldPlugin::new(names, hold.clone())?))
+                    }),
+            );
+        }
+    })
+    .await;
     let mut client = Client::new_version(&server, false, 3).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
+    hold.leader.set(lead.clone()).unwrap();
     let lead_session = agent.get_session(&lead).unwrap();
     let default_agent = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
         .as_str()
         .unwrap()
         .to_owned();
+    hold.armed.store(true, Ordering::SeqCst);
     say(
         &mut client,
         &lead,
@@ -2899,7 +2972,19 @@ async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled()
         "queue",
     )
     .await;
-    request_held.notified().await;
+    // Collaboration is delivering the request: its member is being created.
+    hold.entered.notified().await;
+    leader_timeline
+        .get()
+        .expect("the gate saw the leader's request")
+        .append(
+            EventKind::Extension(
+                dim_agent_types::ExtensionEvent::new("collaborationtest", "barrier", json!({}))
+                    .unwrap(),
+            )
+            .into(),
+        )
+        .unwrap();
     let stop = tokio::spawn({
         let session = lead_session.clone();
         async move { session.stop("main", "stopped".into()).await }
@@ -2912,7 +2997,7 @@ async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled()
             .then_some(())
     })
     .await;
-    request_release.notify_one();
+    hold.release.notify_one();
     stop.await.unwrap().unwrap();
     let member = poll("delivered member", async || {
         events(&lead_session)
@@ -3146,7 +3231,7 @@ async fn a_request_covered_before_its_member_input_is_refused() {
             builder.require_feature(
                 Feature::new("collaboration-test.member-hold")
                     .session("collaboration-test.member-hold", move |names| {
-                        names.part(MemberHoldPlugin { hold: hold.clone() })
+                        Ok(Box::new(MemberHoldPlugin::new(names, hold.clone())?))
                     }),
             );
         }
@@ -3801,7 +3886,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
             builder.require_feature(
                 Feature::new("collaboration-test.member-hold")
                     .session("collaboration-test.member-hold", move |names| {
-                        names.part(MemberHoldPlugin { hold: hold.clone() })
+                        Ok(Box::new(MemberHoldPlugin::new(names, hold.clone())?))
                     }),
             );
         }
