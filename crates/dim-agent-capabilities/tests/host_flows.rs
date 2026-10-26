@@ -6,7 +6,8 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Plugin};
 use std::{
     sync::{
         Arc, Mutex,
@@ -30,25 +31,33 @@ fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuil
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::install(&mut builder);
     builder
 }
 
-struct Rewrite;
-impl TypedPlugin for Rewrite {
-    type Deps = (Keyed<Timeline>,);
+struct Rewrite {
+    timeline: Key<Timeline>,
+}
+impl Rewrite {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            timeline: names.key()?,
+        })
+    }
+}
+impl DynPlugin for Rewrite {
     fn name(&self) -> &str {
         "Rewrite"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
             timeline.before(ctx, "rewrite-model", &["model/call"], |mut draft| {
                 if let EventKind::ModelCall(call) = &mut draft.kind {
                     Arc::make_mut(&mut call.request).model_id = "final-model".into();
@@ -165,7 +174,7 @@ async fn model_receives_the_committed_before_result_and_fixed_history() {
             Arc::new(MockTools),
         );
         builder.require_feature(
-            Feature::new("Rewrite").branch("Rewrite", |names| names.part(Rewrite)),
+            Feature::new("Rewrite").branch("Rewrite", |names| Ok(Box::new(Rewrite::new(names)?))),
         );
         let agent = builder.build();
         let session = agent
@@ -631,21 +640,15 @@ impl ModelDriver for RecoveryProbe {
     }
 }
 struct RecoveryHosts(RecoveryProbe);
-impl TypedPlugin for RecoveryHosts {
+impl Plugin for RecoveryHosts {
     type Deps = ();
     fn name(&self) -> &str {
         "test.recovery.hosts"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide(ModelHost(Arc::new(self.0.clone())))?;
-            ctx.provide(ProviderConnectionResolver(Arc::new(self.0.clone())))?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.provide(ModelHost(Arc::new(self.0.clone())))?;
+        ctx.provide(ProviderConnectionResolver(Arc::new(self.0.clone())))?;
+        Ok(())
     }
 }
 #[tokio::test]
@@ -660,7 +663,7 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
                 drained: Default::default(),
             };
             let root = Ctx::root().unwrap();
-            root.plugin(rutis::Typed::new(RecoveryHosts(probe.clone())));
+            root.plugin(RecoveryHosts(probe.clone()));
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
                 .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -672,7 +675,7 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
                 .session_value(Arc::new(CompactionStrategyHost(None)))
                 .require_feature(
                     Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                        names.part(DefaultPrepareModelPlugin::new(names)?)
+                        Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                     }),
                 );
             defaults::install_with_process_model(&mut builder);
@@ -767,7 +770,7 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                 drained: Default::default(),
             };
             let root = Ctx::root().unwrap();
-            root.plugin(rutis::Typed::new(RecoveryHosts(probe.clone())));
+            root.plugin(RecoveryHosts(probe.clone()));
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
                 .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -779,7 +782,7 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
                 .session_value(Arc::new(CompactionStrategyHost(None)))
                 .require_feature(
                     Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                        names.part(DefaultPrepareModelPlugin::new(names)?)
+                        Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                     }),
                 );
             defaults::install_with_process_model(&mut builder);
@@ -854,7 +857,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                 drained: Default::default(),
             };
             let root = Ctx::root().unwrap();
-            let provider = root.plugin(rutis::Typed::new(RecoveryHosts(probe.clone())));
+            let provider = root.plugin(RecoveryHosts(probe.clone()));
             let mut builder = AgentBuilder::new(AgentConfig::default());
             builder
                 .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -866,7 +869,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                 .session_value(Arc::new(CompactionStrategyHost(None)))
                 .require_feature(
                     Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                        names.part(DefaultPrepareModelPlugin::new(names)?)
+                        Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                     }),
                 );
             defaults::install_with_process_model(&mut builder);
@@ -1057,7 +1060,7 @@ async fn retry_after_uses_one_real_sixty_second_budget() {
             drained: Default::default(),
         };
         let root = Ctx::root().unwrap();
-        root.plugin(rutis::Typed::new(RecoveryHosts(probe.clone())));
+        root.plugin(RecoveryHosts(probe.clone()));
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder
             .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
@@ -1069,7 +1072,7 @@ async fn retry_after_uses_one_real_sixty_second_budget() {
             .session_value(Arc::new(CompactionStrategyHost(None)))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             );
         defaults::install_with_process_model(&mut builder);

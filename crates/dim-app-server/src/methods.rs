@@ -8,9 +8,11 @@ use dim_agent_capabilities::methods::{
     SessionMethods, valid_name, within,
 };
 use dim_agent_runtime::Session;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, FiberState, Snapshot, TypedPlugin};
+use rutis::host::{CtxHost, ErrorKind, FiberState, Key, Snapshot};
+use rutis::{Ctx, Error, Plugin};
 use rutis_bridge::session::{HostDispatch, host_key};
-use rutis_loader::{EntryStatus, Loader};
+use rutis_loader::Loader;
+use rutis_loader::report::EntryStatus;
 use serde::Deserialize;
 use serde_json::Value;
 use std::{ops::Deref, sync::Arc};
@@ -37,7 +39,7 @@ impl ManagementMethods {
     /// Management methods are about the host, never a Session. The `session`
     /// root belongs to built-ins and Session-scoped methods, so contributed
     /// methods cannot impersonate Session traffic.
-    pub(crate) fn check_namespace(namespace: &str) -> Result<(), CordisError> {
+    pub(crate) fn check_namespace(namespace: &str) -> Result<(), Error> {
         if !valid_name(namespace)
             || ["hello", "daemon", "agent", "approval", "session"]
                 .iter()
@@ -53,9 +55,9 @@ impl ManagementMethods {
                 })
                 .any(|reserved| reserved)
         {
-            return Err(CordisError::PluginFailed(
+            return Err(rutis::Error::from(ErrorKind::PluginFailed(
                 "Invalid management namespace".into(),
-            ));
+            )));
         }
         Ok(())
     }
@@ -67,9 +69,9 @@ impl ManagementMethods {
                 .iter()
                 .any(|decl| crate::protocol::is_builtin_method(&decl.name))
             {
-                return Err(CordisError::PluginFailed(
+                return Err(rutis::Error::from(ErrorKind::PluginFailed(
                     "Invalid management contribution".into(),
-                ));
+                )));
             }
             Ok(())
         })
@@ -79,38 +81,34 @@ impl ManagementMethods {
 /// Process part: the management method table, at its native key and, for
 /// other languages, at its dispatcher key.
 pub struct ManagementMethodsPlugin {
-    table: DepKey<ManagementMethods>,
+    table: Key<ManagementMethods>,
 }
 impl ManagementMethodsPlugin {
-    pub fn new(names: &dim_agent_runtime::Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &dim_agent_runtime::Names<'_>) -> Result<Self, Error> {
         Ok(Self {
             table: names.key()?,
         })
     }
     /// This part keyed from `catalog`, to mount it directly.
-    pub fn typed(
-        catalog: &dim_agent_runtime::names::ServiceCatalog,
-    ) -> Result<rutis::Typed<Self>, CordisError> {
+    pub fn typed(catalog: &dim_agent_runtime::names::ServiceCatalog) -> Result<Self, Error> {
         let build = Default::default();
         let plugin = Self::new(&dim_agent_runtime::Names::copy(catalog, &build))?;
-        Ok(rutis::Typed::new(plugin))
+        Ok(plugin)
     }
 }
-impl TypedPlugin for ManagementMethodsPlugin {
+impl Plugin for ManagementMethodsPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "ManagementMethods"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let table = Arc::new(MethodTable::new(ManagementMethods::check()));
-            ctx.provide_as::<dyn HostDispatch>(
-                host_key(&dim_agent_runtime::names::name_of::<ManagementMethods>()),
-                Arc::new(ForeignMethods(table.clone())),
-            )?;
-            ctx.provide_as(self.table.key().clone(), Arc::new(ManagementMethods(table)))?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        let table = Arc::new(MethodTable::new(ManagementMethods::check()));
+        ctx.provide_at::<dyn HostDispatch>(
+            host_key(&dim_agent_runtime::names::name_of::<ManagementMethods>()),
+            Arc::new(ForeignMethods(table.clone())),
+        )?;
+        ctx.provide_at(self.table.clone(), Arc::new(ManagementMethods(table)))?;
+        Ok(())
     }
 }
 
@@ -126,9 +124,9 @@ pub(crate) fn reserved_for_sessions() -> Check {
                 .any(|root| within(namespace, root))
             || crate::protocol::builtin_methods().any(overlaps)
         {
-            return Err(CordisError::PluginFailed(
+            return Err(rutis::Error::from(ErrorKind::PluginFailed(
                 format!("invalid Session namespace {namespace}").into(),
-            ));
+            )));
         }
         Ok(())
     })

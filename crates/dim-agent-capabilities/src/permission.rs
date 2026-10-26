@@ -14,7 +14,8 @@ use dim_agent_types::{
     AgentEvent, ApprovalCallData, COMMAND_SEPARATORS, CommandMatch, CommandRule,
     CommandRuleDecision, EventKind, PermissionChangedData, PermissionPolicy, PermissionPreset,
 };
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Error};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -351,33 +352,43 @@ fn decide(policy: &PermissionPolicy, name: &str, risk: Option<&str>) -> Decision
 }
 
 pub struct PermissionPlugin {
-    state: DepKey<StateCell<PermissionState>>,
-    permission: DepKey<Permission>,
+    state: Key<StateCell<PermissionState>>,
+    permission: Key<Permission>,
+    config: Key<SessionConfig>,
+    rules: Key<CommandRulesHost>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
 }
 impl PermissionPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
             state: names.state_cell()?,
             permission: names.key()?,
+            config: names.key()?,
+            rules: names.key()?,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
         })
     }
 }
-impl TypedPlugin for PermissionPlugin {
-    type Deps = (
-        Keyed<SessionConfig>,
-        Keyed<CommandRulesHost>,
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-    );
+impl DynPlugin for PermissionPlugin {
     fn name(&self) -> &str {
         "Permission"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(config), Keyed(rules), Keyed(timeline), Keyed(dispatcher)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.config.erase(),
+            self.rules.erase(),
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let config = ctx.require_at(&self.config)?;
+            let rules = ctx.require_at(&self.rules)?;
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
             let service = Arc::new(Permission {
                 timeline,
                 state: Arc::new(StateCell::new(PermissionState {
@@ -390,13 +401,13 @@ impl TypedPlugin for PermissionPlugin {
             });
             let closing = service.clone();
             ctx.effect(move || {
-                Effect::Disposer(Box::new(move || {
+                async move {
                     let mut inner = closing.inner.lock().unwrap();
                     inner.closed = true;
                     // Dropped waiters report `Closed`.
                     inner.waiters.clear();
                     Ok(())
-                }))
+                }
             })?;
             let owner = service.clone();
             dispatcher
@@ -416,8 +427,8 @@ impl TypedPlugin for PermissionPlugin {
                     },
                 )
                 .await?;
-            ctx.provide_as(self.state.key().clone(), service.state.clone())?;
-            ctx.provide_as(self.permission.key().clone(), service)?;
+            ctx.provide_at(self.state.clone(), service.state.clone())?;
+            ctx.provide_at(self.permission.clone(), service)?;
             Ok(Effect::Done)
         })
     }

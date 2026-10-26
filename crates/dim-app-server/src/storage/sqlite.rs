@@ -1,6 +1,7 @@
 use dim_agent_runtime::{AgentError, Result};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::host::ErrorKind;
+use rutis::{Ctx, Plugin};
 use std::{
     fs::File,
     path::PathBuf,
@@ -450,42 +451,34 @@ impl SqliteStoragePlugin {
         Self { path }
     }
 }
-impl TypedPlugin for SqliteStoragePlugin {
+impl Plugin for SqliteStoragePlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "SqliteStorage"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let path = self.path.clone();
-            let storage = tokio::task::spawn_blocking(move || SqliteStorage::open(path))
-                .await
-                .map_err(|error| CordisError::PluginFailed(error.into()))??;
-            // Direct to stderr: the daemon's default log filter keeps only
-            // errors, and a user who rolls back finds this line next to the
-            // old daemon's refusal.
-            if let Some(from) = storage.upgraded_from() {
-                eprintln!(
-                    "Upgraded native store {} from format v{from} to v{FORMAT}; earlier dimcode versions cannot open it.",
-                    storage.path.display()
-                );
-            }
-            let owned = storage.clone();
-            if let Err(error) = ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move { owned.close().await.map_err(Into::into) })
-                }))
-            }) {
-                storage.close().await?;
-                return Err(error);
-            }
-            ctx.provide_as(rutis::TypeKey::of::<SqliteStorage>(), storage)?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        let path = self.path.clone();
+        let storage = tokio::task::spawn_blocking(move || SqliteStorage::open(path))
+            .await
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))??;
+        // Direct to stderr: the daemon's default log filter keeps only
+        // errors, and a user who rolls back finds this line next to the
+        // old daemon's refusal.
+        if let Some(from) = storage.upgraded_from() {
+            eprintln!(
+                "Upgraded native store {} from format v{from} to v{FORMAT}; earlier dimcode versions cannot open it.",
+                storage.path.display()
+            );
+        }
+        let owned = storage.clone();
+        if let Err(error) =
+            ctx.effect(move || async move { owned.close().await.map_err(Into::into) })
+        {
+            storage.close().await?;
+            return Err(error);
+        }
+        ctx.provide_as::<SqliteStorage>(storage)?;
+        Ok(())
     }
 }
 

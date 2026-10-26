@@ -11,6 +11,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
+use rutis::host::CtxHost;
 use std::path::{Path, PathBuf};
 
 fn list(input: &InputMessageData) -> Option<Option<String>> {
@@ -357,29 +358,20 @@ async fn skill_loads_the_latest_view_after_queue_and_steer_interleave() {
     env.agent.close().await.unwrap();
 }
 
-/// The latest version announced on the catalog channel.
-struct Announced(tokio::sync::watch::Sender<u64>);
-impl rutis::Listener<CatalogChanged> for Announced {
-    fn call<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        changed: &'a CatalogChanged,
-        _: rutis::Call<'a, ()>,
-    ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
-        self.0.send_replace(changed.version);
-        Box::pin(async { Ok(None) })
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enablement_changes_the_list_and_loading() {
     let dirs = Dirs::new();
     let layout = layout(&dirs);
     let env = env(&dirs, Options::default()).await;
     let (announced, mut seen) = tokio::sync::watch::channel(0);
+    // The latest version announced on the catalog channel.
     env.root
-        .events()
-        .on(&env.root, &catalog_changes(), Announced(announced))
+        .listen::<CatalogChanged>()
+        .name(catalog_changes())
+        .on(move |changed, _| {
+            announced.send_replace(changed.version);
+            async { Ok(None) }
+        })
         .unwrap();
     let session = env.session(&layout.cwd, "").await.unwrap();
     run(&session, "first").await;
@@ -436,16 +428,12 @@ async fn enablement_changes_the_list_and_loading() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(view_version(&session), before);
     env.root
-        .events()
-        .emit(
-            &env.root,
-            &settings_changes(SOURCE),
-            std::sync::Arc::new(SettingsChanged {
-                source: SOURCE.into(),
-                scope: SettingsScope::User,
-                revision,
-            }),
-        )
+        .emit(SettingsChanged {
+            name: settings_changes(SOURCE),
+            source: SOURCE.into(),
+            scope: SettingsScope::User,
+            revision,
+        })
         .unwrap();
     wait_view_change(&session, &before).await;
     assert_eq!(
@@ -517,7 +505,7 @@ impl SkillSettings for SlowFirstResponse {
     fn skills(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> rutis::BoxFuture<
+    ) -> rutis::host::BoxFuture<
         '_,
         std::result::Result<
             dim_agent_capabilities::skill_settings::SkillSettingsSnapshot,
@@ -532,7 +520,7 @@ impl SkillSettings for SlowFirstResponse {
         id: String,
         enabled: bool,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> rutis::BoxFuture<
+    ) -> rutis::host::BoxFuture<
         'static,
         std::result::Result<String, dim_agent_capabilities::skill_settings::SkillSettingsError>,
     > {
@@ -562,35 +550,25 @@ async fn a_late_update_response_does_not_overwrite_a_newer_setting() {
     let dirs = Dirs::new();
     let layout = layout(&dirs);
     let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
-    root.provide_as(
-        rutis::TypeKey::of::<HostPlatform>(),
-        Arc::new(platform(&dirs.home)),
-    )
-    .unwrap();
+    root.provide_as::<HostPlatform>(Arc::new(platform(&dirs.home)))
+        .unwrap();
     let settings = Arc::new(SlowFirstResponse {
         inner: Arc::default(),
         first: true.into(),
         committed: Default::default(),
         release: Default::default(),
     });
-    root.provide_as(
-        rutis::TypeKey::of::<SkillSettingsHost>(),
-        Arc::new(SkillSettingsHost(settings.clone())),
-    )
-    .unwrap();
+    root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(settings.clone())))
+        .unwrap();
     // Where the Skills plugin registers its parts; no Agent mounts them here.
-    root.provide_as(
-        rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
-        Arc::new(dim_agent_runtime::PartRegistry::default()),
-    )
-    .unwrap();
-    (&root.plugin(
-        dim_agent_runtime::names::process_plugin(
-            &dim_agent_capabilities::catalog(),
-            SkillsCatalogPlugin::new(),
-        )
-        .unwrap(),
+    root.provide_as::<dim_agent_runtime::PartRegistry>(Arc::new(
+        dim_agent_runtime::PartRegistry::default(),
     ))
+    .unwrap();
+    let services = dim_agent_capabilities::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = dim_agent_runtime::Names::copy(&services, &build);
+    (&root.plugin(SkillsCatalogPlugin::new(&names).unwrap()))
         .await
         .unwrap();
     let catalog = root.get::<SkillsCatalog>().unwrap();
@@ -640,7 +618,7 @@ impl SkillSettings for FailingReads {
     fn skills(
         &self,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> rutis::BoxFuture<
+    ) -> rutis::host::BoxFuture<
         '_,
         std::result::Result<
             dim_agent_capabilities::skill_settings::SkillSettingsSnapshot,
@@ -669,7 +647,7 @@ impl SkillSettings for FailingReads {
         id: String,
         enabled: bool,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> rutis::BoxFuture<
+    ) -> rutis::host::BoxFuture<
         'static,
         std::result::Result<String, dim_agent_capabilities::skill_settings::SkillSettingsError>,
     > {
@@ -764,9 +742,8 @@ async fn unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessi
             .unwrap()
             .plugins
             .iter()
-            .filter(
-                |plugin| plugin.name == "SkillContent" && plugin.state == rutis::FiberState::Active
-            )
+            .filter(|plugin| plugin.name == "SkillContent"
+                && plugin.state == rutis::host::FiberState::Active)
             .count(),
         3
     );
@@ -792,9 +769,13 @@ async fn unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessi
     assert_eq!(result.is_error, Some(true));
     assert!(!result_text(&result).contains("BODY-B-1"));
     assert!(
-        env.agent.diagnostics().unwrap().plugins.iter().all(
-            |plugin| plugin.name != "SkillContent" || plugin.state != rutis::FiberState::Active
-        )
+        env.agent
+            .diagnostics()
+            .unwrap()
+            .plugins
+            .iter()
+            .all(|plugin| plugin.name != "SkillContent"
+                || plugin.state != rutis::host::FiberState::Active)
     );
     env.agent.close().await.unwrap();
 }
@@ -810,33 +791,23 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
     let dirs = Dirs::new();
     let layout = layout(&dirs);
     let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
-    root.provide_as(
-        rutis::TypeKey::of::<HostPlatform>(),
-        Arc::new(platform(&dirs.home)),
-    )
-    .unwrap();
+    root.provide_as::<HostPlatform>(Arc::new(platform(&dirs.home)))
+        .unwrap();
     let settings = Arc::new(FailingReads {
         inner: Arc::default(),
         failing: Default::default(),
     });
-    root.provide_as(
-        rutis::TypeKey::of::<SkillSettingsHost>(),
-        Arc::new(SkillSettingsHost(settings.clone())),
-    )
-    .unwrap();
+    root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(settings.clone())))
+        .unwrap();
     // Where the Skills plugin registers its parts; no Agent mounts them here.
-    root.provide_as(
-        rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
-        Arc::new(dim_agent_runtime::PartRegistry::default()),
-    )
-    .unwrap();
-    (&root.plugin(
-        dim_agent_runtime::names::process_plugin(
-            &dim_agent_capabilities::catalog(),
-            SkillsCatalogPlugin::new(),
-        )
-        .unwrap(),
+    root.provide_as::<dim_agent_runtime::PartRegistry>(Arc::new(
+        dim_agent_runtime::PartRegistry::default(),
     ))
+    .unwrap();
+    let services = dim_agent_capabilities::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = dim_agent_runtime::Names::copy(&services, &build);
+    (&root.plugin(SkillsCatalogPlugin::new(&names).unwrap()))
         .await
         .unwrap();
     let catalog = root.get::<SkillsCatalog>().unwrap();
@@ -871,7 +842,7 @@ async fn content_instances_are_session_owned_and_only_changed_content_is_replace
             .plugins
             .iter()
             .filter(|plugin| {
-                plugin.name == "SkillContent" && plugin.state == rutis::FiberState::Active
+                plugin.name == "SkillContent" && plugin.state == rutis::host::FiberState::Active
             })
             .map(|plugin| plugin.id)
             .collect();
@@ -966,7 +937,8 @@ async fn catalog_changes_during_assembly_wait_for_session_publication() {
                     .plugins
                     .into_iter()
                     .filter(|plugin| {
-                        plugin.name == "SkillContent" && plugin.state == rutis::FiberState::Active
+                        plugin.name == "SkillContent"
+                            && plugin.state == rutis::host::FiberState::Active
                     })
                     .map(|plugin| plugin.id)
                     .collect::<std::collections::HashSet<_>>()

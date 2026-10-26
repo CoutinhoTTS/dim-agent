@@ -6,7 +6,7 @@ use crate::{
     mcp::{McpSession, McpSessionState},
 };
 use dim_agent_capabilities::tool_registry::{ToolSourcesState, ToolSourcesView};
-use rutis::{EventKey, FiberState, FiberStatusChanged, Listener};
+use rutis::host::{FiberState, FiberStatusChanged};
 use tokio::sync::watch;
 
 fn project_state(id: &str, state: McpSessionState, tools: ToolSourcesState) -> McpStateResult {
@@ -47,17 +47,17 @@ pub(super) fn session_state(session: &Session) -> Result<McpStateResult, RpcErro
 
 /// Reacquire services when their Plugins become active; never poll readiness.
 pub(super) struct Availability(pub(super) watch::Sender<()>);
-impl Listener<FiberStatusChanged> for Availability {
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        event: &'a FiberStatusChanged,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+impl Availability {
+    pub(super) async fn on_event(
+        &self,
+        _ctx: &rutis::Ctx,
+        event: &FiberStatusChanged,
+        _: rutis::events::Call<FiberStatusChanged>,
+    ) -> Result<Option<()>, Error> {
         if event.to == FiberState::Active {
             self.0.send_replace(());
         }
-        Box::pin(async { Ok(None) })
+        Ok(None)
     }
 }
 impl Connection {
@@ -69,11 +69,16 @@ impl Connection {
         cancel: CancellationToken,
     ) {
         let (signal, mut active) = watch::channel(());
-        let Ok(listener) = host
-            .ctx
-            .events()
-            .on(&host.ctx, &EventKey::of(), Availability(signal))
-        else {
+        let Ok(listener) = host.ctx.on::<FiberStatusChanged>({
+            let listener = std::sync::Arc::new(Availability(signal));
+            move |event, call| {
+                let listener = listener.clone();
+                async move {
+                    let ctx = call.ctx().clone();
+                    listener.on_event(&ctx, &event, call).await
+                }
+            }
+        }) else {
             return;
         };
         let mut owners: Option<(Arc<McpSession>, Arc<ToolSourcesView>)> = None;

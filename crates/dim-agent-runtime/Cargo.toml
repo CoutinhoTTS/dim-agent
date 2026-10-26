@@ -9,6 +9,7 @@ rust-version.workspace = true
 dim-agent-types.workspace = true
 rutis.workspace = true
 rutis-loader.workspace = true
+rutis-bridge.workspace = true
 schemars.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

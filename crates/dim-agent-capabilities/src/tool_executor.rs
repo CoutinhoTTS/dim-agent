@@ -8,7 +8,8 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Error};
 use std::{
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
@@ -31,39 +32,46 @@ pub struct ToolExecutor {
 }
 pub struct ToolExecutorPlugin {
     pub emit_progress: bool,
-    executor: DepKey<ToolExecutor>,
+    executor: Key<ToolExecutor>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    binding: Key<ToolBinding>,
+    approval: Key<Approval>,
+    identity: Key<TimelineIdentity>,
 }
 impl ToolExecutorPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
             emit_progress: false,
             executor: names.key()?,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            binding: names.key()?,
+            approval: names.key()?,
+            identity: names.key()?,
         })
     }
 }
-impl TypedPlugin for ToolExecutorPlugin {
-    type Deps = (
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-        Keyed<ToolBinding>,
-        Keyed<Approval>,
-        Keyed<TimelineIdentity>,
-    );
+impl DynPlugin for ToolExecutorPlugin {
     fn name(&self) -> &str {
         "ToolExecutor"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(timeline),
-            Keyed(dispatcher),
-            Keyed(binding),
-            Keyed(approval),
-            Keyed(identity),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.binding.erase(),
+            self.approval.erase(),
+            self.identity.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let binding = ctx.require_at(&self.binding)?;
+            let approval = ctx.require_at(&self.approval)?;
+            let identity = ctx.require_at(&self.identity)?;
             let emit_progress = self.emit_progress;
             let service = Arc::new(ToolExecutor {
                 state: Mutex::new(ToolState::default()),
@@ -71,23 +79,18 @@ impl TypedPlugin for ToolExecutorPlugin {
                 errors: Mutex::new(Vec::new()),
             });
             let closing = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        let cancel = {
-                            let mut state = closing.state.lock().unwrap();
-                            state.closed = true;
-                            state.current.clone()
-                        };
-                        if let Some(cancel) = cancel {
-                            cancel.cancel();
-                        }
-                        closing.tasks.close();
-                        closing.tasks.wait().await;
-                        AgentError::aggregate(closing.errors.lock().unwrap().clone())
-                            .map_err(Into::into)
-                    })
-                }))
+            ctx.effect(move || async move {
+                let cancel = {
+                    let mut state = closing.state.lock().unwrap();
+                    state.closed = true;
+                    state.current.clone()
+                };
+                if let Some(cancel) = cancel {
+                    cancel.cancel();
+                }
+                closing.tasks.close();
+                closing.tasks.wait().await;
+                AgentError::aggregate(closing.errors.lock().unwrap().clone()).map_err(Into::into)
             })?;
             let owner = service.clone();
             let faults = dispatcher.clone();
@@ -322,7 +325,7 @@ impl TypedPlugin for ToolExecutorPlugin {
                     })
                 },
             ).await?;
-            ctx.provide_as(self.executor.key().clone(), service)?;
+            ctx.provide_at(self.executor.clone(), service)?;
             Ok(Effect::Done)
         })
     }

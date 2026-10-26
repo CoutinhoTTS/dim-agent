@@ -253,16 +253,14 @@ async fn agents_reload_keeps_every_agent() {
 
 async fn launch_with_plugin<P>(new: impl Fn() -> P + Send + Sync + 'static) -> RunningServer
 where
-    P: TypedPlugin,
-    P::Deps: dim_agent_runtime::NamedDeps,
+    P: Plugin,
 {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let name = new().name().to_owned();
-    builder
-        .require_feature(Feature::new(name.clone()).session(name, move |names| names.part(new())));
+    builder.require_feature(Feature::new(name.clone()).session(name, move |_| Ok(Box::new(new()))));
     let config = ServerConfig {
         unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
             "dim-agent-agents-test-{}/server.sock",
@@ -382,33 +380,25 @@ struct GatedCleanup {
     gate: std::sync::Arc<tokio::sync::Notify>,
     fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
-impl TypedPlugin for GatedCleanup {
+impl Plugin for GatedCleanup {
     type Deps = ();
     fn name(&self) -> &'static str {
         "test.gated-cleanup"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
         let gate = self.gate.clone();
         let fail = self.fail.clone();
-        let result = ctx.effect(move || {
-            rutis::Effect::AsyncDisposer(Box::new(move || {
-                let gate = gate.clone();
-                let fail = fail.clone();
-                Box::pin(async move {
-                    gate.notified().await;
-                    if fail.load(std::sync::atomic::Ordering::SeqCst) {
-                        Err(rutis::CordisError::PluginFailed("cleanup".into()))
-                    } else {
-                        Ok(())
-                    }
-                })
-            }))
-        });
-        Box::pin(async move { result.map(|_| rutis::Effect::Done) })
+        ctx.effect(move || async move {
+            gate.notified().await;
+            if fail.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    "cleanup".into(),
+                )))
+            } else {
+                Ok(())
+            }
+        })?;
+        Ok(())
     }
 }
 
@@ -536,7 +526,7 @@ async fn agent_profile_supplies_session_defaults() {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));

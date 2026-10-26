@@ -5,7 +5,8 @@
 //! Overwriting an existing file requires a binding from this branch.
 
 use dim_agent_runtime::Names;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::host::{CtxHost, Key};
+use rutis::{Ctx, Plugin};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -73,28 +74,22 @@ impl FileReads {
 }
 
 pub struct FileReadsPlugin {
-    reads: rutis::DepKey<FileReads>,
+    reads: Key<FileReads>,
 }
 impl FileReadsPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             reads: names.key()?,
         })
     }
 }
-impl TypedPlugin for FileReadsPlugin {
+impl Plugin for FileReadsPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "FileReads"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(self.reads.key().clone(), Arc::new(FileReads::default()))?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.provide_at(self.reads.clone(), Arc::new(FileReads::default()))?;
+        Ok(())
     }
 }

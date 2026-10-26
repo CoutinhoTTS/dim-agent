@@ -1,7 +1,9 @@
 use super::*;
-use dim_agent_capabilities::session_broadcast::{SessionBroadcastEvent, session_channel};
+use dim_agent_capabilities::session_broadcast::{
+    SessionBroadcast, SessionBroadcastEvent, session_channel,
+};
 use dim_agent_runtime::SessionIdentity;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Listener};
+use rutis::host::CtxHost;
 use std::collections::HashMap;
 use tokio::sync::Notify;
 
@@ -24,13 +26,9 @@ impl Gate {
     }
 }
 struct Delay(Arc<Gate>);
-impl Listener<SessionBroadcastEvent> for Delay {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        record: &'a SessionBroadcastEvent,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+impl Delay {
+    /// The listener's synchronous part.
+    fn hold(&self, record: &SessionBroadcastEvent) {
         let block = matches!(record, SessionBroadcastEvent::Event { event, .. }
             if matches!(event.kind, dim_agent_types::EventKind::Text(_)))
             && !self.0.blocked.swap(true, Ordering::SeqCst);
@@ -41,39 +39,44 @@ impl Listener<SessionBroadcastEvent> for Delay {
                 drop(self.0.opened.wait_while(open, |open| !*open).unwrap());
             });
         }
-        Box::pin(async { Ok(None) })
     }
 }
 struct DelayPlugin {
     gate: Arc<Gate>,
+
+    identity: rutis::host::Key<SessionIdentity>,
 }
-impl TypedPlugin for DelayPlugin {
-    type Deps = Keyed<SessionIdentity>;
+impl DelayPlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>, gate: Arc<Gate>) -> rutis::Result<Self> {
+        Ok(Self {
+            gate,
+            identity: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for DelayPlugin {
     fn name(&self) -> &str {
         "test.delay-session-broadcast"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.identity.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        ctx: &'a Ctx,
-        Keyed(identity): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
-            let listener = ctx.events().on(
-                ctx,
-                &session_channel(&identity.session_id),
-                Delay(self.gate.clone()),
-            )?;
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        listener
-                            .dispose()
-                            .await
-                            .map_err(|e| CordisError::PluginFailed(Box::new(e)))
-                    })
-                }))
-            })?;
-            Ok(Effect::Done)
+            let identity = ctx.require_at(&self.identity)?;
+            let delay = Delay(self.gate.clone());
+            let listener = ctx
+                .listen::<SessionBroadcast>()
+                .name(session_channel(&identity.session_id))
+                .on(move |event, _| {
+                    delay.hold(&event.record);
+                    async { Ok(None) }
+                })?;
+            ctx.effect(move || async move { Ok(listener.dispose().await?) })?;
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -85,14 +88,12 @@ async fn setup(ws: bool) -> (RunningServer, Client, String, Arc<Gate>) {
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     let plugin_gate = gate.clone();
-    builder.require_feature(Feature::new("test.delay-session-broadcast").session(
-        "test.delay-session-broadcast",
-        move |names| {
-            names.part(DelayPlugin {
-                gate: plugin_gate.clone(),
-            })
-        },
-    ));
+    builder.require_feature(
+        Feature::new("test.delay-session-broadcast")
+            .session("test.delay-session-broadcast", move |names| {
+                Ok(Box::new(DelayPlugin::new(names, plugin_gate.clone())?))
+            }),
+    );
     let server = serve(
         builder,
         ServerConfig {

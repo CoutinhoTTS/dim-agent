@@ -6,6 +6,7 @@ use axum::{Json, Router, extract::State, routing::post};
 use dim_agent_runtime::{Timeline, TimelineKey, TimelineStore};
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
 use rusqlite::OpenFlags;
+use rutis::host::CtxHost;
 use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
@@ -376,23 +377,34 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 }
 
 /// Tags every input message, so its events carry a before trace.
-struct TagInput;
-impl TypedPlugin for TagInput {
-    type Deps = (rutis::Keyed<Timeline>,);
+struct TagInput {
+    timeline: rutis::host::Key<Timeline>,
+}
+impl TagInput {
+    fn new(names: &dim_agent_runtime::Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            timeline: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for TagInput {
     fn name(&self) -> &str {
         "TagInput"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.timeline.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (rutis::Keyed(timeline),): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
             timeline.before(ctx, "tag-input", &["input/message"], |mut draft| {
                 draft.tags.get_or_insert_default().push("tagged".into());
                 Ok(draft)
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -405,8 +417,9 @@ async fn timeline_export_carries_before_traces() {
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
-    builder
-        .require_feature(Feature::new("TagInput").branch("TagInput", |names| names.part(TagInput)));
+    builder.require_feature(
+        Feature::new("TagInput").branch("TagInput", |names| Ok(Box::new(TagInput::new(names)?))),
+    );
     let server = serve(
         builder,
         ServerConfig {

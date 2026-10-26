@@ -9,10 +9,9 @@ pub(crate) use workflow_files::WorkflowPackages;
 
 use crate::storage::SqliteStorage;
 use dim_agent_capabilities::file_storage::{FilePath, FileStorage, FileStorageError};
-use dim_agent_runtime::{Names, When, names::ServiceCatalog};
-use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, Event, EventKey, Keyed, Plugin, TypeKey, TypedPlugin,
-};
+use dim_agent_runtime::Names;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
+use rutis::{Ctx, Event};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
@@ -74,40 +73,22 @@ pub use dim_agent_capabilities::settings::{SettingsChanged, SettingsScope, setti
 /// A project directory newly authorized for project sources.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectAuthorized {
+    /// The channel it is sent under ([`project_authorizations`]).
+    #[serde(skip)]
+    pub name: String,
     pub root: usize,
     pub cwd: PathBuf,
 }
 impl Event for ProjectAuthorized {
-    const NAME: &'static str = "settings.project_authorized";
+    const NAME: &'static str = "";
     type Value = ();
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 /// The rutis channel of project authorizations.
-pub fn project_authorizations() -> EventKey<ProjectAuthorized> {
-    EventKey::dynamic("settings/projects")
-}
-
-/// Wakes a receiver on every event it listens to, for an owner whose read
-/// loop waits on a watch receiver: it rereads the source after each wake.
-#[derive(Clone)]
-pub(crate) struct Wake(Arc<tokio::sync::watch::Sender<()>>);
-impl Wake {
-    pub(crate) fn new() -> Self {
-        Self(Arc::new(tokio::sync::watch::Sender::new(())))
-    }
-    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
-        self.0.subscribe()
-    }
-}
-impl<E: Event<Value = ()>> rutis::Listener<E> for Wake {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        _: &'a E,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
-        self.0.send_replace(());
-        Box::pin(async { Ok(None) })
-    }
+pub fn project_authorizations() -> String {
+    "settings/projects".to_owned()
 }
 
 pub trait BusinessDocument: Default + Serialize + DeserializeOwned + Send + Sync + 'static {
@@ -198,7 +179,11 @@ impl SettingsService {
                 let _guard = owner.gate.lock().unwrap();
                 owner.check_open(&cancel)?;
                 if owner.projects.lock().unwrap().insert(cwd.clone(), root) != Some(root) {
-                    owner.emit(&project_authorizations(), ProjectAuthorized { root, cwd });
+                    owner.emit(ProjectAuthorized {
+                        name: project_authorizations(),
+                        root,
+                        cwd,
+                    });
                 }
                 Ok(root)
             })
@@ -228,24 +213,19 @@ impl SettingsService {
     /// Announces a committed write on the source's channel. Callers hold the
     /// commit order (the gate or the native connection), so events follow it.
     fn publish(&self, source: &str, scope: SettingsScope, revision: &str) {
-        self.emit(
-            &settings_changes(source),
-            SettingsChanged {
-                source: source.to_owned(),
-                scope,
-                revision: revision.to_owned(),
-            },
-        );
+        self.emit(SettingsChanged {
+            name: settings_changes(source),
+            source: source.to_owned(),
+            scope,
+            revision: revision.to_owned(),
+        });
     }
     /// The change is already committed; a refused announcement cannot undo it,
     /// so it is recorded rather than returned to the writer.
-    fn emit<E: Event>(&self, key: &EventKey<E>, event: E) {
-        if let Err(error) = self
-            .events
-            .events()
-            .emit(&self.events, key, Arc::new(event))
-        {
-            tracing::warn!(event = E::NAME, %error, "Settings change was not announced");
+    fn emit<E: Event>(&self, event: E) {
+        let name = event.name().to_owned();
+        if let Err(error) = self.events.emit(event) {
+            tracing::warn!(event = name, %error, "Settings change was not announced");
         }
     }
     fn path<D: BusinessDocument>(&self, scope: SettingsScope) -> Result<FilePath> {
@@ -478,28 +458,39 @@ pub struct SettingsPlugin {
     home_root: usize,
     project_roots: Vec<usize>,
     projects: Arc<Mutex<BTreeMap<PathBuf, usize>>>,
-    native: bool,
+    files: Key<FileStorage>,
+    /// SqliteStorage only for the native profile.
+    database: Option<Key<SqliteStorage>>,
     /// Rust sources the composition root registers, claimed before any
     /// declaration so a declaration cannot take one of their names.
     reserved: Vec<(TypeId, Vec<String>)>,
     declarations: Vec<SourceDeclaration>,
 }
 impl SettingsPlugin {
-    pub fn new(home_root: usize, project_roots: Vec<usize>) -> Self {
-        Self {
+    pub fn new(
+        names: &Names<'_>,
+        home_root: usize,
+        project_roots: Vec<usize>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
             home_root,
             project_roots,
             projects: Arc::new(Mutex::new(BTreeMap::new())),
-            native: false,
+            files: names.key()?,
+            database: None,
             reserved: Vec::new(),
             declarations: Vec::new(),
-        }
+        })
     }
-    pub fn native(home_root: usize, project_roots: Vec<usize>) -> Self {
-        Self {
-            native: true,
-            ..Self::new(home_root, project_roots)
-        }
+    pub fn native(
+        names: &Names<'_>,
+        home_root: usize,
+        project_roots: Vec<usize>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            database: Some(names.key()?),
+            ..Self::new(names, home_root, project_roots)?
+        })
     }
     /// Reserves a Rust source's names: a declaration naming one fails assembly.
     pub fn reserve<D: BusinessDocument>(mut self) -> Self {
@@ -515,57 +506,39 @@ impl SettingsPlugin {
         self.declarations.extend(declarations);
         self
     }
-    /// This part with its keys from `names`: SqliteStorage only for the
-    /// native profile.
-    pub fn part(self, names: &Names<'_>) -> std::result::Result<Box<dyn Plugin>, CordisError> {
-        let keys = self.keys(names)?;
-        Ok(names.part_with(self, keys))
-    }
-    /// This part keyed from `catalog`, to mount it directly.
-    pub fn typed(
-        self,
-        catalog: &ServiceCatalog,
-    ) -> std::result::Result<rutis::Typed<Self>, CordisError> {
-        let build = Default::default();
-        let keys = self.keys(&Names::copy(catalog, &build))?;
-        Ok(rutis::Typed::with_keys(self, keys))
-    }
-    fn keys(
-        &self,
-        names: &Names<'_>,
-    ) -> std::result::Result<<<Self as TypedPlugin>::Deps as rutis::Deps>::Keys, CordisError> {
-        Ok((
-            names.key()?,
-            names.when::<Keyed<SqliteStorage>>(self.native)?,
-        ))
-    }
 }
-impl TypedPlugin for SettingsPlugin {
-    type Deps = (Keyed<FileStorage>, When<Keyed<SqliteStorage>>);
+impl DynPlugin for SettingsPlugin {
     fn name(&self) -> &str {
         "Settings"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(files), When(database)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        let mut keys = vec![self.files.erase()];
+        keys.extend(self.database.as_ref().map(Key::erase));
+        keys
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let files = ctx.require_at(&self.files)?;
+            let database = match &self.database {
+                Some(key) => Some(ctx.require_at(key)?),
+                None => None,
+            };
             let mut claims = BTreeMap::new();
             for (owner, names) in &self.reserved {
-                claim(&mut claims, Claimant::Rust(*owner), names.clone())
-                    .map_err(|error| CordisError::PluginFailed(error.to_string().into()))?;
+                claim(&mut claims, Claimant::Rust(*owner), names.clone()).map_err(|error| {
+                    rutis::Error::from(ErrorKind::PluginFailed(error.to_string().into()))
+                })?;
             }
             let mut declared = BTreeMap::new();
             for (index, declaration) in self.declarations.iter().enumerate() {
                 let failed = |reason: String| {
-                    CordisError::PluginFailed(
+                    rutis::Error::from(ErrorKind::PluginFailed(
                         format!(
                             "settings source {} of {}: {reason}",
                             declaration.source, declaration.owner
                         )
                         .into(),
-                    )
+                    ))
                 };
                 let compiled = Declared::compile(declaration.clone()).map_err(failed)?;
                 claim(
@@ -583,12 +556,12 @@ impl TypedPlugin for SettingsPlugin {
             for root in &self.project_roots {
                 let path = files
                     .root_path(*root)
-                    .map_err(|error| CordisError::PluginFailed(error.into()))?;
+                    .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
                 self.projects.lock().unwrap().insert(path, *root);
             }
             let service = Arc::new(SettingsService {
                 files,
-                database: database.map(|Keyed(database)| database),
+                database,
                 home_root: self.home_root,
                 projects: self.projects.clone(),
                 stopping: CancellationToken::new(),
@@ -599,25 +572,18 @@ impl TypedPlugin for SettingsPlugin {
                 declared,
             });
             let owner = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let _guard = owner.gate.lock().unwrap();
-                            owner.stopping.cancel();
-                            owner.updates.close();
-                        }
-                        owner.updates.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                {
+                    let _guard = owner.gate.lock().unwrap();
+                    owner.stopping.cancel();
+                    owner.updates.close();
+                }
+                owner.updates.wait().await;
+                Ok(())
             })?;
             declared::provide(ctx, &service)?;
-            ctx.provide_as(
-                TypeKey::of::<WorkflowFiles>(),
-                Arc::new(WorkflowFiles(service.clone())),
-            )?;
-            ctx.provide_as(TypeKey::of::<SettingsService>(), service)?;
+            ctx.provide_as::<WorkflowFiles>(Arc::new(WorkflowFiles(service.clone())))?;
+            ctx.provide_as::<SettingsService>(service)?;
             Ok(Effect::Done)
         })
     }

@@ -304,14 +304,16 @@ pub fn run_with(
                     .require_feature(
                         dim_agent_runtime::Feature::new("ContextCompaction")
                             .session("ProductSummaryStrategy", |names| {
-                                names.part(ProductSummaryStrategyPlugin::new(names)?)
+                                Ok(Box::new(ProductSummaryStrategyPlugin::new(names)?))
                             })
-                            .session("ContextMethods", |names| names.part(ContextMethodsPlugin)),
+                            .session("ContextMethods", |names| {
+                                Ok(Box::new(ContextMethodsPlugin::new(names)?))
+                            }),
                     )
                     .require_feature(
                         dim_agent_runtime::Feature::new("PrepareModelHost")
                             .session("PrepareModelHost", |names| {
-                                names.part(DefaultPrepareModelPlugin::new(names)?)
+                                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                             }),
                     );
             }

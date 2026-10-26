@@ -6,8 +6,9 @@ use dim_agent_capabilities::{
     host::{SessionFileError, SessionFileErrorCode, SessionFilesHost},
     methods::{self, Interruption, MethodDecl, RpcError, SessionMethods},
 };
-use dim_agent_runtime::{AgentBuilder, SessionIdentity};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use dim_agent_runtime::{AgentBuilder, Names, SessionIdentity};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{path::PathBuf, sync::Arc};
 
 /// The `sessionMethods` namespace Attachments provides.
@@ -19,8 +20,9 @@ const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 /// SessionStore provides `sessionFiles` and the model has `read`.
 pub fn install(builder: &mut AgentBuilder) {
     builder.require_feature(
-        dim_agent_runtime::Feature::new("Attachments")
-            .session("Attachments", |names| names.part(AttachmentsPlugin)),
+        dim_agent_runtime::Feature::new("Attachments").session("Attachments", |names| {
+            Ok(Box::new(AttachmentsPlugin::new(names)?))
+        }),
     );
 }
 
@@ -57,22 +59,36 @@ fn put_error(error: SessionFileError) -> RpcError {
     RpcError::app(-32000, code, error.message)
 }
 
-pub struct AttachmentsPlugin;
-impl TypedPlugin for AttachmentsPlugin {
-    type Deps = (
-        Keyed<SessionIdentity>,
-        Keyed<SessionFilesHost>,
-        Keyed<SessionMethods>,
-    );
+pub struct AttachmentsPlugin {
+    identity: Key<SessionIdentity>,
+    files: Key<SessionFilesHost>,
+    methods: Key<SessionMethods>,
+}
+impl AttachmentsPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            identity: names.key()?,
+            files: names.key()?,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for AttachmentsPlugin {
     fn name(&self) -> &str {
         "Attachments"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(identity), Keyed(files), Keyed(methods)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.identity.erase(),
+            self.files.erase(),
+            self.methods.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let identity = ctx.require_at(&self.identity)?;
+            let files = ctx.require_at(&self.files)?;
+            let methods = ctx.require_at(&self.methods)?;
             let session_id = identity.session_id.clone();
             // `drain`: an unload waits for the put either way, and the client
             // gets the path or `service_reloading` with nothing stored.

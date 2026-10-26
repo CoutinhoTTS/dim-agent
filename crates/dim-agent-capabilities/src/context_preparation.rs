@@ -10,7 +10,8 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use std::{
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
@@ -570,49 +571,60 @@ fn validate_capability_snapshot(request: &ModelRequest) -> Result<(), HostError>
         })
 }
 pub struct ContextPreparationPlugin {
-    publisher: DepKey<ConfigurationPublisher>,
-    context: DepKey<ContextPreparation>,
+    publisher: Key<ConfigurationPublisher>,
+    context: Key<ContextPreparation>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    host: Key<PrepareContextHost>,
+    model_context: Key<ContextModelHost>,
+    strategy: Key<CompactionStrategyHost>,
+    history: Key<HistoryRenderer>,
+    identity: Key<TimelineIdentity>,
 }
 impl ContextPreparationPlugin {
-    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             publisher: names.key()?,
             context: names.key()?,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            host: names.key()?,
+            model_context: names.key()?,
+            strategy: names.key()?,
+            history: names.key()?,
+            identity: names.key()?,
         })
     }
 }
-impl TypedPlugin for ContextPreparationPlugin {
-    type Deps = (
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-        Keyed<PrepareContextHost>,
-        Keyed<ContextModelHost>,
-        Keyed<CompactionStrategyHost>,
-        Keyed<HistoryRenderer>,
-        Keyed<TimelineIdentity>,
-    );
+impl DynPlugin for ContextPreparationPlugin {
     fn name(&self) -> &str {
         "ContextPreparation"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(timeline),
-            Keyed(dispatcher),
-            Keyed(host),
-            Keyed(context),
-            Keyed(strategy),
-            Keyed(history),
-            Keyed(identity),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.host.erase(),
+            self.model_context.erase(),
+            self.strategy.erase(),
+            self.history.erase(),
+            self.identity.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let host = ctx.require_at(&self.host)?;
+            let context = ctx.require_at(&self.model_context)?;
+            let strategy = ctx.require_at(&self.strategy)?;
+            let history = ctx.require_at(&self.history)?;
+            let identity = ctx.require_at(&self.identity)?;
             let publisher = Arc::new(ConfigurationPublisher {
                 timeline: timeline.clone(),
                 identity: (*identity).clone(),
             });
-            ctx.provide_as(self.publisher.key().clone(), publisher)?;
+            ctx.provide_at(self.publisher.clone(), publisher)?;
             let service = Arc::new(ContextPreparation {
                 state: Mutex::new(PreparationState::default()),
                 tasks: TaskTracker::new(),
@@ -620,28 +632,23 @@ impl TypedPlugin for ContextPreparationPlugin {
                 prepared: Mutex::new(None),
                 host,
                 policy: ContextPolicy::bind(&timeline, &context, &strategy, &history)
-                    .map_err(|error| CordisError::PluginFailed(error.into()))?,
+                    .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?,
                 timeline,
                 history,
                 identity,
             });
             let owner = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let mut state = owner.state.lock().unwrap();
-                            state.closed = true;
-                            if let Some((_, cancel)) = &state.current {
-                                cancel.cancel();
-                            }
-                        }
-                        owner.tasks.close();
-                        owner.tasks.wait().await;
-                        AgentError::aggregate(owner.errors.lock().unwrap().clone())
-                            .map_err(Into::into)
-                    })
-                }))
+            ctx.effect(move || async move {
+                {
+                    let mut state = owner.state.lock().unwrap();
+                    state.closed = true;
+                    if let Some((_, cancel)) = &state.current {
+                        cancel.cancel();
+                    }
+                }
+                owner.tasks.close();
+                owner.tasks.wait().await;
+                AgentError::aggregate(owner.errors.lock().unwrap().clone()).map_err(Into::into)
             })?;
             let owner = service.clone();
             let failures = dispatcher.clone();
@@ -751,7 +758,7 @@ impl TypedPlugin for ContextPreparationPlugin {
                     },
                 )
                 .await?;
-            ctx.provide_as(self.context.key().clone(), service)?;
+            ctx.provide_at(self.context.clone(), service)?;
             Ok(Effect::Done)
         })
     }

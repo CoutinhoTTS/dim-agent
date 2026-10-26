@@ -1236,6 +1236,30 @@
         "provider": 38,
         "generation": 1,
         "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#branchLifecycle@main",
+        "provider": 32,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#dispatcher@main",
+        "provider": 32,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#timeline@main",
+        "provider": 32,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#timelineIdentity@main",
+        "provider": 32,
+        "generation": 1,
+        "removing": false
       }
     ]
   },
@@ -1749,6 +1773,24 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#sessionConfig@session",
+        "provider": 21,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#sessionIdentity@session",
+        "provider": 21,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#sessionLifecycle@session",
+        "provider": 21,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#sessionMethods@session",
         "provider": 28,
         "generation": 1,
@@ -1757,6 +1799,12 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#toolRegistry@session",
         "provider": 30,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#treeCommands@session",
+        "provider": 29,
         "generation": 1,
         "removing": false
       }

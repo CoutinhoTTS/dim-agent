@@ -16,9 +16,8 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
-use rutis::{
-    BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, KeyedGate, TypedPlugin,
-};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, InstanceId, Key, TypeKey};
+use rutis::{Ctx, Plugin};
 use std::{
     sync::{
         Arc, Mutex,
@@ -92,13 +91,10 @@ impl TestSource {
             .as_ref()
             .expect("offer through the Session's TestSource service");
         *self.sets.lock().unwrap() = sets;
-        ctx.events()
-            .emit(
-                ctx,
-                &tool_provider_changes(*session),
-                Arc::new(ToolProviderChanged),
-            )
-            .unwrap();
+        ctx.emit(ToolProviderChanged {
+            name: tool_provider_changes(*session),
+        })
+        .unwrap();
     }
 }
 impl ToolProvider for TestSource {
@@ -139,7 +135,8 @@ fn set(
 struct SourcePlugin {
     session: InstanceId,
     name: &'static str,
-    key: DepKey<TestSource>,
+    key: Key<TestSource>,
+    tools: Key<ToolRegistry>,
     source: Arc<TestSource>,
 }
 /// Registers `source` as the Session tool source `name` of every Session.
@@ -147,31 +144,31 @@ fn add_source(builder: &mut AgentBuilder, source: Arc<TestSource>, name: &'stati
     names::register::<TestSource>(builder.catalog_mut(), Some(SESSION_GROUP));
     builder.require_feature(
         Feature::new("TestSource").session("TestSource", move |names| {
-            names.part(SourcePlugin {
+            Ok(Box::new(SourcePlugin {
                 session: names.instance(SESSION_GROUP)?,
                 name,
                 key: names.key()?,
+                tools: names.key()?,
                 source: source.clone(),
-            })
+            }))
         }),
     );
 }
-impl TypedPlugin for SourcePlugin {
-    type Deps = (Keyed<ToolRegistry>,);
+impl DynPlugin for SourcePlugin {
     fn name(&self) -> &str {
         "TestSource"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(tools),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.tools.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let tools = ctx.require_at(&self.tools)?;
             let source = Arc::new(TestSource {
                 sets: Mutex::new(std::mem::take(&mut *self.source.sets.lock().unwrap())),
                 emitter: Some((ctx.clone(), self.session)),
             });
-            ctx.provide_as(self.key.key().clone(), source.clone())?;
+            ctx.provide_at(self.key.clone(), source.clone())?;
             tools.register_source(ctx, self.name, source)?;
             Ok(Effect::Done)
         })
@@ -227,7 +224,9 @@ fn env_named(
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(
+                    dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?,
+                ))
             }),
         );
     defaults::tool_host(&mut builder, Arc::new(GateTools(Arc::new(Gate::default()))));
@@ -336,20 +335,14 @@ async fn last_result(session: &Session, branch: &str) -> String {
 
 struct ContributorEnabled;
 struct EnableContributor;
-impl TypedPlugin for EnableContributor {
+impl Plugin for EnableContributor {
     type Deps = ();
     fn name(&self) -> &str {
         "EnableContributor"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): (),
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide(ContributorEnabled)?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        ctx.provide(ContributorEnabled)?;
+        Ok(())
     }
 }
 struct OptionalContributor {
@@ -357,6 +350,8 @@ struct OptionalContributor {
     hold: Arc<Gate>,
     /// Every generation's handler, to observe its release.
     provided: Arc<Mutex<Vec<std::sync::Weak<OptionalHandler>>>>,
+    enabled: Key<ContributorEnabled>,
+    tools: Key<ToolRegistry>,
 }
 struct OptionalHandler {
     generation: usize,
@@ -387,17 +382,17 @@ impl ToolHandler for OptionalHandler {
         })
     }
 }
-impl TypedPlugin for OptionalContributor {
-    type Deps = (Keyed<ContributorEnabled>, Keyed<ToolRegistry>);
+impl DynPlugin for OptionalContributor {
     fn name(&self) -> &str {
         "OptionalContributor"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (_, Keyed(tools)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.enabled.erase(), self.tools.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let _enabled = ctx.require_at(&self.enabled)?;
+            let tools = ctx.require_at(&self.tools)?;
             let generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
             let handler = Arc::new(OptionalHandler {
                 generation,
@@ -432,16 +427,18 @@ fn add_optional(
     builder.require_feature(Feature::new("OptionalContributor").session(
         "OptionalContributor",
         move |names| {
-            names.part(OptionalContributor {
+            Ok(Box::new(OptionalContributor {
                 generations: generations.clone(),
                 hold: hold.clone(),
                 provided: provided.clone(),
-            })
+                enabled: names.key()?,
+                tools: names.key()?,
+            }))
         },
     ));
 }
 
-async fn plugin_state(view: &rutis::FiberView, state: rutis::FiberState) {
+async fn plugin_state(view: &rutis::host::FiberView, state: rutis::host::FiberState) {
     tokio::time::timeout(Duration::from_secs(5), async {
         view.watch()
             .wait_for(|snapshot| snapshot.state == state)
@@ -455,8 +452,8 @@ async fn plugin_state(view: &rutis::FiberView, state: rutis::FiberState) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations() {
     let root = Ctx::root().unwrap();
-    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
-    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let enabled = root.plugin(EnableContributor);
+    plugin_state(&enabled, rutis::host::FiberState::Active).await;
     let generations = Arc::new(AtomicUsize::new(0));
     let hold = Arc::new(Gate::default());
     let held = hold.clone();
@@ -522,7 +519,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
         .await
         .unwrap();
     enabled.dispose().await.unwrap();
-    plugin_state(&provider, rutis::FiberState::Pending).await;
+    plugin_state(&provider, rutis::host::FiberState::Pending).await;
     session.idle("main").await.unwrap();
     assert!(
         last_result(&session, "main")
@@ -559,16 +556,16 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
         .iter()
         .find(|plugin| plugin.id == registry_id)
         .unwrap();
-    assert_eq!(registry.state, rutis::FiberState::Active);
+    assert_eq!(registry.state, rutis::host::FiberState::Active);
     assert_eq!(registry.generation, registry_generation);
 
     // The provider's next generation is offered without a Session reload
     // (#241); this configuration has no tool part, so the next request
     // declares it with no adoption fact.
     let reloaded = session.sequence("main").unwrap();
-    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
-    plugin_state(&enabled, rutis::FiberState::Active).await;
-    plugin_state(&provider, rutis::FiberState::Active).await;
+    let enabled = root.plugin(EnableContributor);
+    plugin_state(&enabled, rutis::host::FiberState::Active).await;
+    plugin_state(&provider, rutis::host::FiberState::Active).await;
     session
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
         .await
@@ -603,7 +600,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
             .watch()
             .wait_for(|snapshot| {
                 snapshot.generation > previous_loop.generation
-                    && snapshot.state == rutis::FiberState::Active
+                    && snapshot.state == rutis::host::FiberState::Active
             })
             .await
             .unwrap();
@@ -623,8 +620,8 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn contributors_are_current_for_the_first_request_without_initial_configuration() {
     let root = Ctx::root().unwrap();
-    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
-    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let enabled = root.plugin(EnableContributor);
+    plugin_state(&enabled, rutis::host::FiberState::Active).await;
     let store = Arc::new(MemoryTimelineStore::default());
     let generations = Arc::new(AtomicUsize::new(0));
     let hold = Arc::new(Gate::default());
@@ -666,9 +663,9 @@ async fn contributors_are_current_for_the_first_request_without_initial_configur
         )
         .unwrap();
     enabled.dispose().await.unwrap();
-    plugin_state(&provider, rutis::FiberState::Pending).await;
-    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
-    plugin_state(&provider, rutis::FiberState::Active).await;
+    plugin_state(&provider, rutis::host::FiberState::Pending).await;
+    let enabled = root.plugin(EnableContributor);
+    plugin_state(&provider, rutis::host::FiberState::Active).await;
     session
         .submit("tool:optional {}".into(), InputMode::Queue, "main")
         .await
@@ -701,36 +698,17 @@ async fn contributors_are_current_for_the_first_request_without_initial_configur
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_accepted_source_change_is_adopted_after_its_emitter_closes() {
     struct Emitter(tokio::sync::mpsc::UnboundedSender<Ctx>);
-    impl rutis::Plugin for Emitter {
+    impl rutis::host::DynPlugin for Emitter {
         fn name(&self) -> &str {
             "SourceEmitter"
         }
-        fn apply<'a>(
-            &'a self,
-            ctx: &'a Ctx,
-        ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
             Box::pin(async move {
                 self.0.send(ctx.clone()).unwrap();
                 Ok(Effect::Done)
             })
         }
     }
-    struct Pause(Arc<Gate>);
-    impl rutis::Listener<ToolProviderChanged> for Pause {
-        fn call<'a>(
-            &'a self,
-            _: &'a Ctx,
-            _: &'a ToolProviderChanged,
-            _: rutis::Call<'a, ()>,
-        ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
-            Box::pin(async move {
-                self.0.entered.notify_one();
-                self.0.release.notified().await;
-                Ok(None)
-            })
-        }
-    }
-
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
     let env = env(source.clone(), None);
@@ -751,17 +729,26 @@ async fn an_accepted_source_change_is_adopted_after_its_emitter_closes() {
     // Hold one dispatch after its registry read so the next accepted change
     // remains queued until its emitter has started closing.
     let gate = Arc::new(Gate::default());
-    ctx.events().once(ctx, &key, Pause(gate.clone())).unwrap();
-    ctx.events()
-        .emit(ctx, &key, Arc::new(ToolProviderChanged))
+    let pause = gate.clone();
+    ctx.listen::<ToolProviderChanged>()
+        .name(key.clone())
+        .once()
+        .on(move |_, _| {
+            let gate = pause.clone();
+            async move {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+                Ok(None)
+            }
+        })
         .unwrap();
+    ctx.emit(ToolProviderChanged { name: key.clone() }).unwrap();
     tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
         .await
         .unwrap();
     *source.sets.lock().unwrap() = vec![set("mcp:a", "v2", &["lookup"], &log, None)];
     emitting
-        .events()
-        .emit(&emitting, &key, Arc::new(ToolProviderChanged))
+        .emit(ToolProviderChanged { name: key.clone() })
         .unwrap();
     let disposal = emitter.shutdown();
     gate.release.notify_one();
@@ -1026,27 +1013,34 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
         ready:
             tokio::sync::mpsc::UnboundedSender<(Arc<Timeline>, Arc<ToolRegistry>, Arc<TestSource>)>,
         fail: bool,
+        binding: Key<ToolBinding>,
+        timeline: Key<Timeline>,
+        registry: Key<ToolRegistry>,
+        source: Key<TestSource>,
     }
-    impl TypedPlugin for StartupGate {
-        type Deps = (
-            KeyedGate<ToolBinding>,
-            Keyed<Timeline>,
-            Keyed<ToolRegistry>,
-            Keyed<TestSource>,
-        );
+    impl DynPlugin for StartupGate {
         fn name(&self) -> &str {
             "ToolBindingStartupGate"
         }
-        fn apply<'a>(
-            &'a self,
-            _ctx: &'a Ctx,
-            (_, Keyed(timeline), Keyed(registry), Keyed(source)): Self::Deps,
-        ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+        fn injects(&self) -> Vec<TypeKey> {
+            vec![
+                self.binding.erase(),
+                self.timeline.erase(),
+                self.registry.erase(),
+                self.source.erase(),
+            ]
+        }
+        fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
             Box::pin(async move {
+                let timeline = ctx.require_at(&self.timeline)?;
+                let registry = ctx.require_at(&self.registry)?;
+                let source = ctx.require_at(&self.source)?;
                 self.ready.send((timeline, registry, source)).unwrap();
                 self.gate.release.notified().await;
                 if self.fail {
-                    return Err(CordisError::PluginFailed("assembly rejected".into()));
+                    return Err(rutis::Error::from(ErrorKind::PluginFailed(
+                        "assembly rejected".into(),
+                    )));
                 }
                 Ok(Effect::Done)
             })
@@ -1067,9 +1061,9 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
             .require_feature(Feature::new("PrepareModelHost").session(
                 "PrepareModelHost",
                 |names| {
-                    names.part(
+                    Ok(Box::new(
                         dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?,
-                    )
+                    ))
                 },
             ));
         defaults::tool_host(&mut builder, Arc::new(GateTools(Arc::new(Gate::default()))));
@@ -1088,11 +1082,15 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
         builder.require_feature(Feature::new("ToolBindingStartupGate").branch(
             "ToolBindingStartupGate",
             move |names| {
-                names.part(StartupGate {
+                Ok(Box::new(StartupGate {
                     gate: hold.clone(),
                     ready: send.clone(),
                     fail,
-                })
+                    binding: names.key()?,
+                    timeline: names.key()?,
+                    registry: names.key()?,
+                    source: names.key()?,
+                }))
             },
         ));
         let env = Env {
@@ -1185,44 +1183,35 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
     /// Holds the branch's unload, so every Session capability stays loaded
     /// while the Session is already closing.
     struct CloseGate(Arc<Gate>);
-    impl TypedPlugin for CloseGate {
+    impl Plugin for CloseGate {
         type Deps = ();
         fn name(&self) -> &str {
             "CloseGate"
         }
-        fn apply<'a>(
-            &'a self,
-            ctx: &'a Ctx,
-            (): (),
-        ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-            Box::pin(async move {
-                let gate = self.0.clone();
-                ctx.effect(move || {
-                    Effect::AsyncDisposer(Box::new(move || {
-                        Box::pin(async move {
-                            gate.entered.notify_one();
-                            gate.release.notified().await;
-                            Ok(())
-                        })
-                    }))
-                })?;
-                Ok(Effect::Done)
-            })
+        async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+            let gate = self.0.clone();
+            ctx.effect(move || async move {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+                Ok(())
+            })?;
+            Ok(())
         }
     }
 
     let root = Ctx::root().unwrap();
-    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
-    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let enabled = root.plugin(EnableContributor);
+    plugin_state(&enabled, rutis::host::FiberState::Active).await;
     let gate = Arc::new(Gate::default());
     let hold = gate.clone();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
     add_optional(&mut builder, Arc::default(), Arc::default(), Arc::default());
-    builder.require_feature(Feature::new("CloseGate").branch("CloseGate", move |names| {
-        names.part(CloseGate(hold.clone()))
-    }));
+    builder.require_feature(
+        Feature::new("CloseGate")
+            .branch("CloseGate", move |_| Ok(Box::new(CloseGate(hold.clone())))),
+    );
     let agent = builder.build_in(&root);
     let session = agent
         .create_session(SessionConfig {
@@ -1273,10 +1262,10 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
     // waiting for a request: retirement withdraws the tool, and the next
     // generation is offered under a new version.
     enabled.dispose().await.unwrap();
-    plugin_state(&provider, rutis::FiberState::Pending).await;
+    plugin_state(&provider, rutis::host::FiberState::Pending).await;
     follow(&mut sources, |version| version.is_none()).await;
-    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
-    plugin_state(&provider, rutis::FiberState::Active).await;
+    let enabled = root.plugin(EnableContributor);
+    plugin_state(&provider, rutis::host::FiberState::Active).await;
     let second = follow(&mut sources, |version| version.is_some()).await;
     assert_ne!(second, first);
 
@@ -1287,7 +1276,7 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
     // The provider retires after the close started: the registry's
     // background refresh has ended, so nothing rereads or withdraws its tool.
     enabled.dispose().await.unwrap();
-    plugin_state(&provider, rutis::FiberState::Pending).await;
+    plugin_state(&provider, rutis::host::FiberState::Pending).await;
     let refreshed = tokio::time::timeout(Duration::from_millis(150), sources.changed())
         .await
         .is_ok();
@@ -1327,18 +1316,18 @@ async fn adopted_version(session: &Session, branch: &str, key: &str) -> Option<S
 /// Hands out the Session's registry, to resolve versions as `bind` does.
 struct RegistryProbe {
     slot: Arc<Mutex<Option<Arc<ToolRegistry>>>>,
+    registry: Key<ToolRegistry>,
 }
-impl TypedPlugin for RegistryProbe {
-    type Deps = (Keyed<ToolRegistry>,);
+impl DynPlugin for RegistryProbe {
     fn name(&self) -> &str {
         "RegistryProbe"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(registry),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.registry.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let registry = ctx.require_at(&self.registry)?;
             *self.slot.lock().unwrap() = Some(registry);
             Ok(Effect::Done)
         })
@@ -1348,8 +1337,8 @@ impl TypedPlugin for RegistryProbe {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_persisted_contributed_version_names_one_generation_across_restores() {
     let root = Ctx::root().unwrap();
-    let enabled = root.plugin(rutis::Typed::new(EnableContributor));
-    plugin_state(&enabled, rutis::FiberState::Active).await;
+    let enabled = root.plugin(EnableContributor);
+    plugin_state(&enabled, rutis::host::FiberState::Active).await;
     let store = Arc::new(MemoryTimelineStore::default());
     let generations = Arc::new(AtomicUsize::new(0));
     let log = Arc::new(Log::default());
@@ -1379,11 +1368,15 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
         );
         add_source(&mut builder, source, "mcp");
         let slot = registry.clone();
-        builder.require_feature(
-            Feature::new("RegistryProbe").session("RegistryProbe", move |names| {
-                names.part(RegistryProbe { slot: slot.clone() })
-            }),
-        );
+        builder.require_feature(Feature::new("RegistryProbe").session(
+            "RegistryProbe",
+            move |names| {
+                Ok(Box::new(RegistryProbe {
+                    slot: slot.clone(),
+                    registry: names.key()?,
+                }))
+            },
+        ));
         builder.build_in(&root)
     };
     let config = SessionConfig {

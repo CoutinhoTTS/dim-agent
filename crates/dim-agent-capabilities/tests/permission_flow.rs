@@ -501,22 +501,34 @@ async fn an_allowed_approval_is_rechecked_against_the_current_policy() {
 /// Commits an `allow` for every pending approval while `stop/interrupt` is
 /// dispatched, after ToolExecutor cancelled the batch and before the admit
 /// waiting on it runs: the response then finds its request cancelled.
-struct RespondOnStop;
-impl rutis::TypedPlugin for RespondOnStop {
-    type Deps = (
-        rutis::Keyed<Dispatcher>,
-        rutis::Keyed<dim_agent_capabilities::approval::Approval>,
-    );
+struct RespondOnStop {
+    dispatcher: rutis::host::Key<Dispatcher>,
+    approval: rutis::host::Key<Approval>,
+}
+impl RespondOnStop {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            dispatcher: names.key()?,
+            approval: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for RespondOnStop {
     fn name(&self) -> &str {
         "RespondOnStop"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.dispatcher.erase(), self.approval.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (rutis::Keyed(dispatcher), rutis::Keyed(approval)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         use futures_util::FutureExt;
+        use rutis::host::CtxHost;
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let approval = ctx.require_at(&self.approval)?;
             dispatcher.subscribe(ctx, "RespondOnStop", &["stop/interrupt"], move |_| {
                 let mut pending = Vec::new();
                 approval.replay(|request| pending.push(request.approval_id.clone()));
@@ -528,7 +540,7 @@ impl rutis::TypedPlugin for RespondOnStop {
                 }
                 Box::pin(async { Ok(()) })
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -543,8 +555,9 @@ async fn a_response_that_finds_its_batch_stopped_ends_as_an_interrupt() {
         defaults::mock_model_hosts(&mut builder);
         defaults::tool_host(&mut builder, tools.clone());
         builder.require_feature(
-            Feature::new("RespondOnStop")
-                .branch("RespondOnStop", |names| names.part(RespondOnStop)),
+            Feature::new("RespondOnStop").branch("RespondOnStop", |names| {
+                Ok(Box::new(RespondOnStop::new(names)?))
+            }),
         );
         let agent = builder.build();
         let session = agent

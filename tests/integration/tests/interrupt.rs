@@ -1,8 +1,10 @@
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, BRANCH_GROUP, Dispatcher, Feature, SessionConfig, Timeline, names,
+    AgentBuilder, AgentConfig, BRANCH_GROUP, Dispatcher, Feature, Names, SessionConfig, Timeline,
+    names,
 };
 use dim_agent_types::{ContentBlock, EventKind, InputMode};
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, KeyedGate, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -48,34 +50,42 @@ struct ExternalWork {
     cancelling: Arc<Notify>,
     release: Arc<Notify>,
 }
-struct ExternalWorkPlugin(ExternalWork, DepKey<Registered>);
-impl TypedPlugin for ExternalWorkPlugin {
-    type Deps = (Keyed<Dispatcher>,);
+struct ExternalWorkPlugin {
+    probe: ExternalWork,
+    dispatcher: Key<Dispatcher>,
+    registered: Key<Registered>,
+}
+impl ExternalWorkPlugin {
+    fn new(names: &Names<'_>, probe: ExternalWork) -> rutis::Result<Self> {
+        Ok(Self {
+            probe,
+            dispatcher: names.key()?,
+            registered: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ExternalWorkPlugin {
     fn name(&self) -> &str {
         "ExternalWork"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
             let tasks = TaskTracker::new();
             let cancel = CancellationToken::new();
             let cleanup_tasks = tasks.clone();
             let cleanup_cancel = cancel.clone();
-            ctx.effect(|| {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        cleanup_cancel.cancel();
-                        cleanup_tasks.close();
-                        cleanup_tasks.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(|| async move {
+                cleanup_cancel.cancel();
+                cleanup_tasks.close();
+                cleanup_tasks.wait().await;
+                Ok(())
             })?;
             let once = AtomicBool::new(false);
-            let probe = self.0.clone();
+            let probe = self.probe.clone();
             let handle = ctx.handle().clone();
             dispatcher.subscribe(
                 ctx,
@@ -102,24 +112,36 @@ impl TypedPlugin for ExternalWorkPlugin {
                     Box::pin(async { Ok(()) })
                 },
             )?;
-            ctx.provide_as(self.1.key().clone(), Arc::new(Registered))?;
+            ctx.provide_at(self.registered.clone(), Arc::new(Registered))?;
             Ok(Effect::Done)
         })
     }
 }
-struct LaterSubscriber(watch::Sender<Option<u64>>);
-impl TypedPlugin for LaterSubscriber {
-    type Deps = (Keyed<Dispatcher>, KeyedGate<Registered>);
+struct LaterSubscriber {
+    seen: watch::Sender<Option<u64>>,
+    dispatcher: Key<Dispatcher>,
+    registered: Key<Registered>,
+}
+impl LaterSubscriber {
+    fn new(names: &Names<'_>, seen: watch::Sender<Option<u64>>) -> rutis::Result<Self> {
+        Ok(Self {
+            seen,
+            dispatcher: names.key()?,
+            registered: names.key()?,
+        })
+    }
+}
+impl DynPlugin for LaterSubscriber {
     fn name(&self) -> &str {
         "LaterSubscriber"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher), _): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase(), self.registered.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let seen = self.0.clone();
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let seen = self.seen.clone();
             dispatcher.subscribe(ctx, "LaterSubscriber", &["stop/interrupt"], move |event| {
                 seen.send_replace(Some(event.sequence));
                 Box::pin(async { Ok(()) })
@@ -145,12 +167,12 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
     builder
         .require_feature(
             Feature::new("ExternalWork").branch("ExternalWork", move |names| {
-                names.part(ExternalWorkPlugin(factory.clone(), names.key()?))
+                Ok(Box::new(ExternalWorkPlugin::new(names, factory.clone())?))
             }),
         )
         .require_feature(
             Feature::new("LaterSubscriber").branch("LaterSubscriber", move |names| {
-                names.part(LaterSubscriber(send.clone()))
+                Ok(Box::new(LaterSubscriber::new(names, send.clone())?))
             }),
         );
     let agent = builder.build();
@@ -210,24 +232,32 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
     agent.close().await.unwrap();
 }
 
-struct OversizedInterrupt(Arc<AtomicBool>);
-impl TypedPlugin for OversizedInterrupt {
-    type Deps = (Keyed<Timeline>,);
+struct OversizedInterrupt {
+    cleaned: Arc<AtomicBool>,
+    timeline: Key<Timeline>,
+}
+impl OversizedInterrupt {
+    fn new(names: &Names<'_>, cleaned: Arc<AtomicBool>) -> rutis::Result<Self> {
+        Ok(Self {
+            cleaned,
+            timeline: names.key()?,
+        })
+    }
+}
+impl DynPlugin for OversizedInterrupt {
     fn name(&self) -> &str {
         "OversizedInterrupt"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let cleaned = self.0.clone();
-            ctx.effect(|| {
-                Effect::Disposer(Box::new(move || {
-                    cleaned.store(true, Ordering::Release);
-                    Ok(())
-                }))
+            let timeline = ctx.require_at(&self.timeline)?;
+            let cleaned = self.cleaned.clone();
+            ctx.effect(|| async move {
+                cleaned.store(true, Ordering::Release);
+                Ok(())
             })?;
             timeline.before(
                 ctx,
@@ -252,7 +282,7 @@ async fn a_large_interrupt_and_later_input_need_no_byte_budget() {
     let disposed = cleaned.clone();
     builder.require_feature(
         Feature::new("OversizedInterrupt").branch("OversizedInterrupt", move |names| {
-            names.part(OversizedInterrupt(disposed.clone()))
+            Ok(Box::new(OversizedInterrupt::new(names, disposed.clone())?))
         }),
     );
     let agent = builder.build();

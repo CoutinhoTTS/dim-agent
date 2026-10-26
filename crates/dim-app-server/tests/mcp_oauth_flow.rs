@@ -906,7 +906,7 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
         let _ = tokio::time::timeout(Duration::from_secs(5), async {
             while !daemon.server.diagnostics().plugins.iter().any(|plugin| {
                 matches!(plugin.name.as_str(), "Mcp" | "McpServer" | "McpSession")
-                    && plugin.state == rutis::FiberState::Unloading
+                    && plugin.state == rutis::host::FiberState::Unloading
             }) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
