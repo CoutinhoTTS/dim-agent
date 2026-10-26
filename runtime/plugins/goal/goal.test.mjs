@@ -511,6 +511,22 @@ test('Pursuit 1: a steer input before the prompt takes neither the role nor its 
   assert.deepEqual(branch.fold.evaluate, { branch: B, evaluation: '7' })
 })
 
+test('Pursuit 1/5: an evaluation that is not a sequence names no role and no evaluator', () => {
+  // Both the role and a `branch/create` name their evaluation by a marker or
+  // an operation id, so both take the decimal form of §5 and nothing else.
+  const branch = new Branch()
+  branch.commit('branch', 'start', { parent: B })
+  branch.user(evaluatorPrompt(B, 'abc', 'ship it', 'all tests pass'), 'queue')
+  assert.equal(branch.fold.evaluate, undefined)
+  branch.commit('branch', 'create', {
+    at: { kind: 'sequence', sequence: 1 },
+    source: { kind: 'host', operation_id: 'goal:evaluate:abc' },
+    branch: 'E',
+    prompt: 'x',
+  })
+  assert.deepEqual([...branch.fold.evaluations], [])
+})
+
 test('Pursuit 1: the evaluator role survives the refold of a deleted input', () => {
   const branch = new Branch()
   branch.commit('branch', 'start', { parent: B })
@@ -640,6 +656,58 @@ test('Pursuit 1: the evaluator DONE completes the goal by the evaluator', async 
   assert.match(done, new RegExp(`^<dim-goal kind="goal" op="completed" by="evaluator" evaluation="${end.sequence}" branch="main">`))
   assert.match(done, /\nResult:\nall 3 tests pass\n\nAn evaluator verified that the goal for branch main is completed\./)
   assert.equal(goal.branch.fold.status.status, 'completed')
+})
+
+test('Pursuit 4/5: a report without a valid evaluation or evaluator decides nothing', async t => {
+  // A report marker is a persisted cross-plugin format, so a producer can
+  // leave an attribute out: only the complete marker is a conclusion (§5).
+  const rejections = []
+  const listener = reason => rejections.push(reason)
+  process.on('unhandledRejection', listener)
+  t.after(() => process.off('unhandledRejection', listener))
+  const goal = await loadGoalBranch(async () => settingsDocument(20))
+  t.after(() => goal.unload())
+  const end = await completionRequested(goal)
+  const evaluator = goal.creates[0].branch
+  for (const attrs of [
+    `result="done" evaluator="${evaluator}"`,
+    `result="done" evaluation="abc" evaluator="${evaluator}"`,
+    `result="done" evaluation="${end.sequence}"`,
+    'result="done"',
+  ]) {
+    const text = `<dim-goal kind="report" ${attrs} branch="main">\nEvaluator report:\nDONE: x\n</dim-goal>`
+    assert.equal(conclusionOf(text), undefined, attrs)
+    await goal.emit('input', 'message', { mode: 'append', blocks: [{ type: 'raw', text }] })
+    await flush()
+    assert.equal(goal.writes.length, 1, `no decision for ${attrs}`)
+  }
+  assert.deepEqual([...goal.branch.fold.conclusions], [], 'no malformed report is a conclusion')
+  assert.equal(goal.branch.fold.status.status, 'active')
+  // A valid conclusion afterwards still decides.
+  await goal.emit('input', 'message', writes.conclusion(B, evaluator, String(end.sequence), 'done', 'DONE: all 3 tests pass'))
+  await flush()
+  assert.equal(goal.writes.length, 2)
+  assert.match(goal.writes[1].data.blocks[0].text, /by="evaluator"/)
+  assert.deepEqual(rejections, [], 'no unhandled rejection')
+})
+
+test('Pursuit 4: a report outside the first block decides nothing', async t => {
+  // The conclusion input is one block, the report (§5): a report anywhere
+  // else is not a conclusion, so the goal stays active.
+  const goal = await loadGoalBranch(async () => settingsDocument(20))
+  t.after(() => goal.unload())
+  const end = await completionRequested(goal)
+  const evaluator = goal.creates[0].branch
+  const report = writes.conclusion(B, evaluator, String(end.sequence), 'done', 'DONE: later').blocks[0]
+  await goal.emit('input', 'message', {
+    submission_id: 'goal:two-blocks',
+    mode: 'append',
+    blocks: [{ type: 'raw', text: 'a note before the report' }, report],
+  })
+  await flush()
+  assert.equal(goal.writes.length, 1, 'no conclusion after the first block')
+  assert.deepEqual([...goal.branch.fold.conclusions], [])
+  assert.equal(goal.branch.fold.status.status, 'active')
 })
 
 test('Pursuit 2: a CONTINUE conclusion writes one Pursuit continuation, or Goal limit pause', async t => {

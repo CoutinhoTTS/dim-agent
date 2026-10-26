@@ -96,7 +96,7 @@ Goal 不拥有持久状态。分支 `B` 的目标是 `B` 从自己的开场事�
 | `judge` | 最新的存活本地 `goal:objective` 块（`set`）的 `judge` 属性；`edit` 保留它，`clear` 退役它；缺省为 `model`（[Pursuit](Pursuit.md) §3） |
 | `request` | 评审裁判下，`goal_update` 写入的 `op="completed"` 且不带 `by="evaluator"` 的 `goal:status` 块：一次完成请求，不改变 `status` 与 `A`（A16） |
 | `evaluation` | 评审裁判下，来源为 host、操作 id 为 `goal:evaluate:N` 的最新本地 `branch/create`：评审 `N` 及它所记录的分支。`N` 之后没有带 key 的目标块时它仍是当前评审 |
-| `conclusion` | 第一个本地输入，其第一个块的标记为 `kind="report"`，且其 `evaluator` 等于它 `evaluation` 的 `branch/create` 所记录的分支 |
+| `conclusion` | 第一个本地输入，其第一个块的标记是一份有效报告（[Pursuit](Pursuit.md) §5）：`kind="report"`、`result` 为四种结果之一、`evaluation` 为十进制序号，且 `evaluator` 等于 `evaluation` 的 `branch/create` 所记录的分支。缺少任一项的报告不是结论 |
 | `pending_driving` | 有效模式为 Queue 或 Steer、且既无 `input/consumed` 也无 `input/deleted` 的本地 `input/message`（session access §2 待处理规则）。Goal 不解读 InputQueue 的指令 `input/withdraw`；只有 InputQueue 的结果 `input/deleted` 才移除输入 |
 | `turn_open` | 最新 `turn/end` 之后存在 `turn/start` |
 

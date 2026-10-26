@@ -96,7 +96,7 @@ Derived values over the consumed events:
 | `judge` | The `judge` attribute of the latest live local `goal:objective` block (`set`); `edit` keeps it, `clear` retires it; `model` when absent ([Pursuit](Pursuit.md) §3) |
 | `request` | Under the evaluator judge, a `goal:status` block written by `goal_update` with `op="completed"` and without `by="evaluator"`: a completion request, which leaves `status` and `A` unchanged (A16) |
 | `evaluation` | Under the evaluator judge, the latest local `branch/create` whose source is host with operation id `goal:evaluate:N`: evaluation `N` and the evaluator branch it names. It is still current while no keyed goal block follows `N` |
-| `conclusion` | The first local input whose first block's marker is `kind="report"` with an `evaluator` equal to the branch the `branch/create` of its `evaluation` names |
+| `conclusion` | The first local input whose first block's marker is a valid report ([Pursuit](Pursuit.md) §5): `kind="report"`, `result` one of the four kinds, a decimal `evaluation`, and an `evaluator` equal to the branch the `branch/create` of `evaluation` names. A report missing any of them is not a conclusion |
 | `pending_driving` | Local `input/message` with effective mode Queue or Steer that has neither `input/consumed` nor `input/deleted` (session access §2 pending rule). Goal does not interpret `input/withdraw`, InputQueue's command; only InputQueue's result `input/deleted` removes an input |
 | `turn_open` | A `turn/start` after the latest `turn/end` |
 

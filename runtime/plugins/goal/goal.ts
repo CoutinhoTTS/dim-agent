@@ -168,13 +168,22 @@ export type ConclusionKind = 'done' | 'continue' | 'blocked' | 'failed'
 /** A conclusion input's attributes and decoded text. */
 export type Conclusion = { evaluation: string; evaluator: string; result: ConclusionKind; text: string }
 
+/**
+ * A sequence as Goal writes one (`String` of a `bigint`, in `after` and
+ * `evaluation`): decimal, without a leading zero. Anything else a marker or an
+ * operation id carries names no evaluation (§5).
+ */
+function sequenceOf(value: string | undefined): string | undefined {
+  return value !== undefined && /^[1-9]\d*$/.test(value) ? value : undefined
+}
+
 /** The operation id a `branch/create` records for evaluation `N` (§4.1). */
 export const evaluationOperation = (evaluation: string) => `goal:evaluate:${evaluation}`
 
 /** The evaluation a `branch/create` operation id names, if it is one. */
 export function evaluationOfOperation(operation: string | undefined): string | undefined {
   const prefix = 'goal:evaluate:'
-  return operation?.startsWith(prefix) ? operation.slice(prefix.length) : undefined
+  return operation?.startsWith(prefix) ? sequenceOf(operation.slice(prefix.length)) : undefined
 }
 
 const CONCLUSION = 4000
@@ -219,12 +228,18 @@ export function replyConclusion(reply: string): { result: ConclusionKind; text: 
   }
 }
 
-/** The conclusion a report block carries (§5). */
+/**
+ * The conclusion a report block carries (§5). A report is a persisted
+ * cross-plugin input, so every attribute it needs is checked here: a kind, one
+ * of the four results, a decimal evaluation and a non-empty evaluator.
+ */
 export function conclusionOf(text: string): Conclusion | undefined {
-  const attrs = marker(text)
-  const result = attrs?.result as ConclusionKind | undefined
-  if (attrs?.kind !== 'report' || result === undefined || !(result in PREFIX)) return undefined
-  return { evaluation: attrs.evaluation, evaluator: attrs.evaluator, result, text: body(text, 'Evaluator report:') }
+  const attrs = marker(text) ?? {}
+  const result = attrs.result as ConclusionKind | undefined
+  const evaluation = sequenceOf(attrs.evaluation)
+  if (attrs.kind !== 'report' || result === undefined || !Object.hasOwn(PREFIX, result)) return undefined
+  if (evaluation === undefined || !attrs.evaluator) return undefined
+  return { evaluation, evaluator: attrs.evaluator, result, text: body(text, 'Evaluator report:') }
 }
 
 /** The result a `done` or `blocked` conclusion states, without its prefix. */
@@ -363,14 +378,18 @@ export class Fold {
           this.firstInput = true
           const line = data.user?.content.find(content => content.type === 'text')?.text?.split('\n')[0]
           const role = line && marker(line)
-          if (role?.kind === 'evaluate' && role.branch === this.openingParent) {
-            this.evaluate = { branch: role.branch, evaluation: role.evaluation }
+          const evaluation = sequenceOf(role?.evaluation)
+          if (role?.kind === 'evaluate' && role.branch === this.openingParent && evaluation !== undefined) {
+            this.evaluate = { branch: role.branch, evaluation }
           }
         }
         if (first?.after) this.decided.add(first.after)
         if (first?.kind === 'continuation') this.continuations.push(sequence)
-        if (first?.kind === 'report' && this.evaluations.get(first.evaluation) === first.evaluator) {
-          if (!this.conclusions.has(first.evaluation)) this.conclusions.set(first.evaluation, sequence)
+        // The validated parse the branch part decides with (§5): a report
+        // missing an attribute matches no evaluation, not evaluation undefined.
+        const conclusion = blocks[0] && conclusionOf(blocks[0].text)
+        if (conclusion && this.evaluations.get(conclusion.evaluation) === conclusion.evaluator) {
+          if (!this.conclusions.has(conclusion.evaluation)) this.conclusions.set(conclusion.evaluation, sequence)
         }
         for (const raw of blocks) {
           const attrs = marker(raw.text)
