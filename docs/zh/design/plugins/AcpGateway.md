@@ -1,6 +1,6 @@
 # AcpGateway
 
-状态：Draft，尚未实现。需求：[#436](https://github.com/arcships/dim/issues/436)。作用域：接入方宿主进程，位于 App Server daemon 之外。语言：Rust。[实施计划](../../../design/acp-gateway-implementation.md) 定义首版的完整方法矩阵、接线、连接状态机、不支持项、验收和 issue 依赖。[English](../../../design/plugins/AcpGateway.md)
+状态：实施中，交付证据见[实施计划 §10](../../../design/acp-gateway-implementation.md#10-交付单元和验收顺序)。需求：[#436](https://github.com/arcships/dim/issues/436)。作用域：接入方宿主进程，位于 App Server daemon 之外。语言：Rust。实施计划定义首版的完整方法矩阵、接线、连接状态机、不支持项、验收和 issue 依赖。[English](../../../design/plugins/AcpGateway.md)
 
 `AcpGateway` 是将 Dim 作为 ACP agent 提供的可复用 rutis 插件。它拥有 ACP 连接和通往现有 App Server 的独立公开 RPC 连接。`dimcode acp` 是第一个宿主和 stdio 入口；其他宿主装载同一实现，或启动该命令。网关不依赖 TUI。Desktop 继续使用同一个 daemon 和持久 Session，无须另写 ACP 协议实现。
 
@@ -36,7 +36,7 @@ Session / InputQueue / Loop / Approval / Questions / Attachments / ...
 
 只有一个 Gateway 部件，没有 daemon、Session 或 branch 部件。它不是 Capability：不拥有分支 Timeline 上的状态机。真实连接资源和在途操作使其成为有自身职责的插件，宿主直接完成装配，不加接线部件。
 
-Gateway 计划路径是 `crates/dim-acp`。既有 RPC 引擎和 loopback callback I/O 已提取至 `crates/dim-client`，供 CLI 使用；Gateway 尚未交付。提取和宿主边界见[实施计划 §3](../../../design/acp-gateway-implementation.md#3-模块宿主与接线)。不假定存在 `AcpHost`、新 daemon endpoint、exported rutis link 或可依赖的私有 `RpcService`。
+Gateway 实现位于 `crates/dim-acp`。公开 RPC 引擎、产品事件边界、Questions 合同和 loopback callback I/O 位于 `crates/dim-client`，由 CLI 共用。提取和宿主边界见[实施计划 §3](../../../design/acp-gateway-implementation.md#3-模块宿主与接线)。不假定存在 `AcpHost`、新 daemon endpoint、exported rutis link 或可依赖的私有 `RpcService`。
 
 ## 2. 协议边界
 

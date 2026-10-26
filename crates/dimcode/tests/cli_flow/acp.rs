@@ -52,30 +52,47 @@ impl Peer {
 
     fn response(&mut self, id: i64) -> Value {
         loop {
-            if self.output.buffer().is_empty() {
-                let mut fd = libc::pollfd {
-                    fd: self.output.get_ref().as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                assert!(
-                    unsafe { libc::poll(&mut fd, 1, PATIENCE.as_millis() as i32) } > 0,
-                    "ACP response {id} timed out"
-                );
-            }
-            let mut line = String::new();
-            assert_ne!(
-                self.output.read_line(&mut line).unwrap(),
-                0,
-                "ACP closed before response {id}"
-            );
-            let frame: Value = serde_json::from_str(&line).expect("stdout must contain only ACP");
+            let frame = self.frame();
             if frame.get("id") == Some(&json!(id)) {
                 return frame;
+            }
+            if frame["method"] == "$/cancel_request" {
+                continue;
             }
             assert_eq!(frame["method"], "session/update", "{frame}");
             self.updates.push(frame);
         }
+    }
+
+    fn frame(&mut self) -> Value {
+        if self.output.buffer().is_empty() {
+            let mut fd = libc::pollfd {
+                fd: self.output.get_ref().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert!(
+                unsafe { libc::poll(&mut fd, 1, PATIENCE.as_millis() as i32) } > 0,
+                "ACP frame timed out"
+            );
+        }
+        let mut line = String::new();
+        assert_ne!(
+            self.output.read_line(&mut line).unwrap(),
+            0,
+            "ACP closed before a frame"
+        );
+        serde_json::from_str(&line).expect("stdout must contain only ACP")
+    }
+
+    fn answer(&mut self, request: &Value, result: Value) {
+        writeln!(
+            self.input,
+            "{}",
+            json!({"jsonrpc":"2.0","id":request["id"],"result":result})
+        )
+        .unwrap();
+        self.input.flush().unwrap();
     }
 
     fn initialize(&mut self) {
@@ -102,6 +119,232 @@ impl Peer {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn acp_stdio_cancels_a_held_input_after_a_late_submit_reply() {
+    let home = Home::new();
+    let (submitted, ready) = std::sync::mpsc::sync_channel(0);
+    let (release, delayed) = std::sync::mpsc::sync_channel(0);
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        wire.created();
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let history = wire.read("session.history"); wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let submit = wire.read("session.submit");
+        submitted.send(()).unwrap(); delayed.recv_timeout(PATIENCE).unwrap();
+        wire.reply(&submit,json!({"event":event(9,"held","input","message",json!({"submission_id":submit["params"]["submissionId"],"user":{"content":[{"type":"text","text":"held"}]},"mode":"queue"}))}));
+        let withdraw = wire.read("session.input.withdraw");
+        assert_eq!(withdraw["params"]["inputId"],"held");
+        wire.reply(&withdraw,json!({"status":"deleted","sequence":10}));
+        let stop = wire.read("session.stop");
+        wire.reply(&stop,json!({}));
+        let close = wire.read("session.close");
+        wire.reply(&close,json!({}));
+        let mut eof = String::new(); assert_eq!(wire.0.read_line(&mut eof).unwrap(),0);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    peer.response(2);
+    peer.send(
+        3,
+        "session/prompt",
+        json!({"sessionId":"session","prompt":[{"type":"text","text":"held"}]}),
+    );
+    ready.recv_timeout(PATIENCE).unwrap();
+    writeln!(
+        peer.input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session"}})
+    )
+    .unwrap();
+    peer.input.flush().unwrap();
+    release.send(()).unwrap();
+    assert_eq!(peer.response(3)["result"]["stopReason"], "cancelled");
+    writeln!(
+        peer.input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session"}})
+    )
+    .unwrap();
+    peer.input.flush().unwrap();
+    peer.send(4, "session/close", json!({"sessionId":"session"}));
+    assert!(peer.response(4).get("error").is_none());
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let mut methods = METHODS.to_vec(); methods.push("session.methods"); wire.hello(&methods);
+        wire.created();
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let history = wire.read("session.history"); wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let methods = wire.read("session.methods");
+        wire.reply(&methods,json!({"methods":[{"name":"session.permission.get","mutating":false},{"name":"session.permission.update","mutating":true},{"name":"session.question.respond","mutating":true}]}));
+        let get = wire.read("session.permission.get");
+        wire.reply(&get,json!({"version":4,"policy":{"preset":"read-only","allowedTools":["fixture"],"disallowedTools":["danger"]}}));
+        let get = wire.read("session.permission.get");
+        wire.reply(&get,json!({"version":4,"policy":{"preset":"read-only","allowedTools":["fixture"],"disallowedTools":["danger"]}}));
+        let update = wire.read("session.permission.update");
+        assert_eq!(update["params"]["expectedVersion"],4);
+        assert_eq!(update["params"]["policy"],json!({"preset":"workspace-write","allowedTools":["fixture"],"disallowedTools":["danger"]}));
+        wire.reply(&update,json!({"version":5,"policy":update["params"]["policy"]}));
+        let get = wire.read("session.permission.get");
+        wire.reply(&get,json!({"version":5,"policy":update["params"]["policy"]}));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["user"]["content"][0]["source"]["mediaType"],"image/png");
+        let input = event(9,"input","input","message",json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}));
+        wire.reply(&submit,json!({"event":input}));
+        let fact = |wire: &mut Wire,value: Value|wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":value}));
+        fact(wire,event(10,"start","turn","start",json!({"turn_id":"turn"})));
+        fact(wire,event(11,"consumed","input","consumed",json!({"input_id":"input"})));
+        wire.notice("approval.request",json!({"sessionId":"session","branchId":"child","requestId":"approval","call":{"name":"exec","input":{"command":"echo test"}},"reason":"Run command?"}));
+        let approval = wire.read("approval.respond");
+        assert_eq!(approval["params"]["branchId"],"child");
+        assert_eq!(approval["params"]["decision"],"deny");
+        wire.reply(&approval,json!({}));
+        wire.notice("approval.resolved",json!({"sessionId":"session","branchId":"child","requestId":"approval","decision":"deny"}));
+        fact(wire,event(12,"ask","step","tool-call",json!({"turn_id":"turn","request_id":"model","calls":[{"id":"question","name":"ask_user","input":{"questions":[{"id":"choice","question":"Choose","options":[{"label":"A"},{"label":"B"}],"multiSelect":true,"allowCustom":true}]}}]})));
+        let answer = wire.read("session.question.respond");
+        assert_eq!(answer["params"]["requestId"],"model");
+        assert_eq!(answer["params"]["answers"],json!([{"questionId":"choice","selected":["A","B"],"custom":"C"}]));
+        wire.reply(&answer,json!({}));
+        fact(wire,event(13,"result","step","tool-result",json!({"turn_id":"turn","request_id":"model","call_event_id":"ask","results":[{"call_id":"question","result":{"content":"answered"}}]})));
+        fact(wire,event(14,"end","turn","end",json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
+        let mut eof = String::new(); let _ = wire.0.read_line(&mut eof);
+    });
+    let mut peer = Peer::start(&home);
+    peer.send(
+        1,
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}),
+    );
+    peer.response(1);
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert_eq!(
+        peer.response(2)["result"]["modes"]["currentModeId"],
+        "read-only"
+    );
+    peer.send(
+        3,
+        "session/set_mode",
+        json!({"sessionId":"session","modeId":"workspace-write"}),
+    );
+    assert!(peer.response(3).get("error").is_none());
+    peer.send(4,"session/prompt",json!({"sessionId":"session","prompt":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="},{"type":"resource","resource":{"uri":"test://text","text":"inline"}}]}));
+    loop {
+        let frame = peer.frame();
+        match frame["method"].as_str() {
+            Some("session/request_permission") => peer.answer(
+                &frame,
+                json!({"outcome":{"outcome":"selected","optionId":"reject_once"}}),
+            ),
+            Some("elicitation/create") => {
+                assert_eq!(
+                    frame["params"]["requestedSchema"]["properties"]["q0"]["type"],
+                    "array"
+                );
+                peer.answer(
+                    &frame,
+                    json!({"action":"accept","content":{"q0":["A","B"],"custom0":"C"}}),
+                );
+            }
+            Some("session/update") | Some("$/cancel_request") => {}
+            _ => {
+                assert_eq!(frame["id"], 4, "{frame}");
+                assert_eq!(frame["result"]["stopReason"], "end_turn", "{frame}");
+                break;
+            }
+        }
+    }
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_discovers_managed_auth_without_starting_an_existing_login() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let mut methods = METHODS.to_vec(); methods.push("account.providers"); wire.hello(&methods);
+        let providers = wire.read("account.providers");
+        wire.reply(&providers,json!([{"providerId":"managed-fixture","displayName":"Fixture","loginMethods":["browser","device"]}]));
+        let status = wire.read("account.status"); wire.reply(&status,json!({"account":{"displayName":"fixture"}}));
+        let status = wire.read("account.status"); wire.reply(&status,json!({"account":{"displayName":"fixture"}}));
+        let mut eof = String::new(); assert_eq!(wire.0.read_line(&mut eof).unwrap(),0,"{eof}");
+    });
+    let mut peer = Peer::start(&home);
+    peer.send(
+        1,
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{"auth":{"terminal":true}}}),
+    );
+    let initialized = peer.response(1);
+    let methods = initialized["result"]["authMethods"].as_array().unwrap();
+    let agent = methods
+        .iter()
+        .find(|method| method.get("type").is_none())
+        .unwrap()["id"]
+        .clone();
+    let terminal = methods
+        .iter()
+        .find(|method| method["type"] == "terminal")
+        .unwrap()["id"]
+        .clone();
+    peer.send(2, "authenticate", json!({"methodId":agent}));
+    assert!(peer.response(2).get("error").is_none());
+    peer.send(3, "authenticate", json!({"methodId":terminal}));
+    assert_eq!(peer.response(3)["error"]["code"], -32602);
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_model_choices_keep_the_catalog_provider_and_adopted_result() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let mut methods = METHODS.to_vec(); methods.extend(["session.methods","provider.catalog"]); wire.hello(&methods);
+        wire.created();
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history,json!({"events":[event(8,"configured","context","configured",json!({"provider_id":"provider/with/slashes","model_id":"native/model"}))],"through":8,"nextAfter":8,"done":true}));
+        let methods = wire.read("session.methods"); wire.reply(&methods,json!({"methods":[{"name":"session.model.update","mutating":true}]}));
+        let catalog = |wire: &mut Wire| {
+            let list = wire.read("provider.list"); wire.reply(&list,json!({"providers":[{"providerId":"provider/with/slashes","enabled":true}]}));
+            let read = wire.read("provider.catalog");
+            assert_eq!(read["params"]["providerId"],"provider/with/slashes");
+            wire.reply(&read,json!({"catalog":{"models":[{"id":"native/model","name":"First"},{"id":"next/model","name":"Next"}],"disabledModelIds":[]}}));
+        };
+        catalog(wire);
+        let update = wire.read("session.model.update");
+        assert_eq!(update["params"]["providerId"],"provider/with/slashes");
+        assert_eq!(update["params"]["modelId"],"next/model");
+        wire.reply(&update,json!({"outcome":"adopted","model":{"providerId":"provider/with/slashes","modelId":"next/model"}}));
+        catalog(wire);
+        let mut eof = String::new(); assert_eq!(wire.0.read_line(&mut eof).unwrap(),0);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    let created = peer.response(2);
+    assert_eq!(
+        created["result"]["configOptions"][0]["currentValue"], "native/model",
+        "{created}"
+    );
+    peer.send(
+        3,
+        "session/set_config_option",
+        json!({"sessionId":"session","configId":"model","value":"next/model"}),
+    );
+    assert_eq!(
+        peer.response(3)["result"]["configOptions"][0]["currentValue"],
+        "next/model"
+    );
+    peer.close();
+    daemon.join().unwrap();
 }
 
 #[test]

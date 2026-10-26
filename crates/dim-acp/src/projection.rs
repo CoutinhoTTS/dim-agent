@@ -119,7 +119,14 @@ impl Projection {
                 let silent = self.silent_inputs.remove(&data.input_id);
                 if !silent && let Some(user) = user {
                     for content in user.content {
-                        if let ContentBlock::Text { text } = content { chunk("user_message_chunk", text, &mut updates); }
+                        match content {
+                            ContentBlock::Text { text } => chunk("user_message_chunk", text, &mut updates),
+                            ContentBlock::Image { source } => {
+                                if let Some(data) = source.data {
+                                    updates.push(json!({"sessionUpdate":"user_message_chunk","content":{"type":"image","mimeType":source.media_type,"data":data}}));
+                                }
+                            }
+                        }
                     }
                 }
             }

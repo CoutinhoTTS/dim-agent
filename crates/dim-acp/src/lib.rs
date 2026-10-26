@@ -1,6 +1,10 @@
 //! Client-owned ACP transport and protocol projection over the public App Server.
 
+pub mod auth;
+mod config;
+mod content;
 mod gateway;
+mod interaction;
 mod projection;
 mod rpc;
 
@@ -32,6 +36,7 @@ struct Inputs {
     io: Io,
     agent_id: Option<String>,
     done: oneshot::Sender<dim_client::Result<()>>,
+    login: Option<auth::Login>,
 }
 
 /// One ACP connection, its independent native connection and owned work.
@@ -50,9 +55,15 @@ impl AcpGateway {
                 io,
                 agent_id,
                 done,
+                login: None,
             }))),
             finished,
         )
+    }
+
+    pub fn login(self, login: auth::Login) -> Self {
+        self.0.lock().unwrap().as_mut().unwrap().login = Some(login);
+        self
     }
 }
 
@@ -89,8 +100,9 @@ impl TypedPlugin for AcpGateway {
                     io,
                     agent_id,
                     done,
+                    login,
                 } = inputs;
-                let result = serve(client, io, agent_id, stop, owned_tasks).await;
+                let result = serve(client, io, agent_id, login, stop, owned_tasks).await;
                 let _ = done.send(result);
             });
             Ok(Effect::Done)
@@ -102,6 +114,7 @@ async fn serve(
     client: Client,
     io: Io,
     agent_id: Option<String>,
+    login: Option<auth::Login>,
     stop: CancellationToken,
     tasks: TaskTracker,
 ) -> dim_client::Result<()> {
@@ -150,7 +163,7 @@ async fn serve(
         .connect_with(
             agent_client_protocol::Lines::new(outgoing, incoming_frames),
             async move |cx| {
-                gateway::Gateway::new(rpc, cx, foreground, tasks, foreground_stop, agent_id)
+                gateway::Gateway::new(rpc, cx, foreground, tasks, foreground_stop, agent_id, login)
                     .run(messages, native)
                     .await
             },

@@ -72,6 +72,7 @@ pub enum Action {
     Exec,
     Acp {
         agent_id: Option<String>,
+        auth_setup: Option<String>,
     },
     Export {
         session_id: String,
@@ -275,14 +276,25 @@ impl Options {
                     );
                 }
                 "acp" if matches!(options.action, Action::Chat) => {
-                    options.action = Action::Acp { agent_id: None };
+                    options.action = Action::Acp {
+                        agent_id: None,
+                        auth_setup: None,
+                    };
                 }
                 "--agent" => {
-                    let Action::Acp { agent_id } = &mut options.action else {
+                    let Action::Acp { agent_id, .. } = &mut options.action else {
                         return Err("--agent requires acp".into());
                     };
                     if agent_id.replace(value(&mut args)?).is_some() {
                         return Err("Supply --agent only once".into());
+                    }
+                }
+                "--auth-setup" => {
+                    let Action::Acp { auth_setup, .. } = &mut options.action else {
+                        return Err("--auth-setup requires acp".into());
+                    };
+                    if auth_setup.replace(value(&mut args)?).is_some() {
+                        return Err("Supply --auth-setup only once".into());
                     }
                 }
                 "tui" if matches!(options.action, Action::Chat) => options.action = Action::Tui,

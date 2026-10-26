@@ -1,6 +1,6 @@
 # AcpGateway
 
-Status: Draft; not implemented. Requirement: [#436](https://github.com/arcships/dim/issues/436). Scope: the client host process, outside the App Server daemon. Language: Rust. The [implementation plan](../acp-gateway-implementation.md) defines the complete first-delivery method matrix, wiring, connection state machines, unsupported features, acceptance and issue dependencies. [中文](../../zh/design/plugins/AcpGateway.md)
+Status: implementation in progress; delivery evidence is in the [implementation plan](../acp-gateway-implementation.md#10-交付单元和验收顺序). Requirement: [#436](https://github.com/arcships/dim/issues/436). Scope: the client host process, outside the App Server daemon. Language: Rust. The plan defines the complete first-delivery method matrix, wiring, connection state machines, unsupported features, acceptance and issue dependencies. [中文](../../zh/design/plugins/AcpGateway.md)
 
 `AcpGateway` is a reusable rutis plugin that serves Dim as an ACP agent. It owns the ACP connection and its independent public-RPC connection to the existing App Server. `dimcode acp` is its first host and stdio entry; another host can mount the same implementation or launch that command. The gateway has no TUI dependency. Desktop continues to use the same daemon and persisted Sessions; it needs no separate ACP protocol implementation.
 
@@ -36,7 +36,7 @@ Session / InputQueue / Loop / Approval / Questions / Attachments / ...
 
 There is one gateway part and no daemon, Session or branch part. It is not a Capability: it does not own a state machine on a branch Timeline. Its connection resources and in-flight operations make it a real plugin, rather than a row whose only purpose is wiring other plugins.
 
-The proposed gateway implementation is `crates/dim-acp`. The existing RPC engine and loopback callback I/O now live in `crates/dim-client`, used by the CLI; the gateway is not yet delivered. The extraction and host boundary are [plan §3](../acp-gateway-implementation.md#3-模块宿主与接线). No `AcpHost`, new daemon endpoint, exported rutis link or private `RpcService` dependency is assumed.
+The gateway implementation is `crates/dim-acp`. The public RPC engine, product-event boundary, question contract and loopback callback I/O live in `crates/dim-client`, shared with the CLI. The extraction and host boundary are [plan §3](../acp-gateway-implementation.md#3-模块宿主与接线). No `AcpHost`, new daemon endpoint, exported rutis link or private `RpcService` dependency is assumed.
 
 ## 2. Protocol boundary
 

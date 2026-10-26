@@ -1,6 +1,7 @@
 //! Public RPC v3 transport shared by native Dim clients.
 
 pub mod callback;
+pub mod question;
 pub mod wire;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;

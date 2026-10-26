@@ -410,6 +410,19 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
         },
         agent_id,
     );
+    let gateway = gateway.login(dim_acp::auth::Login {
+        directory: options
+            .directory
+            .clone()
+            .unwrap_or_else(|| login::account_directory().into()),
+        redirect_uri: options.redirect_uri.clone(),
+        open_browser: if std::env::var("DIMCODE_OAUTH_MANUAL").is_ok_and(|value| value == "1") {
+            None
+        } else {
+            Some(browser::open)
+        },
+        terminal: true,
+    });
     let gateway = root.plugin(rutis::Typed::new(gateway));
     (&gateway).await.map_err(plugin_error)?;
     let (code, result) = tokio::select! {
@@ -422,7 +435,19 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
 }
 
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
-    if let Action::Acp { agent_id } = &options.action {
+    if let Action::Acp {
+        auth_setup: Some(method),
+        ..
+    } = &options.action
+    {
+        let mut client = client::connect_inner(&options, true)
+            .await?
+            .ok_or("App Server did not start")?;
+        let (provider, device) = dim_acp::auth::terminal_method(&mut client, method).await?;
+        options.device = device;
+        return login::login(&mut client, &options, &provider).await;
+    }
+    if let Action::Acp { agent_id, .. } = &options.action {
         return run_acp(root, &options, agent_id.clone()).await;
     }
     if matches!(options.action, Action::Chat | Action::Tui)

@@ -161,7 +161,7 @@ attachment 上传成功而后续 submit 失败时，文件仍归原生 Session�
 1. `account.providers {}` 返回 `providerId/displayName/loginMethods`；`account.status {providerId}` 返回 AccountSnapshot。只有方法明确不存在或 providers 为空时，才视为没有此接入；网络、存储、配置错误不能吞成“无须认证”。
 2. auth method id 从发现的 provider/method/flow 确定性编码，按本连接已发布 id 查表，不从客户端 methodId 解析任意 provider、realm 或 callback。provider id 来自原生响应，public build 不硬编码某个私有账户。独立 terminal helper 重新 discovery 并生成同一 id 表，再校验传入 id，不依赖父进程的内存映射。
 3. 当 provider 声明 browser，且宿主可打开浏览器并捕获其已配置 loopback redirect 时，发布 agent-type browser method；它才使用 `authenticate`。已登录时调用 authenticate 只核对状态并成功，不重启登录。
-4. client 声明 `clientCapabilities.auth.terminal=true` 时，可发布 terminal-type method。其计划 args 是 `["--auth-setup", METHOD_ID]`，追加到同一个配置中的 `dimcode acp ...` invocation；新交互进程复用既有 CLI login 的 browser/device 流程、相同 executable、home、profile 和宿主登录配置。`--auth-setup` 尚未实现，不是现有参数。客户端等待交互进程退出后再试请求；按照 ACP，**不能**把 terminal methodId 发给 authenticate。
+4. client 声明 `clientCapabilities.auth.terminal=true` 时，可发布 terminal-type method。args 是 `["--auth-setup", METHOD_ID]`，追加到同一个配置中的 `dimcode acp ...` invocation；新交互进程复用既有 CLI login 的 browser/device 流程、相同 executable、home、profile 和宿主登录配置。客户端等待交互进程退出后再试请求；按照 ACP，**不能**把 terminal methodId 发给 authenticate。
 5. 无可交付 UI/终端的 headless 宿主不发布不可执行的方法。device 已有原生接口，但首版通过上述交互 helper 提供，不另造 ACP user-code/form 流程。终端 helper 是独立交互进程，其文本输出不进入 ACP 连接 stdout。
 
 认证方法可在账户已登录时继续发布，供后续重新认证；是否需要认证必须针对当前选择的 provider 判断。API-key/configured profile 不因其他 managed provider 未登录而被阻止。没有 account 插件时 authMethods 可为空；同一 Gateway 不安装插件、不切换默认 provider、不启动另一个账户构建。
@@ -424,15 +424,17 @@ Steering 的 handoff 允许上游换 turn，并不允许脱离 ACP prompt 槽启
 | --- | --- | --- |
 | A. 共享 RPC 与宿主 | 已完成：dim-client、现有 CLI client/MCP callback 调用者 | 保留 socket/pipe/profile/frame/security 行为；Gateway 构造接收自有输入且 Deps=()，不迁移既有 CLI 插件。2 个公共传输/callback 边界测试、94 个现有 CLI flows、受影响 crate 全 target Clippy、xtask check 通过；10 个需额外环境的既有 CLI flows 未运行。无 ACP handler，无 daemon diff |
 | B. 插件与标准会话 | 已完成：dim-acp、CLI acp 入口、共享产品事件边界 | initialize/new/list/load/resume/prompt；3 个 ACP stdio flows 覆盖真实 daemon 与 loopback model、消费输入关联、emoji 去重、固定头空页和并发准备。受影响 CLI flows 共 97 通过，10 个额外环境用例未运行 |
-| C. 交互与结算 | 同一 Gateway 的 auth/permission/question/config/content | managed provider discovery、agent browser authenticate、terminal helper、登录取消/到期及交换不确定性；allow/deny、另一客户端先回答、form accept/decline/cancel、模式冲突、图片/文本资源、cancel 各交接点、close/delete、EOF 和 RPC recovery |
+| C. 交互与结算 | 已完成：同一 Gateway 的 auth/permission/question/config/content | managed provider discovery、browser authenticate、terminal helper；输入撤回/stop、审批、form、mode/model、图片/文本资源和 close/delete。101 个 CLI flows 通过、10 个额外环境用例跳过；另有 2 个公共 Gateway 宿主流程验证真实 loopback callback、native exchange 和请求取消。RPC recovery 与输出/卸载结算在 E 验证 |
 | D. 有依据的 Lody 子集 | history/forkAtTurn/compaction、startup model、后台 task、最小 subagent snapshots | 普通 acpx 无未协商的自定义通知；Lody 真实消费；只声明已实现字段和 run support，含 prompt 外 task 终态、双向协商和断线 unknown；不支持控制在 native 变更前拒绝 |
-| E. 发布入口与实机 | dimcode 包、文档和验收记录 | 正确架构二进制启动 ACP；Lody/acpx 启动的是本次构建，不是历史 npx 缓存；隔离 home；至少完成 macOS，其他平台记录待验收 |
+| E. 连接恢复、发布入口与实机 | dimcode 包、文档和验收记录 | RPC recovery、不重发不确定变更、输出队列/卸载结算；正确架构二进制启动 ACP；Lody/acpx 启动的是本次构建，不是历史 npx 缓存；隔离 home；至少完成 macOS，其他平台记录待验收 |
 
 这是串行交付范围，不为每个字段建立独立任务或 agent。实际实现路径引入 crate/依赖时运行 xtask check；装配变化按项目规则生成 graph，禁止手写 generated 输出。
 
 A 的消融复核：传输只保留一份，CLI 继续拥有 daemon 启动策略；删除了可由 hello features 直接判断的重复 shutdown flag。ConnectionConfig 是连接身份、profile 校验和重连所需的实际边界输入；callback 模块只拥有 I/O，没有账户业务。未发现可进一步删除且不损害既有行为的结构。
 
 B 的消融复核：没有服务注册层、业务 Session store 或额外 daemon。每个原生连接仅一个 RPC reader；每 Session 一个准备槽位合并并发建立，保留旧 runtime 只用于建立失败恢复。history cursor 校验和产品事件解析移至共享边界，删除 CLI 的重复定义。
+
+C 的消融复核：Questions 的协议解析移入 dim-client，CLI 和 Gateway 使用同一校验及答案编码；保留原有终端交互。认证只接公开账户方法和宿主 browser/callback 配置，无 token、私有 realm 或独立 OAuth 实现。配置使用原生 CAS 和采用结果，没有第二个 Provider registry。
 
 ### 10.1 自动化公开流程
 
@@ -507,7 +509,7 @@ acpx --agent "$ACP_TEST_COMMAND" --cwd "$ACP_TEST_ROOT/workspace" \
 | [#143](https://github.com/arcships/dim/issues/143)、[#422](https://github.com/arcships/dim/issues/422) | Hooks/Pursuit 各自交付；Gateway 不实现 prompt hooks、Goal evaluator 或 Goal 的续轮结算 |
 | [#427](https://github.com/arcships/dim/issues/427)、[#428](https://github.com/arcships/dim/issues/428)、[#429](https://github.com/arcships/dim/issues/429) | branches/compaction/prompt 的新要求由原所有者决定；本版本只投影已有 main 与压缩事实，不改变 context 输入路径 |
 | [#387](https://github.com/arcships/dim/issues/387) | daemon startup 无进展超时仍归原所有者；Gateway 不修改其策略，30 秒仅为已经断开的 RPC 恢复窗口 |
-| [#114](https://github.com/arcships/dim/issues/114) | 交付顺序与 Ready 流程；本 PR 只交设计/实施计划，不把 Draft 认作实现授权 |
+| [#114](https://github.com/arcships/dim/issues/114) | 交付顺序与 Ready 流程；本 PR 保持 Draft，实施和验证按 §10 记录，不自动合并 |
 
 其余开放项涉及发布、性能预算、CI 或无关功能，不因 ACP 计划扩大范围。#386 的 UI leaf events 不是 ACP transport，不作为接线依赖；#438–#440 的发布验收不在此宣称完成。
 

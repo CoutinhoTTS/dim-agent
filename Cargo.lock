@@ -1066,12 +1066,15 @@ name = "dim-acp"
 version = "0.1.0-alpha.5"
 dependencies = [
  "agent-client-protocol",
+ "base64 0.22.1",
  "dim-agent-types",
  "dim-client",
  "futures-util",
  "rutis",
  "serde",
  "serde_json",
+ "tempfile",
+ "time",
  "tokio",
  "tokio-util",
  "uuid",
