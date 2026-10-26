@@ -13,6 +13,10 @@ test('documents that code reads keep their checks',()=>{
   assert.deepEqual(classify(['docs/design/appserver/native-storage-format.md']),only('rust'));
 });
 
+test('dependency policy changes select the scan without compiling the workspace',()=>{
+  assert.deepEqual(classify(['deny.toml','LICENSE','docs/release/README.md']),only('dependencies'));
+});
+
 test('source areas select their groups',()=>{
   assert.deepEqual(classify(['web/src/main.ts']),only('web'));
   assert.deepEqual(classify(['scripts/stage-web.mjs']),only('scripts','web'));

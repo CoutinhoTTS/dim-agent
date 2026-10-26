@@ -340,6 +340,11 @@ async fn execute(
         Ok(tool) => tool,
         Err(message) => return Ok(ToolResult::error(message)),
     };
+    let call = if tool.definition.risk.as_deref() == Some("write_filesystem") {
+        tool.handler.resolve_write(call, cancel.clone()).await?
+    } else {
+        call
+    };
     approval
         .admit(
             AdmitCall {

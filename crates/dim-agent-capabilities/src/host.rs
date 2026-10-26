@@ -420,6 +420,11 @@ pub trait ToolDriver: Send + Sync + 'static {
     fn definitions(&self) -> Vec<ToolDefinition> {
         Vec::new()
     }
+    /// Resolve a filesystem write's target without effects. The returned call
+    /// is the one Approval admits and the handler executes.
+    fn resolve_write(&self, call: ToolCall, _: CancellationToken) -> HostFuture<'_, ToolCall> {
+        Box::pin(async move { Ok(call) })
+    }
     fn execute(
         &self,
         call: ToolCall,

@@ -1,6 +1,6 @@
 # Questions
 
-状态：Ready（重新设计，[#144](https://github.com/arcships/dim/issues/144)）；维护者的确认记录在 [§12](#12-ready-确认)。总体设计：[overview §4](../overview.md#4-插件目录)。里程碑：M2。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。
+状态：已实现（[#262](https://github.com/arcships/dim/issues/262)：#269、#336、#351；重新设计 [#144](https://github.com/arcships/dim/issues/144)）；维护者的确认记录在 [§12](#12-ready-确认)。总体设计：[overview §4](../overview.md#4-插件目录)。里程碑：M2。语言：Rust。作用域：Session（[ADR 002](../../adr/002-plugin-scope.md)）。
 
 模型通过 `ask_user` 工具向用户提出一个或多个问题并等待回答：单选、多选、一次调用多个问题、自定义回答或拒绝回答。**问题就是待完成的工具调用，回答就是它的工具结果。** 客户端把已提交、尚无 `step/tool-result` 的 `ask_user` 的 `step/tool-call` 视为问题，用 Session 方法 `session.question.respond` 回答；等待中的处理函数把回答作为自己的 `ToolResult` 返回，ToolExecutor 像发布其他工具输出一样把它写进该批次的 `step/tool-result`。模型只从 `ToolResult.content` 得知用户的选择。
 

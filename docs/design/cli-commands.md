@@ -230,7 +230,7 @@ client flow. The App Server, Permission, Approval, events, protocol and storage 
 | Preset | What runs (Permission's existing decision, after `disallowedTools` and deny rules) |
 | --- | --- |
 | `read-only` | Reads and Session tools run; file writes, commands, network and unclassified tools are denied |
-| `workspace-write` | Reads, file writes and Session tools run; commands, network and unclassified tools ask |
+| `workspace-write` | Reads, workspace file writes and Session tools run; outside writes, commands, network and unclassified tools ask |
 | `full-access` | Every tool call runs without asking |
 
 A deny rule applies under every preset. An allow rule only turns a question into a run for a
@@ -337,7 +337,7 @@ are kept for `remove`.
 > /approvals
 Preset (main branch): workspace-write
   read-only        reads run; writes, commands, network and unclassified tools are denied
-* workspace-write  reads and file writes run; commands, network and unclassified tools ask
+* workspace-write  reads and workspace file writes run; outside writes, commands, network and unclassified tools ask
   full-access      every tool call runs without asking
 Command rules (user scope, every Session):
   1  allow  exact   cargo test -p dim-cli

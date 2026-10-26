@@ -3,7 +3,7 @@
 import {execFileSync} from 'node:child_process';
 import {appendFileSync} from 'node:fs';
 
-export const groups=['rust','windows','xtask','web','scripts'];
+export const groups=['rust','windows','xtask','web','scripts','dependencies'];
 const everything=Object.fromEntries(groups.map(group=>[group,true]));
 
 const rules=[
@@ -12,7 +12,8 @@ const rules=[
   // storage_flow reads this document.
   [/^docs\/design\/appserver\/native-storage-format\.md$/,['rust']],
   [/^docs\//,[]],
-  [/^[^/]+\.md$|^LICENSE$/,[]],
+  [/^deny\.toml$|^LICENSE$/,['dependencies']],
+  [/^[^/]+\.md$/,[]],
   [/^web\//,['web']],
   // stage-web.mjs builds the Web workspace.
   [/^scripts\//,['scripts','web']],

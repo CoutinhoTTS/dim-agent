@@ -233,7 +233,7 @@ async fn presets_decide_by_risk_and_denied_calls_do_not_run() {
             ),
             (
                 PermissionPreset::WorkspaceWrite,
-                ["allow", "allow", "ask", "ask", "allow", "ask"],
+                ["allow", "ask", "ask", "ask", "allow", "ask"],
             ),
             (PermissionPreset::FullAccess, ["allow"; 6]),
         ];

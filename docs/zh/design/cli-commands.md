@@ -174,7 +174,7 @@ Permission、Approval、事件、协议和存储都不变。
 | 预设 | 哪些会运行（Permission 现有的判定，在 `disallowedTools` 与 deny 规则之后） |
 | --- | --- |
 | `read-only` | 读取和 Session 工具运行；文件写入、命令、网络和未分类工具被拒绝 |
-| `workspace-write` | 读取、文件写入和 Session 工具运行；命令、网络和未分类工具需要询问 |
+| `workspace-write` | 读取、工作区内文件写入和 Session 工具运行；工作区外写入、命令、网络和未分类工具需要询问 |
 | `full-access` | 每个工具调用都直接运行，不询问 |
 
 deny 规则在任何预设下都生效。allow 规则只把简单命令的询问变成运行，从不解除拒绝。产品和配置型
@@ -267,7 +267,7 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
 > /approvals
 Preset (main branch): workspace-write
   read-only        reads run; writes, commands, network and unclassified tools are denied
-* workspace-write  reads and file writes run; commands, network and unclassified tools ask
+* workspace-write  reads and workspace file writes run; outside writes, commands, network and unclassified tools ask
   full-access      every tool call runs without asking
 Command rules (user scope, every Session):
   1  allow  exact   cargo test -p dim-cli

@@ -4,7 +4,8 @@
 //! `write` `edit` `glob` `grep` `exec`. Branch parts are looked up per call on
 //! the calling branch: `FileReads` for file tools and `BackgroundExec` for a
 //! command that moves to the background. Admission happened before a call
-//! reaches this host; nothing here knows permissions, approvals or sandboxes.
+//! reaches execution; `resolve_write` only prepares its target before admission.
+//! Nothing here decides permissions, approvals or sandboxes.
 pub mod background;
 pub mod exec;
 pub mod file_reads;
@@ -133,6 +134,41 @@ impl ToolDriver for WorkspaceTools {
         let mut definitions = FileTools::definitions();
         definitions.push(exec::definition_for(&self.platform));
         definitions
+    }
+    fn resolve_write(
+        &self,
+        mut call: ToolCall,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolCall> {
+        Box::pin(async move {
+            if self.lifecycle.is_cancelled() {
+                return Err(HostError::Cancelled(CAPABILITY_RELOADING.into()));
+            }
+            if matches!(call.name.as_str(), "write" | "edit")
+                && let Some(path) = call.input.get("path").and_then(|value| value.as_str())
+                && !path.is_empty()
+            {
+                let (cwd, home, path) = (
+                    self.cwd.clone(),
+                    self.platform.home.clone(),
+                    path.to_owned(),
+                );
+                let target =
+                    tokio::task::spawn_blocking(move || files::resolve_path(&cwd, &home, &path));
+                let path = tokio::select! {
+                    result = target => result.map_err(|error| HostError::failed(error.to_string()))?
+                        .map_err(HostError::failed)?,
+                    _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+                };
+                let path = path
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| HostError::failed("The resolved write path is not UTF-8"))?;
+                call.input
+                    .insert("path".into(), serde_json::Value::String(path));
+            }
+            Ok(call)
+        })
     }
     fn execute(
         &self,

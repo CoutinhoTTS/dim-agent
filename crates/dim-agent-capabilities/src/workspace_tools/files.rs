@@ -123,7 +123,7 @@ impl Cancelled {
 /// Resolves a model-supplied file path (TS `path.ts`, design §7.2): `~`
 /// expansion, Windows corrections, join onto cwd, lexical `.`/`..`
 /// removal, then realpath of the longest existing prefix.
-fn resolve_path(cwd: &Path, home: &Path, input: &str) -> Result<PathBuf, String> {
+pub(crate) fn resolve_path(cwd: &Path, home: &Path, input: &str) -> Result<PathBuf, String> {
     let expanded = if input == "~" {
         home.to_owned()
     } else if let Some(rest) = input.strip_prefix("~/").or(input.strip_prefix("~\\")) {
@@ -131,7 +131,7 @@ fn resolve_path(cwd: &Path, home: &Path, input: &str) -> Result<PathBuf, String>
     } else {
         windows_path(input)?
     };
-    Ok(canonical_prefix(lexical(&cwd.join(expanded))))
+    canonical_prefix(lexical(&cwd.join(expanded)))
 }
 
 /// SHA-256 of raw file bytes.
@@ -244,20 +244,27 @@ fn lexical(path: &Path) -> PathBuf {
 }
 
 /// Realpath of the longest existing prefix with the missing rest appended.
-fn canonical_prefix(path: PathBuf) -> PathBuf {
+pub(crate) fn canonical_prefix(path: PathBuf) -> Result<PathBuf, String> {
     let mut existing = path.as_path();
     let mut missing = Vec::new();
     loop {
-        if let Ok(mut canonical) = std::fs::canonicalize(existing) {
-            canonical.extend(missing.iter().rev());
-            return canonical;
+        match std::fs::canonicalize(existing) {
+            Ok(mut canonical) => {
+                canonical.extend(missing.iter().rev());
+                return Ok(canonical);
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(existing)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(format!("Failed to resolve {}: {error}", existing.display())),
         }
         match (existing.parent(), existing.file_name()) {
             (Some(parent), Some(name)) => {
                 missing.push(name.to_owned());
                 existing = parent;
             }
-            _ => return path,
+            _ => return Err(format!("Cannot resolve {}", path.display())),
         }
     }
 }
