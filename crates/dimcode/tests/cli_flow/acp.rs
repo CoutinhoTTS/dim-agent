@@ -221,6 +221,85 @@ fn acp_stdio_does_not_repeat_creation_when_the_native_reply_is_lost() {
 }
 
 #[test]
+fn acp_stdio_recovery_deadline_settles_cancel_without_claiming_native_stop() {
+    let home = Home::new();
+    let endpoint = home.0.join("rust/daemon.sock");
+    let listener = UnixListener::bind(&endpoint).unwrap();
+    fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)).unwrap();
+    let (waiting, ready) = std::sync::mpsc::sync_channel(0);
+    let daemon = thread::spawn(move || {
+        let mut wire = accept_native(&listener);
+        recovery_hello(&mut wire, "first");
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.read("session.submit");
+        drop(wire);
+        let mut wire = accept_native(&listener);
+        wire.0
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(40)))
+            .unwrap();
+        recovery_hello(&mut wire, "first");
+        wire.read("session.input_lookup");
+        waiting.send(()).unwrap();
+        // Keep the connection live while its lookup never replies.
+        detached_eof(&mut wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    peer.response(2);
+    peer.send(
+        3,
+        "session/prompt",
+        json!({"sessionId":"session","prompt":[{"type":"text","text":"Uncertain"}]}),
+    );
+    ready.recv_timeout(PATIENCE).unwrap();
+    writeln!(
+        peer.input,
+        "{}",
+        json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"session"}})
+    )
+    .unwrap();
+    peer.input.flush().unwrap();
+    let mut fd = libc::pollfd {
+        fd: peer.output.get_ref().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert!(
+        unsafe { libc::poll(&mut fd, 1, 40_000) } > 0,
+        "The shared recovery deadline did not settle"
+    );
+    let result = peer.response(3);
+    assert_eq!(result["result"]["stopReason"], "cancelled");
+    assert_eq!(
+        result["result"]["_meta"]["dim"]["nativeCancellation"],
+        "unconfirmed"
+    );
+    let Peer {
+        child,
+        input,
+        output,
+        ..
+    } = peer;
+    drop(input);
+    let failed = wait(child);
+    drop(output);
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("App Server connection is unavailable")
+    );
+    daemon.join().unwrap();
+}
+
+#[test]
 fn acp_stdio_a_closed_preparation_cannot_publish_over_a_later_load() {
     let home = Home::new();
     let cwd = fs::canonicalize(&home.0).unwrap();
@@ -388,7 +467,7 @@ fn acp_stdio_slow_output_fails_explicitly_without_stopping_native_execution() {
     let diagnostic = String::from_utf8_lossy(&failed.stderr);
     assert!(
         diagnostic.contains("reliable output exceeds")
-            || diagnostic.contains("writer did not make progress"),
+            || diagnostic.contains("writer did not flush a frame"),
         "{diagnostic}"
     );
     daemon.join().unwrap();

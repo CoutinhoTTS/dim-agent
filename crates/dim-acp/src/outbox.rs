@@ -18,6 +18,7 @@ struct Pending {
 pub(crate) struct Outbox {
     pending: Arc<Mutex<Pending>>,
     failed: CancellationToken,
+    flushed: Arc<tokio::sync::Notify>,
 }
 fn overflow() -> Error {
     Error::new(-32001, "ACP reliable output exceeds its 16 MiB budget")
@@ -58,6 +59,19 @@ impl Outbox {
     pub(crate) async fn failed(&self) {
         self.failed.cancelled().await;
     }
+    pub(crate) async fn drained(&self) -> Result<(), Error> {
+        loop {
+            let flushed = self.flushed.notified();
+            let empty = self.pending.lock().unwrap().bytes == 0;
+            if empty {
+                return Ok(());
+            }
+            tokio::select! {
+                () = flushed=>{},
+                () = self.failed.cancelled()=>return Err(overflow()),
+            }
+        }
+    }
     pub(crate) fn error(&self) -> Error {
         overflow()
     }
@@ -75,6 +89,9 @@ impl Outbox {
                 pending.frames.remove(&key);
             }
             pending.bytes -= size;
+            if pending.bytes == 0 {
+                self.flushed.notify_one();
+            }
         }
     }
     pub(crate) fn notify(

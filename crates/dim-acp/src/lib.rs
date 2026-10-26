@@ -138,7 +138,7 @@ async fn serve(
                     .map_err(|_| {
                         io::Error::new(
                             io::ErrorKind::TimedOut,
-                            "ACP writer did not make progress for five seconds",
+                            "ACP writer did not flush a frame within five seconds",
                         )
                     })?
                     .map_err(io::Error::other)?;

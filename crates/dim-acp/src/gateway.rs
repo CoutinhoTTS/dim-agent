@@ -1370,7 +1370,7 @@ impl Gateway {
                         .as_ref()
                         .is_some_and(|data| data["code"] == "daemon_unavailable")
                 }) {
-                    return self.fail_connection();
+                    return self.fail_connection().await;
                 }
                 self.recovering_sessions -= 1;
                 if self.recovering_sessions == 0 {
@@ -1667,7 +1667,11 @@ impl Gateway {
         Ok(())
     }
 
-    fn fail_connection(&mut self) -> Result<(), Error> {
+    async fn fail_connection(&mut self) -> Result<(), Error> {
+        self.recovering = true;
+        for (_, (_, token)) in self.interactions.drain() {
+            token.cancel();
+        }
         for (id, slot) in &mut self.sessions {
             match slot {
                 Slot::Ready(session) => {
@@ -1692,6 +1696,9 @@ impl Gateway {
                 }
             }
         }
+        // The SDK drops queued replies when its foreground task returns an error.
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(5), self.outbox.drained()).await;
         Err(rpc::unavailable())
     }
 
@@ -2038,7 +2045,7 @@ impl Gateway {
                     Some(Native::Lost) => self.lost()?,
                     Some(Native::Restored { same_instance,generation,deadline }) if generation == self.rpc.generation() && self.rpc.ready() => self.restore(same_instance,generation,deadline),
                     Some(Native::Restored { .. })=>{},
-                    Some(Native::Closed) | None => return self.fail_connection(),
+                    Some(Native::Closed) | None => return self.fail_connection().await,
                 },
             }
         }
