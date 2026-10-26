@@ -27,7 +27,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 | P2 Attachments | 服务端 #102、CLI 设计 #154、headless 图片 #160、多行/大段粘贴与提交时上传 #163、原生文件/剪贴板输入 #164 | 本轮输入链路已合入；平台支持和原生交互验收范围见各 PR |
 | F6 CLI | 设计 #113、实现 #149、编码请求上限 #153 | 本轮交付完成 |
 | F3 模型参数 | 设计 #110、`/effort`、`/fast`、`/agent` 实现 #148 | 本轮交付完成 |
-| Provider 客户端完整管理 [#329](https://github.com/arcships/dim/issues/329) | 已有 Provider 基础管理、账号入口与会话级模型参数 | [完整方案](appserver/provider-management.md) 待确认、未 Ready 或实现；创建/局部更新替代 save，管理视图重读及 CAS，模型/路由与客户端显式采用的持久偏好，v18 可选字段；用量复用已交付的 account.usage，不扩 core 或公开宿主 API |
+| Provider 客户端完整管理 [#329](https://github.com/arcships/dim/issues/329) | 已有 Provider 基础管理、账号入口与会话级模型参数 | [完整方案](appserver/provider-management.md) 与实现由 PR #349 交付；创建/局部更新替代 save，管理视图重读及 CAS，模型/路由与客户端显式采用的持久偏好，v19 可选字段；用量复用已交付的 account.usage，不扩 core 或公开宿主 API |
 | F4 MCP OAuth | 服务端 #111、CLI 登录与状态 #151 | 本轮交付完成 |
 | F5 OS 隔离 | spike #112、设计 #152 | 产品实现 #189 已合入；用户 `!` / `!!` 不在隔离范围内 |
 | C4 Session 级 TS | spike #99、装配前置 #137、工具/方法设计 #141、实现 #150、rutis 0.11 升级 #173、广播设计 #174 与实现 #180 | C4/#63 已完成，#63/#168 已关闭。原生 Windows Node 验收保留已记录的限制；#156 已关闭且不采用 |
@@ -70,7 +70,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 4. ~~决定 Goal 还是 Pursuit（D3）~~：已决定先做 Goal（#44）。
 5. 确认可能不需要的工作：~~Permission 新类别~~（已确认不需要，现有 `Unclassified` 行为已符合，#45）、~~S3 活动句柄~~（已确认不需要：App Server 不自动卸载空闲 Session，#57）。
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
-7. Provider 的 Desktop/CLI 完整管理由 [#329](https://github.com/arcships/dim/issues/329) 跟踪，负责人 zerob13；[方案](appserver/provider-management.md) 只提交设计、未实现。复用现有调用、重读和 CAS，无机制前置；Provider JSON 以可选字段保持 v18，接受旧二进制重写时丢失未知字段。客户端读取持久模型偏好后显式采用，服务端不自动应用；用量复用已交付的 account.usage 及原有包查询合同。S4 与 F3 已有 Session 采用流程保持，持久偏好取代 F3 原有的无持久偏好范围。
+7. Provider 的 Desktop/CLI 完整管理由 [#329](https://github.com/arcships/dim/issues/329) 跟踪，负责人 zerob13；[方案](appserver/provider-management.md) 的实现与验收由 PR #349 交付。复用现有调用、重读和 CAS，无机制前置；Provider JSON 以可选字段保持 v19，接受旧 v19 二进制重写时丢失未知字段；v18 二进制拒绝 v19 数据库。客户端读取持久模型偏好后显式采用，服务端不自动应用；用量复用已交付的 account.usage 及原有包查询合同。S4 与 F3 已有 Session 采用流程保持，持久偏好取代 F3 原有的无持久偏好范围。
 8. 插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)）归 M1。M1 对外开放插件开发，按第 2 节第 5 条，插件作者直接使用的公开契约须在开放前就位；Dim 尚未发布，所以迁移不保留兼容路径。工作项见 §3.2 的“插件契约迁移”表，阶段与验收见[插件契约 §10](../zh/design/plugin-contract.md#10-迁移)。迁移已完成，只剩 P4 中 R5 的第二种形式（外来插件作为一行）等待 rutis#642（#403、#405）。P6 Scheduler（#70）的 loader 门槛所等的 rutis 0.16 升级（#379）已完成。对外开放前须满足 [#364](https://github.com/arcships/dim/issues/364)：第三方插件的部件注册工具后，模型就能看到这些工具，不需要写进配置。R6（#382）以可选的挂载列表 `SessionConfig.tools` 实现它：没有挂载列表的 Session（产品默认）声明全部宿主工具与部件注册的全部工具；有挂载列表的 Session 只声明其中列出的。工具调用是否执行仍由 Permission 决定，它不改变声明。
 9. 对外发布前处理：[#294](https://github.com/arcships/dim/issues/294)（workspace-write 是否限制写入路径，需维护者决定）、[#296](https://github.com/arcships/dim/issues/296)（依赖漏洞与许可证扫描）、[#297](https://github.com/arcships/dim/issues/297)（发布流水线的 action 固定到提交 SHA）、[#368](https://github.com/arcships/dim/issues/368)（发布包大小门槛）。
 

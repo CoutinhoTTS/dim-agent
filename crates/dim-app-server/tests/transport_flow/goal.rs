@@ -55,15 +55,12 @@ async fn select_model(client: &mut Client) {
         json!({"modelId":"fixture","displayName":"fixture","status":"active",
         "capabilities":dim_agent_types::ModelCapabilities::default()}),
     ];
-    assert_ok(&client.rpc("provider.save", json!({"provider":{
-        "providerId":"goal-fixture","displayName":"Fixture","driverKind":"openai-compatible",
-        "baseUrl":"http://localhost/v1","auth":{"type":"anonymous"},"models":models,"enabled":true
-    }})).await);
+    assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000005","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":models,"enabled":true})).await);
     assert_ok(
         &client
             .rpc(
                 "provider.select",
-                json!({"providerId":"goal-fixture","modelId":"fixture"}),
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000005","modelId":"fixture"}),
             )
             .await,
     );

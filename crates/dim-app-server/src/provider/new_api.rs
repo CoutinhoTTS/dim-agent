@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
 impl Endpoint {
-    fn protocol(self) -> Option<ModelProtocol> {
+    pub(super) fn protocol(self) -> Option<ModelProtocol> {
         match self {
             Self::Openai => Some(ModelProtocol::OpenaiCompatible),
             Self::OpenaiResponse => Some(ModelProtocol::OpenaiResponses),
@@ -38,6 +38,7 @@ struct Metadata {
 pub(super) fn routes(
     models: &[ModelEntry],
     configured: &BTreeMap<String, Endpoint>,
+    overrides: &BTreeMap<String, Endpoint>,
 ) -> Result<HashMap<String, ModelProtocol>, HostError> {
     let mut routes = HashMap::new();
     for model in models {
@@ -50,12 +51,16 @@ pub(super) fn routes(
             })
             .transpose()?
             .unwrap_or_default();
-        if let Some(protocol) = endpoint(
+        let discovered = endpoint(
             &model.model_id,
             raw,
             configured.get(&model.model_id).copied(),
-        )?
-        .and_then(Endpoint::protocol)
+        )?;
+        if let Some(protocol) = overrides
+            .get(&model.model_id)
+            .copied()
+            .or(discovered)
+            .and_then(Endpoint::protocol)
         {
             routes.insert(model.model_id.clone(), protocol);
         }

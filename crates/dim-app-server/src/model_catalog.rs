@@ -59,6 +59,15 @@ pub struct ModelEdit {
     pub vision: Option<bool>,
     pub reasoning: Option<ReasoningEdit>,
     pub modality_capabilities: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "crate::protocol::optional_non_null")]
+    pub endpoint: Option<FieldUpdate<NewApiEndpoint>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+pub enum FieldUpdate<T> {
+    Set { value: T },
+    Clear,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -169,7 +178,7 @@ pub(crate) struct CatalogRawMetadata {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum NewApiEndpoint {
+pub enum NewApiEndpoint {
     Openai,
     OpenaiResponse,
     OpenaiResponseCompact,

@@ -28,7 +28,7 @@ use std::sync::{Mutex as StdMutex, Weak};
 /// A signed-in managed account whose first credential the relay rejects.
 struct Fixture {
     base_url: String,
-    account: AccountSnapshot,
+    account: StdMutex<AccountSnapshot>,
     recovered: AtomicUsize,
     released: StdMutex<Vec<String>>,
 }
@@ -42,7 +42,7 @@ impl Provider {
     fn lease(&self, bearer: &str, id: &str) -> CredentialLease {
         let owner: Weak<dyn LeaseOwner> = Arc::downgrade(&self.0) as Weak<Fixture>;
         CredentialLease::new(
-            self.0.account.clone(),
+            self.0.account.lock().unwrap().clone(),
             ModelProtocol::OpenaiCompatible,
             self.0.base_url.clone(),
             Default::default(),
@@ -66,11 +66,11 @@ impl ManagedProvider for Provider {
     fn status(&self, provider: &str) -> ManagedFuture<AccountSnapshot> {
         ready(match provider {
             "fail" => Err(ManagedError::InvalidStore),
-            _ => Ok(self.0.account.clone()),
+            _ => Ok(self.0.account.lock().unwrap().clone()),
         })
     }
     fn recover(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
-        ready(Ok(self.0.account.clone()))
+        ready(Ok(self.0.account.lock().unwrap().clone()))
     }
     fn begin_browser(&self, _: BrowserLoginBegin) -> ManagedFuture<BrowserLogin> {
         ready(Err(ManagedError::InvalidInput))
@@ -90,7 +90,7 @@ impl ManagedProvider for Provider {
         ready(Ok(()))
     }
     fn logout(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
-        ready(Ok(self.0.account.clone()))
+        ready(Ok(self.0.account.lock().unwrap().clone()))
     }
     fn usage(&self, provider: &str) -> ManagedFuture<Usage> {
         ready(match provider {
@@ -105,11 +105,12 @@ impl ManagedProvider for Provider {
     fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {
         let entry: ModelEntry = serde_json::from_value(json!({"modelId":"fixture-model",
             "displayName":"Fixture model","status":"active",
+            "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}},
             "capabilities":dim_agent_types::ModelCapabilities {
-                context_window: 32_000, max_output_tokens: 128, ..Default::default() }}))
+                context_window: 32_000, max_output_tokens: 128, reasoning: true, ..Default::default() }}))
         .unwrap();
         ready(Ok(ManagedCatalog {
-            account: self.0.account.clone(),
+            account: self.0.account.lock().unwrap().clone(),
             models: vec![ManagedModel {
                 entry,
                 protocol: ModelProtocol::OpenaiCompatible,
@@ -182,7 +183,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
     let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let fixture = Arc::new(Fixture {
         base_url: base,
-        account: AccountSnapshot {
+        account: StdMutex::new(AccountSnapshot {
             credential_epoch: "epoch".into(),
             generation: 1,
             account: Some(AccountView {
@@ -192,7 +193,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
                 name: Some("Fixture".into()),
                 granted_scopes: vec!["model".into()],
             }),
-        },
+        }),
         recovered: AtomicUsize::new(0),
         released: StdMutex::new(vec![]),
     });
@@ -277,11 +278,56 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
             .await["error"]["code"],
         -32601
     );
+    let unrefreshed = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_ok(&unrefreshed);
+    assert_eq!(
+        unrefreshed["result"]["providers"][0]["version"],
+        Value::Null
+    );
+    assert_eq!(unrefreshed["result"]["providers"][0]["models"], Value::Null);
     assert_ok(
         &client
             .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
             .await,
     );
+    assert_ok(&client.rpc("provider.models.edit", json!({"providerId":"managed-fixture","expectedVersion":1,"modelId":"fixture-model","edit":{"displayName":"Edited fixture"}})).await);
+    assert_ok(&client.rpc("provider.preferences.update", json!({"providerId":"managed-fixture","expectedVersion":2,"modelId":"fixture-model","patch":{"reasoningEffort":{"action":"set","value":"high"}}})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "provider.models.set_enabled",
+                json!({"providerId":"managed-fixture","expectedVersion":3,"modelIds":[]}),
+            )
+            .await,
+    );
+    let same_account = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&same_account);
+    assert_eq!(
+        same_account["result"]["models"][0]["name"],
+        "Edited fixture"
+    );
+    assert_eq!(
+        same_account["result"]["disabledModelIds"],
+        json!(["fixture-model"])
+    );
+    let retained = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_eq!(
+        retained["result"]["providers"][0]["preferences"]["fixture-model"]["reasoningEffort"],
+        "high"
+    );
+    assert_ok(&client.rpc("provider.models.set_enabled", json!({"providerId":"managed-fixture","expectedVersion":5,"modelIds":["fixture-model"]})).await);
     let created = client
         .rpc(
             "session.create",
@@ -324,6 +370,59 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         ]
     );
     assert_eq!(fixture.recovered.load(Ordering::SeqCst), 1);
+    {
+        let mut account = fixture.account.lock().unwrap();
+        account.generation += 1;
+        account.account.as_mut().unwrap().subject = "different-account".into();
+    }
+    let stale = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_ok(&stale);
+    assert_eq!(stale["result"]["providers"][0]["version"], 6);
+    assert_eq!(
+        stale["result"]["providers"][0]["models"][0]["unavailableReason"],
+        "account_changed"
+    );
+    assert!(
+        !stale["result"]["providers"][0]["actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("preferences.update"))
+    );
+    let changed = client
+        .rpc("provider.refresh", json!({"providerId":"managed-fixture"}))
+        .await;
+    assert_ok(&changed);
+    assert_eq!(changed["result"]["models"][0]["name"], "Fixture model");
+    assert_eq!(changed["result"]["disabledModelIds"], json!([]));
+    let cleared = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_eq!(cleared["result"]["providers"][0]["preferences"], json!({}));
+    {
+        let mut account = fixture.account.lock().unwrap();
+        account.generation += 1;
+        account.account = None;
+    }
+    let signed_out = client
+        .rpc(
+            "provider.management",
+            json!({"providerId":"managed-fixture"}),
+        )
+        .await;
+    assert_ok(&signed_out);
+    assert_eq!(signed_out["result"]["providers"][0]["version"], 7);
+    assert_eq!(
+        signed_out["result"]["providers"][0]["models"][0]["unavailableReason"],
+        "account_required"
+    );
     assert_ok(&client.rpc("daemon.shutdown", json!({})).await);
     server.join().await.unwrap();
     let mut released = fixture.released.lock().unwrap().clone();

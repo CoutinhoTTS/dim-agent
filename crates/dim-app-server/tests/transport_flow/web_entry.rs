@@ -290,7 +290,7 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
         max_output_tokens: 2048,
         ..Default::default()
     };
-    assert_ok(&local.rpc("provider.save", json!({"provider":{"providerId":"web-fixture","displayName":"Fixture","driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-secret"},"models":[{"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps}],"enabled":true}})).await);
+    assert_ok(&local.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-secret"}},"models":[{"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps}],"enabled":true})).await);
     let opened = local.rpc("web.open", json!({})).await["result"].clone();
     let address = opened["address"].as_str().unwrap().to_owned();
     let url = opened["url"].as_str().unwrap();
@@ -391,7 +391,12 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     ] {
         assert!(features.contains(&json!(method)), "{method}");
     }
-    for method in ["web.open", "provider.save", "mcp.catalog", "skills.catalog"] {
+    for method in [
+        "web.open",
+        "provider.create",
+        "mcp.catalog",
+        "skills.catalog",
+    ] {
         assert!(!features.contains(&json!(method)), "{method}");
     }
     let created = web.rpc("session.create", json!({"cwd":home})).await;
@@ -407,7 +412,10 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     // Catalog reads serve the model picker and carry no credential.
     for (method, params) in [
         ("provider.list", json!({})),
-        ("provider.catalog", json!({"providerId":"web-fixture"})),
+        (
+            "provider.catalog",
+            json!({"providerId":"018ec73f-0000-7000-8000-000000000011"}),
+        ),
         ("provider.selection", json!({"cwd":home})),
     ] {
         let reply = web.rpc(method, params).await;

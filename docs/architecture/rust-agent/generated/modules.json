@@ -1717,6 +1717,7 @@
         "format",
         "matches",
         "params",
+        "serde_json::json",
         "tokio::select",
         "unreachable",
         "vec"
@@ -1746,6 +1747,15 @@
       ]
     },
     {
+      "id": "dim_app_server::provider::editing",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider/editing.rs",
+      "unexpandedMacros": [
+        "params"
+      ]
+    },
+    {
       "id": "dim_app_server::provider::legacy",
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
@@ -1765,6 +1775,16 @@
       "unexpandedMacros": [
         "matches",
         "unreachable"
+      ]
+    },
+    {
+      "id": "dim_app_server::provider::models",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider/models.rs",
+      "unexpandedMacros": [
+        "matches",
+        "params"
       ]
     },
     {
@@ -1792,7 +1812,6 @@
       "file": "crates/dim-app-server/src/provider/remote.rs",
       "unexpandedMacros": [
         "format",
-        "matches",
         "params",
         "tokio::select"
       ]
@@ -1805,6 +1824,17 @@
       "unexpandedMacros": [
         "format",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_app_server::provider::view",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider/view.rs",
+      "unexpandedMacros": [
+        "format",
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -15188,10 +15218,14 @@
         "path CredentialRejection::Unrelated",
         "path HostError",
         "path HostError::Cancelled",
+        "path HostError::Failed",
         "path HostError::classified",
         "path HostError::failed",
+        "path HostErrorKind::Http",
         "path HostErrorKind::InvalidRequest",
         "path HostErrorKind::OwnerClosed",
+        "path HostErrorKind::Transport",
+        "path HostErrorKind::Unsupported",
         "path HostFuture",
         "path HttpModelConnection",
         "path ModelConnection::Bedrock",
@@ -15253,6 +15287,7 @@
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
         "path ModelRequest",
+        "path dim_agent_types::RequestMetadata",
         "path model",
         "use crate::model_catalog::ModelCapabilities",
         "use dim_agent_types::ModelCapabilitySnapshot",
@@ -15298,6 +15333,7 @@
       "to": "dim_app_server::managed_oauth",
       "references": [
         "path managed_oauth::CredentialLease",
+        "path managed_oauth::OAuthError",
         "use crate::managed_oauth"
       ]
     },
@@ -15309,6 +15345,7 @@
         "path CredentialLease",
         "path ManagedModel",
         "path ManagedProviders",
+        "path crate::managed_provider::ManagedProviderError",
         "use crate::managed_provider::AccountSnapshot",
         "use crate::managed_provider::CredentialLease",
         "use crate::managed_provider::ManagedModel",
@@ -15329,7 +15366,6 @@
         "path BundledCatalog",
         "path BundledCatalog::load",
         "path MAX_MODEL_TOKENS",
-        "path ModelEdit",
         "path ModelEntry",
         "path ModelMetadata",
         "path ModelSource::Builtin",
@@ -15367,6 +15403,18 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::editing",
+      "references": [
+        "mod editing",
+        "use editing::ConnectionInput",
+        "use editing::CreateProvider",
+        "use editing::ProbeProvider",
+        "use editing::ProbeResult",
+        "use editing::ProviderPatch"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::legacy",
       "references": [
         "mod legacy",
@@ -15379,6 +15427,15 @@
       "references": [
         "mod management",
         "path management::provide"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::models",
+      "references": [
+        "mod models",
+        "path models",
+        "use models::PreferencesPatch"
       ]
     },
     {
@@ -15422,6 +15479,15 @@
         "use secrets::ProviderSecretHost",
         "use secrets::ResolveProviderSecret",
         "use secrets::StaticCredential"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::view",
+      "references": [
+        "mod view",
+        "use view::ManagementProvider",
+        "use view::ManagementView"
       ]
     },
     {
@@ -15542,6 +15608,82 @@
       ]
     },
     {
+      "from": "dim_app_server::provider::editing",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModelNetwork"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::editing",
+      "to": "dim_app_server::model_catalog",
+      "references": [
+        "path FieldUpdate",
+        "path FieldUpdate::Clear",
+        "path FieldUpdate::Set",
+        "path ModelEntry",
+        "use crate::model_catalog::FieldUpdate"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::editing",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path CredentialAuthority::Static",
+        "path CredentialUpdate",
+        "path CredentialUpdate::Clear",
+        "path CredentialUpdate::Keep",
+        "path CredentialUpdate::Set",
+        "path CredentialUpdate::SetAws",
+        "path CredentialUpdate::SetRef",
+        "path ProviderError",
+        "path ProviderError::AuthRequired",
+        "path ProviderError::Conflict",
+        "path ProviderError::InvalidConfig",
+        "path ProviderError::NotFound",
+        "path ProviderError::Unsupported",
+        "path ProviderService",
+        "path StaticAuth",
+        "path StaticAuth::Anonymous",
+        "path StaticProviderRecord",
+        "path StaticRecordKind::Custom",
+        "path read_static",
+        "path validate_static_record"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::editing",
+      "to": "dim_app_server::provider::drivers",
+      "references": [
+        "path drivers::custom_drivers"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::editing",
+      "to": "dim_app_server::provider::models",
+      "references": [
+        "path models"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::editing",
+      "to": "dim_app_server::provider::secrets",
+      "references": [
+        "path ProviderSecret::Aws",
+        "path ProviderSecret::Token",
+        "path StaticCredential",
+        "path StaticCredential::Inline",
+        "path StaticCredential::Reference"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::editing",
+      "to": "dim_app_server::provider::view",
+      "references": [
+        "path ManagementProvider"
+      ]
+    },
+    {
       "from": "dim_app_server::provider::legacy",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -15597,20 +15739,26 @@
     },
     {
       "from": "dim_app_server::provider::legacy",
+      "to": "dim_app_server::provider::models",
+      "references": [
+        "path models"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::legacy",
+      "to": "dim_app_server::provider::preferences",
+      "references": [
+        "path ModelPreferences"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::legacy",
       "to": "dim_app_server::provider::secrets",
       "references": [
         "path ProviderSecret::Aws",
         "path ProviderSecret::Token",
         "path StaticCredential::Inline",
         "path StaticCredential::Reference"
-      ]
-    },
-    {
-      "from": "dim_app_server::provider::management",
-      "to": "dim_agent_capabilities::host",
-      "references": [
-        "path dim_agent_capabilities::host::HostError",
-        "path dim_agent_capabilities::host::HostError::Cancelled"
       ]
     },
     {
@@ -15652,7 +15800,8 @@
       "from": "dim_app_server::provider::management",
       "to": "dim_app_server::model_catalog",
       "references": [
-        "path crate::model_catalog::ModelEdit"
+        "path crate::model_catalog::ModelEdit",
+        "path crate::model_catalog::ModelEntry"
       ]
     },
     {
@@ -15672,9 +15821,88 @@
       "references": [
         "path ProviderService",
         "path crate::provider::ProviderCatalog",
-        "path crate::provider::ProviderInput",
         "path crate::provider::ProviderSelection",
+        "path super::ProviderError",
         "use super::ProviderService"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::management",
+      "to": "dim_app_server::provider::editing",
+      "references": [
+        "path super::CreateProvider",
+        "path super::ProbeProvider",
+        "path super::ProviderPatch"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::management",
+      "to": "dim_app_server::provider::models",
+      "references": [
+        "path super::PreferencesPatch"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::models",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path model"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::models",
+      "to": "dim_app_server::model_catalog",
+      "references": [
+        "path FieldUpdate",
+        "path FieldUpdate::Clear",
+        "path FieldUpdate::Set",
+        "path MAX_MODEL_TOKENS",
+        "path ModelEdit",
+        "path ModelEntry",
+        "use crate::model_catalog::FieldUpdate"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::models",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path CredentialAuthority::Static",
+        "path ProviderCatalog",
+        "path ProviderError",
+        "path ProviderError::AuthRequired",
+        "path ProviderError::Conflict",
+        "path ProviderError::Failed",
+        "path ProviderError::InvalidConfig",
+        "path ProviderError::NotFound",
+        "path ProviderError::Unsupported",
+        "path ProviderModel",
+        "path ProviderService",
+        "path StaticAuth::Anonymous",
+        "path StaticProviderRecord",
+        "path read_catalog",
+        "path read_static",
+        "path same_account",
+        "path save_catalog",
+        "path static_catalog",
+        "path static_entries",
+        "path static_models",
+        "path validate_static_record"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::models",
+      "to": "dim_app_server::provider::preferences",
+      "references": [
+        "path ModelPreferences",
+        "path ModelPreferences::default",
+        "path preferences"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::models",
+      "to": "dim_app_server::provider::view",
+      "references": [
+        "path ManagementProvider"
       ]
     },
     {
@@ -15761,7 +15989,6 @@
         "path HostError",
         "path HostError::classified",
         "path HostErrorKind::Http",
-        "path HostErrorKind::InvalidRequest",
         "path ModelNetwork",
         "path ModelProtocol::OpenaiCompatible"
       ]
@@ -15789,8 +16016,15 @@
       "from": "dim_app_server::provider::remote",
       "to": "dim_app_server::provider",
       "references": [
-        "path CredentialAuthority::Static",
         "path ProviderCatalog",
+        "path ProviderError",
+        "path ProviderError::AuthRequired",
+        "path ProviderError::Conflict",
+        "path ProviderError::Failed",
+        "path ProviderError::InvalidConfig",
+        "path ProviderError::NotFound",
+        "path ProviderError::Unsupported",
+        "path ProviderError::from",
         "path ProviderService",
         "path StaticAuth::Anonymous",
         "path StaticAuth::ApiKey",
@@ -15801,8 +16035,14 @@
         "path failure",
         "path read_static",
         "path static_catalog",
-        "path storage",
         "path validate_static_record"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::remote",
+      "to": "dim_app_server::provider::models",
+      "references": [
+        "path models"
       ]
     },
     {
@@ -15842,6 +16082,102 @@
         "path StaticAuth::AwsBedrock",
         "path StaticAuth::Bearer",
         "path failure"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModelProtocol"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path model"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::managed_oauth",
+      "references": [
+        "path managed_oauth::AuthStatus"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::managed_provider",
+      "references": [
+        "path AccountSnapshot",
+        "path crate::managed_provider::ProviderDescriptor"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::model_catalog",
+      "references": [
+        "path ModelEntry",
+        "path NewApiEndpoint"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path CredentialAuthority::Grok",
+        "path CredentialAuthority::OpenaiCodex",
+        "path CredentialAuthority::Static",
+        "path PersistedProviderRecord::Managed",
+        "path PersistedProviderRecord::Static",
+        "path ProviderError",
+        "path ProviderError::Failed",
+        "path ProviderError::NotFound",
+        "path ProviderError::Unsupported",
+        "path ProviderError::from",
+        "path ProviderRecord",
+        "path ProviderRecordError",
+        "path ProviderService",
+        "path StaticAuth",
+        "path StaticProviderRecord",
+        "path StaticRecordKind::Builtin",
+        "path bundled_seeds",
+        "path parse_provider_row",
+        "path reseed_candidate",
+        "path same_account",
+        "path static_entries",
+        "path static_models",
+        "path storage"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::provider::drivers",
+      "references": [
+        "path drivers::custom_drivers",
+        "path drivers::remote_model_list"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::provider::models",
+      "references": [
+        "path models"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::provider::preferences",
+      "references": [
+        "path ModelPreferences",
+        "path preferences"
       ]
     },
     {
@@ -17305,6 +17641,7 @@
         "mod client",
         "path client",
         "path client::RpcError",
+        "path client::app_error",
         "path client::shutdown",
         "path client::stop"
       ]
@@ -17467,7 +17804,10 @@
       "from": "dim_cli",
       "to": "dim_cli::session_host",
       "references": [
-        "mod session_host"
+        "mod session_host",
+        "path session_host::clear_saved_model_preferences",
+        "path session_host::model_adoption_error",
+        "path session_host::saved_model_preferences"
       ]
     },
     {
@@ -18901,6 +19241,14 @@
     },
     {
       "from": "dim_cli::session",
+      "to": "dim_cli::session_host",
+      "references": [
+        "path crate::session_host::model_adoption_error",
+        "path crate::session_host::saved_model_preferences"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
       "to": "dim_cli::wire",
       "references": [
         "path Event",
@@ -18947,6 +19295,7 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli",
       "references": [
+        "path crate::Error",
         "path crate::Result"
       ]
     },
@@ -18975,6 +19324,7 @@
         "path Message::Response",
         "path client",
         "path client::RpcError",
+        "path client::app_error",
         "use crate::client",
         "use crate::client::Client",
         "use crate::client::Message"
@@ -19011,6 +19361,7 @@
         "path Command::Approval",
         "path Command::AskAnswers",
         "path Command::AskCancel",
+        "path Command::ClearModelPreferences",
         "path Command::Configure",
         "path Command::InputControl",
         "path Command::ListModels",
@@ -20393,7 +20744,9 @@
       "from": "dim_cli::ui::models_panel",
       "to": "dim_cli::model::session",
       "references": [
+        "path ModelItem",
         "path ModelList",
+        "use crate::model::session::ModelItem",
         "use crate::model::session::ModelList"
       ]
     },
@@ -20428,6 +20781,7 @@
       "to": "dim_cli::ui::prompts",
       "references": [
         "path Effect",
+        "path Effect::ClearModelPreferences",
         "path Effect::Close",
         "path Effect::None",
         "path Effect::Notice",
@@ -20439,8 +20793,12 @@
       "from": "dim_cli::ui::models_panel",
       "to": "dim_cli::ui::terminal::input",
       "references": [
+        "path KeyCode::Char",
         "path KeyEvent",
-        "use crate::ui::terminal::KeyEvent"
+        "path Modifiers::CTRL",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
       ]
     },
     {
@@ -21027,6 +21385,7 @@
         "path Effect::OauthBack",
         "path Effect::OauthCancel",
         "path Effect::Provider",
+        "path Effect::Refresh",
         "use crate::ui::prompts::Effect"
       ]
     },
@@ -21064,14 +21423,17 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode::BackTab",
+        "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",
+        "path Modifiers::CTRL",
         "use crate::ui::terminal::KeyCode",
-        "use crate::ui::terminal::KeyEvent"
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
       ]
     },
     {
@@ -21149,7 +21511,9 @@
       "references": [
         "path KeyCode::Char",
         "path KeyCode::Enter",
+        "path KeyCode::Up",
         "path KeyEvent::new",
+        "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "use crate::ui::terminal::Modifiers"
       ]
@@ -22989,6 +23353,7 @@
         "path Command::Approval",
         "path Command::AskAnswers",
         "path Command::AskCancel",
+        "path Command::ClearModelPreferences",
         "path Command::Configure",
         "path Command::InputControl",
         "path Command::ListModels",
@@ -23251,6 +23616,7 @@
         "path Effect::Answers",
         "path Effect::Approval",
         "path Effect::Cancel",
+        "path Effect::ClearModelPreferences",
         "path Effect::Close",
         "path Effect::Connected",
         "path Effect::Exit",
@@ -24201,11 +24567,79 @@
     },
     {
       "module": "dim_app_server::provider",
+      "path": "E::from"
+    },
+    {
+      "module": "dim_app_server::provider",
+      "path": "OAuthError::AccountChanged"
+    },
+    {
+      "module": "dim_app_server::provider",
+      "path": "OAuthError::Closed"
+    },
+    {
+      "module": "dim_app_server::provider",
+      "path": "OAuthError::Missing"
+    },
+    {
+      "module": "dim_app_server::provider",
+      "path": "OAuthError::RecoveryRequired"
+    },
+    {
+      "module": "dim_app_server::provider",
+      "path": "OAuthError::Rejected"
+    },
+    {
+      "module": "dim_app_server::provider",
+      "path": "OAuthError::Transient"
+    },
+    {
+      "module": "dim_app_server::provider",
       "path": "T::deserialize"
     },
     {
       "module": "dim_app_server::provider",
       "path": "char::is_control"
+    },
+    {
+      "module": "dim_app_server::provider::editing",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::provider::management",
+      "path": "ProviderError::AuthFailed"
+    },
+    {
+      "module": "dim_app_server::provider::management",
+      "path": "ProviderError::AuthRequired"
+    },
+    {
+      "module": "dim_app_server::provider::management",
+      "path": "ProviderError::Cancelled"
+    },
+    {
+      "module": "dim_app_server::provider::management",
+      "path": "ProviderError::Conflict"
+    },
+    {
+      "module": "dim_app_server::provider::management",
+      "path": "ProviderError::Failed"
+    },
+    {
+      "module": "dim_app_server::provider::management",
+      "path": "ProviderError::InvalidConfig"
+    },
+    {
+      "module": "dim_app_server::provider::management",
+      "path": "ProviderError::NotFound"
+    },
+    {
+      "module": "dim_app_server::provider::management",
+      "path": "ProviderError::TransportFailed"
+    },
+    {
+      "module": "dim_app_server::provider::management",
+      "path": "ProviderError::Unsupported"
     },
     {
       "module": "dim_app_server::provider::preferences",
@@ -24382,18 +24816,6 @@
     {
       "module": "dim_cli::session_host",
       "path": "ContentBlock::Text"
-    },
-    {
-      "module": "dim_cli::session_host",
-      "path": "Outcome::Connected"
-    },
-    {
-      "module": "dim_cli::session_host",
-      "path": "Outcome::Disconnected"
-    },
-    {
-      "module": "dim_cli::session_host",
-      "path": "Outcome::Enabled"
     },
     {
       "module": "dim_cli::session_host",

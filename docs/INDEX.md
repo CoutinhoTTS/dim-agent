@@ -41,7 +41,7 @@
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
-- [Provider management for Desktop and CLI](design/appserver/provider-management.md)（[中文](zh/design/appserver/provider-management.md)） (proposal #329; rereads/CAS and client preferences; S4 remains implemented)
+- [Provider management for Desktop and CLI](design/appserver/provider-management.md)（[中文](zh/design/appserver/provider-management.md)） (implemented, #329; snapshots, partial writes, user models and explicit client preferences)
 - [Settings service](design/appserver/settings-service.md) (S8b owner read/write and events implemented)（[中文](zh/design/appserver/settings-service.md)）
 - [MCP OAuth](design/appserver/mcp-oauth.md) (implemented on the daemon side, F4)（[中文](zh/design/appserver/mcp-oauth.md)）
 - [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）

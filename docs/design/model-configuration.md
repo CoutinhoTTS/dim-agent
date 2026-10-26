@@ -105,16 +105,14 @@ Preference commands do not call `Branch::context`, replay history or fill missin
 configuration with defaults. This adds no service key, runtime state, persisted
 field or second configuration type.
 
-The [Provider management proposal](appserver/provider-management.md#33-probe-preference-adoption-and-usage)
-adds persisted per-model `ModelPreferences`, superseding F3's no-persisted-preference
-scope. Provider owns that persistence; clients read it and explicitly pass chosen
+[Provider management](appserver/provider-management.md#33-probe-preference-adoption-and-usage)
+stores per-model `ModelPreferences`. Clients read them and explicitly pass chosen
 preferences through the existing Session adoption methods. The server never
-automatically applies them. Clients must include the exact `{providerId, modelId}`
+applies them automatically. Clients include the exact `{providerId, modelId}`
 with saved preferences for that pair; an unavailable target fails without retrying
-with an implicit selection. `/fast` still changes only the current Session. A saved
-`serviceTier` is a persisted fast/tier setting applied only when a client passes it;
-there is still no persisted `fast` boolean. This addition is a proposal, not an
-implemented part of this F3 Session path.
+with an implicit selection. `/fast` changes only the current Session. A saved
+`serviceTier` takes effect only when a client passes it; no persisted `fast`
+boolean or additional F3 adoption path is introduced.
 
 ## Agent configuration adoption
 

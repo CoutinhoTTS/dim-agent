@@ -2,21 +2,20 @@
 //! models a daemon offers; reasoning-effort levels and "Edit models" are not
 //! built yet).
 
-use crate::model::session::ModelList;
+use crate::model::session::{ModelItem, ModelList};
 use crate::ui::i18n::t;
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
-use crate::ui::terminal::KeyEvent;
+use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 
-const HINT: &str = "Enter select · Esc clear/close";
+const HINT: &str = "Enter select · Ctrl+X clear saved · Esc clear/close";
 const EDIT_MODELS: &str = "__edit_models__";
 const SECTION: &str = "Models";
 
 pub struct ModelsPanel {
     list: ListPanel,
-    /// Row id -> (provider, model): the id is `provider::model`.
-    current: Option<String>,
+    models: Vec<ModelItem>,
 }
 
 impl ModelsPanel {
@@ -30,17 +29,18 @@ impl ModelsPanel {
                 "No matching models.",
                 false,
             ),
-            current: None,
+            models: Vec::new(),
         }
     }
 
     pub fn set_models(&mut self, models: Result<ModelList, String>) {
+        let selected = self.list.selected_id();
         let current = models
             .as_ref()
             .ok()
             .and_then(|m| m.current.as_ref())
             .map(|(p, m)| key(p, m));
-        self.current = current.clone();
+        self.models.clear();
         let items = models.map(|list| {
             let mut items: Vec<Item> = Vec::new();
             if !list.models.is_empty() {
@@ -63,9 +63,11 @@ impl ModelsPanel {
                 items.push(row);
             }
             items.push(Item::new(EDIT_MODELS, t("Edit models"), ""));
+            self.models = list.models;
             items
         });
-        self.list.set_items(items, current.as_deref());
+        self.list
+            .set_items(items, selected.as_deref().or(current.as_deref()));
     }
 
     /// A paste goes into the filter.
@@ -74,6 +76,22 @@ impl ModelsPanel {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
+        if key.code == KeyCode::Char('x') && key.mods.contains(Modifiers::CTRL) {
+            return self
+                .list
+                .selected_id()
+                .and_then(|id| {
+                    self.models
+                        .iter()
+                        .find(|model| id == self::key(&model.provider_id, &model.model_id))
+                })
+                .map(|model| Effect::ClearModelPreferences {
+                    provider_id: model.provider_id.clone(),
+                    model_id: model.model_id.clone(),
+                    expected_version: model.provider_version,
+                })
+                .unwrap_or(Effect::None);
+        }
         match self.list.handle_key(key) {
             Event::None | Event::Refresh => Effect::None,
             Event::Close => Effect::Close,

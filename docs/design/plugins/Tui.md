@@ -108,6 +108,7 @@ the daemon hosts the ordinary `Tui` plugin (§3.6). It keeps the terminal it
 was started on, stays in the shell's foreground job, and returns the TUI's
 exit code. `ui.open` is an internal daemon RPC used by this startup, not a
 separate user command. A daemon without `ui.leaf` keeps the direct TUI.
+Before a model is configured, initial setup uses that existing direct TUI (§3.6).
 
 ### 3.2 `/web` from the TUI: daemon-owned switch
 
@@ -332,6 +333,20 @@ leaf is the shell's process.
 `ui.leaf` feature; a client of an older daemon keeps the direct-TUI path.
 Remote devices are not leaves (`DeviceLease`/RemoteGateway); browsers are
 counted viewers.
+
+**Initial setup before a Session.** When an untargeted product startup has no
+usable model, `session.create` returns `provider_failed` before creating a Session.
+There is no Session for a leaf to attach to. This entry uses the existing direct
+TUI for its lifetime, keeping `/connect` and `/login` available. A Session later
+created by that TUI uses the existing connection registration; the next normal
+startup uses a leaf. Explicit model targets, `--model-config`, resume and other
+error codes retain their errors. No fake model, implicit model substitution, new
+protocol or background setup process is introduced.
+
+```text
+session.create -- usable model --> ui.open --> hosted Tui
+               ` no model -----> direct Tui --> /connect or /login
+```
 
 #### Later: UI events toward the agent (not implemented)
 
