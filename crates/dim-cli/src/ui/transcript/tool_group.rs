@@ -11,7 +11,7 @@
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::model::view::ViewRow;
+use crate::model::view::{MemberCard, MemberConversationState, MemberTarget, TaskKind, ViewRow};
 use crate::ui::i18n::{t, tf};
 use crate::ui::text::display_width;
 use crate::ui::theme::Palette;
@@ -86,14 +86,15 @@ enum Mark {
 }
 
 /// `Truncate` keeps one row. `Wrap` continues under the text column and keeps
-/// the text's own line breaks, up to [`WRAP_MAX_ROWS`], ending the last in
-/// `…`; `Whole` keeps every row, as Amp prints a command however long.
+/// the text's own line breaks, up to [`WRAP_MAX_ROWS`] (`Rows` up to its
+/// own count), ending the last in `…`; `Whole` keeps every row, as Amp prints a command however long.
 /// `Tail` keeps the last [`TAIL_MAX_ROWS`] rows, as a command's output is
 /// shown, with a scrollbar beside them when there are more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Overflow {
     Truncate,
     Wrap,
+    Rows(usize),
     Whole,
     Tail,
 }
@@ -107,6 +108,8 @@ struct Line {
     overflow: Overflow,
     /// Wrapped rows start this many columns further in than `indent`.
     hang: usize,
+    /// A member card's line: the delegation (request event id) it opens.
+    action: Option<String>,
 }
 
 fn header_line(indent: usize, mark: Mark, spans: Vec<Span>) -> Line {
@@ -116,6 +119,7 @@ fn header_line(indent: usize, mark: Mark, spans: Vec<Span>) -> Line {
         spans,
         overflow: Overflow::Truncate,
         hang: 0,
+        action: None,
     }
 }
 
@@ -126,6 +130,7 @@ fn body_line(indent: usize, text: impl Into<String>, tone: Tone, overflow: Overf
         spans: vec![span(text, tone)],
         overflow,
         hang: 0,
+        action: None,
     }
 }
 
@@ -135,6 +140,8 @@ fn body_line(indent: usize, text: impl Into<String>, tone: Tone, overflow: Overf
 pub struct ToolGroup {
     pub state: State,
     pub detail: Detail,
+    /// The delegations its member cards show, by request event id.
+    pub cards: Vec<String>,
     collapsed: Vec<Line>,
     expanded: Vec<Line>,
 }
@@ -165,6 +172,7 @@ struct Call<'a> {
     result: Option<&'a str>,
     diff: Option<&'a str>,
     exit_code: Option<i64>,
+    member: Option<&'a MemberCard>,
 }
 
 impl<'a> Call<'a> {
@@ -186,6 +194,7 @@ impl<'a> Call<'a> {
             result: row.result_text.as_deref(),
             diff: row.diff.as_deref(),
             exit_code: row.exit_code,
+            member: row.member.as_deref(),
         }
     }
 
@@ -312,10 +321,24 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
             Tone::Danger,
         ));
     }
+    // Delegation cards show under a collapsed header too.
+    let mut collapsed = vec![header_line(0, mark, header)];
+    let now = now_ms();
+    for item in &items {
+        if let Item::Agent { call, .. } = item
+            && let Some(card) = call.member
+        {
+            append_card(&mut collapsed, card, now, Detail::Collapsed);
+        }
+    }
     ToolGroup {
         state,
         detail,
-        collapsed: vec![header_line(0, mark, header)],
+        cards: items
+            .iter()
+            .filter_map(|item| Some(item.call().member?.task.id.clone()))
+            .collect(),
+        collapsed,
         expanded,
     }
 }
@@ -686,6 +709,7 @@ fn append_section(lines: &mut Vec<Line>, section: Section, items: &[&Item<'_>], 
                     spans: vec![span(text, Tone::Muted)],
                     overflow: Overflow::Truncate,
                     hang: 0,
+                    action: None,
                 });
             }
         }
@@ -725,7 +749,12 @@ fn append_section(lines: &mut Vec<Line>, section: Section, items: &[&Item<'_>], 
 }
 
 /// A call to the team: the action and its words; a failure's first line.
+/// A request that started a delegation is drawn as its card.
 fn append_agent(lines: &mut Vec<Line>, call: &Call<'_>, detail: &str) {
+    if let Some(card) = call.member {
+        append_card(lines, card, now_ms(), Detail::Expanded);
+        return;
+    }
     let mut spans = vec![span(t("Agent"), Tone::Text)];
     if !detail.is_empty() {
         spans.push(span(format!(" · {detail}"), Tone::Muted));
@@ -734,6 +763,161 @@ fn append_agent(lines: &mut Vec<Line>, call: &Call<'_>, detail: &str) {
     if call.state == State::Failed {
         append_error(lines, call, 4);
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// `<1s`, `42s`, `3m07s`.
+fn elapsed_text(ms: u64) -> String {
+    match ms {
+        0..1000 => "<1s".to_owned(),
+        1000..60_000 => format!("{}s", ms / 1000),
+        _ => format!("{}m{:02}s", ms / 60_000, (ms % 60_000) / 1000),
+    }
+}
+
+/// A delegation card: who took the task, the task, the member's observed
+/// model and activity, the delegation's own state and time, and its result.
+/// Externally supplied text is sanitized before it is styled.
+fn append_card(lines: &mut Vec<Line>, card: &MemberCard, now: u64, detail: Detail) {
+    use crate::sanitize::safe;
+    let task = &card.task;
+    let (status, state) = match &task.finished {
+        Some(finish) if finish.failed => (t(finish.status), State::Failed),
+        Some(finish) => (t(finish.status), State::Done),
+        None if task.kind == TaskKind::Member(MemberTarget::Starting) => {
+            (t("Starting"), State::Running)
+        }
+        None => (t("Running"), State::Running),
+    };
+    let elapsed = elapsed_text(
+        task.finished
+            .as_ref()
+            .map_or(now, |finish| finish.at)
+            .saturating_sub(task.started_at),
+    );
+    let provider = task.kind == TaskKind::Member(MemberTarget::Provider);
+    let action =
+        matches!(task.kind, TaskKind::Member(MemberTarget::Session(_))).then(|| task.id.clone());
+    let who = if provider {
+        tf("Provider member: {name}", &[("name", &safe(&card.agent))])
+    } else {
+        tf("Agent: {name}", &[("name", &safe(&card.agent))])
+    };
+    // The model is member state, never the leader's; loading or failing to
+    // observe it is not the delegation failing.
+    let model = if provider {
+        None
+    } else {
+        let mut model = card
+            .model
+            .as_deref()
+            .map_or_else(|| t("No model observed").to_owned(), safe);
+        match &card.observation {
+            Some(MemberConversationState::Loading) if card.model.is_none() => {
+                model = t("Observing member...").to_owned();
+            }
+            Some(MemberConversationState::ReadError(_)) => {
+                model = tf("{model} (observation unavailable)", &[("model", &model)]);
+            }
+            Some(MemberConversationState::Closed) => {
+                model = tf("{model} (Session closed)", &[("model", &model)]);
+            }
+            _ if task.finished.is_some() && card.model.is_some() => {
+                model = tf("{model} (last observed)", &[("model", &model)]);
+            }
+            _ => {}
+        }
+        Some(model)
+    };
+    let meta = match &model {
+        Some(model) => format!("{model} · {status} · {elapsed}"),
+        None => format!("{status} · {elapsed}"),
+    };
+    let first = |text: &str| {
+        safe(
+            text.lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or(""),
+        )
+    };
+    let mark = state_mark(state);
+    let line = |text: String, tone: Tone, overflow: Overflow| Line {
+        action: action.clone(),
+        ..body_line(4, text, tone, overflow)
+    };
+    if detail == Detail::Collapsed {
+        let mut spans = vec![span(who, Tone::Text)];
+        let label = first(&card.prompt);
+        if !label.is_empty() {
+            spans.push(span(format!(" · {label}"), Tone::Muted));
+        }
+        lines.push(Line {
+            action: action.clone(),
+            ..header_line(2, mark, spans)
+        });
+        lines.push(line(meta, Tone::Muted, Overflow::Truncate));
+        return;
+    }
+    lines.push(Line {
+        action: action.clone(),
+        ..header_line(2, mark, vec![span(who, Tone::Text)])
+    });
+    lines.push(Line {
+        hang: 6,
+        ..line(
+            tf("Task: {task}", &[("task", safe(&card.prompt).trim())]),
+            Tone::Text,
+            Overflow::Rows(3),
+        )
+    });
+    lines.push(line(meta, Tone::Muted, Overflow::Truncate));
+    let activity = if provider {
+        Some(t("Activity: not observed on this attachment").to_owned())
+    } else {
+        card.activity
+            .as_deref()
+            .map(|activity| tf("Activity: {activity}", &[("activity", &first(activity))]))
+    };
+    if let Some(activity) = activity {
+        lines.push(line(activity, Tone::Muted, Overflow::Truncate));
+    }
+    if let Some(finish) = &task.finished {
+        let tone = if finish.failed {
+            Tone::Danger
+        } else {
+            Tone::Text
+        };
+        lines.push(Line {
+            hang: 8,
+            ..line(
+                tf("Result: {result}", &[("result", safe(&finish.text).trim())]),
+                tone,
+                Overflow::Rows(6),
+            )
+        });
+    }
+    lines.push(if provider {
+        line(
+            t("Controlled by the leader").to_owned(),
+            Tone::Muted,
+            Overflow::Truncate,
+        )
+    } else if action.is_some() {
+        line(
+            t("› Open member conversation").to_owned(),
+            Tone::Path,
+            Overflow::Truncate,
+        )
+    } else {
+        // A failed delivery has no member Session to open.
+        return;
+    });
 }
 
 fn append_command(lines: &mut Vec<Line>, call: &Call<'_>, command: &str) {
@@ -751,6 +935,7 @@ fn append_command(lines: &mut Vec<Line>, call: &Call<'_>, command: &str) {
         spans,
         overflow: Overflow::Whole,
         hang: 0,
+        action: None,
     });
     // A detached command's result only says it started; its output arrives
     // through a later check, as in Amp.
@@ -893,6 +1078,7 @@ fn append_diff(lines: &mut Vec<Line>, diff: &[DiffLine]) {
             ],
             overflow: Overflow::Wrap,
             hang: width + 4,
+            action: None,
         });
     }
     let hidden = diff.len() - shown.len();
@@ -1290,9 +1476,73 @@ fn capitalize(text: &str) -> String {
 /// command with output, an edit with its diff). The marker survives the
 /// header's truncation.
 pub fn render_group(group: &ToolGroup, width: usize, p: &Palette, spinner: &str) -> Vec<String> {
+    lay_out_group(group, width, p, spinner).0
+}
+
+/// The delegation a row of the drawn group opens: a member card's line.
+pub fn action_at<'a>(
+    group: &'a ToolGroup,
+    width: usize,
+    p: &Palette,
+    row: usize,
+) -> Option<&'a str> {
+    let (rows, starts) = lay_out_group(group, width, p, "·");
+    if row >= rows.len() {
+        return None;
+    }
+    let line = starts
+        .partition_point(|start| *start <= row)
+        .checked_sub(1)?;
+    group.lines()[line].action.as_deref()
+}
+
+/// The Session cards a keyboard pick can stop on, in drawing order.
+pub fn card_actions(group: &ToolGroup) -> Vec<&str> {
+    let mut actions: Vec<&str> = Vec::new();
+    for action in group
+        .lines()
+        .iter()
+        .filter_map(|line| line.action.as_deref())
+    {
+        if actions.last() != Some(&action) {
+            actions.push(action);
+        }
+    }
+    actions
+}
+
+/// Rows `[start, end)` of the drawn group that a card's lines take.
+pub fn card_rows(
+    group: &ToolGroup,
+    width: usize,
+    p: &Palette,
+    action: &str,
+) -> Option<(usize, usize)> {
+    let (rows, starts) = lay_out_group(group, width, p, "·");
+    let lines = group.lines();
+    let first = lines
+        .iter()
+        .position(|line| line.action.as_deref() == Some(action))?;
+    // The card ends where the next card or call starts.
+    let end = lines[first + 1..]
+        .iter()
+        .position(|line| line.mark.is_some() && line.indent <= lines[first].indent)
+        .map_or(rows.len(), |offset| starts[first + 1 + offset]);
+    Some((starts[first], end))
+}
+
+/// The group's rows and the first row of each of its lines.
+fn lay_out_group(
+    group: &ToolGroup,
+    width: usize,
+    p: &Palette,
+    spinner: &str,
+) -> (Vec<String>, Vec<usize>) {
     let lines = group.lines();
     let mut rows = Vec::new();
+    let mut starts = Vec::with_capacity(lines.len());
     for (at, line) in lines.iter().enumerate() {
+        starts.push(rows.len());
         let disclosure = if at == 0 {
             Some(match group.detail {
                 Detail::Collapsed => "▸",
@@ -1351,7 +1601,7 @@ pub fn render_group(group: &ToolGroup, width: usize, p: &Palette, spinner: &str)
             rows.push(row);
         }
     }
-    rows
+    (rows, starts)
 }
 
 fn mark_text(mark: Mark, spinner: &str, p: &Palette) -> String {
@@ -1487,7 +1737,10 @@ fn layout(
             .flat_map(|(index, source)| rows_of(source, index, false, usize::MAX))
             .collect();
     }
-    let cap = WRAP_MAX_ROWS;
+    let cap = match overflow {
+        Overflow::Rows(rows) => rows,
+        _ => WRAP_MAX_ROWS,
+    };
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     for (index, source) in sources.iter().enumerate() {
         if rows.len() > cap {

@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use dim_agent_types::BranchCreateFailedData;
 
 use super::*;
-use crate::model::view::TaskKind;
+use crate::model::view::{MemberTarget, TaskKind};
 
 #[derive(Default)]
 pub(super) struct BranchHistory {
@@ -39,7 +39,7 @@ pub(super) struct StopBatch {
 impl Worker {
     /// The replacement releases this attachment after creating or finding its Session.
     pub(super) fn invalidate_projection(&mut self) -> String {
-        self.watch_member(None);
+        self.release_members();
         self.projection_id += 1;
         let attached_session = std::mem::take(&mut self.session_id);
         self.projection = Projection::default();
@@ -279,10 +279,14 @@ impl Worker {
         {
             match &task.kind {
                 TaskKind::Command(_) => targets.push_back(task.kind.clone()),
-                TaskKind::Member {
-                    session_id: Some(id),
-                } if members.insert(id.clone()) => targets.push_back(task.kind.clone()),
-                TaskKind::Member { session_id: None } => unavailable += 1,
+                TaskKind::Member(MemberTarget::Session(id)) if members.insert(id.clone()) => {
+                    targets.push_back(task.kind.clone())
+                }
+                TaskKind::Member(MemberTarget::Session(_)) => {}
+                // Not delivered yet, or a provider member: no Session to stop.
+                TaskKind::Member(MemberTarget::Starting | MemberTarget::Provider) => {
+                    unavailable += 1
+                }
                 TaskKind::Workflow(view)
                     if stop_workflows
                         && view.run.state == crate::wire::WorkflowState::Running
@@ -338,17 +342,15 @@ impl Worker {
                     "sessionId": batch.session_id, "branchId": target.branch_id, "taskId": target.task_id,
                 }),
             ),
-            TaskKind::Member {
-                session_id: Some(session_id),
-            } => (
+            TaskKind::Member(MemberTarget::Session(session_id)) => (
                 format!("member {session_id}"),
                 "session.stop",
                 json!({
                     "sessionId": session_id, "branchId": "main", "reason": "stopped by the user",
                 }),
             ),
-            TaskKind::Member { session_id: None } => {
-                unreachable!("admission excludes undelivered targets")
+            TaskKind::Member(MemberTarget::Starting | MemberTarget::Provider) => {
+                unreachable!("admission excludes targets without a member Session")
             }
         };
         batch.attempted += 1;

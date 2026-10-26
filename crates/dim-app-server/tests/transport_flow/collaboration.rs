@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_capabilities::prompt_state::PromptSnapshot;
 use dim_agent_runtime::{Agent, CollaborationRole, Session};
 use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
@@ -224,6 +225,95 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             assert_eq!(snapshot.target.model_id, expected);
             assert_eq!(snapshot.capabilities.context_window, 32000);
         }
+
+        // The subagent model policy: a local management source that
+        // overrides temporary and named profiles for new members only.
+        const PROVIDER: &str = "018ec73f-0000-7000-8000-000000000003";
+        let model = |id: &str| json!({"providerId":PROVIDER,"modelId":id});
+        for method in ["collaboration.model_policy", "collaboration.set_model_policy"] {
+            assert!(client.features.as_array().unwrap().contains(&json!(method)));
+        }
+        let mut remote = Client::new_version(&server, true, 3).await;
+        assert_eq!(remote.rpc("collaboration.model_policy", json!({})).await["error"]["data"]["appError"], "local_transport_required");
+        let read = client.rpc("collaboration.model_policy", json!({})).await;
+        assert_eq!(read["result"]["policy"], json!({"mode":"agent"}));
+        let initial = read["result"]["revision"].as_str().unwrap().to_owned();
+        for invalid in [
+            json!({"mode":"agent","model":model("alpha")}),
+            json!({"mode":"inherit","extra":true}),
+            json!({"mode":"fixed"}),
+            json!({"mode":"fixed","model":{"providerId":PROVIDER,"modelId":""}}),
+            json!({"mode":"fixed","model":{"providerId":PROVIDER,"modelId":"alpha","extra":1}}),
+            json!({"mode":"leader"}),
+        ] {
+            let rejected = client.rpc("collaboration.set_model_policy", json!({"expectedRevision":initial,"policy":invalid})).await;
+            assert_eq!(rejected["error"]["code"], -32602, "{invalid}: {rejected}");
+        }
+        let set = async |client: &mut Client, revision: &str, policy: Value| {
+            let reply = client.rpc("collaboration.set_model_policy", json!({"expectedRevision":revision,"policy":policy})).await;
+            assert_ok(&reply);
+            reply["result"]["revision"].as_str().unwrap().to_owned()
+        };
+        let fixed = set(&mut client, &initial, json!({"mode":"fixed","model":model("alpha")})).await;
+        // A second client's stale revision loses the CAS.
+        let mut other = Client::new_version(&server, false, 3).await;
+        let stale = other.rpc("collaboration.set_model_policy", json!({"expectedRevision":initial,"policy":{"mode":"inherit"}})).await;
+        assert_eq!(stale["error"]["data"]["appError"], "collaboration_model_policy_conflict", "{stale}");
+        let reread = other.rpc("collaboration.model_policy", json!({})).await;
+        assert_eq!(reread["result"], json!({"revision":fixed,"policy":{"mode":"fixed","model":model("alpha")}}));
+
+        let created = client.rpc("agent.create", json!({"profile":{"name":"reviewer","description":"fixture",
+            "systemPrompt":"review","tools":["agent"],"model":model("beta")}})).await;
+        assert_ok(&created);
+        let reviewer = created["result"]["agentId"].as_str().unwrap().to_owned();
+        let temporary = json!({"name":"worker","description":"fixture","systemPrompt":"work","tools":["agent"],"model":model("beta")});
+        let mut count = 2;
+        let mut member_model = async |client: &mut Client, request: Value| {
+            say(client, &lead, tool(request), "queue").await;
+            count += 1;
+            returned(client, &lead, &lead_session, count).await;
+            last_ok(&events(&lead_session).await);
+            configs.lock().unwrap().last().unwrap().model.clone()
+        };
+        // Fixed overrides both a named Agent's and a temporary profile's model.
+        for request in [
+            json!({"action":"request","agentId":reviewer,"prompt":"hello"}),
+            json!({"action":"request","profile":temporary,"prompt":"hello"}),
+        ] {
+            let selected = member_model(&mut client, request).await;
+            assert_eq!(selected.model_id, "alpha");
+            assert_eq!(selected.capability_snapshot.unwrap().target.model_id, "alpha");
+        }
+        // Inherit copies the requesting branch's adopted selection, not its
+        // creation configuration, and no request identity.
+        let inherit = set(&mut client, &fixed, json!({"mode":"inherit"})).await;
+        assert_ok(&client.rpc("session.model.update", json!({"sessionId":lead,"branchId":"main","providerId":PROVIDER,"modelId":"beta"})).await);
+        let adopted = poll("adopted leader model", async || {
+            lead_session.get::<PromptSnapshot>("main").unwrap()?.configuration.filter(|adopted| adopted.model_id == "beta")
+        }).await;
+        let selected = member_model(&mut client, json!({"action":"request","agentId":reviewer,"prompt":"hello"})).await;
+        assert_eq!(lead_session.config().model.model_id, "alpha");
+        assert_eq!((selected.provider_id.as_str(), selected.model_id.as_str()), (PROVIDER, "beta"));
+        assert_eq!(selected.capability_snapshot, adopted.capability_snapshot);
+        assert_eq!(selected.config, adopted.config);
+        assert!(selected.metadata.as_ref().is_none_or(|metadata| metadata.session_id.is_none()
+            && metadata.run_id.is_none() && metadata.trace_id.is_none() && metadata.turn_id.is_none()));
+        let named = json!({"action":"request","profile":{"name":"worker","description":"fixture","systemPrompt":"work","tools":["agent"],"model":model("alpha")},"prompt":"hello"});
+        assert_eq!(member_model(&mut client, named).await.model_id, "beta");
+        // Agent restores each profile's own model.
+        let agent_mode = set(&mut client, &inherit, json!({"mode":"agent"})).await;
+        let selected = member_model(&mut client, json!({"action":"request","agentId":reviewer,"prompt":"hello"})).await;
+        assert_eq!(selected.model_id, "beta");
+        // A fixed model that cannot resolve fails creation with no fallback
+        // and leaves no temporary Agent behind.
+        set(&mut client, &agent_mode, json!({"mode":"fixed","model":model("missing")})).await;
+        let agents = client.rpc("agent.list", json!({})).await["result"].as_array().unwrap().len();
+        let members = configs.lock().unwrap().len();
+        say(&mut client, &lead, tool(json!({"action":"request","profile":temporary,"prompt":"hello"})), "queue").await;
+        idle(&mut client, &lead).await;
+        assert!(last_error(&events(&lead_session).await).contains("member_create_failed"));
+        assert_eq!(configs.lock().unwrap().len(), members);
+        assert_eq!(client.rpc("agent.list", json!({})).await["result"].as_array().unwrap().len(), agents);
         server.shutdown();
         server.join().await.unwrap();
         std::fs::remove_dir_all(home).unwrap();
@@ -765,6 +855,18 @@ fn result_of(events: &[Arc<AgentEvent>], member: &str) -> Vec<CollaborationOutco
 async fn leader_delegates_and_team_members_communicate() {
     let (server, agent) = launch_team().await;
     let mut client = Client::new_version(&server, false, 3).await;
+    // Without local execution there is no subagent model policy to manage.
+    assert!(
+        !client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("collaboration.model_policy"))
+    );
+    assert_eq!(
+        client.rpc("collaboration.model_policy", json!({})).await["error"]["code"],
+        -32601
+    );
     let rejected = client
         .rpc(
             "session.create",

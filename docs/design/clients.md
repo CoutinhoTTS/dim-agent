@@ -70,7 +70,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | API-key Providers, add/edit/test/enable/disable/switch | done; remove and model-list edits: none in the CLI (server supports them) | read-only `provider.*` | [Provider management](appserver/provider-management.md) |
 | Switch model | done | done | `session.model.update` |
 | Reasoning effort, fast mode | done (`/effort`, `/fast`); effort inside `/models`: none | — | [Model configuration](model-configuration.md) |
-| Subagent model policy | designed | — | [Subagent model policy](subagent-model-policy.md), [#263](https://github.com/arcships/dim/issues/263) |
+| Subagent model policy | done (`/models` → Subagent models) | — | [Subagent model policy](subagent-model-policy.md), [#263](https://github.com/arcships/dim/issues/263) |
 | Auxiliary models | designed server-side per owner (e.g. SessionTitle); no client UI | — | [AuxiliaryModel](appserver/auxiliary-model.md) |
 
 ### 3.2 Session management
@@ -106,7 +106,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | Todo status | out | out | [overview](overview.md) §1 |
 | Background tasks: commands and members (detail, stop one, stop all) | done | — | [Background-task list](background-task-list.md), [output](background-task-output.md), [member conversation](member-conversation.md) |
 | Background tasks: Workflow runs | done | later phase | [Workflow task view](workflow-task-view.md), [#264](https://github.com/arcships/dim/issues/264) |
-| Member transcript cards | designed | — | [Member conversation](member-conversation.md) §7–9, [#263](https://github.com/arcships/dim/issues/263) |
+| Member transcript cards | done | — | [Member conversation](member-conversation.md) §7–9, [#263](https://github.com/arcships/dim/issues/263) |
 
 ### 3.4 System management
 

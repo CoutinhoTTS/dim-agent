@@ -1,4 +1,8 @@
-//! One read-only member observation on the leader's existing connection.
+//! Read-only member observations on the leader's existing connection: one
+//! per member Session that an unfinished delegation card or the selected
+//! detail needs, shared by both. History pages go through one slot.
+
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::*;
 use crate::model::view::MemberConversationState;
@@ -15,11 +19,13 @@ enum Pending {
     Detach(u64),
 }
 
-pub(super) struct MemberObservation {
+struct Observation {
+    /// The leader attachment it was made for; a replacement releases it.
     projection_id: u64,
-    session_id: String,
     projection: Projection,
     state: MemberConversationState,
+    /// The latest `context/configured` the member adopted.
+    model: Option<String>,
     attached: bool,
     closing: bool,
     pending: Option<Pending>,
@@ -29,17 +35,17 @@ pub(super) struct MemberObservation {
     live: Vec<Notice>,
 }
 
-impl MemberObservation {
-    pub(super) fn request_id(&self) -> Option<u64> {
-        self.pending.as_ref().map(|pending| match pending {
-            Pending::Attach(id) | Pending::History(id) | Pending::Detach(id) => *id,
-        })
-    }
-
+impl Observation {
     fn apply(&mut self, notice: Notice) {
         match notice {
             Notice::Event(event) if event.sequence > self.cursor => {
                 self.cursor = event.sequence;
+                if let EventContent::Configuration(configuration) = &event.content {
+                    self.model = Some(format!(
+                        "{} / {}",
+                        configuration.provider_id, configuration.model_id
+                    ));
+                }
                 self.projection.apply("main", &event);
             }
             Notice::Event(_) => {}
@@ -49,167 +55,360 @@ impl MemberObservation {
     }
 }
 
+#[derive(Default)]
+pub(super) struct Members {
+    observations: HashMap<String, Observation>,
+    /// The detail's member: the attachment it was opened on and its Session.
+    selected: Option<(u64, String)>,
+    /// Observations waiting for the history-page slot, oldest first.
+    pages: VecDeque<String>,
+    /// Members whose read failed or whose Session closed: an unfinished card
+    /// does not reattach them; opening the member again does.
+    unavailable: HashSet<String>,
+    /// The `agent.list` read in flight, with the attachment it names.
+    agents: Option<(u64, u64)>,
+}
+
+impl Members {
+    pub(super) fn owns(&self, request_id: u64) -> bool {
+        self.agents.is_some_and(|(id, _)| id == request_id) || self.request(request_id).is_some()
+    }
+
+    fn request(&self, request_id: u64) -> Option<String> {
+        self.observations.iter().find_map(|(id, observation)| {
+            matches!(
+                observation.pending,
+                Some(Pending::Attach(at) | Pending::History(at) | Pending::Detach(at)) if at == request_id
+            )
+            .then(|| id.clone())
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentSummary {
+    agent_id: String,
+    name: String,
+}
+
 impl Worker {
     pub(super) fn watch_member(&mut self, member_id: Option<String>) {
-        let desired = member_id.map(|id| (self.projection_id, id));
-        if desired == self.desired_member {
+        let selected = member_id.map(|id| (self.projection_id, id));
+        if selected == self.members.selected {
             return;
         }
-        self.desired_member = desired;
-        if let Some(member) = &mut self.member {
-            member.closing = true;
+        // Opening a member is the explicit retry of a failed or closed read.
+        if let Some((_, id)) = &selected {
+            self.members.unavailable.remove(id);
         }
+        self.members.selected = selected;
+        self.publish_member();
+    }
+
+    /// A replacement leader releases every observation the old one owned.
+    pub(super) fn release_members(&mut self) {
+        self.members.selected = None;
+        self.members.unavailable.clear();
+        self.members.pages.clear();
     }
 
     pub(super) fn observes_member(&self, session_id: &str) -> bool {
-        self.member
-            .as_ref()
-            .is_some_and(|member| member.session_id == session_id)
+        self.members
+            .observations
+            .get(session_id)
+            .is_some_and(|observation| !observation.closing)
+    }
+
+    /// Unfinished delegations' members, once main's history says which are
+    /// unfinished, and the selected detail's member.
+    fn needed_members(&self) -> HashSet<String> {
+        let mut needed = HashSet::new();
+        if self
+            .task_history
+            .get("main")
+            .is_some_and(|branch| branch.done)
+        {
+            needed.extend(self.projection.unfinished_members().map(str::to_owned));
+        }
+        if let Some((projection_id, id)) = &self.members.selected
+            && *projection_id == self.projection_id
+        {
+            needed.insert(id.clone());
+        }
+        needed.retain(|id| !self.members.unavailable.contains(id));
+        needed
     }
 
     pub(super) async fn poll_member(&mut self) -> crate::Result<()> {
-        loop {
-            if self.member.is_none() {
-                let Some((projection_id, session_id)) = self.desired_member.clone() else {
-                    return Ok(());
-                };
-                self.member = Some(MemberObservation {
-                    projection_id,
-                    session_id,
-                    projection: Projection::default(),
-                    state: MemberConversationState::Loading,
-                    attached: false,
-                    closing: false,
-                    pending: None,
-                    after: 0,
-                    through: None,
-                    cursor: 0,
-                    live: Vec::new(),
-                });
-                self.publish_member();
+        self.poll_agents().await?;
+        let needed = self.needed_members();
+        for (id, observation) in &mut self.members.observations {
+            if !needed.contains(id) || observation.projection_id != self.projection_id {
+                observation.closing = true;
             }
-            let member = self.member.as_ref().expect("selected observation");
-            if member.pending.is_some() {
-                return Ok(());
+        }
+        for id in needed {
+            // A released observation of the same member finishes first.
+            if !self.members.observations.contains_key(&id) {
+                self.members.observations.insert(
+                    id.clone(),
+                    Observation {
+                        projection_id: self.projection_id,
+                        projection: Projection::default(),
+                        state: MemberConversationState::Loading,
+                        model: None,
+                        attached: false,
+                        closing: false,
+                        pending: None,
+                        after: 0,
+                        through: None,
+                        cursor: 0,
+                        live: Vec::new(),
+                    },
+                );
+                self.member_changed(&id);
             }
-            if member.closing && !member.attached {
-                self.member = None;
+        }
+        let ids: Vec<String> = self.members.observations.keys().cloned().collect();
+        for id in ids {
+            let observation = &self.members.observations[&id];
+            if observation.pending.is_some() {
                 continue;
             }
-            let (method, params) = if member.closing {
-                ("session.detach", json!({"sessionId":member.session_id}))
-            } else if !member.attached {
-                ("session.attach", json!({"sessionId":member.session_id}))
-            } else if member.state == MemberConversationState::Loading {
-                let mut params = json!({
-                    "sessionId":member.session_id,"branchId":"main",
-                    "after":member.after,"limit":HISTORY_PAGE,
-                });
-                if let Some(through) = member.through {
-                    params["through"] = json!(through);
-                }
-                ("session.history", params)
+            let method = if observation.closing && !observation.attached {
+                self.members.observations.remove(&id);
+                continue;
+            } else if observation.closing {
+                "session.detach"
+            } else if !observation.attached {
+                "session.attach"
             } else {
-                return Ok(());
+                continue;
             };
-            let id = self.client.send(method, params).await?;
-            self.member.as_mut().expect("admitted observation").pending = Some(match method {
-                "session.attach" => Pending::Attach(id),
-                "session.detach" => Pending::Detach(id),
-                _ => Pending::History(id),
+            let request = self.client.send(method, json!({"sessionId":id})).await?;
+            self.members
+                .observations
+                .get_mut(&id)
+                .expect("admitted observation")
+                .pending = Some(if method == "session.attach" {
+                Pending::Attach(request)
+            } else {
+                Pending::Detach(request)
             });
+        }
+        // One history page at a time, in the order members asked.
+        if self
+            .members
+            .observations
+            .values()
+            .any(|observation| matches!(observation.pending, Some(Pending::History(_))))
+        {
             return Ok(());
         }
+        while let Some(id) = self.members.pages.pop_front() {
+            let Some(observation) = self.members.observations.get(&id) else {
+                continue;
+            };
+            if observation.closing
+                || observation.pending.is_some()
+                || observation.state != MemberConversationState::Loading
+            {
+                continue;
+            }
+            let mut params = json!({
+                "sessionId":id,"branchId":"main",
+                "after":observation.after,"limit":HISTORY_PAGE,
+            });
+            if let Some(through) = observation.through {
+                params["through"] = json!(through);
+            }
+            let request = self.client.send("session.history", params).await?;
+            self.members
+                .observations
+                .get_mut(&id)
+                .expect("admitted observation")
+                .pending = Some(Pending::History(request));
+            break;
+        }
+        Ok(())
     }
 
-    pub(super) fn member_reply(&mut self, result: Result<serde_json::Value, client::RpcError>) {
-        let member = self.member.as_mut().expect("matched observation");
-        let pending = member.pending.take().expect("matched member request");
+    /// Names native Agents on the cards with one shared `agent.list`.
+    async fn poll_agents(&mut self) -> crate::Result<()> {
+        if self.members.agents.is_some()
+            || !self
+                .task_history
+                .get("main")
+                .is_some_and(|branch| branch.done)
+            || !self.projection.unnamed_agents()
+        {
+            return Ok(());
+        }
+        if !self.client.supports(&["agent.list"]) {
+            self.projection.name_agents(HashMap::new());
+            self.changed();
+            return Ok(());
+        }
+        let id = self.client.send("agent.list", json!({})).await?;
+        self.members.agents = Some((id, self.projection_id));
+        Ok(())
+    }
+
+    pub(super) fn member_reply(
+        &mut self,
+        request_id: u64,
+        result: Result<serde_json::Value, client::RpcError>,
+    ) {
+        if let Some((_, projection_id)) = self.members.agents.take_if(|(id, _)| *id == request_id) {
+            if projection_id == self.projection_id {
+                // A failed read shows Agent IDs: no name is invented.
+                let names = result
+                    .ok()
+                    .and_then(|value| serde_json::from_value::<Vec<AgentSummary>>(value).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|agent| (agent.agent_id, agent.name))
+                    .collect();
+                self.projection.name_agents(names);
+                self.changed();
+            }
+            return;
+        }
+        let id = self
+            .members
+            .request(request_id)
+            .expect("matched member request");
+        let observation = self
+            .members
+            .observations
+            .get_mut(&id)
+            .expect("matched observation");
+        let pending = observation.pending.take().expect("matched member request");
         match pending {
             Pending::Attach(_) => match result {
-                Ok(_) => member.attached = true,
-                Err(error) if !member.closing => self.fail_member(error.to_string()),
+                Ok(_) => {
+                    observation.attached = true;
+                    if !observation.closing {
+                        self.members.pages.push_back(id);
+                    }
+                }
+                Err(error) if !observation.closing => self.fail_member(&id, error.to_string()),
                 Err(_) => {}
             },
             Pending::Detach(_) => {
-                let error = result
-                    .err()
-                    .map(|error| format!("Member {} detach: {error}", member.session_id));
-                self.member = None;
-                if let Some(error) = error {
-                    self.send(Update::Notice(error));
+                self.members.observations.remove(&id);
+                if let Err(error) = result {
+                    self.send(Update::Notice(format!("Member {id} detach: {error}")));
                 }
             }
-            Pending::History(_) if member.closing => {}
+            Pending::History(_) if observation.closing => {}
             Pending::History(_) => {
-                let page = result
-                    .map_err(|error| error.to_string())
-                    .and_then(|value| History::decode(value, member.after, member.through));
+                let page = result.map_err(|error| error.to_string()).and_then(|value| {
+                    History::decode(value, observation.after, observation.through)
+                });
                 match page {
-                    Err(error) => self.fail_member(error),
+                    Err(error) => self.fail_member(&id, error),
                     Ok(page) => {
-                        member.after = page.next_after;
-                        member.through = Some(page.through);
+                        observation.after = page.next_after;
+                        observation.through = Some(page.through);
                         for event in page.events {
-                            member.apply(Notice::Event(event));
+                            observation.apply(Notice::Event(event));
                         }
-                        member.cursor = page.next_after;
+                        observation.cursor = page.next_after;
                         if page.done {
-                            member.state = MemberConversationState::Live;
-                            for notice in std::mem::take(&mut member.live) {
-                                member.apply(notice);
+                            observation.state = MemberConversationState::Live;
+                            for notice in std::mem::take(&mut observation.live) {
+                                observation.apply(notice);
                             }
+                        } else {
+                            // Behind the members already waiting.
+                            self.members.pages.push_back(id.clone());
                         }
-                        self.changed();
+                        self.member_changed(&id);
                     }
                 }
             }
         }
     }
 
-    pub(super) fn member_notice(&mut self, notice: Notice) {
-        let member = self.member.as_mut().expect("routed observation");
-        if member.closing {
+    pub(super) fn member_notice(&mut self, session_id: &str, notice: Notice) {
+        let observation = self
+            .members
+            .observations
+            .get_mut(session_id)
+            .expect("routed observation");
+        if observation.state == MemberConversationState::Loading {
+            observation.live.push(notice);
             return;
         }
-        if member.state == MemberConversationState::Loading {
-            member.live.push(notice);
-        } else {
-            member.apply(notice);
+        observation.apply(notice);
+        self.member_changed(session_id);
+    }
+
+    pub(super) fn member_closed(&mut self, session_id: &str) {
+        self.members
+            .observations
+            .get_mut(session_id)
+            .expect("closed observation")
+            .state = MemberConversationState::Closed;
+        self.end_member(session_id);
+    }
+
+    fn fail_member(&mut self, session_id: &str, error: String) {
+        let observation = self
+            .members
+            .observations
+            .get_mut(session_id)
+            .expect("failed observation");
+        observation.state = MemberConversationState::ReadError(error);
+        observation.live.clear();
+        self.end_member(session_id);
+    }
+
+    /// Shows the final state, then releases the observation without
+    /// reattaching it for an unfinished card.
+    fn end_member(&mut self, session_id: &str) {
+        self.member_changed(session_id);
+        self.publish_member();
+        self.members
+            .observations
+            .get_mut(session_id)
+            .expect("ended observation")
+            .closing = true;
+        self.members.unavailable.insert(session_id.to_owned());
+    }
+
+    /// Cards show what the member now does; the detail follows on publish.
+    fn member_changed(&mut self, session_id: &str) {
+        let observation = &self.members.observations[session_id];
+        if observation.projection_id != self.projection_id {
+            return;
         }
+        self.projection.observe_member(
+            session_id,
+            observation.model.as_deref(),
+            observation.projection.activity().as_deref(),
+            &observation.state,
+        );
         self.changed();
     }
 
-    pub(super) fn member_closed(&mut self) {
-        let member = self.member.as_mut().expect("closed observation");
-        if member.closing {
-            return;
-        }
-        member.state = MemberConversationState::Closed;
-        self.publish_member();
-        self.member.as_mut().expect("closed observation").closing = true;
-        self.desired_member = None;
-    }
-
-    fn fail_member(&mut self, error: String) {
-        let member = self.member.as_mut().expect("failed observation");
-        member.state = MemberConversationState::ReadError(error);
-        member.live.clear();
-        self.publish_member();
-        self.member.as_mut().expect("failed observation").closing = true;
-        self.desired_member = None;
-    }
-
     pub(super) fn publish_member(&self) {
-        if let Some(member) = &self.member
-            && !member.closing
-            && member.projection_id == self.projection_id
+        let Some((projection_id, session_id)) = &self.members.selected else {
+            return;
+        };
+        if let Some(observation) = self.members.observations.get(session_id)
+            && !observation.closing
+            && observation.projection_id == *projection_id
+            && *projection_id == self.projection_id
         {
             self.send(Update::MemberConversation {
-                projection_id: member.projection_id,
-                session_id: member.session_id.clone(),
-                snapshot: Box::new(member.projection.snapshot()),
-                state: member.state.clone(),
+                projection_id: *projection_id,
+                session_id: session_id.clone(),
+                snapshot: Box::new(observation.projection.snapshot()),
+                state: observation.state.clone(),
+                model: observation.model.clone(),
             });
         }
     }
