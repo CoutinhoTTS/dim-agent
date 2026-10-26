@@ -22,6 +22,14 @@ pub struct Emu {
     /// Cursor visibility toggles seen.
     pub visibility_changes: usize,
     pub bytes: usize,
+    /// Rows that showed text when a write began, were blanked during it and
+    /// showed text again at its end: without synchronized output the
+    /// terminal can show them blank in between, which reads as a flicker.
+    pub flickers: usize,
+    /// Per screen row, during a write: it showed text when the write began.
+    had_text: Vec<bool>,
+    /// Per screen row, during a write: it was blanked after showing text.
+    blanked: Vec<bool>,
 }
 
 impl Emu {
@@ -39,6 +47,9 @@ impl Emu {
             sync_blocks: 0,
             visibility_changes: 0,
             bytes: 0,
+            flickers: 0,
+            had_text: vec![false; rows],
+            blanked: vec![false; rows],
         }
     }
 
@@ -64,7 +75,24 @@ impl Emu {
         all
     }
 
+    fn blank(&self, y: usize) -> bool {
+        self.screen[y].iter().all(|&c| c == ' ')
+    }
+
+    /// Notes rows that went blank after showing text at the write's start.
+    fn note_blanked(&mut self, rows: impl IntoIterator<Item = usize>) {
+        for y in rows {
+            if self.had_text[y] && self.blank(y) {
+                self.blanked[y] = true;
+            }
+        }
+    }
+
     fn scroll_up(&mut self) {
+        self.had_text.remove(0);
+        self.had_text.push(false);
+        self.blanked.remove(0);
+        self.blanked.push(false);
         let top = self.screen.remove(0);
         self.scrollback
             .push(top.iter().collect::<String>().trim_end().to_owned());
@@ -106,6 +134,15 @@ impl Emu {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.had_text = (0..self.rows).map(|y| !self.blank(y)).collect();
+        self.blanked = vec![false; self.rows];
+        self.feed_bytes(bytes);
+        self.flickers += (0..self.rows)
+            .filter(|&y| self.blanked[y] && !self.blank(y))
+            .count();
+    }
+
+    fn feed_bytes(&mut self, bytes: &[u8]) {
         self.bytes += bytes.len();
         let text = String::from_utf8_lossy(bytes).into_owned();
         let chars: Vec<char> = text.chars().collect();
@@ -210,6 +247,7 @@ impl Emu {
                 for x in from..to {
                     self.screen[self.cy][x] = ' ';
                 }
+                self.note_blanked([self.cy]);
             }
             (false, 'J') => {
                 let mode = nums.first().copied().unwrap_or(0);
@@ -223,7 +261,7 @@ impl Emu {
                     1 => (0..self.cy).collect(),
                     _ => (self.cy + 1..self.rows).collect(),
                 };
-                for y in rows {
+                for &y in &rows {
                     self.screen[y] = vec![' '; self.cols];
                 }
                 if mode == 0 {
@@ -231,6 +269,7 @@ impl Emu {
                         self.screen[self.cy][x] = ' ';
                     }
                 }
+                self.note_blanked(rows.into_iter().chain([self.cy]));
             }
             (true, 'h') | (true, 'l') => {
                 let on = final_byte == 'h';
