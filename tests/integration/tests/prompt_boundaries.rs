@@ -1,7 +1,8 @@
 use dim_agent_capabilities::{defaults, host::*, prompt_state::PromptSnapshot};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -75,7 +76,10 @@ async fn rejected_prompt_load_does_not_publish_or_poison_the_pending_load() {
     // The second request is rebound onto the pending operation's identity.
     builder.require_feature(
         Feature::new("TamperControl").branch("TamperControl", |names| {
-            names.part(TamperControl("prompt/configure-request"))
+            Ok(Box::new(TamperControl::new(
+                names,
+                "prompt/configure-request",
+            )?))
         }),
     );
     let agent = builder.build();
@@ -153,19 +157,24 @@ async fn rejected_prompt_load_does_not_publish_or_poison_the_pending_load() {
     agent.close().await.unwrap();
 }
 
-struct TamperControl(&'static str);
+struct TamperControl(&'static str, Key<Timeline>);
 
-impl TypedPlugin for TamperControl {
-    type Deps = (Keyed<Timeline>,);
+impl TamperControl {
+    fn new(names: &Names<'_>, key: &'static str) -> rutis::Result<Self> {
+        Ok(Self(key, names.key()?))
+    }
+}
+
+impl DynPlugin for TamperControl {
     fn name(&self) -> &str {
         "TamperControl"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.1.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.1)?;
             timeline.before(ctx, "TamperControl", &[self.0], |mut draft| {
                 match &mut draft.kind {
                     EventKind::PromptConfigureRequest(data)
@@ -195,8 +204,9 @@ async fn rewritten_control_identity_is_registered_without_leaking_activity() {
             None,
         );
         builder.require_feature(
-            Feature::new("TamperControl")
-                .branch("TamperControl", move |names| names.part(TamperControl(key))),
+            Feature::new("TamperControl").branch("TamperControl", move |names| {
+                Ok(Box::new(TamperControl::new(names, key)?))
+            }),
         );
         let agent = builder.build();
         let session = agent
@@ -260,19 +270,25 @@ async fn rewritten_control_identity_is_registered_without_leaking_activity() {
     }
 }
 
-struct EndScopeBeforeAdoption(PromptScope);
+struct EndScopeBeforeAdoption(PromptScope, Key<Timeline>, Key<Dispatcher>);
 
-impl TypedPlugin for EndScopeBeforeAdoption {
-    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>);
+impl EndScopeBeforeAdoption {
+    fn new(names: &Names<'_>, scope: PromptScope) -> rutis::Result<Self> {
+        Ok(Self(scope, names.key()?, names.key()?))
+    }
+}
+
+impl DynPlugin for EndScopeBeforeAdoption {
     fn name(&self) -> &str {
         "EndScopeBeforeAdoption"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(dispatcher)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.1.erase(), self.2.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.1)?;
+            let dispatcher = ctx.require_at(&self.2)?;
             timeline.append(
                 EventKind::ContextScope(ContextScopeData {
                     scope: self.0.clone(),
@@ -314,11 +330,15 @@ async fn scope_ended_in_committed_tail_supersedes_loading_result() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     let task_scope = scope.clone();
-    builder.require_feature(
-        Feature::new("EndScopeBeforeAdoption").branch("EndScopeBeforeAdoption", move |names| {
-            names.part(EndScopeBeforeAdoption(task_scope.clone()))
-        }),
-    );
+    builder.require_feature(Feature::new("EndScopeBeforeAdoption").branch(
+        "EndScopeBeforeAdoption",
+        move |names| {
+            Ok(Box::new(EndScopeBeforeAdoption::new(
+                names,
+                task_scope.clone(),
+            )?))
+        },
+    ));
     defaults::install_with_prompt(
         &mut builder,
         Arc::new(GatedPrompts {

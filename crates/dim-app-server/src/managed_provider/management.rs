@@ -6,7 +6,7 @@ use crate::{
     provider::management::ProviderTarget,
 };
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
-use rutis::{CordisError, Ctx};
+use rutis::{Ctx, Error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -171,7 +171,7 @@ pub(super) fn provide(
     ctx: &Ctx,
     methods: &ManagementMethods,
     oauth: Arc<ManagedProviders>,
-) -> Result<(), CordisError> {
+) -> Result<(), Error> {
     methods.register(
         ctx,
         "account",

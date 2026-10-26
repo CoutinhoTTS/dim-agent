@@ -21,7 +21,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
-use rutis::TypeKey;
+use rutis::host::CtxHost;
 use std::{path::Path, sync::Arc, time::Duration};
 
 struct Product {
@@ -40,12 +40,10 @@ async fn product(dirs: &Dirs) -> Product {
     }))
     .unwrap();
     platform.home = dirs.home.clone();
-    root.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(platform))
-        .unwrap();
-    root.provide_as(
-        TypeKey::of::<SkillSettingsHost>(),
-        Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
-    )
+    root.provide_as::<HostPlatform>(Arc::new(platform)).unwrap();
+    root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
+        MemorySkillSettings::default(),
+    ))))
     .unwrap();
     let model = Arc::new(ScriptedModel::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -58,7 +56,9 @@ async fn product(dirs: &Dirs) -> Product {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(
+                    dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?,
+                ))
             }),
         );
     defaults::install_local_execution(
@@ -69,7 +69,7 @@ async fn product(dirs: &Dirs) -> Product {
         },
     );
     // The Agent's own plugin: the catalog and the Skills parts.
-    builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
+    builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
     Product {
         agent: builder.build_in(&root),
         _root: root,

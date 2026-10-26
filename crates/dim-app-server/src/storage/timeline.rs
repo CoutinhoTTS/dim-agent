@@ -8,6 +8,7 @@ use super::{
     sqlite::error,
 };
 use dim_agent_capabilities::host::SessionFilesHost;
+use dim_agent_runtime::Names;
 use dim_agent_runtime::{
     AgentError, BoxFuture, PublishCallback, Result, SessionConfig, StoredBranch, StoredEvent,
     TimelineInfo, TimelineKey, TimelineStore, TimelineTrace,
@@ -17,7 +18,8 @@ use dim_agent_types::{
     SessionForkedData,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use rutis::{CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_bridge::session::{HostDispatch, host_key};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1142,47 +1144,43 @@ impl SessionStore {
 /// `files_root`, which is the database directory.
 pub struct SessionStorePlugin {
     files_root: usize,
+    db: Key<SqliteStorage>,
 }
 impl SessionStorePlugin {
-    pub fn new(files_root: usize) -> Self {
-        Self { files_root }
+    pub fn new(names: &Names<'_>, files_root: usize) -> rutis::Result<Self> {
+        Ok(Self {
+            files_root,
+            db: names.key()?,
+        })
     }
 }
-impl TypedPlugin for SessionStorePlugin {
-    type Deps = (Keyed<SqliteStorage>,);
+impl DynPlugin for SessionStorePlugin {
     fn name(&self) -> &str {
         "SessionStore"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(db),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.db.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let db = ctx.require_at(&self.db)?;
             let store = Arc::new(SessionStore::new(db, ctx.clone(), self.files_root));
             let files = store.files.clone();
             let (timeline, owned_files, titles) =
                 (store.timeline.clone(), files.clone(), store.titles.clone());
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        // Admitted title writes and puts settle before the
-                        // native store stops writing.
-                        titles.close().await;
-                        owned_files.close().await;
-                        timeline.close().await.map_err(Into::into)
-                    })
-                }))
+            ctx.effect(move || async move {
+                // Admitted title writes and puts settle before the
+                // native store stops writing.
+                titles.close().await;
+                owned_files.close().await;
+                timeline.close().await.map_err(Into::into)
             })?;
             files.start();
-            ctx.provide_as(TypeKey::of::<SessionStore>(), store.clone())?;
-            ctx.provide_as(
-                TypeKey::of::<SessionFilesHost>(),
-                Arc::new(SessionFilesHost(Arc::new(files))),
-            )?;
-            ctx.provide_as::<dyn HostDispatch>(
+            ctx.provide_as::<SessionStore>(store.clone())?;
+            ctx.provide_as::<SessionFilesHost>(Arc::new(SessionFilesHost(Arc::new(files))))?;
+            ctx.provide_at(
                 host_key("sessionMetadata"),
-                Arc::new(metadata::Dispatch(store)),
+                Arc::new(metadata::Dispatch(store)) as Arc<dyn HostDispatch>,
             )?;
             Ok(Effect::Done)
         })

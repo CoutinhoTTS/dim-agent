@@ -12,7 +12,8 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::{
@@ -1187,48 +1188,59 @@ impl LoopState for AgentLoop {
 }
 
 pub struct LoopPlugin {
-    state: DepKey<StateCell<LoopSnapshot>>,
-    service: DepKey<AgentLoop>,
-    loop_state: DepKey<dyn LoopState>,
+    state: Key<StateCell<LoopSnapshot>>,
+    service: Key<AgentLoop>,
+    loop_state: Key<dyn LoopState>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    prepare: Key<PrepareModelHost>,
+    binding: Key<ToolBinding>,
+    history: Key<HistoryRenderer>,
+    context: Key<ContextModelHost>,
+    strategy: Key<CompactionStrategyHost>,
 }
 impl LoopPlugin {
-    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             state: names.state_cell()?,
             service: names.key()?,
             loop_state: names.key()?,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            prepare: names.key()?,
+            binding: names.key()?,
+            history: names.key()?,
+            context: names.key()?,
+            strategy: names.key()?,
         })
     }
 }
-impl TypedPlugin for LoopPlugin {
-    type Deps = (
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-        Keyed<PrepareModelHost>,
-        Keyed<ToolBinding>,
-        Keyed<HistoryRenderer>,
-        Keyed<ContextModelHost>,
-        Keyed<CompactionStrategyHost>,
-    );
+impl DynPlugin for LoopPlugin {
     fn name(&self) -> &str {
         "Loop"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(timeline),
-            Keyed(dispatcher),
-            Keyed(prepare),
-            Keyed(binding),
-            Keyed(history),
-            Keyed(context),
-            Keyed(strategy),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.prepare.erase(),
+            self.binding.erase(),
+            self.history.erase(),
+            self.context.erase(),
+            self.strategy.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let prepare = ctx.require_at(&self.prepare)?;
+            let binding = ctx.require_at(&self.binding)?;
+            let history = ctx.require_at(&self.history)?;
+            let context = ctx.require_at(&self.context)?;
+            let strategy = ctx.require_at(&self.strategy)?;
             let policy = ContextPolicy::bind(&timeline, &context, &strategy, &history)
-                .map_err(|error| CordisError::PluginFailed(error.into()))?;
+                .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
             let service = Arc::new(AgentLoop {
                 turn: Mutex::new(None),
                 compaction: Mutex::new(CompactionSlot::default()),
@@ -1246,15 +1258,11 @@ impl TypedPlugin for LoopPlugin {
                 dispatcher: dispatcher.clone(),
             });
             let owner = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owner.lifecycle.cancel();
-                        owner.tasks.close();
-                        owner.tasks.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                owner.lifecycle.cancel();
+                owner.tasks.close();
+                owner.tasks.wait().await;
+                Ok(())
             })?;
             let owner = service.clone();
             dispatcher
@@ -1298,9 +1306,9 @@ impl TypedPlugin for LoopPlugin {
                     },
                 )
                 .await?;
-            ctx.provide_as(self.state.key().clone(), service.observable.clone())?;
-            ctx.provide_as(self.service.key().clone(), service.clone())?;
-            ctx.provide_as(self.loop_state.key().clone(), service as Arc<dyn LoopState>)?;
+            ctx.provide_at(self.state.clone(), service.observable.clone())?;
+            ctx.provide_at(self.service.clone(), service.clone())?;
+            ctx.provide_at(self.loop_state.clone(), service as Arc<dyn LoopState>)?;
             Ok(Effect::Done)
         })
     }

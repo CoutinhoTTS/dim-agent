@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n"
 import { ArrowUp, Square } from "lucide-vue-next"
 import type { ModelId } from "../../rpc/protocol"
 import ComposerModelMenu from "./ComposerModelMenu.vue"
+import { quoteInto } from "./quote"
 
 /**
  * The message composer: a growing text field, the model menu, and one button
@@ -83,8 +84,18 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
+/** Quotes `message` at the end of the draft (see quote.ts). */
+async function quote(message: string): Promise<void> {
+  text.value = quoteInto(text.value, message)
+  await nextTick()
+  resize()
+  const element = field.value
+  element?.focus()
+  element?.setSelectionRange(text.value.length, text.value.length)
+}
+
 onMounted(() => field.value?.focus())
-defineExpose({ focus: () => field.value?.focus() })
+defineExpose({ focus: () => field.value?.focus(), quote })
 </script>
 
 <template>

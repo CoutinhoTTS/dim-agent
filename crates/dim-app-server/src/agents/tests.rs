@@ -12,6 +12,7 @@ use crate::ServerConfig;
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::InputMode;
 use rutis::Ctx;
+use rutis::host::CtxHost;
 use rutis_bridge::session::{HostDispatch, host_key};
 use serde_json::{Value, json};
 use std::{
@@ -87,7 +88,7 @@ fn config(directory: &Path) -> ServerConfig {
 /// One `sessions` call as a process owner makes it: the reply envelope.
 async fn call(root: &Ctx, method: &str, request: Value) -> Value {
     let service = root
-        .get_as::<dyn HostDispatch>(host_key("sessions"))
+        .get_at::<dyn HostDispatch>(&host_key("sessions"))
         .expect("the sessions service");
     match service.invoke(method, json!([request]).into()).unwrap() {
         rutis_bridge::session::Value::Reference(reply) if reply.is_future() => {

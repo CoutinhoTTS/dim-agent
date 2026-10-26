@@ -6,7 +6,8 @@ use dim_agent_runtime::{
     AgentError, Delivery, Dispatcher, InputSnapshot, Names, Result, StateCell, Timeline,
 };
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Error};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -278,28 +279,32 @@ impl InputQueue {
     }
 }
 pub struct InputQueuePlugin {
-    state: DepKey<StateCell<InputSnapshot>>,
-    queue: DepKey<InputQueue>,
+    state: Key<StateCell<InputSnapshot>>,
+    queue: Key<InputQueue>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
 }
 impl InputQueuePlugin {
-    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, Error> {
         Ok(Self {
             state: names.state_cell()?,
             queue: names.key()?,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
         })
     }
 }
-impl TypedPlugin for InputQueuePlugin {
-    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>);
+impl DynPlugin for InputQueuePlugin {
     fn name(&self) -> &str {
         "InputQueue"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(dispatcher)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase(), self.dispatcher.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
             let queue = Arc::new(InputQueue {
                 state: Mutex::new(QueueState::default()),
                 observable: Arc::new(StateCell::new(InputSnapshot::default())),
@@ -330,8 +335,8 @@ impl TypedPlugin for InputQueuePlugin {
                     },
                 )
                 .await?;
-            ctx.provide_as(self.state.key().clone(), queue.observable.clone())?;
-            ctx.provide_as(self.queue.key().clone(), queue)?;
+            ctx.provide_at(self.state.clone(), queue.observable.clone())?;
+            ctx.provide_at(self.queue.clone(), queue)?;
             Ok(Effect::Done)
         })
     }
@@ -357,18 +362,29 @@ struct WithdrawParams {
 
 /// Serves `session.input.withdraw` for every branch of its Session through
 /// the branch's InputQueue, so Rpc names no owning service.
-pub struct InputMethodsPlugin;
-impl TypedPlugin for InputMethodsPlugin {
-    type Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>);
+pub struct InputMethodsPlugin {
+    tree: Key<TreeCommands>,
+    methods: Key<SessionMethods>,
+}
+impl InputMethodsPlugin {
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, Error> {
+        Ok(Self {
+            tree: names.key()?,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for InputMethodsPlugin {
     fn name(&self) -> &str {
         "InputMethods"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(tree), Keyed(methods)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.tree.erase(), self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let tree = ctx.require_at(&self.tree)?;
+            let methods = ctx.require_at(&self.methods)?;
             methods.register(
                 ctx,
                 INPUT_METHODS,

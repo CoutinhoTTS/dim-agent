@@ -1,7 +1,8 @@
 //! Immutable content services owned by real Session loader instances.
 use super::{CatalogView, SkillDefinition, SkillStatus, SkillView, SkillsError};
 use dim_agent_runtime::SessionLoader;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, InstanceId, TypeKey, TypedPlugin};
+use rutis::host::{CtxHost, FiberView, InstanceId, Key, TypeKey};
+use rutis::{Ctx, Plugin};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex},
@@ -23,7 +24,7 @@ pub(super) enum ContentError {
 #[derive(Clone)]
 pub(super) struct ContentConfig {
     definition: Arc<SkillDefinition>,
-    key: TypeKey,
+    key: Key<Contribution>,
     contributions: Arc<SkillContributions>,
 }
 struct Contribution(Arc<SkillDefinition>);
@@ -34,31 +35,27 @@ struct Contribution(Arc<SkillDefinition>);
 #[derive(Default)]
 pub(super) struct SkillContributions(Mutex<HashMap<TypeKey, Arc<Contribution>>>);
 pub(super) struct ContentPlugin(pub(super) ContentConfig);
-impl TypedPlugin for ContentPlugin {
+impl Plugin for ContentPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "SkillContent"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let contributions = self.0.contributions.clone();
-            let service = Arc::new(Contribution(self.0.definition.clone()));
-            ctx.provide_as(self.0.key.clone(), service.clone())?;
-            let key = self.0.key.clone();
-            let cleanup = contributions.clone();
-            ctx.effect(move || {
-                Effect::Disposer(Box::new(move || {
-                    cleanup.0.lock().unwrap().remove(&key);
-                    Ok(())
-                }))
-            })?;
-            contributions
-                .0
-                .lock()
-                .unwrap()
-                .insert(self.0.key.clone(), service);
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        let contributions = self.0.contributions.clone();
+        let service = Arc::new(Contribution(self.0.definition.clone()));
+        ctx.provide_at(self.0.key.clone(), service.clone())?;
+        let key = self.0.key.erase();
+        let cleanup = contributions.clone();
+        ctx.effect(move || async move {
+            cleanup.0.lock().unwrap().remove(&key);
+            Ok(())
+        })?;
+        contributions
+            .0
+            .lock()
+            .unwrap()
+            .insert(self.0.key.erase(), service);
+        Ok(())
     }
 }
 
@@ -160,14 +157,14 @@ impl Contents {
             }
             // A replaced definition has already retired its previous instance.
             // Session-scoped identity is sufficient; no random service name is needed.
-            let key =
-                TypeKey::keyed_dynamic::<Contribution>(id.clone()).with_instance(self.session);
+            let provided = Key::<Contribution>::dynamic(id.clone()).instance(self.session);
+            let key = provided.erase();
             // Await creation to settlement even on cancellation: never abandon a partial instance.
             let instance = loader
                 .create_instance(GROUP)
                 .with(ContentConfig {
                     definition,
-                    key: key.clone(),
+                    key: provided,
                     contributions: self.contributions.clone(),
                 })
                 .await

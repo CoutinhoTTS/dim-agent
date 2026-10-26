@@ -410,8 +410,22 @@ In fullscreen mode, add member cards to the existing transcript keyboard focus
 order alongside user messages. Tab/Up selects older items, Shift+Tab/Down newer;
 Esc returns to the composer without modifying its draft. Enter on a focused
 Session-member card opens the base read-only detail; a provider card has no such
-action. Editing a selected user message with `e` keeps its current behavior;
-a member card cannot be copied into the composer by that action. Ordinary text
+action. Editing a selected user message with `e` keeps its current behavior,
+and `q` appends it to the draft as a Markdown quote; a member card cannot be
+copied into the composer by either action. `q` does nothing in a shell draft
+(`!`, `!!`), where the quote would run as part of the command, and says so.
+
+The Web workspace offers the same quote as an action on a user message, shown
+while its composer is. Both clients write one format, pinned by the cases in
+`web/src/features/chat/quote-cases.json`, and submit the draft as it stands:
+
+- CRLF becomes LF and one trailing newline is dropped; a message that is then
+  empty leaves the draft unchanged.
+- Each line becomes `> line`, an empty line `>`, each followed by a newline.
+- The block follows the draft after a separator that makes one blank line: none
+  for an empty draft or one ending in two newlines, one newline for a draft
+  ending in one, two otherwise. A newline follows the block, so typing starts
+  on a fresh line after a blank one. Ordinary text
 ends focus and returns to existing
 composer input rather than controlling a member.
 

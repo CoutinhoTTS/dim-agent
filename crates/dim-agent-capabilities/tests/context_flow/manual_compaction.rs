@@ -6,6 +6,8 @@ use dim_agent_capabilities::{
     agent_loop::AgentLoop,
     history::{context_messages, read_context, summary_message},
 };
+use rutis::host::CtxHost;
+use rutis::host::ErrorKind;
 use std::sync::atomic::AtomicBool;
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -139,53 +141,40 @@ impl ModelDriver for ToolOnRequest {
 /// Provides the strategy from a child plugin; restarting it reloads the
 /// Loop and ContextPreparation of every branch.
 #[derive(Clone, Default)]
-struct StrategyReload(Arc<std::sync::Mutex<Vec<rutis::FiberView>>>);
+struct StrategyReload(Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>);
 struct StrategyOwner {
-    key: rutis::DepKey<CompactionStrategyHost>,
+    key: rutis::host::Key<CompactionStrategyHost>,
     strategy: Arc<Scripted>,
-    views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
+    views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
 }
-impl TypedPlugin for StrategyOwner {
+impl Plugin for StrategyOwner {
     type Deps = ();
     fn name(&self) -> &str {
         "test.strategy-owner"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let view = ctx.plugin(rutis::Typed::new(StrategyProvider(
-                self.key.clone(),
-                self.strategy.clone(),
-            )));
-            (&view).await.map_err(|error| {
-                CordisError::PluginFailed(format!("Strategy provider failed: {error}").into())
-            })?;
-            self.views.lock().unwrap().push(view);
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        let view = ctx.plugin(StrategyProvider(self.key.clone(), self.strategy.clone()));
+        (&view).await.map_err(|error| {
+            rutis::Error::from(ErrorKind::PluginFailed(
+                format!("Strategy provider failed: {error}").into(),
+            ))
+        })?;
+        self.views.lock().unwrap().push(view);
+        Ok(())
     }
 }
-struct StrategyProvider(rutis::DepKey<CompactionStrategyHost>, Arc<Scripted>);
-impl TypedPlugin for StrategyProvider {
+struct StrategyProvider(rutis::host::Key<CompactionStrategyHost>, Arc<Scripted>);
+impl Plugin for StrategyProvider {
     type Deps = ();
     fn name(&self) -> &str {
         "test.strategy"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(
-                self.0.key().clone(),
-                Arc::new(CompactionStrategyHost(Some(self.1.clone()))),
-            )?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.provide_at(
+            self.0.clone(),
+            Arc::new(CompactionStrategyHost(Some(self.1.clone()))),
+        )?;
+        Ok(())
     }
 }
 
@@ -209,7 +198,7 @@ fn builder_with_strategy(
         )))))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     match reload {
@@ -218,11 +207,11 @@ fn builder_with_strategy(
             builder.require_feature(Feature::new("test.strategy-owner").session(
                 "test.strategy-owner",
                 move |names| {
-                    names.part(StrategyOwner {
+                    Ok(Box::new(StrategyOwner {
                         key: names.key()?,
                         strategy: strategy.clone(),
                         views: views.clone(),
-                    })
+                    }))
                 },
             ));
         }
@@ -662,26 +651,44 @@ async fn a_manual_compaction_inside_a_turn_runs_at_the_next_step_boundary() {
 /// While the child opens, reads its ancestry as Permission does, then its
 /// context as Prompt does, from `main`'s checkpoint; records the store reads
 /// of the context read and where its checkpoint resumes.
-struct OpeningReads(
-    Arc<super::context_reads::CountContextReads>,
-    Arc<AtomicBool>,
-    Arc<std::sync::Mutex<Option<ContextReads>>>,
-);
+struct OpeningReads {
+    store: Arc<super::context_reads::CountContextReads>,
+    armed: Arc<AtomicBool>,
+    reads: Arc<std::sync::Mutex<Option<ContextReads>>>,
+    timeline: Key<Timeline>,
+    identity: Key<TimelineIdentity>,
+}
+impl OpeningReads {
+    fn new(
+        names: &Names<'_>,
+        store: Arc<super::context_reads::CountContextReads>,
+        armed: Arc<AtomicBool>,
+        reads: Arc<std::sync::Mutex<Option<ContextReads>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            store,
+            armed,
+            reads,
+            timeline: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
 /// The store reads of one read and the branch its checkpoint resumes on.
 type ContextReads = (Vec<(String, std::ops::RangeInclusive<u64>)>, String);
-impl TypedPlugin for OpeningReads {
-    type Deps = (Keyed<Timeline>, Keyed<TimelineIdentity>);
+impl DynPlugin for OpeningReads {
     fn name(&self) -> &str {
         "test.opening-reads"
     }
-    fn apply<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(identity)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase(), self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let store = &self.0;
-            if !self.1.load(Ordering::SeqCst) {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let store = &self.store;
+            if !self.armed.load(Ordering::SeqCst) {
                 return Ok(Effect::Done);
             }
             if identity.branch_id != "main" {
@@ -695,7 +702,7 @@ impl TypedPlugin for OpeningReads {
                 let resume = context?
                     .checkpoint
                     .map(|checkpoint| checkpoint.resume.branch_id);
-                *self.2.lock().unwrap() = Some((reads, resume.unwrap_or_default()));
+                *self.reads.lock().unwrap() = Some((reads, resume.unwrap_or_default()));
                 return Ok(Effect::Done);
             }
             store.entered.notified().await;
@@ -810,11 +817,12 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     builder.require_feature(Feature::new("test.opening-reads").branch(
         "test.opening-reads",
         move |names| {
-            names.part(OpeningReads(
+            Ok(Box::new(OpeningReads::new(
+                names,
                 probe.clone(),
                 arm.clone(),
                 child_probe.clone(),
-            ))
+            )?))
         },
     ));
     let agent = builder.build();
@@ -957,7 +965,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     // Both branches' Loops rebuild; the Session closes after both.
     for (branch, before) in ["main", child.as_str()].into_iter().zip(before) {
         while !generation(branch).is_some_and(|(generation, state)| {
-            generation > before && state == rutis::FiberState::Active
+            generation > before && state == rutis::host::FiberState::Active
         }) {
             tokio::task::yield_now().await;
         }
@@ -1170,19 +1178,32 @@ async fn a_failed_manual_compaction_lets_the_turn_continue_and_recovery_compacts
 
 /// Captures the branch Timeline so a test can write a `context/compact`
 /// that does not come through `AgentLoop::compact`.
-struct RawTimeline(Arc<std::sync::OnceLock<Arc<Timeline>>>);
-impl TypedPlugin for RawTimeline {
-    type Deps = (Keyed<Timeline>,);
+struct RawTimeline {
+    timeline_cell: Arc<std::sync::OnceLock<Arc<Timeline>>>,
+    timeline: Key<Timeline>,
+}
+impl RawTimeline {
+    fn new(
+        names: &Names<'_>,
+        timeline_cell: Arc<std::sync::OnceLock<Arc<Timeline>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            timeline_cell,
+            timeline: names.key()?,
+        })
+    }
+}
+impl DynPlugin for RawTimeline {
     fn name(&self) -> &str {
         "test.raw-timeline"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let _ = self.0.set(timeline);
+            let timeline = ctx.require_at(&self.timeline)?;
+            let _ = self.timeline_cell.set(timeline);
             Ok(Effect::Done)
         })
     }
@@ -1270,7 +1291,7 @@ async fn a_second_command_consumed_while_one_is_outstanding_is_skipped() {
     let captured = timeline.clone();
     builder.require_feature(
         Feature::new("test.raw-timeline").branch("test.raw-timeline", move |names| {
-            names.part(RawTimeline(captured.clone()))
+            Ok(Box::new(RawTimeline::new(names, captured.clone())?))
         }),
     );
     let agent = builder.build();

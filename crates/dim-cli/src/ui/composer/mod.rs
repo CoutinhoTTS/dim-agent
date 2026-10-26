@@ -161,6 +161,39 @@ impl Composer {
         self.area.set_cursor(text.len());
     }
 
+    /// Appends `text` to the draft as a Markdown quote and a blank line,
+    /// keeping what is already there; the cursor goes to the end. The
+    /// format is the one the Web composer writes (member-conversation
+    /// design, cases in `web/src/features/chat/quote-cases.json`). A
+    /// shell draft takes no quote: it would run as part of the command.
+    /// Returns whether the draft changed.
+    pub fn quote(&mut self, text: &str) -> bool {
+        let text = text.replace("\r\n", "\n");
+        let text = text.strip_suffix('\n').unwrap_or(&text);
+        if self.shell.is_some() || text.is_empty() {
+            return false;
+        }
+        let quote: String = text
+            .split('\n')
+            .map(|line| match line {
+                "" => ">\n".to_owned(),
+                line => format!("> {line}\n"),
+            })
+            .collect();
+        let draft = self.area.text();
+        let gap = if draft.is_empty() || draft.ends_with("\n\n") {
+            ""
+        } else if draft.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        let end = draft.len();
+        self.area.set_cursor(end);
+        self.area.insert_str(&format!("{gap}{quote}\n"));
+        true
+    }
+
     /// Skills the palette offers as `$skill:` mentions.
     #[allow(dead_code)] // Set once the App Server lists skills.
     pub fn set_skills(&mut self, skills: Vec<palette::Skill>) {
@@ -958,6 +991,68 @@ mod tests {
         assert_eq!(
             short.handle_key(key(KeyCode::Enter)),
             Outcome::Submit("one\ntwo\nthree".into())
+        );
+    }
+
+    #[test]
+    fn a_quoted_message_joins_the_draft_and_submits_with_it() {
+        // The Web composer checks the same cases: one format for both.
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../../../web/src/features/chat/quote-cases.json"
+        ))
+        .unwrap();
+        for case in cases {
+            let field = |name: &str| case[name].as_str().unwrap().to_owned();
+            let (draft, result) = (field("draft"), field("result"));
+            let mut c = Composer::new(Vec::new());
+            c.set_draft(&draft);
+            assert_eq!(
+                c.quote(&field("message")),
+                draft != result,
+                "{}",
+                field("name")
+            );
+            assert_eq!(c.text(), result, "{}", field("name"));
+            // What Enter submits is the draft as it stands.
+            assert_eq!(
+                c.handle_key(key(KeyCode::Enter)),
+                if result.trim().is_empty() {
+                    Outcome::Handled
+                } else {
+                    Outcome::Submit(result.clone())
+                },
+                "{}",
+                field("name")
+            );
+        }
+        // A draft keeps its pasted parts; the quote goes after them.
+        let mut c = Composer::new(Vec::new());
+        let block = (1..=12)
+            .map(|n| format!("pasted line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        c.paste(&block);
+        c.quote("earlier");
+        assert_eq!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::SubmitDraft {
+                text: format!("{block}\n\n> earlier\n\n"),
+                parts: vec![
+                    DraftPart::Paste(block),
+                    DraftPart::Text("\n\n> earlier\n\n".into()),
+                ],
+            }
+        );
+        // A shell draft takes no quote: it would run as part of the command.
+        let mut c = Composer::new(Vec::new());
+        typed(&mut c, "!ls");
+        assert!(!c.quote("earlier"));
+        assert_eq!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::Shell {
+                command: "ls".into(),
+                shell: Shell::Recorded,
+            }
         );
     }
 

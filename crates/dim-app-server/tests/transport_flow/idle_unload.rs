@@ -5,6 +5,7 @@
 use super::super::deletion::eventually;
 use super::*;
 use dim_agent_runtime::{SessionIdentity, TimelineTreeControl};
+use rutis::host::CtxHost;
 use std::sync::Weak;
 use tokio::sync::Notify;
 
@@ -31,7 +32,7 @@ impl Loads {
         let loads = self.clone();
         builder.require_feature(
             Feature::new("test.loads").session("test.loads", move |names| {
-                names.part(LoadsPart(loads.clone()))
+                Ok(Box::new(LoadsPart::new(names, loads.clone())?))
             }),
         );
     }
@@ -74,46 +75,51 @@ impl Loads {
         self.0.release.notify_one();
     }
 }
-struct LoadsPart(Loads);
-impl TypedPlugin for LoadsPart {
-    type Deps = (
-        rutis::Keyed<SessionIdentity>,
-        rutis::Keyed<dyn TimelineTreeControl>,
-    );
+struct LoadsPart(
+    Loads,
+    rutis::host::Key<SessionIdentity>,
+    rutis::host::Key<dyn TimelineTreeControl>,
+);
+impl LoadsPart {
+    fn new(names: &dim_agent_runtime::Names<'_>, a0: Loads) -> rutis::Result<Self> {
+        Ok(Self(a0, names.key()?, names.key()?))
+    }
+}
+impl rutis::host::DynPlugin for LoadsPart {
     fn name(&self) -> &str {
         "test.loads"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.1.erase(), self.2.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (rutis::Keyed(identity), rutis::Keyed(tree)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let identity = ctx.require_at(&self.1)?;
+            let tree = ctx.require_at(&self.2)?;
             let state = self.0.0.clone();
             state.loads.lock().unwrap().push((
                 identity.session_id.clone(),
                 identity.restored,
                 Arc::downgrade(&tree),
             ));
-            ctx.effect(move || {
-                rutis::Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        let held = identity.unloading.is_cancelled()
-                            && state
-                                .held
-                                .lock()
-                                .unwrap()
-                                .take_if(|id| *id == identity.session_id)
-                                .is_some();
-                        if held {
-                            state.entered.notify_one();
-                            state.release.notified().await;
-                        }
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                let held = identity.unloading.is_cancelled()
+                    && state
+                        .held
+                        .lock()
+                        .unwrap()
+                        .take_if(|id| *id == identity.session_id)
+                        .is_some();
+                if held {
+                    state.entered.notify_one();
+                    state.release.notified().await;
+                }
+                Ok(())
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }

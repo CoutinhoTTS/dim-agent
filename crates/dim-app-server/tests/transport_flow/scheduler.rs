@@ -2,7 +2,7 @@
 use super::*;
 use dim_agent_capabilities::input_queue::InputQueue;
 use dim_agent_runtime::SessionIdentity;
-use rutis::Keyed;
+use rutis::host::CtxHost;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -10,26 +10,50 @@ struct AppliedInputGate {
     held: Arc<AtomicBool>,
     entered: tokio::sync::mpsc::UnboundedSender<(String, String)>,
     release: Arc<tokio::sync::Notify>,
+
+    dispatcher: rutis::host::Key<dim_agent_runtime::core::Dispatcher>,
+    queue: rutis::host::Key<InputQueue>,
+    identity: rutis::host::Key<SessionIdentity>,
 }
-impl TypedPlugin for AppliedInputGate {
-    type Deps = (
-        Keyed<dim_agent_runtime::core::Dispatcher>,
-        Keyed<InputQueue>,
-        Keyed<SessionIdentity>,
-    );
+impl AppliedInputGate {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        held: Arc<AtomicBool>,
+        entered: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+        release: Arc<tokio::sync::Notify>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            held,
+            entered,
+            release,
+            dispatcher: names.key()?,
+            queue: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for AppliedInputGate {
     fn name(&self) -> &str {
         "test.scheduler-applied-input"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![
+            self.dispatcher.erase(),
+            self.queue.erase(),
+            self.identity.erase(),
+        ]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (Keyed(dispatcher), _, Keyed(identity)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let identity = ctx.require_at(&self.identity)?;
             let release = self.release.clone();
             ctx.effect(move || {
                 release.notify_waiters();
-                rutis::Effect::Done
+                async { Ok(()) }
             })?;
             let (held, entered, release) = (
                 self.held.clone(),
@@ -49,7 +73,7 @@ impl TypedPlugin for AppliedInputGate {
                     Ok(())
                 })
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -1435,11 +1459,12 @@ async fn node_scheduler_applied_inputs_interrupted_before_consumption_expire_wit
                 dim_agent_runtime::Feature::new("SchedulerAppliedInputGate").branch(
                     "test.scheduler-applied-input",
                     move |names| {
-                        names.part(AppliedInputGate {
-                            held: held.clone(),
-                            entered: entered.clone(),
-                            release: for_plugin.clone(),
-                        })
+                        Ok(Box::new(AppliedInputGate::new(
+                            names,
+                            held.clone(),
+                            entered.clone(),
+                            for_plugin.clone(),
+                        )?))
                     },
                 ),
             );
@@ -2339,17 +2364,14 @@ async fn node_scheduler_reports_drain_native_writers_before_row_or_runtime_clean
             async {
                 let mut state = owner.watch();
                 tokio::time::timeout(Duration::from_secs(5), async {
-                    while state.borrow_and_update().state != rutis::FiberState::Unloading {
+                    while state.borrow_and_update().state != rutis::host::FiberState::Unloading {
                         state.changed().await.unwrap();
                     }
                 })
                 .await
                 .unwrap();
                 assert!(
-                    owner
-                        .effects()
-                        .iter()
-                        .any(|effect| effect.label == "sessions.input"),
+                    super::unload_held(&owner).await,
                     "native writer remains owned during cleanup"
                 );
                 assert_eq!(stored(&home)["runs"][0]["run_id"], id);
@@ -3749,7 +3771,8 @@ async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_na
         let failure = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if server.diagnostics().plugins.iter().any(|part| {
-                    part.name == "@dimcode/scheduler" && part.state == rutis::FiberState::Failed
+                    part.name == "@dimcode/scheduler"
+                        && part.state == rutis::host::FiberState::Failed
                 }) {
                     return client.rpc("schedule.list", json!({})).await;
                 }
@@ -3768,7 +3791,7 @@ async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_na
             .iter()
             .find(|part| part.name == "@dimcode/scheduler")
             .unwrap();
-        assert_eq!(owner.state, rutis::FiberState::Failed, "{owner:?}");
+        assert_eq!(owner.state, rutis::host::FiberState::Failed, "{owner:?}");
         assert!(
             format!("{:?}", owner.error).contains("invalid_data"),
             "{owner:?}"
@@ -3778,7 +3801,8 @@ async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_na
                 owner
                     .injects
                     .iter()
-                    .any(|dependency| dependency.key == rutis_bridge::session::host_key(name)),
+                    .any(|dependency| dependency.key
+                        == rutis_bridge::session::host_key(name).erase()),
                 "module metadata retains required {name}: {owner:?}"
             );
         }

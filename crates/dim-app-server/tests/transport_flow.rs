@@ -9,7 +9,8 @@ use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
 use dim_agent_types::{EventKind, ToolCall, ToolDefinition, ToolResult};
 use dim_app_server::{RunningServer, ServerConfig, ShutdownReason, serve};
 use futures_util::{SinkExt, StreamExt};
-use rutis::TypedPlugin;
+use rutis::Plugin;
+use rutis::host::CtxHost;
 use serde_json::{Value, json};
 use std::{
     sync::{
@@ -25,6 +26,21 @@ use tokio::{
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
+
+/// Whether `view` stays Unloading for a moment: a cleanup it owns, such as
+/// the drain of a native input still in flight, is waiting.
+async fn unload_held(view: &rutis::host::FiberView) -> bool {
+    let mut state = view.watch();
+    tokio::time::timeout(Duration::from_millis(200), async {
+        while state.borrow_and_update().state == rutis::host::FiberState::Unloading {
+            if state.changed().await.is_err() {
+                break;
+            }
+        }
+    })
+    .await
+    .is_err()
+}
 
 #[path = "transport_flow/approval.rs"]
 mod approval;
@@ -298,7 +314,7 @@ async fn try_launch_with(
 /// ToolRegistry and every capability downstream of it.
 #[derive(Clone, Default)]
 struct ToolReload(
-    Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
+    Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
     /// Holds the next provider start until notified.
     Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
 );
@@ -309,12 +325,12 @@ impl ToolReload {
         builder.require_feature(Feature::new("ToolHostOwner").session(
             "ToolHostOwner",
             move |names| {
-                names.part(ToolHostOwner {
+                Ok(Box::new(ToolHostOwner {
                     tool_host: names.key()?,
                     tools: tools.clone(),
                     views: views.clone(),
                     hold: hold.clone(),
-                })
+                }))
             },
         ));
     }
@@ -333,58 +349,46 @@ impl ToolReload {
     }
 }
 struct ToolHostOwner {
-    tool_host: rutis::DepKey<dim_agent_capabilities::host::ToolHost>,
+    tool_host: rutis::host::Key<dim_agent_capabilities::host::ToolHost>,
     tools: Arc<dyn ToolDriver>,
-    views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
+    views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
     hold: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
 }
-impl TypedPlugin for ToolHostOwner {
+impl Plugin for ToolHostOwner {
     type Deps = ();
     fn name(&self) -> &str {
         "ToolHostOwner"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            let view = ctx.plugin(rutis::Typed::new(ToolHostPlugin(
-                self.tool_host.clone(),
-                self.tools.clone(),
-                self.hold.clone(),
-            )));
-            self.views.lock().unwrap().push(view);
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
+        let view = ctx.plugin(ToolHostPlugin(
+            self.tool_host.clone(),
+            self.tools.clone(),
+            self.hold.clone(),
+        ));
+        self.views.lock().unwrap().push(view);
+        Ok(())
     }
 }
 struct ToolHostPlugin(
-    rutis::DepKey<dim_agent_capabilities::host::ToolHost>,
+    rutis::host::Key<dim_agent_capabilities::host::ToolHost>,
     Arc<dyn ToolDriver>,
     Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
 );
-impl TypedPlugin for ToolHostPlugin {
+impl Plugin for ToolHostPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "ToolHost"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            let hold = self.2.lock().unwrap().take();
-            if let Some(gate) = hold {
-                gate.notified().await;
-            }
-            ctx.provide_as(
-                self.0.key().clone(),
-                Arc::new(dim_agent_capabilities::host::ToolHost(self.1.clone())),
-            )?;
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
+        let hold = self.2.lock().unwrap().take();
+        if let Some(gate) = hold {
+            gate.notified().await;
+        }
+        ctx.provide_at(
+            self.0.clone(),
+            Arc::new(dim_agent_capabilities::host::ToolHost(self.1.clone())),
+        )?;
+        Ok(())
     }
 }
 fn create(tools: Value) -> Value {
@@ -414,7 +418,7 @@ async fn session_create_rejects_trace_and_rolls_back_a_failed_main_branch() {
         defaults::mock_hosts(&mut builder);
         builder.require_feature(
             Feature::new("UnreadyCapability").branch("UnreadyCapability", |_| {
-                Ok(Box::new(UnreadyCapability(true).plugin()))
+                Ok(Box::new(UnreadyCapability(true)))
             }),
         );
         builder.startup_timeout(Duration::from_secs(1));
@@ -452,26 +456,25 @@ async fn session_create_rejects_trace_and_rolls_back_a_failed_main_branch() {
 /// Exercises both loader Waiting (missing dependency) and Loading (apply
 /// has not returned).
 struct UnreadyCapability(bool);
-impl UnreadyCapability {
-    /// Waits on a gate nobody opens when the flag is set.
-    fn plugin(self) -> rutis::Typed<Self> {
-        let keys = self.0.then_some(());
-        rutis::Typed::with_keys(self, keys)
-    }
-}
-impl TypedPlugin for UnreadyCapability {
-    type Deps = dim_agent_runtime::When<rutis::Gate<UnreadyCapability>>;
+/// Waits on a gate nobody opens when the flag is set.
+impl rutis::host::DynPlugin for UnreadyCapability {
     fn name(&self) -> &str {
         "UnreadyCapability"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        if self.0 {
+            vec![rutis::host::TypeKey::of::<UnreadyCapability>()]
+        } else {
+            Vec::new()
+        }
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        _: Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
             ctx.cancellation_token().cancelled().await;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -484,7 +487,7 @@ async fn session_initialization_timeout_and_missing_dependency_fail_the_creation
                 builder.startup_timeout(Duration::from_millis(500));
                 builder.require_feature(
                     Feature::new("UnreadyCapability").session("UnreadyCapability", move |_| {
-                        Ok(Box::new(UnreadyCapability(missing_dependency).plugin()))
+                        Ok(Box::new(UnreadyCapability(missing_dependency)))
                     }),
                 );
             })
@@ -502,18 +505,28 @@ async fn session_initialization_timeout_and_missing_dependency_fail_the_creation
 
 /// A Session part that reads a branch name: its plugin registers it, and the
 /// Session that mounts it cannot build it.
-struct MisplacedPart;
-impl TypedPlugin for MisplacedPart {
-    type Deps = (rutis::Keyed<dim_agent_runtime::TimelineIdentity>,);
+struct MisplacedPart {
+    identity: rutis::host::Key<dim_agent_runtime::TimelineIdentity>,
+}
+impl MisplacedPart {
+    fn new(names: &dim_agent_runtime::Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            identity: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for MisplacedPart {
     fn name(&self) -> &str {
         "MisplacedPart"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.identity.erase()]
     }
     fn apply<'a>(
         &'a self,
         _: &'a rutis::Ctx,
-        _: Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async { Ok(rutis::Effect::Done) })
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move { Ok(rutis::host::Effect::Done) })
     }
 }
 
@@ -523,8 +536,9 @@ impl TypedPlugin for MisplacedPart {
 async fn a_required_part_that_cannot_be_built_fails_the_creation_as_a_build_failure() {
     let (server, _) = launch_with(Arc::new(MockTools), ServerConfig::default(), |builder| {
         builder.require_feature(
-            Feature::new("MisplacedPart")
-                .session("MisplacedPart", |names| names.part(MisplacedPart)),
+            Feature::new("MisplacedPart").session("MisplacedPart", |names| {
+                Ok(Box::new(MisplacedPart::new(names)?))
+            }),
         );
     })
     .await;
@@ -767,18 +781,29 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
     }
 }
 
-struct FailInterrupt;
-impl TypedPlugin for FailInterrupt {
-    type Deps = rutis::Keyed<dim_agent_runtime::Dispatcher>;
+struct FailInterrupt {
+    dispatcher: rutis::host::Key<dim_agent_runtime::Dispatcher>,
+}
+impl FailInterrupt {
+    fn new(names: &dim_agent_runtime::Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            dispatcher: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for FailInterrupt {
     fn name(&self) -> &str {
         "transport-test.fail-interrupt"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.dispatcher.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        rutis::Keyed(dispatcher): Self::Deps,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
             dispatcher.subscribe(
                 ctx,
                 "transport-test.fail-interrupt",
@@ -792,7 +817,7 @@ impl TypedPlugin for FailInterrupt {
                     })
                 },
             )?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -806,7 +831,7 @@ async fn both_transports_report_stop_failure_instead_of_success() {
     builder.require_feature(
         Feature::new("transport-test.fail-interrupt")
             .branch("transport-test.fail-interrupt", |names| {
-                names.part(FailInterrupt)
+                Ok(Box::new(FailInterrupt::new(names)?))
             }),
     );
     let config = ServerConfig {
@@ -907,31 +932,24 @@ struct ShutdownCleanup {
     release: Arc<tokio::sync::Notify>,
     fail: bool,
 }
-impl TypedPlugin for ShutdownCleanup {
+impl Plugin for ShutdownCleanup {
     type Deps = ();
     fn name(&self) -> &str {
         "ShutdownCleanup"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        (): (),
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
         let cleanup = self.clone();
-        Box::pin(async move {
-            Ok(rutis::Effect::AsyncDisposer(Box::new(move || {
-                Box::pin(async move {
-                    cleanup.entered.notify_one();
-                    cleanup.release.notified().await;
-                    if cleanup.fail {
-                        return Err(rutis::CordisError::PluginFailed(Box::new(
-                            std::io::Error::other("private cleanup detail"),
-                        )));
-                    }
-                    Ok(())
-                })
-            })))
-        })
+        ctx.effect(|| async move {
+            cleanup.entered.notify_one();
+            cleanup.release.notified().await;
+            if cleanup.fail {
+                return Err(rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    Box::new(std::io::Error::other("private cleanup detail")),
+                )));
+            }
+            Ok(())
+        })?;
+        Ok(())
     }
 }
 
@@ -959,7 +977,7 @@ async fn daemon_shutdown_reports_completion_after_cleanup_and_preserves_failures
             move |builder| {
                 builder.require_feature(
                     Feature::new("ShutdownCleanup")
-                        .session("ShutdownCleanup", move |names| names.part(owner.clone())),
+                        .session("ShutdownCleanup", move |_| Ok(Box::new(owner.clone()))),
                 );
             },
         )
@@ -1379,7 +1397,7 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));

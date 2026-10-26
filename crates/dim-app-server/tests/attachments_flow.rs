@@ -21,6 +21,7 @@ use dim_app_server::{
     storage::{SessionStore, SessionStorePlugin, SqliteStoragePlugin},
 };
 use rusqlite::Connection;
+use rutis::host::CtxHost;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::{
@@ -403,16 +404,17 @@ impl Contract {
     async fn mount(home: &Home, file_storage: bool) -> Self {
         let root = rutis::Ctx::root().unwrap();
         if file_storage {
-            (&root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-                home.0.clone(),
-            ]))))
+            (&root.plugin(FileStoragePlugin::new(vec![home.0.clone()])))
                 .await
                 .unwrap();
         }
-        (&root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(home.database()))))
+        (&root.plugin(SqliteStoragePlugin::new(home.database())))
             .await
             .unwrap();
-        (&root.plugin(rutis::Typed::new(SessionStorePlugin::new(0))))
+        let catalog = dim_app_server::catalog();
+        let build = rutis_loader::resolve::Build::default();
+        let names = dim_agent_runtime::Names::copy(&catalog, &build);
+        (&root.plugin(SessionStorePlugin::new(&names, 0).unwrap()))
             .await
             .unwrap();
         let store = root.get::<SessionStore>().unwrap();

@@ -5,7 +5,7 @@ use dim_agent_capabilities::{
     timeline_tree::TreeCommands, workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::BranchLifecycle;
-use rutis::Keyed;
+use rutis::host::CtxHost;
 use std::{
     os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
@@ -276,23 +276,35 @@ struct Probed {
 }
 struct ProbePlugin {
     probe: Probe,
+
+    tree: rutis::host::Key<TreeCommands>,
 }
-impl TypedPlugin for ProbePlugin {
-    type Deps = Keyed<TreeCommands>;
+impl ProbePlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>, probe: Probe) -> rutis::Result<Self> {
+        Ok(Self {
+            probe,
+            tree: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for ProbePlugin {
     fn name(&self) -> &str {
         "test.shell-probe"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.tree.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        Keyed(tree): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let tree = ctx.require_at(&self.tree)?;
             *self.probe.0.lock().unwrap() = Some(Probed {
                 ctx: ctx.clone(),
                 tree,
             });
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -307,30 +319,38 @@ struct CloseGate {
 }
 struct CloseGatePlugin {
     gate: Arc<CloseGate>,
+    lifecycle: rutis::host::Key<BranchLifecycle>,
 }
-impl TypedPlugin for CloseGatePlugin {
-    type Deps = Keyed<BranchLifecycle>;
+impl CloseGatePlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>, gate: Arc<CloseGate>) -> rutis::Result<Self> {
+        Ok(Self {
+            gate,
+            lifecycle: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for CloseGatePlugin {
     fn name(&self) -> &str {
         "test.shell-close-gate"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.lifecycle.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        _: Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         let gate = self.gate.clone();
-        let result = ctx.effect(|| {
-            rutis::Effect::AsyncDisposer(Box::new(move || {
-                Box::pin(async move {
-                    if gate.armed.swap(false, Ordering::SeqCst) {
-                        gate.held.notify_one();
-                        gate.release.notified().await;
-                    }
-                    Ok(())
-                })
-            }))
-        });
-        Box::pin(async move { result.map(|_| rutis::Effect::Done) })
+        Box::pin(async move {
+            ctx.effect(|| async move {
+                if gate.armed.swap(false, Ordering::SeqCst) {
+                    gate.held.notify_one();
+                    gate.release.notified().await;
+                }
+                Ok(())
+            })?;
+            Ok(rutis::host::Effect::Done)
+        })
     }
 }
 
@@ -394,19 +414,16 @@ impl Shell {
         defaults::mock_model_hosts(&mut builder);
         let probe = Probe::default();
         let slot = probe.clone();
-        builder.require_feature(Feature::new("test.shell-probe").session(
-            "test.shell-probe",
-            move |names| {
-                names.part(ProbePlugin {
-                    probe: slot.clone(),
-                })
-            },
-        ));
+        builder.require_feature(
+            Feature::new("test.shell-probe").session("test.shell-probe", move |names| {
+                Ok(Box::new(ProbePlugin::new(names, slot.clone())?))
+            }),
+        );
         let close_gate = Arc::new(CloseGate::default());
         let gate = close_gate.clone();
         builder.require_feature(
             Feature::new("test.shell-close-gate").branch("test.shell-close-gate", move |names| {
-                names.part(CloseGatePlugin { gate: gate.clone() })
+                Ok(Box::new(CloseGatePlugin::new(names, gate.clone())?))
             }),
         );
         let model = models.default_model().clone();
@@ -457,7 +474,7 @@ impl Shell {
     /// Restarts the Session's ShellInput plugin and nothing else.
     fn restart_shell_input(
         &self,
-    ) -> rutis::BoxFuture<'static, Result<(), Arc<rutis::CordisError>>> {
+    ) -> rutis::host::BoxFuture<'static, Result<(), Arc<rutis::host::ErrorKind>>> {
         let session = self.server.agent().unwrap().get_session(&self.sid).unwrap();
         let plugins = session.diagnostics().unwrap().plugins;
         let id = plugins

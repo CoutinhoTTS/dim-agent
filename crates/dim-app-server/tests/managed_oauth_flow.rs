@@ -14,6 +14,7 @@ use dim_agent_capabilities::{
         ProviderConnectionResolver,
     },
 };
+use dim_agent_runtime::Names;
 use dim_agent_types::{Message, ModelId, ModelRequest, Role};
 use dim_app_server::{
     codex_oauth::{
@@ -24,7 +25,8 @@ use dim_app_server::{
     provider::{ModelPreferences, ProviderPlugin, ProviderService},
 };
 use futures_util::StreamExt;
-use rutis::{Ctx, FiberState, FiberView};
+use rutis::Ctx;
+use rutis::host::{CtxHost, FiberState, FiberView};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -253,18 +255,14 @@ async fn codex(
     base: &str,
 ) -> (Ctx, FiberView, FiberView, Arc<OpenAICodexOAuthService>) {
     let root = Ctx::root().unwrap();
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = Names::copy(&catalog, &build);
     // The management table the process providers register with.
-    root.plugin(
-        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
-            .unwrap(),
-    );
-    let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        home.to_owned(),
-    ])));
-    let plugin = root.plugin(rutis::Typed::new(OpenAICodexOAuthPlugin::with_config(
-        0,
-        config(base, true),
-    )));
+    root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
+    let files = root.plugin(FileStoragePlugin::new(vec![home.to_owned()]));
+    let plugin =
+        root.plugin(OpenAICodexOAuthPlugin::with_config(&names, 0, config(base, true)).unwrap());
     active(&files).await;
     active(&plugin).await;
     let service = root.get::<OpenAICodexOAuthService>().unwrap();
@@ -628,24 +626,18 @@ async fn minimal_ts_legacy_records_recover_only_from_fixed_plugin_config() {
         write(&home, &minimal);
         let before = fs::read(home.join("auth.json")).unwrap();
         let root = Ctx::root().unwrap();
+        let catalog = dim_app_server::catalog();
+        let build = rutis_loader::resolve::Build::default();
+        let names = Names::copy(&catalog, &build);
         // The management table the process providers register with.
-        root.plugin(
-            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
-                .unwrap(),
-        );
-        let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-            home.clone(),
-        ])));
+        root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
+        let files = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
         let plugin = if codex_owner {
-            root.plugin(rutis::Typed::new(OpenAICodexOAuthPlugin::with_config(
-                0,
-                config(&f.base, true),
-            )))
+            root.plugin(
+                OpenAICodexOAuthPlugin::with_config(&names, 0, config(&f.base, true)).unwrap(),
+            )
         } else {
-            root.plugin(rutis::Typed::new(GrokOAuthPlugin::with_config(
-                0,
-                config(&f.base, false),
-            )))
+            root.plugin(GrokOAuthPlugin::with_config(&names, 0, config(&f.base, false)).unwrap())
         };
         active(&files).await;
         active(&plugin).await;
@@ -814,18 +806,14 @@ async fn browser_cancellation_and_external_record_changes_do_not_commit_stale_id
 async fn grok_device_flow_observes_slowdown_expiry_cancellation_and_uri_trust() {
     let (f, server, home) = fixture().await;
     let root = Ctx::root().unwrap();
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = Names::copy(&catalog, &build);
     // The management table the process providers register with.
-    root.plugin(
-        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
-            .unwrap(),
-    );
-    let files = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        home.clone(),
-    ])));
-    let plugin = root.plugin(rutis::Typed::new(GrokOAuthPlugin::with_config(
-        0,
-        config(&f.base, false),
-    )));
+    root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
+    let files = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    let plugin =
+        root.plugin(GrokOAuthPlugin::with_config(&names, 0, config(&f.base, false)).unwrap());
     active(&files).await;
     active(&plugin).await;
     let grok = root.get::<GrokOAuthService>().unwrap();
@@ -913,23 +901,19 @@ async fn grok_device_flow_observes_slowdown_expiry_cancellation_and_uri_trust() 
 #[tokio::test]
 async fn managed_provider_selection_http_recovery_and_restart_flow() {
     let (f, server, home) = fixture().await;
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = Names::copy(&catalog, &build);
     let (root, _, _, codex) = codex(&home, &f.base).await;
-    let grok_plugin = root.plugin(rutis::Typed::new(GrokOAuthPlugin::with_config(
-        0,
-        config(&f.base, false),
-    )));
-    let dim = root.plugin(rutis::Typed::new(
-        dim_app_server::managed_provider::ManagedProvidersPlugin,
+    let grok_plugin =
+        root.plugin(GrokOAuthPlugin::with_config(&names, 0, config(&f.base, false)).unwrap());
+    let dim =
+        root.plugin(dim_app_server::managed_provider::ManagedProvidersPlugin::new(&names).unwrap());
+    let sqlite = root.plugin(dim_app_server::storage::SqliteStoragePlugin::new(
+        home.join("native.sqlite"),
     ));
-    let sqlite = root.plugin(rutis::Typed::new(
-        dim_app_server::storage::SqliteStoragePlugin::new(home.join("native.sqlite")),
-    ));
-    let provider_plugin = root.plugin(
-        ProviderPlugin::default()
-            .typed(&dim_app_server::catalog())
-            .unwrap(),
-    );
-    let aimux = root.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin));
+    let provider_plugin = root.plugin(ProviderPlugin::new(&names).unwrap());
+    let aimux = root.plugin(dim_agent_aimux::AimuxPlugin);
     for plugin in [&grok_plugin, &dim, &sqlite, &provider_plugin, &aimux] {
         active(plugin).await;
     }
@@ -1337,22 +1321,14 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
     drop(db);
     let (restarted, _, _, _) = self::codex(&home, &f.base).await;
     let plugins = [
-        restarted.plugin(rutis::Typed::new(GrokOAuthPlugin::with_config(
-            0,
-            config(&f.base, false),
-        ))),
-        restarted.plugin(rutis::Typed::new(
-            dim_app_server::managed_provider::ManagedProvidersPlugin,
+        restarted.plugin(GrokOAuthPlugin::with_config(&names, 0, config(&f.base, false)).unwrap()),
+        restarted
+            .plugin(dim_app_server::managed_provider::ManagedProvidersPlugin::new(&names).unwrap()),
+        restarted.plugin(dim_app_server::storage::SqliteStoragePlugin::new(
+            home.join("native.sqlite"),
         )),
-        restarted.plugin(rutis::Typed::new(
-            dim_app_server::storage::SqliteStoragePlugin::new(home.join("native.sqlite")),
-        )),
-        restarted.plugin(
-            ProviderPlugin::default()
-                .typed(&dim_app_server::catalog())
-                .unwrap(),
-        ),
-        restarted.plugin(rutis::Typed::new(dim_agent_aimux::AimuxPlugin)),
+        restarted.plugin(ProviderPlugin::new(&names).unwrap()),
+        restarted.plugin(dim_agent_aimux::AimuxPlugin),
     ];
     for plugin in &plugins {
         active(plugin).await;
@@ -1403,6 +1379,9 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
 #[tokio::test]
 async fn login_retains_ts_claim_precedence_and_bounds_pending_attempts() {
     let (f, server, home) = fixture().await;
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = Names::copy(&catalog, &build);
     let (root, files, plugin, service) = codex(&home, &f.base).await;
     let cancel = CancellationToken::new();
     login(&service, "ts-claims").await;
@@ -1422,10 +1401,8 @@ async fn login_retains_ts_claim_precedence_and_bounds_pending_attempts() {
         .unwrap();
     service.begin_browser(&cancel).await.unwrap();
 
-    let grok_plugin = root.plugin(rutis::Typed::new(GrokOAuthPlugin::with_config(
-        0,
-        config(&f.base, false),
-    )));
+    let grok_plugin =
+        root.plugin(GrokOAuthPlugin::with_config(&names, 0, config(&f.base, false)).unwrap());
     active(&grok_plugin).await;
     let grok = root.get::<GrokOAuthService>().unwrap();
     *f.device_response.lock().unwrap() = Some(json!({
