@@ -25,6 +25,7 @@ mod session_host;
 mod ui;
 mod update;
 mod usage;
+mod web_install;
 mod wire;
 
 use args::{Action, Options};
@@ -409,6 +410,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         }
         return open_tui_leaf(root, &options).await;
     }
+    if matches!(options.action, Action::WebInstall) {
+        return web_install::install(&options.home).await;
+    }
     if let Action::Web {
         port,
         open_browser,
@@ -624,6 +628,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         | Action::DaemonStop
         | Action::Timeline { .. }
         | Action::Web { .. }
+        | Action::WebInstall
         | Action::DefaultTerminalMode { .. } => unreachable!(),
     }
 }

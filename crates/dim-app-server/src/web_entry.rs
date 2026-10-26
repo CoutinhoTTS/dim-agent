@@ -172,24 +172,27 @@ impl WebEntry {
         port: Option<u16>,
         holders: HashSet<String>,
     ) -> Result<Open, RpcError> {
-        let assets = match &self.assets {
-            Some(path) => path
-                .canonicalize()
-                .ok()
-                .filter(|path| path.join("index.html").is_file())
-                .map(Assets::Directory),
-            None => EMBEDDED
-                .iter()
-                .any(|(path, ..)| *path == "/index.html")
-                .then_some(Assets::Embedded),
-        }
-        .ok_or_else(|| {
-            RpcError::app(
-                -32000,
-                "web_assets_missing",
-                "This App Server has no Web workspace",
-            )
-        })?;
+        // The directory is looked at on each open, so a frontend installed
+        // while the daemon runs is served without a restart.
+        let assets = self
+            .assets
+            .as_ref()
+            .and_then(|path| path.canonicalize().ok())
+            .filter(|path| path.join("index.html").is_file())
+            .map(Assets::Directory)
+            .or_else(|| {
+                EMBEDDED
+                    .iter()
+                    .any(|(path, ..)| *path == "/index.html")
+                    .then_some(Assets::Embedded)
+            })
+            .ok_or_else(|| {
+                RpcError::app(
+                    -32000,
+                    "web_assets_missing",
+                    "This App Server has no Web workspace",
+                )
+            })?;
         if let Assets::Directory(root) = &assets {
             check_protocol(root)?;
         }

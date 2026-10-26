@@ -223,22 +223,16 @@ impl WebHold {
         };
         let opened: Opened = match client.typed("web.open", params).await {
             Ok(opened) => opened,
-            Err(error) if client::app_error(&error) == Some("web_assets_missing") => {
-                // A missing optional package is not an error of this
-                // command: say how to get it and exit 1 for scripts.
+            Err(error) => {
+                // A frontend that is missing or of another version is not
+                // an error of this command: say how to get it, exit 1.
                 let executable = std::env::current_exe().unwrap_or_default();
-                let (problem, fix) = client::web_missing(&executable, &self.home);
+                let Some((problem, fix)) = client::web_hint(&error, &executable, &self.home) else {
+                    return Err(error);
+                };
                 eprintln!("{problem}.\n{fix}.");
                 return Ok(false);
             }
-            Err(error) if client::app_error(&error) == Some("web_assets_incompatible") => {
-                return Err(format!(
-                    "{error}; install the dimcode-web package of version {}",
-                    env!("CARGO_PKG_VERSION")
-                )
-                .into());
-            }
-            Err(error) => return Err(error),
         };
         let fragment = opened.url.split_once('#').map_or("", |(_, f)| f);
         let url = format!("http://{}/", opened.address);

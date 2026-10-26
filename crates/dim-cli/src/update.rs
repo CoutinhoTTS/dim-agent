@@ -55,6 +55,13 @@ pub fn enabled() -> bool {
         && !is("DIMCODE_AUTOUPDATE", "0")
 }
 
+/// The npm registry, or the mirror named in `DIMCODE_NPM_REGISTRY`.
+pub fn registry() -> String {
+    std::env::var("DIMCODE_NPM_REGISTRY")
+        .map(|registry| registry.trim_end_matches('/').to_owned())
+        .unwrap_or_else(|_| REGISTRY.to_owned())
+}
+
 /// The npm package this copy was started from; the launcher names it.
 fn package() -> String {
     std::env::var("DIMCODE_NPM_PACKAGE").unwrap_or_else(|_| PACKAGE.to_owned())
@@ -154,13 +161,6 @@ fn installer(exe: &Path, package: &str, version: &str) -> Option<Install> {
     })
 }
 
-/// How to install this version again the way this copy was installed, which
-/// also brings back an optional package the first install missed, such as
-/// `dimcode-web`; `None` for a copy no package manager installed.
-pub fn reinstall(exe: &Path) -> Option<String> {
-    installer(exe, &package(), env!("CARGO_PKG_VERSION")).map(|install| install.command_line())
-}
-
 /// npm and bun reinstall a package in place, so this executable is the
 /// updated one afterwards; pnpm, yarn and volta move it, so the package's
 /// command on `PATH` starts it.
@@ -179,7 +179,7 @@ pub async fn available(home: &Path, current: &str) -> Option<Offer> {
     let package = package();
     let client = reqwest::Client::builder().timeout(TIMEOUT).build().ok()?;
     let tags: serde_json::Value = client
-        .get(format!("{REGISTRY}/-/package/{package}/dist-tags"))
+        .get(format!("{}/-/package/{package}/dist-tags", registry()))
         .send()
         .await
         .ok()?

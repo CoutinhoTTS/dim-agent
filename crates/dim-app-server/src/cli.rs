@@ -161,6 +161,12 @@ pub fn run_with(
     if config.product_home.is_some() {
         config.managed_provider = managed_provider;
     }
+    // Without `--web-assets`, the product home's `web/`, where `dimcode web
+    // install` puts the frontend; the entry looks at it on each open
+    // (web-workspace.md §2.4).
+    if config.web_assets.is_none() {
+        config.web_assets = config.product_home.as_ref().map(|home| home.join("web"));
+    }
     if let Some(path) = session_rows {
         let (Some(node), Some(js_runtime)) = (node, js_runtime) else {
             return Err("--session-rows requires --node and --js-runtime".into());

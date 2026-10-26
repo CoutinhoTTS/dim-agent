@@ -393,32 +393,28 @@ fn web_assets_in(configured: Option<OsString>, executable: &Path, home: &Path) -
         .find(|directory| directory.join("index.html").is_file())
 }
 
-/// Why the daemon has no Web workspace and how to fix it, as two sentences
-/// without their full stops. A daemon started before the frontend was
-/// installed keeps serving without it until it restarts; otherwise the
-/// frontend is installed the way this copy was, or unpacked from its archive.
-pub fn web_missing(executable: &Path, home: &Path) -> (String, String) {
-    if web_assets(executable, home).is_some() {
-        return (
+/// What to tell the user when the daemon cannot serve the Web workspace, as
+/// two sentences without their full stops; `None` for any other failure. A
+/// daemon started with no frontend while the CLI now finds one beside the
+/// executable or in `DIMCODE_WEB_ASSETS` keeps serving without it until it
+/// restarts; otherwise `dimcode web install` brings this version's.
+pub fn web_hint(error: &crate::Error, executable: &Path, home: &Path) -> Option<(String, String)> {
+    let install = "Install it with `dimcode web install`".to_owned();
+    match app_error(error)? {
+        "web_assets_missing" if web_assets(executable, home).is_some() => Some((
             "The Web workspace was installed after the daemon started".into(),
             "Restart the daemon with `dimcode daemon stop`, then try again".into(),
-        );
-    }
-    let fix = match crate::update::reinstall(executable) {
-        Some(command) => format!("Install it with `{command}`"),
-        None => {
-            let beside = executable.parent().and_then(Path::parent).map_or_else(
-                || "../web".to_owned(),
-                |root| root.join("web").display().to_string(),
-            );
+        )),
+        "web_assets_missing" => Some(("The Web workspace is not installed".into(), install)),
+        "web_assets_incompatible" => Some((
             format!(
-                "Install it by unpacking dimcode-web-{}.tar.gz so that index.html is in {beside} or {}",
-                env!("CARGO_PKG_VERSION"),
-                home.join("web").display()
-            )
-        }
-    };
-    ("The Web workspace is not installed".into(), fix)
+                "The installed Web workspace does not fit dimcode {}",
+                env!("CARGO_PKG_VERSION")
+            ),
+            install,
+        )),
+        _ => None,
+    }
 }
 
 /// The name the daemon shows in process lists.
