@@ -8,7 +8,7 @@ Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[�
 
 ## 1. 现状
 
-本轮大部分 Rust 前置机制已合入，包括 C1/C2/C3、S1/S2、S4、S5a/S5c、S6/S7、S8a、S10/S11、R1 和 E1/E2；C7、S3 已确认无需新增机制。C4 工具/方法绑定、原生 Session 广播、rutis 0.11 升级，以及 S8b Rust 服务、C4 行来源声明、TypeScript owner 读写和 Settings 事件已合入；C6 广播通知与 S5b 标题元数据也已合入。C5 通用导出实现 #196 及 rutis 0.12.1 升级 #195 已合入；S8b 通过 #185 撤销共享 `credentials` 服务，密钥由各插件自己处理（settings-service §1.2）。插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)）的 PC-P1–P3d、PC-R6 与 PC-P4（#376）已于 2026-10-24 至 10-25 合入，#364 随 R6 的 #407 关闭；外部插件以一行注册其部件的第二种形式（#403）跟随 rutis#642（#405），仍未完成。插件按自己需要的接口推进，设计、spike、研究合入不表示产品实现完成。已有、可直接扩展的基础：
+本轮大部分 Rust 前置机制已合入，包括 C1/C2/C3、S1/S2、S4、S5a/S5c、S6/S7、S8a、S10/S11、R1 和 E1/E2；C7、S3 已确认无需新增机制。C4 工具/方法绑定、原生 Session 广播、rutis 0.11 升级，以及 S8b Rust 服务、C4 行来源声明、TypeScript owner 读写和 Settings 事件已合入；C6 广播通知与 S5b 标题元数据也已合入。C5 通用导出实现 #196 及 rutis 0.12.1 升级 #195 已合入；S8b 通过 #185 撤销共享 `credentials` 服务，密钥由各插件自己处理（settings-service §1.2）。插件按自己需要的接口推进，设计、spike、研究合入不表示产品实现完成。已有、可直接扩展的基础：
 
 | 已有 | 位置 | 对应工作项 |
 | --- | --- | --- |
