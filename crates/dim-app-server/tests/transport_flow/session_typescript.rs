@@ -1218,13 +1218,20 @@ pub(super) fn setup() -> (
 /// TypeScript §2.1, ADR 006 D3).
 pub(super) async fn plugin_active(server: &RunningServer, row: &Value) {
     let name = row["name"].as_str().unwrap();
+    // The process loader, whose children are the plugin rows; it is Active
+    // once `serve` returns.
+    let loader = server
+        .diagnostics()
+        .plugins
+        .into_iter()
+        .find(|plugin| plugin.name == "rutis-loader")
+        .expect("the process loader")
+        .id;
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let plugins = server.diagnostics().plugins;
-            let loader = plugins.iter().find(|p| p.name == "rutis-loader");
-            if plugins.iter().any(|plugin| {
+            if server.diagnostics().plugins.iter().any(|plugin| {
                 plugin.name == name
-                    && plugin.parent == loader.map(|loader| loader.id)
+                    && plugin.parent == Some(loader)
                     && plugin.state == rutis::host::FiberState::Active
             }) {
                 break;
