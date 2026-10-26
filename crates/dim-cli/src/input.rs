@@ -40,7 +40,8 @@ impl Input {
             return Err(io::Error::last_os_error().into());
         }
         let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
-        let fd = tokio::io::unix::AsyncFd::new(fd)?;
+        // SAFETY: AsyncFd owns the descriptor; Input never closes or replaces it while registered.
+        let fd = unsafe { tokio::io::unix::AsyncFd::register(fd) }.map_err(io::Error::from)?;
         Ok(Self {
             fd,
             buffer: Vec::new(),
