@@ -20,6 +20,7 @@ export type AgentEvent = {
 }
 
 export type Status = 'active' | 'paused' | 'completed' | 'blocked'
+export type Judge = 'model' | 'evaluator'
 export type PauseReason = 'user' | 'interrupted' | 'limit' | 'turn_failed'
 
 const REASONS: Record<Exclude<PauseReason, 'user'>, string> = {
@@ -79,8 +80,8 @@ function cleared(branch: string, attrs: Record<string, string>, text: string): I
 
 /** The change inputs (A.5); each is one `input/message`. */
 export const changes = {
-  set: (branch: string, objective: string) => input([
-    block({ kind: 'goal', op: 'set', branch }, [
+  set: (branch: string, objective: string, judge: Judge = 'model') => input([
+    block({ kind: 'goal', op: 'set', ...(judge === 'evaluator' ? { judge } : {}), branch }, [
       'Objective:', escape(objective), '',
       `This is the user's standing goal for branch ${branch}. If you are working on a delegated sub-task started from branch ${branch}, treat this goal as background and do not call goal_update.`,
     ], OBJECTIVE_KEY),
@@ -177,6 +178,16 @@ export class Fold {
    * inherited and read from history.
    */
   copiedLive: boolean | undefined
+  /**
+   * The judge of the latest `set`, kept by `edit` (Pursuit §3): a `judge="evaluator"`
+   * `set` marks it, and any other objective block leaves it as it was.
+   */
+  judge: Judge = 'model'
+  /**
+   * Under the evaluator judge, the worker's `completed` blocks: a request, not
+   * a status change (A16). Each carries the summary the evaluator is shown.
+   */
+  requests: { sequence: bigint; summary: string }[] = []
   private interrupts: bigint[] = []
   private continuations: bigint[] = []
   private decided = new Set<string>()
@@ -186,7 +197,9 @@ export class Fold {
 
   /** Applies one consumed local event; `input/deleted` refolds without the input. */
   apply(event: AgentEvent): void {
-    // The fold starts over at the branch's own opening.
+    // The fold starts over at the branch's own opening; the events before it
+    // are inherited or copied and never contribute a goal (§2, A11). Emptying
+    // the event list here is what makes a refold replay from the opening.
     if (isOpening(event)) {
       const copiedLive = event.type === 'session' ? this.objective !== undefined || this.status !== undefined : undefined
       Object.assign(this, new Fold())
@@ -230,14 +243,29 @@ export class Fold {
           if (!attrs || (raw.key !== OBJECTIVE_KEY && raw.key !== STATUS_KEY)) continue
           this.localBlocks++
           if (raw.key === OBJECTIVE_KEY) {
-            this.objective = raw.retire ? undefined : value(raw.text, 'Objective:')
-          } else if (raw.retire) {
-            this.status = undefined
-          } else {
-            this.status = statusOf(attrs, raw.text)
-            if (this.status.status === 'active' && (attrs.op === 'resume' || attrs.kind === 'status')) {
-              this.active = sequence
+            if (raw.retire) {
+              this.objective = undefined
+              this.judge = 'model'
+            } else {
+              this.objective = value(raw.text, 'Objective:')
+              if (attrs.op === 'set') this.judge = attrs.judge === 'evaluator' ? 'evaluator' : 'model'
             }
+            continue
+          }
+          if (raw.retire) {
+            this.status = undefined
+            continue
+          }
+          const status = statusOf(attrs, raw.text)
+          if (status.status === 'completed' && attrs.by !== 'evaluator' && this.judge === 'evaluator') {
+            // A16: under the evaluator judge the worker's `completed` is a
+            // request; only the evaluator completes the goal (§4.1).
+            this.requests.push({ sequence, summary: status.summary ?? '' })
+            continue
+          }
+          this.status = status
+          if (status.status === 'active' && (attrs.op === 'resume' || attrs.kind === 'status')) {
+            this.active = sequence
           }
         }
         return
@@ -274,6 +302,10 @@ export class Fold {
   get turnOpen(): boolean {
     return this.turnStart > (this.turnEnd?.sequence ?? -1n)
   }
+  /** The worker's completion request inside the turn that ends at `sequence` (§4.1). */
+  requestInTurn(sequence: bigint): { sequence: bigint; summary: string } | undefined {
+    return this.requests.filter(request => request.sequence > this.turnStart && request.sequence < sequence).at(-1)
+  }
   isDecided(sequence: bigint): boolean {
     return this.decided.has(String(sequence))
   }
@@ -284,7 +316,11 @@ export type Decision =
   | { write: 'pause'; reason: Exclude<PauseReason, 'user'> }
   | undefined
 
-/** The decision for the latest `turn/end` (A.4), over the fold as consumed. */
+/**
+ * The decision for the latest `turn/end` (A.4), over the fold as consumed. The
+ * evaluator decision, when it applies, comes first: `decideEvaluation` takes
+ * it before the caller reads the continuation limit.
+ */
 export function decideTurnEnd(fold: Fold, limit: number): Decision {
   const end = fold.turnEnd
   if (!end || fold.isDecided(end.sequence) || !fold.running) return undefined
@@ -299,4 +335,17 @@ export function decideTurnEnd(fold: Fold, limit: number): Decision {
 export function decideInterrupt(fold: Fold, sequence: bigint): Decision {
   if (fold.isDecided(sequence) || !fold.running || fold.active >= sequence) return undefined
   return { write: 'pause', reason: 'interrupted' }
+}
+
+/**
+ * Whether the turn ending at `sequence` creates an evaluator instead of
+ * continuing (Pursuit §4.1): Goal's C1–C4 hold under the evaluator judge and
+ * the turn carries the worker's completion request. It needs no Settings, so
+ * the caller takes it before reading the continuation limit.
+ */
+export function decideEvaluation(fold: Fold, sequence: bigint): boolean {
+  const end = fold.turnEnd
+  if (!end || end.sequence !== sequence || fold.isDecided(sequence) || !fold.running) return false
+  if (fold.interrupted || end.status !== 'completed' || fold.turnOpen) return false
+  return fold.judge === 'evaluator' && fold.requestInTurn(sequence) !== undefined
 }

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { load } from '@arcships/rutis/testing'
 import goalBranch from './branch.ts'
-import { Fold, changes, decideInterrupt, decideTurnEnd, writes } from './goal.ts'
+import { Fold, changes, decideEvaluation, decideInterrupt, decideTurnEnd, writes } from './goal.ts'
 
 const B = 'main'
 
@@ -376,4 +376,93 @@ test('D12: set, completed, blocked: the current status is blocked with the secon
   branch.input(changes.report(B, 'completed', 'shipped'))
   branch.input(changes.report(B, 'blocked', 'needs credentials'))
   assert.deepEqual(branch.fold.status, { status: 'blocked', summary: 'needs credentials' })
+})
+
+test('Pursuit 1: set records the judge, edit keeps it, and a completion is a request under it', () => {
+  const branch = new Branch()
+  const set = branch.input(changes.set(B, 'ship it', 'evaluator'))
+  assert.match(set.data.blocks[0].text, /^<dim-goal kind="goal" op="set" judge="evaluator" branch="main">/)
+  assert.equal(branch.fold.judge, 'evaluator')
+  branch.input(changes.edit(B, 'ship it twice'))
+  assert.equal(branch.fold.judge, 'evaluator', 'edit keeps the judge')
+  // Goal's continuations are unchanged under the evaluator judge.
+  branch.turn([set])
+  assert.deepEqual(decideTurnEnd(branch.fold, 20), { write: 'continuation', count: 1 })
+  const continuation = branch.write(decideTurnEnd(branch.fold, 20), branch.fold.turnEnd.sequence, 20)
+  // A turn whose worker reports completion keeps the status active, and the
+  // request moves neither `A` nor the count.
+  branch.commit('turn', 'start', {})
+  branch.consume(continuation)
+  const request = branch.input(changes.report(B, 'completed', 'all tests pass'))
+  const end = branch.commit('turn', 'end', { status: 'completed' })
+  assert.equal(branch.fold.status.status, 'active')
+  assert.equal(branch.fold.running, true)
+  assert.deepEqual(branch.fold.requests, [{ sequence: request.sequence, summary: 'all tests pass' }])
+  assert.equal(branch.fold.count, 1)
+  assert.equal(decideEvaluation(branch.fold, end.sequence), true)
+  // The refold of the same history takes the same decision (Pursuit 6).
+  const refold = new Fold()
+  for (const event of branch.events) refold.apply(event)
+  assert.equal(refold.judge, 'evaluator')
+  assert.equal(decideEvaluation(refold, end.sequence), true)
+  // A later turn carries no request: its end creates no evaluator.
+  assert.equal(decideEvaluation(branch.fold, branch.turn([]).sequence), false)
+  // `clear` retires the judge with the goal, and a later `set` chooses again.
+  branch.input(changes.clear(B))
+  assert.equal(branch.fold.judge, 'model')
+  branch.input(changes.set(B, 'again', 'evaluator'))
+  branch.input(changes.set(B, 'again'))
+  assert.equal(branch.fold.judge, 'model')
+})
+
+test('Pursuit 3: a worker blocked, an interrupt, a user pause and a limit pause create no evaluator', () => {
+  // A worker's `blocked` stands: the goal is blocked and its turn end decides nothing.
+  let branch = new Branch()
+  branch.input(changes.set(B, 'ship it', 'evaluator'))
+  branch.commit('turn', 'start', {})
+  branch.input(changes.report(B, 'blocked', 'needs credentials'))
+  let end = branch.commit('turn', 'end', { status: 'completed' })
+  assert.equal(branch.fold.running, false)
+  assert.equal(decideEvaluation(branch.fold, end.sequence), false)
+  assert.equal(decideTurnEnd(branch.fold, 20), undefined)
+  // An interrupt before the turn end pauses the goal; its pause decides the turn.
+  branch = new Branch()
+  branch.input(changes.set(B, 'ship it', 'evaluator'))
+  branch.commit('turn', 'start', {})
+  const interrupt = branch.interrupt()
+  branch.input(changes.report(B, 'completed', 'done'))
+  end = branch.commit('turn', 'end', { status: 'cancelled' })
+  assert.equal(decideEvaluation(branch.fold, end.sequence), false)
+  assert.deepEqual(decideInterrupt(branch.fold, interrupt.sequence), { write: 'pause', reason: 'interrupted' })
+  // A user pause before the turn end leaves nothing to evaluate.
+  branch = new Branch()
+  branch.input(changes.set(B, 'ship it', 'evaluator'))
+  branch.commit('turn', 'start', {})
+  branch.input(changes.pause(B))
+  branch.input(changes.report(B, 'completed', 'done'))
+  end = branch.commit('turn', 'end', { status: 'completed' })
+  assert.equal(decideEvaluation(branch.fold, end.sequence), false)
+  // A limit pause is Goal's; a request in a later turn does not revive it.
+  branch = new Branch()
+  branch.input(changes.set(B, 'ship it', 'evaluator'))
+  branch.input(writes.pause(B, 'limit', 1n))
+  branch.commit('turn', 'start', {})
+  branch.input(changes.report(B, 'completed', 'done'))
+  end = branch.commit('turn', 'end', { status: 'completed' })
+  assert.deepEqual(branch.fold.status, { status: 'paused', reason: 'limit' })
+  assert.equal(decideEvaluation(branch.fold, end.sequence), false)
+})
+
+test('Pursuit 9: the model judge is unchanged: a completion is the status, not a request', () => {
+  const branch = started()
+  const set = branch.events[0]
+  assert.match(set.data.blocks[0].text, /^<dim-goal kind="goal" op="set" branch="main">/)
+  branch.commit('turn', 'start', {})
+  branch.input(changes.report(B, 'completed', 'done'))
+  const end = branch.commit('turn', 'end', { status: 'completed' })
+  assert.deepEqual(branch.fold.status, { status: 'completed', summary: 'done' })
+  assert.deepEqual(branch.fold.requests, [])
+  assert.equal(branch.fold.judge, 'model')
+  assert.equal(decideEvaluation(branch.fold, end.sequence), false)
+  assert.equal(decideTurnEnd(branch.fold, 20), undefined)
 })
