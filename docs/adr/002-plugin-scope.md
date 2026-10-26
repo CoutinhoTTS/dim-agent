@@ -9,6 +9,8 @@ amended on 2026-10-26 to name the tool mechanism as built: a part registers a to
 `toolRegistry` (ADR 006 D4), and `toolContribution`, `SessionToolSource` and `Contributions<T>` are
 gone.
 
+D4's location of structural configuration is corrected by [ADR 007](007-plugin-configuration.md).
+
 ## Context
 
 Dim assembles plugins at three scopes: the process, a Session, and a branch
@@ -76,7 +78,7 @@ crash is an infrastructure failure, like an App Server crash, and nothing is des
 
 | Kind | Examples | Location | On change |
 | --- | --- | --- | --- |
-| Structural plugin configuration | installed or not, which plugin a name uses, turned off or not, package paths | PluginManager's `plugins.json`, carried out on loader rows ([PluginManager](../design/plugins/PluginManager.md)) | may reload the row |
+| Structural plugin configuration | enable or disable, runtime and package paths, node binding | loader rows (issue #3 editable layer) | may reload the row |
 | Business configuration | search services, notification channels, hook rules, scheduled jobs, workflow definitions, each consumer's auxiliary model choice, MCP server and Skill documents, external agent entries and bridges, gateway listener settings, OCR component path, exec shell | the owning plugin's business source (Settings source or the plugin's own store) | data update plus notification; read at use time; no reload |
 
 ### D5. Contracts are language-neutral

@@ -273,7 +273,7 @@ PluginManager is not a Capability: it has no Timeline state, writes no Timeline 
 | ADR 002 D3 (dependencies follow scope) | Process dependencies only; owners are optional reads, so their reload does not reload PluginManager. |
 | ADR 002 D4 (structural vs business configuration) | Structural configuration (installed, used, off) is `plugins.json`; business configuration stays in each plugin's Settings sources, registered by the plugin. |
 | ADR 002 D5 (language-neutral contracts) | Methods and owner operations are JSON contracts. |
-| ADR 006 D3 (a rutis plugin is one row) | Each plugin with code is one process row, created, turned off and reloaded by PluginManager's commands; content is not a row. |
+| ADR 006 D3 as corrected by ADR 007 (a plugin's code is one row) | Each plugin with code is one process row, created, turned off and reloaded by PluginManager's commands; content is not a row ([ADR 007](../../adr/007-plugin-configuration.md)). |
 
 ## 9. Requirements raised to mechanism owners
 

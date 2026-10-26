@@ -273,7 +273,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | ADR 002 D3（依赖跟随作用域） | 只有进程依赖；所有者是可选读取，所以它们重新加载时不会重新加载 PluginManager。 |
 | ADR 002 D4（结构配置与业务配置） | 结构配置（已安装、使用中、已关闭）在 `plugins.json` 中；业务配置留在每个插件的 Settings 来源中，由插件自己登记。 |
 | ADR 002 D5（语言中立的契约） | 方法和所有者操作都是 JSON 契约。 |
-| ADR 006 D3（一个 rutis 插件是一行） | 每个带代码的插件是一个进程行，由 PluginManager 的命令创建、关闭和重新加载；内容不是行。 |
+| ADR 006 D3，由 ADR 007 纠正（插件的代码是一行） | 每个带代码的插件是一个进程行，由 PluginManager 的命令创建、关闭和重新加载；内容不是行（[ADR 007](../../adr/007-plugin-configuration.md)）。 |
 
 ## 9. 向机制所有者提出的需求
 

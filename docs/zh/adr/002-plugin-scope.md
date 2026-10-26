@@ -7,6 +7,8 @@ Dim 的运行时服务进入命名目录，部件的位置就是它所在 loader
 2026-10-26 修订 D2 与 D5，按实现后的机制描述工具：部件向 Session 的 `toolRegistry` 注册工具
 （ADR 006 D4）；`toolContribution`、`SessionToolSource` 与 `Contributions<T>` 已移除。
 
+D4 中结构性配置的存放位置由 [ADR 007](007-plugin-configuration.md) 纠正。
+
 ## 背景
 
 Dim 在三个作用域装配插件：进程、Session 和分支
@@ -66,7 +68,7 @@ ToolRegistry、Rpc，以及 Mcp、SkillsCatalog 这类内容所有者）从不�
 
 | 类别 | 示例 | 位置 | 变更时 |
 | --- | --- | --- | --- |
-| 结构性插件配置 | 是否安装、一个名字用哪个插件、是否关闭、包路径 | PluginManager 的 `plugins.json`，由它对 loader 行执行（[PluginManager](../design/plugins/PluginManager.md)） | 可能重载该行 |
+| 结构性插件配置 | 启用或禁用、运行时与包路径、节点绑定 | loader 行（issue #3 可编辑层） | 可能重载该行 |
 | 业务配置 | 搜索服务、通知渠道、Hook 规则、定时任务、工作流定义、各使用者的辅助模型选择、MCP 服务器与 Skill 文档、外部 Agent 条目与桥接、网关监听设置、OCR 组件路径、exec shell | 所属插件的业务来源（Settings 来源或插件自有存储） | 数据更新并通知；使用时读取；不重载 |
 
 ### D5. 合同语言中立
