@@ -67,7 +67,7 @@ verified bindings.
 
 | Surface | Current implementation and consequence |
 | --- | --- |
-| Tool / process package | C4 supports ordinary Session tool rows; tool attachment and provider generations follow the current feature binding (§1.1). A row without a group in `ServerConfig.session_typescript.rows` installs the process owner in the same runtime. The Session tool declares `workflowRuns` in `definePlugin.inject` (§1.1); the optional package supplies these rows. |
+| Tool / process package | C4 supports Session parts registered as definitions with `partRegistry`; tool attachment and provider generations follow the current feature binding (§1.1). One row in `ServerConfig.session_typescript.rows` installs the process owner, which registers the Session tool's definition; each Session mounts a copy in the same runtime. The Session tool declares `workflowRuns` in `definePlugin.inject` (§1.1); the optional package supplies the row. |
 | Management | The process row injects `managementMethods` and registers `workflow` from its apply; the registration uses native per-call admission and `report`/`drain`. The package implements all five methods. |
 | Definitions / Settings | Settings owner read/update/CAS/events and generated workflowFiles are delivered. The source, file authority and package identity follow the accepted native access contract; §1.3 fixes their package placement. The package supplies the source schema and A.1 semantic diagnostics. No direct filesystem access. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `workflow/` before enabling the row; a missing parent returns `io` before the transaction callback. Inner v2, unchanged-byte v1 rejection and deferred migration remain A.4. |
@@ -81,27 +81,29 @@ A17 is confirmed: capture the cap at first stage admission. Permission changes b
 
 No runtime, facade, loader, event format or rutis change. New business behavior belongs to the Workflow package; source, tool and management namespace are consumed by Settings, ToolRegistry and operators. `workflowRuns` connects the feature's actual two scopes. No registry, readiness service, new context path or App Server business module is added.
 
-### 1.3 Concrete package rows
+### 1.3 Concrete package row
 
 The optional package lives at `runtime/plugins/workflow`, named
-`@dimcode/workflow`. Its root module owns runs; `./session` provides the Session
-tool. The package supplies complete `process.json` and `session.json` rows for
-the existing `SessionTypeScriptConfig.rows` array; `session.json` declares `"group": "session"` and
-`process.json` no group.
-The package includes both rows; hosts install them explicitly. No default CLI
-installation or PluginManager implementation is included.
+`@dimcode/workflow`. Its root module owns runs and, from its apply, registers
+`session.ts` with `partRegistry` as the Session definition `WorkflowSession`,
+which provides the Session tool. The package supplies one complete
+`process.json` row for the existing `SessionTypeScriptConfig.rows` array; hosts
+install it explicitly. No default CLI installation or PluginManager
+implementation is included.
 
-| Row field | Process row | Session row |
-| --- | --- | --- |
-| `id` | `workflow` | `workflow-session` |
-| `name` | `@dimcode/workflow` | `@dimcode/workflow/session` |
-| `config` | `{packages:[{id,root}, ...]}`; an empty list installs no package definitions | `{}` |
-| `inject` | `sessions`, `settings`, `pluginFiles`, `workflowFiles`, `managementMethods` | `workflowRuns`, `toolRegistry` |
-| `provides` | `workflowRuns: {call:"async"}`; apply registers `workflow` with `managementMethods` | `{}`; apply registers `workflow` with `toolRegistry` |
-| `settings` | One user-only `workflow` source, `userFile:"workflow.json"`, no `projectFile`, `userOnly:["/projectEnabled"]`, with definitions, enablement and A11 concurrency fields from the source contract | Absent |
+| Row field | Process row |
+| --- | --- |
+| `id` | `workflow` |
+| `name` | `@dimcode/workflow` |
+| `config` | `{packages:[{id,root}, ...]}`; an empty list installs no package definitions |
+| `inject` | `sessions`, `settings`, `pluginFiles`, `workflowFiles`, `managementMethods`, `partRegistry` |
+| `provides` | `workflowRuns: {call:"async"}`; apply registers `workflow` with `managementMethods` and the Session definition with `partRegistry` |
+| `settings` | One user-only `workflow` source, `userFile:"workflow.json"`, no `projectFile`, `userOnly:["/projectEnabled"]`, with definitions, enablement and A11 concurrency fields from the source contract |
 
-Module declarations and supplied rows agree on dependencies and method kinds.
-Both rows share the existing runtime. `workflowFiles` shares the Settings
+The Session definition injects `workflowRuns` and `toolRegistry`, provides
+nothing, and registers `workflow` with `toolRegistry` from its apply.
+Module declarations and the supplied row agree on dependencies and method kinds.
+Each Session's copy runs in the row's runtime. `workflowFiles` shares the Settings
 generation this process row already injects, so it adds no independent reload
 source or Provider/index dependency. The process's original row provides its
 business and management services directly. No adapter, readiness service or
@@ -355,7 +357,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §1 Capability and App Server boundary | The process plugin owns definitions and runs; the Session Capability offers its tool. Storage uses `pluginFiles`; no App Server business module. |
 | ADR 002 D1 | Runs span Sessions (process part); the tool belongs to a Session (Session part). |
 | ADR 002 D2 | Existing Rpc consumes feature-owned methods and ToolRegistry keeps the tool the feature registers; no wiring plugin, extra Provider port or registry. The TS management binding is available. |
-| ADR 002 D3 | Stable sessions isolates index reload; C3 keeps core independent of optional rows; the optional tool row declares its owner dependency under §1.1's availability constraints. |
+| ADR 002 D3 | Stable sessions isolates index reload; C3 keeps core independent of optional rows; the Session tool definition declares its owner dependency under §1.1's availability constraints. |
 | ADR 002 D4 | Definitions and run limits are business data read at use time; nothing structural changes. |
 | ADR 002 D5 | `workflowRuns`, the tool, the methods and the definition format are named services or data; Rust forms are in Appendix G. |
 
@@ -593,7 +595,7 @@ The optional package and Appendix D acceptance flows are present. Product instal
 | --- | --- |
 | Public run store | Process-typescript §5.2 supplies pluginFiles; §3.4's persisted-attempt, failed-replacement and host-restart probes exercise it directly. No private managed-plugin slot or direct filesystem fallback. |
 | Stages run by a Collaboration member (possible future feature) | Not designed. A stage could run in a Collaboration member of the starter to reuse that member's context across stages. It would need Collaboration to accept member requests from outside a branch. Today every stage runs in a launched Session. |
-| Package binding | Concrete process/Session rows, source ownership, package installation options and management admission are specified in §1.3; the optional package and its business acceptance flows are present. |
+| Package binding | The concrete process row and its Session definition, source ownership, package installation options and management admission are specified in §1.3; the optional package and its business acceptance flows are present. |
 | Definition sources | File authority is delivered by #265. The source contract includes definitions, protected enablement and both A11 concurrency fields. SDK and native package flows cover parsing, source identity/precedence, protected enablement, source defaults, definition saves preserving limits and later starts observing edited limits. |
 | Report once / cleanup | The [native settlement contract](../p6-p7-bindings.md#4-native-report-settlement), #267 and §3.4's persisted-marker/failed-store/host-restart probes prove the selected binding. Actual package flows cover its background-task join, failed record replacement, duplicate lookup and row/runtime/host restart recovery; no host epoch or unproved restart inference is introduced. |
 | Native idle lifetime | Existing #126 must land before repeated stage creation ships; Workflow does not implement host unloading. |

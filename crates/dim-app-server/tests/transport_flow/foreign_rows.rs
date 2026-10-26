@@ -1,9 +1,12 @@
-//! Rows of other languages declare their group (plugin contract P4, rutis
-//! usage §2, §3.5): nothing infers it from what they inject. A Python
-//! Session row and branch row, and an unmodified Cordis 4 plugin in a branch
-//! row, each read their own instance's services by plain names.
+//! Parts of other languages are placed without inference (plugin contract
+//! P4, rutis usage §2, §3.5): a Python plugin, one row, registers a Session
+//! and a branch part, and an unmodified Cordis 4 plugin a TypeScript row
+//! registers as a branch part is mounted in each branch. Each reads its own
+//! instance's services by plain names.
 use super::branch_typescript::{launch_stored, marked};
-use super::session_typescript::{ControlledGate, fixture, new_session, setup, submit};
+use super::session_typescript::{
+    ControlledGate, fixture, new_session, session_copies, setup, submit,
+};
 use super::*;
 use dim_app_server::session_typescript::{PythonConfig, SessionTypeScriptConfig};
 use std::path::PathBuf;
@@ -42,7 +45,7 @@ fn home(prefix: &str) -> PathBuf {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE, DIM_TEST_JS_RUNTIME and DIM_TEST_PYTHON"]
-async fn node_python_rows_mount_in_session_and_branch() {
+async fn node_python_plugin_is_one_row_and_its_parts_mount_in_session_and_branch() {
     let mut parts = fixture();
     parts.python = Some(PythonConfig {
         interpreter: std::env::var_os("DIM_TEST_PYTHON")
@@ -50,20 +53,9 @@ async fn node_python_rows_mount_in_session_and_branch() {
             .into(),
         project: parts.anchor.parent().unwrap().join("fixtures/python"),
     });
-    parts.rows = vec![
-        json!({
-            "id": "python-session", "name": "py:python_session_part", "group": "session",
-            "inject": ["sessionIdentity", "toolRegistry"],
-            "provides": {},
-            "config": {},
-        }),
-        json!({
-            "id": "python-branch", "name": "py:python_branch_part", "group": "branch",
-            "inject": ["dispatcher", "timelineIdentity", "treeCommands"],
-            "provides": {},
-            "config": {},
-        }),
-    ];
+    parts.rows = vec![json!({
+        "id": "python", "name": "py:python_plugin", "provides": {}, "config": {},
+    })];
     let home = home("dm-py");
     let (server, agent) = launch_stored(ServerConfig {
         unix_path: Some(home.join("server.sock")),
@@ -80,12 +72,12 @@ async fn node_python_rows_mount_in_session_and_branch() {
         let created = client.rpc("session.create", params).await;
         assert_ok(&created);
         sessions.push(created["result"]["sessionId"].as_str().unwrap().to_owned());
-        active(&server, "py:python_session_part", sessions.len()).await;
-        active(&server, "py:python_branch_part", sessions.len()).await;
+        active(&server, "PythonSessionPart", sessions.len()).await;
+        active(&server, "PythonBranchPart", sessions.len()).await;
     }
     for session in &sessions {
         submit(&mut client, session, r#"tool:py_echo {"text":"hello"}"#).await;
-        // The Session row's tool ran with its own Session's identity.
+        // The Session part's tool ran with its own Session's identity.
         let history = agent
             .get_session(session)
             .unwrap()
@@ -107,7 +99,7 @@ async fn node_python_rows_mount_in_session_and_branch() {
             echoed,
             json!({"session":session, "callSession":session, "branch":"main", "text":"hello"})
         );
-        // The branch row folded its own branch's facts in order and wrote
+        // The branch part folded its own branch's facts in order and wrote
         // its input there.
         let marker = marked(&agent, session, "main", "<py-marker").await;
         assert!(
@@ -131,12 +123,11 @@ async fn node_python_rows_mount_in_session_and_branch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_cordis_plugin_in_a_branch_row_gets_its_own_branch() {
+async fn node_cordis_plugin_registered_as_a_branch_part_gets_its_own_branch() {
     let mut parts = fixture();
     let root = parts.anchor.parent().unwrap().join("fixtures");
     parts.rows = vec![json!({
-        "id": "cordis-branch", "name": root.join("cordis-branch.ts"), "group": "branch",
-        "inject": ["dispatcher", "timelineIdentity", "treeCommands"],
+        "id": "cordis-branch", "name": root.join("cordis-branch-row.ts"),
         "provides": {},
         "config": {},
     })];
@@ -154,7 +145,7 @@ async fn node_cordis_plugin_in_a_branch_row_gets_its_own_branch() {
         let created = client.rpc("session.create", create(json!([]))).await;
         assert_ok(&created);
         let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
-        active(&server, "cordis-branch.ts", sessions.len() + 1).await;
+        active(&server, "cordis-branch-fixture", sessions.len() + 1).await;
         submit(&mut client, &session, "first").await;
         sessions.push(session);
     }
@@ -180,7 +171,7 @@ async fn node_cordis_plugin_in_a_branch_row_gets_its_own_branch() {
         )
         .await
         .unwrap();
-    active(&server, "cordis-branch.ts", 3).await;
+    active(&server, "cordis-branch-fixture", 3).await;
     assert_ok(
         &client
             .rpc(
@@ -200,25 +191,6 @@ async fn node_cordis_plugin_in_a_branch_row_gets_its_own_branch() {
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
-}
-
-/// The entry of row `id` in the Session instance `instance`.
-fn entry(
-    loader: &rutis_loader::Loader,
-    id: &str,
-    instance: rutis::host::InstanceId,
-) -> rutis_loader::report::EntryInfo {
-    loader
-        .entries()
-        .into_iter()
-        .find(|entry| {
-            entry.id == id
-                && entry
-                    .instance
-                    .as_ref()
-                    .is_some_and(|scope| scope.chain.iter().any(|(_, id)| *id == instance))
-        })
-        .unwrap_or_else(|| panic!("row {id} in the Session"))
 }
 
 /// A server whose Sessions report their instance and the loader.
@@ -258,14 +230,19 @@ async fn node_python_import_failure_is_local_to_its_row() {
         project: parts.anchor.parent().unwrap().join("fixtures/python"),
     });
     parts.rows = vec![json!({
-        "id": "python-missing", "name": "py:no_such_fixture_module", "group": "session",
+        "id": "python-missing", "name": "py:no_such_fixture_module",
         "provides": {}, "config": {},
     })];
     let (server, mut requests, mut controls) = controlled(parts).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let id = new_session(&mut client, json!(["echo"])).await;
-    let (session_instance, _, loader, _) = controls.recv().await.unwrap();
-    let status = entry(&loader, "python-missing", session_instance).status;
+    let (_, _, loader, _) = controls.recv().await.unwrap();
+    let status = loader
+        .entries()
+        .into_iter()
+        .find(|entry| entry.id == "python-missing")
+        .expect("the row")
+        .status;
     assert!(
         matches!(&status, rutis_loader::report::EntryStatus::Unresolved(error)
             if error.to_string().contains("no_such_fixture_module")),
@@ -277,9 +254,10 @@ async fn node_python_import_failure_is_local_to_its_row() {
     server.join().await.unwrap();
 }
 
-/// One provider per name per instance (rutis usage §3.1): of two rows that
-/// provide one declared name in a Session, one provides it and the other
+/// One provider per name per instance (rutis usage §3.1): of two parts that
+/// provide one Session name in a Session, one provides it and the other
 /// fails with rutis's duplicate-provider error; each Session has its own.
+/// One row lists the name in `instanceNames`, as a name is declared once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_a_second_provider_of_a_name_in_one_instance_fails() {
@@ -289,22 +267,32 @@ async fn node_a_second_provider_of_a_name_in_one_instance_fails() {
         .parent()
         .unwrap()
         .join("fixtures/shared-provider.ts");
-    parts.rows = ["first-provider", "second-provider"]
-        .map(|id| {
-            json!({
-                "id": id, "name": module, "group": "session",
-                "provides": {"exampleShared": {"ping": "sync"}}, "config": {},
-            })
-        })
-        .to_vec();
+    parts.rows = vec![
+        json!({
+            "id": "first-provider", "name": module, "provides": {}, "config": {},
+            "instanceNames": {"exampleShared": "session"},
+        }),
+        json!({"id": "second-provider", "name": module, "provides": {}, "config": {}}),
+    ];
     let (server, _requests, mut controls) = controlled(parts).await;
     let mut client = Client::new_version(&server, false, 3).await;
     for _ in 0..2 {
         new_session(&mut client, json!(["echo"])).await;
-        let (session_instance, _, loader, _) = controls.recv().await.unwrap();
+        let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
+        let copies = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let copies = session_copies(&ctx, session_instance, "SharedProviderFixture");
+                if copies.len() == 2 {
+                    break copies;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the Session mounts both copies");
         let mut settled = Vec::new();
-        for id in ["first-provider", "second-provider"] {
-            let mut state = entry(&loader, id, session_instance).view.unwrap().watch();
+        for copy in copies {
+            let mut state = copy.watch();
             settled.push(
                 tokio::time::timeout(Duration::from_secs(10), async {
                     loop {

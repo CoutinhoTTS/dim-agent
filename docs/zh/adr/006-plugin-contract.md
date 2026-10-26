@@ -8,7 +8,7 @@
 2026-10-26 修订背景、D4 与两处说明：背景标明它描述迁移之前的状态，并写明其中哪些机制已被迁移移除；
 D4 把移除写成已完成；按层 API 与 `sessionLifecycle` 的两处说明改为现状。同日修订 D3：外来插件以 rutis
 插件定义登记部件，rutis 0.17 以此交付了 rutis#642。
-实现：P1、P2、P3、R6 与 P4 的最初形式已完成；R5 的第二种形式见 #403。各阶段见
+实现：P1、P2、P3、R6 与 P4 已完成；R5 的第二种形式随 #403 完成。各阶段见
 [插件契约设计](../design/plugin-contract.md#10-迁移)。
 
 与其他决策的关系：
@@ -90,7 +90,7 @@ rutis 模型靠拢，但保留了本 ADR 拒绝的两样东西。它在名字之
 一次（[Dim 如何使用 rutis §3.4](../design/rutis-usage.md#34-服务目录)）；工具贡献只有一个标识，
 向所有者登记；贡献由提供它的部件登记，因此宿主不预注册任何贡献，也不翻译 `provides`；其他语言的行
 通过 `sessionLifecycle` 等命名服务取得发布与关闭，并直接监听总线，而不是经过中继。仍保留的是 R5 的
-第二种形式：外来功能仍是一个部件一行、各自声明所属组，直到 #403；rutis 0.17 的插件定义已为它扫清障碍。
+第二种形式：外来功能仍是一个部件一行、各自声明所属组，直到 #403 将其移除。
 
 ## 决策
 
@@ -205,8 +205,8 @@ rutis 仍是外部依赖。
 实现已移除：`Capability` trait 及其 key、`SessionScope`/`BranchScope`、
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`、`SessionService`/`BranchService`、
 `session_plugin`/`timeline_plugin`、宿主侧的名称预注册、`toolContribution:*`、`sessionMethods:*` 和
-`managementMethods:*` 这些名字及其原生/外来之分、Session 行和分支行、App Server 对行所属组的推断，
-以及目录中的组已经表达的按前缀位置检查。其他语言的 Session 行和分支行在 #403 之前仍保留。
+`managementMethods:*` 这些名字及其原生/外来之分、Session 行和分支行（包括其他语言的，随 #403）、App Server 对行所属组的推断，
+以及目录中的组已经表达的按前缀位置检查。
 `PublicService` 保留。它限制 Session 与分支门面向普通调用方暴露哪些分支服务，这是门面规则，不是插件规则。
 
 细节见 [Dim 如何使用 rutis §3](../design/rutis-usage.md#3-按名字的服务)；Dim 定义的名称列在
@@ -310,7 +310,7 @@ Dim 尚未发布，所以任何一步都不保留兼容路径：不为仓库外�
 - D3 的机制都是 Cordis 的：登记归调用方所有，和 `ctx.on` 一样；挂上的部件归挂载它的实例所有；按实例的标签隔离。
   组合方式（实例拉取为它的作用域登记的生成器）在 Cordis 和 Koishi 中没有先例，那里的常规做法是一个插件加按条件
   过滤的上下文。
-- 在 #403 之前，外来功能仍是每个部件一行；Rust 功能已随 #402 变成一行。外来部件不能像 Rust 生成器那样跳过某个实例；它的副本照样挂上，只是在那里不做任何工作。
+- Rust 功能已随 #402 变成一行，TypeScript 与 Python 功能随 #403。外来部件不能像 Rust 生成器那样跳过某个实例；它的副本照样挂上，只是在那里不做任何工作。
 - `docs/architecture/rust-agent/plugins/` 下的 33 个插件页面在第 3 步按插件重新归组。
 
 ## 考虑过的替代方案

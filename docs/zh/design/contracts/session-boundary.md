@@ -441,7 +441,7 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 
 ## 附录 F. Rust 绑定
 
-上述服务映射到下列原生所有者。工具注册到 ToolRegistry（A.5）。每张方法表也经自己的分发器服务其他语言：`SessionMethods` 部件在 `host_key_in("sessionMethods", session_instance)`，App Server 的 `ManagementMethods` 行在 `host_key("managementMethods")`。Session 行（[C4](../../../design/session-typescript.md)）或进程行（[TypeScript 进程绑定](../../../design/process-typescript.md)）注入方法表并调用 `register(namespace, declarations, call)`，它返回一个 Promise。注册属于调用方行（桥的调用方），`call` 经桥回调，并使用 C1 的受理、进度与 `report`/`drain`；已受理的调用在外来行清理之前结束。不向 Session facade 增加按名称的服务查找，入口准入不变。Session 行从 `sessionIdentity`、`sessionConfig` 与 `sessionLifecycle` 服务读取 Session 标识、配置与 closing；每个行自己监听其 Session 的 `session/{sessionId}` 通道。它不增加公开 facade 查找或关键分支输入路径。连接通知、交接和 origin 不在已实现的子集内。
+上述服务映射到下列原生所有者。工具注册到 ToolRegistry（A.5）。每张方法表也经自己的分发器服务其他语言：`SessionMethods` 部件在 `host_key_in("sessionMethods", session_instance)`，App Server 的 `ManagementMethods` 行在 `host_key("managementMethods")`。其他语言的 Session 部件（[C4](../../../design/session-typescript.md)）或进程行（[TypeScript 进程绑定](../../../design/process-typescript.md)）注入方法表并调用 `register(namespace, declarations, call)`，它返回一个 Promise。注册属于调用方（桥的调用方行），`call` 经桥回调，并使用 C1 的受理、进度与 `report`/`drain`；已受理的调用在调用方清理之前结束。不向 Session facade 增加按名称的服务查找，入口准入不变。Session 部件从 `sessionIdentity`、`sessionConfig` 与 `sessionLifecycle` 服务读取 Session 标识、配置与 closing；每个部件自己监听其 Session 的 `session/{sessionId}` 通道。它不增加公开 facade 查找或关键分支输入路径。连接通知、交接和 origin 不在已实现的子集内。
 
 | 语言中立服务 | Rust 类型 | Rust 中的注册 | 收集 | 状态 |
 | --- | --- | --- | --- | --- |

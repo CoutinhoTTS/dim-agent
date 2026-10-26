@@ -271,7 +271,7 @@ after the upgrade commits (S5a's log line, with the version the store came from)
 | Item | Rule |
 | --- | --- |
 | Identity | `dyn HostDispatch` at `host_key("sessionMetadata")`, provided by SessionStore; `register_shared("sessionMetadata")` in App Server's service catalog, beside `sessions` and `settings` |
-| Use | A C4 Session row declares `inject: ['sessionMetadata']` and calls `ctx.use('sessionMetadata')`, the path `settings` takes from a Session row ([settings-owner fixture](../../../runtime/fixtures/settings-owner.ts)). Types are in [npm/plugin.d.ts](../../../npm/plugin.d.ts) |
+| Use | A C4 Session part declares `inject: ['sessionMetadata']` and calls `ctx.use('sessionMetadata')`, the path `settings` takes from a Session part ([settings-owner fixture](../../../runtime/fixtures/settings-owner.ts)). Types are in [npm/plugin.d.ts](../../../npm/plugin.d.ts) |
 | Modes | `read` and `setTitle` are both `async` |
 | Writer | The service carries no caller identity, as for `settings` (AGENTS.md rule 11). SessionTitle is the title's one writer by design ([SessionTitle §2](../plugins/SessionTitle.md#2-data-and-state)); other packages only read |
 | Reload | A consuming row reloads with SessionStore. SessionStore reloads only with SqliteStorage, so no directory part that never reloads is needed, unlike `sessions`, whose index reloads with Settings ([sessions D1](sessions-service.md#3-decisions)) |
@@ -335,7 +335,7 @@ None. S5b uses C6's `notify`, the existing service catalog and `HostDispatch`, a
 9. An empty store is created at v16. Disposable v15 and v13 stores upgrade in place to the exact v16 schema with
    every business row unchanged and report the upgrade once; v16 schemas with a wrong marker, partial upgrades and
    older schemas are refused and preserved.
-10. A TypeScript Session row running in Node injects `sessionMetadata`, reads and sets the title, and the attached
+10. A TypeScript Session part running in Node injects `sessionMetadata`, reads and sets the title, and the attached
     client receives the notice (`node_` test, run by CI's Node step).
 11. A `setTitle` request without `title` is rejected; the plugin SDK type check covers the call shapes.
 12. Unload: writes admitted before SessionStore starts closing, one in its turn and one waiting for it, commit and

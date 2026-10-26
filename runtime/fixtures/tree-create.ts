@@ -1,4 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import provides from './tree-create.json' with { type: 'json' }
 import type { SessionMethods } from '../../npm/plugin.js'
 
@@ -10,7 +11,7 @@ type MethodCall = { method: string; params: { sessionId: string; at: number; can
 // Creates a child of `main` through `treeCommands.create`, passing the
 // caller's cancellation explicitly: one that never completes, or one that
 // has already completed.
-export default definePlugin({
+export const part = definePlugin({
   name: 'TreeCreateFixture',
   provides,
   inject: ['treeCommands', 'sessionMethods'],
@@ -32,3 +33,5 @@ export default definePlugin({
     )
   },
 })
+
+export default partRow('session', part)

@@ -1,9 +1,8 @@
 {
   "id": "session-title",
   "name": "@dimcode/session-title",
-  "group": "session",
   "config": {},
-  "inject": ["sessions", "settings", "sessionMetadata", "auxiliaryModel", "sessionIdentity", "sessionConfig", "sessionLifecycle", "sessionMethods"],
+  "inject": ["partRegistry"],
   "provides": {},
   "settings": [{
     "source": "session-title",

@@ -2091,6 +2091,12 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#partRegistry",
+        "provider": 30,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#pluginFiles",
         "provider": 9,
         "generation": 1,

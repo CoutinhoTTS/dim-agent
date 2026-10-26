@@ -69,8 +69,8 @@ text. The stable process dependency boundary still applies. This settles the
 
 | Surface | Current implementation and consequence |
 | --- | --- |
-| Session tool | An ordinary C4 row injects `toolRegistry` and registers `schedule` from its apply with its declaration and asynchronous `execute`. Registration does no I/O. Registration and provider-generation changes follow the current C4 binding (§1.1). |
-| Process package / `scheduleJobs` | A row without a group in `ServerConfig.session_typescript.rows` installs the package's ordinary process owner in the shared runtime. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1). |
+| Session tool | A C4 Session definition, registered by the process row with `partRegistry`, injects `toolRegistry` and registers `schedule` from its apply with its declaration and asynchronous `execute`. Registration does no I/O. Registration and provider-generation changes follow the current C4 binding (§1.1). |
+| Process package / `scheduleJobs` | One row in `ServerConfig.session_typescript.rows` installs the package's ordinary process owner in the shared runtime; each Session mounts a copy of its Session definition there. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1). |
 | Management namespace | The process row restores its run store before registering `schedule` with `managementMethods` and publishing `scheduleJobs`. A failed restore retains the fault and still registers the namespace before failing the row, so subsequent calls report that row's failed status. Native per-call admission and `report`/`drain` follow the registering row's lifetime and status. |
 | Settings | Owner `settings.read/update` and `settings/schedule` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
@@ -81,25 +81,27 @@ text. The stable process dependency boundary still applies. This settles the
 
 No runtime, facade, loader, event format or rutis change is proposed. All new business behavior belongs to the Scheduler package. The source, tool and management namespace above have concrete consumers (Settings, ToolRegistry and operators); `scheduleJobs` exists only for the feature's two scopes. There is no additional registry, readiness service, notification bus or App Server business module.
 
-### 1.3 Concrete package rows
+### 1.3 Concrete package row
 
 The optional package lives at `runtime/plugins/scheduler`, with package name
-`@dimcode/scheduler`. Its root module is the process plugin; the `./session`
-export is the Session tool. The installed package supplies complete `process.json`
-and `session.json` rows. `session.json` declares `"group": "session"`; `process.json`
-has no group. The embedding host puts both in `SessionTypeScriptConfig.rows`. These are
-the package's explicit installation rows. No default CLI installation or
+`@dimcode/scheduler`. Its root module is the process plugin; from its apply it
+registers `session.ts` with `partRegistry` as the Session definition
+`SchedulerSession`, the Session tool. The installed package supplies one complete
+`process.json` row, which the embedding host puts in `SessionTypeScriptConfig.rows`.
+This is the package's explicit installation row. No default CLI installation or
 PluginManager implementation is included.
 
-| Row field | Process row | Session row |
-| --- | --- | --- |
-| `id` | `scheduler` | `scheduler-session` |
-| `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
-| `group` | Absent | `"session"` |
-| `config` | `{}` | `{}` |
-| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles`, `managementMethods` | `scheduleJobs`, `toolRegistry` |
-| `provides` | `scheduleJobs: {call:"async"}`; apply registers `schedule` with `managementMethods` | `{}`; apply registers `schedule` with `toolRegistry` |
-| `settings` | The complete `schedule` source in §7.1, including its schema | Absent |
+| Row field | Process row |
+| --- | --- |
+| `id` | `scheduler` |
+| `name` | `@dimcode/scheduler` |
+| `config` | `{}` |
+| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles`, `managementMethods`, `partRegistry` |
+| `provides` | `scheduleJobs: {call:"async"}`; apply registers `schedule` with `managementMethods` and the Session definition with `partRegistry` |
+| `settings` | The complete `schedule` source in §7.1, including its schema |
+
+The Session definition injects `scheduleJobs` and `toolRegistry`, provides nothing,
+and registers `schedule` with `toolRegistry` from its apply.
 
 **Failed-owner reporting.** The coordinated [rutis 0.16 upgrade](../rutis-0.16-upgrade.md)
 supplies the loader failure reporting required by Appendix C and Appendix D
@@ -399,7 +401,7 @@ Writing the user's full document is an operator action that can change all jobs 
 ### 7.1 Settings source
 
 The Scheduler process row declares one source through the ordinary row `settings` member
-([Settings §3.1](../appserver/settings-service.md#31-source-declaration)); the Session row does not declare it.
+([Settings §3.1](../appserver/settings-service.md#31-source-declaration)); the Session definition does not declare it.
 
 | Declaration | Value |
 | --- | --- |
@@ -790,7 +792,7 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 | Gated-row failure reporting | Pinned rutis 0.17.1 supplies failed-owner diagnostics and `service_unavailable`. Appendix D items 8, 12 and 13 check incomplete-v1 rejection, known-failed owners and invalid inner versions, with dependencies and assertions unchanged. |
 | Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public Node storage acceptance. The package must persist required transitions before starting run effects; no private managed-plugin slot or direct Node filesystem access. |
 | Liveness wording | Feature list says the interactive terminal must be alive; this design keeps "daemon alive" (E5); recorded, not open |
-| Package binding | Concrete process/Session rows, named dependencies, management admission and caller authority are implemented in #317 under §1.3. |
+| Package binding | The concrete process row and its Session definition, named dependencies, management admission and caller authority are implemented in #317 under §1.3. |
 | Policy capture / reuse | #259 supplies generated `sessionPermissions`; §1.3 names each read site. The package README records save/CAS/reuse flow evidence, including the accepted #339 binding rules. |
 | Native input lifetime | A.6 retains admitted reports through settlement; merged #267 supplies that S2 lifetime. The package README records actual report/cleanup evidence; failed-owner behavior is checked under §1.3. |
 | Reporting | A.6 fixes Steer delivery to the latest saving branch, one attempt without resend; selected terminal outcomes report, skipped/missed and management saves remain history-only. |

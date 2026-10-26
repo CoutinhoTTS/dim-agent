@@ -1,9 +1,9 @@
-"""A branch row in Python: it rebuilds from committed history, follows live
+"""A branch part in Python: it rebuilds from committed history, follows live
 events in order and, after the first turn ends, writes one marked input to
-its own branch naming the branch and the events it has seen."""
+its own branch naming the branch and the events it has seen.
+`python_plugin` registers it."""
 
-inject = ["dispatcher", "timelineIdentity", "treeCommands"]
-provides = {}
+from rutis import define_plugin
 
 
 async def apply(ctx, config):
@@ -36,3 +36,8 @@ async def apply(ctx, config):
 
     # The replayed history first, then live events after it.
     await dispatcher.consume("python-branch-fixture", ["input/message", "turn/start", "turn/end"], handler)
+
+
+part = define_plugin(
+    apply, inject=["dispatcher", "timelineIdentity", "treeCommands"], name="PythonBranchPart"
+)

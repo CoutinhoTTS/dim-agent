@@ -607,8 +607,7 @@ async fn node_typescript_row_reads_and_sets_the_title_through_session_metadata()
         rows: vec![json!({
             "id": "titles",
             "name": root.join("runtime/fixtures/session-metadata.ts"),
-            "group": "session",
-            "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/session-metadata.json")).unwrap(),
+            "provides": {},
             "config": {},
         })],
     };

@@ -1,8 +1,9 @@
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import provides from './session-late.json' with { type: 'json' }
 import type { SessionMethods, ToolRegistry } from '../../npm/plugin.js'
 
-export default definePlugin({
+export const part = definePlugin({
   name: 'LateSessionTypeScriptFixture',
   // Pending until the test provides `lateGate` in its Session.
   inject: ['lateGate', 'toolRegistry', 'sessionMethods'],
@@ -22,3 +23,5 @@ export default definePlugin({
     )
   },
 })
+
+export default partRow('session', part)

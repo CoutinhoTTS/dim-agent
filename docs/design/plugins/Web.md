@@ -31,7 +31,7 @@ flowchart LR
 
 **Contracts depended on:** the implemented [C4 tool binding](../session-typescript.md), [named Settings/source declarations](../appserver/settings-service.md), and Permission's existing `network` risk. #150 supplies tools, #166/#175 supply Settings, and #177 supplies Settings events. Web consumes no Session broadcast and does not wait for #168. **Contracts defined here:** the two tools, result formats and the `web` document.
 
-Web uses one JSON declaration in its own TypeScript package and gives it to the existing Session row entry; App Server gains no business code, registry or host port. Calls read Settings at use time, so the existing events require no additional subscription or cache-invalidation protocol. Non-fatal configuration diagnostics use existing `ToolResult.structuredContent`; there is no assumed injectable TypeScript diagnostics channel.
+Web uses one JSON declaration in its own TypeScript package and gives it to the existing row entry; App Server gains no business code, registry or host port. Calls read Settings at use time, so the existing events require no additional subscription or cache-invalidation protocol. Non-fatal configuration diagnostics use existing `ToolResult.structuredContent`; there is no assumed injectable TypeScript diagnostics channel.
 
 The search API key is `searchService.apiKey`, a user-only field in Web's Settings source ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)). On Unix, the file-backed profile writes the user document with mode 0600. The native profile stores it as `user/web` in SQLite; its boundary is the product home, created with mode 0700 for a new directory on Unix (Windows inherits the parent DACL). Existing home permissions are preserved, and the database has no separate 0600 guarantee. `userOnly` restricts writes, not local reads: the field is written through the client method `settings.update`, never by Web, and local clients can read it through `settings.read`; remote and paired clients cannot. Web reads it with the document at each call, never keeps it, and never places it in definitions, results, `structuredContent`, diagnostics, errors or logs.
 
@@ -107,7 +107,7 @@ sequenceDiagram
   end
 ```
 
-While the Web row is Active, `web_search` is always declared; it fails with `search_unavailable` until a usable service is configured (A3). Changing the service takes effect at the next call.
+While a Session's Web part is Active, `web_search` is always declared; it fails with `search_unavailable` until a usable service is configured (A3). Changing the service takes effect at the next call.
 
 ## 4. Timing and conflicts
 
@@ -160,14 +160,14 @@ No Session methods, `managementMethods` or CLI subcommand: protected client conf
 
 ### 6.1 C4 row and source
 
-The package ships this declaration as one JSON file: the module imports its `inject` and `provides` and the host uses the same row. Row id `web` is the source owner; TypeScript does not register sources again. The example retains existing loader and Settings shapes:
+The package ships this declaration as one JSON file: the module imports its `inject` and `provides` and the host uses the same row. From its `apply` the row registers the Session part with `partRegistry` as a Session definition; each Session mounts a copy, which injects `settings` and `toolRegistry`. Row id `web` is the source owner; TypeScript does not register sources again. The example retains existing loader and Settings shapes:
 
 ```json
 {
   "id": "web",
   "name": "@dimcode/web",
   "config": {},
-  "inject": ["settings", "toolRegistry"],
+  "inject": ["partRegistry"],
   "provides": {},
   "settings": [
     {
@@ -220,7 +220,7 @@ The package ships this declaration as one JSON file: the module imports its `inj
 }
 ```
 
-The plugin declares `inject: ["settings", "toolRegistry"]`; apply registers cleanup and its two tools with `toolRegistry.register(declaration, execute)` only, and performs no I/O. Execution follows C4 `execute(call, cancelled)` with the existing Session identity/creation configuration. Every call starts with `settings.read({source:"web", scope:"user"})`, handles the Settings `{ok,value}` / `{ok:false,error}` envelope, and takes the API key from `searchService.apiKey` in that document. The delivered document is neither revalidated nor filled by Web.
+The Session part declares `inject: ["settings", "toolRegistry"]`; its apply registers cleanup and its two tools with `toolRegistry.register(declaration, execute)` only, and performs no I/O. Execution follows C4 `execute(call, cancelled)` with the existing Session identity/creation configuration. Every call starts with `settings.read({source:"web", scope:"user"})`, handles the Settings `{ok,value}` / `{ok:false,error}` envelope, and takes the API key from `searchService.apiKey` in that document. The delivered document is neither revalidated nor filled by Web.
 
 Settings treats `format: "uri"` as an annotation. Web parses `searchService.endpoint` and `proxy` when constructing an HTTP request, rather than revalidating the Settings document. An unparsable endpoint fails `web_search` with `search_unavailable`. An unparsable proxy fails `web_search` with `search_unavailable` or `web_fetch` with `connect_failed`. No connection is attempted, no direct-connection fallback is used, and diagnostics omit configuration values.
 
@@ -430,7 +430,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | --- | --- | --- | --- |
 | A1 | Search services, including account-backed ones, are built-in adapters; no backend registry | ADR 002 D2 | A search-backend contract owned by Web |
 | A2 | Requests leave from the App Server process hosting the Session | Judgment | Network access through the resource node's services |
-| A3 | The Active Web row always declares `web_search`, failing when no search service is usable | ADR 002 D4 (configuration never reloads) | Declaration would follow configuration |
+| A3 | An Active Web part always declares `web_search`, failing when no search service is usable | ADR 002 D4 (configuration never reloads) | Declaration would follow configuration |
 | A4 | Query length 500; `max_results` 1 to 10, default 5 | Judgment | Limits change |
 | A5 | 10 s connect, 30 s fetch, 20 s search; 5 MiB download | Judgment | Limits change |
 | A6 | Only `http`/`https`, at most 2048 characters, no userinfo | Judgment | Wider input surface |
@@ -449,7 +449,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 
 | Question | Current boundary |
 | --- | --- |
-| Initial scope | Tool parameters, network/content policy and A1–A16 are maintainer-confirmed. The package uses existing Session rows; product installation remains PluginManager work. |
+| Initial scope | Tool parameters, network/content policy and A1–A16 are maintainer-confirmed. The package uses one existing row; product installation remains PluginManager work. |
 | Configuration diagnostics | Non-fatal configuration diagnostics for UI/persistence use ToolResult.structuredContent; model-actionable information still belongs in content, with no new channel |
 
 ## Appendix G. Rust binding

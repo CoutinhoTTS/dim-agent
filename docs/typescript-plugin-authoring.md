@@ -29,9 +29,10 @@ provider and the methods it serves to other languages. This table says which to 
 | Read or set a Session's title | `sessionMetadata`, process | Implemented by SessionStore: `read` and the revision-checked `setTitle` ([title metadata](design/appserver/session-title-metadata.md)). SessionTitle is the title's one writer; other plugins only read. |
 | Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the row's `settings` member. |
 | Read/save Workflow definition files | `workflowFiles`, process | Generated `read/list/replace/createDirectory`; fixed project directories and the calling row's read-only packages ([contract](design/p6-p7-bindings.md#3-workflow-definition-files)). |
-| Offer model tools | `toolRegistry`, Session | A row in the `session` group registers each tool with `register` ([Session tools](#session-tools-and-client-methods)). |
-| Offer client methods | `sessionMethods`, Session | A row in the `session` group registers each method namespace with `register` ([Session tools](#session-tools-and-client-methods)). |
+| Offer model tools | `toolRegistry`, Session | A Session part registers each tool with `register` ([Session tools](#session-tools-and-client-methods)). |
+| Offer client methods | `sessionMethods`, Session | A Session part registers each method namespace with `register` ([Session tools](#session-tools-and-client-methods)). |
 | Offer host management methods | `managementMethods`, process | A process row registers each namespace with `register`; protected-local v3 Rpc serves it ([management methods](#process-owners-and-management-methods)). |
+| Register Session and branch parts | `partRegistry`, process | `registerDefinition(scope, name, definition)` ([One row per plugin](#one-row-per-plugin)). |
 | Know this Session and its phases | `sessionIdentity`, `sessionConfig`, `sessionLifecycle`, Session | `get()` returns `{sessionId, restored}` or the creation-time configuration; `activated()`, `closing()`, `hold()` and `release(id)` ([Session observation](#session-observation)). |
 | Observe this Session | the `session/{sessionId}` channel | Listen with `ctx.on` ([Session observation](#session-observation)). |
 | Consume branch events in order or act on branches | `dispatcher`, `branchLifecycle`, `timelineIdentity`, branch; `treeCommands`, Session | Use `Services` from the SDK. |
@@ -42,47 +43,103 @@ See [Session TypeScript bindings](design/session-typescript.md) and
 plugin uses `sessions` for other Sessions; it does not use that service to imitate
 a Session part or hold a Session's private state.
 
-## Rows and groups
+## One row per plugin
 
-Each part is one loader row in `ServerConfig.session_typescript.rows`. The row says where the part
-lives with `group`: `"session"` runs one copy in every Session, `"branch"` one in every branch, and a
-row without `group` runs once in the process. Nothing else decides it: the host does not look at
-what a row injects or provides.
+A plugin is one loader row in `ServerConfig.session_typescript.rows`, and that row runs once, in the
+process. Its Session and branch parts are not rows: from `apply`, the plugin registers each part
+with `partRegistry` as a plugin definition, a `definePlugin` value, for the `session` or `branch`
+scope. Every Session, or every branch, mounts one copy of each registered definition, the open ones
+at once and later ones as they open. A copy runs in the plugin's Node runtime, and its `inject`
+resolves in the instance it is mounted in. The host does not look at what a part injects or
+provides to place it; the scope it is registered for decides.
+
+```ts
+import { definePlugin } from '@arcships/rutis'
+import type { Services } from 'dimcode/plugin'
+
+// A Session part: one copy per Session. It closes over the row's config.
+const greeter = (greeting: string) => definePlugin({
+  name: 'ExampleGreeter',
+  inject: ['sessionIdentity'],
+  async apply(ctx) {
+    const { sessionId } = await ctx.use<Services['sessionIdentity']>('sessionIdentity').get()
+    console.warn(`${greeting} ${sessionId}`)
+  },
+})
+
+// A branch part: one copy per branch, providing a name in its branch.
+const counter = definePlugin({
+  name: 'ExampleCounter',
+  inject: ['dispatcher'],
+  provides: { exampleCounter: { get: 'sync' } },
+  async apply(ctx) {
+    let count = 0
+    await ctx.use<Services['dispatcher']>('dispatcher').consume('example-counter', ['input/message'], delivery => {
+      count += 'live' in delivery ? 1 : delivery.replay.filter(event => event.name === 'message').length
+    })
+    ctx.provide('exampleCounter', { get: () => ({ count }) })
+  },
+})
+
+export default definePlugin({
+  name: 'Example',
+  inject: ['partRegistry'],
+  async apply(ctx, config: { greeting: string }) {
+    const parts = ctx.use<Services['partRegistry']>('partRegistry')
+    await parts.registerDefinition('session', 'ExampleGreeter', greeter(config.greeting))
+    await parts.registerDefinition('branch', 'ExampleCounter', counter)
+  },
+})
+```
 
 ```json
 [
-  { "id": "example-session", "name": "/absolute/example/session.ts", "group": "session",
-    "inject": ["toolRegistry", "sessionMethods"], "provides": {}, "config": {} },
-  { "id": "example-counter", "name": "/absolute/example/counter.ts", "group": "branch",
-    "inject": ["dispatcher"], "provides": { "exampleCounter": { "get": "sync" } }, "config": {} }
+  { "id": "example", "name": "/absolute/example/index.ts", "inject": ["partRegistry"],
+    "provides": {}, "instanceNames": { "exampleCounter": "branch" },
+    "config": { "greeting": "hello" } }
 ]
 ```
 
+The registration belongs to the row. When the row unloads, whether it is reloaded, disabled or
+fails, rutis ends every copy first, and the registration goes with it; the next generation
+registers again. A definition may close over anything the plugin prepared in `apply`, such as its
+config or a process object. It cannot skip an instance: a part that one Session's business
+configuration turns off still gets a copy there, which reads that configuration and does no work.
+
 Each copy reads plain names, and the framework resolves every name to the nearest enclosing
 instance of the name's group ([How Dim uses rutis §3.5](design/rutis-usage.md#35-how-each-runtime-resolves-a-name)):
-`timelineIdentity` in a branch row is that branch's, `sessionIdentity` in a Session or branch row
-is the enclosing Session's, and `settings` is the process's. A row that names a service of a group
-it is not inside fails when it is composed, with an error such as
-`"dispatcher" is a service inside "branch" instances: put the row in the "branch" group`.
+`timelineIdentity` in a branch part is that branch's, `sessionIdentity` in a Session or branch part
+is the enclosing Session's, and `settings` is the process's. A part that names a service of a group
+it is not registered inside cannot be built there: the instance mounts no copy of it, and the
+host's log names the reason, such as
+`"dispatcher" is a service inside "branch" instances: put the row in the "branch" group`. The
+message is the loader's, written for rows; for a part, register it for the scope it names
+(`registerDefinition('branch', …)` here), since the plugin's own row has no group.
 
-Which names a row declares:
+Which names a part declares:
 
-- **Provided for its instance:** list the name in `provides`. The host registers each provided
-  name in the row's group, so every Session or branch has its own copy, and the other rows of that
-  instance, in any language, read it by name.
-- **Private to the part, or to a group of its rows:** isolate it with the row's `isolate` instead.
-  An isolated name is not shared with other rows or languages.
+- **Provided for its instance:** list the name in the part's `provides`, and in the row's
+  `instanceNames` with its group, `"session"` or `"branch"`. The catalog is fixed before the
+  runtime starts, so this is the one thing the row declares about its parts
+  ([How Dim uses rutis §2](design/rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)):
+  the host registers each name in its group, every Session or branch has its own copy, and the other
+  parts of that instance, in any language, read it by name. A name is declared once: one that is
+  already a service, or that two rows list, fails the configuration.
+- **Private to the plugin:** keep it in the plugin's own code; its definitions close over it. It
+  needs no service name.
 - **Provided without declaring it** (an undeclared `ctx.provide`, as an unmodified Cordis plugin
   does): rutis publishes it under its plain name for the whole process. Inside a Session or branch
   that is one process-wide service: a second copy fails with rutis's duplicate-provider error, and a
   debug build of the host refuses the Session at once (`scoped service provided without an instance
   key`).
 
-One provider per name per instance: of two rows that provide the same name in one Session or
+One provider per name per instance: of two parts that provide the same name in one Session or
 branch, the second fails with rutis's duplicate-provider error.
 
 The host adds no check of its own beyond the configuration's shape. The row's `provides` must equal
-the module's declaration, and its `inject`, if given, lists the names the module injects.
+the module's declaration, and its `inject`, if given, lists the names the module injects. A row has
+no `group`. Python plugins take the same form with `define_plugin`
+([How Dim uses rutis, appendix B](design/rutis-usage.md#appendix-b-typescript-and-python-binding)).
 
 ## Plugin shape and lifetime
 
@@ -97,8 +154,7 @@ Do no business I/O or asynchronous business initialization there, including
 top-level `await` on a network request. Node evaluates a module to discover its
 declaration before the plugin has an owned context or effects. One load that
 never finishes can keep the shared `RuntimeRows` gate unpublished and cause
-host startup to time out, even when native rows are ready. This holds for rows of
-every group. Put resource
+host startup to time out, even when native rows are ready. Put resource
 acquisition and work in the owned lifecycle below.
 
 During `apply`, acquire owned resources and register services, subscriptions and
@@ -106,8 +162,8 @@ cleanup. Background I/O starts after publication, as required by
 [the architecture rules](architecture/rust-agent/principles.md). Branch Dispatcher handlers
 can receive opening facts before publication; they follow the ordered-consumption contract below.
 An injected dependency becoming available is not Session publication. Do not
-start a timer or task from `apply` and assume that the Session is ready. A Session row injects
-`sessionLifecycle` and a branch row `branchLifecycle`: background work waits for `activated()`,
+start a timer or task from `apply` and assume that the Session is ready. A Session part injects
+`sessionLifecycle` and a branch part `branchLifecycle`: background work waits for `activated()`,
 which is `false` when the instance is never published, and ends when `closing()` resolves.
 The process has no lifecycle service; a process row follows host start and shutdown through its
 own `apply` and cleanup. The
@@ -115,7 +171,7 @@ rutis TypeScript `Context` has `use`, `provide`, `effect` and the bus: `ctx.on(n
 listens to every event of that name on the host's one bus, from any process or language, and
 `ctx.emit` / `parallel` / `serial` / `waterfall` / `bail` emit on it. `emit` returns at once and does
 not wait for listeners; `parallel` waits for all. Neither listening nor emitting needs a
-declaration in the row.
+declaration.
 
 Write diagnostics to standard error (`console.warn`, `console.error`). The host writes each line
 of the runtime's standard error to its process log, the App Server's `daemon.log`
@@ -130,7 +186,7 @@ the distinction between loader structural configuration and business sources.
 
 ## Process owners and management methods
 
-A process owner is a row without `group` in `SessionTypeScriptConfig.rows`. All rows
+A process owner is a plugin's row in `SessionTypeScriptConfig.rows`. All rows
 share the configured Node runtime and declaration catalog. Process scope describes ownership and
 lifetime, not a dedicated operating-system process. This embedding input does
 not select additional named runtimes or replicate workers.
@@ -375,11 +431,12 @@ and definition semantics remain with Settings and the Workflow package.
 
 ## Session tools and client methods
 
-A row in the `session` group registers its tools with the Session's `toolRegistry` and its client
-method namespaces with the Session's `sessionMethods`. The host configures ordinary rows through
-`ServerConfig.session_typescript`; general CLI installation remains PluginManager work. Give each
+A Session part registers its tools with the Session's `toolRegistry` and its client method
+namespaces with the Session's `sessionMethods`. The host configures plugin rows through
+`ServerConfig.session_typescript`; general CLI installation remains PluginManager work. Give the
 row the same `inject` and `provides` the module declares. Neither tools nor method namespaces are
-in `provides`: a row registers each from its code. The public
+in `provides`: a part registers each from its code. The plugin registers this part for `session`
+([One row per plugin](#one-row-per-plugin)). The public
 [embedding example](../crates/dim-app-server/examples/session_typescript.rs)
 shows the row input and actual Session calls.
 
@@ -387,7 +444,7 @@ shows the row input and actual Session calls.
 import { definePlugin } from '@arcships/rutis';
 import type { SessionMethods, ToolRegistry } from 'dimcode/plugin';
 
-export default definePlugin({
+export const sessionExample = definePlugin({
   name: 'SessionExample',
   inject: ['toolRegistry', 'sessionMethods'],
   provides: {},
@@ -421,18 +478,18 @@ export default definePlugin({
 });
 ```
 
-Copy the module's `inject` and `provides` into the existing host row during your package's
+Copy the row module's `inject` and `provides` into the existing host row during your package's
 build. The App Server does not discover them or install a plugin by itself.
 Online module metadata must match the configured row snapshot. Disabled, Pending
 and malformed rows have the outcomes in the
 [binding contract](design/session-typescript.md#host-input-and-declaration-discovery).
-ToolRegistry declares a tool the Session mounts while a row has it registered.
+ToolRegistry declares a tool the Session mounts while a part has it registered.
 `SessionConfig.tools` is the Session's optional mount list, fixed at creation: a
 Session without one mounts every registered tool, so your tool is declared with
 no configuration edit; a Session with one mounts the tools it names, and `[]`
-mounts none. The registration lasts until the row unloads, and a row that
-registers later, or its next generation after a reload, is declared from the
-next request without a Session reload. A named tool that no row registers is not
+mounts none. The registration lasts until the part's copy unloads, and a part
+that registers later, or its next generation after a reload, is declared from
+the next request without a Session reload. A named tool that no part registers is not
 declared and does not fail the Session. Permission (its preset, `allowedTools`
 and `disallowedTools`) decides whether a declared tool's call runs; it never
 changes the declarations the model sees, so the prompt prefix stays stable.
@@ -454,7 +511,7 @@ mount list. It is not the latest adopted Prompt/model
 configuration after a configuration command.
 
 The second `execute` argument is a cancellation Promise. It settles when the call
-ends, is cancelled or its row unloads. Cooperative work releases its resources
+ends, is cancelled or its part unloads. Cooperative work releases its resources
 before settling. Ordinary provider failures return a valid `ToolResult` with
 `isError: true`; thrown exceptions are binding failures. Put every handle or
 reference the model needs into `content`; `structuredContent` is for persistence,
@@ -467,7 +524,7 @@ method declares its full name inside the namespace, `mutating`, `interruption` a
 outside its namespace or declared twice, a namespace the Session has registered
 already, one that is, contains or lies inside a built-in method, and one under the
 `hello`, `daemon`, `agent` or `approval` roots; an `apply` that awaits a refusal
-fails its row. The registration lasts until the row unloads, and `session.methods`
+fails its part. The registration lasts until the part unloads, and `session.methods`
 lists the methods registered at that call. `call` is asynchronous and receives an
 opaque runtime `callId`, the method and original params containing `sessionId` and
 optional `branchId`; it also receives cancellation and a per-call progress callback.
@@ -478,27 +535,27 @@ the wire error: `code` becomes `appError`, with JSON-RPC code -32602 for `invali
 `treeCommands.input`) maps as it does for built-in methods. Do not choose JSON-RPC codes yourself; a
 throw without a `code` is a binding failure. Handoff and connection-bound notifications are not provided by
 this binding. On unload, C1 stops admission and settles accepted calls before the
-JavaScript row unloads: `report` replies with interruption, while `drain` preserves
+JavaScript part unloads: `report` replies with interruption, while `drain` preserves
 the provider's reply. No business task in this example runs during `apply`.
 
 ## Session observation
 
-A Session row learns about its Session from three Session services, read by name like any other:
+A Session part learns about its Session from three Session services, read by name like any other:
 
 | Service | Contract |
 | --- | --- |
 | `sessionIdentity` | `get()` returns `{sessionId, restored}`; `restored` is true when the Session was loaded from storage rather than created. |
 | `sessionConfig` | `get()` returns the creation-time configuration, the same snapshot a `ToolCall` carries as `config`. |
-| `sessionLifecycle` | `activated()` resolves when the Session is published (`false` if it never is); `closing()` resolves when its close starts. `hold()` keeps an idle unload from ending accepted work: it returns the id of a hold the calling row owns, or `null` once the Session is closing or its release is decided. `release(id)` ends that hold and returns whether it was still held; the row's unload ends the holds it still has. |
+| `sessionLifecycle` | `activated()` resolves when the Session is published (`false` if it never is); `closing()` resolves when its close starts. `hold()` keeps an idle unload from ending accepted work: it returns the id of a hold the calling part owns, or `null` once the Session is closing or its release is decided. `release(id)` ends that hold and returns whether it was still held; the part's unload ends the holds it still has. |
 
-A row needs no tool or client method to observe. This one listens to its Session's channel from
+A part needs no tool or client method to observe. This one listens to its Session's channel from
 `apply` and stops when the Session starts closing:
 
 ```ts
 import { definePlugin } from '@arcships/rutis';
 import type { SessionBroadcast, Services } from 'dimcode/plugin';
 
-export default definePlugin({
+export const observer = definePlugin({
   name: 'SessionObserver',
   provides: {},
   inject: ['sessionIdentity', 'sessionConfig', 'sessionLifecycle'],
@@ -518,8 +575,7 @@ export default definePlugin({
 });
 ```
 
-Its row is `{ "id": "observer", "name": "/absolute/observer.ts", "group": "session", "provides": {},
-"config": {} }`.
+Its plugin registers it for `session`, as in [One row per plugin](#one-row-per-plugin).
 
 `session/{sessionId}` is the Session's channel on the bus; only that Session's
 records reach the listener. `SessionBroadcast` is `{kind: 'event', branchId, event}`
@@ -530,9 +586,9 @@ leader checks `config.interactive !== false && config.collaborationRole === 'lea
 It does not report later Prompt/model adoption.
 
 The example only logs transient observations. Handlers that start async work
-register it with their own row and return; when `closing()` resolves, stop admission,
-cancel and release resources, and join accepted work in a row effect. `ctx.on` removes
-the listener on unload. Captured handlers must not start work after closing or after the row
+register it with their own part and return; when `closing()` resolves, stop admission,
+cancel and release resources, and join accepted work in an effect of the part. `ctx.on` removes
+the listener on unload. Captured handlers must not start work after closing or after the part
 unloads.
 
 A branch event reaches the listener after its branch dispatches it. Records of one
@@ -559,20 +615,20 @@ it to a compatible owner.
 ## Ordered branch consumption
 
 Dim serves its Rust branch services to other languages by name. Import their generated types from
-`dimcode/plugin`; no per-service adapter or branch setup call is needed. A row in the `branch` group
-runs in each branch of its Session and reads that branch's `dispatcher`, `branchLifecycle`,
-`timeline` and `timelineIdentity`. Keep Session tools, client methods and observers in `session`
-rows.
+`dimcode/plugin`; no per-service adapter or branch setup call is needed. A part registered for
+`branch` runs in each branch of its Session and reads that branch's `dispatcher`, `branchLifecycle`,
+`timeline` and `timelineIdentity`. Keep Session tools, client methods and observers in Session
+parts.
 
 | Service | Contract |
 | --- | --- |
-| `dispatcher` | `consume(name, keys, handler)` registers an ordered consumer on the calling row's context: the handler receives `{ replay }`, the branch's own committed history through a fixed cutoff, then `{ live }` for each matching event after it, and the call resolves once the replay is handled. `listen(name, keys, handler)` registers for live events only. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
+| `dispatcher` | `consume(name, keys, handler)` registers an ordered consumer on the calling part's context: the handler receives `{ replay }`, the branch's own committed history through a fixed cutoff, then `{ live }` for each matching event after it, and the call resolves once the replay is handled. `listen(name, keys, handler)` registers for live events only. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
 | `treeCommands` | Session directory `list/info`, validated `input` by branch id and `create`. These are the Rust data methods, not the process `sessions` request envelopes. |
 | `branchLifecycle` | Background work waits for `activated()` and releases its resources when `closing()` resolves. Never wait for activation inside a Dispatcher callback. |
 | `timelineIdentity` | `get()` returns the original Session and branch ids. |
 
 This part reconstructs its own input count, then follows live input. The native subscription
-belongs to its row, so no second event channel or manual unsubscription is needed.
+belongs to the part, so no second event channel or manual unsubscription is needed.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
@@ -580,7 +636,7 @@ import type { BranchEvent, Services } from 'dimcode/plugin'
 
 const provides = { exampleCounter: { get: 'sync' } } as const
 
-export default definePlugin({
+export const counter = definePlugin({
   name: 'ExampleCounter',
   provides,
   inject: ['dispatcher'],
@@ -601,18 +657,8 @@ export default definePlugin({
 })
 ```
 
-Configure the same declaration on its structural row:
-
-```json
-{
-  "id": "example-counter",
-  "name": "/absolute/counter/index.ts",
-  "group": "branch",
-  "provides": { "exampleCounter": { "get": "sync" } },
-  "inject": ["dispatcher"],
-  "config": {}
-}
-```
+Its plugin registers it for `branch` and lists `"exampleCounter": "branch"` in its row's
+`instanceNames` ([One row per plugin](#one-row-per-plugin)).
 
 `consume` subscribes, fixes the committed cutoff and hands the handler the replay: this branch's
 own events through the cutoff as `local` reads them, without the ancestor prefix and not filtered
@@ -620,7 +666,7 @@ by the keys, since a rebuild may need facts it does not consume live. Live event
 follow through the same handler in sequence order; none is delivered twice. Live events wait until
 the replay call returns, so do what the replay leaves to do, such as ending the operations a
 previous generation left open, in that call. A rebuild repeats no external side effect. Publish a
-derived service after `consume` resolves. This example's state belongs to the branch row and is
+derived service after `consume` resolves. This example's state belongs to the branch part and is
 rebuilt on each generation.
 
 The hand-written form stays valid: subscribe with `listen` before sampling `committed()`, rebuild
@@ -631,7 +677,7 @@ Callbacks can run on opening facts before publication. Register long work in the
 tasks and return; do not wait for dispatch, activation or a child creation whose progress depends
 on this callback returning. `treeCommands.input` commits validated input to the Timeline tail;
 its reply does not prove dispatch or adoption. `treeCommands.create(parent, at, options, cancelled)` takes a by-reference callback whose
-Promise completes when the caller cancels. Complete it during row cleanup; the native call owns
+Promise completes when the caller cancels. Complete it during the part's cleanup; the native call owns
 and ends the wait when creation completes. Cancellation before acceptance stops admission;
 after the creation anchor commits, TimelineTree finishes the branch or records `branch/create-failed`,
 while cancellation stops the caller waiting. See [branch cancellation](design/branch-typescript.md#cancellation).
@@ -678,7 +724,7 @@ feeds do not deliver them. History keeps them after your plugin is uninstalled.
 import { definePlugin } from '@arcships/rutis'
 import type { Services } from 'dimcode/plugin'
 
-export default definePlugin({
+export const checkpoints = definePlugin({
   name: 'ExampleCheckpoints',
   provides: {},
   inject: ['dispatcher', 'timeline'],
@@ -705,26 +751,28 @@ See the [real Node part](../runtime/fixtures/extension-events.ts).
 ## Using services that other-language plugins provide
 
 A service is a name, whatever language provides it. Inject the name and call it as you would a
-service of another TypeScript row: a Rust part, a Python row and a TypeScript row in the same
+service of another TypeScript part: a Rust part, a Python part and a TypeScript part in the same
 Session provide and read one another's services by name, and every method returns a Promise in
-TypeScript. The name resolves the same way for every language (see [Rows and groups](#rows-and-groups)):
-in a branch row, a Session service is the enclosing Session's copy and a branch service that
+TypeScript. The name resolves the same way for every language (see [One row per plugin](#one-row-per-plugin)):
+in a branch part, a Session service is the enclosing Session's copy and a branch service that
 branch's.
 
 - **Provider in Rust:** a Rust service that crosses languages is in the host's catalog with its
   group. Its methods take and return serde data, and its errors are thrown as `RustError` values
   with the type's name and the variant's `code`. Its TypeScript type is in `Services` when Dim
   defines it; a service another Rust part defines has its own declarations.
-- **Provider in Python or TypeScript:** the provider's row lists the name in `provides`, which
-  registers it in that row's group. Its methods and their `sync` or `async` kinds are what that
-  declaration says; a failure it reports is its own contract.
-- **Not available yet:** an injected name gates the row; it loads once a provider is there and
+- **Provider in Python or TypeScript:** the host registers the name in its group from the
+  provider's row: its `instanceNames` for a Session or branch name, or its `provides` for a process
+  name. Its methods and their `sync` or `async` kinds are what the provider declares; a failure it
+  reports is its own contract.
+- **Not available yet:** an injected name gates the part or row; it loads once a provider is there and
   unloads when the provider goes, in any language.
 
 Python rows are named `py:<module>` and run in the host's Python runtime when one is configured;
 the Python binding is in [How Dim uses rutis, appendix B](design/rutis-usage.md#appendix-b-typescript-and-python-binding).
-An unmodified plugin for rutis's Cordis 4 (`@deepseek-ai/cordis`) runs as a row too: its `inject`
-and `ctx.get(name)` resolve to its own instance's copies.
+An unmodified plugin for rutis's Cordis 4 (`@deepseek-ai/cordis`) can be registered as a part:
+pass the plugin module, or its object or function, to `registerDefinition`, and its `inject` and
+`ctx.get(name)` resolve to its own instance's copies.
 
 
 ## Packaging and trust

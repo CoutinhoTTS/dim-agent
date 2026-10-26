@@ -1,6 +1,6 @@
 import { definePlugin, type Plugin } from '@arcships/rutis'
 import { validateHeaderValue, STATUS_CODES } from 'node:http'
-import type { JsonObject, Settings, ToolCall, ToolDefinition, ToolRegistry, ToolResult } from '../../../npm/plugin.d.ts'
+import type { JsonObject, PartRegistry, Settings, ToolCall, ToolDefinition, ToolRegistry, ToolResult } from '../../../npm/plugin.d.ts'
 import row from './web.json' with { type: 'json' }
 import { convert, plainText, redact } from './content.ts'
 import { DOWNLOAD_LIMIT, WebError, domain, get, hostname, parseUrl, proxyUrl, type Diagnostic, type NetworkConfig } from './network.ts'
@@ -68,8 +68,10 @@ function brave(value: unknown, key: string): Hit[] {
   })
 }
 
-export default definePlugin({
-  name: 'Web', inject: row.inject, provides: row.provides as Plugin['provides'],
+// The Session part: each Session mounts one copy.
+export const part = definePlugin({
+  name: 'Web',
+  inject: ['settings', 'toolRegistry'],
   async apply(ctx) {
     const settings = ctx.use<Settings>('settings')
     const cache = new Map<string, Page>()
@@ -236,5 +238,13 @@ export default definePlugin({
         (call, cancelled) => execute(name, call, cancelled),
       )
     }
+  },
+})
+
+// The plugin's one row registers the Session part (rutis usage §2).
+export default definePlugin({
+  name: 'Web', inject: row.inject, provides: row.provides as Plugin['provides'],
+  async apply(ctx) {
+    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'Web', part)
   },
 })

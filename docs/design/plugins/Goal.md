@@ -42,7 +42,7 @@ All model-visible effects are `input/message` facts consumed by the existing Inp
 | `GoalPlugin` | Session | `treeCommands`, `toolRegistry`, `sessionMethods` (Session exports) | Registers `goal_update` with `toolRegistry` and `session.goal` with `sessionMethods`; writes change inputs by branch id through `treeCommands.input` |
 | `GoalBranchPlugin` | Branch | `dispatcher`, `timelineIdentity`, `branchLifecycle` (branch exports), `treeCommands`, process service `settings` (S8b) for its source `goal` | No service; it owns the fold, the continuation decision and Goal's own writes |
 
-The Session part registers its tool with `toolRegistry` and its method namespace `session.goal` with `sessionMethods` from its apply. The branch part provides nothing; injecting `dispatcher` places it in every branch (C5). Every Session of an assembly that installs Goal runs Goal's Session part, so every such Session has `session.goal` once that part is active ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). `maxContinuations` is a field of the document in Goal's Settings source `goal`, business configuration ([ADR 002](../../adr/002-plugin-scope.md) D4). Goal is a TypeScript plugin and reads it only through the language-neutral process service `settings` of S8b ([settings service](../appserver/settings-service.md)), never through App Server types. Goal's branch row declares the source in its `settings` member as S8b §3.1 specifies: `source: "goal"`, a user file, no project file (user scope only), no user-only fields, and a JSON Schema in which `maxContinuations` is an integer with `minimum: 1`, `maximum: 1000` and `default: 20` (A4). Settings applies the default and validates on write and when reading a persisted file, so Goal uses the document as delivered; a change is a data update, never a reload. The Dispatcher callback registers owned work and returns without awaiting Settings. After branch publication, each turn-end task reads `settings.read {source: "goal", scope: "user"}` at use, then rechecks its deciding turn and the current consumed fold before writing (A.6). There is no cached limit or `settings.changed` listener. Changes committed before that read are visible without a reload, including direct user-document edits in the file-backed Settings profile. An unreadable source stops that decision without an automatic input or fallback limit (Appendix C). Interrupt pauses and the inherited start clear do not need the limit. No Goal tool writes it; clients write it through `settings.read`/`settings.update`. Goal reads only public data contracts of `branch/start`, `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
+The Session part registers its tool with `toolRegistry` and its method namespace `session.goal` with `sessionMethods` from its apply. The branch part provides nothing; registered as a branch definition, it has a copy in every branch (C5). Every Session of an assembly that installs Goal runs Goal's Session part, so every such Session has `session.goal` once that part is active ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). `maxContinuations` is a field of the document in Goal's Settings source `goal`, business configuration ([ADR 002](../../adr/002-plugin-scope.md) D4). Goal is a TypeScript plugin and reads it only through the language-neutral process service `settings` of S8b ([settings service](../appserver/settings-service.md)), never through App Server types. Goal's row declares the source in its `settings` member as S8b §3.1 specifies: `source: "goal"`, a user file, no project file (user scope only), no user-only fields, and a JSON Schema in which `maxContinuations` is an integer with `minimum: 1`, `maximum: 1000` and `default: 20` (A4). Settings applies the default and validates on write and when reading a persisted file, so Goal uses the document as delivered; a change is a data update, never a reload. The Dispatcher callback registers owned work and returns without awaiting Settings. After branch publication, each turn-end task reads `settings.read {source: "goal", scope: "user"}` at use, then rechecks its deciding turn and the current consumed fold before writing (A.6). There is no cached limit or `settings.changed` listener. Changes committed before that read are visible without a reload, including direct user-document edits in the file-backed Settings profile. An unreadable source stops that decision without an automatic input or fallback limit (Appendix C). Interrupt pauses and the inherited start clear do not need the limit. No Goal tool writes it; clients write it through `settings.read`/`settings.update`. Goal reads only public data contracts of `branch/start`, `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
 
 ## 2. Data and state
 
@@ -281,16 +281,17 @@ None. The earlier requirement, runtime services exposed by name to non-Rust part
 
 ## 10. Implementation
 
-TypeScript, in `runtime/plugins/goal` (C4 tool/method row, C5 branch row):
+TypeScript, in `runtime/plugins/goal`, one row whose `index.ts` registers `session.ts` as the Session definition `GoalSession` (C4) and `branch.ts` as the branch definition `GoalBranch` (C5) with `partRegistry`:
 
-| File | Part | Row |
+| File | Part | Declaration |
 | --- | --- | --- |
 | `goal.ts` | Shared: change and continuation inputs (A.5), marker parsing, the fold (§2) and the decisions (A.4) | — |
-| `session.ts`, `session.json` | `GoalPlugin`: registers `goal_update` with `toolRegistry`, registers `session.goal` with `sessionMethods`; writes with `treeCommands.input` | Session row, `inject: ["treeCommands", "toolRegistry", "sessionMethods"]` |
-| `branch.ts`, `settings.json` | `GoalBranchPlugin`: registers with `dispatcher.consume`, folds the replay, decides on live events, and writes owned tasks; reads `maxContinuations`; declares the `goal` source. Under [Pursuit](Pursuit.md)'s evaluator judge it also creates the evaluator and takes the evaluator role | Branch row, `inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]`, `settings` from `settings.json` |
+| `index.ts` | The row: registers the two definitions | `inject: ["partRegistry"]`, `provides: {}`, `settings` from `settings.json` |
+| `session.ts` | `GoalPlugin`: registers `goal_update` with `toolRegistry`, registers `session.goal` with `sessionMethods`; writes with `treeCommands.input` | Session definition, `inject: ["treeCommands", "toolRegistry", "sessionMethods"]` |
+| `branch.ts` | `GoalBranchPlugin`: registers with `dispatcher.consume`, folds the replay, decides on live events, and writes owned tasks; reads `maxContinuations` from the `goal` source. Under [Pursuit](Pursuit.md)'s evaluator judge it also creates the evaluator and takes the evaluator role | Branch definition, `inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]` |
 
 The new-branch check (§3.4) reads the inherited prefix with `dispatcher.history(S)` and excludes the
-branch's local events. An embedder installs Goal by adding the two rows to
+branch's local events. An embedder installs Goal by adding its one row to
 `ServerConfig.session_typescript`; product packaging belongs to PluginManager.
 
 Verification covers exact event orders and the actual plugin across its public ports.
@@ -315,8 +316,8 @@ one start `clear` after the opening, the source unchanged), D8 (an unloaded Sess
 then resume continues to the new limit), the method boundary and order of `pause`/`resume`/`clear`,
 and the A.5 encoding round trip.
 
-The Goal rows are ordinary optional rows in these flows, with no dependency forcing Goal
-before the tool snapshot: ToolRegistry offers `goal_update` once the Goal row has registered it
+The Goal row is an ordinary optional row in these flows, with no dependency forcing Goal
+before the tool snapshot: ToolRegistry offers `goal_update` once the Session part has registered it
 ([Session boundary A.5](../contracts/session-boundary.md#a5-tool-contribution), #241).
 
 The keyed-baseline half of D6 is F1's contract and is covered by its
@@ -419,7 +420,7 @@ Status blocks state only the status and the objective is a separate block, so a 
 
 | Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Optional Goal Session row still Pending when the Session starts | first request < registration | `goal_update` is absent from requests before the row registers it and offered from the next one ([A.5](../contracts/session-boundary.md#a5-tool-contribution), #241); a continuation in between cannot report through it | Goal; ToolRegistry |
+| Optional Goal Session part still Pending when the Session starts | first request < registration | `goal_update` is absent from requests before the part registers it and offered from the next one ([A.5](../contracts/session-boundary.md#a5-tool-contribution), #241); a continuation in between cannot report through it | Goal; ToolRegistry |
 | User Queue input while a goal turn runs | input < `turn/end` N, unconsumed | C5 fails; the user's turn runs; its end continues with count reset | Goal, InputQueue |
 | User input committed after N, before the continuation | N < input < continuation | Both run in order: user turn, then continuation turn; count reset | InputQueue, Loop |
 | User input after the continuation | continuation < input | Continuation turn first; Queue next; Steer joins the continuation turn | InputQueue, Loop |
@@ -545,6 +546,6 @@ Goal is implemented in TypeScript (§10); a Rust implementation would bind the n
 | Namespace `session.goal` registered with `sessionMethods` | `Keyed<SessionMethods>`; `methods.register(ctx, "session.goal", Vec<MethodDecl>, Handler)` in the Session part's `apply`. the declarations are the `MethodDecl` list (`name`, `mutating`, `interruption: Report`, `progress: false`); `call` = the `Handler` `(method, params, CancellationToken, Progress)` returning `Result<Value, RpcError>` ([session-boundary Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | Keys | `const OBJECTIVE_KEY: &str = "objective"` and `const STATUS_KEY: &str = "status"`, written as `KeyUse::Live(name)` / `KeyUse::Retire(name)` and stored as `goal:objective` / `goal:status`; continuations carry no `KeyUse` |
 | Unload disposer | `ctx.effect` |
-| `goal` Settings source | Not bound in Rust: even a Rust start reads it at each turn-end decision through the named service `settings` (S8b `read`); the source is declared in Goal's branch row `settings`, not as a Rust document type |
+| `goal` Settings source | Not bound in Rust: even a Rust start reads it at each turn-end decision through the named service `settings` (S8b `read`); the source is declared in Goal's row `settings`, not as a Rust document type |
 | Write task | A task registered on the branch part's `ctx` by the Dispatcher handler, keyed by the deciding sequence; ended by unload |
 | Writes | `Branch::input` through `S:TreeCommands`, from the Session part's calls and from the write tasks |

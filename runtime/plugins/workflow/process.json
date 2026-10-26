@@ -9,7 +9,8 @@
     "settings",
     "pluginFiles",
     "workflowFiles",
-    "managementMethods"
+    "managementMethods",
+    "partRegistry"
   ],
   "provides": {
     "workflowRuns": {

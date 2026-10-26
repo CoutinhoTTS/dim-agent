@@ -1,4 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import type { BranchEvent, Services } from '../../npm/plugin.js'
 
 // A branch part that writes events of its own domain (ADR 001, issue #2).
@@ -9,7 +10,7 @@ import type { BranchEvent, Services } from '../../npm/plugin.js'
 // its event writes a marked input with what it received. The replayed
 // history folds its own events, so a restored generation does not append
 // again.
-export default definePlugin({
+export const part = definePlugin({
   name: 'ExtensionEventsFixture',
   provides: {},
   inject: ['dispatcher', 'timeline', 'timelineIdentity', 'treeCommands'],
@@ -62,3 +63,5 @@ export default definePlugin({
     })
   },
 })
+
+export default partRow('branch', part)

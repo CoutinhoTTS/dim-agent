@@ -482,8 +482,9 @@ async fn closed_session_and_branch_subtrees_leave_no_plugins_or_bindings() {
     // instance with its anchor and process values, the row providing its
     // registry and the 13 plugins of the profile's features; and the
     // loader's service and its mounter of other languages' plugin
-    // definitions, the process ModelHost and `partRegistry`.
-    assert_eq!(baseline, Some((19, 4)));
+    // definitions, the process ModelHost, and `partRegistry` at its type's
+    // key and, as a marked service, by name for other languages.
+    assert_eq!(baseline, Some((19, 5)));
     agent.close().await.unwrap();
 }
 

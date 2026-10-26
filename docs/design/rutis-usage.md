@@ -1,8 +1,7 @@
 # How Dim uses rutis
 
-Status: Accepted under [ADR 006](../adr/006-plugin-contract.md) (D2–D4). Implemented, except
-foreign plugins as one row (R5's second form, #403), which rutis 0.17's plugin definitions (R7)
-unblock; each section says what holds today.
+Status: Accepted under [ADR 006](../adr/006-plugin-contract.md) (D2–D4). Implemented; each section
+says what holds today.
 [中文](../zh/design/rutis-usage.md)
 
 rutis owns the plugin machinery. This document states how Dim uses it: how a part is mounted, how it
@@ -82,6 +81,14 @@ besides the scope's own mechanisms.
   registration once the definition has ended, so no later instance mounts it. A definition cannot return
   nothing for an instance: a copy whose instance's business configuration turns the feature off does
   no work.
+- **What a foreign row still declares.** The loader's catalog is fixed before the runtime starts, and a
+  name a part provides inside its Session or branch must be in the catalog with that group, or rutis
+  publishes it once for the whole process and a second instance's copy fails as a duplicate provider
+  (§3.5). A Rust plugin registers such names in the host's builder. A foreign plugin's parts only
+  exist once its runtime runs, so its single row lists them, `instanceNames`, each with its group,
+  and the App Server registers them before the runtime starts. It is the one thing a foreign row
+  declares about its parts: their `inject`, `provides` and everything else travel with the
+  definition.
 
 **Every plugin and part:**
 
@@ -110,9 +117,9 @@ name-bound (#391, #392, #396–#398, #400).
 - Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry, and Session
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).
-- Rows of other languages carry their group in the App Server's configuration (appendix B), one row per
-  part, until R5's second form ([#403](https://github.com/arcships/dim/issues/403)). TypeScript plugins
-  hand definitions over since rutis 0.17.0 and Python plugins since 0.17.1, which Dim is on.
+- `partRegistry` crosses languages: a TypeScript or Python plugin is one process row and registers its
+  parts with `registerDefinition` (appendix B, [#403](https://github.com/arcships/dim/issues/403));
+  the App Server rejects a row that declares a group.
 
 ## 3. Services by name
 
@@ -263,10 +270,10 @@ These requirements concern how Dim uses rutis. They follow
   its code, as plugin definitions (R7). The Session and branch rows of other languages, and the group
   they declare, are deleted. No package declaration is built: a definition carries its own `inject`
   and `provides`, and R6 removed most of the host's need to know names before the runtime starts.
+  What remains, the names its parts provide in their instances, stays in the plugin's row (§2).
 - **Effect:** none on the Timeline.
 - **Owner:** App Server and the SDKs, with the repository's plugins
-  ([#403](https://github.com/arcships/dim/issues/403)). R7 is delivered, so nothing outside Dim
-  blocks it.
+  ([#403](https://github.com/arcships/dim/issues/403)). Delivered.
 
 ### R6. Contributions register with their owner
 
@@ -469,31 +476,54 @@ Carried from [#6](https://github.com/arcships/dim/issues/6):
 ## Appendix B: TypeScript and Python binding
 
 Parts use `definePlugin` (in Python `define_plugin`, or a module with `inject`, `provides` and
-`apply`) with `inject` and `provides`. The row carries the group: `"session"`, `"branch"`, or none at
-the process. The SDK's generated declarations come from the catalog.
+`apply`) with `inject` and `provides`.
+
+A plugin is one process row, in either language. Its `apply` registers each Session and branch part
+with `partRegistry.registerDefinition(scope, name, definition)`, where `definition` is a
+`definePlugin` value (in Python a `define_plugin` value; in Node also an unmodified Cordis 4 plugin)
+that may close over what the plugin prepared. Its row injects `partRegistry`, and lists in
+`instanceNames` the names its parts provide in each Session or branch (§2). The SDK's generated
+declarations come from the catalog.
 
 ```json
-{ "id": "goal-branch", "name": "/abs/goal/branch.ts", "group": "branch",
-  "inject": ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"],
+{ "id": "goal", "name": "/abs/goal/index.ts", "inject": ["partRegistry"], "provides": {},
   "config": {} }
 ```
 
-A Python row names its module after the runtime, `py:<module>`; the App Server runs it in its
-Python runtime when one is configured, importing the module from the configured project directory.
+```ts
+export default definePlugin({
+  name: 'Goal',
+  inject: ['partRegistry'],
+  async apply(ctx) {
+    const parts = ctx.use<Services['partRegistry']>('partRegistry')
+    await parts.registerDefinition('session', 'GoalSession', session)
+    await parts.registerDefinition('branch', 'GoalBranch', branch)
+  },
+})
+```
+
+A Python row names its module after the runtime, `py:<module>`; the App Server runs it in its Python
+runtime when one is configured, importing the module from the configured project directory.
 
 ```json
-{ "id": "py-branch", "name": "py:python_branch_part", "group": "branch",
-  "inject": ["dispatcher", "timelineIdentity", "treeCommands"], "provides": {}, "config": {} }
+{ "id": "python", "name": "py:python_plugin", "provides": {}, "config": {} }
 ```
 
 ```python
-inject = ["dispatcher", "timelineIdentity", "treeCommands"]
-provides = {}
+from rutis import define_plugin
 
-async def apply(ctx, config):
+async def apply_branch(ctx, config):
     dispatcher = ctx.use("dispatcher")
     identity = await ctx.use("timelineIdentity").get()
     ...
+
+branch = define_plugin(apply_branch, inject=["dispatcher", "timelineIdentity", "treeCommands"])
+
+inject = ["partRegistry"]
+provides = {}
+
+async def apply(ctx, config):
+    await ctx.use("partRegistry").registerDefinition("branch", "PythonBranchPart", branch)
 ```
 
 ```ts

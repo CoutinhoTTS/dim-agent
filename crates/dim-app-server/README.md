@@ -452,17 +452,19 @@ It installs no production capability bridge or Session RPC methods.
 `ServerConfig.session_typescript` accepts `SessionTypeScriptConfig` with absolute Node executable,
 runtime package and anchor paths, an optional Python runtime (`python`: an interpreter with the
 `rutis` package and the directory its `py:<module>` rows are imported from), plus ordinary loader
-rows. Each row declares its group: `"group": "session"` or `"branch"`, or none for a process owner;
-the host places it there. The runtimes' standard error reaches the process log; their standard
-output is discarded.
-A Session row registers its tools
+rows. Each row is one plugin, placed in the process. From its `apply` the plugin registers its
+Session and branch parts with `partRegistry` as plugin definitions, and every Session or branch
+mounts a copy; the row lists in `instanceNames` the names those parts provide in their instances.
+A row has no `group`. The runtimes' standard error reaches the process log; their standard output
+is discarded.
+A Session part registers its tools
 and Session method namespaces from its own `apply`, with the `toolRegistry` and `sessionMethods`
-services it injects; its `RowSchema.provides` lists only the services it provides by name. See the [binding contract](../../docs/design/session-typescript.md)
+services it injects; the row's `RowSchema.provides` lists only the process services it provides by name. See the [binding contract](../../docs/design/session-typescript.md)
 and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
 
 The `dim-app-server` binary builds this configuration from `--session-rows FILE` with the
 existing `--node` and `--js-runtime` flags, and `--python PATH` for `py:` rows. `FILE` is a JSON
-array of ordinary loader rows, each with its group; it is also the anchor, so package names in the
+array of ordinary loader rows, one per plugin; it is also the anchor, so package names in the
 rows resolve from its location and `py:` modules are imported from its directory. Rows are
 validated as they are for an embedding host; nothing is installed by default. Optional packages such as
 [SessionTitle](../../runtime/plugins/session-title/README.md) and Goal are enabled this way:

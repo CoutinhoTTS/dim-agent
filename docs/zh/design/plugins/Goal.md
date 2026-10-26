@@ -42,7 +42,7 @@ flowchart LR
 | `GoalPlugin` | Session | `treeCommands`、`toolRegistry`、`sessionMethods`（Session 导出） | 把 `goal_update` 注册到 `toolRegistry`，把 `session.goal` 注册到 `sessionMethods`；经 `treeCommands.input` 按分支 id 写变更输入 |
 | `GoalBranchPlugin` | 分支 | `dispatcher`、`timelineIdentity`、`branchLifecycle`（分支导出）、`treeCommands`、用于其来源 `goal` 的进程服务 `settings`（S8b） | 不提供服务；拥有折叠结果、续跑决策和 Goal 自己的写入 |
 
-Session 部分在 apply 中把工具注册到 `toolRegistry`，把方法命名空间 `session.goal` 注册到 `sessionMethods`。分支部分不提供服务；它注入 `dispatcher`，因此运行在每个分支中（C5）。安装了 Goal 的装配的每个 Session 都运行 Goal 的 Session 部分，因此该部分激活后，每个这样的 Session 都有 `session.goal`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。`maxContinuations` 是 Goal 的 Settings 来源 `goal` 中文档的字段，属于业务配置（[ADR 002](../../adr/002-plugin-scope.md) D4）。Goal 是 TypeScript 插件，只通过 S8b 的语言中立进程服务 `settings` 读取它（[Settings 服务](../appserver/settings-service.md)），从不经 App Server 的类型。Goal 的分支行在其 `settings` 成员中按 S8b §3.1 声明该来源：`source: "goal"`，一个用户文件，没有项目文件（只有用户作用域），没有 user-only 字段，JSON Schema 中 `maxContinuations` 为整数，`minimum: 1`、`maximum: 1000`、`default: 20`（A4）。Settings 在写入和读取持久化文件时应用默认值并校验，因此 Goal 按交付的样子使用文档；变更是数据更新，从不重载。Dispatcher 回调登记自有任务后即返回，不等待 Settings。分支发布后，每个 turn/end 任务使用时调用 `settings.read {source: "goal", scope: "user"}`，再在写入前复核其决定轮次及当前已消费的折叠结果（A.6）。不缓存上限，也不监听 `settings.changed`。在该读取前已提交的变更无须重载即生效，包括文件后端 Settings 用户文档的直接编辑。来源不可读时停止该次决策，不产生自动输入，也不使用回退上限（附录 C）。中断暂停与继承目标的起始 clear 不需要读取上限。Goal 的工具都不写它；客户端经 `settings.read`/`settings.update` 写入它。Goal 只读取 `branch/start`、`input/message`、`input/consumed`、`input/deleted`、`turn/start`、`turn/end` 和 `stop/interrupt` 的公开数据契约；从不读取其他插件的状态。
+Session 部分在 apply 中把工具注册到 `toolRegistry`，把方法命名空间 `session.goal` 注册到 `sessionMethods`。分支部分不提供服务；它作为分支定义注册，因此每个分支都有一份副本（C5）。安装了 Goal 的装配的每个 Session 都运行 Goal 的 Session 部分，因此该部分激活后，每个这样的 Session 都有 `session.goal`（[session-boundary A.1](../contracts/session-boundary.md#a1-方法贡献)）。`maxContinuations` 是 Goal 的 Settings 来源 `goal` 中文档的字段，属于业务配置（[ADR 002](../../adr/002-plugin-scope.md) D4）。Goal 是 TypeScript 插件，只通过 S8b 的语言中立进程服务 `settings` 读取它（[Settings 服务](../appserver/settings-service.md)），从不经 App Server 的类型。Goal 的行在其 `settings` 成员中按 S8b §3.1 声明该来源：`source: "goal"`，一个用户文件，没有项目文件（只有用户作用域），没有 user-only 字段，JSON Schema 中 `maxContinuations` 为整数，`minimum: 1`、`maximum: 1000`、`default: 20`（A4）。Settings 在写入和读取持久化文件时应用默认值并校验，因此 Goal 按交付的样子使用文档；变更是数据更新，从不重载。Dispatcher 回调登记自有任务后即返回，不等待 Settings。分支发布后，每个 turn/end 任务使用时调用 `settings.read {source: "goal", scope: "user"}`，再在写入前复核其决定轮次及当前已消费的折叠结果（A.6）。不缓存上限，也不监听 `settings.changed`。在该读取前已提交的变更无须重载即生效，包括文件后端 Settings 用户文档的直接编辑。来源不可读时停止该次决策，不产生自动输入，也不使用回退上限（附录 C）。中断暂停与继承目标的起始 clear 不需要读取上限。Goal 的工具都不写它；客户端经 `settings.read`/`settings.update` 写入它。Goal 只读取 `branch/start`、`input/message`、`input/consumed`、`input/deleted`、`turn/start`、`turn/end` 和 `stop/interrupt` 的公开数据契约；从不读取其他插件的状态。
 
 ## 2. 数据与状态
 
@@ -281,15 +281,16 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 
 ## 10. 实现
 
-TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行）：
+TypeScript，位于 `runtime/plugins/goal`，为一行：其 `index.ts` 经 `partRegistry` 把 `session.ts` 注册为 Session 定义 `GoalSession`（C4），把 `branch.ts` 注册为分支定义 `GoalBranch`（C5）：
 
-| 文件 | 部分 | 行 |
+| 文件 | 部分 | 声明 |
 | --- | --- | --- |
 | `goal.ts` | 共享：变更与续跑输入（A.5）、标记解析、折叠（§2）与决策（A.4） | — |
-| `session.ts`、`session.json` | `GoalPlugin`：把 `goal_update` 注册到 `toolRegistry`，把 `session.goal` 注册到 `sessionMethods`；经 `treeCommands.input` 写入 | Session 行，`inject: ["treeCommands", "toolRegistry", "sessionMethods"]` |
-| `branch.ts`、`settings.json` | `GoalBranchPlugin`：用 `dispatcher.consume` 注册，折叠重放，对实时事件决策，并以自有任务写入；读取 `maxContinuations`；声明 `goal` 来源。在 [Pursuit](Pursuit.md) 的评审裁判下它还创建评审分支并担任评审者角色 | 分支行，`inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]`，`settings` 取自 `settings.json` |
+| `index.ts` | 该行：注册两个定义 | `inject: ["partRegistry"]`、`provides: {}`，`settings` 取自 `settings.json` |
+| `session.ts` | `GoalPlugin`：把 `goal_update` 注册到 `toolRegistry`，把 `session.goal` 注册到 `sessionMethods`；经 `treeCommands.input` 写入 | Session 定义，`inject: ["treeCommands", "toolRegistry", "sessionMethods"]` |
+| `branch.ts` | `GoalBranchPlugin`：用 `dispatcher.consume` 注册，折叠重放，对实时事件决策，并以自有任务写入；从 `goal` 来源读取 `maxContinuations`。在 [Pursuit](Pursuit.md) 的评审裁判下它还创建评审分支并担任评审者角色 | 分支定义，`inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]` |
 
-新分支检查（§3.4）用 `dispatcher.history(S)` 读取继承前缀，并排除分支的本地事件。嵌入方把这两行加入
+新分支检查（§3.4）用 `dispatcher.history(S)` 读取继承前缀，并排除分支的本地事件。嵌入方把这一行加入
 `ServerConfig.session_typescript` 即可安装 Goal；产品打包归 PluginManager。
 
 验证覆盖精确事件顺序，以及实际插件的公开端口流程。
@@ -308,7 +309,7 @@ TypeScript，位于 `runtime/plugins/goal`（C4 工具/方法行，C5 分支行�
 由 `session.goal.pause` 恢复并写入；新的 `maxContinuations` 无需重载即生效；没有 Goal 时为 `unknown_method`）、
 第 11 条（完成后 resume，续跑到新上限）、方法边界与 `pause`/`resume`/`clear` 的顺序，以及 A.5 编码往返。
 
-这些流程中的 Goal 行是普通可选行，没有任何依赖强制 Goal 先于工具快照：Goal 行注册 `goal_update` 后，
+这些流程中的 Goal 行是普通可选行，没有任何依赖强制 Goal 先于工具快照：Session 部分注册 `goal_update` 后，
 ToolRegistry 即提供它（[Session 边界 A.5](../contracts/session-boundary.md#a5-工具贡献)，#241）。
 
 第 6 条中关于键控基线的一半是 F1 的契约，由其 `keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired`
@@ -408,7 +409,7 @@ Goal 消费分支 `B` 上序号 `N` 处的 `turn/end` 时，基于直到 `N` 的
 
 | 场景 | 序号顺序 | 结果 | 归属 |
 | --- | --- | --- | --- |
-| Session 启动时可选 Goal Session 行仍为 Pending | 首个请求 < 注册 | 行注册前的请求不含 `goal_update`，此后的下一个请求起提供（[A.5](../contracts/session-boundary.md#a5-工具贡献)，#241）；其间的续跑无法经该工具报告 | Goal；ToolRegistry |
+| Session 启动时可选 Goal Session 部分仍为 Pending | 首个请求 < 注册 | 部分注册前的请求不含 `goal_update`，此后的下一个请求起提供（[A.5](../contracts/session-boundary.md#a5-工具贡献)，#241）；其间的续跑无法经该工具报告 | Goal；ToolRegistry |
 | 目标轮次运行时的用户 Queue 输入 | 输入 < `turn/end` N，未消费 | C5 不成立；用户的轮次运行；其结束时以重置后的计数续跑 | Goal、InputQueue |
 | 用户输入在 N 之后、续跑之前提交 | N < 输入 < 续跑 | 两者按顺序运行：先用户轮次，再续跑轮次；计数重置 | InputQueue、Loop |
 | 续跑之后的用户输入 | 续跑 < 输入 | 先运行续跑轮次；Queue 接着运行；Steer 加入续跑轮次 | InputQueue、Loop |
@@ -534,6 +535,6 @@ Goal 以 TypeScript 实现（§10）；Rust 实现将按如下方式绑定中立
 | 注册到 `sessionMethods` 的命名空间 `session.goal` | `Keyed<SessionMethods>`；在 Session 部分的 `apply` 中调用 `methods.register(ctx, "session.goal", Vec<MethodDecl>, Handler)`。声明 = `MethodDecl` 列表（`name`、`mutating`、`interruption: Report`、`progress: false`）；`call` = `Handler` `(method, params, CancellationToken, Progress)`，返回 `Result<Value, RpcError>`（[session-boundary 附录 F](../contracts/session-boundary.md#附录-f-rust-绑定)） |
 | Key | `const OBJECTIVE_KEY: &str = "objective"` 与 `const STATUS_KEY: &str = "status"`，以 `KeyUse::Live(name)` / `KeyUse::Retire(name)` 写入，存为 `goal:objective` / `goal:status`；续跑不带 `KeyUse` |
 | 卸载清理函数 | `ctx.effect` |
-| `goal` Settings 来源 | 不做 Rust 绑定：即使先用 Rust 起步，也经命名服务 `settings`（S8b `read`）在每次 turn/end 决策时读取；该来源在 Goal 分支行的 `settings` 中声明，不是 Rust 文档类型 |
+| `goal` Settings 来源 | 不做 Rust 绑定：即使先用 Rust 起步，也经命名服务 `settings`（S8b `read`）在每次 turn/end 决策时读取；该来源在 Goal 行的 `settings` 中声明，不是 Rust 文档类型 |
 | 写入任务 | Dispatcher 处理器在分支部分的 `ctx` 上登记的任务，以做出决定的序号为键；随卸载结束 |
 | 写入 | 经 `S:TreeCommands` 调用 `Branch::input`，来自 Session 部分的调用和写入任务 |

@@ -60,7 +60,7 @@ flowchart LR
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| 工具 / 进程包 | C4 支持普通 Session 工具行；工具接入与提供者代际遵循当前功能绑定（§1.1）。ServerConfig.session_typescript.rows 中不带组的行在同一运行时装载进程 owner。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；可选包已提供这两种行。 |
+| 工具 / 进程包 | C4 支持经 `partRegistry` 注册为定义的 Session 部分；工具接入与提供者代际遵循当前功能绑定（§1.1）。ServerConfig.session_typescript.rows 中的一行装载进程 owner，由它注册 Session 工具的定义；每个 Session 在同一运行时挂载一份副本。Session 工具在 definePlugin.inject 声明 workflowRuns（§1.1）；可选包已提供该行。 |
 | 管理 | 进程行注入 managementMethods，在 apply 中注册 workflow，注册使用原生按调用准入及 report/drain；包已实现这五个具体方法。 |
 | 定义 / Settings | Settings owner 读写/CAS/事件与生成的 workflowFiles 已交付。来源、文件授权、包身份沿用已接受原生接入合同，§1.3 指定包内位置；包提供业务 schema 和 A.1 语义诊断。不直接访问文件系统。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `workflow/`；父目录缺失时在事务回调前返回 `io`。内部 v2、拒绝 v1 并保留原字节、延后迁移仍遵循 A.4。 |
@@ -77,21 +77,22 @@ A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之�
 ### 1.3 具体包行
 
 可选包位于 `runtime/plugins/workflow`，包名 `@dimcode/workflow`；根模块拥有运行，
-`./session` 提供 Session 工具。完整 `process.json` 与 `session.json` 放入现有
-`SessionTypeScriptConfig.rows` 数组；`session.json` 声明 `"group": "session"`，`process.json` 不带组。
-包已提供这两种行，由宿主显式安装；
+并在 apply 中经 `partRegistry` 把 `session.ts` 注册为 Session 定义 `WorkflowSession`，
+由它提供 Session 工具。完整 `process.json` 这一行放入现有
+`SessionTypeScriptConfig.rows` 数组，由宿主显式安装；
 不包含默认 CLI 安装或 PluginManager 实现。
 
-| row 字段 | 进程行 | Session 行 |
-| --- | --- | --- |
-| `id` | `workflow` | `workflow-session` |
-| `name` | `@dimcode/workflow` | `@dimcode/workflow/session` |
-| `config` | `{packages:[{id,root}, ...]}`；空列表表示未安装包定义 | `{}` |
-| `inject` | `sessions`、`settings`、`pluginFiles`、`workflowFiles`、`managementMethods` | `workflowRuns`、`toolRegistry` |
-| `provides` | `workflowRuns: {call:"async"}`；apply 把 `workflow` 注册到 `managementMethods` | `{}`；apply 把 `workflow` 注册到 `toolRegistry` |
-| `settings` | 唯一用户来源 workflow、userFile:"workflow.json"、无 projectFile、userOnly:["/projectEnabled"]，包含来源合同的定义、启用状态与 A11 并发字段 | 无 |
+| row 字段 | 进程行 |
+| --- | --- |
+| `id` | `workflow` |
+| `name` | `@dimcode/workflow` |
+| `config` | `{packages:[{id,root}, ...]}`；空列表表示未安装包定义 |
+| `inject` | `sessions`、`settings`、`pluginFiles`、`workflowFiles`、`managementMethods`、`partRegistry` |
+| `provides` | `workflowRuns: {call:"async"}`；apply 把 `workflow` 注册到 `managementMethods`，把 Session 定义注册到 `partRegistry` |
+| `settings` | 唯一用户来源 workflow、userFile:"workflow.json"、无 projectFile、userOnly:["/projectEnabled"]，包含来源合同的定义、启用状态与 A11 并发字段 |
 
-模块与包行声明相同依赖和方法种类，共用现有运行时。workflowFiles 属于已经注入的 Settings
+Session 定义注入 `workflowRuns` 与 `toolRegistry`，不提供服务，在 apply 中把 `workflow` 注册到 `toolRegistry`。
+模块与包行声明相同依赖和方法种类；每个 Session 的副本运行在该行的运行时中。workflowFiles 属于已经注入的 Settings
 同一 generation，不增加独立重载来源或 Provider/index 依赖。进程原行直接提供业务和管理服务，
 不增加适配器、就绪服务或 Session 接线插件。定义、启用状态、并发限制、运行状态属于业务数据。
 
@@ -335,7 +336,7 @@ Workflow 无宿主本地批准（[overview §6.4](../overview.md#64-约定)）�
 | §1 Capability 与 App Server 边界 | 进程插件拥有定义和运行，Session Capability 提供工具；通过 pluginFiles 存储，不设 App Server 业务模块。 |
 | ADR 002 D1 作用域跟随状态所有者 | 运行跨越 Session（进程部分）；工具属于 Session（Session 部分）。 |
 | ADR 002 D2 不设接线模块 | 现有 Rpc 消费业务方法，ToolRegistry 保存本功能注册的工具，不增接线插件、Provider 端口或注册表；TS 管理绑定已提供。 |
-| ADR 002 D3 依赖跟随作用域 | 稳定 sessions 隔离 index 重载，C3 隔离核心和可选 row，可选工具行按 §1.1 的可用性约束声明 owner 依赖。 |
+| ADR 002 D3 依赖跟随作用域 | 稳定 sessions 隔离 index 重载，C3 隔离核心和可选 row，Session 工具定义按 §1.1 的可用性约束声明 owner 依赖。 |
 | ADR 002 D4 结构性配置与业务配置分离 | 定义和运行上限是使用时读取的业务数据；没有结构性变化。 |
 | ADR 002 D5 合同语言中立 | `workflowRuns`、工具、方法和定义格式都是命名服务或数据；Rust 形式见附录 G。 |
 
@@ -572,7 +573,7 @@ Stage { id, step, state: waiting | launching | running | completed | failed | st
 | --- | --- |
 | 公开运行存储 | process-typescript §5.2 已提供 pluginFiles，§3.4 的持久化标记、替换失败与宿主重启探针直接采用该绑定；不借用私有 managed 插件入口、不绕过文件服务。 |
 | 由 Collaboration 成员运行阶段（可能的后续功能） | 未设计。阶段可以在起始方的某个 Collaboration 成员中运行，以便跨阶段复用该成员的上下文。这需要 Collaboration 接受从分支外发出的成员请求。目前每个阶段都在启动的 Session 中运行。 |
-| 包绑定 | §1.3 指定进程/Session 行、来源归属、包安装选项和管理准入；可选包和业务验收流程已提供。 |
+| 包绑定 | §1.3 指定进程行及其 Session 定义、来源归属、包安装选项和管理准入；可选包和业务验收流程已提供。 |
 | 定义来源 | #265 已交付文件授权，来源合同包含定义、受保护启用及两个 A11 并发字段。SDK 与真实包流程覆盖解析、来源身份/优先级、受保护启用、来源默认值、保存定义保留并发字段和后续 start 读取修改后的上限。 |
 | 报告一次 / 清理 | [原生结算合同](../../../design/p6-p7-bindings.md#4-native-report-settlement)、#267 和 §3.4 的持久标记/存储失败/宿主重启探针已证明选定绑定。真实包流程覆盖后台任务 join、记录替换失败、重复 lookup 及行/runtime/宿主重启恢复，不增加宿主 epoch 或未经证明的重启推断。 |
 | 原生空闲生命周期 | 反复创建阶段发布前须 #126；Workflow 不实现宿主卸载。 |

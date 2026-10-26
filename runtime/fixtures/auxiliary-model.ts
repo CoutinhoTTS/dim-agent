@@ -1,8 +1,9 @@
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import type { AuxiliaryModel, SessionMethods } from '../../npm/plugin.d.ts'
 import provides from './auxiliary-model.json' with { type: 'json' }
 
-export default definePlugin({
+export const part = definePlugin({
   name: 'AuxiliaryModelFixture',
   inject: ['auxiliaryModel', 'sessionMethods'],
   provides,
@@ -25,3 +26,5 @@ export default definePlugin({
     )
   },
 })
+
+export default partRow('session', part)

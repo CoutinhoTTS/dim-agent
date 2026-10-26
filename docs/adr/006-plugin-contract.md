@@ -9,8 +9,8 @@ waiting for rutis#642. Context and D4 amended on 2026-10-26: the Context is mark
 before the migration and says which of its mechanisms the migration removed, and D4 states that
 removal as done; the notes on the layer-typed API and on `sessionLifecycle` state the current fact.
 D3 amended the same day: a foreign plugin registers its parts as rutis plugin definitions, which
-rutis 0.17 delivered for rutis#642. Implementation: P1, P2, P3 and R6 done, and the first form of
-P4; R5's second form is #403. The phases are in the
+rutis 0.17 delivered for rutis#642. Implementation: P1, P2, P3, R6 and P4 done; R5's second form
+with #403. The phases are in the
 [plugin contract design](../design/plugin-contract.md#10-migration).
 [中文](../zh/adr/006-plugin-contract.md)
 
@@ -107,7 +107,7 @@ identity registered with its owner, contributions register from the part that of
 host pre-registers none and translates no `provides`, and rows of other languages get publication
 and closing from named services such as `sessionLifecycle` and read the bus directly instead of a
 relay. What remains is R5's second form: a foreign feature is still one configured row per part,
-each declaring its group, until #403, which rutis 0.17's plugin definitions unblock.
+each declaring its group, until #403, which removed it.
 
 ## Decisions
 
@@ -258,10 +258,10 @@ The implementation removed: the `Capability` trait and its keys, `SessionScope`/
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`, `SessionService`/`BranchService`,
 `session_plugin`/`timeline_plugin`, the host-side name pre-registration, the `toolContribution:*`,
 `sessionMethods:*` and `managementMethods:*` names with their native/foreign split, the Session and
-branch rows, the App Server's inference of a row's group, and the per-prefix placement checks that
-the catalog's groups already express. The Session and branch rows of other languages remain until
-#403. `PublicService` stays. It limits which branch services the Session and branch
-facades expose to ordinary callers, which is a facade rule, not a plugin rule.
+branch rows, those of other languages included (#403), the App Server's inference of a row's group,
+and the per-prefix placement checks that the catalog's groups already express. `PublicService`
+stays. It limits which branch services the Session and branch facades expose to ordinary callers,
+which is a facade rule, not a plugin rule.
 
 The details are [How Dim uses rutis §3](../design/rutis-usage.md#3-services-by-name); the names Dim
 defines are listed in the [plugin contract §4](../design/plugin-contract.md#4-dims-services).
@@ -383,9 +383,8 @@ persisted or wire format.
   part owned by the instance that mounted it; isolation by the instance's labels. How they are put
   together, an instance pulling the generators registered for its scope, has no precedent in Cordis
   or Koishi, where one plugin with filtered contexts is the norm.
-- Until #403, a foreign feature keeps one row per part, while a Rust feature became one row with
-  #402. A foreign part cannot skip an instance as a Rust generator can; its copy is mounted and does
-  no work there.
+- A Rust feature became one row with #402, and a TypeScript or Python feature with #403. A foreign part cannot skip an instance as a Rust
+  generator can; its copy is mounted and does no work there.
 - The 33 plugin pages under `docs/architecture/rust-agent/plugins/` are regrouped by plugin in step 3.
 
 ## Alternatives considered

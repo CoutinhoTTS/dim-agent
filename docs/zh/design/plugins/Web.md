@@ -31,7 +31,7 @@ flowchart LR
 
 **依赖的契约：** 已实现的 [C4 工具绑定](../../../design/session-typescript.md)、[Settings 具名服务与 row 来源声明](../appserver/settings-service.md)及 Permission 既有的 `network` 风险。#150 提供工具，#166/#175 提供 Settings，#177 提供 Settings 事件。Web 不消费 Session 广播，不等待 #168。**本文定义的契约：** 两个工具、结果格式和 `web` 业务文档。
 
-Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 Session row 入口；不在 App Server 增加业务代码、注册表或宿主端口。工具按调用读取 Settings，已有事件无需为此再建订阅或缓存失效协议。非致命配置诊断放入既有 `ToolResult.structuredContent`，不假设存在可注入的 TypeScript 诊断通道。
+Web 在自己的 TypeScript 包中使用同一个 JSON 声明，交给现有 row 入口；不在 App Server 增加业务代码、注册表或宿主端口。工具按调用读取 Settings，已有事件无需为此再建订阅或缓存失效协议。非致命配置诊断放入既有 `ToolResult.structuredContent`，不假设存在可注入的 TypeScript 诊断通道。
 
 搜索 API 密钥是 `searchService.apiKey`，Web Settings 来源中的仅用户字段（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）。Unix 上的文件存储 profile 以 0600 权限写用户文档。原生 profile 将其作为 `user/web` 存入 SQLite；权限边界是产品 home，Unix 新建目录使用 0700，Windows 继承父目录 DACL；已有目录权限保持不变，数据库没有独立的 0600 保证。`userOnly` 限制写入，不屏蔽本地读取：该字段只经客户端方法 `settings.update` 写入，Web 从不写；本地客户端可经 `settings.read` 读回，远程与配对客户端不能。Web 每次调用随文档读取密钥，从不保留，也不把它放入声明、结果、`structuredContent`、诊断、错误或日志。
 
@@ -160,14 +160,14 @@ sequenceDiagram
 
 ### 6.1 C4 row 与来源
 
-Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `inject` 与 `provides`，宿主使用同一份 row。row id `web` 是来源所有者；TS 不重复登记来源。示例保留现有 loader 与 Settings 数据形状：
+Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `inject` 与 `provides`，宿主使用同一份 row。该行在 `apply` 中经 `partRegistry` 把 Session 部分注册为 Session 定义；每个 Session 挂载一份副本，副本注入 `settings` 与 `toolRegistry`。row id `web` 是来源所有者；TS 不重复登记来源。示例保留现有 loader 与 Settings 数据形状：
 
 ```json
 {
   "id": "web",
   "name": "@dimcode/web",
   "config": {},
-  "inject": ["settings", "toolRegistry"],
+  "inject": ["partRegistry"],
   "provides": {},
   "settings": [
     {
@@ -220,7 +220,7 @@ Web 包把以下声明作为一个 JSON 文件发布，模块导入其中的 `in
 }
 ```
 
-插件声明 `inject: ["settings", "toolRegistry"]`，apply 只登记资源清理，并以 `toolRegistry.register(declaration, execute)` 注册两个工具，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；API 密钥取自该文档的 `searchService.apiKey`。不重复校验或填充已交付的文档。
+Session 部分声明 `inject: ["settings", "toolRegistry"]`，其 apply 只登记资源清理，并以 `toolRegistry.register(declaration, execute)` 注册两个工具，不读文件或发请求。执行沿 C4 的 `execute(call, cancelled)`，取 call 中既有 Session 身份与创建配置。每次调用先读 `settings.read({source:"web", scope:"user"})`，按 Settings 的 `{ok,value}` / `{ok:false,error}` 信封处理；API 密钥取自该文档的 `searchService.apiKey`。不重复校验或填充已交付的文档。
 
 Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `searchService.endpoint` 和 `proxy`，不重新校验 Settings 文档。端点无法解析时，`web_search` 返回 `search_unavailable`；代理无法解析时，`web_search` 返回 `search_unavailable`，`web_fetch` 返回 `connect_failed`。均不建立连接、不回退为直连，诊断不包含配置值。
 
@@ -430,7 +430,7 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址默认�
 | --- | --- | --- | --- |
 | A1 | 搜索服务（包括基于账号的服务）是内置适配器；没有后端注册表 | ADR 002 D2 | 由 Web 拥有的搜索后端契约 |
 | A2 | 请求从承载 Session 的 App Server 进程发出 | 判断 | 经资源节点的服务进行网络访问 |
-| A3 | Web row Active 时始终声明 `web_search`，无可用搜索服务时失败 | ADR 002 D4（配置从不重载） | 声明将随配置变化 |
+| A3 | Web 部件 Active 时始终声明 `web_search`，无可用搜索服务时失败 | ADR 002 D4（配置从不重载） | 声明将随配置变化 |
 | A4 | 查询长度 500；`max_results` 1 到 10，默认 5 | 判断 | 限制改变 |
 | A5 | 连接 10 s，抓取 30 s，搜索 20 s；下载 5 MiB | 判断 | 限制改变 |
 | A6 | 仅 `http`/`https`，至多 2048 个字符，不含 userinfo | 判断 | 输入面更宽 |
@@ -449,7 +449,7 @@ Fake-IP DNS 答案同样受此策略约束。合成的基准测试地址默认�
 
 | 问题 | 当前边界 |
 | --- | --- |
-| 初始范围 | 工具参数、网络/内容策略及 A1–A16 已获维护者确认。包使用现有 Session row；产品安装仍属于 PluginManager。 |
+| 初始范围 | 工具参数、网络/内容策略及 A1–A16 已获维护者确认。包使用现有的一行；产品安装仍属于 PluginManager。 |
 | 配置诊断 | 非致命且仅供 UI/持久化的配置诊断放入 ToolResult.structuredContent；模型需要采取动作的信息仍必须放在 content，不新增通道 |
 
 ## 附录 G. Rust 绑定

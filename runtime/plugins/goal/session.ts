@@ -1,5 +1,4 @@
 import { definePlugin } from '@arcships/rutis'
-import provides from './session.json' with { type: 'json' }
 import { type InputMessage, changes } from './goal.ts'
 import type { SessionMethods, ToolRegistry } from '../../../npm/plugin.js'
 
@@ -20,7 +19,7 @@ const text = (value: unknown, limit: number) =>
 // never read Goal's state; the branch part decides what a change does.
 export default definePlugin({
   name: 'GoalSession',
-  provides,
+  provides: {},
   inject: ['treeCommands', 'toolRegistry', 'sessionMethods'],
   async apply(ctx) {
     const tree = ctx.use<TreeCommands>('treeCommands')

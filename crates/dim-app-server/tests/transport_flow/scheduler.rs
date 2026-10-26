@@ -84,10 +84,6 @@ fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
             "../../../../runtime/plugins/scheduler/process.json"
         ))
         .unwrap(),
-        serde_json::from_str(include_str!(
-            "../../../../runtime/plugins/scheduler/session.json"
-        ))
-        .unwrap(),
     ];
     parts
 }

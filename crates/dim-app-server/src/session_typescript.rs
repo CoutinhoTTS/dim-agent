@@ -1,13 +1,15 @@
-//! Rows of other languages (Node, Python) in the process, `session` or
-//! `branch` group. Each row declares its group (rutis usage §2); the
-//! runtime and native bindings share each row's owner.
+//! Rows of other languages (Node, Python). Each is a process row: its plugin
+//! registers its Session and branch parts with `partRegistry` as plugin
+//! definitions, and the row lists the names those parts provide in their
+//! instances (`instanceNames`), which the catalog needs before the runtime
+//! starts (rutis usage §2).
 use crate::{
     Result, ServerError,
     methods::ManagementMethods,
     settings::{SourceDeclaration, WorkflowPackages},
 };
 use dim_agent_capabilities::{methods::SessionMethods, tool_registry::ToolRegistry};
-use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, SESSION_GROUP, names::name_of};
+use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, PartRegistry, SESSION_GROUP, names::name_of};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, PluginFactory, TypeKey};
 use rutis::{Ctx, Error};
 use rutis_bridge::{
@@ -55,10 +57,11 @@ fn crossing_instance_names() -> [(String, &'static str); 8] {
 }
 
 /// The names a host of foreign parts shares across languages beyond those
-/// the catalog already shares: the marked Session and branch services, and
-/// the tool and method registries, with which a part of any language
-/// registers its contributions. The generated catalog (`xtask graph`)
-/// shares them the same way.
+/// the catalog already shares: the marked Session and branch services, the
+/// tool and method registries, with which a part of any language registers
+/// its contributions, and the part registry, with which a plugin registers
+/// its parts. The generated catalog (`xtask graph`) shares them the same
+/// way.
 pub fn share_names(catalog: &mut ServiceCatalog) {
     for (name, group) in crossing_instance_names() {
         catalog.register_shared_instance(name, group);
@@ -66,7 +69,8 @@ pub fn share_names(catalog: &mut ServiceCatalog) {
     catalog
         .register_shared_instance(name_of::<ToolRegistry>(), SESSION_GROUP)
         .register_shared_instance(name_of::<SessionMethods>(), SESSION_GROUP)
-        .register_shared(name_of::<ManagementMethods>());
+        .register_shared(name_of::<ManagementMethods>())
+        .register_shared(name_of::<PartRegistry>());
 }
 
 /// The runtimes of other languages and their loader rows, each with a
@@ -78,8 +82,9 @@ pub struct SessionTypeScriptConfig {
     pub anchor: PathBuf,
     /// The Python runtime of rows named `py:<module>`, if any.
     pub python: Option<PythonConfig>,
-    /// Loader rows: a row's `group` is `"session"` or `"branch"`; a process
-    /// row has none.
+    /// Loader rows, each a process row. A row may list `instanceNames`, the
+    /// names its plugin's parts provide in each Session or branch, as
+    /// `{"name": "session" | "branch"}`.
     pub rows: Vec<Value>,
 }
 
@@ -133,10 +138,8 @@ pub(crate) struct Parts {
     pub node: ForeignRuntime,
     pub python: Option<ForeignRuntime>,
     pub resolver: Arc<SessionResolver>,
-    /// The rows of each group, without the host's fields.
-    pub session_rows: Vec<Value>,
-    pub branch_rows: Vec<Value>,
-    pub process_rows: Vec<Value>,
+    /// The rows, without the host's fields.
+    pub rows: Vec<Value>,
 }
 
 impl Parts {
@@ -160,8 +163,7 @@ impl Parts {
         }
         let mut ids = HashSet::new();
         let mut snapshots = HashMap::new();
-        let (mut session_rows, mut branch_rows, mut process_rows) =
-            (Vec::new(), Vec::new(), Vec::new());
+        let mut rows = Vec::new();
         // Before the rows register their names and the resolvers take the
         // catalog. Parts register their tools and method namespaces with
         // their owners, which provide their own dispatchers.
@@ -186,17 +188,45 @@ impl Parts {
             if !matches!(row.get("disabled"), None | Some(Value::Bool(_))) {
                 return Err(invalid("row disabled must be boolean"));
             }
-            let group = match row.get("group") {
-                None => None,
-                Some(Value::String(group)) if [SESSION_GROUP, BRANCH_GROUP].contains(&&**group) => {
-                    Some(group.as_str())
-                }
-                Some(_) => {
-                    return Err(invalid(
-                        "row group must be \"session\" or \"branch\"; a process row has none",
-                    ));
-                }
+            // A plugin registers its parts (rutis usage R5): no row is placed
+            // in a Session or branch.
+            if row.get("group").is_some() {
+                return Err(invalid(
+                    "a plugin row is a process row and has no group: its plugin registers \
+                     its Session and branch parts with partRegistry",
+                ));
+            }
+            // The names the plugin's parts provide in their instances: the
+            // catalog is fixed before the runtime starts, so the row says
+            // which group each belongs to (rutis usage §2).
+            let instance_names = match row.get("instanceNames") {
+                None => Map::new(),
+                Some(Value::Object(names)) => names.clone(),
+                Some(_) => return Err(invalid("instanceNames must be an object")),
             };
+            for (service, group) in &instance_names {
+                let group = match group {
+                    Value::String(group) if [SESSION_GROUP, BRANCH_GROUP].contains(&&**group) => {
+                        group.as_str()
+                    }
+                    _ => {
+                        return Err(invalid(
+                            "an instanceNames entry must be \"session\" or \"branch\"",
+                        ));
+                    }
+                };
+                if !matches!(
+                    builder.catalog().key_in(service, &Build::default()),
+                    Err(LoaderError::UnknownService(_))
+                ) {
+                    return Err(ServerError::Configuration(format!(
+                        "instanceNames of row {id}: {service} is already a service"
+                    )));
+                }
+                builder
+                    .catalog_mut()
+                    .register_shared_instance(service, group);
+            }
             let provides = row
                 .get("provides")
                 .and_then(Value::as_object)
@@ -225,32 +255,22 @@ impl Parts {
                         "TypeScript row provides the removed {family} name {service}; register through {owner} instead"
                     )));
                 }
-                // A name the catalog does not hold yet belongs to this row's
-                // group, so each instance has its own (rutis usage §3.5).
+                // A process name the catalog does not hold yet.
                 if let Err(LoaderError::UnknownService(_)) =
                     builder.catalog().key_in(service, &Build::default())
                 {
-                    match group {
-                        None => builder.catalog_mut().register_shared(service),
-                        Some(group) => builder
-                            .catalog_mut()
-                            .register_shared_instance(service, group),
-                    };
+                    builder.catalog_mut().register_shared(service);
                 }
             }
             snapshots.insert(name.to_owned(), provides.clone());
-            // `settings` is the host's input to Settings and `group` says
-            // where the row goes: neither is a loader field.
+            // `settings` is the host's input to Settings and `instanceNames`
+            // went to the catalog: neither is a loader field.
             let mut row = row.clone();
             if let Value::Object(fields) = &mut row {
                 fields.remove("settings");
-                fields.remove("group");
+                fields.remove("instanceNames");
             }
-            match group {
-                None => process_rows.push(row),
-                Some(SESSION_GROUP) => session_rows.push(row),
-                Some(_) => branch_rows.push(row),
-            }
+            rows.push(row);
         }
         let node = LocalRuntime::node(&config.js_runtime, &config.anchor)
             .interpreter(config.node.clone())
@@ -272,9 +292,7 @@ impl Parts {
             node,
             python,
             resolver,
-            session_rows,
-            branch_rows,
-            process_rows,
+            rows,
         })
     }
     /// The runtimes the rows run in: Node, then Python if configured.
@@ -342,7 +360,6 @@ impl Resolver for SessionResolver {
             }
             let mut resolved = Resolved::new(Arc::new(BoundFactory {
                 inner: original.factory.clone(),
-                process: true,
                 file_roots: self.file_roots.clone(),
             }))
             .with_schema(original.schema.clone())
@@ -353,32 +370,15 @@ impl Resolver for SessionResolver {
             if let Some(declares) = &original.declares {
                 resolved = resolved.with_declarations(declares.clone());
             }
-            let scoped = original
-                .scoped
-                .clone()
-                .ok_or_else(|| LoaderError::Resolve {
-                    name: name.into(),
-                    message: "runtime row has no scoped factory".into(),
-                })?;
-            let file_roots = self.file_roots.clone();
-            resolved = resolved.with_scoped(Arc::new(move |build| {
-                Ok(Arc::new(BoundFactory {
-                    inner: scoped(build)?,
-                    // Where the row is placed: its innermost instance.
-                    process: build.instances().next().is_none(),
-                    file_roots: file_roots.clone(),
-                }))
-            }));
             Ok(Arc::new(resolved))
         })
     }
 }
 
-/// A row of another language: a process row that uses `workflowFiles` is
-/// handed its own Workflow packages.
+/// A row of another language: one that uses `workflowFiles` is handed its
+/// own Workflow packages.
 struct BoundFactory {
     inner: Arc<dyn PluginFactory<Value>>,
-    process: bool,
     file_roots: Arc<[PathBuf]>,
 }
 impl PluginFactory<Value> for BoundFactory {
@@ -392,12 +392,11 @@ impl PluginFactory<Value> for BoundFactory {
         self.inner.validate_config(config)
     }
     fn build(&self, config: &Value) -> std::result::Result<Box<dyn DynPlugin>, Error> {
-        let packages = match self.process {
-            true if self.injects().contains(&host_key("workflowFiles").erase()) => Some(Arc::new(
-                WorkflowPackages::from_config(config, &self.file_roots)?,
-            )),
-            _ => None,
-        };
+        let packages = self
+            .injects()
+            .contains(&host_key("workflowFiles").erase())
+            .then(|| WorkflowPackages::from_config(config, &self.file_roots).map(Arc::new))
+            .transpose()?;
         Ok(Box::new(BoundRow {
             inner: self.inner.build(config)?,
             packages,
@@ -482,7 +481,6 @@ mod tests {
             rows: vec![serde_json::json!({
                 "id": "legacy",
                 "name": "/nonexistent/legacy.js",
-                "group": "session",
                 "provides": {"toolContribution:ask_user": {}},
             })],
         };

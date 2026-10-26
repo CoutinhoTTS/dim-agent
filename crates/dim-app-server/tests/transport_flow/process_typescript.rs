@@ -185,7 +185,6 @@ async fn node_public_plugin_files_session_only_configuration() {
     let mut parts = session_typescript::fixture();
     parts.rows = vec![json!({
         "id":"files-session", "name":parts.anchor.parent().unwrap().join("fixtures/files-session.ts"),
-        "group":"session",
         "provides":{},
         "config":{"gate":{"host":"127.0.0.1", "port":gate.local_addr().unwrap().port()}},
     })];
@@ -273,13 +272,30 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
     }
     // A `py:` row needs the configured Python runtime.
     cases.push(vec![
-        json!({"id":"python", "name":"py:module", "group":"session", "provides":{}}),
+        json!({"id":"python", "name":"py:module", "provides":{}}),
     ]);
-    for group in [json!("process"), json!(true)] {
+    // A plugin row is a process row: it has no group, even a valid one.
+    for group in [json!("process"), json!(true), json!("session")] {
         let mut row = process.clone();
         row["group"] = group;
         cases.push(vec![row]);
     }
+    // `instanceNames` gives each name a Session or branch group, names a
+    // service the catalog does not hold yet, and declares a name once.
+    for names in [
+        json!(["exampleName"]),
+        json!({"exampleName": "process"}),
+        json!({"toolRegistry": "session"}),
+    ] {
+        let mut row = process.clone();
+        row["instanceNames"] = names;
+        cases.push(vec![row]);
+    }
+    let mut first = process.clone();
+    first["instanceNames"] = json!({"exampleName": "session"});
+    let mut second = first.clone();
+    second["id"] = json!("other");
+    cases.push(vec![first, second]);
     for rows in cases {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::install(&mut builder);
