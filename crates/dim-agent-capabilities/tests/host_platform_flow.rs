@@ -1,6 +1,7 @@
 //! HostPlatform acceptance on Unix (`docs/architecture/rust-agent/plugins/HostPlatform.md`).
 #![cfg(unix)]
 use dim_agent_capabilities::host_platform::*;
+use rutis::host::CtxHost;
 use std::{ffi::OsString, path::PathBuf, time::Duration};
 use tokio::io::AsyncReadExt;
 
@@ -193,16 +194,20 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
     let shell = home.join("bin/bash");
     std::fs::remove_file(&shell).unwrap();
     let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(rutis::Typed::new(
-        dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
-    ));
+    let storage = root
+        .plugin(dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]));
     (&storage).await.unwrap();
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
     let platform = root.plugin(
-        HostPlatformPlugin::new(HostPlatformConfig {
-            exec_shell_file: Some((0, "exec-shell.json".into())),
-            ..HostPlatformConfig::default()
-        })
-        .typed(&dim_agent_capabilities::catalog())
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                exec_shell_file: Some((0, "exec-shell.json".into())),
+                ..HostPlatformConfig::default()
+            },
+        )
         .unwrap(),
     );
     (&platform).await.unwrap();

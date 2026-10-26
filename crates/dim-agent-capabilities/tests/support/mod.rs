@@ -1,41 +1,20 @@
 //! Follows one branch the way a host does: listen on the Session broadcast
 //! first, then read the Timeline history and drop what the broadcast repeats.
 #![allow(dead_code)]
-use dim_agent_capabilities::session_broadcast::{SessionBroadcastEvent, session_channel};
+use dim_agent_capabilities::session_broadcast::{
+    SessionBroadcast, SessionBroadcastEvent, session_channel,
+};
 use dim_agent_runtime::Session;
 use dim_agent_types::AgentEvent;
-use rutis::{BoxFuture, CordisError, Ctx, Disposer, Listener};
+use rutis::Ctx;
+use rutis::Disposer;
+use rutis::host::CtxHost;
 use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::mpsc;
 
 /// A root the test owns, so it can listen on the Agent's rutis bus.
 pub fn root() -> Ctx {
     Ctx::root_with(tokio::runtime::Handle::current())
-}
-
-struct Forward {
-    branch: String,
-    sender: mpsc::UnboundedSender<Option<Arc<AgentEvent>>>,
-}
-impl Listener<SessionBroadcastEvent> for Forward {
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        record: &'a SessionBroadcastEvent,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        match record {
-            SessionBroadcastEvent::Event { branch_id, event } if *branch_id == self.branch => {
-                let _ = self.sender.send(Some(event.clone()));
-            }
-            SessionBroadcastEvent::Event { .. } => {}
-            SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {}
-            SessionBroadcastEvent::Closed => {
-                let _ = self.sender.send(None);
-            }
-        }
-        Box::pin(async { Ok(None) })
-    }
 }
 
 pub struct Events {
@@ -49,19 +28,31 @@ impl Events {
     /// Events of `branch` after `after`, then each one as it is dispatched.
     pub async fn follow(ctx: &Ctx, session: &Session, branch: &str, after: u64) -> Self {
         let (sender, live) = mpsc::unbounded_channel();
+        let branch = branch.to_owned();
         let listener = ctx
-            .events()
-            .on(
-                ctx,
-                &session_channel(session.id()),
-                Forward {
-                    branch: branch.to_owned(),
-                    sender,
-                },
-            )
+            .listen::<SessionBroadcast>()
+            .name(session_channel(session.id()))
+            .on({
+                let branch = branch.clone();
+                move |event, _| {
+                    match &event.record {
+                        SessionBroadcastEvent::Event { branch_id, event }
+                            if *branch_id == branch =>
+                        {
+                            let _ = sender.send(Some(event.clone()));
+                        }
+                        SessionBroadcastEvent::Event { .. } => {}
+                        SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {}
+                        SessionBroadcastEvent::Closed => {
+                            let _ = sender.send(None);
+                        }
+                    }
+                    async { Ok(None) }
+                }
+            })
             .unwrap();
         let history: VecDeque<_> = session
-            .local(branch, ..)
+            .local(&branch, ..)
             .await
             .unwrap()
             .into_iter()
@@ -131,27 +122,6 @@ impl Committed {
 
 /// Every record of one Session channel; `None` is the end record.
 pub type Record = Option<(String, Arc<AgentEvent>)>;
-struct Collect(Arc<std::sync::Mutex<Vec<Record>>>, Arc<tokio::sync::Notify>);
-impl Listener<SessionBroadcastEvent> for Collect {
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        record: &'a SessionBroadcastEvent,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        self.0.lock().unwrap().push(match record {
-            SessionBroadcastEvent::Event { branch_id, event } => {
-                Some((branch_id.clone(), event.clone()))
-            }
-            SessionBroadcastEvent::Closed => None,
-            SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {
-                return Box::pin(async { Ok(None) });
-            }
-        });
-        self.1.notify_waiters();
-        Box::pin(async { Ok(None) })
-    }
-}
 pub struct Broadcast {
     records: Arc<std::sync::Mutex<Vec<Record>>>,
     changed: Arc<tokio::sync::Notify>,
@@ -159,16 +129,31 @@ pub struct Broadcast {
 }
 impl Broadcast {
     pub fn listen(ctx: &Ctx, session_id: &str) -> Self {
-        let records = Arc::default();
+        let records: Arc<std::sync::Mutex<Vec<Record>>> = Arc::default();
         let changed = Arc::new(tokio::sync::Notify::new());
-        let listener = ctx
-            .events()
-            .on(
-                ctx,
-                &session_channel(session_id),
-                Collect(Arc::clone(&records), changed.clone()),
-            )
-            .unwrap();
+        let listener =
+            ctx.listen::<SessionBroadcast>()
+                .name(session_channel(session_id))
+                .on({
+                    let records = Arc::clone(&records);
+                    let changed = changed.clone();
+                    move |event, _| {
+                        let record = match &event.record {
+                            SessionBroadcastEvent::Event { branch_id, event } => {
+                                Some(Some((branch_id.clone(), event.clone())))
+                            }
+                            SessionBroadcastEvent::Closed => Some(None),
+                            SessionBroadcastEvent::Notice(_)
+                            | SessionBroadcastEvent::Fence { .. } => None,
+                        };
+                        if let Some(record) = record {
+                            records.lock().unwrap().push(record);
+                            changed.notify_waiters();
+                        }
+                        async { Ok(None) }
+                    }
+                })
+                .unwrap();
         Self {
             records,
             changed,

@@ -1,4 +1,5 @@
 use dim_agent_capabilities::host::ModelProtocol;
+use dim_agent_runtime::Names;
 use dim_app_server::managed_provider::{
     AccountSnapshot, AccountView, CredentialLease, LeaseOwner, ManagedCatalog, ManagedError,
     ManagedFuture, ManagedProvider, ManagedProviderBinding, ManagedProviders,
@@ -8,7 +9,8 @@ use dim_app_server::managed_provider::{
         ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
     },
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, Keyed, TypeKey, Typed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberState, Key, TypeKey};
+use rutis::{Ctx, Plugin};
 use std::sync::{
     Arc, Mutex, OnceLock, Weak,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -160,39 +162,47 @@ impl ManagedProvider for Provider {
     }
 }
 struct FixturePlugin(Arc<Fixture>);
-impl TypedPlugin for FixturePlugin {
+impl Plugin for FixturePlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "managed-fixture"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as::<dyn ManagedProvider>(
-                TypeKey::of::<dyn ManagedProvider>(),
-                Arc::new(Provider(self.0.clone())),
-            )?;
-            Ok(Effect::Done)
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        ctx.provide_as::<dyn ManagedProvider>(Arc::new(Provider(self.0.clone())))?;
+        Ok(())
+    }
+}
+struct Capture {
+    captured: Arc<OnceLock<Arc<ManagedProviders>>>,
+    owner: Key<ManagedProviders>,
+}
+impl Capture {
+    fn new(
+        names: &Names<'_>,
+        captured: Arc<OnceLock<Arc<ManagedProviders>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            captured,
+            owner: names.key()?,
         })
     }
 }
-struct Capture(Arc<OnceLock<Arc<ManagedProviders>>>);
-impl TypedPlugin for Capture {
-    type Deps = Keyed<ManagedProviders>;
+impl DynPlugin for Capture {
     fn name(&self) -> &str {
         "capture-managed"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        Keyed(owner): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.owner.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let _ = self.0.set(owner);
+            let owner = ctx.require_at(&self.owner)?;
+            let _ = self.captured.set(owner);
             Ok(Effect::Done)
         })
     }
 }
-async fn active(view: &rutis::FiberView) {
+async fn active(view: &rutis::host::FiberView) {
     let mut watch = view.watch();
     while watch.borrow().state != FiberState::Active {
         assert_ne!(
@@ -205,20 +215,25 @@ async fn active(view: &rutis::FiberView) {
     }
 }
 
-async fn setup() -> (Ctx, Arc<Fixture>, Arc<ManagedProviders>, rutis::FiberView) {
+async fn setup() -> (
+    Ctx,
+    Arc<Fixture>,
+    Arc<ManagedProviders>,
+    rutis::host::FiberView,
+) {
     let root = Ctx::root().unwrap();
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = Names::copy(&catalog, &build);
     // The management table the process providers register with.
-    root.plugin(
-        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
-            .unwrap(),
-    );
+    root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
     let fixture = Arc::new(Fixture::default());
     *fixture.recovered_generation.lock().unwrap() = 1;
     let captured = Arc::new(OnceLock::new());
-    let owner_plugin = root.plugin(Typed::new(ManagedProvidersPlugin));
-    let fixture_plugin = root.plugin(Typed::new(FixturePlugin(fixture.clone())));
-    let binding = root.plugin(Typed::new(ManagedProviderBinding));
-    let capture = root.plugin(Typed::new(Capture(captured.clone())));
+    let owner_plugin = root.plugin(ManagedProvidersPlugin::new(&names).unwrap());
+    let fixture_plugin = root.plugin(FixturePlugin(fixture.clone()));
+    let binding = root.plugin(ManagedProviderBinding::new(&names).unwrap());
+    let capture = root.plugin(Capture::new(&names, captured.clone()).unwrap());
     for view in [&owner_plugin, &fixture_plugin, &binding, &capture] {
         active(view).await;
     }
@@ -322,11 +337,13 @@ async fn a_lease_of_a_replaced_provider_never_reaches_its_replacement() {
         let (first, second) = (fixture(), fixture());
         let captured = Arc::new(OnceLock::new());
         let catalog = dim_app_server::catalog();
+        let build = rutis_loader::resolve::Build::default();
+        let names = Names::copy(&catalog, &build);
         root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
-        let owner_plugin = root.plugin(Typed::new(ManagedProvidersPlugin));
-        let first_plugin = root.plugin(Typed::new(FixturePlugin(first.clone())));
-        let binding = root.plugin(Typed::new(ManagedProviderBinding));
-        let capture = root.plugin(Typed::new(Capture(captured.clone())));
+        let owner_plugin = root.plugin(ManagedProvidersPlugin::new(&names).unwrap());
+        let first_plugin = root.plugin(FixturePlugin(first.clone()));
+        let binding = root.plugin(ManagedProviderBinding::new(&names).unwrap());
+        let capture = root.plugin(Capture::new(&names, captured.clone()).unwrap());
         for view in [&owner_plugin, &first_plugin, &binding, &capture] {
             active(view).await;
         }
@@ -344,7 +361,7 @@ async fn a_lease_of_a_replaced_provider_never_reaches_its_replacement() {
         // lease IDs is a different binding: the old lease is refused before
         // the replacement sees it.
         first_plugin.shutdown().await.unwrap();
-        let second_plugin = root.plugin(Typed::new(FixturePlugin(second.clone())));
+        let second_plugin = root.plugin(FixturePlugin(second.clone()));
         active(&second_plugin).await;
         active(&binding).await;
         second.resume.notify_one();

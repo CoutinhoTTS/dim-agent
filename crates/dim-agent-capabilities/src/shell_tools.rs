@@ -11,7 +11,8 @@ use crate::{
 };
 use dim_agent_runtime::{AgentBuilder, Names};
 use dim_agent_types::{ToolCall, ToolResult};
-use rutis::{BoxFuture, Ctx, Effect, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -100,35 +101,41 @@ impl ToolDriver for ShellToolsDriver {
 pub fn install(builder: &mut AgentBuilder) {
     builder.require_feature(
         dim_agent_runtime::Feature::new("ShellTools").session("ShellTools", |names| {
-            names.part(ShellToolsPlugin::new(names)?)
+            Ok(Box::new(ShellToolsPlugin::new(names)?))
         }),
     );
 }
 
 /// The plugin.
 pub struct ShellToolsPlugin {
-    host: rutis::DepKey<ToolHost>,
+    host: Key<ToolHost>,
+    platform: Key<HostPlatform>,
+    tree: Key<TreeCommands>,
 }
 
 impl ShellToolsPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, rutis::CordisError> {
-        Ok(Self { host: names.key()? })
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            host: names.key()?,
+            platform: names.key()?,
+            tree: names.key()?,
+        })
     }
 }
 
-impl TypedPlugin for ShellToolsPlugin {
-    type Deps = (rutis::Keyed<HostPlatform>, rutis::Keyed<TreeCommands>);
+impl DynPlugin for ShellToolsPlugin {
     fn name(&self) -> &str {
         "ShellTools"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (rutis::Keyed(platform), rutis::Keyed(tree)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, rutis::CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.platform.erase(), self.tree.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let platform = ctx.require_at(&self.platform)?;
+            let tree = ctx.require_at(&self.tree)?;
             let driver = Arc::new(ShellToolsDriver { platform, tree });
-            ctx.provide_as(self.host.key().clone(), Arc::new(ToolHost(driver)))?;
+            ctx.provide_at(self.host.clone(), Arc::new(ToolHost(driver)))?;
             Ok(Effect::Done)
         })
     }

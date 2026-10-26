@@ -14,15 +14,6 @@ export interface TimelineInfo {
   create_anchor?: number | bigint | null
 }
 
-export type BranchSource =
-  | { kind: "tool"; turn_id: string; request_id: string; call_id: string }
-  | { kind: "host"; operation_id: string }
-
-export interface BranchOptions {
-  prompt: string
-  source: BranchSource
-}
-
 export type ImageSourceType = "base64" | "url"
 
 export interface ImageSource {
@@ -51,6 +42,15 @@ export interface InputMessageData {
   user?: UserInput | null
   blocks?: InputBlock[]
   mode?: InputMode | null
+}
+
+export type BranchSource =
+  | { kind: "tool"; turn_id: string; request_id: string; call_id: string }
+  | { kind: "host"; operation_id: string }
+
+export interface BranchOptions {
+  prompt: string
+  source: BranchSource
 }
 
 /** Shared with Timeline roots; never owns the tree or its child roots. */
@@ -83,12 +83,43 @@ export interface TreeCommands {
   create(parent: string, at: number | bigint, options: BranchOptions, cancelled: () => void | Promise<void>): Promise<string>
 }
 
+export interface SessionConfig {
+  /**
+   * The creation-time configuration as data, for parts in other
+   * languages.
+   */
+  get(): Promise<import('./plugin.js').SessionConfig>
+}
+
+export interface TimelineIdentity {
+  /** The identity as data, for parts in other languages. */
+  get(): Promise<import('./plugin.js').SessionRef>
+}
+
 export interface SessionIdentity {
   /**
    * The identity as data, `{sessionId, restored}`, for parts in other
    * languages.
    */
   get(): Promise<{ sessionId: string; restored: boolean }>
+}
+
+/**
+ * Lifecycle of one branch: provided by its scope, advanced only by the
+ * branch's [`crate::TimelineContext`]. Capabilities that spawn background
+ * work in `apply` wait for [`Self::activated`] before doing it.
+ */
+export interface BranchLifecycle {
+  /**
+   * Waits until the branch leaves `Loading`: true when it became Active,
+   * false when it closes without ever starting.
+   */
+  activated(): Promise<boolean>
+  /**
+   * Waits until the branch starts closing; background work ends then,
+   * without waiting for its capability to unload.
+   */
+  closing(): Promise<void>
 }
 
 /**
@@ -137,14 +168,6 @@ export interface SessionLifecycle {
   release(id: number | bigint): Promise<boolean>
 }
 
-export interface SessionConfig {
-  /**
-   * The creation-time configuration as data, for parts in other
-   * languages.
-   */
-  get(): Promise<import('./plugin.js').SessionConfig>
-}
-
 /**
  * What an ordered consumer registered with [`Dispatcher::follow`] receives:
  * the replay once, then live events.
@@ -191,24 +214,6 @@ export interface Dispatcher {
   changed(): Promise<void>
 }
 
-/**
- * Lifecycle of one branch: provided by its scope, advanced only by the
- * branch's [`crate::TimelineContext`]. Capabilities that spawn background
- * work in `apply` wait for [`Self::activated`] before doing it.
- */
-export interface BranchLifecycle {
-  /**
-   * Waits until the branch leaves `Loading`: true when it became Active,
-   * false when it closes without ever starting.
-   */
-  activated(): Promise<boolean>
-  /**
-   * Waits until the branch starts closing; background work ends then,
-   * without waiting for its capability to unload.
-   */
-  closing(): Promise<void>
-}
-
 export interface TraceStep {
   handler: string
   result?: { type: string; name: string; data: unknown; tags?: string[] } | null
@@ -244,11 +249,6 @@ export interface Timeline {
   history(through?: number | bigint | null): Promise<import('./plugin.js').BranchEvent[]>
   /** @throws {AgentErrorThrown} */
   trace(sequence: number | bigint): Promise<TimelineTrace | null>
-}
-
-export interface TimelineIdentity {
-  /** The identity as data, for parts in other languages. */
-  get(): Promise<import('./plugin.js').SessionRef>
 }
 
 /** A branch of a Session. */
@@ -370,13 +370,13 @@ export type WorkflowFilesErrorThrown = RustError<"WorkflowFilesError", "invalid_
 /** The exported services by name: `ctx.use<Services['name']>('name')`. */
 export interface Services {
   treeCommands: TreeCommands
-  sessionIdentity: SessionIdentity
-  sessionLifecycle: SessionLifecycle
   sessionConfig: SessionConfig
-  dispatcher: Dispatcher
-  branchLifecycle: BranchLifecycle
-  timeline: Timeline
   timelineIdentity: TimelineIdentity
+  sessionIdentity: SessionIdentity
+  branchLifecycle: BranchLifecycle
+  sessionLifecycle: SessionLifecycle
+  dispatcher: Dispatcher
+  timeline: Timeline
   sessionPermissions: SessionPermissions
   workflowFiles: WorkflowFiles
 }

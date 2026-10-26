@@ -258,7 +258,7 @@ The public server runs without a managed provider. API-key and supported native 
 // `dimcode app-server …`, run by the CLI as its daemon from this same executable.
 dim_app_server::cli::run_with(args, Some(ManagedProviderRow(Arc::new(|builtins, root| {
     dim_agent_runtime::register_part(builtins, &dim_app_server::catalog(), move |names| {
-        names.part(MyProviderPlugin::new(root))
+        Ok(Box::new(MyProviderPlugin::new(names, root)?))
     }).expect("managed provider dependencies")
 }))))
 ```

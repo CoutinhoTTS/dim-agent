@@ -1,8 +1,9 @@
 //! Broadcasts every dispatched event of one branch on its Session channel,
 //! which also carries owners' notices about the Session's process-level state.
-use dim_agent_runtime::{Dispatcher, SessionIdentity, TimelineIdentity};
+use dim_agent_runtime::{Dispatcher, Names, SessionIdentity, TimelineIdentity};
 use dim_agent_types::AgentEvent;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Event, EventKey, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Event};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -22,10 +23,39 @@ pub enum SessionBroadcastEvent {
     /// fences from this end record.
     Closed,
 }
-impl Event for SessionBroadcastEvent {
-    // Dispatched only under a Session's name ([`session_channel`]).
+/// A record sent on one Session's channel ([`session_channel`]). It
+/// serializes as its record: the channel is the name it is sent under.
+pub struct SessionBroadcast {
+    channel: String,
+    pub record: SessionBroadcastEvent,
+}
+impl SessionBroadcast {
+    pub fn new(session_id: &str, record: SessionBroadcastEvent) -> Self {
+        Self {
+            channel: session_channel(session_id),
+            record,
+        }
+    }
+}
+impl Event for SessionBroadcast {
     const NAME: &'static str = "";
     type Value = ();
+    fn name(&self) -> &str {
+        &self.channel
+    }
+}
+impl Serialize for SessionBroadcast {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.record.serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for SessionBroadcast {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self {
+            channel: String::new(),
+            record: SessionBroadcastEvent::deserialize(deserializer)?,
+        })
+    }
 }
 
 /// The public serde form of a [`SessionBroadcastEvent`], which every runtime
@@ -92,8 +122,8 @@ impl<'de> Deserialize<'de> for SessionBroadcastEvent {
 }
 
 /// The rutis channel shared by the broadcaster and every listener.
-pub fn session_channel(session_id: &str) -> EventKey<SessionBroadcastEvent> {
-    EventKey::dynamic(format!("session/{session_id}"))
+pub fn session_channel(session_id: &str) -> String {
+    format!("session/{session_id}")
 }
 
 /// An owner's announcement that its process-level state about a Session
@@ -113,39 +143,44 @@ pub struct SessionNotice {
 /// own context after the commit. It does not wait for listeners: without one
 /// (the Session is not loaded or not observed) the notice is dropped.
 pub fn notify(ctx: &Ctx, session_id: &str, notice: SessionNotice) {
-    if let Err(error) = ctx.events().emit(
-        ctx,
-        &session_channel(session_id),
-        Arc::new(SessionBroadcastEvent::Notice(Arc::new(notice))),
-    ) {
+    let notice = SessionBroadcastEvent::Notice(Arc::new(notice));
+    if let Err(error) = ctx.emit(SessionBroadcast::new(session_id, notice)) {
         tracing::warn!(%error, session_id, "failed to emit a Session notice");
     }
 }
 
-pub struct SessionBroadcastPlugin;
-impl TypedPlugin for SessionBroadcastPlugin {
-    type Deps = (Keyed<Dispatcher>, Keyed<TimelineIdentity>);
+pub struct SessionBroadcastPlugin {
+    dispatcher: Key<Dispatcher>,
+    identity: Key<TimelineIdentity>,
+}
+impl SessionBroadcastPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            dispatcher: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for SessionBroadcastPlugin {
     fn name(&self) -> &str {
         "SessionBroadcast"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher), Keyed(identity)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase(), self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let channel = session_channel(&identity.session_id);
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let session_id = identity.session_id.clone();
             let branch_id = identity.branch_id.clone();
             let emitter = ctx.clone();
             dispatcher.subscribe_all(ctx, "SessionBroadcast", move |event| {
-                let _ = emitter.events().emit(
-                    &emitter,
-                    &channel,
-                    Arc::new(SessionBroadcastEvent::Event {
-                        branch_id: branch_id.clone(),
-                        event,
-                    }),
-                );
+                let record = SessionBroadcastEvent::Event {
+                    branch_id: branch_id.clone(),
+                    event,
+                };
+                let _ = emitter.emit(SessionBroadcast::new(&session_id, record));
                 Box::pin(async { Ok(()) })
             })?;
             Ok(Effect::Done)
@@ -154,31 +189,33 @@ impl TypedPlugin for SessionBroadcastPlugin {
 }
 /// Ends the Session channel. Session capabilities unload after every branch
 /// closed, so this record follows every broadcast event.
-pub struct SessionBroadcastEndPlugin;
-impl TypedPlugin for SessionBroadcastEndPlugin {
-    type Deps = (Keyed<SessionIdentity>,);
+pub struct SessionBroadcastEndPlugin {
+    identity: Key<SessionIdentity>,
+}
+impl SessionBroadcastEndPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for SessionBroadcastEndPlugin {
     fn name(&self) -> &str {
         "SessionBroadcastEnd"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(identity),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let channel = session_channel(&identity.session_id);
+            let identity = ctx.require_at(&self.identity)?;
             let emitter = ctx.clone();
-            ctx.effect(move || {
-                Effect::Disposer(Box::new(move || {
-                    if !identity.unloading.is_cancelled() {
-                        let _ = emitter.events().emit(
-                            &emitter,
-                            &channel,
-                            Arc::new(SessionBroadcastEvent::Closed),
-                        );
-                    }
-                    Ok(())
-                }))
+            ctx.effect(move || async move {
+                if !identity.unloading.is_cancelled() {
+                    let record = SessionBroadcastEvent::Closed;
+                    let _ = emitter.emit(SessionBroadcast::new(&identity.session_id, record));
+                }
+                Ok(())
             })?;
             Ok(Effect::Done)
         })

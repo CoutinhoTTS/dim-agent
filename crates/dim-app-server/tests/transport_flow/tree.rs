@@ -1,4 +1,5 @@
 use super::*;
+use rutis::host::CtxHost;
 
 fn v2_create() -> Value {
     json!({
@@ -13,27 +14,38 @@ fn error_name(value: &Value) -> &str {
 }
 
 /// Holds the key of its Session's ToolRegistry, which it reads undeclared.
-struct FailChildBuild(rutis::DepKey<dim_agent_capabilities::tool_registry::ToolRegistry>);
-impl TypedPlugin for FailChildBuild {
-    type Deps = rutis::Keyed<dim_agent_runtime::TimelineIdentity>;
+struct FailChildBuild(
+    rutis::host::Key<dim_agent_capabilities::tool_registry::ToolRegistry>,
+    rutis::host::Key<dim_agent_runtime::TimelineIdentity>,
+);
+impl FailChildBuild {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        a0: rutis::host::Key<dim_agent_capabilities::tool_registry::ToolRegistry>,
+    ) -> rutis::Result<Self> {
+        Ok(Self(a0, names.key()?))
+    }
+}
+impl rutis::host::DynPlugin for FailChildBuild {
     fn name(&self) -> &str {
         "test.fail-child-build /private/config token=test-secret"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.1.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        rutis::Keyed(identity): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let identity = ctx.require_at(&self.1)?;
             if identity.branch_id != "main" {
                 // Trigger the real assembly validation error, rather than a
                 // framework error (whose wire mapping is already sanitized):
                 // an undeclared read of a service provided outside the scope.
-                let _ = ctx.get_as::<dim_agent_capabilities::tool_registry::ToolRegistry>(
-                    self.0.key().clone(),
-                );
+                let _ = ctx.get_at(&self.0);
             }
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -50,7 +62,7 @@ async fn failed_branch_build_keeps_private_details_off_both_transports() {
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         builder.require_feature(
             Feature::new("test.fail-child-build").branch("test.fail-child-build", |names| {
-                names.part(FailChildBuild(names.key()?))
+                Ok(Box::new(FailChildBuild::new(names, names.key()?)?))
             }),
         );
         let server = serve(

@@ -1,6 +1,6 @@
 # Pursuit
 
-Status: Draft, Ready candidate ([#146](https://github.com/arcships/dim/issues/146), milestone M2; no product decision remains, [§12](#12-what-remains-for-ready)). Scope: an amendment of [Goal](Goal.md)'s Session and branch parts; no new Capability ([ADR 002](../../adr/002-plugin-scope.md)). Language: TypeScript, in Goal's package `runtime/plugins/goal` ([Goal §10](Goal.md#10-implementation)). Depends on: Goal (P5, implemented by [#199](https://github.com/arcships/dim/pull/199)), C5 ([branch TypeScript binding](../branch-typescript.md)); both delivered. Milestone M2, not part of the current plan ([roadmap](../roadmap.md) D3).
+Status: Ready, not implemented ([#146](https://github.com/arcships/dim/issues/146), milestone M2; the maintainer's confirmation is recorded in [§12](#12-ready-confirmation)). Scope: an amendment of [Goal](Goal.md)'s Session and branch parts; no new Capability ([ADR 002](../../adr/002-plugin-scope.md)). Language: TypeScript, in Goal's package `runtime/plugins/goal` ([Goal §10](Goal.md#10-implementation)). Depends on: Goal (P5, implemented by [#199](https://github.com/arcships/dim/pull/199)), C5 ([branch TypeScript binding](../branch-typescript.md)); both delivered. Milestone M2, not part of the current plan ([roadmap](../roadmap.md) D3).
 
 Requirement ([feature list](../../feature-list.md), Agent behavior): keep working toward an explicit objective and record its completion or blockage, **with completion judged by an evaluator instead of the model doing the work**.
 
@@ -161,6 +161,6 @@ What is left, and why each piece is needed:
 
 Removed from the earlier draft: claim and reopen states, deadline and `evaluationTimeoutSeconds`, the `goal/evaluation-reported` record, special rules for user input during an evaluation, and the requirements to stop and retire branches.
 
-## 12. What remains for Ready
+## 12. Ready confirmation
 
-No product decision remains; this design waits for maintainer confirmation.
+No product decision remained. The maintainer confirmed the design as Ready on 2026-10-26 ([#146](https://github.com/arcships/dim/issues/146)), including the A16 fold exception in [Goal](Goal.md#appendix-e-assumptions) (decided 2026-10-22). Goal describes the implemented model judge and is amended when this design is implemented.

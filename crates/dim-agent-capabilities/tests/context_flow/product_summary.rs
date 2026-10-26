@@ -82,12 +82,12 @@ async fn product_session(
         )))))
         .require_feature(
             Feature::new("ProductSummaryStrategy").session("ProductSummaryStrategy", |names| {
-                names.part(ProductSummaryStrategyPlugin::new(names)?)
+                Ok(Box::new(ProductSummaryStrategyPlugin::new(names)?))
             }),
         )
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     let snapshot: ModelCapabilitySnapshot = serde_json::from_value(serde_json::json!({

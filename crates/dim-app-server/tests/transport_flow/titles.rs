@@ -9,7 +9,7 @@ use dim_app_server::{
     session_typescript::SessionTypeScriptConfig, storage::testing::hold_title_write,
 };
 use futures_util::FutureExt;
-use rutis::Keyed;
+use rutis::host::CtxHost;
 use rutis_bridge::session::{HostDispatch, Reply};
 use std::sync::OnceLock;
 
@@ -17,20 +17,33 @@ use std::sync::OnceLock;
 /// extra process rows, so the part is the test's consumer.
 #[derive(Clone, Default)]
 struct Metadata(Arc<OnceLock<Arc<dyn HostDispatch>>>);
-struct MetadataConsumer(Metadata);
-impl TypedPlugin for MetadataConsumer {
-    type Deps = Keyed<dyn HostDispatch>;
+struct MetadataConsumer {
+    metadata: Metadata,
+    service: rutis::host::Key<dyn HostDispatch>,
+}
+impl MetadataConsumer {
+    fn new(names: &dim_agent_runtime::Names<'_>, metadata: Metadata) -> rutis::Result<Self> {
+        Ok(Self {
+            metadata,
+            service: names.named("sessionMetadata")?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for MetadataConsumer {
     fn name(&self) -> &str {
         "title-metadata-consumer"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.service.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a rutis::Ctx,
-        Keyed(service): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
-            let _ = self.0.0.set(service);
-            Ok(rutis::Effect::Done)
+            let service = ctx.require_at(&self.service)?;
+            let _ = self.metadata.0.set(service);
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -97,13 +110,12 @@ async fn serve_titles(store: &Store) -> (RunningServer, dim_agent_runtime::Agent
     let metadata = Metadata::default();
     let consumer = metadata.clone();
     let (server, agent) = launch_with(Arc::new(MockTools), store.config(), move |builder| {
-        builder.require_feature(Feature::new("title-metadata-consumer").session(
-            "title-metadata-consumer",
-            move |names| {
-                let service = names.named::<dyn HostDispatch>("sessionMetadata")?;
-                Ok(names.part_with(MetadataConsumer(consumer.clone()), service))
-            },
-        ));
+        builder.require_feature(
+            Feature::new("title-metadata-consumer")
+                .session("title-metadata-consumer", move |names| {
+                    Ok(Box::new(MetadataConsumer::new(names, consumer.clone())?))
+                }),
+        );
     })
     .await;
     (server, agent, metadata)

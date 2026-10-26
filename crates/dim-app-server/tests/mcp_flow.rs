@@ -1,4 +1,5 @@
 use dim_agent_capabilities::file_storage::{FileStorage, FileStoragePlugin};
+use dim_agent_runtime::Names;
 use dim_agent_runtime::wait_active;
 use dim_app_server::{
     mcp::{
@@ -10,7 +11,9 @@ use dim_app_server::{
         settings_changes,
     },
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Gate, Keyed, Typed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberView, Key, TypeKey};
+use rutis::{Ctx, Plugin};
+use rutis_loader::resolve::Build;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -24,23 +27,35 @@ use tokio_util::sync::CancellationToken;
 mod mcp_host;
 
 type Services = (Arc<McpService>, Arc<SettingsService>, Arc<FileStorage>);
-struct Capture(Arc<OnceLock<Services>>);
-impl TypedPlugin for Capture {
-    type Deps = (
-        Keyed<McpService>,
-        Keyed<SettingsService>,
-        Keyed<FileStorage>,
-    );
+struct Capture {
+    services: Arc<OnceLock<Services>>,
+    mcp: Key<McpService>,
+    settings: Key<SettingsService>,
+    files: Key<FileStorage>,
+}
+impl Capture {
+    fn new(names: &Names<'_>, services: Arc<OnceLock<Services>>) -> rutis::Result<Self> {
+        Ok(Self {
+            services,
+            mcp: names.key()?,
+            settings: names.key()?,
+            files: names.key()?,
+        })
+    }
+}
+impl DynPlugin for Capture {
     fn name(&self) -> &str {
         "McpTest"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(mcp), Keyed(settings), Keyed(files)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.mcp.erase(), self.settings.erase(), self.files.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            assert!(self.0.set((mcp, settings, files)).is_ok());
+            let mcp = ctx.require_at(&self.mcp)?;
+            let settings = ctx.require_at(&self.settings)?;
+            let files = ctx.require_at(&self.files)?;
+            assert!(self.services.set((mcp, settings, files)).is_ok());
             Ok(Effect::Done)
         })
     }
@@ -78,6 +93,9 @@ impl Fixture {
     }
     async fn open(home: PathBuf, reversed: bool) -> Self {
         let root = Ctx::root().unwrap();
+        let catalog = dim_app_server::catalog();
+        let build = Build::default();
+        let names = Names::copy(&catalog, &build);
         // The management table the process providers register with.
         root.plugin(
             dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
@@ -86,25 +104,23 @@ impl Fixture {
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
         // Where Mcp registers its Session part; no Agent mounts it here.
-        root.provide_as(
-            rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
-            Arc::new(dim_agent_runtime::PartRegistry::default()),
-        )
+        root.provide_as::<dim_agent_runtime::PartRegistry>(Arc::new(
+            dim_agent_runtime::PartRegistry::default(),
+        ))
         .unwrap();
-        let plugin = root.plugin(Typed::new(McpPlugin::new(0)));
+        let plugin = root.plugin(McpPlugin::new(&names, 0).unwrap());
         let mut roots = vec![home.clone(), home.join("project")];
         if reversed {
             roots.reverse();
         }
         let views = vec![
-            root.plugin(rutis::Typed::new(FileStoragePlugin::new(roots))),
+            root.plugin(FileStoragePlugin::new(roots)),
             root.plugin(
-                SettingsPlugin::new(usize::from(reversed), vec![usize::from(!reversed)])
-                    .typed(&dim_app_server::catalog())
+                SettingsPlugin::new(&names, usize::from(reversed), vec![usize::from(!reversed)])
                     .unwrap(),
             ),
             plugin.clone(),
-            root.plugin(Typed::new(Capture(capture.clone()))),
+            root.plugin(Capture::new(&names, capture.clone()).unwrap()),
         ];
         wait_active(
             &root,
@@ -733,37 +749,30 @@ async fn framework_precancellation_closes_admission_before_dependent_cleanup_fin
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     }
-    impl TypedPlugin for SlowConsumer {
-        type Deps = Gate<McpService>;
+    impl Plugin for SlowConsumer {
+        type Deps = Arc<McpService>;
         fn name(&self) -> &str {
             "SlowMcpConsumer"
         }
-        fn apply<'a>(
-            &'a self,
-            _: &'a Ctx,
-            _: Self::Deps,
-        ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-            Box::pin(async move {
-                let entered = self.entered.clone();
-                let release = self.release.clone();
-                Ok(Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        entered.notify_one();
-                        release.notified().await;
-                        Ok(())
-                    })
-                })))
-            })
+        async fn apply(&self, ctx: &Ctx, _: Self::Deps) -> rutis::Result {
+            let entered = self.entered.clone();
+            let release = self.release.clone();
+            ctx.effect(move || async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(())
+            })?;
+            Ok(())
         }
     }
 
     let fixture = Fixture::new().await;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let consumer = fixture.root.plugin(Typed::new(SlowConsumer {
+    let consumer = fixture.root.plugin(SlowConsumer {
         entered: entered.clone(),
         release: release.clone(),
-    }));
+    });
     wait_active(
         &fixture.root,
         &[consumer],
@@ -783,20 +792,6 @@ async fn framework_precancellation_closes_admission_before_dependent_cleanup_fin
     assert!(matches!(result, Err(McpError::Closed)));
 }
 
-/// Wakes the test once Settings announces a write.
-struct Ping(Arc<tokio::sync::Notify>);
-impl rutis::Listener<SettingsChanged> for Ping {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        _: &'a SettingsChanged,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        self.0.notify_one();
-        Box::pin(async { Ok(None) })
-    }
-}
-
 #[tokio::test]
 async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
     let fixture = Fixture::new().await;
@@ -804,14 +799,16 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
     let path = fixture.files.path(0, "mcp.json").unwrap();
     let snapshot = fixture.mcp.catalog(None, &cancel).await.unwrap();
     let changed = Arc::new(tokio::sync::Notify::new());
+    // Wakes the test once Settings announces a write.
+    let ping = changed.clone();
     fixture
         .root
-        .events()
-        .on(
-            &fixture.root,
-            &settings_changes("mcp"),
-            Ping(changed.clone()),
-        )
+        .listen::<SettingsChanged>()
+        .name(settings_changes("mcp"))
+        .on(move |_, _| {
+            ping.notify_one();
+            async { Ok(None) }
+        })
         .unwrap();
     let lease = fixture.files.lock(&path, &cancel).await.unwrap();
     // Poll the operation into admission, then drop only its caller while the

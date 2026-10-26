@@ -5,6 +5,7 @@
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
 - [Development plan and priorities](design/roadmap.md)（中文）
+- [Plugin management: goals and requirements to define](design/plugin-management.md)（中文；Dim plugins and Claude Code / Codex-style plugins; requirements, not design）
 - [ADR 002 — Plugin scope](adr/002-plugin-scope.md)（[中文](zh/adr/002-plugin-scope.md)）
 - [ADR 003 — Approval scope](adr/003-approval-scope.md)（[中文](zh/adr/003-approval-scope.md)）
 - [ADR 004 — Session-owned MCP and business configuration](adr/004-loader-plugin-management.md)
@@ -15,9 +16,11 @@
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
+- [Owner-independent Timeline instances](design/collaboration-timeline.md) (proposed, #335)
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
+- [Clients](design/clients.md): which clients exist, what they share, capability coverage per client, gaps and open decisions (draft)（[中文](zh/design/clients.md)）
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)

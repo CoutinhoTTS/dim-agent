@@ -22,7 +22,7 @@ pub fn install(builder: &mut AgentBuilder) {
     register_names(builder);
     builder.require_feature(
         dim_agent_runtime::Feature::new("ConfiguredModel").session("ConfiguredModel", |names| {
-            names.part(ConfiguredModelPlugin::new(names)?)
+            Ok(Box::new(ConfiguredModelPlugin::new(names)?))
         }),
     );
 }

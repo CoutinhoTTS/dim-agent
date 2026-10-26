@@ -7,7 +7,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::host::ErrorKind;
+use rutis::{Ctx, Plugin};
 use tokio::sync::oneshot;
 
 use crate::args::Options;
@@ -56,21 +57,19 @@ pub struct DaemonLink {
     pub start: bool,
 }
 
-impl TypedPlugin for DaemonLink {
+impl Plugin for DaemonLink {
     type Deps = ();
 
     fn name(&self) -> &str {
         "DaemonLink"
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let client = client::connect_inner(&self.options, self.start)
-                .await
-                .map_err(CordisError::PluginFailed)?;
-            ctx.provide(Connection(Mutex::new(client)))?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        let client = client::connect_inner(&self.options, self.start)
+            .await
+            .map_err(ErrorKind::PluginFailed)?;
+        ctx.provide(Connection(Mutex::new(client)))?;
+        Ok(())
     }
 }
 
@@ -84,62 +83,56 @@ pub struct Tui {
     pub leave: Mutex<Option<oneshot::Sender<Leave>>>,
 }
 
-impl TypedPlugin for Tui {
+impl Plugin for Tui {
     type Deps = (Arc<Connection>,);
 
     fn name(&self) -> &str {
         "Tui"
     }
 
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (connection,): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            // Registered before the render thread enters raw mode, so every
-            // way out of the tree hands the terminal back.
-            ctx.effect(|| {
-                Effect::Disposer(Box::new(|| {
-                    ui::terminal::restore_if_held();
-                    Ok(())
-                }))
+    async fn apply(&self, ctx: &Ctx, (connection,): Self::Deps) -> rutis::Result {
+        // Registered before the render thread enters raw mode, so every
+        // way out of the tree hands the terminal back.
+        ctx.effect(|| async move {
+            ui::terminal::restore_if_held();
+            Ok(())
+        })?;
+        let client = connection
+            .take()
+            .ok_or_else(|| rutis::Error::from(ErrorKind::PluginFailed(CONNECTION_TAKEN.into())))?;
+        let leave = self
+            .leave
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| {
+                rutis::Error::from(ErrorKind::PluginFailed("Tui was loaded twice".into()))
             })?;
-            let client = connection
-                .take()
-                .ok_or_else(|| CordisError::PluginFailed(CONNECTION_TAKEN.into()))?;
-            let leave = self
-                .leave
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
-                .ok_or_else(|| CordisError::PluginFailed("Tui was loaded twice".into()))?;
-            let host = SessionHost::start(self.options.clone(), client);
-            let env = self.env.clone();
-            let render = std::thread::Builder::new()
-                .name("dim-tui".into())
-                .spawn(move || {
-                    // The interface shuts the session thread down before it
-                    // returns; a dropped sender means the root stopped waiting.
-                    let _ = leave.send(ui::tui::run(Box::new(host), env));
-                })
-                .map_err(|error| CordisError::PluginFailed(error.into()))?;
-            ctx.effect(|| {
-                Effect::Disposer(Box::new(move || {
-                    // Finished once `leave` was sent; bounded for an unload
-                    // that did not wait for it.
-                    let deadline = std::time::Instant::now() + Duration::from_secs(1);
-                    while !render.is_finished() && std::time::Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    if render.is_finished() {
-                        let _ = render.join();
-                    }
-                    Ok(())
-                }))
-            })?;
-            Ok(Effect::Done)
-        })
+        let host = SessionHost::start(self.options.clone(), client);
+        let env = self.env.clone();
+        let render = std::thread::Builder::new()
+            .name("dim-tui".into())
+            .spawn(move || {
+                // The interface shuts the session thread down before it
+                // returns; a dropped sender means the root stopped waiting.
+                let _ = leave.send(ui::tui::run(Box::new(host), env));
+            })
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
+        ctx.effect(|| {
+            async move {
+                // Finished once `leave` was sent; bounded for an unload
+                // that did not wait for it.
+                let deadline = std::time::Instant::now() + Duration::from_secs(1);
+                while !render.is_finished() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if render.is_finished() {
+                    let _ = render.join();
+                }
+                Ok(())
+            }
+        })?;
+        Ok(())
     }
 }
 
@@ -156,48 +149,42 @@ pub struct WebHold {
     pub done: Mutex<Option<oneshot::Sender<crate::Result<i32>>>>,
 }
 
-impl TypedPlugin for WebHold {
+impl Plugin for WebHold {
     type Deps = (Arc<Connection>,);
 
     fn name(&self) -> &str {
         "WebHold"
     }
 
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (connection,): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let mut client = connection
-                .take()
-                .ok_or_else(|| CordisError::PluginFailed(CONNECTION_TAKEN.into()))?;
-            let done = self
-                .done
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
-                .ok_or_else(|| CordisError::PluginFailed("WebHold was loaded twice".into()))?;
-            // The signals are listened for before the panel says how to
-            // stop, so a Ctrl+C that follows it at once is ours.
-            let signals =
-                Signals::listen().map_err(|error| CordisError::PluginFailed(error.into()))?;
-            self.open(&mut client)
-                .await
-                .map_err(CordisError::PluginFailed)?;
-            // The entry stays open while this connection does: the task
-            // owns it until a signal or the daemon's end, then reports.
-            let wait = tokio::spawn(async move {
-                let _ = done.send(hold(client, signals).await);
-            });
-            ctx.effect(|| {
-                Effect::Disposer(Box::new(move || {
-                    wait.abort();
-                    Ok(())
-                }))
+    async fn apply(&self, ctx: &Ctx, (connection,): Self::Deps) -> rutis::Result {
+        let mut client = connection
+            .take()
+            .ok_or_else(|| rutis::Error::from(ErrorKind::PluginFailed(CONNECTION_TAKEN.into())))?;
+        let done = self
+            .done
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| {
+                rutis::Error::from(ErrorKind::PluginFailed("WebHold was loaded twice".into()))
             })?;
-            Ok(Effect::Done)
-        })
+        // The signals are listened for before the panel says how to
+        // stop, so a Ctrl+C that follows it at once is ours.
+        let signals = Signals::listen()
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
+        self.open(&mut client)
+            .await
+            .map_err(ErrorKind::PluginFailed)?;
+        // The entry stays open while this connection does: the task
+        // owns it until a signal or the daemon's end, then reports.
+        let wait = tokio::spawn(async move {
+            let _ = done.send(hold(client, signals).await);
+        });
+        ctx.effect(|| async move {
+            wait.abort();
+            Ok(())
+        })?;
+        Ok(())
     }
 }
 

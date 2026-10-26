@@ -6,27 +6,39 @@ use crate::{
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::Branch;
+use dim_agent_runtime::{Branch, Names};
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub const NAMESPACE: &str = "session.context";
 
-pub struct ContextMethodsPlugin;
-impl TypedPlugin for ContextMethodsPlugin {
-    type Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>);
+pub struct ContextMethodsPlugin {
+    tree: Key<TreeCommands>,
+    methods: Key<SessionMethods>,
+}
+impl ContextMethodsPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            tree: names.key()?,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ContextMethodsPlugin {
     fn name(&self) -> &str {
         "ContextMethods"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(tree), Keyed(methods)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.tree.erase(), self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let tree = ctx.require_at(&self.tree)?;
+            let methods = ctx.require_at(&self.methods)?;
             methods.register(
                 ctx,
                 NAMESPACE,

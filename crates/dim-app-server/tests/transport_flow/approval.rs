@@ -5,7 +5,7 @@ use dim_agent_types::{
     ApprovalDecision, ContentBlock, EventKind, InputMode, InterruptScope, StopInterruptData,
     TurnOutcome,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, KeyedGate};
+use rutis::host::CtxHost;
 use std::sync::{Mutex as StdMutex, atomic::AtomicBool};
 use tokio::sync::Notify;
 
@@ -25,18 +25,31 @@ struct Probe {
     cancel_gate: StdMutex<Option<std::sync::mpsc::Receiver<()>>>,
     cancel_entered: Notify,
 }
-struct ProbePlugin(Arc<Probe>);
-impl TypedPlugin for ProbePlugin {
-    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>, KeyedGate<ToolExecutor>);
+struct ProbePlugin(
+    Arc<Probe>,
+    rutis::host::Key<Timeline>,
+    rutis::host::Key<Dispatcher>,
+    rutis::host::Key<ToolExecutor>,
+);
+impl ProbePlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>, a0: Arc<Probe>) -> rutis::Result<Self> {
+        Ok(Self(a0, names.key()?, names.key()?, names.key()?))
+    }
+}
+impl rutis::host::DynPlugin for ProbePlugin {
     fn name(&self) -> &str {
         "approval-transport-probe"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.1.erase(), self.2.erase(), self.3.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(dispatcher), _): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.1)?;
+            let dispatcher = ctx.require_at(&self.2)?;
             *self.0.timeline.lock().unwrap() = Some(timeline.clone());
             *self.0.dispatcher.lock().unwrap() = Some(dispatcher.clone());
             let probe = self.0.clone();
@@ -111,7 +124,7 @@ impl TypedPlugin for ProbePlugin {
                     })
                 },
             )?;
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -152,7 +165,7 @@ async fn setup_store(
     );
     builder.require_feature(
         Feature::new("approval-transport-probe").branch("approval-transport-probe", move |names| {
-            names.part(ProbePlugin(probe.clone()))
+            Ok(Box::new(ProbePlugin::new(names, probe.clone())?))
         }),
     );
     let server = serve(

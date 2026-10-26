@@ -4,7 +4,8 @@
 //! `write` `edit` `glob` `grep` `exec`. Branch parts are looked up per call on
 //! the calling branch: `FileReads` for file tools and `BackgroundExec` for a
 //! command that moves to the background. Admission happened before a call
-//! reaches this host; nothing here knows permissions, approvals or sandboxes.
+//! reaches execution; `resolve_write` only prepares its target before admission.
+//! Nothing here decides permissions, approvals or sandboxes.
 pub mod background;
 pub mod exec;
 pub mod file_reads;
@@ -24,7 +25,8 @@ use dim_agent_runtime::{
 use dim_agent_types::*;
 use file_reads::{FileReads, FileReadsPlugin};
 use files::{FileTools, FileWriteCoordinator};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{path::PathBuf, sync::Arc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -47,17 +49,17 @@ pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
     builder.require_feature(
         dim_agent_runtime::Feature::new("WorkspaceTools")
             .session("WorkspaceTools", move |names| {
-                names.part(WorkspaceToolsPlugin::new(
+                Ok(Box::new(WorkspaceToolsPlugin::new(
                     names,
                     config.clone(),
                     coordinator.clone(),
-                )?)
+                )?))
             })
             .branch("FileReads", |names| {
-                names.part(FileReadsPlugin::new(names)?)
+                Ok(Box::new(FileReadsPlugin::new(names)?))
             })
             .branch("BackgroundExec", |names| {
-                names.part(BackgroundExecPlugin::new(names)?)
+                Ok(Box::new(BackgroundExecPlugin::new(names)?))
             }),
     );
 }
@@ -134,6 +136,41 @@ impl ToolDriver for WorkspaceTools {
         definitions.push(exec::definition_for(&self.platform));
         definitions
     }
+    fn resolve_write(
+        &self,
+        mut call: ToolCall,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolCall> {
+        Box::pin(async move {
+            if self.lifecycle.is_cancelled() {
+                return Err(HostError::Cancelled(CAPABILITY_RELOADING.into()));
+            }
+            if matches!(call.name.as_str(), "write" | "edit")
+                && let Some(path) = call.input.get("path").and_then(|value| value.as_str())
+                && !path.is_empty()
+            {
+                let (cwd, home, path) = (
+                    self.cwd.clone(),
+                    self.platform.home.clone(),
+                    path.to_owned(),
+                );
+                let target =
+                    tokio::task::spawn_blocking(move || files::resolve_path(&cwd, &home, &path));
+                let path = tokio::select! {
+                    result = target => result.map_err(|error| HostError::failed(error.to_string()))?
+                        .map_err(HostError::failed)?,
+                    _ = cancel.cancelled() => return Err(HostError::Cancelled("Tool execution cancelled.".into())),
+                };
+                let path = path
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| HostError::failed("The resolved write path is not UTF-8"))?;
+                call.input
+                    .insert("path".into(), serde_json::Value::String(path));
+            }
+            Ok(call)
+        })
+    }
     fn execute(
         &self,
         call: ToolCall,
@@ -145,7 +182,12 @@ impl ToolDriver for WorkspaceTools {
 }
 
 struct WorkspaceToolsPlugin {
-    host: rutis::DepKey<ToolHost>,
+    host: Key<ToolHost>,
+    platform: Key<HostPlatform>,
+    session_config: Key<SessionConfig>,
+    identity: Key<SessionIdentity>,
+    tree: Key<TreeCommands>,
+    methods: Key<SessionMethods>,
     config: WorkspaceToolsConfig,
     coordinator: Arc<FileWriteCoordinator>,
 }
@@ -154,31 +196,39 @@ impl WorkspaceToolsPlugin {
         names: &Names<'_>,
         config: WorkspaceToolsConfig,
         coordinator: Arc<FileWriteCoordinator>,
-    ) -> Result<Self, CordisError> {
+    ) -> rutis::Result<Self> {
         Ok(Self {
             host: names.key()?,
+            platform: names.key()?,
+            session_config: names.key()?,
+            identity: names.key()?,
+            tree: names.key()?,
+            methods: names.key()?,
             config,
             coordinator,
         })
     }
 }
-impl TypedPlugin for WorkspaceToolsPlugin {
-    type Deps = (
-        Keyed<HostPlatform>,
-        Keyed<SessionConfig>,
-        Keyed<SessionIdentity>,
-        Keyed<TreeCommands>,
-        Keyed<SessionMethods>,
-    );
+impl DynPlugin for WorkspaceToolsPlugin {
     fn name(&self) -> &str {
         "WorkspaceTools"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(platform), Keyed(config), Keyed(identity), Keyed(tree), Keyed(methods)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.platform.erase(),
+            self.session_config.erase(),
+            self.identity.erase(),
+            self.tree.erase(),
+            self.methods.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let platform = ctx.require_at(&self.platform)?;
+            let config = ctx.require_at(&self.session_config)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let tree = ctx.require_at(&self.tree)?;
+            let methods = ctx.require_at(&self.methods)?;
             // `session.create` validated and canonicalized the cwd.
             let cwd = PathBuf::from(&config.cwd);
             let output_dir = self.config.output_root.join(&identity.session_id);
@@ -198,15 +248,11 @@ impl TypedPlugin for WorkspaceToolsPlugin {
                 calls: TaskTracker::new(),
             });
             let owner = tools.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owner.lifecycle.cancel();
-                        owner.calls.close();
-                        owner.calls.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                owner.lifecycle.cancel();
+                owner.calls.close();
+                owner.calls.wait().await;
+                Ok(())
             })?;
             let tree = tools.tree.clone();
             methods.register(
@@ -250,7 +296,7 @@ impl TypedPlugin for WorkspaceToolsPlugin {
                     })
                 }),
             )?;
-            ctx.provide_as(self.host.key().clone(), Arc::new(ToolHost(tools)))?;
+            ctx.provide_at(self.host.clone(), Arc::new(ToolHost(tools)))?;
             Ok(Effect::Done)
         })
     }

@@ -1,5 +1,6 @@
 use crate::ServerError;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::host::BoxFuture;
+use rutis::{Ctx, Plugin};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -83,19 +84,13 @@ impl ServerControlPlugin {
         Self(Arc::new(ServerControl::new()))
     }
 }
-impl TypedPlugin for ServerControlPlugin {
+impl Plugin for ServerControlPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "ServerControl"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(rutis::TypeKey::of::<ServerControl>(), self.0.clone())?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.provide_as::<ServerControl>(self.0.clone())?;
+        Ok(())
     }
 }

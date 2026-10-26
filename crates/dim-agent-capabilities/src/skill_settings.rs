@@ -1,6 +1,6 @@
 //! Product-owned Skill enablement storage. Discovery and effective Skill views
 //! belong to Skills; this port has no filesystem or app-server dependency.
-use rutis::BoxFuture;
+use rutis::host::BoxFuture;
 use std::{collections::BTreeSet, sync::Arc};
 use tokio_util::sync::CancellationToken;
 

@@ -1,5 +1,6 @@
 use super::*;
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, SessionMethods};
+use rutis::host::CtxHost;
 
 /// Registers one Session namespace with the Session's method table and
 /// records what the table answered: "" when it took the registration.
@@ -7,18 +8,37 @@ struct Claim {
     namespace: &'static str,
     answer: Arc<std::sync::Mutex<Option<String>>>,
     called: Arc<std::sync::atomic::AtomicBool>,
+
+    methods: rutis::host::Key<SessionMethods>,
 }
-impl TypedPlugin for Claim {
-    type Deps = (rutis::Keyed<SessionMethods>,);
+impl Claim {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        namespace: &'static str,
+        answer: Arc<std::sync::Mutex<Option<String>>>,
+        called: Arc<std::sync::atomic::AtomicBool>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            namespace,
+            answer,
+            called,
+            methods: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for Claim {
     fn name(&self) -> &str {
         "Claim"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.methods.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (rutis::Keyed(methods),): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let methods = ctx.require_at(&self.methods)?;
             let called = self.called.clone();
             let answer = methods
                 .register(
@@ -38,7 +58,7 @@ impl TypedPlugin for Claim {
                 .map(|error| error.to_string())
                 .unwrap_or_default();
             *self.answer.lock().unwrap() = Some(answer);
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -64,11 +84,12 @@ async fn a_session_namespace_registers_unless_it_overlaps_a_builtin() {
             let (answer, called) = (answer.clone(), called.clone());
             move |builder| {
                 builder.require_feature(Feature::new("Claim").session("Claim", move |names| {
-                    names.part(Claim {
+                    Ok(Box::new(Claim::new(
+                        names,
                         namespace,
-                        answer: answer.clone(),
-                        called: called.clone(),
-                    })
+                        answer.clone(),
+                        called.clone(),
+                    )?))
                 }));
             }
         })
@@ -122,11 +143,12 @@ async fn session_methods_does_not_list_a_name_management_holds() {
                 builder.require_feature(dim_agent_runtime::Feature::new("Claim").session(
                     "Claim",
                     move |names| {
-                        names.part(Claim {
-                            namespace: "skills",
-                            answer: answer.clone(),
-                            called: called.clone(),
-                        })
+                        Ok(Box::new(Claim::new(
+                            names,
+                            "skills",
+                            answer.clone(),
+                            called.clone(),
+                        )?))
                     },
                 ));
             }
@@ -201,7 +223,7 @@ struct Notes(Arc<NotesState>);
 #[derive(Default)]
 struct NotesState {
     /// The provider of each Session, most recent last.
-    views: std::sync::Mutex<Vec<rutis::FiberView>>,
+    views: std::sync::Mutex<Vec<rutis::host::FiberView>>,
     /// Holds the next provider start until notified.
     hold: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// `notes.wait` started, and later settled after its token fired.
@@ -219,9 +241,7 @@ impl Notes {
         let notes = self.clone();
         builder.require_feature(
             Feature::new("NotesOwner").session("NotesOwner", move |names| {
-                names.part(NotesOwner {
-                    notes: notes.clone(),
-                })
+                Ok(Box::new(NotesOwner::new(names, notes.clone())?))
             }),
         );
     }
@@ -239,27 +259,41 @@ impl Notes {
 }
 struct NotesOwner {
     notes: Notes,
+
+    methods: rutis::host::Key<SessionMethods>,
 }
-impl TypedPlugin for NotesOwner {
-    type Deps = (rutis::Keyed<SessionMethods>,);
+impl NotesOwner {
+    fn new(names: &dim_agent_runtime::Names<'_>, notes: Notes) -> rutis::Result<Self> {
+        Ok(Self {
+            notes,
+            methods: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for NotesOwner {
     fn name(&self) -> &str {
         "NotesOwner"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.methods.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (rutis::Keyed(methods),): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
-            let view = ctx.plugin(rutis::Typed::new(NotesProvider {
+            let methods = ctx.require_at(&self.methods)?;
+            let view = ctx.plugin(NotesProvider {
                 methods,
                 notes: self.notes.clone(),
-            }));
+            });
             (&view).await.map_err(|error| {
-                rutis::CordisError::PluginFailed(format!("Notes provider failed: {error}").into())
+                rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    format!("Notes provider failed: {error}").into(),
+                ))
             })?;
             self.notes.0.views.lock().unwrap().push(view);
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -267,80 +301,74 @@ struct NotesProvider {
     methods: Arc<SessionMethods>,
     notes: Notes,
 }
-impl TypedPlugin for NotesProvider {
+impl Plugin for NotesProvider {
     type Deps = ();
     fn name(&self) -> &str {
         "Notes"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            let hold = self.notes.0.hold.lock().unwrap().take();
-            if let Some(gate) = hold {
-                gate.notified().await;
-            }
-            let state = self.notes.0.clone();
-            self.methods.register(
-                ctx,
-                "notes",
-                vec![
-                    MethodDecl::new("notes.echo", false, Interruption::Drain),
-                    MethodDecl {
-                        progress: true,
-                        ..MethodDecl::new("notes.wait", true, Interruption::Report)
-                    },
-                    MethodDecl {
-                        progress: true,
-                        ..MethodDecl::new("notes.stream", false, Interruption::Drain)
-                    },
-                    MethodDecl {
-                        progress: true,
-                        ..MethodDecl::new("notes.flood", false, Interruption::Drain)
-                    },
-                ],
-                Arc::new(move |method, params, cancel, progress| {
-                    let state = state.clone();
-                    Box::pin(async move {
-                        match method.as_str() {
-                            // Undeclared progress never reaches the caller.
-                            "notes.echo" => progress.send(json!("undeclared")),
-                            "notes.wait" => {
-                                state.entered.notify_one();
-                                cancel.cancelled().await;
-                                // After the interrupted reply: dropped.
-                                progress.send(json!("after the reply"));
-                                state.settled.notify_one();
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
+        let hold = self.notes.0.hold.lock().unwrap().take();
+        if let Some(gate) = hold {
+            gate.notified().await;
+        }
+        let state = self.notes.0.clone();
+        self.methods.register(
+            ctx,
+            "notes",
+            vec![
+                MethodDecl::new("notes.echo", false, Interruption::Drain),
+                MethodDecl {
+                    progress: true,
+                    ..MethodDecl::new("notes.wait", true, Interruption::Report)
+                },
+                MethodDecl {
+                    progress: true,
+                    ..MethodDecl::new("notes.stream", false, Interruption::Drain)
+                },
+                MethodDecl {
+                    progress: true,
+                    ..MethodDecl::new("notes.flood", false, Interruption::Drain)
+                },
+            ],
+            Arc::new(move |method, params, cancel, progress| {
+                let state = state.clone();
+                Box::pin(async move {
+                    match method.as_str() {
+                        // Undeclared progress never reaches the caller.
+                        "notes.echo" => progress.send(json!("undeclared")),
+                        "notes.wait" => {
+                            state.entered.notify_one();
+                            cancel.cancelled().await;
+                            // After the interrupted reply: dropped.
+                            progress.send(json!("after the reply"));
+                            state.settled.notify_one();
+                        }
+                        // `count` notices of `bytes` bytes each, at once.
+                        "notes.flood" => {
+                            let text = "x".repeat(params["bytes"].as_u64().unwrap() as usize);
+                            for step in 0..params["count"].as_u64().unwrap() {
+                                progress.send(json!({"step": step, "text": text.as_str()}));
                             }
-                            // `count` notices of `bytes` bytes each, at once.
-                            "notes.flood" => {
-                                let text = "x".repeat(params["bytes"].as_u64().unwrap() as usize);
-                                for step in 0..params["count"].as_u64().unwrap() {
-                                    progress.send(json!({"step": step, "text": text.as_str()}));
-                                }
-                                state.flooded.notify_one();
+                            state.flooded.notify_one();
+                        }
+                        _ => {
+                            for step in 0..3 {
+                                progress.send(json!({"step": step}));
                             }
-                            _ => {
-                                for step in 0..3 {
-                                    progress.send(json!({"step": step}));
-                                }
-                                if params["hold"] == true {
-                                    state.release.notified().await;
-                                    progress.send(json!({"step": 3}));
-                                    if let Some(streamed) = state.streamed.lock().await.take() {
-                                        let _ = streamed.send(cancel.is_cancelled());
-                                    }
+                            if params["hold"] == true {
+                                state.release.notified().await;
+                                progress.send(json!({"step": 3}));
+                                if let Some(streamed) = state.streamed.lock().await.take() {
+                                    let _ = streamed.send(cancel.is_cancelled());
                                 }
                             }
                         }
-                        Ok(json!({"method": method, "params": params}))
-                    })
-                }),
-            )?;
-            Ok(rutis::Effect::Done)
-        })
+                    }
+                    Ok(json!({"method": method, "params": params}))
+                })
+            }),
+        )?;
+        Ok(())
     }
 }
 fn app_error(reply: &Value) -> &str {

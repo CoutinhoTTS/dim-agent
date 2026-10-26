@@ -1,6 +1,7 @@
 use dim_agent_capabilities::file_storage::{
     FileLease, FilePath, FileStorage, FileStorageError, FileStoragePlugin,
 };
+use dim_agent_runtime::Names;
 use dim_agent_runtime::wait_active;
 use dim_app_server::{
     settings::{
@@ -11,72 +12,77 @@ use dim_app_server::{
     storage::SqliteStoragePlugin,
 };
 use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_bridge::session::{HostDispatch, Value as RpcValue, host_key};
+use rutis_loader::resolve::Build;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use std::{fs, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 /// Settings keyed from the App Server's catalog, mounted on a test root.
-fn settings_part(plugin: SettingsPlugin) -> rutis::Typed<SettingsPlugin> {
-    plugin.typed(&dim_app_server::catalog()).unwrap()
+fn settings_part(home_root: usize, project_roots: Vec<usize>) -> SettingsPlugin {
+    let catalog = dim_app_server::catalog();
+    let build = Build::default();
+    SettingsPlugin::new(&Names::copy(&catalog, &build), home_root, project_roots).unwrap()
+}
+/// [`settings_part`] for the native profile.
+fn native_settings_part(home_root: usize, project_roots: Vec<usize>) -> SettingsPlugin {
+    let catalog = dim_app_server::catalog();
+    let build = Build::default();
+    SettingsPlugin::native(&Names::copy(&catalog, &build), home_root, project_roots).unwrap()
 }
 
-struct ProcessSettings(
-    tokio::sync::watch::Sender<
-        Option<(
-            std::sync::Arc<SettingsService>,
-            std::sync::Arc<rutis_loader::Loader>,
-        )>,
-    >,
-);
-impl rutis::TypedPlugin for ProcessSettings {
-    type Deps = (
-        rutis::Keyed<SettingsService>,
+type Captured = tokio::sync::watch::Sender<
+    Option<(
+        std::sync::Arc<SettingsService>,
         std::sync::Arc<rutis_loader::Loader>,
-    );
+    )>,
+>;
+struct ProcessSettings {
+    capture: Captured,
+    settings: Key<SettingsService>,
+}
+impl ProcessSettings {
+    fn new(names: &Names<'_>, capture: Captured) -> rutis::Result<Self> {
+        Ok(Self {
+            capture,
+            settings: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ProcessSettings {
     fn name(&self) -> &str {
         "test.process-settings"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (rutis::Keyed(settings), loader): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.settings.erase(), TypeKey::of::<rutis_loader::Loader>()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            self.0.send_replace(Some((settings, loader)));
-            Ok(rutis::Effect::Done)
+            let settings = ctx.require_at(&self.settings)?;
+            let loader = ctx.require::<rutis_loader::Loader>()?;
+            self.capture.send_replace(Some((settings, loader)));
+            Ok(Effect::Done)
         })
     }
 }
 
 /// Records every event of one rutis channel, in delivery order.
-struct Log<E>(std::sync::Arc<tokio::sync::watch::Sender<Vec<E>>>);
-impl<E> Clone for Log<E> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-impl<E: rutis::Event<Value = ()> + Clone> rutis::Listener<E> for Log<E> {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        event: &'a E,
-        _: rutis::Call<'a, ()>,
-    ) -> rutis::BoxFuture<'a, std::result::Result<Option<()>, rutis::CordisError>> {
-        self.0.send_modify(|log| log.push(event.clone()));
-        Box::pin(async { Ok(None) })
-    }
-}
 fn listen<E: rutis::Event<Value = ()> + Clone>(
     root: &Ctx,
-    key: &rutis::EventKey<E>,
+    name: &str,
 ) -> tokio::sync::watch::Receiver<Vec<E>> {
-    let log = Log(std::sync::Arc::new(tokio::sync::watch::Sender::new(
-        Vec::new(),
-    )));
-    root.events().on(root, key, log.clone()).unwrap();
-    log.0.subscribe()
+    let log = std::sync::Arc::new(tokio::sync::watch::Sender::new(Vec::new()));
+    let sender = log.clone();
+    root.listen::<E>()
+        .name(name)
+        .on(move |event, _| {
+            sender.send_modify(|log| log.push((*event).clone()));
+            async { Ok(None) }
+        })
+        .unwrap();
+    log.subscribe()
 }
 /// Waits until the channel has delivered an event matching `seen`.
 async fn saw<E: Clone>(
@@ -139,7 +145,7 @@ async fn server_reload_preserves_project_root_identity_and_settings() {
         // The process loader is a handle the loader provides, not a name.
         builder.require_feature(
             Feature::new("test.process-settings").session("test.process-settings", move |names| {
-                Ok(names.part_with(ProcessSettings(capture.clone()), (names.key()?, ())))
+                Ok(Box::new(ProcessSettings::new(names, capture.clone())?))
             }),
         );
         let server = serve(
@@ -226,10 +232,8 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     let home = home();
     let root = Ctx::root().unwrap();
     let views = vec![
-        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-            home.clone(),
-        ]))),
-        root.plugin(settings_part(SettingsPlugin::new(0, vec![]))),
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(settings_part(0, vec![])),
     ];
     let cancel = CancellationToken::new();
     wait_active(&root, &views, Duration::from_secs(5), &cancel)
@@ -239,7 +243,7 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     let project = home.join("later");
     fs::create_dir(&project).unwrap();
     assert_eq!(settings.project_root(&project), None);
-    let mut authorized = listen(&root, &project_authorizations());
+    let mut authorized = listen::<ProjectAuthorized>(&root, &project_authorizations());
     let (first, same) = tokio::join!(
         settings.authorize_project(project.clone(), &cancel),
         settings.authorize_project(project.clone(), &cancel)
@@ -346,19 +350,15 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
     for restarted in [false, true] {
         let root = Ctx::root().unwrap();
         let views = vec![
-            root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-                home.clone(),
-            ]))),
-            root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-                database.clone(),
-            ))),
-            root.plugin(settings_part(SettingsPlugin::native(0, vec![]))),
+            root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+            root.plugin(SqliteStoragePlugin::new(database.clone())),
+            root.plugin(native_settings_part(0, vec![])),
         ];
         wait_active(&root, &views, Duration::from_secs(5), &cancel)
             .await
             .unwrap();
         let settings = root.get::<SettingsService>().unwrap();
-        let mut changes = listen(&root, &settings_changes("example"));
+        let mut changes = listen::<SettingsChanged>(&root, &settings_changes("example"));
         assert!(changes.borrow_and_update().is_empty());
         let current = settings
             .read::<Document>(SettingsScope::User, &cancel)
@@ -488,12 +488,12 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
     fs::create_dir(&second).unwrap();
     let root = Ctx::root().unwrap();
     let views = vec![
-        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
+        root.plugin(FileStoragePlugin::new(vec![
             home.clone(),
             project.clone(),
             second.clone(),
-        ]))),
-        root.plugin(settings_part(SettingsPlugin::new(0, vec![1, 2]))),
+        ])),
+        root.plugin(settings_part(0, vec![1, 2])),
     ];
     let cancel = CancellationToken::new();
     wait_active(&root, &views, Duration::from_secs(5), &cancel)
@@ -501,7 +501,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .unwrap();
     let settings = root.get::<SettingsService>().unwrap();
     let files = root.get::<FileStorage>().unwrap();
-    let mut changes = listen(&root, &settings_changes("example"));
+    let mut changes = listen::<SettingsChanged>(&root, &settings_changes("example"));
     let empty = settings
         .read::<Document>(SettingsScope::User, &cancel)
         .await
@@ -715,7 +715,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
             .await,
         Err(SettingsError::Closed)
     ));
-    let view = root.plugin(settings_part(SettingsPlugin::new(0, vec![1, 2])));
+    let view = root.plugin(settings_part(0, vec![1, 2]));
     wait_active(&root, &[view], Duration::from_secs(5), &cancel)
         .await
         .unwrap();
@@ -736,10 +736,8 @@ async fn business_documents_reject_escaping_filenames() {
     let home = home();
     let root = Ctx::root().unwrap();
     let views = vec![
-        root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-            home.clone(),
-        ]))),
-        root.plugin(settings_part(SettingsPlugin::new(0, vec![]))),
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(settings_part(0, vec![])),
     ];
     let cancel = CancellationToken::new();
     wait_active(&root, &views, Duration::from_secs(5), &cancel)
@@ -849,30 +847,24 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         fs::create_dir(&project).unwrap();
         let root = Ctx::root().unwrap();
         let settings_plugin = if native {
-            SettingsPlugin::native(0, vec![])
+            native_settings_part(0, vec![])
         } else {
-            SettingsPlugin::new(0, vec![])
+            settings_part(0, vec![])
         };
-        let mut views = vec![root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-            home.clone(),
-        ])))];
+        let mut views = vec![root.plugin(FileStoragePlugin::new(vec![home.clone()]))];
         if native {
-            views.push(root.plugin(rutis::Typed::new(SqliteStoragePlugin::new(
-                home.join("settings.sqlite"),
-            ))));
+            views.push(root.plugin(SqliteStoragePlugin::new(home.join("settings.sqlite"))));
         }
-        views.push(root.plugin(settings_part(
-            settings_plugin.declare(vec![declaration("example")]),
-        )));
+        views.push(root.plugin(settings_plugin.declare(vec![declaration("example")])));
         let cancel = CancellationToken::new();
         wait_active(&root, &views, Duration::from_secs(5), &cancel)
             .await
             .unwrap();
         let settings = root.get::<SettingsService>().unwrap();
         let owner = root
-            .get_as::<dyn HostDispatch>(host_key("settings"))
+            .get_at::<dyn HostDispatch>(&host_key("settings"))
             .unwrap();
-        let mut changes = listen(&root, &settings_changes("example"));
+        let mut changes = listen::<SettingsChanged>(&root, &settings_changes("example"));
         let user = json!({"source": "example", "scope": "user"});
 
         // The first read is the default document.
@@ -975,7 +967,7 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         )
         .await;
         assert_eq!(unauthorized["error"]["code"], "invalid_scope");
-        let mut authorized = listen(&root, &project_authorizations());
+        let mut authorized = listen::<ProjectAuthorized>(&root, &project_authorizations());
         let project_root = settings
             .authorize_project(project.clone(), &cancel)
             .await
@@ -1033,23 +1025,20 @@ async fn invalid_or_conflicting_declarations_fail_assembly() {
     let mut escaping = declaration("example");
     escaping.user_file = "../example.json".into();
     let cases = [
-        SettingsPlugin::new(0, vec![])
+        settings_part(0, vec![])
             .reserve::<dim_app_server::mcp::config::McpSettings>()
             .declare(vec![declaration("mcp")]),
-        SettingsPlugin::new(0, vec![])
-            .declare(vec![declaration("example"), declaration("example")]),
-        SettingsPlugin::new(0, vec![]).declare(vec![unreachable]),
-        SettingsPlugin::new(0, vec![]).declare(vec![invalid_default]),
-        SettingsPlugin::new(0, vec![]).declare(vec![escaping]),
+        settings_part(0, vec![]).declare(vec![declaration("example"), declaration("example")]),
+        settings_part(0, vec![]).declare(vec![unreachable]),
+        settings_part(0, vec![]).declare(vec![invalid_default]),
+        settings_part(0, vec![]).declare(vec![escaping]),
     ];
     let home = home();
     for plugin in cases {
         let root = Ctx::root().unwrap();
         let views = vec![
-            root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-                home.clone(),
-            ]))),
-            root.plugin(settings_part(plugin)),
+            root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+            root.plugin(plugin),
         ];
         let error = wait_active(
             &root,

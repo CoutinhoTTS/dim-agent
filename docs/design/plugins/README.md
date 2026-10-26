@@ -9,7 +9,7 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | Plugin | Process part | Session part | Branch part | Phase |
 | --- | --- | --- | --- | --- |
 | [Provider management](../appserver/provider-management.md) | existing Provider: configuration, catalogs, client preferences and management methods | — | — | Proposed supplement (#329); no mechanism prerequisite; S4 remains implemented |
-| [Questions](Questions.md) | — | `ask_user` tool, `session.question.respond`, waiters of running `ask_user` calls; no events | — | M2 (Ready) |
+| [Questions](Questions.md) | — | `ask_user` tool, `session.question.respond`, waiters of running `ask_user` calls; no events | — | M2 (implemented, #262) |
 | [ShellInput](ShellInput.md) | — | `shell.*` methods, command runs | — | P1 (implemented) |
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 (implemented) |
 | [SessionTitle](SessionTitle.md) | — | observes adoption of the first user input, `session.rename` | — | P1 |

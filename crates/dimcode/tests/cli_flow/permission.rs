@@ -420,7 +420,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.write(b"/approvals\n");
     terminal.until("Preset (main branch): workspace-write");
     terminal.until("  read-only        reads run;");
-    terminal.until("* workspace-write  reads and file writes run;");
+    terminal.until("* workspace-write  reads and workspace file writes run;");
     terminal.until("  full-access      every tool call runs without asking");
     terminal.until("  disallowed tools: blocked-tool");
     terminal.until("Command rules (user scope, every Session):");

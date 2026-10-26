@@ -95,7 +95,7 @@ impl Branch {
         self.0.public::<T>()
     }
     /// The branch scope and the capabilities it installed.
-    pub fn diagnostics(&self) -> rutis::RuntimeDiagnostics {
+    pub fn diagnostics(&self) -> rutis::host::diagnostics::RuntimeDiagnostics {
         self.0.diagnostics()
     }
     /// Published sequence of the branch Timeline.

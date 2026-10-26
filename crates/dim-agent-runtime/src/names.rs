@@ -2,8 +2,9 @@
 //!
 //! A service is a name in one group: the process, [`SESSION_GROUP`] or
 //! [`BRANCH_GROUP`]. The catalog holds each name once with its group. A Rust
-//! part is a plain rutis [`TypedPlugin`] whose dependencies are [`Keyed`]
-//! services: the Rust binding takes a service's name from its type, as
+//! part is a rutis `host::DynPlugin` that keeps the keys of the services it
+//! depends on, declares them in `injects` and reads them with `require_at`
+//! in `apply`. [`Names`] gives those keys: the Rust binding takes a service's name from its type, as
 //! `#[rutis::service]` does (`TreeCommands` is `treeCommands`), its group from
 //! the catalog, and its key for each copy from the instances the copy runs in.
 //! A part therefore names no group: where its row is placed decides, and a
@@ -11,9 +12,11 @@
 //! composition, naming that group.
 
 use crate::*;
-use rutis::{CordisError, DepKey, Deps, InstanceId, Keyed, KeyedGate, Plugin, TypedPlugin};
+use rutis::Error;
+use rutis::host::{ErrorKind, InstanceId, Key};
+use rutis_loader::LoaderError;
 pub use rutis_loader::ServiceCatalog;
-use rutis_loader::{Build, LoaderError};
+use rutis_loader::resolve::Build;
 use std::any::{TypeId, type_name};
 use std::result::Result;
 
@@ -64,6 +67,10 @@ pub fn register<T: ?Sized + Send + Sync + 'static>(
     let name = name_of::<T>();
     let known = match catalog.key_in(&name, &Build::default()) {
         Err(LoaderError::UnknownService(_)) => None,
+        // A marked type's name resolves globally to its dispatcher until the
+        // host registers it in its group: not registered yet. A process name
+        // already shared keeps its registration.
+        Ok(key) if group.is_some() && key.type_id() != TypeId::of::<T>() => None,
         Ok(_) => Some(None),
         Err(LoaderError::OutsideInstance { group, .. }) => Some(Some(group)),
         Err(error) => panic!("{name}: {error}"),
@@ -112,20 +119,6 @@ pub fn catalog() -> ServiceCatalog {
     catalog
 }
 
-/// A process part mounted directly on a context rather than as a loader row
-/// (tests, hosts without a loader), keyed from `catalog` at the process.
-pub fn process_plugin<P>(
-    catalog: &ServiceCatalog,
-    plugin: P,
-) -> Result<rutis::Typed<P>, CordisError>
-where
-    P: TypedPlugin,
-    P::Deps: NamedDeps,
-{
-    let keys = Names::copy(catalog, &Build::default()).keys::<P::Deps>()?;
-    Ok(rutis::Typed::with_keys(plugin, keys))
-}
-
 /// Where one copy of a part runs, to find the keys of the names it depends
 /// on.
 pub struct Names<'a> {
@@ -163,7 +156,7 @@ impl<'a> Names<'a> {
         }
     }
     /// The instance of the enclosing `group` the copy runs in.
-    pub fn instance(&self, group: &str) -> Result<InstanceId, CordisError> {
+    pub fn instance(&self, group: &str) -> Result<InstanceId, Error> {
         match &self.place {
             Place::Copy(build) => build.instance(group),
             Place::Check { groups, instance } if groups.contains(&group) => {
@@ -173,13 +166,13 @@ impl<'a> Names<'a> {
         }
     }
     /// The key of `T`'s name for this copy.
-    pub fn key<T: ?Sized + 'static>(&self) -> Result<DepKey<T>, CordisError> {
+    pub fn key<T: ?Sized + 'static>(&self) -> Result<Key<T>, Error> {
         let name = name_of::<T>();
-        let failed = |message: String| CordisError::PluginFailed(message.into());
+        let failed = |message: String| rutis::Error::from(ErrorKind::PluginFailed(message.into()));
         let group = match self.catalog.key_in(&name, &Build::default()) {
             Ok(key) => {
                 self.check_type::<T>(&name, &key)?;
-                return Ok(DepKey::of());
+                return Ok(Key::of());
             }
             Err(LoaderError::OutsideInstance { group, .. }) => group,
             Err(LoaderError::UnknownService(_)) => {
@@ -203,7 +196,7 @@ impl<'a> Names<'a> {
                 instance.ok_or_else(|| misplaced(&name, &group))?
             }
         };
-        Ok(DepKey::of().instance(instance))
+        Ok(Key::of().instance(instance))
     }
     /// Whether the assembly names `T`: a part whose dependency on it is
     /// optional includes it only then ([`Self::when`]).
@@ -217,8 +210,8 @@ impl<'a> Names<'a> {
     /// A name that crosses languages is at its dispatcher's key, so `T` is
     /// then `dyn HostDispatch`: there a provider of any language is found.
     /// [`Self::key`] is the form for a name registered with a Rust type.
-    pub fn named<T: ?Sized + 'static>(&self, name: &str) -> Result<DepKey<T>, CordisError> {
-        let failed = |message: String| CordisError::PluginFailed(message.into());
+    pub fn named<T: ?Sized + 'static>(&self, name: &str) -> Result<Key<T>, Error> {
+        let failed = |message: String| rutis::Error::from(ErrorKind::PluginFailed(message.into()));
         let key = match self.catalog.key_in(name, &Build::default()) {
             Ok(key) => key,
             Err(LoaderError::OutsideInstance { group, .. }) => match &self.place {
@@ -231,7 +224,7 @@ impl<'a> Names<'a> {
                     let instance = instance
                         .filter(|_| groups.contains(&group.as_str()))
                         .ok_or_else(|| misplaced(name, &group))?;
-                    return Ok(DepKey::dynamic(name.to_owned()).instance(instance));
+                    return Ok(Key::dynamic(name.to_owned()).instance(instance));
                 }
             },
             Err(LoaderError::UnknownService(_)) => {
@@ -247,14 +240,14 @@ impl<'a> Names<'a> {
             )));
         }
         let typed = match key.name() {
-            Some(qualifier) => DepKey::<T>::dynamic(qualifier.to_owned()),
-            None => DepKey::of(),
+            Some(qualifier) => Key::<T>::dynamic(qualifier.to_owned()),
+            None => Key::of(),
         };
         let typed = match key.instance_id() {
             Some(instance) => typed.instance(instance),
             None => typed,
         };
-        if typed.key() != &key {
+        if typed.erase() != key {
             return Err(failed(format!(
                 "{name} is at {}, which a typed key cannot name",
                 key.describe()
@@ -265,118 +258,48 @@ impl<'a> Names<'a> {
     /// The key of this branch's state cell of type `S`, which the Session
     /// and branch facades read (`Session::get`/`on`). State cells are keyed
     /// by type in their branch, not named; only a branch part provides one.
-    pub fn state_cell<S: Clone + Send + Sync + 'static>(
-        &self,
-    ) -> Result<DepKey<StateCell<S>>, CordisError> {
+    pub fn state_cell<S: Clone + Send + Sync + 'static>(&self) -> Result<Key<StateCell<S>>, Error> {
         let instance = self.instance(BRANCH_GROUP).map_err(|_| {
-            CordisError::PluginFailed(
+            rutis::Error::from(ErrorKind::PluginFailed(
                 format!(
                     "the state cell of {} is a branch's: place the part inside the branch group",
                     type_name::<S>()
                 )
                 .into(),
-            )
+            ))
         })?;
-        Ok(DepKey::of().instance(instance))
-    }
-    /// The keys of the dependencies `D` for this copy.
-    pub fn keys<D: NamedDeps>(&self) -> Result<D::Keys, CordisError> {
-        D::keys(self)
-    }
-    /// The keys of a dependency the part's configuration enables or not.
-    pub fn when<D: NamedDeps>(&self, enabled: bool) -> Result<Option<D::Keys>, CordisError> {
-        enabled.then(|| D::keys(self)).transpose()
-    }
-    /// The Rust part `plugin`, gated on its dependencies' keys for this copy.
-    pub fn part<P>(&self, plugin: P) -> Result<Box<dyn Plugin>, CordisError>
-    where
-        P: TypedPlugin,
-        P::Deps: NamedDeps,
-    {
-        let keys = self.keys::<P::Deps>()?;
-        Ok(Box::new(rutis::Typed::with_keys(plugin, keys)))
-    }
-    /// The Rust part `plugin` with keys its factory computed, for
-    /// configuration-chosen dependencies ([`Self::when`]).
-    pub fn part_with<P: TypedPlugin>(
-        &self,
-        plugin: P,
-        keys: <P::Deps as Deps>::Keys,
-    ) -> Box<dyn Plugin> {
-        Box::new(rutis::Typed::with_keys(plugin, keys))
+        Ok(Key::of().instance(instance))
     }
     /// A name registered for a Rust service of another type is a programming
     /// error; a shared name crosses languages and has no Rust type here.
     fn check_type<T: ?Sized + 'static>(
         &self,
         name: &str,
-        key: &rutis::TypeKey,
-    ) -> Result<(), CordisError> {
+        key: &rutis::host::TypeKey,
+    ) -> Result<(), Error> {
         if self.catalog.is_shared(name) || key.type_id() == TypeId::of::<T>() {
             return Ok(());
         }
-        Err(CordisError::PluginFailed(
+        Err(rutis::Error::from(ErrorKind::PluginFailed(
             format!(
                 "{name} is a {}, not a {}",
                 key.type_name(),
                 type_name::<T>()
             )
             .into(),
-        ))
+        )))
     }
 }
-fn outside(group: &str) -> CordisError {
-    CordisError::PluginFailed(format!("the part is not inside a {group} instance").into())
+fn outside(group: &str) -> Error {
+    rutis::Error::from(ErrorKind::PluginFailed(
+        format!("the part is not inside a {group} instance").into(),
+    ))
 }
-fn misplaced(name: &str, group: &str) -> CordisError {
-    CordisError::PluginFailed(
+fn misplaced(name: &str, group: &str) -> Error {
+    rutis::Error::from(ErrorKind::PluginFailed(
         format!("{name} is a {group} service: place the part inside the {group} group").into(),
-    )
+    ))
 }
-
-/// Dependencies whose keys follow from their names: [`Keyed`], [`KeyedGate`],
-/// `Option<Keyed<T>>` (read if present, without gating), `()` and tuples of
-/// up to eight.
-pub trait NamedDeps: Deps {
-    fn keys(names: &Names<'_>) -> Result<Self::Keys, CordisError>;
-}
-impl<T: ?Sized + Send + Sync + 'static> NamedDeps for Keyed<T> {
-    fn keys(names: &Names<'_>) -> Result<DepKey<T>, CordisError> {
-        names.key::<T>()
-    }
-}
-impl<T: ?Sized + Send + Sync + 'static> NamedDeps for Option<Keyed<T>> {
-    fn keys(names: &Names<'_>) -> Result<DepKey<T>, CordisError> {
-        names.key::<T>()
-    }
-}
-impl<T: ?Sized + 'static> NamedDeps for KeyedGate<T> {
-    fn keys(names: &Names<'_>) -> Result<DepKey<T>, CordisError> {
-        names.key::<T>()
-    }
-}
-impl NamedDeps for () {
-    fn keys(_: &Names<'_>) -> Result<(), CordisError> {
-        Ok(())
-    }
-}
-macro_rules! named_tuple {
-    ($($name:ident),+) => {
-        impl<$($name: NamedDeps),+> NamedDeps for ($($name,)+) {
-            fn keys(names: &Names<'_>) -> Result<Self::Keys, CordisError> {
-                Ok(($($name::keys(names)?,)+))
-            }
-        }
-    };
-}
-named_tuple!(A);
-named_tuple!(A, B);
-named_tuple!(A, B, C);
-named_tuple!(A, B, C, D);
-named_tuple!(A, B, C, D, E);
-named_tuple!(A, B, C, D, E, F);
-named_tuple!(A, B, C, D, E, F, G);
-named_tuple!(A, B, C, D, E, F, G, H);
 
 /// Fails unless the catalog registers `T`'s name in `group`: what a facade
 /// reads of a Session or branch is a service of that group.

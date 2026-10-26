@@ -5,7 +5,7 @@ The Permission plugin registers two branch parts: Permission, which decides each
 ## Permission
 
 Owner: [permission.rs](../../../../crates/dim-agent-capabilities/src/permission.rs).
-Evaluates tool risk, explicit allow/deny policy and the user's command rules,
+Evaluates tool risk, workspace write targets, explicit allow/deny policy and the user's command rules,
 and exposes versioned branch-local permission state.
 
 `PermissionState` is serializable for read-only generated host exports. Agents'
@@ -31,6 +31,65 @@ closes admission and drops pending waiters, which report Closed. Reload builds
 a new state cell from history. Policy is admission logic, not OS isolation;
 explicit disallow overrides allow.
 
+### Workspace write targets
+
+Decision for [#294](https://github.com/arcships/dim/issues/294): under
+`workspace-write`, a `write_filesystem` call runs automatically only when its
+resolved `path` is inside the Session workspace. Every outside write asks for
+approval for that call, including a model write to a host-owned output directory.
+`allowedTools` does not bypass this question; `disallowedTools` still denies.
+A write tool without an absolute target also asks because its workspace scope
+cannot be established. `read-only` and `full-access` retain their existing rules.
+
+The tool's owner resolves its target before admission. WorkspaceTools expands
+home-relative paths using its own HostPlatform facts and applies its shared
+path boundary: platform path handling, lexical components and canonicalization
+of the longest existing prefix, including a new file's parent. ToolExecutor
+passes that resolved call to both Approval and execution, so retargeting an
+original symlink while approval is pending does not redirect the approved write.
+The model's original tool-call fact stays unchanged. Permission canonicalizes
+the workspace and target for its current boundary check. Compare path
+components, not string prefixes. Resolution failures refuse the call; an unreadable prefix,
+symlink loop or dangling symlink is not a missing directory to skip. I/O runs
+outside the async executor. Read the dispatched policy after this I/O so a policy
+change while it waits takes effect. Approval rechecks the path and policy before
+an approved call starts, using its existing call-specific request and response.
+
+There is no remembered path grant, output-directory exemption, new permission
+preset, event or persistence field. Reads stay path-independent, including
+Session attachments and command output. Host-generated output and configured
+commands retain their own execution contracts under ADR 003. This is tool
+admission, not an OS filesystem sandbox against concurrent filesystem mutation.
+
+The CLI uses its existing approval prompt, with the resolved outside target in
+the reason and no permanent-allow action for file tools:
+
+```text
+[approval] write: Writing outside the session workspace requires approval: /home/user/.zshrc
+  path: /home/user/.zshrc
+Allow once or deny? [y/N] _
+```
+
+### Rule check
+
+- §1 and ADR 002 D1–D3: the existing branch Permission and Approval Capabilities
+  own admission and approval facts. WorkspaceTools owns file execution; no
+  plugin, wiring part, lifecycle or isolation dependency is added.
+- §4 rules 1–6 and 9: existing approval requests/responses and tool results
+  carry the decision and outcome; handlers retain their existing tasks,
+  cancellation and cleanup. No new event or context input path is introduced.
+- §4 rule 7: Permission reads its declared Session configuration; WorkspaceTools
+  uses its existing HostPlatform dependency. The bound handler's `resolve_write`
+  prepares the actual call at its external path boundary before admission; it
+  reads metadata and performs no file mutation or process execution.
+- ADR 002 D4–D5: policy state and public request/reply formats stay unchanged.
+  Clients display the existing language-neutral approval request.
+- §4 rule 8: no new Timeline, Dispatcher, loader or rutis mechanism is required.
+
+### Requirements raised to mechanism owners
+
+None. Existing admission, approval facts and host process facts suffice.
+
 Command rules are read on each decision of an `execute_process` call with a
 string `command`, never cached, stored or replayed. A matching deny rule denies
 under every preset; a matching allow rule only turns an approval question into
@@ -48,6 +107,11 @@ it waits decides the call. See [permission command rules](../../../design/appser
 `deny_rules_match_any_segment_under_every_preset_and_are_read_at_use_time`,
 `unreadable_rules_deny_command_calls_only`,
 `a_policy_tightened_during_the_rules_read_decides_the_call`.
+
+[local_product.rs](../../../../tests/integration/tests/local_product.rs) verifies
+real workspace writes, per-call external write/edit approvals despite explicit
+tool allows, outside reads, denied edits, host output targets, parent symlinks,
+unresolvable targets and the unchanged read-only/full-access presets.
 
 <!-- generated:plugin Permission — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

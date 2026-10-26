@@ -32,7 +32,8 @@ use rmcp::{
         },
     },
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
+use rutis::host::{CtxHost, Key};
+use rutis::{Ctx, Plugin};
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
@@ -780,12 +781,12 @@ fn http_client() -> Result<Client> {
 }
 
 pub(super) struct McpServerPlugin {
-    pub key: TypeKey,
+    pub key: Key<McpServer>,
     transport: TransportConfig,
     oauth: Option<(super::auth::CredentialKey, reqwest_mcp::Url)>,
 }
 impl McpServerPlugin {
-    pub fn new(id: &str, configuration: McpServerSettings, key: TypeKey) -> Result<Self> {
+    pub fn new(id: &str, configuration: McpServerSettings, key: Key<McpServer>) -> Result<Self> {
         let oauth = credential_key(id, &configuration);
         let transport = match &configuration {
             McpServerSettings::Stdio {
@@ -816,58 +817,49 @@ impl McpServerPlugin {
         })
     }
 }
-impl TypedPlugin for McpServerPlugin {
-    // Also orders this server inside the directory's lifetime.
-    type Deps = (Keyed<McpAuth>,);
+impl Plugin for McpServerPlugin {
+    // Also orders this server inside the directory's lifetime. McpAuth is a
+    // process name, whose key is its type's.
+    type Deps = Arc<McpAuth>;
     fn name(&self) -> &str {
         "McpServer"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(auth),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let state = StateCell::new(McpServerState::Disconnected);
-            let service = Arc::new(McpServer {
-                transport: self.transport.clone(),
-                authorization: self.oauth.clone().map(|(key, server)| Authorization {
-                    credential: auth.credential(key),
-                    server,
-                    state: state.clone(),
-                }),
-                state,
-                tool_changes: StateCell::new(0),
-                connection: AsyncMutex::new(None),
-                stopping: ctx.cancellation_token(),
-                gate: Mutex::new(()),
-                tasks: TaskTracker::new(),
+    async fn apply(&self, ctx: &Ctx, auth: Arc<McpAuth>) -> rutis::Result {
+        let state = StateCell::new(McpServerState::Disconnected);
+        let service = Arc::new(McpServer {
+            transport: self.transport.clone(),
+            authorization: self.oauth.clone().map(|(key, server)| Authorization {
+                credential: auth.credential(key),
+                server,
+                state: state.clone(),
+            }),
+            state,
+            tool_changes: StateCell::new(0),
+            connection: AsyncMutex::new(None),
+            stopping: ctx.cancellation_token(),
+            gate: Mutex::new(()),
+            tasks: TaskTracker::new(),
+        });
+        let owner = service.clone();
+        ctx.effect(move || async move {
+            {
+                let _gate = owner.gate.lock().unwrap();
+                owner.tasks.close();
+            }
+            owner.tasks.wait().await;
+            let connection = owner.connection.lock().await.take();
+            let result = match connection {
+                Some(connection) => connection.close().await,
+                None => Ok(()),
+            };
+            owner.state.set(if result.is_ok() {
+                McpServerState::Closed
+            } else {
+                McpServerState::Failed
             });
-            let owner = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let _gate = owner.gate.lock().unwrap();
-                            owner.tasks.close();
-                        }
-                        owner.tasks.wait().await;
-                        let connection = owner.connection.lock().await.take();
-                        let result = match connection {
-                            Some(connection) => connection.close().await,
-                            None => Ok(()),
-                        };
-                        owner.state.set(if result.is_ok() {
-                            McpServerState::Closed
-                        } else {
-                            McpServerState::Failed
-                        });
-                        result.map_err(|e| CordisError::PluginFailed(Box::new(e)))
-                    })
-                }))
-            })?;
-            ctx.provide_as(self.key.clone(), service)?;
-            Ok(Effect::Done)
-        })
+            Ok(result?)
+        })?;
+        ctx.provide_at(self.key.clone(), service)?;
+        Ok(())
     }
 }
