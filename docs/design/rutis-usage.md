@@ -70,7 +70,7 @@ besides the scope's own mechanisms.
   unmount a withdrawn one. A withdrawal finishes when every instance has unloaded its copy.
 - The instance closes its mounted parts with itself, through rutis's ownership of children.
 
-**What a generator returns.**
+**What a plugin registers.**
 
 - A Rust generator receives the names of the instance it is mounted in (appendix A) and returns a
   plugin, which may hold what the plugin prepared in its `apply`.
@@ -111,9 +111,8 @@ name-bound (#391, #392, #396–#398, #400).
   and management method namespaces with the Session's `sessionMethods` and the process's
   `managementMethods`, which Rpc reads per call (R6, [#382](https://github.com/arcships/dim/issues/382)).
 - Rows of other languages carry their group in the App Server's configuration (appendix B), one row per
-  part, until R5's second form ([#403](https://github.com/arcships/dim/issues/403)). TypeScript can
-  move with rutis 0.17.0; Python follows when Dim takes rutis 0.17.1, whose Python runtime hands
-  definitions over.
+  part, until R5's second form ([#403](https://github.com/arcships/dim/issues/403)). TypeScript plugins
+  hand definitions over since rutis 0.17.0 and Python plugins since 0.17.1, which Dim is on.
 
 ## 3. Services by name
 

@@ -58,7 +58,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 - 实例打开期间，挂载器跟随登记处：新登记的就挂上，撤销的就卸下。所有实例都卸载完各自那一份，撤销才算结束。
 - 实例关闭时，挂上的部件随它一起关闭，由 rutis 对子节点的所有权保证。
 
-**生成器返回什么。**
+**插件登记什么。**
 
 - Rust 生成器拿到它所挂进的实例的名字（附录 A），返回一个插件。这个插件可以带着插件在 `apply` 里准备好的东西。
 - 其他运行时的插件登记的不是函数，而是插件定义（R7）：用该运行时的 `definePlugin` 做出的一个值，可以闭包引用插件
@@ -84,7 +84,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
   选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。自己放置的 Agent 在
   第一个 Session 或 `Agent::start` 时启动自己的插件。
 - 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
-- 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5 的第二种形式（[#403](https://github.com/arcships/dim/issues/403)）。TypeScript 用 rutis 0.17.0 即可迁移；Python 等 Dim 升到 rutis 0.17.1，它的 Python 运行时才能交出定义。
+- 其他语言的行在 App Server 的配置中携带自己的组（附录 B），每个部件一行，直到 R5 的第二种形式（[#403](https://github.com/arcships/dim/issues/403)）。TypeScript 插件从 rutis 0.17.0 起、Python 插件从 0.17.1 起能交出定义，Dim 已在 0.17.1 上。
 
 ## 3. 按名字的服务
 
