@@ -32,7 +32,7 @@
 2. **装上就能用。** 安装后立即启用；可以停用、移除。插件装在本机，不分项目；仓库自带的 skills、MCP 配置等仍由各负责方的项目来源处理（[ADR 003](../adr/003-approval-scope.md)）。
 3. **改完 reload 就生效，不用重启。** 宿主不监视文件，reload 操作本身就是“改了”的信号。reload 是插件换一代（[rutis usage §4](rutis-usage.md#4-lifecycle-rutis-provides)）：旧的一代卸载，它正在跑的调用由 rutis 取消；新的一代重新登记，Session 和分支里挂的部件随之更换；依赖它的插件由 rutis 重新加载；Capability 从 Timeline 恢复（[插件契约 §7.2](plugin-contract.md#72-generations-reload-and-rebuild)）。
    - 内容：插件这一行换一代，把新内容交给负责方。
-   - TypeScript、Python 代码：运行时会保留已导入的代码，所以 reload 代码就是重启它所在的运行时。同一种语言的插件共用一个运行时，里面所有插件都换一代。
+   - TypeScript、Python 代码：reload 重新导入这个插件的入口模块，插件带着新代码换一代；同一运行时里的其他插件不受影响。入口模块导入的其他模块不会重新导入，它们的改动要重启运行时才生效（或者把插件代码放在入口模块里）。
    - 编进 Dim 本体的 Rust 代码不能 reload，要重新编译、重启；要换它，用第 4 条。
 4. **Dim 自带的插件也能换。** 在配置里把它指向另一个插件；不允许换的，写在默认配置文件里。
 5. **agent 也能装插件、reload 插件**，和用户用同一套操作；agent 的调用是工具调用，由 Permission 照常决定。
