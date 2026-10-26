@@ -272,9 +272,9 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
     }
     // A `py:` row needs the configured Python runtime.
     cases.push(vec![
-        json!({"id":"python", "name":"py:module", "group":"session", "provides":{}}),
+        json!({"id":"python", "name":"py:module", "provides":{}}),
     ]);
-    // A TypeScript row is a process row: it has no group, even a valid one.
+    // A plugin row is a process row: it has no group, even a valid one.
     for group in [json!("process"), json!(true), json!("session")] {
         let mut row = process.clone();
         row["group"] = group;

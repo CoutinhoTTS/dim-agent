@@ -30,9 +30,8 @@ the [shared method owner](../../crates/dim-agent-capabilities/src/methods.rs).
 ## 2. Host input and process placement
 
 Process owners are rows of the existing public `SessionTypeScriptConfig.rows` without a
-`group`. A TypeScript row is always such a row: its plugin registers its Session and branch parts
-with `partRegistry` and lists the names they provide in `instanceNames`; a `py:` Session or branch
-part is still a row declaring `"group": "session"` or `"branch"`
+`group`. Every row of another language is such a row: its plugin registers its Session and branch
+parts with `partRegistry` and lists the names they provide in `instanceNames`
 ([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). The name of the configuration
 type is retained to avoid an unrelated rename. This is a Rust source change, not a persisted or
 wire format change.
@@ -54,8 +53,7 @@ The placement rules are:
 
 | Input | Placement and lifetime |
 | --- | --- |
-| No `group` | Ordinary top-level rows in the existing process assembly; one instance per host, independent of Session creation and closure. |
-| `group: "session"` or `"branch"` (`py:` rows only) | Instanced Session/branch placement ([C4](session-typescript.md), [C5](branch-typescript.md)). |
+| Every row (a `group` is rejected) | Ordinary top-level rows in the existing process assembly; one instance per host, independent of Session creation and closure. |
 
 Use the same public Node runtime, resolver and declaration catalog for all
 rows. Keep its existing runtime name. Do not
@@ -79,8 +77,7 @@ Validate the combined external configuration before assembly:
 - Row ids are unique across all rows and do not collide with host rows or
   generated module names. Rows of one module share the same declaration snapshot.
 - Register a process row's provided names that the `ServiceCatalog` does not hold yet as shared,
-  without an instance key; a row's `instanceNames` and `py:` Session and branch rows' names get
-  their group's instance key. A part that names a service of a group it is not inside fails, by
+  without an instance key; a row's `instanceNames` get their group's instance key. A part that names a service of a group it is not inside fails, by
   rutis; a second
   provider of a name fails with rutis's duplicate-provider error. `toolRegistry` and
   `sessionMethods` are Session services, so only Session parts register tools and Session

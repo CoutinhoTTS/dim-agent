@@ -994,13 +994,17 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             .entries()
             .into_iter()
             .find(|entry| entry.id == "observer" && entry.instance.is_none())
+            .unwrap()
+            .view
             .unwrap();
-        assert!(
-            matches!(&row.status, rutis_loader::report::EntryStatus::Running(state)
-                if state.state == rutis::host::FiberState::Active),
-            "{:?}",
-            row.status
-        );
+        let mut state = row.watch();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while state.borrow_and_update().state != rutis::host::FiberState::Active {
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the registering row is Active: {:?}", row.state()));
         // The row records only what it sees after it starts listening, and a
         // Session is published without waiting for its optional rows: wait
         // until it serves before the input it is asked about.
@@ -1321,6 +1325,19 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
     let mut client = Client::new_version(&server, false, 3).await;
     let first = new_session(&mut client, json!(["ts_echo", "native_slow", "echo"])).await;
     let second = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    // An optional part's copy mounts without holding its Session's
+    // publication: wait until each Session's copy serves (it registers its
+    // tool first).
+    for id in [&first, &second] {
+        assert_ok(
+            &when_served(
+                &mut client,
+                "session.typescript.status",
+                json!({"sessionId":id}),
+            )
+            .await,
+        );
+    }
     submit(&mut client, &first, r#"tool:ts_echo {"text":"first"}"#).await;
     assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
     let status = client
@@ -1527,6 +1544,15 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     let (server, mut requests, _) = start(config.clone()).await;
     assert!(server.agent().unwrap().get_session(&session_id).is_none());
     let mut client = Client::new_version(&server, false, 3).await;
+    // The call restores the Session; its part's new copy then serves.
+    assert_ok(
+        &when_served(
+            &mut client,
+            "session.typescript.status",
+            json!({"sessionId":session_id}),
+        )
+        .await,
+    );
     submit(
         &mut client,
         &session_id,
@@ -1552,9 +1578,12 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     let source_status = client
         .rpc("session.typescript.status", json!({"sessionId":session_id}))
         .await;
-    let fork_status = client
-        .rpc("session.typescript.status", json!({"sessionId":fork_id}))
-        .await;
+    let fork_status = when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId":fork_id}),
+    )
+    .await;
     assert_ok(&fork_status);
     assert_eq!(source_status["result"]["pid"], fork_status["result"]["pid"]);
     assert_ne!(
@@ -2032,7 +2061,18 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
     };
     let mut saved: Option<String> = None;
     for text in ["created", "restored"] {
-        let (server, mut requests, _) = start(config.clone()).await;
+        // The tool is in the first request because the profile requires
+        // the part: the Session waits for it (ADR 006 D3, Publication). An
+        // optional part's tool is offered from the request after it
+        // registers.
+        let (mut builder, mut requests, _) = setup();
+        builder.require_part("SessionToolOnlyFixture");
+        let mut config = config.clone();
+        config.unix_path = Some(std::env::temp_dir().join(format!(
+            "dm-ts-{}/server.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        )));
+        let server = serve(builder, config).await.unwrap();
         let mut client = Client::new_version(&server, false, 3).await;
         let session_id = match &saved {
             Some(id) => {
@@ -2096,6 +2136,16 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
     let mut client = Client::new_version(&server, false, 3).await;
     let session_id = new_session(&mut client, json!(["ts_echo", "echo"])).await;
     let (session_instance, ctx, _, registry) = controls.recv().await.unwrap();
+    // The part registers its tool before its methods: once they are served,
+    // the contribution is the one this copy registered.
+    assert_ok(
+        &when_served(
+            &mut client,
+            "session.typescript.status",
+            json!({"sessionId":session_id}),
+        )
+        .await,
+    );
     let retained = registry.contributed("ts_echo").unwrap();
     let old = client
         .rpc("session.typescript.status", json!({"sessionId":session_id}))

@@ -2,7 +2,7 @@
 
 [English](../../design/plugin-contract.md)
 
-状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)。已实现，只剩 P4 中 R5 的第二种形式对 Python 插件尚未完成，它等 Dim 升到 rutis 0.17.1（[#403](https://github.com/arcships/dim/issues/403)）。各节说明今天已成立的部分。
+状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)。已实现；P4 中 R5 的第二种形式随 [#403](https://github.com/arcships/dim/issues/403) 完成。各节说明今天已成立的部分。
 它所依据的理论，即[时间总线](../../architecture/rust-agent/time-bus.md)与[设计规则](../../architecture/rust-agent/principles.md)，
 不变，现在即适用。
 
@@ -289,7 +289,7 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 | P1 | [rutis 0.16 升级](rutis-0.16-upgrade.md) | 该设计的流程检查和完整的 CI 序列 |
 | P2 | 服务目录与 Rust 绑定：注册 Dim 的名称和组；Rust 部件按名称声明依赖，并在同样的 key 上提供，每个 key 按名字和副本的实例链从目录取得（[rutis 使用 §3.5](rutis-usage.md#35-各运行时如何解析名字)、[附录 A](rutis-usage.md#附录-a-rust-绑定)）；旧类型只保留到 P3 迁完所有部件为止 | 不导入任何层类型的 Rust 部件可以在进程、`session` 和 `branch` 中挂载，按名称注入和提供；放错位置的行在组合时失败，并给出它需要的组 |
 | P3 | 把每个部件迁到名称依赖，分批进行：进程与简单部件；核心 Session 部件与分支部件；其余部件。然后是部件登记处与实例的挂载（[ADR 006 D3](../adr/006-plugin-contract.md#d3-插件是一行每个实例挂载为它登记的部件)、[rutis 使用 §2](rutis-usage.md#2-插件是一行实例挂载它的部件)）：每个插件（包括 App Server 的宿主插件）都变成进程里的一行，并登记自己的 Session 部件和分支部件；库宿主和测试把插件加到 Agent builder 上，登记处属于一次放置（[#402](https://github.com/arcships/dim/issues/402)）。R6：贡献向所有者登记，每种语言都一样，登记随调用方结束（[#382](https://github.com/arcships/dim/issues/382)）。检查每个插件位于同一作用域的部件：只有一个所有者、又没有分开的理由（例如重载隔离）的就合并；合并单独提交，和迁移分开。删除 `Capability` trait、作用域类型、`In*`/`*Gate` 包装、`*Service` 标记、`session_plugin`/`timeline_plugin`、`session_part`/`branch_part`、Session 行和分支行以及名称预先注册。重新生成插件页面，按插件归组 | `xtask check` 通过；代码和文档中不再有层类型；配置里没有 Session 行或分支行；Session 打开期间加载的插件，它的部件挂进每个 Session，卸载时从中撤掉；每次合并都单独提交；现有的多 Session 与多分支流程测试、顺序、取消和门面限制不变 |
-| P4 | 跨语言对等：R2、R3 和 R5。它们的最初形式已在 #376 交付；R5 的第二种形式，即外来插件是一行，在代码里以 rutis 插件定义登记自己的部件，TypeScript 已交付，Python 等 rutis 0.17.1（[#403](https://github.com/arcships/dim/issues/403)）；用 `#[rutis::service]` 导出 Dim 的跨语言服务；作者指南写明行在实例内要登记或隔离哪些名字（[rutis 使用 §3.5](rutis-usage.md#35-各运行时如何解析名字)）；外来运行时的输出进入进程日志，而不是被丢弃（[ADR 005](../../adr/005-observability.md)）；SDK 与作者指南随之修改；私有的 managed-provider 插件随后跟进 | TypeScript 插件和 Python 插件各自只占一行，登记一个 Session 部件和一个分支部件，无需宿主推断即可挂载、消费事实、提交输入并提供一个工具；登记为分支部件的未经修改的 Cordis 4 插件拿到自己分支的服务。基于 Node 的流程测试通过 |
+| P4 | 跨语言对等：R2、R3 和 R5。它们的最初形式已在 #376 交付；R5 的第二种形式，即外来插件是一行，在代码里以 rutis 插件定义登记自己的部件，TypeScript 与 Python 均已交付（[#403](https://github.com/arcships/dim/issues/403)）；用 `#[rutis::service]` 导出 Dim 的跨语言服务；作者指南写明行在实例内要登记或隔离哪些名字（[rutis 使用 §3.5](rutis-usage.md#35-各运行时如何解析名字)）；外来运行时的输出进入进程日志，而不是被丢弃（[ADR 005](../../adr/005-observability.md)）；SDK 与作者指南随之修改；私有的 managed-provider 插件随后跟进 | TypeScript 插件和 Python 插件各自只占一行，登记一个 Session 部件和一个分支部件，无需宿主推断即可挂载、消费事实、提交输入并提供一个工具；登记为分支部件的未经修改的 Cordis 4 插件拿到自己分支的服务。基于 Node 的流程测试通过 |
 | P5 | R1 | 每个 Capability 重建测试以一次注册的形式通过；手写形式仍然通过 |
 | P6 | 指导与生成文档定稿：插件页面、作者指南、single-tree 和 lifecycle 描述已实现的契约 | `xtask check`；没有文档要求不存在的 API |
 

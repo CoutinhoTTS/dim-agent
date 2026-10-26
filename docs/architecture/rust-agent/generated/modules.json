@@ -11290,7 +11290,6 @@
       "references": [
         "path AgentBuilder",
         "path Modules::new",
-        "path dim_agent_runtime::BRANCH_GROUP",
         "path register_part",
         "path wait_active",
         "use dim_agent_runtime::AgentBuilder",

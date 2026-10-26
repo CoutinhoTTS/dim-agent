@@ -117,8 +117,7 @@ await ctx.use<PartRegistry>('partRegistry').registerDefinition('branch', 'GoalBr
 
 The scope it is registered for decides its placement, not the names it injects; there is no setup
 service. A part registered for the Session that names a branch service cannot be built there, so it
-never mounts in a Session, and the row that registered it keeps running. A `py:` branch part is
-still a row with `"group": "branch"`.
+never mounts in a Session, and the row that registered it keeps running.
 
 Names a branch part provides are listed in its row's `instanceNames` as `"branch"`, so each branch
 has its own. Tools and Session methods are read in the Session, so they belong to Session parts. A

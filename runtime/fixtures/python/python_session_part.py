@@ -1,10 +1,10 @@
-"""A Session row in Python: it reads its Session's identity by name and
-registers the `py_echo` tool, whose result names the Session it ran in."""
+"""A Session part in Python: it reads its Session's identity by name and
+registers the `py_echo` tool, whose result names the Session it ran in.
+`python_plugin` registers it."""
 
 import json
 
-inject = ["sessionIdentity", "toolRegistry"]
-provides = {}
+from rutis import define_plugin
 
 
 async def apply(ctx, config):
@@ -25,3 +25,6 @@ async def apply(ctx, config):
         "source": "extension",
         "risk": "session",
     }, execute)
+
+
+part = define_plugin(apply, inject=["sessionIdentity", "toolRegistry"], name="PythonSessionPart")

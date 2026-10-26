@@ -787,16 +787,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     // Agents, Sessions and branches are instances of this same loader.
     let reserved_names = session_parts
         .iter()
-        .flat_map(|parts| {
-            parts
-                .session_rows
-                .iter()
-                .chain(&parts.branch_rows)
-                .chain(&parts.process_rows)
-        })
+        .flat_map(|parts| &parts.rows)
         .flat_map(|row| [&row["id"], &row["name"]])
         .filter_map(serde_json::Value::as_str);
-    let mut session_row = match builder.install(&mut builtins, reserved_names).await {
+    let session_row = match builder.install(&mut builtins, reserved_names).await {
         Ok(row) => row,
         Err(error) => {
             startup.armed = false;
@@ -808,19 +802,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             .into());
         }
     };
-    if let Some(parts) = &session_parts {
-        let session = session_row["config"]
-            .as_array_mut()
-            .expect("installed Session rows");
-        // Branch parts join the existing nested branch group.
-        session
-            .iter_mut()
-            .find(|row| row["id"] == dim_agent_runtime::BRANCH_GROUP)
-            .and_then(|branch| branch["config"].as_array_mut())
-            .expect("installed branch rows")
-            .extend(parts.branch_rows.clone());
-        session.extend(parts.session_rows.clone());
-    }
     let mut rows: Vec<_> = rows
         .iter()
         .map(|name| serde_json::json!({ "id": name, "name": name }))
@@ -831,12 +812,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .map(|row| row["id"].as_str().expect("host row id").to_owned())
         .collect();
     if let Some(parts) = &session_parts {
-        for row in parts
-            .process_rows
-            .iter()
-            .chain(&parts.session_rows)
-            .chain(&parts.branch_rows)
-        {
+        for row in &parts.rows {
             if rows
                 .iter()
                 .any(|host| row["id"] == host["id"] || row["name"] == host["name"])
@@ -846,7 +822,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 ));
             }
         }
-        rows.extend(parts.process_rows.clone());
+        rows.extend(parts.rows.clone());
     }
     let runtime_rows = session_parts
         .iter()

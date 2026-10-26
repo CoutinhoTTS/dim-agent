@@ -112,7 +112,9 @@ instance of the name's group ([How Dim uses rutis §3.5](design/rutis-usage.md#3
 is the enclosing Session's, and `settings` is the process's. A part that names a service of a group
 it is not registered inside cannot be built there: the instance mounts no copy of it, and the
 host's log names the reason, such as
-`"dispatcher" is a service inside "branch" instances: put the row in the "branch" group`.
+`"dispatcher" is a service inside "branch" instances: put the row in the "branch" group`. The
+message is the loader's, written for rows; for a part, register it for the scope it names
+(`registerDefinition('branch', …)` here), since the plugin's own row has no group.
 
 Which names a part declares:
 
@@ -135,9 +137,9 @@ One provider per name per instance: of two parts that provide the same name in o
 branch, the second fails with rutis's duplicate-provider error.
 
 The host adds no check of its own beyond the configuration's shape. The row's `provides` must equal
-the module's declaration, and its `inject`, if given, lists the names the module injects. A
-TypeScript row has no `group`; Python plugins still put each part in a row of its group until Dim
-takes rutis 0.17.1 ([How Dim uses rutis, appendix B](design/rutis-usage.md#appendix-b-typescript-and-python-binding)).
+the module's declaration, and its `inject`, if given, lists the names the module injects. A row has
+no `group`. Python plugins take the same form with `define_plugin`
+([How Dim uses rutis, appendix B](design/rutis-usage.md#appendix-b-typescript-and-python-binding)).
 
 ## Plugin shape and lifetime
 
@@ -749,7 +751,7 @@ See the [real Node part](../runtime/fixtures/extension-events.ts).
 ## Using services that other-language plugins provide
 
 A service is a name, whatever language provides it. Inject the name and call it as you would a
-service of another TypeScript part: a Rust part, a Python row and a TypeScript part in the same
+service of another TypeScript part: a Rust part, a Python part and a TypeScript part in the same
 Session provide and read one another's services by name, and every method returns a Promise in
 TypeScript. The name resolves the same way for every language (see [One row per plugin](#one-row-per-plugin)):
 in a branch part, a Session service is the enclosing Session's copy and a branch service that
@@ -760,9 +762,9 @@ branch's.
   with the type's name and the variant's `code`. Its TypeScript type is in `Services` when Dim
   defines it; a service another Rust part defines has its own declarations.
 - **Provider in Python or TypeScript:** the host registers the name in its group from the
-  provider's row: a TypeScript row's `instanceNames` for a Session or branch name, or its
-  `provides` for a process name; a Python row's `provides`, in the row's group. Its methods and their `sync` or `async` kinds are what that
-  declaration says; a failure it reports is its own contract.
+  provider's row: its `instanceNames` for a Session or branch name, or its `provides` for a process
+  name. Its methods and their `sync` or `async` kinds are what the provider declares; a failure it
+  reports is its own contract.
 - **Not available yet:** an injected name gates the part or row; it loads once a provider is there and
   unloads when the provider goes, in any language.
 

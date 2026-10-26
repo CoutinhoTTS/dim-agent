@@ -2,7 +2,7 @@
 
 [English](../../design/rutis-usage.md)
 
-状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)（D2–D4）。已实现，只是 Python 插件在 Dim 升到 rutis 0.17.1 之前仍每个部件一行（R5）；各节说明今天已成立的部分。
+状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)（D2–D4）。已实现；各节说明今天已成立的部分。
 
 插件机制归 rutis。本文说明 Dim 怎样使用它：部件如何装载，如何按名字提供和查找服务，服务如何跨语言，
 以及 rutis 的生命周期和事件总线提供什么。它适用于每个部件，不论用哪种语言编写；附录是 Rust 与
@@ -88,7 +88,7 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
   选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。自己放置的 Agent 在
   第一个 Session 或 `Agent::start` 时启动自己的插件。
 - 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
-- `partRegistry` 可以跨语言调用：TypeScript 插件是进程里的一行，用 `registerDefinition` 登记自己的部件（附录 B，[#403](https://github.com/arcships/dim/issues/403)）；声明了组的 TypeScript 行会被 App Server 拒绝。Python 插件在 App Server 的配置里仍携带自己的组，每个部件一行，直到 Dim 升到 rutis 0.17.1，它的 Python 运行时才能交出定义。
+- `partRegistry` 可以跨语言调用：TypeScript 或 Python 插件是进程里的一行，用 `registerDefinition` 登记自己的部件（附录 B，[#403](https://github.com/arcships/dim/issues/403)）；声明了组的行会被 App Server 拒绝。
 
 ## 3. 按名字的服务
 
@@ -211,8 +211,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
   Session 行和分支行，以及它们声明的组，都删除。不做包声明：定义自带 `inject` 和 `provides`，而 R6 已经去掉了宿主
   在运行时启动前知道名字的大部分需要。剩下的，即部件在自己实例里提供的名字，留在插件的那一行里（§2）。
 - **影响：**对 Timeline 没有影响。
-- **所有者：**App Server 和各 SDK，仓库内的插件一起改（[#403](https://github.com/arcships/dim/issues/403)）。TypeScript
-  已交付；Python 等 Dim 升到 rutis 0.17.1。
+- **所有者：**App Server 和各 SDK，仓库内的插件一起改（[#403](https://github.com/arcships/dim/issues/403)）。已交付。
 
 ### R6. 贡献向所有者登记
 
@@ -383,9 +382,9 @@ Agent 为自己挂载的插件建一个自己的登记处。登记是调用方 `
 部件使用 `definePlugin`（Python 中为 `define_plugin`，或一个带 `inject`、`provides` 和 `apply` 的模块），
 带 `inject` 和 `provides`。
 
-TypeScript 插件是进程里的一行。它的 `apply` 用 `partRegistry.registerDefinition(scope, name, definition)` 登记每个
-Session 部件和分支部件；`definition` 是一个 `definePlugin` 值（或未经修改的 Cordis 4 插件），可以闭包引用插件准备好的
-东西。它的行注入 `partRegistry`，并在 `instanceNames` 里列出部件在每个 Session 或分支里提供的名字（§2）。SDK 生成的
+插件不论用哪种语言写，都是进程里的一行。它的 `apply` 用 `partRegistry.registerDefinition(scope, name, definition)`
+登记每个 Session 部件和分支部件；`definition` 是一个 `definePlugin` 值（Python 中为 `define_plugin` 值；Node 中也可以是
+未经修改的 Cordis 4 插件），可以闭包引用插件准备好的东西。它的行注入 `partRegistry`，并在 `instanceNames` 里列出部件在每个 Session 或分支里提供的名字（§2）。SDK 生成的
 声明来自服务目录。
 
 ```json
@@ -405,23 +404,28 @@ export default definePlugin({
 })
 ```
 
-Python 插件在 Dim 升到 rutis 0.17.1 之前仍每个部件一行：行携带组，`"session"`、`"branch"`，或者在进程中不带组。
-它的名字以运行时为前缀写出模块：`py:<module>`；配置了 Python 运行时时，App Server 在其中运行该行，从配置的项目目录
-导入该模块。
+Python 行的名字以运行时为前缀写出模块：`py:<module>`；配置了 Python 运行时时，App Server 在其中运行该行，从配置的
+项目目录导入该模块。
 
 ```json
-{ "id": "py-branch", "name": "py:python_branch_part", "group": "branch",
-  "inject": ["dispatcher", "timelineIdentity", "treeCommands"], "provides": {}, "config": {} }
+{ "id": "python", "name": "py:python_plugin", "provides": {}, "config": {} }
 ```
 
 ```python
-inject = ["dispatcher", "timelineIdentity", "treeCommands"]
-provides = {}
+from rutis import define_plugin
 
-async def apply(ctx, config):
+async def apply_branch(ctx, config):
     dispatcher = ctx.use("dispatcher")
     identity = await ctx.use("timelineIdentity").get()
     ...
+
+branch = define_plugin(apply_branch, inject=["dispatcher", "timelineIdentity", "treeCommands"])
+
+inject = ["partRegistry"]
+provides = {}
+
+async def apply(ctx, config):
+    await ctx.use("partRegistry").registerDefinition("branch", "PythonBranchPart", branch)
 ```
 
 ```ts

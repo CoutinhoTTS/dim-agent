@@ -8,12 +8,11 @@ The [spike](session-typescript-spike.md) establishes transport feasibility;
 its private service names and combined fixture are not this API.
 
 The [process-row and management binding](process-typescript.md) uses the same
-embedding input and runtime. A TypeScript plugin is one process row; from its `apply` it registers
+embedding input and runtime. A TypeScript or Python plugin is one process row; from its `apply` it registers
 its Session and branch parts with `partRegistry` as plugin definitions, and each Session (or branch,
 [branch binding](branch-typescript.md)) mounts one copy
-([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). A Python
-plugin is still one row per part, its Session parts rows in `session` and branch parts rows in
-`branch`. Below, a "Session row" is a Session part's copy in one Session, or a `py:` Session row.
+([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). Below, a
+"Session row" is a Session part's copy in one Session.
 
 ## Scope and ownership
 
@@ -26,7 +25,7 @@ The existing owners implement their language bindings:
 
 | Owner | Responsibility |
 | --- | --- |
-| App Server assembly | Validate structural input, serve `toolRegistry` and `sessionMethods` to Session parts and `partRegistry` to process rows by name, register a row's `instanceNames` in their group, append `py:` Session rows inside `SESSION_GROUP`, select the existing runtime resolver. |
+| App Server assembly | Validate structural input, serve `toolRegistry` and `sessionMethods` to Session parts and `partRegistry` to process rows by name, register a row's `instanceNames` in their group, select the existing runtime resolver. |
 | ToolRegistry | Accept a row's `register(declaration, execute)`, decode the declaration once and keep the registration, owned by the calling row, in its versioned contributed set (A.5, #241). |
 | C1 `sessionMethods` (the Session's method table) | Accept a row's `register(namespace, declarations, call)`, check the namespace and decode the declarations once, and bind `call` to the existing generation-owned admission, progress, interruption and drain; the registration belongs to the calling row. |
 | Session broadcast | Encode its own records for the native rutis event path. |
@@ -55,13 +54,11 @@ Settings events on the bus with `ctx.on` ([settings-service §4.4](appserver/set
 Each row retains loader's `id`, `name` (module entry), `config`, `disabled`, `inject` and `isolate`
 semantics. The row metadata is `provides`, with **exactly the
 existing `rutis_bridge::runtime::RowSchema.provides` shape**: the services the row's own module
-provides by name. A TypeScript row is a process row and has no `group`; the App Server rejects one.
+provides by name. A row is a process row and has no `group`; the App Server rejects one.
 It may add `instanceNames`, `{"<name>": "session" | "branch"}`, listing the names its parts provide
 inside each Session or branch, which the catalog needs before the runtime starts
-([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). A `py:`
-row instead adds `group`: `"session"` for a Session part, `"branch"` for a branch part, absent for a
-process owner. The host places that row in its group and passes neither `group` nor `instanceNames`
-to the loader, whose own `group` field marks a row that is a group. Only a package that owns
+([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). The host
+does not pass `instanceNames` to the loader. Only a package that owns
 Settings sources adds `settings` (below):
 
 ```json
@@ -121,8 +118,7 @@ after declaration discovery; it does not wait for genuinely Pending optional Ses
 Rows naming the same module must use the same snapshot; distinct row ids alone do not make
 conflicting structural declarations valid.
 
-At this external configuration boundary reject a `group` on a TypeScript row, a `py:` row group
-other than `session` or `branch`, an `instanceNames` entry other than `session` or `branch` or naming
+At this external configuration boundary reject a `group` on any row, an `instanceNames` entry other than `session` or `branch` or naming
 a service the catalog already holds, and malformed identities. Tool names and method namespaces are checked when a row registers them
 ([Tools](#tools), [Session methods](#session-methods)). Disabled rows are not instantiated and
 register no tools and no namespaces. A stored mount list (`SessionConfig.tools`) that names one of
@@ -360,13 +356,13 @@ calls, Session channel records, or background tasks that wait for `sessionLifecy
 and end at `closing()`. Row Active alone never permits business work from TS apply.
 
 Session assembly uses the registered required-part membership implemented by [#137](https://github.com/arcships/dim/pull/137).
-Session assembly settles rows already Loading.
-Host-appended optional rows stay in the original disposal group and diagnostics and do not enter
-the Session's required Active wait: a row genuinely Pending on a missing dependency does not
-delay native Session use. A row that registers tools or method namespaces waits for its Session's
-`toolRegistry` or `sessionMethods`; once the required parts are Active, Session assembly settles the
-rows that started loading meanwhile, so such a row has registered them before the Session is
-published and its first request. Their
+A plugin's Session part is optional unless the host's profile requires it by name
+(`AgentBuilder::require_part`). An optional part's copy mounts without holding the Session's
+publication ([ADR 006 D3](../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it),
+Publication): a part genuinely Pending on a missing dependency does not delay native Session use,
+and the tools it registers are offered from the request after it registers them (A.5). A part the
+first request must have is required: the Session then waits for its registration and for it to be
+Active, so its tools are in the first request after create and restore. Their
 hard dependencies, key validation and failure reporting do not weaken. Disabled parts have no row instance. An optional failure changes only its features;
 there is no automatic retry of an operation that may have produced external side effects.
 
@@ -410,8 +406,8 @@ Native-store fork creates fresh Session-scoped providers from the copied configu
 delete drains the fork's admitted method before unloading it while its source remains usable.
 
 The existing CI Node step executes the product Node/Rpc flows alongside the managed-provider
-flow. Ordinary Session assembly covers the immediate first request after create and restore,
-including a tool-only module with no method namespace or test-only required dependency.
+flow. A required tool-only part, with no method namespace, is in the immediate first request after
+create and restore; optional parts are called once they serve.
 Separate Pending and disabled rows verify native continuity. Row-only reload exercises in-flight
 tool cancellation and rejection through retained handlers. Invalid tool/method declarations,
 refused namespaces, malformed replies, omitted method values, online snapshot mismatch and
