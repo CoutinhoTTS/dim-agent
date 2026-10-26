@@ -385,7 +385,7 @@ Agents 为每个 Session id 保留一个准入槽（`SessionSlot`），存放该
 | --- | --- | --- | --- |
 | R2 | BackgroundExec（[background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs)） | 依赖中加入 `Keyed<SessionLifecycle>`。每个任务一个持有，在 `start` 中、`exec/started` 之前取得，在监管任务提交 `exec/ended` 或启动被拒绝后释放；取不到持有（`None`）时像分支正在关闭一样拒绝启动 | `idle_unload_stops_tasks_and_a_restart_wakes_for_every_unreported_end`：任务运行期间卸载被拒绝，任务结束且被唤醒的 turn 结束后卸载成功；恢复的一半不变。BackgroundExec 页面关于卸载的那句随之只涵盖重载和关闭。`xtask graph` 与 `check` |
 | R3 | ShellInput（[shell_input.rs](../../../../crates/dim-agent-capabilities/src/shell_input.rs)） | 每次运行一个持有，在第二次准入时与 spawn 和登记一起取得，运行任务结束时释放；`None` 时以 `session_closed` 拒绝运行 | 流程测试：客户端断开后 `!` 运行继续，宿主的卸载被拒绝，运行结果被记录。ShellInput §3.2、§4.1、附录 B 和 A.5 去掉“宿主的空闲卸载”这一结束运行的途径 |
-| R4 | Collaboration（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs)） | leader 的 `CollaborationCapability` 注入 `Keyed<SessionLifecycle>`；每个 `Request` 在持有成员租约的同时持有 leader 的一个持有，请求结算并移除时释放。只有 leader 正在关闭时才会得到 `None`，Collaboration 已经会结算这种情况 | 流程测试：有未结束请求、没有客户端的 leader 一直装载到成员给出结果，然后两者在 `G` 之后卸载 |
+| R4 | Collaboration（[collaboration.rs](../../../../crates/dim-app-server/src/collaboration.rs)） | leader 的 `CollaborationSession` 注入 `Keyed<SessionLifecycle>`；每个 `Request` 在持有成员租约的同时持有 leader 的一个持有，请求结算并移除时释放。只有 leader 正在关闭时才会得到 `None`，Collaboration 已经会结算这种情况 | 流程测试：有未结束请求、没有客户端的 leader 一直装载到成员给出结果，然后两者在 `G` 之后卸载 |
 
 R2 已实现（[#201](https://github.com/arcships/dim/pull/201)）。
 [background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) 在 `start` 中、

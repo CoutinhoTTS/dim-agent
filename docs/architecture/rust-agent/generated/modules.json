@@ -11362,9 +11362,9 @@
         "mod collaboration",
         "path CollaborationPlugin::new",
         "path collaboration::Collaboration",
-        "path collaboration::CollaborationCapability",
         "path collaboration::CollaborationDirectory",
         "path collaboration::CollaborationDirectoryPlugin",
+        "path collaboration::CollaborationSession",
         "use collaboration::CollaborationPlugin"
       ]
     },
