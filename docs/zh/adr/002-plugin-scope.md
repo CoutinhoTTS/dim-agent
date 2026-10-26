@@ -4,6 +4,8 @@
 
 由 [ADR 006](006-plugin-contract.md) 扩展：D1–D4 不变。D5 由[插件契约](../design/plugin-contract.md)补全：
 Dim 的运行时服务进入命名目录，部件的位置就是它所在 loader 行的组，Rust 是契约的一种绑定。
+2026-10-26 修订 D2 与 D5，按实现后的机制描述工具：部件向 Session 的 `toolRegistry` 注册工具
+（ADR 006 D4）；`toolContribution`、`SessionToolSource` 与 `Contributions<T>` 已移除。
 
 ## 背景
 
@@ -39,7 +41,7 @@ Session 提供工具、观察 Session 的事件并写入分支的输入，于是
 
 | 需求 | 机制 |
 | --- | --- |
-| 向 Session 提供工具 | Session 级 `toolContribution`（具名工具服务）或 `SessionToolSource` |
+| 向 Session 提供工具 | 由提供工具的部件向 Session 的 `toolRegistry` 注册（ADR 006 D4、R6） |
 | 提供指令 | PromptRegistry 提示词来源 |
 | 观察 Session 的事件 | 现有的 Session 广播，由 Session 级插件监听 |
 | 按序观察并响应分支事件 | 分支 Dispatcher，由分支级插件订阅 |
@@ -81,10 +83,10 @@ rutis 按名称跨语言调用插件与服务（rutis-bridge 运行时、配合 
 | 错误 | 数据：`{code, message}`，错误码有文档说明 |
 | 取消 | 一个协议动作：取消请求，或消费方丢弃该调用 |
 | 注册 | 由插件声明（其 `provides` 与 loader 行），而非宿主侧的 `AgentBuilder` 调用；消费方按服务名和作用域收集 |
-| Rust 细节 | trait 签名、`TypeKey`、`Contributions<T>` 与 `AgentBuilder` 调用属于一种绑定，列在“Rust 绑定”附录中 |
+| Rust 细节 | trait 签名、`TypeKey` 与 `AgentBuilder` 调用属于一种绑定，列在“Rust 绑定”附录中 |
 
 规范服务：`sessionMethods`（Session，按命名空间）、`managementMethods`（进程，按命名空间）、
-`toolContribution`（Session，按工具名）、`sessions`（进程）和 `collaborationMembers`（进程，按成员类型）。它们
+`toolRegistry`（Session，部件注册的工具）、`sessions`（进程）和 `collaborationMembers`（进程，按成员类型）。它们
 定义在[合同](../design/contracts/session-boundary.md)和所属插件文档中。运行时现有的类型化服务
 （Timeline、Dispatcher、ToolHost 等）保持不变；把它们按名称暴露给非 Rust 的 Capability 部分是
 issue #4 的工作。
