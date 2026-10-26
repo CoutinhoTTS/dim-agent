@@ -2646,6 +2646,7 @@
         "assert_eq",
         "assert_ne",
         "format",
+        "include_str",
         "panic",
         "vec"
       ]
@@ -13835,6 +13836,13 @@
     },
     {
       "from": "dim_app_server::managed_provider",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path dim_agent_runtime::Modules"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider",
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
@@ -24222,10 +24230,13 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::tui",
       "references": [
+        "path WebOpened",
+        "path banner",
         "path boxed",
         "path chunk",
         "path goodbye_panel",
-        "path queue_strip"
+        "path queue_strip",
+        "path web_panel"
       ]
     },
     {
