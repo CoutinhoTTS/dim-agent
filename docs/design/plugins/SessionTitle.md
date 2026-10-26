@@ -9,7 +9,7 @@ SessionTitle is a Session plugin that gives an interactive leader Session a titl
 C1/C2, C4 tools/methods #150, S2 #98/#159, S4's Rust host #89,
 Settings #166/#175/#177, C6 notices #85, S5b title metadata #96 and the named S4 binding #225 are delivered.
 The optional [SessionTitle package](../../../runtime/plugins/session-title/README.md) implements
-the Session row and Appendix D behavior using these owners. The package is installed explicitly
+the Session part and Appendix D behavior using these owners. The package is installed explicitly
 through `SessionTypeScriptConfig`; default CLI-profile installation is outside this contract.
 
 Verification uses the actual plugin over its declared SDK ports and the real Node/App Server flow
@@ -30,7 +30,7 @@ contain only outcome and duration on runtime stderr, which the host writes to it
 | Policies | A1–A12 define the first implementation. Appendix D requires public-flow acceptance; documentation CI alone is not runtime acceptance. |
 
 C7 #50 is already unnecessary (#86). S4 owns its own credential/connection resolution. Missing
-required providers keep the whole row Pending under existing rules, including rename; native
+required providers keep the Session part Pending under existing rules, including rename; native
 Session use continues. No optional lookup or alternate rename path.
 
 The C4 leaf callback filters `main` adoption on its own Session's channel, registers an owned task and returns;
@@ -41,11 +41,12 @@ API. Retain T and page with through=T and after=the last returned sequence; neve
 through together. Use native HistoryPage/AgentEvent data. S2's stable directory reads the index per
 call, so index reload does not reload this consumer.
 
-Use the [C4 binding contract](../session-typescript.md): the row is in the `session` group, injects
+Use the [C4 binding contract](../session-typescript.md): the package's one row injects `partRegistry`
+and registers the Session part as a Session definition; each Session mounts a copy. The part injects
 `sessionMethods` and registers `session.rename` with it from `apply`; its provides dictionary is empty.
 `apply` reads the Session identity and creation configuration and registers observation/cleanup;
 it does not start an asynchronous initialization job. Its creation configuration is immutable.
-The same row declares all its dependencies in `inject`: the process services `sessions`,
+The same part declares all its dependencies in `inject`: the process services `sessions`,
 `settings`, `sessionMetadata` and `auxiliaryModel`, and the Session services `sessionIdentity`,
 `sessionConfig`, `sessionLifecycle` and `sessionMethods`. The package is optional and is installed through the
 existing `ServerConfig.session_typescript.rows` input, as Web is; it adds no default-profile
@@ -299,7 +300,7 @@ omits `maxOutputTokens`, using S4's existing model limit; the 30 s budget remain
 
 | Step | Path |
 | --- | --- |
-| Listen | The Session row listens to its Session's `session/{sessionId}` from `apply`, filters main input/applied, registers an owned task and returns; `sessionLifecycle.closing()` or row cleanup ends owned work |
+| Listen | The Session's copy of the part listens to its Session's `session/{sessionId}` from `apply`, filters main input/applied, registers an owned task and returns; `sessionLifecycle.closing()` or copy cleanup ends owned work |
 | Eligibility | C4 creation snapshot: `interactive !== false && collaborationRole === "leader"`; native omission means true |
 | Trigger | On `input/applied` at `N`: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `sessionMetadata.read({sessionId})`: skip if any title exists; keep revision `r` |
@@ -389,7 +390,7 @@ auxiliary binding use the owner contracts in §0. No shared contract or Core cha
 
 | Neutral | Rust |
 | --- | --- |
-| Namespace `session.rename` registered with `sessionMethods` | The TypeScript row calls `ctx.use('sessionMethods').register('session.rename', declarations, call)`, and the registration belongs to the row; a Rust provider calls `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` on a `Keyed<SessionMethods>` dependency |
+| Namespace `session.rename` registered with `sessionMethods` | The TypeScript Session part calls `ctx.use('sessionMethods').register('session.rename', declarations, call)`, and the registration belongs to that copy; a Rust provider calls `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` on a `Keyed<SessionMethods>` dependency |
 | Session broadcast listener | Listener on `session_channel(session_id)` for `Event` records, removed by `ctx.effect` |
 | Generation task | Spawned under `ctx.effect` |
 

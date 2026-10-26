@@ -221,7 +221,7 @@ CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES a
 | 项 | 规则 |
 | --- | --- |
 | 身份 | 由 SessionStore 提供、位于 `host_key("sessionMetadata")` 的 `dyn HostDispatch`；App Server 服务目录中的 `register_shared("sessionMetadata")`，与 `sessions`、`settings` 并列 |
-| 使用 | C4 Session 行声明 `inject: ['sessionMetadata']` 并调用 `ctx.use('sessionMetadata')`，与 Session 行使用 `settings` 的路径相同（[settings-owner 夹具](../../../../runtime/fixtures/settings-owner.ts)）。类型在 [npm/plugin.d.ts](../../../../npm/plugin.d.ts) |
+| 使用 | C4 Session 部分声明 `inject: ['sessionMetadata']` 并调用 `ctx.use('sessionMetadata')`，与 Session 部分使用 `settings` 的路径相同（[settings-owner 夹具](../../../../runtime/fixtures/settings-owner.ts)）。类型在 [npm/plugin.d.ts](../../../../npm/plugin.d.ts) |
 | 模式 | `read` 与 `setTitle` 都是 `async` |
 | 写入者 | 服务不携带调用方身份，与 `settings` 相同（AGENTS.md 第 11 条）。按设计 SessionTitle 是标题唯一的写入者（[SessionTitle §2](../plugins/SessionTitle.md#2-数据与状态)）；其他包只读取 |
 | 重载 | 使用它的行随 SessionStore 重载。SessionStore 只随 SqliteStorage 重载，所以不需要一个永不重载的目录部件；`sessions` 需要，是因为它的索引随 Settings 重载（[sessions D1](sessions-service.md#3-决定)） |
@@ -276,7 +276,7 @@ CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES a
 7. v3 的 `session.list` 与 `session.summaries` 带 `title`、`titleSource`、`titleRevision`；v2 的列表不带。
 8. 标题在重启后保留，Session 未装载时也能读写；分叉从无标题、修订号 0 开始；删除移除该行。
 9. 空库建为 v16。一次性的 v15 与 v13 库原地升级为精确的 v16 结构，所有业务行不变，并报告一次升级；标记不符的 v16 结构、升级到一半的库与更旧的结构被拒绝并保留。
-10. 在 Node 中运行的 TypeScript Session 行注入 `sessionMetadata`，读写标题，附加的客户端收到通知（`node_` 测试，由 CI 的 Node 步骤运行）。
+10. 在 Node 中运行的 TypeScript Session 部分注入 `sessionMetadata`，读写标题，附加的客户端收到通知（`node_` 测试，由 CI 的 Node 步骤运行）。
 11. 缺少 `title` 的 `setTitle` 请求被拒绝；插件 SDK 类型检查覆盖调用形状。
 12. 卸载：SessionStore 开始关闭之前已接纳的写入（一个正在执行，一个在等待轮次）提交并回复各自的修订号，关闭过程等待它们；关闭开始之后的调用立即失败为 `storage`，重启后存储里没有它（§6）。
 

@@ -29,7 +29,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `modelHost` | process | Aimux | Rust-only | — |
 | `modelSelectionHost` | process | Provider | Rust-only | — |
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | Rust-only | — |
-| `partRegistry` | process | PartRegistry | Rust-only | — |
+| `partRegistry` | process | PartRegistry | yes | `registerDefinition` async |
 | `pluginFiles` | process | PluginFiles | yes | `open` async |
 | `providerConnectionResolver` | process | Provider | Rust-only | — |
 | `providerService` | process | Provider | Rust-only | — |

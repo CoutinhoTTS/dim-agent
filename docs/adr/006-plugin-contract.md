@@ -7,7 +7,8 @@ each Session and branch mounts the parts that plugins register for it. D3 and D4
 2026-10-25: where plugins run, contributions registering with their owner, and foreign plugins
 waiting for rutis#642. D3 amended on 2026-10-26: a foreign plugin registers its parts as rutis
 plugin definitions, which rutis 0.17 delivered for rutis#642. Implementation: P1, P2, P3 and R6
-done, and the first form of P4; R5's second form is #403. The phases are in the
+done, and the first form of P4; R5's second form is done for TypeScript (#403) and waits for rutis
+0.17.1 for Python. The phases are in the
 [plugin contract design](../design/plugin-contract.md#10-migration).
 [中文](../zh/adr/006-plugin-contract.md)
 
@@ -242,7 +243,7 @@ The implementation removes: the `Capability` trait and its keys, `SessionScope`/
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`, `SessionService`/`BranchService`,
 `session_plugin`/`timeline_plugin`, the host-side name pre-registration, the `toolContribution:*`,
 `sessionMethods:*` and `managementMethods:*` names with their native/foreign split, the Session and
-branch rows (those of other languages with #403) and the App Server's inference of a
+branch rows (those of TypeScript with #403, those of Python with rutis 0.17.1) and the App Server's inference of a
 row's group, and the per-prefix placement checks that the catalog's groups already express.
 `PublicService` stays. It limits which branch services the Session and branch facades expose to
 ordinary callers, which is a facade rule, not a plugin rule.
@@ -367,9 +368,9 @@ persisted or wire format.
   part owned by the instance that mounted it; isolation by the instance's labels. How they are put
   together, an instance pulling the generators registered for its scope, has no precedent in Cordis
   or Koishi, where one plugin with filtered contexts is the norm.
-- Until #403, a foreign feature keeps one row per part, while a Rust feature became one row with
-  #402. A foreign part cannot skip an instance as a Rust generator can; its copy is mounted and does
-  no work there.
+- A Rust feature became one row with #402 and a TypeScript feature with #403; a Python feature keeps
+  one row per part until Dim takes rutis 0.17.1. A foreign part cannot skip an instance as a Rust
+  generator can; its copy is mounted and does no work there.
 - The 33 plugin pages under `docs/architecture/rust-agent/plugins/` are regrouped by plugin in step 3.
 
 ## Alternatives considered

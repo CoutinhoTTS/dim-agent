@@ -196,7 +196,7 @@ Provider 的 `apply` 提供 `AuxiliaryModelHost`；其 `Deps` 增加 `Arc<ModelH
 4. 流进行中丢弃调用会取消请求；卸载 Provider 会以 `cancelled` 结束进行中的调用。
 5. 托管账号恢复后的凭据再次被拒：账号被结算（登出），调用以 `failed` 失败；端点恰好收到两次请求。
 6. 回复、错误和 `auxiliary.complete` 日志事件都不含 API key；调用后 Session 的 Timeline 没有新事件。
-7. 真实 Node Session 行按名称注入进程服务，经 `complete({model, request})` 发起 HTTP 调用；
+7. 真实 Node Session 部分按名称注入进程服务，经 `complete({model, request})` 发起 HTTP 调用；
    回复字段和抛出的错误码保持不变。非法请求、未知模型不发送 HTTP 请求，调用不写 Session 历史。
    将模型请求停在 HTTP 端点后，关闭调用方会完成取消引用，在 Provider 保持装载时关闭 HTTP 流。
    没有 Provider 时，原生 Session 仍能创建，只有外来命名空间不可用。

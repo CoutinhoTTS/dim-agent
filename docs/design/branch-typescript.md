@@ -107,25 +107,22 @@ fact: cancelling then only stops the caller waiting, and TimelineTree finishes t
 
 ## Placement
 
-A row with `"group": "branch"` is a branch part: App Server appends it to the existing nested
-`BRANCH_GROUP`, so it runs once in every branch ([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)).
-Its declared group decides its placement, not the names it injects; there is no setup service. A
-row in another group that names a branch service fails at composition, naming the branch group.
+A TypeScript plugin's row registers its branch part with `partRegistry` from its `apply`, and every
+branch mounts one copy, in the existing nested `BRANCH_GROUP`
+([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)):
 
-```json
-{
-  "id": "goal-state",
-  "name": "/absolute/goal/branch.ts",
-  "group": "branch",
-  "provides": {},
-  "inject": ["dispatcher", "timelineIdentity", "treeCommands"],
-  "config": {}
-}
+```ts
+await ctx.use<PartRegistry>('partRegistry').registerDefinition('branch', 'GoalBranch', branch)
 ```
 
-A branch row's provided names are registered in its branch instance, so each branch has its own.
-Tools and Session methods are read in the Session, so they belong to Session rows. A package with
-Session and branch parts uses separate entry modules. The C4 rules on ids,
+The scope it is registered for decides its placement, not the names it injects; there is no setup
+service. A part registered for the Session that names a branch service cannot be built there, so it
+never mounts in a Session, and the row that registered it keeps running. A `py:` branch part is
+still a row with `"group": "branch"`.
+
+Names a branch part provides are listed in its row's `instanceNames` as `"branch"`, so each branch
+has its own. Tools and Session methods are read in the Session, so they belong to Session parts. A
+package with Session and branch parts registers both from its one row. The C4 rules on ids,
 same-module snapshots, online metadata, disablement and Pending apply unchanged.
 
 ## Subscription, rebuild and recovery
@@ -151,7 +148,7 @@ same-module snapshots, online metadata, disablement and Pending apply unchanged.
 
 - ~~**A Session part reading a branch-owned service.**~~ Settled with Goal: a Session part reads
   no branch state. It writes input by branch id and the branch owner decides; clients read the
-  owner's results as Timeline facts (Goal A.3, A8). A Session row cannot depend on a per-branch
+  owner's results as Timeline facts (Goal A.3, A8). A Session part cannot depend on a per-branch
   service (ADR 002 D3), and none is needed.
 - **Generator limitations worked around.** rutis' generator resolves a generic alias's item type
   where the alias is defined, so the exported methods spell out `std::result::Result<_, AgentError>`

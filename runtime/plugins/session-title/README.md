@@ -1,7 +1,8 @@
 # SessionTitle
 
 Optional Session TypeScript package implementing the [SessionTitle contract](../../../docs/design/plugins/SessionTitle.md).
-Its row, in the `session` group, registers `session.rename` with the Session's `sessionMethods` and
+Its one row registers the Session part (the `part` export) with `partRegistry`, and each Session
+mounts a copy. The copy registers `session.rename` with the Session's `sessionMethods` and
 reads its Session through `sessionIdentity`, `sessionConfig` and `sessionLifecycle`; the existing
 process services own history, settings, model execution and title persistence.
 
@@ -18,19 +19,20 @@ npm ci --prefix runtime/plugins/session-title --ignore-scripts
 Pass the complete [session-title.json](session-title.json) row to
 `ServerConfig.session_typescript.rows`, with `anchor` pointing to the embedding host's
 `package.json` (`runtime/package.json` here). The package name resolves through its export.
-The module and host use the same `inject`/`provides` declaration and Settings source.
+The module and host use the same `inject`/`provides` declaration and Settings source; the row
+injects only `partRegistry` and provides nothing.
 This is an explicit optional installation, separate from the default CLI profile and release payload.
 The `dim-app-server` binary takes such rows with `--session-rows FILE` (a JSON array whose
 file location is the anchor); see the [App Server README](../../../crates/dim-app-server/README.md#session-typescript-embedding).
 
-Required named dependencies are `sessions`, `settings`, `sessionMetadata` and `auxiliaryModel`.
-An unavailable provider keeps this optional row Pending, including rename. Native Sessions
-continue under existing assembly rules. Events missed while the row is unavailable are not replayed;
+The Session part's required named dependencies are `sessions`, `settings`, `sessionMetadata` and
+`auxiliaryModel`. An unavailable provider keeps the part Pending, including rename. Native Sessions
+continue under existing assembly rules. Events missed while the part is unavailable are not replayed;
 the next adopted operator input can trigger an attempt using the first adopted input in history.
 
 ## Behavior
 
-The row listens to its Session's `session/{sessionId}` channel. An interactive leader's own
+Each Session's copy listens to its Session's `session/{sessionId}` channel. An interactive leader's own
 `main` adoption schedules owned asynchronous work and returns from the listener. A fixed published history prefix supplies only the first adopted
 operator input's text, bounded to 2000 Unicode code points. Images, raw blocks, deleted inputs,
 later input text and tool/assistant/system content are excluded. An image-only first input

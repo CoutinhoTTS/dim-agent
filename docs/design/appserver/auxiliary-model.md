@@ -219,7 +219,7 @@ takes it as a request parameter. It is decided with the `/settings` design, not 
    and the call fails with `failed`; the endpoint received exactly two requests.
 6. No API key appears in the reply, errors or the `auxiliary.complete` log event; the Session's
    Timeline has no new event after a call.
-7. A real Node Session row injects the process service by name and makes the HTTP call through
+7. A real Node Session part injects the process service by name and makes the HTTP call through
    `complete({model, request})`; reply fields and thrown error codes cross unchanged. Invalid
    requests and unknown models send no HTTP request, and no call writes Session history. With
    a model request held at the HTTP endpoint, closing its caller resolves the cancellation

@@ -62,8 +62,8 @@ flowchart LR
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
-| Session 工具 | 普通 C4 row 注入 toolRegistry，在 apply 中以其声明和异步 execute 注册 schedule，注册不做 I/O；注册和提供者代际变化遵循当前 C4 绑定（§1.1）。 |
-| 进程包 / scheduleJobs | ServerConfig.session_typescript.rows 中不带组的行在共享运行时装载包的普通进程 owner。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）。 |
+| Session 工具 | 由进程行经 partRegistry 注册的 C4 Session 定义注入 toolRegistry，在 apply 中以其声明和异步 execute 注册 schedule，注册不做 I/O；注册和提供者代际变化遵循当前 C4 绑定（§1.1）。 |
+| 进程包 / scheduleJobs | ServerConfig.session_typescript.rows 中的一行在共享运行时装载包的普通进程 owner；每个 Session 在该运行时挂载其 Session 定义的一份副本。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）。 |
 | 管理命名空间 | 进程行先恢复运行存储，再把 schedule 注册到 managementMethods 并发布 scheduleJobs。恢复失败时保留 fault，仍注册命名空间后使行失败，让后续调用返回该行的失败状态。原生按调用准入及 report/drain 跟随注册行的生命周期和状态。 |
 | Settings | owner settings.read/update、settings/schedule 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `scheduler/`；父目录缺失时在事务回调前返回 `io`。Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
@@ -77,19 +77,20 @@ flowchart LR
 ### 1.3 具体包行
 
 可选包位于 `runtime/plugins/scheduler`，包名 `@dimcode/scheduler`；根模块为进程插件，
-`./session` 导出为 Session 工具。包提供完整的 `process.json` 与 `session.json`，
-`session.json` 声明 `"group": "session"`，`process.json` 不带组；宿主把两者都放入现有 `SessionTypeScriptConfig.rows`。
-这些是包的显式安装行；不包含默认 CLI 安装或 PluginManager 实现。
+并在 apply 中经 `partRegistry` 把 `session.ts` 注册为 Session 定义 `SchedulerSession`，即 Session 工具。
+包提供完整的 `process.json` 这一行，宿主把它放入现有 `SessionTypeScriptConfig.rows`。
+这是包的显式安装行；不包含默认 CLI 安装或 PluginManager 实现。
 
-| row 字段 | 进程行 | Session 行 |
-| --- | --- | --- |
-| `id` | `scheduler` | `scheduler-session` |
-| `name` | `@dimcode/scheduler` | `@dimcode/scheduler/session` |
-| `group` | 无 | `"session"` |
-| `config` | `{}` | `{}` |
-| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles`、`managementMethods` | `scheduleJobs`、`toolRegistry` |
-| `provides` | `scheduleJobs: {call:"async"}`；apply 把 `schedule` 注册到 `managementMethods` | `{}`；apply 把 `schedule` 注册到 `toolRegistry` |
-| `settings` | §7.1 完整的 schedule 来源及 schema | 无 |
+| row 字段 | 进程行 |
+| --- | --- |
+| `id` | `scheduler` |
+| `name` | `@dimcode/scheduler` |
+| `config` | `{}` |
+| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles`、`managementMethods`、`partRegistry` |
+| `provides` | `scheduleJobs: {call:"async"}`；apply 把 `schedule` 注册到 `managementMethods`，把 Session 定义注册到 `partRegistry` |
+| `settings` | §7.1 完整的 schedule 来源及 schema |
+
+Session 定义注入 `scheduleJobs` 与 `toolRegistry`，不提供服务，在 apply 中把 `schedule` 注册到 `toolRegistry`。
 
 **失败 owner 报告。** 统一的 [rutis 0.16 升级](../rutis-0.16-upgrade.md)
 提供附录 C 与附录 D 第 8、12、13 项要求的加载失败报告。运行存储不可读或无效时，
@@ -358,7 +359,7 @@ schedule 来源沿用 [Settings 的信任边界](../appserver/settings-service.m
 
 ### 7.1 Settings 来源
 
-Scheduler 进程 row 通过普通 row 的 settings 成员声明唯一来源（[Settings §3.1](../appserver/settings-service.md#31-来源声明)）；Session row 不声明它。
+Scheduler 进程 row 通过普通 row 的 settings 成员声明唯一来源（[Settings §3.1](../appserver/settings-service.md#31-来源声明)）；Session 定义不声明它。
 
 | 声明 | 值 |
 | --- | --- |
@@ -711,7 +712,7 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 | 行级失败报告 | rutis 0.17.0 提供失败 owner 诊断和 service_unavailable。附录 D 第 8 项不完整 v1 拒绝、第 12 项已知失败 owner 检查和第 13 项非法内部版本检查使用原失败断言验收；不绕过 loader。 |
 | 公开运行存储 | process-typescript §5.2 已提供 pluginFiles 既有提供者与真实公开 Node 存储验收。插件须在发起运行副作用前持久化必要转换，不借用私有 managed 插件入口、不用 Node 文件系统旁路。 |
 | 存活表述 | 功能清单要求交互式终端存活；本设计保持“守护进程存活”（E5）；已记录，非开放问题 |
-| 包绑定 | #317 按 §1.3 实现具体进程/Session 行、命名依赖、管理准入和调用方权限，使用与宿主一致的 rutis 0.16.0。 |
+| 包绑定 | #317 按 §1.3 实现具体进程行及其 Session 定义、命名依赖、管理准入和调用方权限，使用与宿主一致的 rutis 0.16.0。 |
 | 权限捕获 / reuse | #259 提供生成的 sessionPermissions，§1.3 指定读取位置；包 README 记录保存/CAS/reuse 流程证据，包含已接受的 #339 绑定规则。 |
 | 原生输入生命周期 | A.6 保留已准入报告至结算，已合入的 #267 提供该 S2 生命周期；包 README 记录真实报告/清理证据，包括失败 owner 检查。 |
 | 报告 | A.6 确定 Steer 投递到最近保存者分支，单次尝试、不补发；选定终态报告，skipped/missed 与管理保存只记历史。 |

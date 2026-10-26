@@ -30,7 +30,9 @@ the [shared method owner](../../crates/dim-agent-capabilities/src/methods.rs).
 ## 2. Host input and process placement
 
 Process owners are rows of the existing public `SessionTypeScriptConfig.rows` without a
-`group`; Session and branch parts declare `"group": "session"` or `"branch"`
+`group`. A TypeScript row is always such a row: its plugin registers its Session and branch parts
+with `partRegistry` and lists the names they provide in `instanceNames`; a `py:` Session or branch
+part is still a row declaring `"group": "session"` or `"branch"`
 ([How Dim uses rutis §2](rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). The name of the configuration
 type is retained to avoid an unrelated rename. This is a Rust source change, not a persisted or
 wire format change.
@@ -53,7 +55,7 @@ The placement rules are:
 | Input | Placement and lifetime |
 | --- | --- |
 | No `group` | Ordinary top-level rows in the existing process assembly; one instance per host, independent of Session creation and closure. |
-| `group: "session"` or `"branch"` | Instanced Session/branch placement ([C4](session-typescript.md), [C5](branch-typescript.md)). |
+| `group: "session"` or `"branch"` (`py:` rows only) | Instanced Session/branch placement ([C4](session-typescript.md), [C5](branch-typescript.md)). |
 
 Use the same public Node runtime, resolver and declaration catalog for all
 rows. Keep its existing runtime name. Do not
@@ -77,10 +79,11 @@ Validate the combined external configuration before assembly:
 - Row ids are unique across all rows and do not collide with host rows or
   generated module names. Rows of one module share the same declaration snapshot.
 - Register a process row's provided names that the `ServiceCatalog` does not hold yet as shared,
-  without an instance key; Session and branch rows' names get their group's instance key. A row
-  that names a service of a group it is not inside fails at composition, by rutis; a second
+  without an instance key; a row's `instanceNames` and `py:` Session and branch rows' names get
+  their group's instance key. A part that names a service of a group it is not inside fails, by
+  rutis; a second
   provider of a name fails with rutis's duplicate-provider error. `toolRegistry` and
-  `sessionMethods` are Session services, so only Session rows register tools and Session
+  `sessionMethods` are Session services, so only Session parts register tools and Session
   methods; process rows register management namespaces with `managementMethods`.
 - Process-provided services retain the ordinary bridge method declarations; no
   host business parser is introduced for them. Management namespaces are checked
@@ -259,7 +262,7 @@ do not claim isolation from the hung module-load residual in §2.1.
 
 1. One configured process owner serves two Sessions, survives either closing,
    and exposes a declared management method through local v3 `hello` and Rpc.
-   Existing C4 Session/branch rows still use the same runtime correctly.
+   Existing C4/C5 Session and branch parts still use the same runtime correctly.
 2. Configuring no process row preserves current C4/C5 behavior. A disabled row is
    unknown; malformed/colliding structure is rejected. With a real missing
    declared dependency, native startup and Session calls succeed while the row
@@ -414,7 +417,7 @@ No row field, SDK method, dependency registry, optional lookup or rutis/core
 mechanism is added. The managed plugin keeps its existing binding; public rows
 use their own ordinary runtime and declarations, without a managed-plugin slot.
 The provider depends only on FileStorage, preserving §5.1's stable boundary.
-Session and branch rows resolve this same shared service through the existing
+Session and branch parts resolve this same shared service through the existing
 catalog; a Session-only configuration must not require a dummy process row.
 
 All trusted consumers use that same host-authorized root. A FileScope owns
@@ -461,7 +464,7 @@ behavior; no-run-effect behavior requires each package's business-flow acceptanc
 | §4.8 Infrastructure | #4 completes host bindings and makes the host readiness selection obey D3 for configured optional rows, including startup report failures and restart completion (§2.1–2.2). §5.2 supplies the existing storage provider in public composition; required-row waiting, rutis and the runtime gate are unchanged. |
 | §4.9 Durable facts | Assembly metadata and process call bookkeeping do not enter Timeline. |
 | §1 Scope/App Server | Process parts are loader rows, not Capabilities; App Server owns assembly/wire binding, packages own all feature work. |
-| ADR 002 D1 | Process rows outlive Sessions; existing Session/branch rows retain their own lifetimes. |
+| ADR 002 D1 | Process rows outlive Sessions; Session and branch parts retain their own lifetimes. |
 | ADR 002 D2 | Bind in the original row; no adapter or management plugin. |
 | ADR 002 D3 | Rpc reads the management table per call and depends on no provider. Host startup and restart readiness exclude optional extension rows while those rows retain their own hard dependencies and normal reload behavior (§2.1–2.2). A hung top-level module load remains a shared-gate startup limit (§2.1). |
 | ADR 002 D4 | Structural declarations stay in rows; Settings documents remain business data and do not reload rows. |

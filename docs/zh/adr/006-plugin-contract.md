@@ -6,7 +6,7 @@
 部件可以在实例内提供哪些名字，以及如何找到带前缀服务的提供者；同日改写 D3：插件是一行，每个 Session 和分支
 挂载插件为它登记的部件；2026-10-25 修订 D3 和 D4：插件在哪里运行、贡献向所有者登记、外来插件等待 rutis#642。
 2026-10-26 修订 D3：外来插件以 rutis 插件定义登记部件，rutis 0.17 以此交付了 rutis#642。
-实现：P1、P2、P3、R6 与 P4 的最初形式已完成；R5 的第二种形式见 #403。各阶段见
+实现：P1、P2、P3、R6 与 P4 的最初形式已完成；R5 的第二种形式对 TypeScript 已完成（#403），Python 等 rutis 0.17.1。各阶段见
 [插件契约设计](../design/plugin-contract.md#10-迁移)。
 
 与其他决策的关系：
@@ -194,7 +194,7 @@ rutis 仍是外部依赖。
 实现将移除：`Capability` trait 及其 key、`SessionScope`/`BranchScope`、
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`、`SessionService`/`BranchService`、
 `session_plugin`/`timeline_plugin`、宿主侧的名称预注册、`toolContribution:*`、`sessionMethods:*` 和
-`managementMethods:*` 这些名字及其原生/外来之分、Session 行和分支行（其他语言的这些行随 #403）
+`managementMethods:*` 这些名字及其原生/外来之分、Session 行和分支行（TypeScript 的这些行随 #403，Python 的随 rutis 0.17.1）
 以及 App Server 对行所属组的推断，以及目录中的组已经表达的按前缀位置检查。`PublicService` 保留。它限制 Session 与分支门面向普通调用方暴露哪些分支服务，这是门面规则，不是插件规则。
 
 细节见 [Dim 如何使用 rutis §3](../design/rutis-usage.md#3-按名字的服务)；Dim 定义的名称列在
@@ -297,7 +297,7 @@ Dim 尚未发布，所以任何一步都不保留兼容路径：不为仓库外�
 - D3 的机制都是 Cordis 的：登记归调用方所有，和 `ctx.on` 一样；挂上的部件归挂载它的实例所有；按实例的标签隔离。
   组合方式（实例拉取为它的作用域登记的生成器）在 Cordis 和 Koishi 中没有先例，那里的常规做法是一个插件加按条件
   过滤的上下文。
-- 在 #403 之前，外来功能仍是每个部件一行；Rust 功能已随 #402 变成一行。外来部件不能像 Rust 生成器那样跳过某个实例；它的副本照样挂上，只是在那里不做任何工作。
+- Rust 功能已随 #402 变成一行，TypeScript 功能随 #403；Python 功能在 Dim 升到 rutis 0.17.1 之前仍每个部件一行。外来部件不能像 Rust 生成器那样跳过某个实例；它的副本照样挂上，只是在那里不做任何工作。
 - `docs/architecture/rust-agent/plugins/` 下的 33 个插件页面在第 3 步按插件重新归组。
 
 ## 考虑过的替代方案
