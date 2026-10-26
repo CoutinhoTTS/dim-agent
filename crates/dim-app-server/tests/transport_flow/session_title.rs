@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 
 type Request = (Value, oneshot::Sender<String>);
 
-async fn complete(
+pub(super) async fn complete(
     State(sent): State<mpsc::UnboundedSender<Request>>,
     Json(request): Json<Value>,
 ) -> axum::response::Response {
@@ -27,7 +27,7 @@ async fn complete(
         .unwrap()
 }
 
-fn rows() -> SessionTypeScriptConfig {
+pub(super) fn rows() -> SessionTypeScriptConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -50,7 +50,7 @@ fn rows() -> SessionTypeScriptConfig {
     }
 }
 
-async fn entry(client: &mut Client, id: &str) -> Value {
+pub(super) async fn entry(client: &mut Client, id: &str) -> Value {
     let listed = client.rpc("session.list", json!({})).await;
     assert_ok(&listed);
     listed["result"]
@@ -62,7 +62,7 @@ async fn entry(client: &mut Client, id: &str) -> Value {
         .clone()
 }
 
-async fn titled(client: &mut Client, id: &str, text: &str, source: &str) {
+pub(super) async fn titled(client: &mut Client, id: &str, text: &str, source: &str) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let current = entry(client, id).await;
@@ -133,7 +133,7 @@ async fn idle(client: &mut Client, id: &str) {
     );
 }
 
-async fn configure(client: &mut Client, document: Value) {
+pub(super) async fn configure(client: &mut Client, document: Value) {
     let read = client
         .rpc(
             "settings.read",
