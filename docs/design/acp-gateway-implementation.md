@@ -103,7 +103,7 @@ parse CLI options (including isolated --home / --cwd / --server / --agent)
 | `initialize` | 可接 | 先 `hello {protocolVersion:3, clientKind:"other", clientName:"AcpGateway"}`。按 SDK 协商 ACP 1；记录 client capabilities；读取现有 account discovery/status，按 §4.4 生成真实可执行的 authMethods。initialize 不自动开始登录；无 managed provider 时不强制登录。重复 initialize 拒绝 |
 | `authenticate` | 条件可接 | 仅接受本连接已发布的 agent-type methodId；`account.status` 确认已登录则返回 `{}`，否则走现有 browser begin → 宿主 callback capture → browser complete → status。OAuth 和 token 交换由原插件完成，不由本地 RPC transport 的身份校验代替 |
 | `logout` | 不支持 | 不映射到账户登出，不声明 logout capability |
-| `session/new` | 可接 | 校验绝对 `cwd`，只接受空 `mcpServers` 和空/缺失 additional directories；按 §8.3 验证 startup model 后，在同一 `session.create {cwd, agentId?, model?}` 中传入 → `session.attach {sessionId}` → 读取 main 固定历史头和 Session methods / permission / adopted model。先登记 runtime，再订阅和回放；初始化完成才返回 id、可用 modes/configOptions |
+| `session/new` | 可接 | 校验绝对 `cwd`，忽略 `mcpServers`，只接受空/缺失 additional directories；按 §8.3 验证 startup model 后，在同一 `session.create {cwd, agentId?, model?}` 中传入 → `session.attach {sessionId}` → 读取 main 固定历史头和 Session methods / permission / adopted model。先登记 runtime，再订阅和回放；初始化完成才返回 id、可用 modes/configOptions |
 | `session/load` | 可接 | 从 `session.summaries` 或 `session.list` 获取真实 cwd，检查一致；attach → 固定头 main history 从 0 回放 → 接上 live → 返回。重复 load 复用 runtime，不重复建立订阅；在 prompt 中拒绝重放 |
 | `session/resume` | 可接 | 同 load 的准备和状态恢复，但历史只用于内部关联/去重，不向客户端发送旧消息；先返回，再发送准备期间缓存的真正 live updates |
 | `session/list` | 条件可接 | `session.summaries {agentId?}`；不存在时用 `session.list {agentId?}` 并省略不可得的 updatedAt。按 ACP cwd 在内存过滤；毫秒时间转 ISO 8601。返回完整的一页，不声明原生分页，不制造 nextCursor；非空未知 cursor 报错。原生全量响应超过 frame limit 就报错，不循环扫描凑页 |
@@ -116,7 +116,7 @@ parse CLI options (including isolated --home / --cwd / --server / --agent)
 
 mode 和 model 的选项来自当前 Session 的公开状态，不能用用户偏好默认值冒充已采用值。模型切换影响可用选项时重读 catalog；超时或连接丢失后的写入不能报告为未应用。effort、fast/service tier 的写入口虽然存在，但 RPC 未提供完整的 Session 当前值读取；首版不发布这些 config options。不同 Session 的可选方法逐个检查，不能因另一个 Session 安装了插件就假定可用。
 
-非空 `mcpServers` / `additionalDirectories` 在所有 new/load/resume/fork 入口均拒绝，不忽略后返回成功。App Server 的 MCP 配置管理和 HostPlatform 是已有能力，但没有客户端临时配置/未保存 buffer 的同等 Session 绑定合同，首版不修改它们。
+所有 new/load/resume/fork 入口接受并忽略 `mcpServers`；非空列表不阻塞会话操作。Gateway 不启动、连接、转发或持久化其中的服务器，也不据此声明 MCP transport capability。会话继续使用原生配置的工具。非空 `additionalDirectories` 仍在创建或 attach 前拒绝。客户端 MCP 的实际接入和资源生命周期不在首版，本次不修改 App Server 的 MCP 配置或 HostPlatform。
 
 ### 4.2 Agent → client 及协议取消
 
@@ -444,7 +444,7 @@ D 的消融复核：Lody 只是同一投影的 metadata 和受协商约束的通
 
 复用已有 mock-model daemon 和 transport/CLI fixture，在临时 workspace 和隔离 product home 内验证：
 
-1. ACP initialize/版本/能力与 handler 一致；未知方法、非空 MCP/additionalDirectories、音频/二进制资源在写入前拒绝。
+1. ACP initialize/版本/能力与 handler 一致；new/load/resume/fork 忽略非空 MCP 配置并正常建立，不转发客户端配置；未知方法、非空 additionalDirectories、音频/二进制资源在写入前拒绝。
 2. new → prompt → text/thought/tool → end_turn；单连接多个 Session；同 Session 第二个 prompt 拒绝；另一 RPC 客户端可 attach 同一 Session。
 3. progress/committed/history 重复和乱序到达、Unicode scalar offsets、页内无可见事件和 nextAfter 前进、load/load 与 load/resume 单消费者、关闭期间迟到准备。
 4. cancel 在提交回复前、持有输入、采用后/消费前、消费后、turn/end 竞态；native 残留输入如实保留，不能断言已删除。

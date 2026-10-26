@@ -235,16 +235,9 @@ fn params<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, Error> {
     serde_json::from_value(value).map_err(|_| Error::invalid_params())
 }
 
-fn establishment(cwd: &Path, servers: usize, roots: usize) -> Result<(), Error> {
+fn establishment(cwd: &Path, roots: usize) -> Result<(), Error> {
     if !cwd.is_absolute() {
         return Err(Error::invalid_params());
-    }
-    if servers != 0 {
-        return Err(Error::new(
-            -32602,
-            "Client-supplied MCP servers are unsupported; disable them in the ACP client",
-        )
-        .data(json!({"code":"unsupported_mcp_servers"})));
     }
     if roots != 0 {
         return Err(
@@ -456,11 +449,9 @@ impl Gateway {
                     Ok(value) => value,
                     Err(error) => return reply.respond_with_error(error),
                 };
-                if let Err(error) = establishment(
-                    &request.cwd,
-                    request.mcp_servers.len(),
-                    request.additional_directories.len(),
-                ) {
+                if let Err(error) =
+                    establishment(&request.cwd, request.additional_directories.len())
+                {
                     return reply.respond_with_error(error);
                 }
                 if self.sessions.len() + self.creating >= 128 {
@@ -536,7 +527,6 @@ impl Gateway {
                         (
                             request.session_id,
                             request.cwd,
-                            request.mcp_servers.len(),
                             request.additional_directories.len(),
                         )
                     })
@@ -545,16 +535,15 @@ impl Gateway {
                         (
                             request.session_id,
                             request.cwd,
-                            request.mcp_servers.len(),
                             request.additional_directories.len(),
                         )
                     })
                 };
-                let (session_id, cwd, servers, roots) = match parsed {
+                let (session_id, cwd, roots) = match parsed {
                     Ok(value) => value,
                     Err(error) => return reply.respond_with_error(error),
                 };
-                if let Err(error) = establishment(&cwd, servers, roots) {
+                if let Err(error) = establishment(&cwd, roots) {
                     return reply.respond_with_error(error);
                 }
                 let id = session_id.to_string();
@@ -627,11 +616,7 @@ impl Gateway {
                     Ok(args) => args,
                     Err(error) => return reply.respond_with_error(error),
                 };
-                if let Err(error) = establishment(
-                    &args.cwd,
-                    args.mcp_servers.len(),
-                    args.additional_directories.len(),
-                ) {
+                if let Err(error) = establishment(&args.cwd, args.additional_directories.len()) {
                     return reply.respond_with_error(error);
                 }
                 if self.sessions.len() + self.creating >= 128 {

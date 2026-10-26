@@ -48,7 +48,7 @@ Gateway 实现位于 `crates/dim-acp`。公开 RPC 引擎、产品事件边界�
 
 Lody 方法和 metadata 按固定 Core DTO 及语义注释实现，不设连接级 Lody 总开关，不从一项推导整套支持。Subagent snapshot 可以如实声明无输出流、progress、read 或 cancel；最小投影不需要旧 SDK task API。准确协商、native fact 关联、startup config 和各项限制见[计划 §8](../../../design/acp-gateway-implementation.md#8-lody-方法和能力逐项决策)。Lody canonical tool ID 不能填任意 native 工具名。
 
-网关不调用 client fs/terminal，不启动客户端 MCP，不暴露任意账户管理、不注入 raw blocks。非空 mcpServers/additionalDirectories 在创建或 attach 前报错，不静默忽略。未知非控制 metadata 按 ACP 扩展规则处理；识别到尚不支持的控制字段，在提交输入前拒绝。
+网关不调用 client fs/terminal，不启动客户端 MCP，不暴露任意账户管理、不注入 raw blocks。new/load/resume/fork 接受并忽略 mcpServers，不转发或持久化该配置，会话继续使用原生工具。非空 additionalDirectories 在创建或 attach 前报错。未知非控制 metadata 按 ACP 扩展规则处理；识别到尚不支持的控制字段，在提交输入前拒绝。
 
 socket/pipe 身份校验与模型账户认证分开。网关从现有 account.providers/status 发现 managed provider，并只发布真正可执行的 auth method。agent-type browser 方法通过 authenticate 调用现有 begin/complete/status/cancel；terminal 方法另开交互 helper，不能把其 methodId 发给 authenticate。OAuth、凭据交换和持久化仍归 provider。准确调用、callback 所有权、headless 限制和取消合同见[计划 §4.4](../../../design/acp-gateway-implementation.md#44-账户认证与现有-oauth-插件)。没有账户插件时不强制 configured/API-key 模型登录。
 

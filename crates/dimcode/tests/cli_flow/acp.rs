@@ -997,7 +997,7 @@ fn lody_projection(version: u32) {
         |frame| frame["params"]["update"]["_meta"]["lody"]["activity"]["failureReason"]
             == "Cancelled: Stopped by owner"
     ));
-    peer.send(4,"session/fork",json!({"sessionId":"session","cwd":home.0,"_meta":{"lody":{"forkAtTurn":{"version":1,"turnId":"turn"}}}}));
+    peer.send(4,"session/fork",json!({"sessionId":"session","cwd":home.0,"mcpServers":[{"type":"http","name":"client","url":"http://127.0.0.1:9/mcp","headers":[]}],"_meta":{"lody":{"forkAtTurn":{"version":1,"turnId":"turn"}}}}));
     assert_eq!(peer.response(4)["result"]["sessionId"], "forked");
     peer.close();
     daemon.join().unwrap();
@@ -1071,6 +1071,7 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
                 Err(error) => panic!("{error}"),
             }
         };
+        stream.set_nonblocking(false).unwrap();
         stream.set_read_timeout(Some(PATIENCE)).unwrap();
         let mut stream = BufReader::new(stream);
         let mut line = String::new();
@@ -1131,7 +1132,7 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
         updates: Vec::new(),
     };
     peer.initialize();
-    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[{"type":"http","name":"client-http","url":"http://127.0.0.1:9/mcp","headers":[]},{"name":"client-stdio","command":"unused-client-mcp","args":[],"env":[]}]}));
     let created = peer.response(2);
     assert!(created.get("error").is_none(), "{created}");
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
@@ -1280,17 +1281,24 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
     });
     let mut peer = Peer::start(&home);
     peer.initialize();
-    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[{"type":"http","name":"client","url":"http://localhost","headers":[]}]}));
-    assert!(peer.response(2).get("error").is_some());
+    peer.send(
+        2,
+        "session/new",
+        json!({"cwd":home.0,"mcpServers":[],"additionalDirectories":[home.0]}),
+    );
+    assert_eq!(
+        peer.response(2)["error"]["data"]["code"],
+        "unsupported_additional_directories"
+    );
     peer.send(
         3,
         "session/load",
-        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[]}),
+        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[{"type":"http","name":"client","url":"http://127.0.0.1:9/mcp","headers":[]}]}),
     );
     peer.send(
         4,
         "session/resume",
-        json!({"sessionId":"saved","cwd":home.0}),
+        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[{"name":"client","command":"unused-client-mcp","args":[],"env":[]}]}),
     );
     assert!(peer.response(3).get("error").is_none());
     assert!(peer.response(4).get("error").is_none());
