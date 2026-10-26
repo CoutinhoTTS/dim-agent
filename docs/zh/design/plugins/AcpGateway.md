@@ -50,6 +50,8 @@ Session / InputQueue / Loop / Approval / Questions / Attachments / ...
 
 socket/pipe 身份校验与模型账户认证分开。网关从现有 account.providers/status 发现 managed provider，并只发布真正可执行的 auth method。agent-type browser 方法通过 authenticate 调用现有 begin/complete/status/cancel；terminal 方法另开交互 helper，不能把其 methodId 发给 authenticate。OAuth、凭据交换和持久化仍归 provider。准确调用、callback 所有权、headless 限制和取消合同见[计划 §4.4](../../../design/acp-gateway-implementation.md#44-账户认证与现有-oauth-插件)。没有账户插件时不强制 configured/API-key 模型登录。
 
+Provider 管理已经归 daemon 的 ProviderPlugin 所有，CLI 使用其公开方法。Gateway 复用该所有者，不新建 Provider registry。[计划 §4.5](../../../design/acp-gateway-implementation.md#45-provider-管理与现有插件) 将 providers/list 接到 provider.management，set/disable 接到带版本的 provider.update，明确完整 headers 替换和 credential 归属。这些持久化、共享 home 的写入没有提供客户端宿主进程的临时覆盖，因此首版不启用 ACP 整组 providers capability；缺口是作用域与配置表达能力，不是原生没有 Provider 管理。
+
 ## 3. 状态与生命周期
 
 内存只含连接协商/generation、Session 映射、操作槽位、两端请求关联、submission/input/turn ids、固定历史 cursor、流式 Unicode offsets 及本地 permission/question waiter。没有持久 store，runtime handle 不充当 durable identity。
@@ -91,7 +93,7 @@ submission id 是查询键，不是 native exactly-once 保证。是否保证未
 
 ## 5. 安全与上下文
 
-保留既有 socket ownership/权限、Windows authenticated pipe、协议/profile 检查及 frame limit。使用明确 native-method 白名单，ACP 方法不能变成任意 RPC proxy。Session 操作外只读取安全 provider catalog，并执行计划 §4.4 中自有的登录流程；不开放 logout、quota 或任意 account management。provider 私有 realm、client ID 和 token 流程不进入本仓库。
+保留既有 socket ownership/权限、Windows authenticated pipe、协议/profile 检查及 frame limit。使用明确 native-method 白名单，ACP 方法不能变成任意 RPC proxy。Session 操作外只读取安全 provider catalog，并执行计划 §4.4 中自有的登录流程；原生 Provider 管理的复用与首版写入边界见 §4.5。不开放 logout、quota 或任意 account management。provider 私有 realm、client ID 和 token 流程不进入本仓库。
 
 ACP 内容经现有 session.submit.user 进入，外部边界完成解析和转换。Gateway 不写任意 Timeline 事件、raw context blocks、插件设置或 host tools。模型只看到正常 adopted input/tool result，不注入 ACP identity 或 transport diagnostics。
 

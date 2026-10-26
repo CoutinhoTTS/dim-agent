@@ -50,6 +50,8 @@ The gateway does not call client `fs/*` or `terminal/*`, start client-supplied M
 
 Socket/pipe authentication is separate from model-account authentication. The gateway discovers existing `account.providers/status` and exposes executable auth methods for the managed-provider plugin. An agent-type browser method uses `authenticate` and the existing native begin/complete/status/cancel operations; a terminal method launches a separate interactive helper and must not be passed to `authenticate`. OAuth, credential exchange and persistence stay inside the provider. The exact calls, callback ownership, headless limits and cancellation contract are [plan §4.4](../acp-gateway-implementation.md#44-账户认证与现有-oauth-插件). No account plugin means no forced managed-account login for configured/API-key models.
 
+Provider management already belongs to the daemon's ProviderPlugin, with public methods used by the CLI. The gateway reuses that owner rather than creating another provider registry. [Plan §4.5](../acp-gateway-implementation.md#45-provider-管理与现有插件) maps `providers/list` to `provider.management`, and set/disable to versioned `provider.update`, including full-header replacement and credential ownership. These persisted, shared-home writes do not provide a temporary override for the client host process. The first delivery therefore leaves the combined ACP `providers` capability disabled; the missing contract is scope and configuration expressiveness, not the absence of native provider management.
+
 ## 3. State and lifecycle
 
 Gateway memory contains only connection negotiation and generation, mapped Session ids, operation slots, ACP/native request correlation, submission/input/turn ids, fixed-history cursors, streamed Unicode offsets and local permission/question waiters. It has no persistent store. Native ids remain identities; runtime handles do not become durable ids.
@@ -91,7 +93,7 @@ A submission id is a lookup key, not a native exactly-once guarantee. The [nativ
 
 ## 5. Security and context
 
-The gateway retains the socket ownership/permissions, authenticated Windows pipe, protocol/profile checks and frame limits of the existing CLI client. It uses an explicit native-method allowlist; ACP methods never become arbitrary RPC proxies. Outside Session operations it permits only safe provider catalog reads and the narrowly owned account-login flow in plan §4.4. Logout, quota queries and arbitrary account management are not exposed. Provider-private realms, client IDs and token flows remain outside this repository.
+The gateway retains the socket ownership/permissions, authenticated Windows pipe, protocol/profile checks and frame limits of the existing CLI client. It uses an explicit native-method allowlist; ACP methods never become arbitrary RPC proxies. Outside Session operations it permits only safe provider catalog reads and the narrowly owned account-login flow in plan §4.4. Native provider-management reuse and its first-delivery write boundary are specified in §4.5. Logout, quota queries and arbitrary account management are not exposed. Provider-private realms, client IDs and token flows remain outside this repository.
 
 ACP content enters through existing `session.submit.user`, with parsing and content conversion at the external boundary. The gateway writes no arbitrary Timeline events, raw context blocks, plugin settings or host tool registrations. The model sees only the ordinary adopted input and tool results; ACP identities and transport diagnostics are not injected into its context.
 
