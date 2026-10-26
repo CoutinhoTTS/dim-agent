@@ -112,8 +112,14 @@ pub(crate) struct Prepared {
 
 struct Waiter {
     reply: Responder,
-    new: bool,
-    replay: bool,
+    kind: Preparation,
+}
+#[derive(Clone, Copy)]
+enum Preparation {
+    New,
+    Load,
+    Resume,
+    History,
 }
 struct Loading {
     cwd: String,
@@ -141,6 +147,10 @@ struct Session {
     questions: dim_client::question::Pending,
     usage_pending: bool,
     title_revision: u64,
+    subagents: crate::lody::Subagents,
+    stopping: bool,
+    removing: bool,
+    pending_remove: Option<(&'static str, Responder)>,
 }
 enum Slot {
     Loading(Loading),
@@ -163,6 +173,7 @@ pub(crate) struct Gateway {
     login: Option<crate::auth::Login>,
     auth_methods: Vec<crate::auth::Method>,
     authenticating: std::collections::HashSet<String>,
+    subagent_events: bool,
 }
 
 fn busy() -> Error {
@@ -170,25 +181,6 @@ fn busy() -> Error {
 }
 fn params<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, Error> {
     serde_json::from_value(value).map_err(|_| Error::invalid_params())
-}
-
-fn controls(value: &Value) -> Result<(), Error> {
-    if let Some(lody) = value.get("_meta").and_then(|meta| meta.get("lody")) {
-        let lody = lody.as_object().ok_or_else(Error::invalid_params)?;
-        for field in [
-            "steer",
-            "goalControl",
-            "sessionConfig",
-            "worktreeProject",
-            "forkAtTurn",
-        ] {
-            if lody.contains_key(field) {
-                return Err(Error::new(-32001, "Unsupported Lody control")
-                    .data(json!({"code":"unsupported_control","field":field})));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn establishment(cwd: &Path, servers: usize, roots: usize) -> Result<(), Error> {
@@ -224,6 +216,7 @@ impl Gateway {
             login,
             auth_methods: Vec::new(),
             authenticating: std::collections::HashSet::new(),
+            subagent_events: false,
         }
     }
 
@@ -247,7 +240,7 @@ impl Gateway {
 
     fn prepare(&mut self, id: String, cwd: String, waiter: Waiter, attach: bool) {
         let rpc = self.rpc.clone();
-        let expected_cwd = (!waiter.new).then(|| cwd.clone());
+        let expected_cwd = (!matches!(waiter.kind, Preparation::New)).then(|| cwd.clone());
         let previous = match self.sessions.remove(&id) {
             Some(Slot::Ready(session)) => Some(session),
             None => None,
@@ -273,6 +266,10 @@ impl Gateway {
             if self.initialized || self.initializing {
                 return reply.respond_with_error(Error::invalid_request());
             }
+            self.subagent_events = request
+                .params
+                .pointer("/clientCapabilities/_meta/lody/subagentEvents/version")
+                == Some(&json!(1));
             let initialize: acp::InitializeRequest = match params(request.params) {
                 Ok(value) => value,
                 Err(error) => return reply.respond_with_error(error),
@@ -318,9 +315,10 @@ impl Gateway {
         if !self.initialized {
             return reply.respond_with_error(Error::invalid_request());
         }
-        if let Err(error) = controls(&request.params) {
-            return reply.respond_with_error(error);
-        }
+        let controls = match crate::lody::controls(&request.method, &request.params) {
+            Ok(controls) => controls,
+            Err(error) => return reply.respond_with_error(error),
+        };
         let rpc = self.rpc.clone();
         match request.method.as_str() {
             "authenticate" => {
@@ -390,10 +388,26 @@ impl Gateway {
                             .into_string()
                             .map_err(|_| Error::invalid_params())?;
                         let mut args = json!({"cwd":cwd});
+                        let explicit = if let Some(model) = controls.startup {
+                            if !rpc.supports("provider.catalog") {
+                                return Err(Error::invalid_params());
+                            }
+                            let choices = crate::config::models(&rpc).await?;
+                            let selected = choices
+                                .into_iter()
+                                .find(|choice| choice.id == model)
+                                .ok_or_else(Error::invalid_params)?;
+                            crate::auth::ensure(&rpc, &selected.provider, &managed).await?;
+                            args["model"] =
+                                json!({"provider":selected.provider,"modelId":selected.id});
+                            true
+                        } else {
+                            false
+                        };
                         if let Some(agent) = agent {
                             args["agentId"] = json!(agent);
                         }
-                        if !managed.is_empty() && rpc.supports("provider.selection") {
+                        if !explicit && !managed.is_empty() && rpc.supports("provider.selection") {
                             #[derive(Deserialize)]
                             struct Selection {
                                 selection: Option<Selected>,
@@ -417,6 +431,11 @@ impl Gateway {
             }
             "session/load" | "session/resume" => {
                 let replay = request.method == "session/load";
+                let kind = if replay {
+                    Preparation::Load
+                } else {
+                    Preparation::Resume
+                };
                 let parsed = if replay {
                     params::<acp::LoadSessionRequest>(request.params).map(|request| {
                         (
@@ -450,46 +469,111 @@ impl Gateway {
                         if loading.cwd != cwd {
                             return reply.respond_with_error(Error::invalid_params());
                         }
-                        loading.waiters.push(Waiter {
-                            reply,
-                            new: false,
-                            replay,
-                        });
+                        if loading.waiters.len() >= 128 {
+                            return reply.respond_with_error(busy());
+                        }
+                        loading.waiters.push(Waiter { reply, kind });
                     }
                     Some(Slot::Ready(session)) => {
-                        if session.prompt.is_some() {
+                        if session.prompt.is_some()
+                            || session.removing
+                            || session.stopping
+                            || session.configuring
+                        {
                             return reply.respond_with_error(busy());
                         }
                         if !replay && session.cwd == cwd {
-                            return reply.respond(json!({}));
+                            return reply.respond(session.config.response());
                         }
-                        self.prepare(
-                            id,
-                            cwd,
-                            Waiter {
-                                reply,
-                                new: false,
-                                replay,
-                            },
-                            false,
-                        );
+                        self.prepare(id, cwd, Waiter { reply, kind }, false);
                     }
                     None => {
                         if self.sessions.len() >= 128 {
                             return reply.respond_with_error(busy());
                         }
-                        self.prepare(
-                            id,
-                            cwd,
-                            Waiter {
-                                reply,
-                                new: false,
-                                replay,
-                            },
-                            true,
-                        );
+                        self.prepare(id, cwd, Waiter { reply, kind }, true);
                     }
                 }
+            }
+            "_lody/session/history/read" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Request {
+                    session_id: String,
+                }
+                let args: Request = match params(request.params) {
+                    Ok(args) => args,
+                    Err(error) => return reply.respond_with_error(error),
+                };
+                let Some(Slot::Ready(session)) = self.sessions.get(&args.session_id) else {
+                    return reply
+                        .respond_with_error(Error::resource_not_found(Some(args.session_id)));
+                };
+                if session.prompt.is_some()
+                    || session.configuring
+                    || session.removing
+                    || session.stopping
+                {
+                    return reply.respond_with_error(busy());
+                }
+                let cwd = session.cwd.clone();
+                self.prepare(
+                    args.session_id,
+                    cwd,
+                    Waiter {
+                        reply,
+                        kind: Preparation::History,
+                    },
+                    false,
+                );
+            }
+            "session/fork" if self.rpc.supports("session.fork") => {
+                let args: acp::ForkSessionRequest = match params(request.params) {
+                    Ok(args) => args,
+                    Err(error) => return reply.respond_with_error(error),
+                };
+                if let Err(error) = establishment(
+                    &args.cwd,
+                    args.mcp_servers.len(),
+                    args.additional_directories.len(),
+                ) {
+                    return reply.respond_with_error(error);
+                }
+                if self.sessions.len() + self.creating >= 128 {
+                    return reply.respond_with_error(busy());
+                }
+                self.creating += 1;
+                self.spawn(async move {
+                    let mut cwd = args.cwd.to_string_lossy().into_owned();
+                    let result = async {
+                        cwd = tokio::fs::canonicalize(&args.cwd)
+                            .await
+                            .map_err(|_| Error::invalid_params())?
+                            .into_os_string()
+                            .into_string()
+                            .map_err(|_| Error::invalid_params())?;
+                        let source = args.session_id.to_string();
+                        let history = read_history(&rpc, &source, false, Some(cwd.clone())).await?;
+                        let at = if let Some(turn) = controls.fork_turn {
+                            history
+                                .history
+                                .iter()
+                                .find_map(|event| match &event.content {
+                                    EventContent::TurnEnd(data) if data.turn_id == turn => {
+                                        Some(event.sequence)
+                                    }
+                                    _ => None,
+                                })
+                                .ok_or_else(Error::invalid_params)?
+                        } else {
+                            history.through
+                        };
+                        rpc.typed("session.fork", json!({"sessionId":source,"at":at}))
+                            .await
+                    }
+                    .await;
+                    Work::Created { reply, cwd, result }
+                });
             }
             "session/prompt" => {
                 let request: acp::PromptRequest = match params(request.params) {
@@ -500,7 +584,7 @@ impl Gateway {
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
                 };
-                if session.prompt.is_some() {
+                if session.prompt.is_some() || session.removing || session.stopping {
                     return reply.respond_with_error(busy());
                 }
                 let parts = match crate::content::parse(
@@ -563,18 +647,16 @@ impl Gateway {
                 if !self.rpc.supports(method) {
                     return reply.respond_with_error(Error::method_not_found());
                 }
-                if !matches!(self.sessions.get(&args.session_id), Some(Slot::Ready(_))) {
+                let Some(Slot::Ready(session)) = self.sessions.get_mut(&args.session_id) else {
                     return reply
                         .respond_with_error(Error::resource_not_found(Some(args.session_id)));
+                };
+                if session.removing || session.configuring {
+                    return reply.respond_with_error(busy());
                 }
-                self.spawn(async move {
-                    let result = rpc.call(method, json!({"sessionId":args.session_id})).await;
-                    Work::Removed {
-                        id: args.session_id,
-                        reply,
-                        result,
-                    }
-                });
+                session.removing = true;
+                session.pending_remove = Some((method, reply));
+                self.remove(&args.session_id);
             }
             "session/set_mode" | "session/set_config_option" => {
                 let mode = request.method == "session/set_mode";
@@ -605,7 +687,7 @@ impl Gateway {
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
                 };
-                if session.configuring {
+                if session.configuring || session.removing || session.stopping {
                     return reply.respond_with_error(busy());
                 }
                 session.configuring = true;
@@ -672,6 +754,9 @@ impl Gateway {
         let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
             return Ok(());
         };
+        if session.removing || session.stopping {
+            return Ok(());
+        }
         if let Some(prompt) = &mut session.prompt {
             prompt.cancelled = true;
             prompt.uploading.cancel();
@@ -687,6 +772,7 @@ impl Gateway {
         let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
             return;
         };
+        session.stopping = true;
         let (submission, input) = match &mut session.prompt {
             Some(prompt) => {
                 prompt.cancelling = true;
@@ -729,7 +815,14 @@ impl Gateway {
                     Ok(methods) => {
                         self.auth_methods = methods;
                         self.initialized = true;
-                        reply.respond(json!({"protocolVersion":1,"agentInfo":{"name":"dimcode","version":env!("CARGO_PKG_VERSION")},"authMethods":self.auth_methods.iter().map(|method|method.value()).collect::<Vec<_>>(),"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"sessionCapabilities":{"resume":{},"list":{}}}}))?;
+                        let mut capabilities = json!({"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"sessionCapabilities":{"resume":{},"list":{},"close":{}},"_meta":{"lody":crate::lody::capabilities(self.rpc.supports("session.fork"))}});
+                        if self.rpc.supports("session.fork") {
+                            capabilities["sessionCapabilities"]["fork"] = json!({});
+                        }
+                        if self.rpc.supports("session.delete") {
+                            capabilities["sessionCapabilities"]["delete"] = json!({});
+                        }
+                        reply.respond(json!({"protocolVersion":1,"agentInfo":{"name":"dimcode","version":env!("CARGO_PKG_VERSION")},"authMethods":self.auth_methods.iter().map(|method|method.value()).collect::<Vec<_>>(),"agentCapabilities":capabilities}))?;
                     }
                     Err(error) => reply.respond_with_error(error)?,
                 }
@@ -750,8 +843,7 @@ impl Gateway {
                         cwd,
                         Waiter {
                             reply,
-                            new: true,
-                            replay: false,
+                            kind: Preparation::New,
                         },
                         true,
                     ),
@@ -759,12 +851,14 @@ impl Gateway {
                 }
             }
             Work::Prepared { id, result } => {
-                let Some(Slot::Loading(loading)) = self.sessions.remove(&id) else {
+                let Some(Slot::Loading(mut loading)) = self.sessions.remove(&id) else {
                     return Ok(());
                 };
                 match result {
                     Ok(prepared) => {
-                        let replay = loading.waiters.iter().any(|waiter| waiter.replay);
+                        let replay = loading.waiters.iter().any(|waiter| {
+                            matches!(waiter.kind, Preparation::Load | Preparation::History)
+                        });
                         let mut session = Session {
                             cwd: loading.cwd,
                             projection: Projection::default(),
@@ -775,10 +869,27 @@ impl Gateway {
                             questions: dim_client::question::Pending::default(),
                             usage_pending: false,
                             title_revision: 0,
+                            stopping: false,
+                            removing: false,
+                            pending_remove: None,
+                            subagents: loading
+                                .previous
+                                .as_mut()
+                                .map(|previous| std::mem::take(&mut previous.subagents))
+                                .unwrap_or_default(),
                         };
                         for event in prepared.history {
                             fold_questions(&mut session.questions, "main", &event);
                             let updates = session.projection.event(&event);
+                            let snapshots = session.subagents.event(&id, &event);
+                            if self.subagent_events {
+                                for snapshot in snapshots {
+                                    self.cx.send_notification(UntypedMessage::new(
+                                        "_lody/subagents/event",
+                                        snapshot,
+                                    )?)?;
+                                }
+                            }
                             if replay {
                                 for update in updates {
                                     self.update(&id, update)?;
@@ -790,8 +901,12 @@ impl Gateway {
                         self.sessions
                             .insert(id.clone(), Slot::Ready(Box::new(session)));
                         for waiter in loading.waiters {
-                            let mut response = state.clone();
-                            if waiter.new {
+                            let mut response = if matches!(waiter.kind, Preparation::History) {
+                                json!({})
+                            } else {
+                                state.clone()
+                            };
+                            if matches!(waiter.kind, Preparation::New) {
                                 response["sessionId"] = json!(id);
                             }
                             waiter.reply.respond(response)?;
@@ -871,6 +986,7 @@ impl Gateway {
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return Ok(());
                 };
+                session.stopping = false;
                 if session
                     .prompt
                     .as_ref()
@@ -893,6 +1009,7 @@ impl Gateway {
                         prompt.reply.respond(value)?;
                     }
                 }
+                self.remove(&id);
             }
             Work::Removed { id, reply, result } => match result {
                 Ok(_) => {
@@ -903,7 +1020,12 @@ impl Gateway {
                     }
                     reply.respond(json!({}))?;
                 }
-                Err(error) => reply.respond_with_error(error)?,
+                Err(error) => {
+                    if let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) {
+                        session.removing = false;
+                    }
+                    reply.respond_with_error(error)?;
+                }
             },
             Work::Configured {
                 id,
@@ -1106,6 +1228,7 @@ impl Gateway {
                     }
                 }
                 let updates = session.projection.event(&notice.event);
+                let snapshots = session.subagents.event(&notice.session_id, &notice.event);
                 if matches!(
                     &notice.event.content,
                     EventContent::Configuration(_) | EventContent::PermissionChanged(_)
@@ -1129,6 +1252,14 @@ impl Gateway {
                     .and_then(|result| session.prompt.take().map(|prompt| (prompt.reply, result)));
                 for update in updates {
                     self.update(&notice.session_id, update)?;
+                }
+                if self.subagent_events {
+                    for snapshot in snapshots {
+                        self.cx.send_notification(UntypedMessage::new(
+                            "_lody/subagents/event",
+                            snapshot,
+                        )?)?;
+                    }
                 }
                 if let Some(options) = config_update {
                     self.update(
@@ -1242,6 +1373,27 @@ impl Gateway {
         Ok(())
     }
 
+    fn remove(&mut self, id: &str) {
+        let Some(Slot::Ready(session)) = self.sessions.get_mut(id) else {
+            return;
+        };
+        if session.stopping {
+            return;
+        }
+        let Some((method, reply)) = session.pending_remove.take() else {
+            return;
+        };
+        let id = id.to_owned();
+        let rpc = self.rpc.clone();
+        self.spawn(async move {
+            Work::Removed {
+                result: rpc.call(method, json!({"sessionId":id})).await,
+                id,
+                reply,
+            }
+        });
+    }
+
     fn questions(&mut self, id: &str) {
         let Some(Slot::Ready(session)) = self.sessions.get(id) else {
             return;
@@ -1315,7 +1467,12 @@ impl Gateway {
                 },
                 message = native.recv() => match message {
                     Some(Native::Notice { method, params }) => self.notice(method, params)?,
-                    Some(Native::Closed) | None => return Err(rpc::unavailable()),
+                    Some(Native::Closed) | None => {
+                        for (id,slot) in &mut self.sessions {
+                            if let Slot::Ready(session) = slot { for snapshot in session.subagents.disconnected(id) { if self.subagent_events { self.cx.send_notification(UntypedMessage::new("_lody/subagents/event",snapshot)?)?; } } }
+                        }
+                        return Err(rpc::unavailable());
+                    },
                 },
             }
         }
@@ -1338,8 +1495,10 @@ fn fold_questions(
 }
 
 fn decode_native<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, Error> {
-    serde_json::from_value(value)
-        .map_err(|_| Error::internal_error().data(json!({"code":"invalid_native_notification"})))
+    serde_json::from_value(value).map_err(|error| {
+        Error::internal_error()
+            .data(json!({"code":"invalid_native_notification","detail":error.to_string()}))
+    })
 }
 
 async fn read_history(

@@ -59,7 +59,13 @@ impl Peer {
             if frame["method"] == "$/cancel_request" {
                 continue;
             }
-            assert_eq!(frame["method"], "session/update", "{frame}");
+            assert!(
+                matches!(
+                    frame["method"].as_str(),
+                    Some("session/update" | "_lody/subagents/event")
+                ),
+                "{frame}"
+            );
             self.updates.push(frame);
         }
     }
@@ -77,11 +83,16 @@ impl Peer {
             );
         }
         let mut line = String::new();
-        assert_ne!(
-            self.output.read_line(&mut line).unwrap(),
-            0,
-            "ACP closed before a frame"
-        );
+        if self.output.read_line(&mut line).unwrap() == 0 {
+            let mut stderr = String::new();
+            self.child
+                .stderr
+                .as_mut()
+                .unwrap()
+                .read_to_string(&mut stderr)
+                .unwrap();
+            panic!("ACP closed before a frame: {stderr}");
+        }
         serde_json::from_str(&line).expect("stdout must contain only ACP")
     }
 
@@ -343,6 +354,154 @@ fn acp_stdio_model_choices_keep_the_catalog_provider_and_adopted_result() {
         peer.response(3)["result"]["configOptions"][0]["currentValue"],
         "next/model"
     );
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_lody_snapshots_background_lifecycle_and_terminal_fork_use_real_facts() {
+    for version in [0, 2, 1] {
+        lody_projection(version);
+    }
+}
+
+fn lody_projection(version: u32) {
+    let home = Home::new();
+    let cwd = fs::canonicalize(&home.0).unwrap();
+    let daemon = home.daemon(move |wire| {
+        let mut methods = METHODS.to_vec(); methods.push("session.fork"); wire.hello(&methods); wire.created();
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let read = wire.read("session.history"); wire.reply(&read,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let facts = vec![
+            event(9,"start","turn","start",json!({"turn_id":"turn"})),
+            event(10,"request-a","collaboration","request",json!({"turn_id":"turn","request_id":"model","call_id":"a","target":{"kind":"member","agent_id":"member-agent","session_id":"member-session"},"prompt":"A"})),
+            event(11,"delivery-a","collaboration","delivered",json!({"op_event_id":"request-a","status":"ok","agent_id":"member-agent","session_id":"member-session","input_event_id":"a-input"})),
+            event(12,"result-a","collaboration","result",json!({"request_event_id":"request-a","agent_id":"member-agent","session_id":"member-session","text":"A done","status":"completed"})),
+            event(13,"request-b","collaboration","request",json!({"turn_id":"turn","request_id":"model","call_id":"b","target":{"kind":"member","agent_id":"member-agent","session_id":"member-session"},"prompt":"B"})),
+            event(14,"delivery-b","collaboration","delivered",json!({"op_event_id":"request-b","status":"ok","agent_id":"member-agent","session_id":"member-session","input_event_id":"b-input"})),
+            event(15,"end","turn","end",json!({"turn_id":"turn","status":"completed","reason":"end_turn"})),
+            event(16,"background","exec","started",json!({"turn_id":"turn","request_id":"model","call_id":"exec","task_id":"background","description":"Detached command","output_path":"fixture-output"})),
+            event(17,"compacting","context","compaction-start",json!({"through":16,"trigger":"manual","strategy":"fixture"})),
+            event(18,"compact-cancelled","context","compaction",json!({"through":16,"start":17,"status":"cancelled","reason":"Stopped by owner"})),
+            event(19,"background-ended","exec","ended",json!({"task_id":"background","status":"cancelled","result":{"content":"Native command was cancelled","isError":true}})),
+        ];
+        for fact in &facts { wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":fact})); }
+        for _ in 0..2 {
+            let list = wire.read("session.list"); wire.reply(&list,json!([{"sessionId":"session","cwd":cwd}]));
+            let history = wire.read("session.history"); wire.reply(&history,json!({"events":facts,"through":19,"nextAfter":19,"done":true}));
+        }
+        let fork = wire.read("session.fork"); assert_eq!(fork["params"]["at"],15); wire.reply(&fork,json!({"sessionId":"forked","sequence":15}));
+        let attach = wire.read("session.attach"); assert_eq!(attach["params"]["sessionId"],"forked"); wire.reply(&attach,json!({}));
+        let history = wire.read("session.history"); wire.reply(&history,json!({"events":[],"through":15,"nextAfter":15,"done":true}));
+        let mut eof = String::new(); assert_eq!(wire.0.read_line(&mut eof).unwrap(),0);
+    });
+    let mut peer = Peer::start(&home);
+    let capabilities = if version == 0 {
+        json!({})
+    } else {
+        json!({"_meta":{"lody":{"subagentEvents":{"version":version}}}})
+    };
+    peer.send(
+        1,
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":capabilities}),
+    );
+    let initialize = peer.response(1);
+    assert_eq!(
+        initialize["result"]["agentCapabilities"]["_meta"]["lody"]["tasks"]["background"],
+        true
+    );
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    peer.response(2);
+    peer.send(
+        3,
+        "_lody/session/history/read",
+        json!({"sessionId":"session"}),
+    );
+    assert_eq!(peer.response(3)["result"], json!({}));
+    let snapshots: Vec<_> = peer
+        .updates
+        .iter()
+        .filter(|frame| frame["method"] == "_lody/subagents/event")
+        .collect();
+    assert_eq!(
+        snapshots.len(),
+        if version == 1 { 5 } else { 0 },
+        "replay cannot duplicate observed delegation transitions: {snapshots:?}"
+    );
+    if version == 1 {
+        assert_ne!(
+            snapshots[0]["params"]["runId"],
+            snapshots[3]["params"]["runId"]
+        );
+        assert_eq!(
+            snapshots[0]["params"]["snapshot"]["support"],
+            json!({"stream":[],"progress":false,"outputRead":"none","cancel":false})
+        );
+        assert_eq!(snapshots[2]["params"]["snapshot"]["state"], "completed");
+    }
+    let task = peer
+        .updates
+        .iter()
+        .find(|frame| frame["params"]["update"]["_meta"]["lody"]["task"]["status"] == "in_progress")
+        .unwrap();
+    assert_ne!(
+        task["params"]["update"]["toolCallId"],
+        task["params"]["update"]["_meta"]["lody"]["task"]["parentToolCallId"]
+    );
+    assert!(peer.updates.iter().any(
+        |frame| frame["params"]["update"]["_meta"]["lody"]["activity"]["failureReason"]
+            == "Cancelled: Stopped by owner"
+    ));
+    peer.send(4,"session/fork",json!({"sessionId":"session","cwd":home.0,"_meta":{"lody":{"forkAtTurn":{"version":1,"turnId":"turn"}}}}));
+    assert_eq!(peer.response(4)["result"]["sessionId"], "forked");
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_lody_startup_model_is_selected_before_creation_without_shared_writes() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let mut methods = METHODS.to_vec();
+        methods.push("provider.catalog");
+        wire.hello(&methods);
+        let list = wire.read("provider.list");
+        wire.reply(
+            &list,
+            json!({"providers":[{"providerId":"native-provider","enabled":true}]}),
+        );
+        let catalog = wire.read("provider.catalog");
+        wire.reply(
+            &catalog,
+            json!({"catalog":{"models":[{"id":"chosen","name":"Chosen"}],"disabledModelIds":[]}}),
+        );
+        let create = wire.created();
+        assert_eq!(
+            create["params"]["model"],
+            json!({"provider":"native-provider","modelId":"chosen"})
+        );
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let mut eof = String::new();
+        assert_eq!(wire.0.read_line(&mut eof).unwrap(), 0);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"modelId":"chosen","configOptionValues":{"model":"ignored"}}}}}));
+    assert_eq!(peer.response(2)["result"]["sessionId"], "session");
+    peer.send(3,"session/resume",json!({"sessionId":"session","cwd":home.0,"_meta":{"lody":{"sessionConfig":{"version":1,"configOptionValues":{"model":"chosen"}}}}}));
+    assert_eq!(
+        peer.response(3)["error"]["data"]["code"],
+        "unsupported_control"
+    );
+    peer.send(4,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":2,"configOptionValues":{}}}}}));
+    assert!(peer.response(4).get("error").is_some());
     peer.close();
     daemon.join().unwrap();
 }

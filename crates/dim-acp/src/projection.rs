@@ -1,6 +1,8 @@
 //! Presentation derived only from committed product facts and native progress.
 
-use dim_agent_types::{ContentBlock, ToolContent, UserInput};
+use dim_agent_types::{
+    CompactionTrigger, ContentBlock, ContextCompactionResult, ExecStatus, ToolContent, UserInput,
+};
 use dim_client::wire::{Event, EventContent, Progress};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -56,6 +58,7 @@ pub(crate) struct Projection {
     texts: HashMap<String, TextCursor>,
     thoughts: HashMap<String, TextCursor>,
     tools: HashSet<String>,
+    compactions: HashMap<u64, bool>,
 }
 
 pub(crate) fn tool_id(branch: &str, request: &str, call: &str) -> String {
@@ -109,6 +112,10 @@ impl Projection {
 
     pub(crate) fn event(&mut self, event: &Event) -> Vec<Value> {
         let mut updates = Vec::new();
+        let turn = match &event.content {
+            EventContent::TurnStart(data) => Some(data.turn_id.clone()),
+            _ => self.turn.clone(),
+        };
         match &event.content {
             EventContent::TurnStart(data) => self.turn = Some(data.turn_id.clone()),
             EventContent::Input(data) => {
@@ -148,8 +155,56 @@ impl Projection {
                 }
             }
             EventContent::ToolCompleted(data) => updates.push(json!({"sessionUpdate":"tool_call_update","toolCallId":tool_id("main", &data.request_id, &data.call_id),"status":"in_progress","content":[{"type":"content","content":{"type":"text","text":preview(&data.result.content)}}]})),
+            EventContent::ExecStarted(data) => {
+                let id = json!(["background",data.task_id]).to_string();
+                self.tool(id.clone(),&data.description,Value::Null,"in_progress",&mut updates);
+                if let Some(update) = updates.last_mut() { update["_meta"] = json!({"lody":{"task":{"version":1,"taskId":data.task_id,"kind":"background","status":"in_progress","description":data.description,"parentToolCallId":tool_id("main",&data.request_id,&data.call_id),"startedAtEpochSeconds":event.create_at as f64/1000.}}}); }
+            }
+            EventContent::ExecEnded(data) => {
+                let id = json!(["background",data.task_id]).to_string();
+                let status = if matches!(data.status,ExecStatus::Completed) {"completed"} else {"failed"};
+                self.tool(id,"Background task",Value::Null,status,&mut updates);
+                if let Some(update) = updates.last_mut() {
+                    update["content"] = json!([{"type":"content","content":{"type":"text","text":preview(&data.result.content)}}]);
+                    update["_meta"] = json!({"lody":{"task":{"version":1,"taskId":data.task_id,"kind":"background","status":status,"endedAtEpochSeconds":event.create_at as f64/1000.,"summary":preview(&data.result.content)}}});
+                    update["rawOutput"] = json!({"status":data.status});
+                }
+            }
+            EventContent::CompactionStart(data) => {
+                let automatic = !matches!(data.trigger,CompactionTrigger::Manual);
+                self.compactions.insert(event.sequence,automatic);
+                self.tool(json!(["compaction",event.sequence]).to_string(),"Context compaction",Value::Null,"in_progress",&mut updates);
+                if let Some(update) = updates.last_mut() { update["_meta"] = json!({"lody":{"activity":{"version":1,"kind":"context_compaction","automatic":automatic}}}); }
+            }
+            EventContent::Compaction(data) => {
+                let automatic = data.start.and_then(|start|self.compactions.remove(&start));
+                let (status,diagnostics,reason) = match &data.outcome {
+                    ContextCompactionResult::Completed { diagnostics,.. } => ("completed",Some(diagnostics.as_ref()),None),
+                    ContextCompactionResult::Skipped { reason,diagnostics } => ("completed",Some(diagnostics.as_ref()),Some(format!("Skipped: {reason}"))),
+                    ContextCompactionResult::Failed { error,diagnostics } => ("failed",diagnostics.as_deref(),Some(error.clone())),
+                    ContextCompactionResult::Cancelled { reason } => ("failed",None,Some(format!("Cancelled: {reason}"))),
+                };
+                self.tool(json!(["compaction",data.start.unwrap_or(event.sequence)]).to_string(),"Context compaction",Value::Null,status,&mut updates);
+                if let Some(update) = updates.last_mut() {
+                    let mut activity = json!({"version":1,"kind":"context_compaction"});
+                    if let Some(automatic) = automatic { activity["automatic"] = json!(automatic); }
+                    if let Some(diagnostics) = diagnostics {
+                        activity["usedTokensBefore"] = json!(diagnostics.estimated_input_tokens);
+                        if let Some(after) = diagnostics.estimated_output_tokens { activity["usedTokensAfter"] = json!(after); }
+                        activity["durationMs"] = json!(diagnostics.duration_ms);
+                        update["rawOutput"] = json!(diagnostics);
+                    }
+                    if let Some(reason) = reason { if status == "failed" { activity["failureReason"] = json!(reason); } update["content"] = json!([{"type":"content","content":{"type":"text","text":reason}}]); }
+                    update["_meta"] = json!({"lody":{"activity":activity}});
+                }
+            }
             EventContent::TurnEnd(_) => self.turn = None,
             _ => {}
+        }
+        if let Some(turn) = turn {
+            for update in &mut updates {
+                update["_meta"]["lody"]["turnId"] = json!(turn);
+            }
         }
         self.through = event.sequence;
         updates
@@ -174,6 +229,11 @@ impl Projection {
                     .progress(progress.thinking_offset, progress.thinking),
                 &mut updates,
             );
+        }
+        if let Some(turn) = &self.turn {
+            for update in &mut updates {
+                update["_meta"]["lody"]["turnId"] = json!(turn);
+            }
         }
         updates
     }

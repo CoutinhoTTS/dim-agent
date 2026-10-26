@@ -85,12 +85,24 @@
       ]
     },
     {
+      "id": "dim_acp::lody",
+      "crate": "dim_acp",
+      "parent": "dim_acp",
+      "file": "crates/dim-acp/src/lody.rs",
+      "unexpandedMacros": [
+        "json",
+        "matches"
+      ]
+    },
+    {
       "id": "dim_acp::projection",
       "crate": "dim_acp",
       "parent": "dim_acp",
       "file": "crates/dim-acp/src/projection.rs",
       "unexpandedMacros": [
-        "json"
+        "format",
+        "json",
+        "matches"
       ]
     },
     {
@@ -3697,6 +3709,13 @@
     },
     {
       "from": "dim_acp",
+      "to": "dim_acp::lody",
+      "references": [
+        "mod lody"
+      ]
+    },
+    {
+      "from": "dim_acp",
       "to": "dim_acp::projection",
       "references": [
         "mod projection"
@@ -3829,6 +3848,7 @@
       "references": [
         "path Config",
         "path Config::read",
+        "path crate::config::models",
         "use crate::config::Config"
       ]
     },
@@ -3847,6 +3867,14 @@
         "path crate::interaction::approval",
         "path crate::interaction::key",
         "path crate::interaction::question"
+      ]
+    },
+    {
+      "from": "dim_acp::gateway",
+      "to": "dim_acp::lody",
+      "references": [
+        "path crate::lody::Subagents",
+        "path crate::lody::controls"
       ]
     },
     {
@@ -3938,6 +3966,39 @@
       ]
     },
     {
+      "from": "dim_acp::lody",
+      "to": "dim_acp::projection",
+      "references": [
+        "path tool_id",
+        "use crate::projection::tool_id"
+      ]
+    },
+    {
+      "from": "dim_acp::lody",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path CollaborationDelivery::Error",
+        "path CollaborationDelivery::Ok",
+        "path CollaborationOutcome::Cancelled",
+        "path CollaborationOutcome::Completed",
+        "path CollaborationOutcome::Failed",
+        "use dim_agent_types::CollaborationDelivery",
+        "use dim_agent_types::CollaborationOutcome"
+      ]
+    },
+    {
+      "from": "dim_acp::lody",
+      "to": "dim_client::wire",
+      "references": [
+        "path Event",
+        "path EventContent::CollaborationDelivered",
+        "path EventContent::CollaborationRequest",
+        "path EventContent::CollaborationResult",
+        "use dim_client::wire::Event",
+        "use dim_client::wire::EventContent"
+      ]
+    },
+    {
       "from": "dim_acp::projection",
       "to": "dim_agent_types::content",
       "references": [
@@ -3954,8 +4015,21 @@
       "from": "dim_acp::projection",
       "to": "dim_agent_types::events",
       "references": [
+        "path ContextCompactionResult::Cancelled",
+        "path ContextCompactionResult::Completed",
+        "path ContextCompactionResult::Failed",
+        "path ContextCompactionResult::Skipped",
         "path UserInput",
+        "use dim_agent_types::ContextCompactionResult",
+        "use dim_agent_types::ExecStatus",
         "use dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_acp::projection",
+      "to": "dim_agent_types::model",
+      "references": [
+        "use dim_agent_types::CompactionTrigger"
       ]
     },
     {
@@ -3963,6 +4037,10 @@
       "to": "dim_client::wire",
       "references": [
         "path Event",
+        "path EventContent::Compaction",
+        "path EventContent::CompactionStart",
+        "path EventContent::ExecEnded",
+        "path EventContent::ExecStarted",
         "path EventContent::Input",
         "path EventContent::InputConsumed",
         "path EventContent::InputDeleted",
@@ -24826,6 +24904,14 @@
     }
   ],
   "unresolved": [
+    {
+      "module": "dim_acp::lody",
+      "path": "OptionValue::Boolean"
+    },
+    {
+      "module": "dim_acp::lody",
+      "path": "OptionValue::Text"
+    },
     {
       "module": "dim_agent_capabilities::file_storage::windows",
       "path": "FILE_ID_INFO::default"

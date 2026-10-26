@@ -5,6 +5,7 @@ mod config;
 mod content;
 mod gateway;
 mod interaction;
+mod lody;
 mod projection;
 mod rpc;
 

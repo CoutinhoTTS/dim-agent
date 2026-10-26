@@ -425,7 +425,7 @@ Steering 的 handoff 允许上游换 turn，并不允许脱离 ACP prompt 槽启
 | A. 共享 RPC 与宿主 | 已完成：dim-client、现有 CLI client/MCP callback 调用者 | 保留 socket/pipe/profile/frame/security 行为；Gateway 构造接收自有输入且 Deps=()，不迁移既有 CLI 插件。2 个公共传输/callback 边界测试、94 个现有 CLI flows、受影响 crate 全 target Clippy、xtask check 通过；10 个需额外环境的既有 CLI flows 未运行。无 ACP handler，无 daemon diff |
 | B. 插件与标准会话 | 已完成：dim-acp、CLI acp 入口、共享产品事件边界 | initialize/new/list/load/resume/prompt；3 个 ACP stdio flows 覆盖真实 daemon 与 loopback model、消费输入关联、emoji 去重、固定头空页和并发准备。受影响 CLI flows 共 97 通过，10 个额外环境用例未运行 |
 | C. 交互与结算 | 已完成：同一 Gateway 的 auth/permission/question/config/content | managed provider discovery、browser authenticate、terminal helper；输入撤回/stop、审批、form、mode/model、图片/文本资源和 close/delete。101 个 CLI flows 通过、10 个额外环境用例跳过；另有 2 个公共 Gateway 宿主流程验证真实 loopback callback、native exchange 和请求取消。RPC recovery 与输出/卸载结算在 E 验证 |
-| D. 有依据的 Lody 子集 | history/forkAtTurn/compaction、startup model、后台 task、最小 subagent snapshots | 普通 acpx 无未协商的自定义通知；Lody 真实消费；只声明已实现字段和 run support，含 prompt 外 task 终态、双向协商和断线 unknown；不支持控制在 native 变更前拒绝 |
+| D. 有依据的 Lody 子集 | 已完成接线：history/forkAtTurn/compaction、startup model、后台 task、最小 subagent snapshots | 9 个 ACP stdio flows 通过；覆盖固定头历史、真实终态锚点、task 与父工具独立、压缩取消、同 member 多次委派的 run 身份、startup model 优先级与非 new 覆盖拒绝。Lody 客户端消费和恢复后的新 activation 在 E 验证 |
 | E. 连接恢复、发布入口与实机 | dimcode 包、文档和验收记录 | RPC recovery、不重发不确定变更、输出队列/卸载结算；正确架构二进制启动 ACP；Lody/acpx 启动的是本次构建，不是历史 npx 缓存；隔离 home；至少完成 macOS，其他平台记录待验收 |
 
 这是串行交付范围，不为每个字段建立独立任务或 agent。实际实现路径引入 crate/依赖时运行 xtask check；装配变化按项目规则生成 graph，禁止手写 generated 输出。
@@ -435,6 +435,8 @@ A 的消融复核：传输只保留一份，CLI 继续拥有 daemon 启动策略
 B 的消融复核：没有服务注册层、业务 Session store 或额外 daemon。每个原生连接仅一个 RPC reader；每 Session 一个准备槽位合并并发建立，保留旧 runtime 只用于建立失败恢复。history cursor 校验和产品事件解析移至共享边界，删除 CLI 的重复定义。
 
 C 的消融复核：Questions 的协议解析移入 dim-client，CLI 和 Gateway 使用同一校验及答案编码；保留原有终端交互。认证只接公开账户方法和宿主 browser/callback 配置，无 token、私有 realm 或独立 OAuth 实现。配置使用原生 CAS 和采用结果，没有第二个 Provider registry。
+
+D 的消融复核：Lody 只是同一投影的 metadata 和受协商约束的通知，没有扩展注册框架、后台执行器或 member Session attach。run 映射由原生 request event 身份重建；唯一额外观察 cursor 防止显式 history 重放重复发布同一 activation 的 snapshots。取消与 close 的顺序由当前 Session 的实际在途操作管理，不新增业务状态机。
 
 ### 10.1 自动化公开流程
 
