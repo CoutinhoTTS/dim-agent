@@ -16,9 +16,9 @@ use serde_json::Value;
 use crate::model::shell::ShellRun;
 use crate::model::view::{
     ApprovalView, QueuedInput, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView,
-    TurnEnd, ViewRow, ViewSnapshot,
+    TurnEnd, ViewRow, ViewSnapshot, WorkflowView,
 };
-use crate::wire::{Event, EventContent, Progress};
+use crate::wire::{Event, EventContent, Progress, WorkflowRun, WorkflowState};
 
 /// Reasoning that is still arriving: the row shows what the Timeline holds
 /// plus the progress not written yet.
@@ -474,6 +474,87 @@ impl Projection {
 
     pub fn tasks(&self) -> &[TaskView] {
         &self.tasks
+    }
+
+    pub fn workflow(&self, run_id: &str) -> Option<&WorkflowView> {
+        self.tasks.iter().find_map(|task| match &task.kind {
+            TaskKind::Workflow(view) if task.id == run_id => Some(&**view),
+            _ => None,
+        })
+    }
+
+    fn workflow_mut(&mut self, run_id: &str) -> Option<&mut WorkflowView> {
+        self.tasks.iter_mut().find_map(|task| match &mut task.kind {
+            TaskKind::Workflow(view) if task.id == run_id => Some(&mut **view),
+            _ => None,
+        })
+    }
+
+    /// Adopts a stored run of this Session from `branch_id`.
+    pub fn set_workflow(&mut self, branch_id: &str, run: WorkflowRun) {
+        let finished = (!run.state.unfinished()).then(|| {
+            let (status, failed) = match run.state {
+                WorkflowState::Completed => ("Completed", false),
+                WorkflowState::Failed => ("Failed", true),
+                WorkflowState::Stopped => ("Stopped", false),
+                WorkflowState::Interrupted => ("Interrupted", true),
+                WorkflowState::Running | WorkflowState::Stopping => unreachable!("terminal"),
+            };
+            TaskFinish {
+                // The owner records `ended_at` with every terminal state.
+                at: run.ended_at.unwrap_or(run.created_at),
+                status,
+                failed,
+                text: String::new(),
+                exit_code: None,
+            }
+        });
+        let task = TaskView {
+            id: run.run_id.clone(),
+            branch_id: branch_id.to_owned(),
+            label: run.name.clone(),
+            started_at: run.created_at,
+            finished,
+            kind: TaskKind::Workflow(Box::new(WorkflowView {
+                stop_pending: self
+                    .workflow(&run.run_id)
+                    .is_some_and(|view| view.stop_pending),
+                unavailable: false,
+                run,
+            })),
+        };
+        match self
+            .tasks
+            .iter_mut()
+            .find(|known| matches!(known.kind, TaskKind::Workflow(_)) && known.id == task.id)
+        {
+            Some(known) => *known = task,
+            None => self.tasks.push(task),
+        }
+        self.retain_tasks();
+    }
+
+    /// A complete discovery: runs it no longer returns leave the list.
+    pub fn reconcile_workflows(&mut self, runs: Vec<(String, WorkflowRun)>) {
+        self.tasks.retain(|task| {
+            !matches!(task.kind, TaskKind::Workflow(_))
+                || runs.iter().any(|(_, run)| run.run_id == task.id)
+        });
+        for (branch_id, run) in runs {
+            self.set_workflow(&branch_id, run);
+        }
+    }
+
+    pub fn workflow_unavailable(&mut self, run_id: &str) {
+        if let Some(view) = self.workflow_mut(run_id) {
+            view.unavailable = true;
+        }
+    }
+
+    pub fn workflow_stop_pending(&mut self, run_id: &str, pending: bool) {
+        if let Some(view) = self.workflow_mut(run_id) {
+            view.stop_pending = pending;
+        }
     }
 
     fn retain_tasks(&mut self) {

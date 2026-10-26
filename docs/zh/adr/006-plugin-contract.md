@@ -5,7 +5,9 @@
 决策状态：已由仓库所有者接受（2026-10-24）；同日修订 D4，写明各运行时如何解析名字、Rust 的 key 从哪来、
 部件可以在实例内提供哪些名字，以及如何找到带前缀服务的提供者；同日改写 D3：插件是一行，每个 Session 和分支
 挂载插件为它登记的部件；2026-10-25 修订 D3 和 D4：插件在哪里运行、贡献向所有者登记、外来插件等待 rutis#642。
-2026-10-26 修订 D3：外来插件以 rutis 插件定义登记部件，rutis 0.17 以此交付了 rutis#642。
+2026-10-26 修订背景、D4 与两处说明：背景标明它描述迁移之前的状态，并写明其中哪些机制已被迁移移除；
+D4 把移除写成已完成；按层 API 与 `sessionLifecycle` 的两处说明改为现状。同日修订 D3：外来插件以 rutis
+插件定义登记部件，rutis 0.17 以此交付了 rutis#642。
 实现：P1、P2、P3、R6 与 P4 的最初形式已完成；R5 的第二种形式见 #403。各阶段见
 [插件契约设计](../design/plugin-contract.md#10-迁移)。
 
@@ -21,10 +23,13 @@
 - 取代按层划分类型的编写 API 作为目标：`Capability` trait 及其 `keys`、
   `SessionScope`/`BranchScope`、`InSession`/`InBranch`/`SessionGate`/`BranchGate`、
   `SessionService`/`BranchService`，以及 `AgentBuilder::session_plugin`/`timeline_plugin`。
-  在迁移替换它之前，这套 API 仍是已实现的 Rust 绑定。
+  迁移已移除它；D4 列出了移除的内容。
 - 替代未合并的实例挂载草案（#377）以及 #370 的决策。
 
 ## 背景
+
+本节记录作出决策的理由，因此它描述迁移之前的 `main`（dd87f6af）。此后实现了什么见开头的决策状态；
+今天成立的内容见 [Dim 如何使用 rutis](../design/rutis-usage.md)。
 
 Dim 的架构建立在一套小理论之上。[时间总线](../../architecture/rust-agent/time-bus.md)
 按序号确定顺序，让每份状态只有一个所有者，把变更作为指令交给所有者，让交接显式化，把 `before`
@@ -80,6 +85,12 @@ Dim 的架构建立在一套小理论之上。[时间总线](../../architecture/
 rutis 模型靠拢，但保留了本 ADR 拒绝的两样东西。它在名字之外保留了 Rust 的 `Service<T>` 标识。
 它还提出由 loader 强制的 Capability 角色，这是一种访问检查，而 [ADR 003](003-approval-scope.md)
 指出受信任的进程内插件没有这种检查。
+
+第 1 个后果列出的机制此后都已被移除：行自行声明所属组，App Server 不再推断；每个名字及其组只声明
+一次（[Dim 如何使用 rutis §3.4](../design/rutis-usage.md#34-服务目录)）；工具贡献只有一个标识，
+向所有者登记；贡献由提供它的部件登记，因此宿主不预注册任何贡献，也不翻译 `provides`；其他语言的行
+通过 `sessionLifecycle` 等命名服务取得发布与关闭，并直接监听总线，而不是经过中继。仍保留的是 R5 的
+第二种形式：外来功能仍是一个部件一行、各自声明所属组，直到 #403；rutis 0.17 的插件定义已为它扫清障碍。
 
 ## 决策
 
@@ -191,11 +202,12 @@ rutis 仍是外部依赖。
   - 登记撤下时，这个贡献的这一代就结束；没有旁路来标记正在退役的贡献。
   - 配置了却没有任何部件登记的名字，由所有者在用到时报告，与它报告任何缺失的贡献一样；创建 Session 时不拒绝它。
 
-实现将移除：`Capability` trait 及其 key、`SessionScope`/`BranchScope`、
+实现已移除：`Capability` trait 及其 key、`SessionScope`/`BranchScope`、
 `InSession`/`InBranch`/`SessionGate`/`BranchGate`、`SessionService`/`BranchService`、
 `session_plugin`/`timeline_plugin`、宿主侧的名称预注册、`toolContribution:*`、`sessionMethods:*` 和
-`managementMethods:*` 这些名字及其原生/外来之分、Session 行和分支行（其他语言的这些行随 #403）
-以及 App Server 对行所属组的推断，以及目录中的组已经表达的按前缀位置检查。`PublicService` 保留。它限制 Session 与分支门面向普通调用方暴露哪些分支服务，这是门面规则，不是插件规则。
+`managementMethods:*` 这些名字及其原生/外来之分、Session 行和分支行、App Server 对行所属组的推断，
+以及目录中的组已经表达的按前缀位置检查。其他语言的 Session 行和分支行在 #403 之前仍保留。
+`PublicService` 保留。它限制 Session 与分支门面向普通调用方暴露哪些分支服务，这是门面规则，不是插件规则。
 
 细节见 [Dim 如何使用 rutis §3](../design/rutis-usage.md#3-按名字的服务)；Dim 定义的名称列在
 [插件契约 §4](../design/plugin-contract.md#4-dim-的服务)。
@@ -251,7 +263,8 @@ Capability。能力重载协议（[single-tree](../../architecture/rust-agent/si
   再投递截点之后的实时事件，在每种语言中都如此。手写形式仍然有效。
 - **Session 作用域和分支作用域各有一个生命周期服务，面向每种语言：** `session` 中的 `sessionLifecycle`
   （`activated`、`closing`、`hold`）和 `branch` 中的 `branchLifecycle`（`activated`、`closing`）。进程作用域没有；
-  进程部件经 rutis 生命周期跟随宿主的启动与关闭。今天 `sessionLifecycle` 仅限 Rust，由 R2 暴露。
+  进程部件经 rutis 生命周期跟随宿主的启动与关闭。这两个服务都在各自组的服务目录中，因此每种语言都能读取
+  （R2，已在阶段 4 交付）。
 - **Rpc 把错误映射到 wire。** 贡献的方法的错误在 Rpc 处映射。部件重新抛出它收到的原生错误数据。
 
 这些以需求 R1–R3 的形式写在契约的[需求一节](../design/plugin-contract.md#9-向机制所有者提出的需求)，

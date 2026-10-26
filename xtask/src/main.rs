@@ -3,6 +3,7 @@ mod app_server;
 mod catalog;
 mod modules;
 mod plugins;
+mod types;
 #[global_allocator]
 static ALLOCATOR: allocation::MeasuredAllocator = allocation::MeasuredAllocator;
 use dim_agent_runtime::*;
@@ -19,10 +20,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("check") => {
             boundaries()?;
             catalog::check(&root()).await?;
+            types::check(&root())?;
         }
+        Some("types") => types::write(&root())?,
         _ => {
             return Err(
-                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|check".into(),
+                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|check|types"
+                    .into(),
             );
         }
     }

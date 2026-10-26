@@ -202,7 +202,7 @@ fn format_reset(iso: &str, now_ms: u64) -> Option<String> {
 }
 
 /// `YYYY-MM-DDTHH:MM:SS(.fff)?(Z|±HH:MM)` as milliseconds since the epoch.
-fn parse_rfc3339_ms(text: &str) -> Option<u64> {
+pub(crate) fn parse_rfc3339_ms(text: &str) -> Option<u64> {
     let b = text.as_bytes();
     if b.len() < 20 {
         return None;

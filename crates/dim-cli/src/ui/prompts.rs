@@ -77,6 +77,12 @@ pub enum Effect {
         session_id: String,
         projection_id: u64,
     },
+    /// Ask Workflow to stop this run.
+    StopWorkflow {
+        session_id: String,
+        projection_id: u64,
+        run_id: String,
+    },
     /// Set the default tool-approval mode.
     SetApprovals(String),
     /// Paint with this theme without saving it.

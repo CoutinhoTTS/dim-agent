@@ -2805,7 +2805,12 @@ impl rutis::host::DynPlugin for DispatchGatePlugin {
     }
 }
 
-/// `launch_team` with the gate's listener ahead of Collaboration's.
+/// `launch_team` with a branch listener that can hold the leader's dispatch.
+/// Its place among the branch's listeners is not fixed: the gate is a
+/// required part and Collaboration's listener an optional one, mounted
+/// concurrently, so Collaboration may receive an event before the gate holds
+/// it. A hold delays every later event for every listener, because the
+/// Dispatcher hands an event to all its listeners before the next.
 async fn launch_gated(gate: Arc<DispatchGate>, config: ServerConfig) -> (RunningServer, Agent) {
     launch_gated_with(gate, config, |_| {}).await
 }
@@ -2916,37 +2921,50 @@ async fn hold_until(timeline: &dim_agent_runtime::Timeline, kind: &str) {
 /// A turn stop committed before a request's `delivered` covers the request,
 /// even when the delivery's append returns before the stop is handled: the
 /// "delivered" mark follows the `delivered` event's position.
+///
+/// The order comes from the Timeline, not from the order of the branch's
+/// listeners: the member's creation is held until the stop has committed, and
+/// the gate holds an event of the test's own, committed after the request
+/// and before the stop, until `delivered` has committed. Collaboration has
+/// received the request by then and sees the stop only after `delivered`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled() {
-    let request_held = Arc::new(tokio::sync::Notify::new());
-    let request_release = Arc::new(tokio::sync::Notify::new());
+    // The leader's Timeline, from the first of its events the gate sees.
+    let leader_timeline = Arc::new(OnceLock::new());
     let gate = DispatchGate::new({
-        let (held, release) = (request_held.clone(), request_release.clone());
+        let leader_timeline = leader_timeline.clone();
         Arc::new(move |timeline, event| {
-            let (held, release) = (held.clone(), release.clone());
+            let _ = leader_timeline.set(timeline.clone());
             Box::pin(async move {
-                match &event.kind {
-                    EventKind::CollaborationRequest(_) => {
-                        held.notify_one();
-                        release.notified().await;
-                    }
-                    EventKind::StopInterrupt(_) => {
-                        hold_until(&timeline, "collaboration/delivered").await;
-                    }
-                    _ => {}
+                if event.kind.key() == "collaborationtest/barrier" {
+                    hold_until(&timeline, "collaboration/delivered").await;
                 }
             })
         })
     });
-    let (server, agent) = launch_gated(gate.clone(), ServerConfig::default()).await;
+    let hold = Arc::new(MemberHold::default());
+    let (server, agent) = launch_gated_with(gate.clone(), ServerConfig::default(), {
+        let hold = hold.clone();
+        move |builder| {
+            builder.require_feature(
+                Feature::new("collaboration-test.member-hold")
+                    .session("collaboration-test.member-hold", move |names| {
+                        Ok(Box::new(MemberHoldPlugin::new(names, hold.clone())?))
+                    }),
+            );
+        }
+    })
+    .await;
     let mut client = Client::new_version(&server, false, 3).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
+    hold.leader.set(lead.clone()).unwrap();
     let lead_session = agent.get_session(&lead).unwrap();
     let default_agent = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
         .as_str()
         .unwrap()
         .to_owned();
+    hold.armed.store(true, Ordering::SeqCst);
     say(
         &mut client,
         &lead,
@@ -2954,7 +2972,19 @@ async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled()
         "queue",
     )
     .await;
-    request_held.notified().await;
+    // Collaboration is delivering the request: its member is being created.
+    hold.entered.notified().await;
+    leader_timeline
+        .get()
+        .expect("the gate saw the leader's request")
+        .append(
+            EventKind::Extension(
+                dim_agent_types::ExtensionEvent::new("collaborationtest", "barrier", json!({}))
+                    .unwrap(),
+            )
+            .into(),
+        )
+        .unwrap();
     let stop = tokio::spawn({
         let session = lead_session.clone();
         async move { session.stop("main", "stopped".into()).await }
@@ -2967,7 +2997,7 @@ async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled()
             .then_some(())
     })
     .await;
-    request_release.notify_one();
+    hold.release.notify_one();
     stop.await.unwrap().unwrap();
     let member = poll("delivered member", async || {
         events(&lead_session)

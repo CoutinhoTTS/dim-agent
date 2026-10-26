@@ -63,7 +63,8 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 - Rust 生成器拿到它所挂进的实例的名字（附录 A），返回一个插件。这个插件可以带着插件在 `apply` 里准备好的东西。
 - 其他运行时的插件登记的不是函数，而是插件定义（R7）：用该运行时的 `definePlugin` 做出的一个值，可以闭包引用插件
   在 `apply` 里准备好的东西。每个实例用 rutis 的 `Definition::at` 挂载它的一份副本；副本在插件的运行时里运行，
-  `inject` 在该实例里解析。登记它的那一代卸载时，rutis 会结束每一份副本，所以登记不需要自己的撤销。定义不能对某个
+  `inject` 在该实例里解析。登记它的那一代卸载时，rutis 先结束每一份副本，再结束这个定义（`Definition::ended`）；
+  定义结束后，部件登记处撤掉这条登记，之后打开的实例不再挂载它。定义不能对某个
   实例什么都不返回：实例的业务配置关掉了这个功能时，副本不做任何工作。
 
 **每个插件和部件：**
@@ -126,7 +127,8 @@ Dim 不增加插件 trait、面向作者的作用域类型、解析器、manifes
 会在那里*认领*它的名字，而每次新的认领都运行一次覆盖整个 loader 的 reconcile，这也会重建那些构建被拒绝的
 副本：在某个 Session 的装配中失败的必需行可能在该 Session 创建期间被重建，每次创建 Session 或分支都会
 reconcile 整个 loader。App Server 把这些名字按各自的组共享（`register_shared_instance`），一个测试检查每个
-名字都在 Rust 绑定登记它的那个组中共享。构建脚本只生成 TypeScript 声明。
+名字都在 Rust 绑定登记它的那个组中共享。`xtask types` 把它们的 TypeScript 声明写到
+`npm/branch-services.d.ts`，该文件过期时 `xtask check` 失败。
 
 ### 3.5 各运行时如何解析名字
 
@@ -178,7 +180,7 @@ Dim 在此之上增加发布与关闭两个阶段（[插件契约 §7](plugin-co
 
 Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线事件，见[插件契约 §5.3](plugin-contract.md#53-总线事件)。
 
-*现状：*Dim 已在 rutis 0.17.0 上，本节成立。
+*现状：*Dim 已在 rutis 0.17.1 上，本节成立。
 
 ## 6. 向机制所有者提出的需求
 
@@ -210,12 +212,13 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 
 ### R6. 贡献向所有者登记
 
-- **受阻：**[ADR 002 D5](../adr/002-plugin-scope.md#d5-合同语言中立)
-  （“注册：由插件声明……而非宿主侧的 `AgentBuilder` 调用”）。宿主预先注册贡献名称
+- **R6 之前：**[ADR 002 D5](../adr/002-plugin-scope.md#d5-合同语言中立)
+  （“注册：由插件声明……而非宿主侧的 `AgentBuilder` 调用”）曾受阻：宿主预先注册贡献名称
   （`session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`），
   并把外来行的 `provides` 翻译成同样的调用。原生工具贡献和外来工具贡献有不同的 key，因此 ToolRegistry
   两者都读，并通过以同一字符串找到的 sidecar 令牌检测正在退役的外来代次（`tool_registry.rs:486-509`）；
-  Rpc 对方法命名空间也有同样的拆分。提示词来源和工具来源不对外来部件开放。
+  Rpc 对方法命名空间也有同样的拆分。提示词来源和工具来源不对外来部件开放。下面“所需机制”和“所有者”两条
+  说明了取代它的做法。
 - **考虑过的现有机制：**
   - 在实例中按名字查找贡献，靠 `rutis/service` 事件或目录列表。不采用：所有者要从框架内部（哪些行提供了哪些名字）
     得知贡献方在调用时本来就知道的事。
@@ -274,7 +277,7 @@ P3 删除了旧形式（[#375](https://github.com/arcships/dim/issues/375)）；
 | `SessionService`、`BranchService` 标记 | 注册在服务目录中的组（`names::register`） |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | 功能向部件登记处登记自己的部件（`Feature` 用 `AgentBuilder::feature` 添加，自己写的插件用 `AgentBuilder::plugin` 添加；profile 用 `require_feature`）；App Server 的进程行用 `register_part` |
 | `AgentBuilder::session_tool`、`session_methods`、`session_prompt_source`、`session_tool_source`、`host_tools`（已删除） | 所有者的 `register`，由提供贡献的部件调用：`toolRegistry`、`promptRegistry`、`sessionMethods`、`managementMethods`（R6） |
-| `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`，包括 Session 和分支级服务（§3.4）；源码无法修改的类型包进 Dim 自己的、带标记的类型。`Exports` 只生成 TypeScript 声明 |
+| `build.rs` `Exports::service_in(..)` | 类型上的 `#[rutis::service]`，包括 Session 和分支级服务（§3.4）；源码无法修改的类型包进 Dim 自己的、带标记的类型。`Exports` 只生成 TypeScript 声明，由 `xtask types` 调用 |
 | `PublicService` | 不变（门面规则） |
 
 ### A.2 绑定

@@ -204,7 +204,7 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | 工作 | Issue / 设计 | 状态 |
 | --- | --- | --- |
 | 成员 transcript 卡片、子 agent 模型策略的运行时 | [#263](https://github.com/arcships/dim/issues/263)；[成员会话](member-conversation.md) §7–9、[子 agent 模型策略](subagent-model-policy.md) | 已设计，未实现；任务面板的成员详情与停止已由 #324 交付 |
-| 任务面板中的 Workflow 运行 | [#264](https://github.com/arcships/dim/issues/264)；[Workflow 任务视图](workflow-task-view.md) | 提案，未 Ready |
+| 任务面板中的 Workflow 运行 | [#264](https://github.com/arcships/dim/issues/264)；[Workflow 任务视图](workflow-task-view.md) | 原生 CLI 已实现；真实 Workflow 包的 App Server 流程待验证 |
 | UI 事件传给 agent | [#386](https://github.com/arcships/dim/issues/386)；[Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves) | 预留约定，未设计细节 |
 | Web 第二阶段（排队、附件、fork、设置页面等） | [Web 工作区](web-workspace.md) §4、Q2 | 未设计；Q2 待决定 |
 | 没有设计的 CLI 能力：`/timeline` 与消息操作、`/queue`、Skill 引用、排队消息的附件等 | [客户端 §4](clients.md#4-gaps-and-conflicts) | 待决定是否设计 |

@@ -36,7 +36,7 @@ Session 能力向本 Session 的 `ToolRegistry` 注册模型可调用的工具�
 | 工具来源 | 提供方式 |
 | --- | --- |
 | 宿主工具 | `ToolHost`（产品根由 `WorkspaceToolsPlugin` 提供；审批在执行时由分支 ToolExecutor 经 Approval 准入，不包装 ToolHost） |
-| Session 能力工具 | 本文的 `ToolContribution`，由部件注册；`branch`、`wait`、`skill`、`ask_user`、`agent` 分别由 `BranchTool`、`Wait`、`Skills`、`Questions`、`CollaborationCapability` 以同一方式注册 |
+| Session 能力工具 | 本文的 `ToolContribution`，由部件注册；`branch`、`wait`、`skill`、`ask_user`、`agent` 分别由 `BranchTool`、`Wait`、`Skills`、`Questions`、`CollaborationSession` 以同一方式注册 |
 
 ## 2. 结构
 
@@ -148,7 +148,7 @@ New bindings automatically adopt the replacement through the existing flow below
 
 | 组件 | 作用域 | 注入 | 提供 | 被谁注入 |
 | --- | --- | --- | --- | --- |
-| `ToolRegistryPlugin` | Session | `S:ToolHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle` | `S:ToolRegistry`、`S:ToolSourcesView` | ToolBinding、PrepareModelHost；注册工具或来源的部件（BranchTool、Questions、Skills、Wait、CollaborationCapability、McpSession） |
+| `ToolRegistryPlugin` | Session | `S:ToolHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle` | `S:ToolRegistry`、`S:ToolSourcesView` | ToolBinding、PrepareModelHost；注册工具或来源的部件（BranchTool、Questions、Skills、Wait、CollaborationSession、McpSession） |
 | `ToolBindingPlugin` | 分支 | `S:ToolRegistry`、`B:Prompt`（采用入口）、`B:Timeline`、`B:BranchLifecycle`、`B:Dispatcher`、`B:BranchOpening` | `B:ToolBinding` | Loop、ToolExecutor |
 
 - 来源方注入 ToolRegistry 以注册来源（沿用第 3 节），不注入 ToolBinding。
