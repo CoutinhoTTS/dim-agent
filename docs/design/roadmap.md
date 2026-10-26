@@ -209,7 +209,7 @@ P3 的 RemoteGateway、Modality、PluginManager 等 P1/P2 落地后，开工前�
 | Web 第二阶段（排队、附件、fork、设置页面等） | [Web 工作区](web-workspace.md) §4、Q2 | 未设计；Q2 待决定 |
 | 没有设计的 CLI 能力：`/timeline` 与消息操作、`/queue`、Skill 引用、排队消息的附件等 | [客户端 §4](clients.md#4-gaps-and-conflicts) | 待决定是否设计 |
 | 文档与代码不一致：全屏终端界面、`/web` 归属、web 入口的管理方法 | [客户端 §4](clients.md#4-gaps-and-conflicts) | 待决定后修订相关文档 |
-| ACP | [#436](https://github.com/arcships/dim/issues/436)；[AcpGateway](plugins/AcpGateway.md)、[验收](acp-gateway-acceptance.md) | 支持子集已实现于 Draft PR #441，未发布；接入方 rutis 插件，App Server 不变。Lody 完整聊天受客户端 MCP 阻塞，不支持项另行评估 |
+| ACP | [#436](https://github.com/arcships/dim/issues/436)；[AcpGateway](plugins/AcpGateway.md)、[验收](acp-gateway-acceptance.md) | 支持子集已实现于 Draft PR #441，未发布；接入方 rutis 插件，App Server 不变。acpx/Lody 基本聊天已验收，不支持项另行评估 |
 | 远程设备 | [RemoteGateway](plugins/RemoteGateway.md) | 草案，P3 |
 
 ## 4. 依赖图

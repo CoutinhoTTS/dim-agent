@@ -143,7 +143,7 @@ Content mappings are in plan §4.3; event projections are in §7. The existing C
 
 ### A.4 Acceptance
 
-[Plan §10](../acp-gateway-implementation.md#10-交付单元和验收顺序) defines public-flow checks and isolated client commands. The [acceptance record](../acp-gateway-acceptance.md) contains actual results: acpx chat passes; Lody's initialize/new/close probe passes, but full chat is blocked by a nonempty client MCP configuration. Desktop UI, Dim consuming external ACP agents, resource nodes and full Lody parity are outside this delivery.
+[Plan §10](../acp-gateway-implementation.md#10-交付单元和验收顺序) defines public-flow checks and isolated client commands. The [acceptance record](../acp-gateway-acceptance.md) contains actual results: acpx and Lody basic chat pass, as does Lody's initialize/new/close probe. Client MCP configuration is ignored. Desktop UI, Dim consuming external ACP agents, resource nodes and full Lody parity are outside this delivery.
 
 ### A.5 Client labels
 

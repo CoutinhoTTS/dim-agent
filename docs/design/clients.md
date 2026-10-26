@@ -41,7 +41,7 @@ Dashed boxes are outside this repository (Desktop) or not implemented (remote de
 | Native CLI `dimcode` | `crates/dim-cli`, `crates/dimcode` | Three interfaces in one executable: the line client (`--no-tui` or no terminal), the scrollback terminal UI (default) and the fullscreen terminal UI; `/tui` switches the two terminal UIs in-process | Implemented | [Tui](plugins/Tui.md), [CLI commands](cli-commands.md), [native CLI contract](../../crates/dim-cli/README.md) |
 | Web workspace | `web/` (Vue 3), entry in `crates/dim-app-server/src/web_entry.rs` | Browser frontend over a loopback-only web entry, opened by `dimcode web` or `/web` | Phase 1 implemented | [Web workspace](web-workspace.md) |
 | Desktop | Its own repository | Desktop application | Outside this repository | This repository owns only the App Server contract it uses (§5) |
-| ACP | `crates/dim-acp` | reusable client-host rutis plugin; `dimcode acp` is the stdio entry, public RPC v3 to the unchanged daemon | Supported subset implemented, unreleased (#436, Draft PR #441); Lody full chat blocked by client MCP | [AcpGateway](plugins/AcpGateway.md), [acceptance](acp-gateway-acceptance.md) |
+| ACP | `crates/dim-acp` | reusable client-host rutis plugin; `dimcode acp` is the stdio entry, public RPC v3 to the unchanged daemon | Supported subset implemented, unreleased (#436, Draft PR #441); acpx/Lody basic chat verified | [AcpGateway](plugins/AcpGateway.md), [acceptance](acp-gateway-acceptance.md) |
 | Remote devices | — | Paired devices through RemoteGateway; absorbs the phase-1 web entry | Draft, P3, not implemented | [RemoteGateway](plugins/RemoteGateway.md) |
 
 ## 2. What clients share

@@ -143,7 +143,7 @@ stdout 仅 ACP。诊断不泄漏凭据、账户 secret、完整 prompt 或无关
 
 ### A.4 验收
 
-[计划 §10](../../../design/acp-gateway-implementation.md#10-交付单元和验收顺序) 定义公开 flow 和隔离客户端命令。[验收记录](../../../design/acp-gateway-acceptance.md) 记录实际结果：acpx 聊天通过；Lody initialize/new/close 探测通过，完整聊天被非空客户端 MCP 配置阻塞。Desktop UI、Dim 调用外部 ACP agent、资源节点和全量 Lody parity 不在本次交付中。
+[计划 §10](../../../design/acp-gateway-implementation.md#10-交付单元和验收顺序) 定义公开 flow 和隔离客户端命令。[验收记录](../../../design/acp-gateway-acceptance.md) 记录实际结果：acpx、Lody 基本聊天和 Lody initialize/new/close 探测通过；客户端 MCP 配置被忽略。Desktop UI、Dim 调用外部 ACP agent、资源节点和全量 Lody parity 不在本次交付中。
 
 ### A.5 Client label
 

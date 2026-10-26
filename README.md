@@ -43,8 +43,8 @@ Run the native stdio gateway from an ACP client such as acpx:
 The gateway connects to the existing local App Server; it owns protocol I/O,
 session projection and connection recovery. Mode/model options and managed
 account login depend on the daemon's installed capabilities. Client-supplied MCP
-servers and additional workspace roots are unsupported. Lody Nightly's automatic
-MCP injection currently blocks its full chat flow. See the
+configuration is accepted and ignored; Sessions use their native tools.
+Additional workspace roots are unsupported. See the
 [implementation contract](docs/design/acp-gateway-implementation.md) and
 [acceptance record](docs/design/acp-gateway-acceptance.md) for supported methods,
 limits and verification.

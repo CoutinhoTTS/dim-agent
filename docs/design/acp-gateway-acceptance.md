@@ -7,9 +7,9 @@
 | 项目 | 验收值 |
 | --- | --- |
 | 日期 / 平台 | 2026-10-26，macOS arm64 |
-| 实现源码 commit | `2bd11b0881a10f06fe387b0c37fd02b91a19b6bb` |
+| 实现源码 commit | `7b5f2693e67e0dc0ffade6a174f9903a0f164b4b` |
 | Native executable | `dimcode 0.1.0-alpha.5`，本仓库 `cargo build --locked -p dimcode`，Mach-O arm64 |
-| Executable SHA-256 | `2cd99bb8d62e93defa8dcd5c37249b2249526b0c227989805cb7ca717a98b9dc` |
+| Executable SHA-256 | `fd97c07e29178472aadc9a01571808266b5d83a6812c31e561521f847737c5cd` |
 | Cargo.lock SHA-256 | `70db7931ea58e9ffd0e90dcf4c3062923620dcd4a1e1a3cc4dde84de3042b811` |
 | ACP | protocol v1；Rust SDK 3.5.0，schema 1.12.0；源协议及 Lody Core 固定版本见合同 §2 |
 | acpx | 0.7.0 |
@@ -23,6 +23,7 @@
 | --- | --- |
 | CLI compatibility | 全量 CLI 回归 110 passed，10 个既有环境依赖用例 ignored；补充的恢复截止测试独立通过。共 111 个用例有通过证据，不宣称一次全量 111 passed |
 | ACP stdio | 15 个 `acp_stdio` flows 和一个真实 CLI terminal-auth helper flow 通过；另一个真实 30 秒恢复截止 flow 通过，最终慢输出诊断复核通过 |
+| 客户端 MCP 兼容 | 三个受影响的公开 flow 通过，覆盖 new/load/resume/fork 接受 HTTP/stdio MCP 配置而不启动或转发，且原生 prompt 正常结束；非空 additionalDirectories 仍明确拒绝 |
 | 共享传输 | `dim-client` 两个公共连接/callback 测试通过；身份/profile 校验、交错响应、半帧取消和受限 loopback callback |
 | Browser authentication | `dim-acp` 三个公共宿主 flow 通过：真实 callback listener/native complete、请求取消、EOF 时先取消自己的 pending attempt 再释放 RPC |
 | 静态检查 | 受影响 crate 的 all-target Clippy、格式和 whitespace 检查通过 |
@@ -63,18 +64,16 @@ session/prompt -> agent_message_chunk: ACP_ACCEPTANCE_OK
 EOF -> local cleanup and native detach
 ```
 
-Lody 自定义命令使用相同 native executable 和隔离配置。实际能力探测完成 `initialize → session/new (mcpServers:[]) → session/close`，UI 显示“就绪”。这证明其握手和 Session 建立/关闭已消费 Gateway 的实际响应。
+Lody 自定义命令使用相同 native executable 和隔离配置。能力探测完成 `initialize → session/new (mcpServers:[]) → session/close`，UI 显示“就绪”。真实聊天的 `session/new` 携带一个名为 `lody` 的 MCP server；Gateway 忽略该配置，成功返回 native Session，随后 prompt 正常结束，Lody UI 显示 `ACP_ACCEPTANCE_OK` 并恢复可发送状态。
 
-**Lody 完整聊天未通过。** 真实会话的 `session/new` 自动携带一个 MCP server；工作区 MCP 目录为空，具体注入来源没有据此推定。请求在任何 native Session 创建之前被拒绝。协议摘要只保留 method、字段名、cwd、MCP 数量和能力标志，不保存 MCP 参数、环境变量、授权 URL 或 token。不能把能力探测成功记作聊天成功。
-
-合同明确不支持客户端 MCP 的 Session 绑定。Gateway 返回 `-32602 / unsupported_mcp_servers`，不会忽略配置后伪称支持，也不会将临时客户端配置写入共享 home。完整 Lody 聊天需要客户端不发送该配置，或另行确定已有 MCP 所有者如何承接连接级配置与生命周期；本交付没有为此修改 core/App Server。关联范围见 #436、#5 和合同 §12。
+协议摘要只保留 method、字段名、cwd、MCP 数量/名称和能力标志，不保存 prompt 正文、MCP 参数、环境变量、授权 URL 或 token。该验收证明基本聊天可用，不表示注入的 MCP 工具已接入。所有 Session 建立入口均接受并忽略 mcpServers，不启动、连接、转发或持久化这些服务器，会话继续使用原生工具。客户端 MCP 的实际接入另按合同 §12 评估；core/App Server 不变。
 
 ## Limits and unverified environments
 
 - 私有 OAuth 插件的真实账户、浏览器授权与令牌交换未实机验收；公开 managed-provider RPC、callback 和取消路径已有测试。私有 realm/token 实现不进入本仓库。
 - Windows/Linux 实机、npm 发布包和 10 个需要额外环境的既有 ignored flows 未验收。本次没有执行 release、publish 或 merge。
 - 本次运行受影响范围的测试和 Clippy；workspace 全量 Clippy/test 及 CI 的 ignored profiles 没有在本机运行，仍须按 AGENTS.md 在合入前完成。
-- Lody GUI 的图片、审批、form、model/mode 和扩展展示未通过完整聊天链路；对应 Gateway 协议流由公开 stdio 测试验证。
+- Lody GUI 的图片、审批、form、model/mode 和扩展展示未实机验收；对应 Gateway 协议流由公开 stdio 测试验证。
 - `providers/*`、Goal、steer/handoff、Lody 精确 token usage、quota、subagent 查询/输出/取消、scheduled tasks、客户端 MCP/terminal/fs backend 等维持合同中的不支持/延期状态。不能以 native 存在某个入口就声明整个扩展已支持。
 
 ## Ablation review

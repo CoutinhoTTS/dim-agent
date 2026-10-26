@@ -5,7 +5,7 @@
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
 - [AcpGateway implementation contract](design/acp-gateway-implementation.md)（中文，#436）：protocol mapping, client-host plugin wiring, lifecycle and unsupported features
-- [AcpGateway acceptance](design/acp-gateway-acceptance.md)（中文）：automated public flows, acpx runtime verification and the Lody MCP limitation
+- [AcpGateway acceptance](design/acp-gateway-acceptance.md)（中文）：automated public flows, acpx/Lody runtime verification and client MCP behavior
 - [Development plan and priorities](design/roadmap.md)（中文）
 - [ADR 002 — Plugin scope](adr/002-plugin-scope.md)（[中文](zh/adr/002-plugin-scope.md)）
 - [ADR 003 — Approval scope](adr/003-approval-scope.md)（[中文](zh/adr/003-approval-scope.md)）
