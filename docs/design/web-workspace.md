@@ -139,7 +139,7 @@ Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` onl
 Web workspace stopped.
 ```
 
-The daemon serves the frontend directory it was started with (§2.4); a running daemon keeps that directory, or its embedded build, until `dimcode daemon stop`.
+The frontend directory is fixed when the daemon starts (§2.4); a daemon started without `--web-assets` reads `<product home>/web` on each open, so a frontend installed or replaced there is used without a restart, and an embedded build serves only while that directory has no `index.html`.
 
 ## 4. Frontend
 

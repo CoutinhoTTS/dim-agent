@@ -28,8 +28,8 @@ Commands:\n\
                                    this workspace's stored enablement\n\
   daemon stop                      Gracefully stop an existing daemon\n\
   web [--port N] [--no-open]       Hold the Web workspace until Ctrl+C
-  web --off                        Turn off the daemon-owned Web switch
-  web install                      Install this version's Web workspace\n\
+web --off                        Turn off the daemon-owned Web switch
+web install                      Install this version's Web workspace\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
   --image PATH                     Add a local image to exec (repeatable)\n\
