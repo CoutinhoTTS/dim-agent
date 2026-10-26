@@ -808,6 +808,11 @@ impl Worker {
                             url: state.url,
                         });
                     }
+                    Err(error) if client::app_error(&error) == Some("web_assets_missing") => {
+                        let executable = std::env::current_exe().unwrap_or_default();
+                        let (problem, fix) = client::web_missing(&executable, &self.options.home);
+                        self.send(Update::Notice(format!("{problem}. {fix}.")));
+                    }
                     Err(error) => self.send(Update::Notice(format!("Web: {error}"))),
                 }
             }

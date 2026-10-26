@@ -393,17 +393,32 @@ fn web_assets_in(configured: Option<OsString>, executable: &Path, home: &Path) -
         .find(|directory| directory.join("index.html").is_file())
 }
 
-/// Where the user puts the Web workspace, for the message when it is missing.
-pub fn web_assets_hint(executable: &Path, home: &Path) -> String {
-    let beside = executable.parent().and_then(Path::parent).map_or_else(
-        || "../web".to_owned(),
-        |root| root.join("web").display().to_string(),
-    );
-    format!(
-        "install the npm package dimcode with its optional dependencies (dimcode-web), or unpack dimcode-web-{}.tar.gz so that index.html is at {beside} or {}",
-        env!("CARGO_PKG_VERSION"),
-        home.join("web").display()
-    )
+/// Why the daemon has no Web workspace and how to fix it, as two sentences
+/// without their full stops. A daemon started before the frontend was
+/// installed keeps serving without it until it restarts; otherwise the
+/// frontend is installed the way this copy was, or unpacked from its archive.
+pub fn web_missing(executable: &Path, home: &Path) -> (String, String) {
+    if web_assets(executable, home).is_some() {
+        return (
+            "The Web workspace was installed after the daemon started".into(),
+            "Restart the daemon with `dimcode daemon stop`, then try again".into(),
+        );
+    }
+    let fix = match crate::update::reinstall(executable) {
+        Some(command) => format!("Install it with `{command}`"),
+        None => {
+            let beside = executable.parent().and_then(Path::parent).map_or_else(
+                || "../web".to_owned(),
+                |root| root.join("web").display().to_string(),
+            );
+            format!(
+                "Install it by unpacking dimcode-web-{}.tar.gz so that index.html is in {beside} or {}",
+                env!("CARGO_PKG_VERSION"),
+                home.join("web").display()
+            )
+        }
+    };
+    ("The Web workspace is not installed".into(), fix)
 }
 
 /// The name the daemon shows in process lists.

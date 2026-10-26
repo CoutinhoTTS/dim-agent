@@ -154,6 +154,13 @@ fn installer(exe: &Path, package: &str, version: &str) -> Option<Install> {
     })
 }
 
+/// How to install this version again the way this copy was installed, which
+/// also brings back an optional package the first install missed, such as
+/// `dimcode-web`; `None` for a copy no package manager installed.
+pub fn reinstall(exe: &Path) -> Option<String> {
+    installer(exe, &package(), env!("CARGO_PKG_VERSION")).map(|install| install.command_line())
+}
+
 /// npm and bun reinstall a package in place, so this executable is the
 /// updated one afterwards; pnpm, yarn and volta move it, so the package's
 /// command on `PATH` starts it.

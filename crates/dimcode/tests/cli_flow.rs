@@ -4402,6 +4402,48 @@ fn web_off_clears_the_daemon_switch() {
 }
 
 #[test]
+fn web_without_the_web_workspace_says_how_to_get_it() {
+    // Not installed at all, then installed after this daemon started: the
+    // command says what to do and exits 1, without an error of its own.
+    for installed in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            let hello = wire.read("hello");
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":"0.1.0","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+            let open = wire.read("web.open");
+            wire.send(json!({"jsonrpc":"2.0","id":open["id"],"error":{"code":-32000,"message":"This App Server has no Web workspace","data":{"appError":"web_assets_missing"}}}));
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command
+            .args(["web", "--no-open"])
+            .env_remove("DIMCODE_WEB_ASSETS");
+        if installed {
+            fs::create_dir_all(home.0.join("web")).unwrap();
+            fs::write(home.0.join("web/index.html"), "<!doctype html>").unwrap();
+        }
+        let output = command.output().unwrap();
+        daemon.join().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(output.stdout.is_empty());
+        let expected = if installed {
+            "The Web workspace was installed after the daemon started.\nRestart the daemon with `dimcode daemon stop`, then try again.\n".to_owned()
+        } else {
+            format!(
+                "The Web workspace is not installed.\nInstall it by unpacking dimcode-web-{}.tar.gz so that index.html is in ",
+                env!("CARGO_PKG_VERSION")
+            )
+        };
+        assert!(stderr.starts_with(&expected), "{stderr}");
+        assert!(!stderr.contains("Error"), "{stderr}");
+    }
+}
+
+#[test]
 fn tui_web_toggles_the_daemon_switch_without_leaving() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -4426,13 +4468,17 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
         );
         let toggle = wire.read("web.toggle");
         wire.reply(&toggle, json!({"enabled":false,"open":false}));
+        let toggle = wire.read("web.toggle");
+        wire.send(json!({"jsonrpc":"2.0","id":toggle["id"],"error":{"code":-32000,"message":"This App Server has no Web workspace","data":{"appError":"web_assets_missing"}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
         }
     });
     let mut command = home.command();
-    command.env("DIMCODE_OAUTH_MANUAL", "1");
+    command
+        .env("DIMCODE_OAUTH_MANUAL", "1")
+        .env_remove("DIMCODE_WEB_ASSETS");
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("test / model");
     terminal.write(b"/web\r");
@@ -4440,6 +4486,10 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
     // The interface is still the same terminal client.
     terminal.write(b"/web\r");
     terminal.until("Web interface off");
+    // A daemon without the frontend gets a hint, not an RPC error.
+    terminal.write(b"/web\r");
+    terminal.until("The Web workspace is not installed. Install it by unpacking");
+    assert!(!terminal.transcript.contains("RPC"));
     terminal.write(b"/exit\r");
     let status = terminal.wait();
     daemon.join().unwrap();
