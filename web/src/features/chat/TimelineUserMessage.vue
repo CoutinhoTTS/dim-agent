@@ -5,7 +5,7 @@ import { Check, ChevronDown, Copy, Quote } from "lucide-vue-next"
 import { copyText } from "../../clipboard"
 import { formatTimelineTimestamp } from "./timeline-time"
 
-const props = defineProps<{ text: string; at: number }>()
+const props = defineProps<{ text: string; at: number; quotable: boolean }>()
 const emit = defineEmits<{ quote: [text: string] }>()
 const { t, locale } = useI18n()
 const content = ref<HTMLElement>()
@@ -47,7 +47,7 @@ async function copy(): Promise<void> {
         <Check v-if="copied" class="is-copied" aria-hidden="true" />
         <Copy v-else aria-hidden="true" />
       </button>
-      <button class="ui-icon-button" data-variant="ghost" data-size="sm" type="button" v-tooltip="t('message.quote')" :aria-label="t('message.quote')" @click="emit('quote', text)">
+      <button v-if="quotable" class="ui-icon-button" data-variant="ghost" data-size="sm" type="button" v-tooltip="t('message.quote')" :aria-label="t('message.quote')" @click="emit('quote', text)">
         <Quote aria-hidden="true" />
       </button>
     </div>

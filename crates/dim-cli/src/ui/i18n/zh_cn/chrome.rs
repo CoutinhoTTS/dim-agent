@@ -60,6 +60,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Run a shell command · Esc to exit" => "输入 shell 命令 · Esc 退出",
         "! shell mode" => "! shell 模式",
         "!! shell mode · not sent to the model" => "!! shell 模式 · 不发送给模型",
+        "Leave shell mode to quote a message" => "退出 shell 模式后才能引用消息",
         "A shell command is already running" => "已有 shell 命令在运行",
         "Running… · Ctrl+C to interrupt · {seconds}s" => "运行中… · Ctrl+C 中断 · {seconds}s",
         "exit code {code}" => "退出码 {code}",

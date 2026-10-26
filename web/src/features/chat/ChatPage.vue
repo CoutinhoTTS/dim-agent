@@ -73,7 +73,7 @@ function selectModel(model: ModelId): Promise<void> {
         <span v-if="view.running" class="ui-badge session-running" data-tone="primary"><span class="status-dot" data-state="running" aria-hidden="true" />{{ t(view.stopping ? "status.stopping" : "status.running") }}</span>
       </header>
     </div>
-    <TimelineView :rows="view.rows" :running="view.running" @quote="composer?.quote($event)" />
+    <TimelineView :rows="view.rows" :running="view.running" :quotable="!approval" @quote="composer?.quote($event)" />
     <div v-if="approval" class="composer-panel">
       <ApprovalPrompt :key="approval.requestId" :session-id="sessionId" :request="approval" />
     </div>

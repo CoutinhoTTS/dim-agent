@@ -1,0 +1,68 @@
+[
+  {
+    "name": "empty message leaves the draft",
+    "draft": "draft",
+    "message": "",
+    "result": "draft"
+  },
+  {
+    "name": "a lone newline is empty",
+    "draft": "",
+    "message": "\n",
+    "result": ""
+  },
+  {
+    "name": "one line",
+    "draft": "",
+    "message": "fix it",
+    "result": "> fix it\n\n"
+  },
+  {
+    "name": "multiline",
+    "draft": "",
+    "message": "first\nsecond",
+    "result": "> first\n> second\n\n"
+  },
+  {
+    "name": "consecutive blank lines",
+    "draft": "",
+    "message": "a\n\n\nb",
+    "result": "> a\n>\n>\n> b\n\n"
+  },
+  {
+    "name": "one trailing newline is dropped",
+    "draft": "",
+    "message": "a\n",
+    "result": "> a\n\n"
+  },
+  {
+    "name": "a second trailing newline is a blank line",
+    "draft": "",
+    "message": "a\n\n",
+    "result": "> a\n>\n\n"
+  },
+  {
+    "name": "CRLF line endings",
+    "draft": "",
+    "message": "a\r\nb\r\n",
+    "result": "> a\n> b\n\n"
+  },
+  {
+    "name": "draft without a trailing newline",
+    "draft": "why?",
+    "message": "a",
+    "result": "why?\n\n> a\n\n"
+  },
+  {
+    "name": "draft ending in one newline",
+    "draft": "why?\n",
+    "message": "a",
+    "result": "why?\n\n> a\n\n"
+  },
+  {
+    "name": "draft ending in two newlines",
+    "draft": "why?\n\n",
+    "message": "a",
+    "result": "why?\n\n> a\n\n"
+  }
+]

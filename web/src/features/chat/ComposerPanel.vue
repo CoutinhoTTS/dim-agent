@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n"
 import { ArrowUp, Square } from "lucide-vue-next"
 import type { ModelId } from "../../rpc/protocol"
 import ComposerModelMenu from "./ComposerModelMenu.vue"
+import { quoteInto } from "./quote"
 
 /**
  * The message composer: a growing text field, the model menu, and one button
@@ -83,12 +84,9 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-/** Appends `message` to the draft as a Markdown quote and a blank line, keeping the draft. */
+/** Quotes `message` at the end of the draft (see quote.ts). */
 async function quote(message: string): Promise<void> {
-  const lines = message.split("\n").map((line) => (line === "" ? ">" : `> ${line}`))
-  const draft = text.value
-  const gap = draft === "" || draft.endsWith("\n\n") ? "" : draft.endsWith("\n") ? "\n" : "\n\n"
-  text.value = `${draft}${gap}${lines.join("\n")}\n\n`
+  text.value = quoteInto(text.value, message)
   await nextTick()
   resize()
   const element = field.value

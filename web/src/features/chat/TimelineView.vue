@@ -9,7 +9,8 @@ import TimelineUserMessage from "./TimelineUserMessage.vue"
 import TimelineWorkRow from "./TimelineWorkRow.vue"
 import { groupRows } from "./work"
 
-const props = defineProps<{ rows: readonly TimelineRow[]; running: boolean }>()
+/** `quotable`: the composer is shown, so a message can be quoted into it. */
+const props = defineProps<{ rows: readonly TimelineRow[]; running: boolean; quotable: boolean }>()
 const emit = defineEmits<{ quote: [text: string] }>()
 const { t } = useI18n()
 const viewport = ref<HTMLElement>()
@@ -97,7 +98,7 @@ onMounted(() => void toEnd())
               @toggle="expandedGroups[entry.key] = !expandedGroups[entry.key]"
               @toggle-item="expandedItems[$event] = !expandedItems[$event]"
             />
-            <TimelineUserMessage v-else-if="entry.row.kind === 'user'" :text="entry.row.text" :at="entry.row.at" @quote="emit('quote', $event)" />
+            <TimelineUserMessage v-else-if="entry.row.kind === 'user'" :text="entry.row.text" :at="entry.row.at" :quotable="quotable" @quote="emit('quote', $event)" />
             <article v-else-if="entry.row.kind === 'assistant'" class="timeline-row" data-role="assistant">
               <strong class="sr-only">{{ t("chat.assistant") }}</strong>
               <ChatMarkdown :content="entry.row.text" :final="!entry.row.streaming" :message-id="entry.row.key" />

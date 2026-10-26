@@ -473,8 +473,11 @@ fn run_terminal(
                         full.follow();
                     }
                     KeyCode::Char('q') if key.mods.0 == 0 => {
-                        if let Some(text) = full.focused_text(&app) {
-                            app.composer.quote(&text);
+                        if let Some(text) = full.focused_text(&app)
+                            && !app.composer.quote(&text)
+                            && app.composer.shell().is_some()
+                        {
+                            app.set_notice(t("Leave shell mode to quote a message"));
                         }
                         full.clear_focus();
                         full.follow();
