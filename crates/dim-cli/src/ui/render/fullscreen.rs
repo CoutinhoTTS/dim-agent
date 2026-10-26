@@ -468,15 +468,23 @@ impl FullScreen {
         doc.card_at(index, self.layout_cols, row)
     }
 
-    /// Scrolls so the picked message's box is on screen, its top border at
-    /// the top of the viewport when it was not.
+    /// Scrolls so the picked message's box or member card is on screen, its
+    /// top at the top of the viewport when it was not: a card inside a tall
+    /// tool group is revealed itself, not the group's first row.
     fn reveal_focus(&mut self, doc: &dyn Document) {
         self.sync(doc);
         let Some(index) = self.focus.and_then(|id| id.checked_sub(self.base)) else {
             return;
         };
-        let (Some(&start), Some(&end)) = (self.starts.get(index), self.starts.get(index + 1))
-        else {
+        let rows = match self.focus_card {
+            Some(_) => self.card_focus_rows(doc),
+            None => self
+                .starts
+                .get(index)
+                .zip(self.starts.get(index + 1))
+                .map(|(s, e)| (*s, *e)),
+        };
+        let Some((start, end)) = rows else {
             return;
         };
         let top = self.top();

@@ -1857,3 +1857,61 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
     terminal.wait();
     daemon.join().unwrap();
 }
+
+#[test]
+fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["agent.list"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        // A failed request and a still-starting one name Agents the list
+        // never returns.
+        let mut events = Vec::new();
+        events.extend(agent_request(
+            1,
+            "r1",
+            "call-1",
+            json!({"kind":"agent","agent_id":"deleted-agent"}),
+            "Ask a deleted Agent",
+        ));
+        events.push(fact(
+            "failed-4",
+            4,
+            4000,
+            "collaboration",
+            "delivered",
+            json!({"op_event_id":"req-1","status":"error","error":"agent_not_found"}),
+        ));
+        events.extend(agent_request(
+            5,
+            "r2",
+            "call-2",
+            json!({"kind":"agent","agent_id":"unlisted-agent"}),
+            "Ask an unlisted Agent",
+        ));
+        wire.reply(
+            &history,
+            json!({"events":events,"through":7,"nextAfter":7,"done":true}),
+        );
+        let mut requests = [wire.read_any(), wire.read_any()];
+        requests.sort_by_key(|request| request["method"].to_string());
+        let [providers, list] = requests;
+        assert_eq!(providers["method"], "account.providers");
+        assert_eq!(list["method"], "agent.list");
+        wire.reply(&providers, json!([]));
+        wire.reply(&list, json!([]));
+        // One read covered both ids; a reply without them is not retried.
+        wire.quiet(Duration::from_millis(1000));
+    });
+    let mut command = home.command();
+    command.arg("--fullscreen");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("Agent: unlisted-agent");
+    daemon.join().unwrap();
+    assert!(terminal.transcript.contains("agent_not_found"));
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}

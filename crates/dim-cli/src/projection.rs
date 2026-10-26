@@ -60,6 +60,9 @@ pub struct Projection {
     cards: HashMap<String, usize>,
     /// Native Agent names from `agent.list`, by Agent id.
     agent_names: HashMap<String, String>,
+    /// Agent ids a finished `agent.list` read was asked to name, whether or
+    /// not it returned them: only a card naming another id reads again.
+    agents_read: std::collections::HashSet<String>,
 }
 
 impl Projection {
@@ -218,7 +221,11 @@ impl Projection {
                         CollaborationTarget::Agent { agent_id }
                         | CollaborationTarget::Member { agent_id, .. } => {
                             let name = self.agent_names.get(agent_id).unwrap_or(agent_id);
-                            (name.clone(), Some(agent_id.clone()))
+                            // A provider member's id is no native Agent to name.
+                            (
+                                name.clone(),
+                                (!agent_id.contains(':')).then(|| agent_id.clone()),
+                            )
                         }
                         CollaborationTarget::Temporary { profile } => (profile.name.clone(), None),
                     };
@@ -284,11 +291,14 @@ impl Projection {
                     update(&mut card.task);
                     // The Agent that actually took the request; a temporary
                     // profile keeps its own name.
-                    if let Some((name, agent_id)) = delivered
-                        && card.agent_id.is_some()
-                    {
-                        card.agent = name;
-                        card.agent_id = agent_id;
+                    match delivered {
+                        Some((name, agent_id)) if card.agent_id.is_some() => {
+                            card.agent = name;
+                            card.agent_id = agent_id;
+                        }
+                        Some(_) => {}
+                        // No member took the request: its id names no Agent to read.
+                        None => card.agent_id = None,
                     }
                 }
             }
@@ -697,8 +707,10 @@ impl Projection {
         }
     }
 
-    /// Names native Agents on their cards, from one shared `agent.list`.
-    pub fn name_agents(&mut self, names: HashMap<String, String>) {
+    /// Names native Agents on their cards, from one shared `agent.list`
+    /// that was asked to name `asked`.
+    pub fn name_agents(&mut self, names: HashMap<String, String>, asked: Vec<String>) {
+        self.agents_read.extend(asked);
         let indexes: Vec<usize> = self.cards.values().copied().collect();
         for index in indexes {
             let Some(name) = self.rows[index]
@@ -719,15 +731,17 @@ impl Projection {
         self.agent_names = names;
     }
 
-    /// Whether a card names a native Agent `agent.list` has not named yet.
-    pub fn unnamed_agents(&self) -> bool {
-        self.cards.values().any(|index| {
-            self.rows[*index]
-                .member
-                .as_ref()
-                .and_then(|card| card.agent_id.as_ref())
-                .is_some_and(|id| !self.agent_names.contains_key(id))
-        })
+    /// Native Agents the cards name that no `agent.list` read covered yet.
+    pub fn unnamed_agents(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .cards
+            .values()
+            .filter_map(|index| self.rows[*index].member.as_ref()?.agent_id.clone())
+            .filter(|id| !self.agent_names.contains_key(id) && !self.agents_read.contains(id))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     /// The member's latest activity as one line: what it runs or says now.

@@ -65,13 +65,17 @@ pub(super) struct Members {
     /// Members whose read failed or whose Session closed: an unfinished card
     /// does not reattach them; opening the member again does.
     unavailable: HashSet<String>,
-    /// The `agent.list` read in flight, with the attachment it names.
-    agents: Option<(u64, u64)>,
+    /// The `agent.list` read in flight, with the attachment and the Agent
+    /// ids it names.
+    agents: Option<(u64, u64, Vec<String>)>,
 }
 
 impl Members {
     pub(super) fn owns(&self, request_id: u64) -> bool {
-        self.agents.is_some_and(|(id, _)| id == request_id) || self.request(request_id).is_some()
+        self.agents
+            .as_ref()
+            .is_some_and(|(id, _, _)| *id == request_id)
+            || self.request(request_id).is_some()
     }
 
     fn request(&self, request_id: u64) -> Option<String> {
@@ -241,17 +245,20 @@ impl Worker {
                 .task_history
                 .get("main")
                 .is_some_and(|branch| branch.done)
-            || !self.projection.unnamed_agents()
         {
             return Ok(());
         }
+        let asked = self.projection.unnamed_agents();
+        if asked.is_empty() {
+            return Ok(());
+        }
         if !self.client.supports(&["agent.list"]) {
-            self.projection.name_agents(HashMap::new());
+            self.projection.name_agents(HashMap::new(), asked);
             self.changed();
             return Ok(());
         }
         let id = self.client.send("agent.list", json!({})).await?;
-        self.members.agents = Some((id, self.projection_id));
+        self.members.agents = Some((id, self.projection_id, asked));
         Ok(())
     }
 
@@ -260,7 +267,9 @@ impl Worker {
         request_id: u64,
         result: Result<serde_json::Value, client::RpcError>,
     ) {
-        if let Some((_, projection_id)) = self.members.agents.take_if(|(id, _)| *id == request_id) {
+        if let Some((_, projection_id, asked)) =
+            self.members.agents.take_if(|(id, _, _)| *id == request_id)
+        {
             if projection_id == self.projection_id {
                 // A failed read shows Agent IDs: no name is invented.
                 let names = result
@@ -270,7 +279,7 @@ impl Worker {
                     .into_iter()
                     .map(|agent| (agent.agent_id, agent.name))
                     .collect();
-                self.projection.name_agents(names);
+                self.projection.name_agents(names, asked);
                 self.changed();
             }
             return;
