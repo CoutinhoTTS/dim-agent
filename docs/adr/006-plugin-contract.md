@@ -8,7 +8,7 @@ each Session and branch mounts the parts that plugins register for it. D3 and D4
 waiting for rutis#642. Context and D4 amended on 2026-10-26: the Context is marked as the state
 before the migration and says which of its mechanisms the migration removed, and D4 states that
 removal as done; the notes on the layer-typed API and on `sessionLifecycle` state the current fact.
-D3 amended on 2026-10-26: a foreign plugin registers its parts as rutis plugin definitions, which
+D3 amended the same day: a foreign plugin registers its parts as rutis plugin definitions, which
 rutis 0.17 delivered for rutis#642. Implementation: P1, P2, P3, R6 and P4 done; R5's second form
 with #403. The phases are in the
 [plugin contract design](../design/plugin-contract.md#10-migration).
@@ -107,7 +107,7 @@ identity registered with its owner, contributions register from the part that of
 host pre-registers none and translates no `provides`, and rows of other languages get publication
 and closing from named services such as `sessionLifecycle` and read the bus directly instead of a
 relay. What remains is R5's second form: a foreign feature is still one configured row per part,
-each declaring its group, until rutis#642 (#403, #405); #403 removed it.
+each declaring its group, until #403, which removed it.
 
 ## Decisions
 

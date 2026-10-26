@@ -69,15 +69,16 @@ besides the scope's own mechanisms.
   unmount a withdrawn one. A withdrawal finishes when every instance has unloaded its copy.
 - The instance closes its mounted parts with itself, through rutis's ownership of children.
 
-**What a generator returns.**
+**What a plugin registers.**
 
 - A Rust generator receives the names of the instance it is mounted in (appendix A) and returns a
   plugin, which may hold what the plugin prepared in its `apply`.
 - A plugin in another runtime registers a plugin definition instead of a function (R7): a value made
   with its runtime's `definePlugin`, which may close over what the plugin prepared in its `apply`.
   Each instance mounts one copy of it with rutis's `Definition::at`; the copy runs in the plugin's
-  runtime, its `inject` resolved in that instance. rutis ends every copy when the registering
-  generation unloads, so the registration needs no withdrawal of its own. A definition cannot return
+  runtime, its `inject` resolved in that instance. When the registering generation unloads, rutis
+  ends every copy and then the definition (`Definition::ended`); the part registry drops the
+  registration once the definition has ended, so no later instance mounts it. A definition cannot return
   nothing for an instance: a copy whose instance's business configuration turns the feature off does
   no work.
 - **What a foreign row still declares.** The loader's catalog is fixed before the runtime starts, and a
