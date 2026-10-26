@@ -32,9 +32,10 @@ Session / InputQueue / Loop / Approval / Questions / Attachments / ...
 | --- | --- | --- | --- |
 | AcpGateway | client host process | ACP and RPC I/O; negotiation; requests; subscriptions; replay and update projection; cleanup | public RPC v3 and the ACP schema |
 | CLI entry | client host composition root | command parsing, existing daemon discovery/start, plugin mount and exit | the reusable gateway and existing client startup policy |
+| TemporaryMcp | native Session, owned by the MCP feature | disposable client server bindings, tools and cleanup | existing McpServer plugins, ToolRegistry and Session lifecycle |
 | Existing business owners | their current process / Session / branch scopes | execution, persistent facts, configuration, approvals, questions, goals, tasks and files | unchanged |
 
-There is one gateway part and no daemon, Session or branch part. It is not a Capability: it does not own a state machine on a branch Timeline. Its connection resources and in-flight operations make it a real plugin, rather than a row whose only purpose is wiring other plugins.
+The Gateway itself has one client part and no native Session or branch part. It is not a Capability: it does not own a state machine on a branch Timeline. Its connection resources and in-flight operations make it a real plugin, rather than a row whose only purpose is wiring other plugins.
 
 The gateway implementation is `crates/dim-acp`. The public RPC engine, product-event boundary, question contract and loopback callback I/O live in `crates/dim-client`, shared with the CLI. The extraction and host boundary are [plan §3](../acp-gateway-implementation.md#3-模块宿主与接线). No `AcpHost`, new daemon endpoint, exported rutis link or private `RpcService` dependency is assumed.
 

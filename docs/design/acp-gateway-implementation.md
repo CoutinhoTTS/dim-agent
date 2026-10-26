@@ -58,6 +58,7 @@ dim-client 提供共享 RPC、产品事件和 Questions 边界以及 callback I/
 | --- | --- | --- |
 | `crates/dim-client/` | 从现有 `dim-cli/src/client.rs` 提取 RPC framing、request/response、hello、socket/pipe 安全连接；复用现有 loopback callback capture 的纯 I/O 部分。输入连接配置，输出已有 Client/Message/RpcError 语义 | CLI 和 Gateway 共用；不依赖 `dim-cli` 或 `dim-app-server`，不包含 OAuth provider 实现 |
 | `crates/dim-acp/` | `AcpGateway` 插件及其 ACP、Session、prompt、更新和 Lody 协议实现 | 依赖 `dim-client`、`dim-agent-types`、rutis、官方 ACP SDK；不依赖 TUI / App Server 实现 |
+| `crates/dim-app-server/src/mcp/temporary.rs` | 独立的 TemporaryMcp Session 部件、临时绑定与服务器子插件；合同见 [TemporaryMcp](plugins/TemporaryMcp.md) | 由现有 MCP 功能注册，复用 McpServer、ToolRegistry 和 Session lifecycle；不改 RPC 框架或 Agent core |
 | `crates/dim-cli/src/client.rs` | 保留 CLI 的 daemon 定位、启动、产品安装路径和命令策略，调用提取后的连接实现 | 保留全部既有调用者；不把 CLI Options 作为共享库合同 |
 | `crates/dim-cli/src/args.rs`、`lib.rs`、`plugins.rs` | 解析 `acp`，取得宿主输入、装载插件、等待终止、返回退出码；`acp --auth-setup METHOD_ID` 是独立交互认证入口 | 不写协议 handler；普通 ACP 入口不装载 Tui、UiLeaf、WebHold 或更新提示 |
 | `crates/dimcode/` 和既有打包验证 | 同一个 executable 分发 `acp`；保留跨平台打包和启动行为，仅发现实际打包缺口时修改脚本 | 不新增常驻进程或独立 ACP daemon |
@@ -90,7 +91,7 @@ parse CLI options (including isolated --home / --cwd / --server / --agent)
 
 可选：`session.list` / `session.summaries`、`session.close`、`session.delete`、`session.fork`、`session.permission.get/update`、`approval.respond`；临时 MCP 使用 `mcp.temporary.capabilities`、`session.mcp_temporary.attach/renew/detach`；每 Session 用 `session.methods` 发现 `session.input.withdraw`、`session.question.respond`、`session.context.usage` 和 `attachment.put`。缺少撤回时取消直接走现有 `session.stop`，并披露已接收输入可能保留的限制。
 
-模型选择只读取 `provider.list`、`provider.catalog`、`provider.selection` 的安全投影。Provider 管理已有独立插件和公开读写接口，接线及尚未满足的 ACP 合同见 §4.5；首版不通过这些接口写入共享产品配置。账户认证只允许 §4.4 列出的 `account.providers/status` 和属于当前连接的 login attempt 调用，不开放 `account.*` 代理、recover/logout/usage、settings、MCP 配置、插件管理或凭据接口。也不把 ACP 方法名直接转成原生 RPC 方法名。
+模型选择只读取 `provider.list`、`provider.catalog`、`provider.selection` 的安全投影。Provider 管理已有独立插件和公开读写接口，接线及尚未满足的 ACP 合同见 §4.5；首版不通过这些接口写入共享产品配置。账户认证只允许 §4.4 列出的 `account.providers/status` 和属于当前连接的 login attempt 调用，不开放 `account.*` 代理、recover/logout/usage、settings、持久 MCP 配置、插件管理或凭据接口。也不把 ACP 方法名直接转成原生 RPC 方法名。
 
 ## 4. 稳定 ACP v1 方法逐项映射
 

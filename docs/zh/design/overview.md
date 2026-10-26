@@ -167,7 +167,7 @@ flowchart LR
 | Workflow | 进程 + Session | 跨 Session 的多阶段运行；`workflow` 工具 | P2 | TypeScript 优先 | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | 投递到渠道；`notify` 工具 | P2 | TypeScript 优先 | [Notifications](plugins/Notifications.md)（已撤回） |
 | ExternalAgent | 进程 | 外部 Agent 作为 Collaboration 子 agent（一种成员类型） | P3 | TypeScript 优先 | [ExternalAgent](plugins/ExternalAgent.md) |
-| AcpGateway | 接入方宿主进程 | 复用现有本地 RPC 的 ACP 服务器；daemon 不变 | 支持子集已实现，未发布（Draft PR #441） | Rust | [AcpGateway](plugins/AcpGateway.md)、[验收](../../design/acp-gateway-acceptance.md) |
+| AcpGateway | 接入方宿主进程 | 复用现有本地 RPC 的 ACP 服务；独立临时 MCP 绑定 | 支持子集已实现，未发布（Draft PR #441） | Rust | [AcpGateway](plugins/AcpGateway.md)、[验收](../../design/acp-gateway-acceptance.md) |
 | RemoteGateway | 进程 | 远程入口、配对、设备 | P3 | Rust | [RemoteGateway](plugins/RemoteGateway.md) |
 | Modality | 进程 | 多模态任务与实时连接 | P3 | TypeScript 优先 | [Modality](plugins/Modality.md) |
 | PluginManager | 进程 | 市场、包、`PluginContents` | P3 | Rust | [PluginManager](plugins/PluginManager.md) |

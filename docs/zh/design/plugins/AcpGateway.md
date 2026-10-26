@@ -32,9 +32,10 @@ Session / InputQueue / Loop / Approval / Questions / Attachments / ...
 | --- | --- | --- | --- |
 | AcpGateway | 接入方宿主进程 | ACP/RPC I/O、协商、请求、订阅、回放、输出投影和清理 | 公开 RPC v3 和 ACP schema |
 | CLI 入口 | 接入方 composition root | 参数、已有 daemon 查找/启动、插件装载和退出 | 可复用 Gateway、已有客户端启动策略 |
+| TemporaryMcp | 原生 Session，归 MCP 功能 | 临时服务器绑定、工具和清理 | 现有 McpServer 插件、ToolRegistry、Session lifecycle |
 | 现有业务所有者 | 当前 process / Session / branch | 执行、持久事实、配置、审批、问题、目标、任务和文件 | 不变 |
 
-只有一个 Gateway 部件，没有 daemon、Session 或 branch 部件。它不是 Capability：不拥有分支 Timeline 上的状态机。真实连接资源和在途操作使其成为有自身职责的插件，宿主直接完成装配，不加接线部件。
+Gateway 自身只有一个客户端部件，没有原生 Session 或 branch 部件。它不是 Capability：不拥有分支 Timeline 上的状态机。真实连接资源和在途操作使其成为有自身职责的插件，宿主直接完成装配，不加接线部件。
 
 Gateway 实现位于 `crates/dim-acp`。公开 RPC 引擎、产品事件边界、Questions 合同和 loopback callback I/O 位于 `crates/dim-client`，由 CLI 共用。提取和宿主边界见[实施计划 §3](../../../design/acp-gateway-implementation.md#3-模块宿主与接线)。不假定存在 `AcpHost`、新 daemon endpoint、exported rutis link 或可依赖的私有 `RpcService`。
 
