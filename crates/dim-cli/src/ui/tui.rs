@@ -3556,7 +3556,7 @@ fn startup_header(greeting: &[String], body_width: usize) -> Vec<String> {
             .flat_map(|line| wrap_words(line, body_width))
             .collect();
     }
-    let text_width = body_width - STARTUP_LOGO_WIDTH - STARTUP_LOGO_GAP;
+    let text_width = body_width.saturating_sub(STARTUP_LOGO_WIDTH + STARTUP_LOGO_GAP);
     if text_width < 16 {
         return STARTUP_LOGO
             .iter()
@@ -3721,6 +3721,29 @@ mod tests {
             "{:?}",
             goodbye_panel(None)
         );
+    }
+
+    #[test]
+    fn startup_panels_keep_their_greeting_and_width_in_narrow_terminals() {
+        let theme = test_theme();
+        let opened = WebOpened {
+            url: "http://127.0.0.1:43201/",
+            sign_in: None,
+            session_id: None,
+        };
+        for cols in [120, 31, 30, 29, 24, 15] {
+            let welcome = banner(cols, &theme.palette, "main");
+            let web = web_panel(cols, &theme.palette, &opened);
+            for panel in [&welcome, &web] {
+                for row in panel.lines() {
+                    assert_eq!(width_of(row), cols - 2, "{cols}: {row:?}");
+                }
+            }
+            if cols >= 29 {
+                assert!(welcome.contains(env!("CARGO_PKG_VERSION")), "{welcome}");
+                assert!(web.contains(t("DIM Web is ready")), "{web}");
+            }
+        }
     }
 
     #[test]

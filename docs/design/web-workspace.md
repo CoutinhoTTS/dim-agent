@@ -121,10 +121,11 @@ Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` onl
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
-│   ▓▓▓▓                                                       │
-│ ▓▓    ▓▓  DIM Web is ready                                   │
-│ ░░    ░░  Opened in your browser                             │
-│   ░░░░                                                       │
+│ ██████╗ ██╗███╗   ███╗                                       │
+│ ██╔══██╗██║████╗ ████║  DIM Web is ready                     │
+│ ██║  ██║██║██╔████╔██║  Opened in your browser               │
+│ ██████╔╝██║██║╚██╔╝██║                                       │
+│ ╚═════╝ ╚═╝╚═╝ ╚═╝ ╚═╝                                       │
 │                                                              │
 │ Web     http://127.0.0.1:43201/chat/<sessionId>              │
 │ Resume  dimcode --resume <sessionId>                         │
