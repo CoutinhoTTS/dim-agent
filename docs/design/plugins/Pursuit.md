@@ -1,6 +1,6 @@
 # Pursuit
 
-Status: Ready, not implemented ([#146](https://github.com/arcships/dim/issues/146), milestone M2; the maintainer's confirmation is recorded in [§12](#12-ready-confirmation)). Scope: an amendment of [Goal](Goal.md)'s Session and branch parts; no new Capability ([ADR 002](../../adr/002-plugin-scope.md)). Language: TypeScript, in Goal's package `runtime/plugins/goal` ([Goal §10](Goal.md#10-implementation)). Depends on: Goal (P5, implemented by [#199](https://github.com/arcships/dim/pull/199)), C5 ([branch TypeScript binding](../branch-typescript.md)); both delivered. Milestone M2, not part of the current plan ([roadmap](../roadmap.md) D3).
+Status: Implemented ([#422](https://github.com/arcships/dim/issues/422), milestone M2; the maintainer's confirmation is recorded in [§12](#12-ready-confirmation)). Scope: an amendment of [Goal](Goal.md)'s Session and branch parts; no new Capability ([ADR 002](../../adr/002-plugin-scope.md)). Language: TypeScript, in Goal's package `runtime/plugins/goal` ([Goal §10](Goal.md#10-implementation)). Depends on: Goal (P5, implemented by [#199](https://github.com/arcships/dim/pull/199)), C5 ([branch TypeScript binding](../branch-typescript.md)); both delivered. Milestone M2, not part of the current plan ([roadmap](../roadmap.md) D3).
 
 Requirement ([feature list](../../feature-list.md), Agent behavior): keep working toward an explicit objective and record its completion or blockage, **with completion judged by an evaluator instead of the model doing the work**.
 
@@ -13,7 +13,7 @@ Requirement ([feature list](../../feature-list.md), Agent behavior): keep workin
 | P1 | A judge mode of Goal, not a separate plugin | One owner of continuation; a separate plugin would race Goal on the same `turn/end` or read Goal's state (§4 rule 7) |
 | P2 | The judge is chosen per goal by `set`, recorded on the `set` block | It is the user's intent for that goal, a Timeline fact |
 | P3 | Evaluate when the worker's completion report stops Goal | That is the only point where the worker decides the goal is done. A worker's `blocked` stands (it needs the user); a limit, or the user's own interrupt or pause, is not a completion and starts nothing |
-| P4 | Under the evaluator judge the worker's `completed` is a request; the status stays `active` | Only the evaluator completes the goal. This is the one exception to Goal's fold rule, proposed in [Goal A16](Goal.md#appendix-e-assumptions) with this design (maintainer decision, 2026-10-22) |
+| P4 | Under the evaluator judge the worker's `completed` is a request; the status stays `active` | Only the evaluator completes the goal. This is the one exception to Goal's fold rule, recorded in [Goal A16](Goal.md#appendix-e-assumptions) with this design (maintainer decision, 2026-10-22) |
 | P5 | The evaluator is a child branch cut at that `turn/end` | It sees what was done and why, runs under the same policy, and is an ordinary branch created with `treeCommands.create` |
 | P6 | The evaluator writes its conclusion to the working branch as input; Goal there decides | A branch reads only its own events; cross-branch communication is input by id ([branch TypeScript binding](../branch-typescript.md#subscription-rebuild-and-recovery), item 6). Callers write, owners decide |
 
@@ -40,7 +40,7 @@ Clients read it all from the working branch's events ([Goal A.3](Goal.md#a3-read
 | Part | Change |
 | --- | --- |
 | `session.ts` | `session.goal.set` accepts `judge?: "model" \| "evaluator"` (default `model`; other values `invalid_params`) and marks the `set` objective block `judge="evaluator"` |
-| `goal.ts` | The fold reads `judge` (from the `set`, kept by `edit`); under the evaluator judge a worker `completed` block is a request and leaves the status unchanged, `active` while the goal runs (the exception proposed in Goal A16). The request is neither `set` nor `resume`, so it does not move `A`: the count stays the continuations after `max(A, last_operator)` ([Goal §2](Goal.md#2-data-and-state)). Goal's `decided` also counts the `branch/create` for `goal:evaluate:N` as `N`'s decision. The decisions and texts below |
+| `goal.ts` | The fold reads `judge` (from the `set`, kept by `edit`); under the evaluator judge a worker `completed` block is a request and leaves the status unchanged, `active` while the goal runs (the exception in Goal A16). The request is neither `set` nor `resume`, so it does not move `A`: the count stays the continuations after `max(A, last_operator)` ([Goal §2](Goal.md#2-data-and-state)). Goal's `decided` also counts the `branch/create` for `goal:evaluate:N` as `N`'s decision. The decisions and texts below |
 | `branch.ts` | Adds the Dispatcher keys `branch/create` and `branch/create-failed`; creates the evaluator; on an evaluator branch, takes the evaluator role (§4.2) |
 
 No new service, injection, Settings field or event type. The evaluator branch is an ordinary host-sourced child; its first Queue input is the prompt ([TimelineTree `first_input`](../../../crates/dim-agent-capabilities/src/timeline_tree.rs)). Goal there has no goal of its own and writes the start `clear` as on any child ([Goal §3.4](Goal.md#34-a-new-branch-clears-the-inherited-goal)), so it never continues.
@@ -88,7 +88,7 @@ Markers, escaping and keys are Goal's ([A.5](Goal.md#a5-model-visible-texts)). `
 | `continue` | B, Goal continuation | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" evaluation="N" branch="B">` / `An evaluator checked your report that the goal for branch B is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status "completed" again.` |
 | `failed` | B, `goal:status` | Append | Goal's pause with reason phrase "the evaluator could not check the result" |
 
-Under the evaluator judge a worker `completed` block is a request and leaves the fold's status unchanged (`active` while the goal runs); it stays the latest status block until an outcome or a change replaces it. That is the one exception to Goal's fold rule, proposed in Goal A16: the replayed status block reads `completed` while the goal is active. The conclusion input carries no key and no `user` content, like Goal's own writes, so it changes no status, is not operator input and resets no count (Goal A5).
+Under the evaluator judge a worker `completed` block is a request and leaves the fold's status unchanged (`active` while the goal runs); it stays the latest status block until an outcome or a change replaces it. That is the one exception to Goal's fold rule in Goal A16: the replayed status block reads `completed` while the goal is active. The conclusion input carries no key and no `user` content, like Goal's own writes, so it changes no status, is not operator input and resets no count (Goal A5).
 
 ## 6. Rule check
 
@@ -151,7 +151,7 @@ What is left, and why each piece is needed:
 | Piece | Why |
 | --- | --- |
 | `judge` on `set` | Which goals are judged by an evaluator |
-| Worker `completed` as a request under the evaluator judge | Only the evaluator completes the goal (the exception proposed in Goal A16) |
+| Worker `completed` as a request under the evaluator judge | Only the evaluator completes the goal (the exception in Goal A16) |
 | Create at the stopping `turn/end` | The trigger; `branch/create` is also what keeps a reload from creating twice |
 | Evaluator role in Goal's branch part | The evaluator branch must report its conclusion, and only a part on that branch can read its reply |
 | Conclusion input to the working branch | The only cross-branch path; Goal there decides |
@@ -163,4 +163,4 @@ Removed from the earlier draft: claim and reopen states, deadline and `evaluatio
 
 ## 12. Ready confirmation
 
-No product decision remained. The maintainer confirmed the design as Ready on 2026-10-26 ([#146](https://github.com/arcships/dim/issues/146)), including the A16 fold exception in [Goal](Goal.md#appendix-e-assumptions) (decided 2026-10-22). Goal describes the implemented model judge and is amended when this design is implemented.
+No product decision remained. The maintainer confirmed the design as Ready on 2026-10-26 ([#146](https://github.com/arcships/dim/issues/146)), including the A16 fold exception in [Goal](Goal.md#appendix-e-assumptions) (decided 2026-10-22). It is implemented ([#422](https://github.com/arcships/dim/issues/422)), and [Goal](Goal.md) describes both judges.
