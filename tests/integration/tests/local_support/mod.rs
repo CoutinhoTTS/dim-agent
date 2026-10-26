@@ -18,7 +18,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::TypeKey;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -215,23 +215,17 @@ impl AssemblyHold {
     }
 }
 struct AssemblyHoldPlugin(Arc<AssemblyHold>);
-impl rutis::TypedPlugin for AssemblyHoldPlugin {
+impl rutis::Plugin for AssemblyHoldPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "AssemblyHold"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        (): (),
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            if self.0.armed.swap(false, Ordering::SeqCst) {
-                self.0.entered.notify_one();
-                self.0.release.notified().await;
-            }
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, _: &rutis::Ctx, (): ()) -> rutis::Result {
+        if self.0.armed.swap(false, Ordering::SeqCst) {
+            self.0.entered.notify_one();
+            self.0.release.notified().await;
+        }
+        Ok(())
     }
 }
 
@@ -289,22 +283,36 @@ impl LifecycleProbe {
 }
 struct LifecycleProbePlugin {
     probe: Arc<LifecycleProbe>,
+    lifecycle: Key<SessionLifecycle>,
+    identity: Key<SessionIdentity>,
+    tree: Key<TreeCommands>,
 }
-impl rutis::TypedPlugin for LifecycleProbePlugin {
-    type Deps = (
-        rutis::Keyed<SessionLifecycle>,
-        rutis::Keyed<SessionIdentity>,
-        rutis::Keyed<TreeCommands>,
-    );
+impl LifecycleProbePlugin {
+    fn new(names: &Names<'_>, probe: Arc<LifecycleProbe>) -> rutis::Result<Self> {
+        Ok(Self {
+            probe,
+            lifecycle: names.key()?,
+            identity: names.key()?,
+            tree: names.key()?,
+        })
+    }
+}
+impl DynPlugin for LifecycleProbePlugin {
     fn name(&self) -> &str {
         "LifecycleProbe"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (rutis::Keyed(lifecycle), rutis::Keyed(identity), rutis::Keyed(tree)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.lifecycle.erase(),
+            self.identity.erase(),
+            self.tree.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let lifecycle = ctx.require_at(&self.lifecycle)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let tree = ctx.require_at(&self.tree)?;
             let probe = self.probe.clone();
             let id = identity.session_id.clone();
             probe
@@ -325,22 +333,18 @@ impl rutis::TypedPlugin for LifecycleProbePlugin {
                 }
             });
             let probe = self.probe.clone();
-            ctx.effect(move || {
-                rutis::Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        if probe.hold_close.swap(false, Ordering::SeqCst) {
-                            probe.close_held.notify_one();
-                            probe.release_close.notified().await;
-                        }
-                        // Like a Session part's own work, the task ends once the
-                        // Session is closing or never published; aborting it
-                        // could drop that record.
-                        let _ = task.await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                if probe.hold_close.swap(false, Ordering::SeqCst) {
+                    probe.close_held.notify_one();
+                    probe.release_close.notified().await;
+                }
+                // Like a Session part's own work, the task ends once the
+                // Session is closing or never published; aborting it
+                // could drop that record.
+                let _ = task.await;
+                Ok(())
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(Effect::Done)
         })
     }
 }
@@ -395,13 +399,9 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
     let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
     let mut host = platform(&dirs.home);
     host.timezone = Some(options.timezone.into());
-    root.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(host))
+    root.provide_as::<HostPlatform>(Arc::new(host)).unwrap();
+    root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(options.settings.clone())))
         .unwrap();
-    root.provide_as(
-        TypeKey::of::<SkillSettingsHost>(),
-        Arc::new(SkillSettingsHost(options.settings.clone())),
-    )
-    .unwrap();
     let model = Arc::new(ScriptedModel::default());
     let gate = Arc::new(Gate::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -418,7 +418,9 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(
+                    dim_agent_capabilities::adapters::DefaultPrepareModelPlugin::new(names)?,
+                ))
             }),
         );
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
@@ -431,24 +433,21 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
     skills::install(&mut builder);
     if let Some(hold) = options.hold {
         builder.require_feature(
-            Feature::new("AssemblyHold").session("AssemblyHold", move |names| {
-                names.part(AssemblyHoldPlugin(hold.clone()))
+            Feature::new("AssemblyHold").session("AssemblyHold", move |_| {
+                Ok(Box::new(AssemblyHoldPlugin(hold.clone())))
             }),
         );
     }
     if let Some(probe) = options.probe {
-        builder.require_feature(Feature::new("LifecycleProbe").session(
-            "LifecycleProbe",
-            move |names| {
-                names.part(LifecycleProbePlugin {
-                    probe: probe.clone(),
-                })
-            },
-        ));
+        builder.require_feature(
+            Feature::new("LifecycleProbe").session("LifecycleProbe", move |names| {
+                Ok(Box::new(LifecycleProbePlugin::new(names, probe.clone())?))
+            }),
+        );
     }
     // The Agent's own plugin: the catalog, and the Skills parts it
     // registers. Placed now, so the catalog is there before any Session.
-    builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
+    builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
     let agent = builder.build_in(&root);
     agent.start().await.unwrap();
     Env {

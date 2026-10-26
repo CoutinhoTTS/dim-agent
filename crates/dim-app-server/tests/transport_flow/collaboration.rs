@@ -4,29 +4,41 @@ use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
     InputMessageData, MessageContent, ToolContent,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed};
+use rutis::host::{BoxFuture, CtxHost};
 use std::ops::RangeInclusive;
 use std::sync::OnceLock;
 
 struct CaptureToolRegistry {
     registry: Arc<OnceLock<Arc<dim_agent_capabilities::tool_registry::ToolRegistry>>>,
+    tools: rutis::host::Key<dim_agent_capabilities::tool_registry::ToolRegistry>,
 }
 
-impl TypedPlugin for CaptureToolRegistry {
-    type Deps = Keyed<dim_agent_capabilities::tool_registry::ToolRegistry>;
-
+impl CaptureToolRegistry {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        registry: Arc<OnceLock<Arc<dim_agent_capabilities::tool_registry::ToolRegistry>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            registry,
+            tools: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for CaptureToolRegistry {
     fn name(&self) -> &str {
         "collaboration-test.capture-tool-registry"
     }
-
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.tools.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a Ctx,
-        Keyed(registry): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let registry = ctx.require_at(&self.tools)?;
             let _ = self.registry.set(registry);
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -133,20 +145,35 @@ async fn launch_team() -> (RunningServer, Agent) {
 
 struct CaptureMemberConfig {
     configs: Arc<std::sync::Mutex<Vec<Arc<dim_agent_runtime::SessionConfig>>>>,
+
+    config: rutis::host::Key<dim_agent_runtime::SessionConfig>,
 }
-impl TypedPlugin for CaptureMemberConfig {
-    type Deps = Keyed<dim_agent_runtime::SessionConfig>;
+impl CaptureMemberConfig {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        configs: Arc<std::sync::Mutex<Vec<Arc<dim_agent_runtime::SessionConfig>>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            configs,
+            config: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for CaptureMemberConfig {
     fn name(&self) -> &str {
         "capture-member-config"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.config.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a Ctx,
-        Keyed(config): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let config = ctx.require_at(&self.config)?;
             self.configs.lock().unwrap().push(config);
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -165,7 +192,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
         }, move |builder| {
             builder.require_feature(Feature::new("capture-member-config").session(
                 "capture-member-config",
-                move |names| names.part(CaptureMemberConfig { configs: observed.clone() }),
+                move |names| Ok(Box::new(CaptureMemberConfig::new(names, observed.clone())?)),
             ));
         }).await;
         let mut client = Client::new_version(&server, false, 3).await;
@@ -259,7 +286,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .session_value(Arc::new(CompactionStrategyHost(None)))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             );
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
@@ -270,9 +297,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             {
                 let captured_registry = captured_registry.clone();
                 move |names| {
-                    names.part(CaptureToolRegistry {
-                        registry: captured_registry.clone(),
-                    })
+                    Ok(Box::new(CaptureToolRegistry::new(names, captured_registry.clone())?))
                 }
             },
         ));
@@ -2354,7 +2379,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     dim_agent_capabilities::defaults::tool_host(
@@ -2726,22 +2751,40 @@ impl DispatchGate {
 }
 struct DispatchGatePlugin {
     gate: Arc<DispatchGate>,
+
+    dispatcher: rutis::host::Key<dim_agent_runtime::Dispatcher>,
+    timeline: rutis::host::Key<dim_agent_runtime::Timeline>,
+    identity: rutis::host::Key<dim_agent_runtime::SessionIdentity>,
 }
-impl TypedPlugin for DispatchGatePlugin {
-    type Deps = (
-        Keyed<dim_agent_runtime::Dispatcher>,
-        Keyed<dim_agent_runtime::Timeline>,
-        Keyed<dim_agent_runtime::SessionIdentity>,
-    );
+impl DispatchGatePlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>, gate: Arc<DispatchGate>) -> rutis::Result<Self> {
+        Ok(Self {
+            gate,
+            dispatcher: names.key()?,
+            timeline: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for DispatchGatePlugin {
     fn name(&self) -> &str {
         "collaboration-test.dispatch-gate"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![
+            self.dispatcher.erase(),
+            self.timeline.erase(),
+            self.identity.erase(),
+        ]
+    }
     fn apply<'a>(
         &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher), Keyed(timeline), Keyed(identity)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let timeline = ctx.require_at(&self.timeline)?;
+            let identity = ctx.require_at(&self.identity)?;
             let session = identity.session_id.clone();
             let gate = self.gate.clone();
             if gate.leader.get() == Some(&session) {
@@ -2757,7 +2800,7 @@ impl TypedPlugin for DispatchGatePlugin {
                     Ok(())
                 })
             })?;
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -2778,18 +2821,30 @@ struct MemberHold {
 }
 struct MemberHoldPlugin {
     hold: Arc<MemberHold>,
+
+    identity: rutis::host::Key<dim_agent_runtime::SessionIdentity>,
 }
-impl TypedPlugin for MemberHoldPlugin {
-    type Deps = Keyed<dim_agent_runtime::SessionIdentity>;
+impl MemberHoldPlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>, hold: Arc<MemberHold>) -> rutis::Result<Self> {
+        Ok(Self {
+            hold,
+            identity: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for MemberHoldPlugin {
     fn name(&self) -> &str {
         "collaboration-test.member-hold"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.identity.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a Ctx,
-        Keyed(identity): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let identity = ctx.require_at(&self.identity)?;
             let session = identity.session_id.clone();
             if self
                 .hold
@@ -2801,7 +2856,7 @@ impl TypedPlugin for MemberHoldPlugin {
                 self.hold.entered.notify_one();
                 self.hold.release.notified().await;
             }
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -2823,7 +2878,7 @@ async fn launch_gated_with(
     builder.require_feature(
         Feature::new("collaboration-test.dispatch-gate")
             .branch("collaboration-test.dispatch-gate", move |names| {
-                names.part(DispatchGatePlugin { gate: gate.clone() })
+                Ok(Box::new(DispatchGatePlugin::new(names, gate.clone())?))
             }),
     );
     dim_app_server::collaboration::install(&mut builder);
@@ -3146,7 +3201,7 @@ async fn a_request_covered_before_its_member_input_is_refused() {
             builder.require_feature(
                 Feature::new("collaboration-test.member-hold")
                     .session("collaboration-test.member-hold", move |names| {
-                        names.part(MemberHoldPlugin { hold: hold.clone() })
+                        Ok(Box::new(MemberHoldPlugin::new(names, hold.clone())?))
                     }),
             );
         }
@@ -3801,7 +3856,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
             builder.require_feature(
                 Feature::new("collaboration-test.member-hold")
                     .session("collaboration-test.member-hold", move |names| {
-                        names.part(MemberHoldPlugin { hold: hold.clone() })
+                        Ok(Box::new(MemberHoldPlugin::new(names, hold.clone())?))
                     }),
             );
         }

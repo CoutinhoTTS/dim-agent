@@ -12,9 +12,12 @@ use crate::{
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
     workspace_tools::background::{WAKE_TASK_TAG, tagged},
 };
-use dim_agent_runtime::{AgentBuilder, AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher};
+use dim_agent_runtime::{
+    AgentBuilder, AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, Names,
+};
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -30,11 +33,9 @@ const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 /// The Wait plugin: the Session tool and the branch part.
 pub fn feature() -> dim_agent_runtime::Feature {
     dim_agent_runtime::Feature::new("Wait")
-        .session("Wait", |names| names.part(WaitPlugin))
+        .session("Wait", |names| Ok(Box::new(WaitPlugin::new(names)?)))
         .branch("WaitBranch", |names| {
-            names.part(WaitBranchPlugin {
-                wait: names.key::<Wait>()?,
-            })
+            Ok(Box::new(WaitBranchPlugin::new(names)?))
         })
 }
 
@@ -309,18 +310,29 @@ impl ToolHandler for WaitTool {
     }
 }
 
-pub struct WaitPlugin;
-impl TypedPlugin for WaitPlugin {
-    type Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>);
+pub struct WaitPlugin {
+    tree: Key<TreeCommands>,
+    tools: Key<ToolRegistry>,
+}
+impl WaitPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            tree: names.key()?,
+            tools: names.key()?,
+        })
+    }
+}
+impl DynPlugin for WaitPlugin {
     fn name(&self) -> &str {
         "Wait"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(tree), Keyed(tools)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.tree.erase(), self.tools.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let tree = ctx.require_at(&self.tree)?;
+            let tools = ctx.require_at(&self.tools)?;
             tools.register(
                 ctx,
                 ToolContribution {
@@ -333,19 +345,27 @@ impl TypedPlugin for WaitPlugin {
     }
 }
 pub struct WaitBranchPlugin {
-    wait: DepKey<Wait>,
+    dispatcher: Key<Dispatcher>,
+    wait: Key<Wait>,
 }
-impl TypedPlugin for WaitBranchPlugin {
-    type Deps = (Keyed<Dispatcher>,);
+impl WaitBranchPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            dispatcher: names.key()?,
+            wait: names.key()?,
+        })
+    }
+}
+impl DynPlugin for WaitBranchPlugin {
     fn name(&self) -> &str {
         "WaitBranch"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
             let wait = Arc::new(Wait {
                 state: Mutex::new(State::default()),
                 arrived: Notify::new(),
@@ -367,7 +387,7 @@ impl TypedPlugin for WaitBranchPlugin {
                     },
                 )
                 .await?;
-            ctx.provide_as(self.wait.key().clone(), wait)?;
+            ctx.provide_at(self.wait.clone(), wait)?;
             Ok(Effect::Done)
         })
     }

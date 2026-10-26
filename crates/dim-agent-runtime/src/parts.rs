@@ -10,9 +10,10 @@
 //! follow registrations and withdrawals while the instance is open, and a
 //! mounted part closes with its instance.
 use crate::{Names, SessionConfig};
-use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Keyed, Plugin, TypeKey, TypedPlugin,
+use rutis::host::{
+    BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key, TypeKey,
 };
+use rutis::{Ctx, Error, Plugin};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -42,7 +43,7 @@ pub struct Mount<'a> {
 /// Builds a part for one instance, or nothing when that instance does not
 /// need one, such as a Session whose configuration turns the feature off.
 pub type Generator =
-    Arc<dyn Fn(&Mount<'_>) -> Result<Option<Box<dyn Plugin>>, CordisError> + Send + Sync>;
+    Arc<dyn Fn(&Mount<'_>) -> Result<Option<Box<dyn DynPlugin>>, Error> + Send + Sync>;
 
 struct Entry {
     id: u64,
@@ -105,20 +106,16 @@ impl PartRegistry {
         ctx: &Ctx,
         scope: PartScope,
         name: impl Into<String>,
-        generator: impl Fn(&Mount<'_>) -> Result<Option<Box<dyn Plugin>>, CordisError>
+        generator: impl Fn(&Mount<'_>) -> Result<Option<Box<dyn DynPlugin>>, Error>
         + Send
         + Sync
         + 'static,
-    ) -> Result<(), CordisError> {
+    ) -> Result<(), Error> {
         let registry = self.clone();
         let id = self.add(scope, name.into(), Arc::new(generator));
-        let registered = ctx.effect(move || {
-            Effect::AsyncDisposer(Box::new(move || {
-                Box::pin(async move {
-                    registry.withdraw(id).await;
-                    Ok(())
-                })
-            }))
+        let registered = ctx.effect(move || async move {
+            registry.withdraw(id).await;
+            Ok(())
         });
         if registered.is_err() {
             // The caller is already unloading: nothing of it may stay.
@@ -205,7 +202,7 @@ pub(crate) struct MountSite {
     /// Registered parts the profile requires, by name.
     pub required: Arc<HashSet<String>>,
     pub catalog: Arc<rutis_loader::ServiceCatalog>,
-    pub build: rutis_loader::Build,
+    pub build: rutis_loader::resolve::Build,
     pub session: SessionConfig,
     pub session_id: String,
     pub restored: bool,
@@ -289,7 +286,7 @@ impl PartMounter {
         id: u64,
         seen: &mut HashMap<u64, Option<FiberView>>,
         snapshot: &[Arc<Entry>],
-    ) -> Result<Vec<FiberView>, CordisError> {
+    ) -> Result<Vec<FiberView>, Error> {
         let site = &self.site;
         let entries: Vec<_> = snapshot
             .iter()
@@ -334,7 +331,7 @@ impl PartMounter {
 /// cascade does (effects run last in, first out). A copy that already failed
 /// showed its failure when it happened and is not reported again; a cleanup
 /// error of a running copy is the mounter's, as a row's would be.
-fn mount(ctx: &Ctx, part: Box<dyn Plugin>, copies: &Copies) -> Result<FiberView, CordisError> {
+fn mount(ctx: &Ctx, part: Box<dyn DynPlugin>, copies: &Copies) -> Result<FiberView, Error> {
     let view = ctx.plugin(part);
     {
         let mut copies = copies.lock().unwrap();
@@ -342,24 +339,19 @@ fn mount(ctx: &Ctx, part: Box<dyn Plugin>, copies: &Copies) -> Result<FiberView,
         copies.push(view.clone());
     }
     let owned = view.clone();
-    let registered = ctx.effect(move || {
-        Effect::AsyncDisposer(Box::new(move || {
-            Box::pin(async move {
-                match owned.state().state {
-                    FiberState::Disposed => Ok(()),
-                    FiberState::Failed => {
-                        let _ = owned.dispose().await;
-                        Ok(())
-                    }
-                    _ => owned
-                        .dispose()
-                        .await
-                        .map_err(|error| CordisError::Aggregate {
-                            errors: vec![error],
-                        }),
-                }
-            })
-        }))
+    let registered = ctx.effect(move || async move {
+        match owned.state().state {
+            FiberState::Disposed => Ok(()),
+            FiberState::Failed => {
+                let _ = owned.dispose().await;
+                Ok(())
+            }
+            _ => owned.dispose().await.map_err(|error| {
+                rutis::Error::from(ErrorKind::Aggregate {
+                    errors: vec![error],
+                })
+            }),
+        }
     });
     if let Err(error) = registered {
         // The mounter is unloading: the copy must not outlive it.
@@ -372,16 +364,16 @@ fn mount(ctx: &Ctx, part: Box<dyn Plugin>, copies: &Copies) -> Result<FiberView,
     Ok(view)
 }
 
-impl Plugin for PartMounter {
+impl DynPlugin for PartMounter {
     fn name(&self) -> &str {
         Self::module(self.site.scope, self.required)
     }
 
-    fn injects(&self) -> &[TypeKey] {
-        &[]
+    fn injects(&self) -> Vec<TypeKey> {
+        Vec::new()
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
             let site = self.site.clone();
             let id = site.registry.mounter();
@@ -408,10 +400,10 @@ impl Plugin for PartMounter {
                 tokio::select! {
                     changed = changes.changed() => if changed.is_err() { break snapshot },
                     () = cancel.cancelled() => {
-                        return Err(CordisError::PluginFailed(
+                        return Err(Error::from(ErrorKind::PluginFailed(
                             format!("required parts not registered: {}", missing.join(", "))
                                 .into(),
-                        ));
+                        )));
                     }
                 }
             };
@@ -437,15 +429,11 @@ impl Plugin for PartMounter {
                 })
             };
             let registry = site.registry.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        cancel.cancel();
-                        let _ = follow.await;
-                        registry.detach(id);
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                cancel.cancel();
+                let _ = follow.await;
+                registry.detach(id);
+                Ok(())
             })?;
             if self.required {
                 // Not awaited here: the loader waits for a Loading row, so
@@ -489,11 +477,11 @@ impl Feature {
 
     /// A part of every Session named `name`: `make` builds a Session's copy
     /// from the names its dependencies resolve to there, usually
-    /// `|names| names.part(MyPart)`.
+    /// `|names| Ok(Box::new(MyPart::new(names)?))`.
     pub fn session(
         self,
         name: impl Into<String>,
-        make: impl Fn(&Names<'_>) -> Result<Box<dyn Plugin>, CordisError> + Send + Sync + 'static,
+        make: impl Fn(&Names<'_>) -> Result<Box<dyn DynPlugin>, Error> + Send + Sync + 'static,
     ) -> Self {
         self.when(PartScope::Session, name, move |mount| {
             make(mount.names).map(Some)
@@ -504,7 +492,7 @@ impl Feature {
     pub fn branch(
         self,
         name: impl Into<String>,
-        make: impl Fn(&Names<'_>) -> Result<Box<dyn Plugin>, CordisError> + Send + Sync + 'static,
+        make: impl Fn(&Names<'_>) -> Result<Box<dyn DynPlugin>, Error> + Send + Sync + 'static,
     ) -> Self {
         self.when(PartScope::Branch, name, move |mount| {
             make(mount.names).map(Some)
@@ -517,7 +505,7 @@ impl Feature {
         mut self,
         scope: PartScope,
         name: impl Into<String>,
-        generator: impl Fn(&Mount<'_>) -> Result<Option<Box<dyn Plugin>>, CordisError>
+        generator: impl Fn(&Mount<'_>) -> Result<Option<Box<dyn DynPlugin>>, Error>
         + Send
         + Sync
         + 'static,
@@ -541,25 +529,30 @@ impl Feature {
     }
 
     /// Its plugin, keyed from `names`.
-    pub fn plugin(&self, names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
-        names.part(FeaturePlugin(self.clone()))
+    pub fn plugin(&self, names: &Names<'_>) -> Result<Box<dyn DynPlugin>, Error> {
+        Ok(Box::new(FeaturePlugin {
+            feature: self.clone(),
+            registry: names.key()?,
+        }))
     }
 }
 
-struct FeaturePlugin(Feature);
+struct FeaturePlugin {
+    feature: Feature,
+    registry: Key<PartRegistry>,
+}
 
-impl TypedPlugin for FeaturePlugin {
-    type Deps = (Keyed<PartRegistry>,);
+impl DynPlugin for FeaturePlugin {
     fn name(&self) -> &str {
-        &self.0.name
+        &self.feature.name
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(registry),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.registry.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
-            for part in &self.0.parts {
+            let registry = ctx.require_at(&self.registry)?;
+            for part in &self.feature.parts {
                 let generator = part.generator.clone();
                 registry.register(ctx, part.scope, part.name.clone(), move |mount| {
                     generator(mount)
@@ -574,18 +567,16 @@ impl TypedPlugin for FeaturePlugin {
 /// `partRegistry`.
 pub(crate) struct PartRegistryPlugin {
     pub registry: Arc<PartRegistry>,
-    pub key: rutis::DepKey<PartRegistry>,
+    pub key: Key<PartRegistry>,
 }
 
-impl TypedPlugin for PartRegistryPlugin {
+impl Plugin for PartRegistryPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "PartRegistry"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(self.key.key().clone(), self.registry.clone())?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        ctx.provide_at(self.key.clone(), self.registry.clone())?;
+        Ok(())
     }
 }

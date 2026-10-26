@@ -15,7 +15,8 @@
 //! prefix below. A replacement writes a temporary file named after its key in
 //! that physically protected namespace, so only the key's holder touches it.
 //! Listing hides those resources; removing a directory removes them with it.
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::host::ErrorKind;
+use rutis::{Ctx, Plugin};
 use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
@@ -1151,36 +1152,26 @@ impl FileStoragePlugin {
         }
     }
 }
-impl TypedPlugin for FileStoragePlugin {
+impl Plugin for FileStoragePlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "FileStorage"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let roots = self.roots.clone();
-            let storage = tokio::task::spawn_blocking(move || FileStorage::open(roots))
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        let roots = self.roots.clone();
+        let storage = tokio::task::spawn_blocking(move || FileStorage::open(roots))
+            .await
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
+        let owner = storage.clone();
+        ctx.effect(move || async move {
+            owner
+                .close()
                 .await
-                .map_err(|error| CordisError::PluginFailed(error.into()))?
-                .map_err(|error| CordisError::PluginFailed(error.into()))?;
-            let owner = storage.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owner
-                            .close()
-                            .await
-                            .map_err(|error| CordisError::PluginFailed(error.into()))
-                    })
-                }))
-            })?;
-            ctx.provide_as(TypeKey::of::<FileStorage>(), storage)?;
-            Ok(Effect::Done)
-        })
+                .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))
+        })?;
+        ctx.provide_as::<FileStorage>(storage)?;
+        Ok(())
     }
 }
 

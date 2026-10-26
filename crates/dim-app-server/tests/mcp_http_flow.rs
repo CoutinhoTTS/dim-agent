@@ -6,6 +6,7 @@ use axum::{
     routing::post,
 };
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
+use dim_agent_runtime::Names;
 use dim_agent_runtime::wait_active;
 use dim_agent_types::{ContentBlock, ToolContent};
 use dim_app_server::{
@@ -16,7 +17,9 @@ use dim_app_server::{
     },
     settings::{SettingsPlugin, SettingsScope, SettingsService},
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Typed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis_loader::resolve::Build;
 use serde_json::{Value, json};
 use std::{
     convert::Infallible,
@@ -31,19 +34,29 @@ use std::{
 use tokio::sync::{Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
-struct Capture(Arc<OnceLock<Arc<McpService>>>);
-impl TypedPlugin for Capture {
-    type Deps = Keyed<McpService>;
+struct Capture {
+    service: Arc<OnceLock<Arc<McpService>>>,
+    mcp: Key<McpService>,
+}
+impl Capture {
+    fn new(names: &Names<'_>, service: Arc<OnceLock<Arc<McpService>>>) -> rutis::Result<Self> {
+        Ok(Self {
+            service,
+            mcp: names.key()?,
+        })
+    }
+}
+impl DynPlugin for Capture {
     fn name(&self) -> &str {
         "McpHttpTest"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        Keyed(mcp): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.mcp.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            assert!(self.0.set(mcp).is_ok());
+            let mcp = ctx.require_at(&self.mcp)?;
+            assert!(self.service.set(mcp).is_ok());
             Ok(Effect::Done)
         })
     }
@@ -83,29 +96,27 @@ impl Fixture {
         file.write_all(&serde_json::to_vec(&json!({"mcpServers":{"docs":configuration}})).unwrap())
             .unwrap();
         let root = Ctx::root().unwrap();
+        let catalog = dim_app_server::catalog();
+        let build = Build::default();
+        let names = Names::copy(&catalog, &build);
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
         // Where Mcp registers its Session part; no Agent mounts it here.
-        root.provide_as(
-            rutis::TypeKey::of::<dim_agent_runtime::PartRegistry>(),
-            Arc::new(dim_agent_runtime::PartRegistry::default()),
-        )
+        root.provide_as::<dim_agent_runtime::PartRegistry>(Arc::new(
+            dim_agent_runtime::PartRegistry::default(),
+        ))
         .unwrap();
         let views = vec![
-            root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
+            root.plugin(FileStoragePlugin::new(vec![
                 fs::canonicalize(&home).unwrap(),
-            ]))),
-            root.plugin(
-                SettingsPlugin::new(0, vec![])
-                    .typed(&dim_app_server::catalog())
-                    .unwrap(),
-            ),
+            ])),
+            root.plugin(SettingsPlugin::new(&names, 0, vec![]).unwrap()),
             root.plugin(
                 dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
                     .unwrap(),
             ),
-            root.plugin(Typed::new(McpPlugin::new(0))),
-            root.plugin(Typed::new(Capture(capture.clone()))),
+            root.plugin(McpPlugin::new(&names, 0).unwrap()),
+            root.plugin(Capture::new(&names, capture.clone()).unwrap()),
         ];
         wait_active(
             &root,

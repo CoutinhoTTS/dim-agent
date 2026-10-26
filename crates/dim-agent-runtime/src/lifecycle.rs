@@ -27,7 +27,7 @@ impl<T: Clone + Send + Sync + 'static> CloseOnce<T> {
         &self,
         handle: &tokio::runtime::Handle,
         work: impl Future<Output = Result<T>> + Send + 'static,
-    ) -> rutis::BoxFuture<'static, Result<T>> {
+    ) -> rutis::host::BoxFuture<'static, Result<T>> {
         if !self.started.swap(true, Ordering::AcqRel) {
             let send = self.result.clone();
             handle.spawn(async move {
@@ -40,7 +40,7 @@ impl<T: Clone + Send + Sync + 'static> CloseOnce<T> {
         }
         self.wait()
     }
-    pub fn wait(&self) -> rutis::BoxFuture<'static, Result<T>> {
+    pub fn wait(&self) -> rutis::host::BoxFuture<'static, Result<T>> {
         let mut result = self.result.subscribe();
         Box::pin(async move {
             loop {

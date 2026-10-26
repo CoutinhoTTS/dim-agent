@@ -3,6 +3,7 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::*;
 use rutis::Ctx;
+use rutis::host::CtxHost;
 use std::sync::Arc;
 fn input(text: &str) -> EventDraft {
     EventKind::InputMessage(InputMessageData::text(text, None)).into()

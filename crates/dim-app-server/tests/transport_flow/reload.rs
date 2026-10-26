@@ -1,20 +1,15 @@
 use super::*;
+use rutis::host::CtxHost;
 
 pub(super) struct NamedExtension(pub String, pub Arc<AtomicUsize>);
-impl TypedPlugin for NamedExtension {
+impl Plugin for NamedExtension {
     type Deps = ();
     fn name(&self) -> &str {
         &self.0
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            self.1.fetch_add(1, Ordering::SeqCst);
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, _: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -36,11 +31,11 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
             let (session, branch) = (count.clone(), count.clone());
             builder.require_feature(
                 Feature::new(format!("test.named-extension-{index}"))
-                    .session(format!("test.named-session-{index}"), move |names| {
-                        names.part(NamedExtension(name.into(), session.clone()))
+                    .session(format!("test.named-session-{index}"), move |_| {
+                        Ok(Box::new(NamedExtension(name.into(), session.clone())))
                     })
-                    .branch(format!("test.named-branch-{index}"), move |names| {
-                        names.part(NamedExtension(name.into(), branch.clone()))
+                    .branch(format!("test.named-branch-{index}"), move |_| {
+                        Ok(Box::new(NamedExtension(name.into(), branch.clone())))
                     }),
             );
         }
@@ -69,11 +64,11 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
 
     // Group IDs are public instance selectors, unlike plugin display names.
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.session_extension_part("Rpc", "extension", |names, _: &()| {
-        names.part(NamedExtension(
+    builder.session_extension_part("Rpc", "extension", |_, _: &()| {
+        Ok(Box::new(NamedExtension(
             "extension".into(),
             Arc::new(AtomicUsize::new(0)),
-        ))
+        )))
     });
     let error = serve(builder, ServerConfig::default())
         .await
@@ -315,29 +310,23 @@ async fn dropping_serve_during_startup_releases_the_listener() {
 
 /// Fails Session cleanup while the flag is set.
 pub(super) struct FailingCleanup(pub(super) Arc<std::sync::atomic::AtomicBool>);
-impl TypedPlugin for FailingCleanup {
+impl Plugin for FailingCleanup {
     type Deps = ();
     fn name(&self) -> &'static str {
         "test.failing-cleanup"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
         let fail = self.0.clone();
-        let result = ctx.effect(move || {
-            rutis::Effect::AsyncDisposer(Box::new(move || {
-                Box::pin(async move {
-                    if fail.load(Ordering::SeqCst) {
-                        Err(rutis::CordisError::PluginFailed("cleanup".into()))
-                    } else {
-                        Ok(())
-                    }
-                })
-            }))
-        });
-        Box::pin(async move { result.map(|_| rutis::Effect::Done) })
+        ctx.effect(move || async move {
+            if fail.load(Ordering::SeqCst) {
+                Err(rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    "cleanup".into(),
+                )))
+            } else {
+                Ok(())
+            }
+        })?;
+        Ok(())
     }
 }
 
@@ -402,7 +391,7 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     let tools = ToolReload::default();
@@ -449,7 +438,7 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
     tools.restart().await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while !loop_generation().is_some_and(|(generation, state)| {
-            generation > before && state == rutis::FiberState::Active
+            generation > before && state == rutis::host::FiberState::Active
         }) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -534,7 +523,10 @@ impl dim_agent_capabilities::host::ModelDriver for DeclaredTools {
 /// A Session capability outside the defaults contributing a stateful tool.
 /// Registers `probe`; the count is the test's, so it continues across the
 /// contributor's generations.
-struct ProbeContributor(Arc<AtomicUsize>);
+struct ProbeContributor(
+    Arc<AtomicUsize>,
+    rutis::host::Key<dim_agent_capabilities::tool_registry::ToolRegistry>,
+);
 struct ProbeTool(Arc<AtomicUsize>);
 impl dim_agent_capabilities::tool_registry::ToolHandler for ProbeTool {
     fn execute(
@@ -547,18 +539,25 @@ impl dim_agent_capabilities::tool_registry::ToolHandler for ProbeTool {
         Box::pin(async move { Ok(ToolResult::text(format!("probe call {calls}"))) })
     }
 }
-impl TypedPlugin for ProbeContributor {
-    type Deps = (rutis::Keyed<dim_agent_capabilities::tool_registry::ToolRegistry>,);
+impl ProbeContributor {
+    fn new(names: &dim_agent_runtime::Names<'_>, calls: Arc<AtomicUsize>) -> rutis::Result<Self> {
+        Ok(Self(calls, names.key()?))
+    }
+}
+impl rutis::host::DynPlugin for ProbeContributor {
     fn name(&self) -> &str {
         "Probe"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.1.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (rutis::Keyed(tools),): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         use dim_agent_capabilities::tool_registry::{ToolContribution, definition};
         Box::pin(async move {
+            let tools = ctx.require_at(&self.1)?;
             tools.register(
                 ctx,
                 ToolContribution {
@@ -566,7 +565,7 @@ impl TypedPlugin for ProbeContributor {
                     handler: Arc::new(ProbeTool(self.0.clone())),
                 },
             )?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -593,12 +592,12 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         )
         .require_feature(Feature::new("Probe").session("Probe", {
             let calls = Arc::new(AtomicUsize::new(0));
-            move |names| names.part(ProbeContributor(calls.clone()))
+            move |names| Ok(Box::new(ProbeContributor::new(names, calls.clone())?))
         }));
     let tools = ToolReload::default();
     tools.install(&mut builder, Arc::new(MockTools));
@@ -632,7 +631,7 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
             .unwrap()
             .plugins
             .into_iter()
-            .find(|plugin| plugin.name == name && plugin.state == rutis::FiberState::Active)
+            .find(|plugin| plugin.name == name && plugin.state == rutis::host::FiberState::Active)
             .map(|plugin| plugin.generation)
     };
     let loop_generation = || {
@@ -641,7 +640,7 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
             .unwrap()
             .plugins
             .into_iter()
-            .find(|plugin| plugin.name == "Loop" && plugin.state == rutis::FiberState::Active)
+            .find(|plugin| plugin.name == "Loop" && plugin.state == rutis::host::FiberState::Active)
             .map(|plugin| plugin.generation)
     };
     let last_result = async || {
@@ -725,7 +724,7 @@ async fn a_stop_while_loop_reloads_waits_for_its_successor() {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     let tools = ToolReload::default();
@@ -836,7 +835,7 @@ async fn state_notifications_follow_a_loop_reload() {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     let tools = ToolReload::default();

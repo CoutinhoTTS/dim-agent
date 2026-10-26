@@ -48,18 +48,19 @@ impl HostDispatch for AuxiliaryModel {
         let request = args
             .next()
             .ok_or_else(|| failure(invalid("Missing auxiliaryModel request")))?;
-        let CompleteRequest { model, request } = rutis_bridge::exports::decode(request)
-            .map_err(|_| failure(invalid("Invalid auxiliaryModel request")))?;
+        let CompleteRequest { model, request } = request
+            .json()
+            .ok()
+            .and_then(|request| serde_json::from_value(request).ok())
+            .ok_or_else(|| failure(invalid("Invalid auxiliaryModel request")))?;
         let model = ModelId {
             provider_id: model.provider_id,
             model_id: model.model_id,
         };
         let cancelled = match args.next() {
             None | Some(Value::Undefined) => None,
-            Some(value) => Some(
-                rutis_bridge::exports::callback(value)
-                    .map_err(|_| failure(invalid("Invalid auxiliaryModel cancellation")))?,
-            ),
+            Some(Value::Reference(reference)) if reference.is_function() => Some(reference),
+            Some(_) => return Err(failure(invalid("Invalid auxiliaryModel cancellation"))),
         };
         if args.next().is_some() {
             return Err(failure(invalid("Too many auxiliaryModel arguments")));
@@ -72,7 +73,11 @@ impl HostDispatch for AuxiliaryModel {
             let reply = if let Some(cancelled) = cancelled {
                 tokio::select! {
                     result = &mut call => result,
-                    _ = cancelled.invoke::<(), Error>(vec![]) => {
+                    // The callback's result, once settled, is ignored.
+                    _ = async {
+                        let returned = cancelled.call_async(Value::List(vec![])).await?;
+                        rutis_bridge::session::settle(returned).await
+                    } => {
                         cancel.cancel();
                         call.await
                     }
@@ -81,7 +86,7 @@ impl HostDispatch for AuxiliaryModel {
                 call.await
             }
             .map_err(failure)?;
-            rutis_bridge::exports::encode(&reply)
+            rutis_bridge::session::arg(&reply)
         }))
     }
 }

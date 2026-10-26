@@ -15,7 +15,8 @@ use crate::{
 use dim_agent_runtime::{AgentError, BranchLifecycle, BranchOpening, Dispatcher, Names, Timeline};
 use dim_agent_types::*;
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Error};
 use std::{
     collections::HashMap,
     panic::AssertUnwindSafe,
@@ -296,40 +297,49 @@ fn register(
 }
 
 pub struct ToolBindingPlugin {
-    binding: DepKey<ToolBinding>,
+    binding: Key<ToolBinding>,
+    registry: Key<ToolRegistry>,
+    prompt: Key<Prompt>,
+    timeline: Key<Timeline>,
+    phase: Key<BranchLifecycle>,
+    dispatcher: Key<Dispatcher>,
+    opening: Key<BranchOpening>,
 }
 impl ToolBindingPlugin {
-    pub fn new(names: &Names<'_>) -> std::result::Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> std::result::Result<Self, Error> {
         Ok(Self {
             binding: names.key()?,
+            registry: names.key()?,
+            prompt: names.key()?,
+            timeline: names.key()?,
+            phase: names.key()?,
+            dispatcher: names.key()?,
+            opening: names.key()?,
         })
     }
 }
-impl TypedPlugin for ToolBindingPlugin {
-    type Deps = (
-        Keyed<ToolRegistry>,
-        Keyed<Prompt>,
-        Keyed<Timeline>,
-        Keyed<BranchLifecycle>,
-        Keyed<Dispatcher>,
-        Keyed<BranchOpening>,
-    );
+impl DynPlugin for ToolBindingPlugin {
     fn name(&self) -> &str {
         "ToolBinding"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(registry),
-            Keyed(prompt),
-            Keyed(timeline),
-            Keyed(phase),
-            Keyed(dispatcher),
-            Keyed(opening),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.registry.erase(),
+            self.prompt.erase(),
+            self.timeline.erase(),
+            self.phase.erase(),
+            self.dispatcher.erase(),
+            self.opening.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let registry = ctx.require_at(&self.registry)?;
+            let prompt = ctx.require_at(&self.prompt)?;
+            let timeline = ctx.require_at(&self.timeline)?;
+            let phase = ctx.require_at(&self.phase)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let opening = ctx.require_at(&self.opening)?;
             let binding = Arc::new(ToolBinding {
                 registry: registry.clone(),
                 state: Mutex::default(),
@@ -427,16 +437,12 @@ impl TypedPlugin for ToolBindingPlugin {
                     }
                 }
             });
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        tasks.close();
-                        tasks.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                tasks.close();
+                tasks.wait().await;
+                Ok(())
             })?;
-            ctx.provide_as(self.binding.key().clone(), binding)?;
+            ctx.provide_at(self.binding.clone(), binding)?;
             Ok(Effect::Done)
         })
     }

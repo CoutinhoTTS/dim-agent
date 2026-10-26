@@ -5,7 +5,6 @@
 use super::*;
 use dim_agent_runtime::Timeline;
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed};
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 use tokio::sync::Notify;
 
@@ -107,7 +106,7 @@ async fn loaded(server: &RunningServer, fixture: &str, expected: usize) {
             if rows.len() == expected
                 && rows
                     .iter()
-                    .all(|row| row.state == rutis::FiberState::Active)
+                    .all(|row| row.state == rutis::host::FiberState::Active)
             {
                 break;
             }
@@ -260,22 +259,28 @@ struct BuildHold {
     armed: AtomicBool,
     release: Notify,
 }
-struct HoldBuild(Arc<BuildHold>);
-impl TypedPlugin for HoldBuild {
-    type Deps = Keyed<Timeline>;
+struct HoldBuild(Arc<BuildHold>, rutis::host::Key<Timeline>);
+impl HoldBuild {
+    fn new(names: &dim_agent_runtime::Names<'_>, a0: Arc<BuildHold>) -> rutis::Result<Self> {
+        Ok(Self(a0, names.key()?))
+    }
+}
+impl rutis::host::DynPlugin for HoldBuild {
     fn name(&self) -> &str {
         "test.hold-branch-build"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.1.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a Ctx,
-        _: Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        _: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
             if self.0.armed.load(Ordering::SeqCst) {
                 self.0.release.notified().await;
             }
-            Ok(Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -312,7 +317,7 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
             builder.require_feature(
                 Feature::new("test.hold-branch-build")
                     .branch("test.hold-branch-build", move |names| {
-                        names.part(HoldBuild(plugin_hold.clone()))
+                        Ok(Box::new(HoldBuild::new(names, plugin_hold.clone())?))
                     }),
             );
         },

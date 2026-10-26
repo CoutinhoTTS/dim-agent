@@ -1058,6 +1058,7 @@ dependencies = [
  "dim-agent-types",
  "futures-util",
  "rutis",
+ "rutis-bridge",
  "rutis-loader",
  "schemars",
  "serde",
@@ -3406,9 +3407,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutis"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2979977c416f20b5ca9315b94538dc94d7424084461ec56b2af42b7314849a3a"
+checksum = "f0bf23fa920f2cd6586e3f045b8fdb49cf361cd9c4552fa322c699ddbfdfa696"
 dependencies = [
  "erased-serde",
  "rutis-macros",
@@ -3422,9 +3423,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-bridge"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dcf8d930b1c200a05fca2166bab4ecf412c44d0d57b35d0c4916e13da6ed59c"
+checksum = "fe7b1a9e8f64881d4147a47c7880346fd0499aed1845484e3e48b767805fd74c"
 dependencies = [
  "getrandom 0.2.17",
  "libc",
@@ -3443,9 +3444,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-loader"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b66ad6bd4f41d2cb91f6773766c4eaaa91bb8867f0c4c40e75c9d04153451db"
+checksum = "327e057c335d3f723c0749e4d31003a34256747965034f44ab1df4cf7c4fab10"
 dependencies = [
  "libc",
  "rutis",
@@ -3460,9 +3461,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-macros"
-version = "0.16.0"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4632181bfad5038d3c412f153711791f3a9e63aeab3bef74822c630b9e088eac"
+checksum = "f37b58c6c193266512cd7821c6368212798a2ccf1f5982bf857442ba6a182d68"
 dependencies = [
  "proc-macro2",
  "quote",

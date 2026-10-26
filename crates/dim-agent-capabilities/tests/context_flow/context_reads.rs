@@ -1,4 +1,6 @@
 use super::*;
+use rutis::host::CtxHost;
+use rutis::host::ErrorKind;
 use std::ops::RangeInclusive;
 
 type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
@@ -42,7 +44,7 @@ tokio::task_local! {
 }
 
 #[derive(Clone, Default)]
-struct ModelReload(Arc<std::sync::Mutex<Vec<rutis::FiberView>>>);
+struct ModelReload(Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>);
 impl ModelReload {
     /// `model` is the process ModelHost; restarting the Session's context
     /// hosts reloads ContextPreparation, and so ModelProvider, and Loop.
@@ -52,11 +54,11 @@ impl ModelReload {
         builder.require_feature(Feature::new("test.context-hosts-owner").session(
             "test.context-hosts-owner",
             move |names| {
-                names.part(ContextHostsOwner {
+                Ok(Box::new(ContextHostsOwner {
                     keys: (names.key()?, names.key()?, names.key()?),
                     model: model.clone(),
                     views: views.clone(),
-                })
+                }))
             },
         ));
     }
@@ -69,66 +71,50 @@ impl ModelReload {
 
 /// Where the Session's context hosts are provided.
 type HostKeys = (
-    rutis::DepKey<PrepareContextHost>,
-    rutis::DepKey<ContextModelHost>,
-    rutis::DepKey<CompactionStrategyHost>,
+    rutis::host::Key<PrepareContextHost>,
+    rutis::host::Key<ContextModelHost>,
+    rutis::host::Key<CompactionStrategyHost>,
 );
 struct ContextHostsOwner {
     keys: HostKeys,
     model: Arc<CancelThenEcho>,
-    views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
+    views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
 }
-impl TypedPlugin for ContextHostsOwner {
+impl Plugin for ContextHostsOwner {
     type Deps = ();
     fn name(&self) -> &str {
         "test.context-hosts-owner"
     }
 
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let view = ctx.plugin(rutis::Typed::new(TestContextHosts(
-                self.keys.clone(),
-                self.model.clone(),
-            )));
-            // A required part awaits the children it mounts in apply.
-            (&view).await.map_err(|error| {
-                CordisError::PluginFailed(format!("context hosts failed: {error}").into())
-            })?;
-            self.views.lock().unwrap().push(view);
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        let view = ctx.plugin(TestContextHosts(self.keys.clone(), self.model.clone()));
+        // A required part awaits the children it mounts in apply.
+        (&view).await.map_err(|error| {
+            rutis::Error::from(ErrorKind::PluginFailed(
+                format!("context hosts failed: {error}").into(),
+            ))
+        })?;
+        self.views.lock().unwrap().push(view);
+        Ok(())
     }
 }
 
 struct TestContextHosts(HostKeys, Arc<CancelThenEcho>);
-impl TypedPlugin for TestContextHosts {
+impl Plugin for TestContextHosts {
     type Deps = ();
     fn name(&self) -> &str {
         "test.context-hosts"
     }
 
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let (prepare, model, strategy) = &self.0;
-            ctx.provide_as(
-                prepare.key().clone(),
-                Arc::new(PrepareContextHost(self.1.clone())),
-            )?;
-            ctx.provide_as(model.key().clone(), Arc::new(ContextModelHost(None)))?;
-            ctx.provide_as(
-                strategy.key().clone(),
-                Arc::new(CompactionStrategyHost(None)),
-            )?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        let (prepare, model, strategy) = &self.0;
+        ctx.provide_at(
+            prepare.clone(),
+            Arc::new(PrepareContextHost(self.1.clone())),
+        )?;
+        ctx.provide_at(model.clone(), Arc::new(ContextModelHost(None)))?;
+        ctx.provide_at(strategy.clone(), Arc::new(CompactionStrategyHost(None)))?;
+        Ok(())
     }
 }
 
@@ -459,7 +445,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
             .session_value(Arc::new(HistoryRenderer::default()))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             );
         reload.install(&mut builder, model.clone());
@@ -492,7 +478,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
         terminal_committed.notified().await;
         loop {
             let plugin = generation();
-            if plugin.generation > before && plugin.state == rutis::FiberState::Active {
+            if plugin.generation > before && plugin.state == rutis::host::FiberState::Active {
                 break;
             }
             tokio::task::yield_now().await;
@@ -578,7 +564,7 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
             .session_value(Arc::new(HistoryRenderer::default()))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             )
             .timeline_store(Arc::new(CountContextReads {
@@ -606,7 +592,7 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
         reload.restart().await;
         loop {
             let plugin = generation();
-            if plugin.generation > before && plugin.state == rutis::FiberState::Active { break; }
+            if plugin.generation > before && plugin.state == rutis::host::FiberState::Active { break; }
             tokio::task::yield_now().await;
         }
         assert_eq!(session.service::<dyn LoopState>("main").unwrap().state().phase, LoopPhase::Idle);
@@ -1083,19 +1069,29 @@ struct InterruptGate {
     release: tokio::sync::Notify,
     once: std::sync::atomic::AtomicBool,
 }
-struct InterruptGatePlugin(Arc<InterruptGate>);
-impl TypedPlugin for InterruptGatePlugin {
-    type Deps = (Keyed<Dispatcher>,);
+struct InterruptGatePlugin {
+    gate: Arc<InterruptGate>,
+    dispatcher: Key<Dispatcher>,
+}
+impl InterruptGatePlugin {
+    fn new(names: &Names<'_>, gate: Arc<InterruptGate>) -> rutis::Result<Self> {
+        Ok(Self {
+            gate,
+            dispatcher: names.key()?,
+        })
+    }
+}
+impl DynPlugin for InterruptGatePlugin {
     fn name(&self) -> &str {
         "test.interrupt-gate"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let gate = self.0.clone();
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let gate = self.gate.clone();
             dispatcher.subscribe(ctx, "test.interrupt-gate", &["stop/interrupt"], move |_| {
                 let gate = gate.clone();
                 Box::pin(async move {
@@ -1132,14 +1128,14 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
         )))))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         )
         .timeline_store(store.clone());
     let copy = gate.clone();
     builder.require_feature(
         Feature::new("test.interrupt-gate").branch("test.interrupt-gate", move |names| {
-            names.part(InterruptGatePlugin(copy.clone()))
+            Ok(Box::new(InterruptGatePlugin::new(names, copy.clone())?))
         }),
     );
     defaults::install(&mut builder);
@@ -1304,7 +1300,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
             .session_value(Arc::new(CompactionStrategyHost(None)))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             );
         defaults::install(&mut builder);

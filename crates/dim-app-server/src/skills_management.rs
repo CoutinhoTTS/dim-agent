@@ -13,7 +13,9 @@ use dim_agent_capabilities::{
         SkillSettingsSnapshot,
     },
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use dim_agent_runtime::Names;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -183,30 +185,47 @@ fn issue(issue: dim_agent_capabilities::skills::SkillIssue) -> SkillIssue {
     }
 }
 
-pub struct SkillsCatalogPlugin;
-impl TypedPlugin for SkillsCatalogPlugin {
-    type Deps = (
-        Keyed<HostPlatform>,
-        Keyed<SettingsService>,
-        Keyed<ManagementMethods>,
-        Keyed<dim_agent_runtime::PartRegistry>,
-    );
+pub struct SkillsCatalogPlugin {
+    platform: Key<HostPlatform>,
+    settings: Key<SettingsService>,
+    methods: Key<ManagementMethods>,
+    parts: Key<dim_agent_runtime::PartRegistry>,
+}
+impl SkillsCatalogPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            platform: names.key()?,
+            settings: names.key()?,
+            methods: names.key()?,
+            parts: names.key()?,
+        })
+    }
+}
+impl DynPlugin for SkillsCatalogPlugin {
     fn name(&self) -> &str {
         "SkillsCatalog"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (platform, Keyed(settings), Keyed(methods), Keyed(parts)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.platform.erase(),
+            self.settings.erase(),
+            self.methods.erase(),
+            self.parts.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let platform = ctx.require_at(&self.platform)?;
+            let settings = ctx.require_at(&self.settings)?;
+            let methods = ctx.require_at(&self.methods)?;
+            let parts = ctx.require_at(&self.parts)?;
             let settings = Arc::new(SkillSettingsHost(Arc::new(SkillStorage { settings })));
             let catalog = dim_agent_capabilities::skills::SkillsCatalogPlugin::mount(
                 ctx,
-                (platform, Keyed(settings)),
+                (platform, settings),
             )
             .await?;
-            ctx.provide_as(rutis::TypeKey::of::<SkillsCatalog>(), catalog.clone())?;
+            ctx.provide_as::<SkillsCatalog>(catalog.clone())?;
             dim_agent_capabilities::skills::register_parts(ctx, &parts)?;
             methods.register(
                 ctx,
