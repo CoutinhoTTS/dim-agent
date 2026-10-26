@@ -179,9 +179,11 @@ an external dependency.
   instance goes through business configuration such as `SessionConfig`, never through rows.
 - **Publication.** The host's assembly profile decides which parts a Session or branch waits for
   before publication ([single-tree](../architecture/rust-agent/single-tree.md#结构)). A required part
-  must be Active, not merely loaded. A part mounted after publication does not publish the instance
-  again, and a part outside the profile that is Pending or Failed affects only its own features. A
-  plugin does not declare that it is required.
+  must be Active, not merely loaded. Every other part registered when the instance opens settles
+  before publication, as the instance's optional rows do, so what it registers (tools, methods) is
+  there once the instance is published; one that is Pending or Failed affects only its own features.
+  A part mounted after publication does not publish the instance again. A plugin does not declare
+  that it is required.
 - **Inside a part.** A part may still create children in its own subtree, as McpSession does for each
   server and Skills for each content. They are the part's business.
 - **Where plugins run.** The App Server places plugins as process rows of its loader. A library

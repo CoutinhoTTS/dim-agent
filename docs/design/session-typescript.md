@@ -357,12 +357,15 @@ and end at `closing()`. Row Active alone never permits business work from TS app
 
 Session assembly uses the registered required-part membership implemented by [#137](https://github.com/arcships/dim/pull/137).
 A plugin's Session part is optional unless the host's profile requires it by name
-(`AgentBuilder::require_part`). An optional part's copy mounts without holding the Session's
-publication ([ADR 006 D3](../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it),
-Publication): a part genuinely Pending on a missing dependency does not delay native Session use,
-and the tools it registers are offered from the request after it registers them (A.5). A part the
-first request must have is required: the Session then waits for its registration and for it to be
-Active, so its tools are in the first request after create and restore. Their
+(`AgentBuilder::require_part`). An optional part registered when the Session opens settles before
+the Session is published ([ADR 006 D3](../adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it),
+Publication), so the tools and methods it registers in `apply` are there from the first request; a
+part genuinely Pending on a missing dependency or Failed affects only its own features. Its `apply`
+must return once it has registered: work that needs an active Session belongs in a task that waits
+for `activated()`. A part registered after the Session is published is offered from the request
+after it registers (A.5). A part the
+Session must not be published without is required: the Session then waits for its registration and
+for it to be Active, and fails if it does not become Active. Their
 hard dependencies, key validation and failure reporting do not weaken. Disabled parts have no row instance. An optional failure changes only its features;
 there is no automatic retry of an operation that may have produced external side effects.
 
