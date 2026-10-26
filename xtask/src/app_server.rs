@@ -13,7 +13,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
 use dim_app_server::{RunningServer, ServerConfig, serve};
-use rutis::RuntimeDiagnostics;
+use rutis::host::diagnostics::RuntimeDiagnostics;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -62,13 +62,15 @@ pub async fn serve_product(
         .require_feature(
             Feature::new("ContextCompaction")
                 .session("ProductSummaryStrategy", |names| {
-                    names.part(ProductSummaryStrategyPlugin::new(names)?)
+                    Ok(Box::new(ProductSummaryStrategyPlugin::new(names)?))
                 })
-                .session("ContextMethods", |names| names.part(ContextMethodsPlugin)),
+                .session("ContextMethods", |names| {
+                    Ok(Box::new(ContextMethodsPlugin::new(names)?))
+                }),
         )
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     dim_app_server::collaboration::install(&mut builder);

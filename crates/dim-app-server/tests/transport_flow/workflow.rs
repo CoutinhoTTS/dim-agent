@@ -187,7 +187,7 @@ async fn report_restart(kill_runtime: bool) {
     let (restarted, ()) = tokio::join!(loader.restart(name), async {
         let mut state = owner.watch();
         tokio::time::timeout(Duration::from_secs(3), async {
-            while state.borrow_and_update().state != rutis::FiberState::Unloading {
+            while state.borrow_and_update().state != rutis::host::FiberState::Unloading {
                 state.changed().await.unwrap();
             }
         })
@@ -1313,7 +1313,7 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
         let original_instance = first.instance().unwrap();
         let owner = loader.get("workflow").unwrap().view.unwrap();
         server.restart("Agents").await.unwrap();
-        assert_eq!(owner.state().state, rutis::FiberState::Active);
+        assert_eq!(owner.state().state, rutis::host::FiberState::Active);
         assert_eq!(
             agent.get_session(first.id()).unwrap().instance().unwrap(),
             original_instance
@@ -1739,7 +1739,7 @@ async fn node_workflow_report_wakes_wait_and_is_adopted_after_its_start_batch() 
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::tool_host(

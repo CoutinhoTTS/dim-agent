@@ -15,7 +15,9 @@ use dim_agent_types::{
     InputWithdrawData, ModelId, ModelSelection, PermissionPolicy, PermissionPreset, UserInput,
 };
 use futures_util::future::Either;
-use rutis::{Ctx, Effect};
+use rutis::Ctx;
+use rutis::host::{CtxHost, Effect};
+use rutis::internal::CtxInternal;
 use rutis_bridge::session::{HostDispatch, Reply, Value, caller_row};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;

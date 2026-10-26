@@ -2,7 +2,8 @@
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, Feature, SessionConfig, wait_active,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::host::{CtxHost, ErrorKind};
+use rutis::{Ctx, Plugin};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -12,42 +13,32 @@ struct SlowInitialization {
     cleaning: Arc<Notify>,
     release: Arc<Notify>,
 }
-impl TypedPlugin for SlowInitialization {
+impl Plugin for SlowInitialization {
     type Deps = ();
     fn name(&self) -> &str {
         "review.slow-initialization"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let cleaning = self.cleaning.clone();
-            let release = self.release.clone();
-            ctx.effect(|| {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        cleaning.notify_one();
-                        release.notified().await;
-                        Err(CordisError::ServiceNotFound(
-                            "rollback resource failure".into(),
-                        ))
-                    })
-                }))
-            })?;
-            self.entered.notify_one();
-            ctx.cancelled().await;
-            Err(CordisError::ServiceNotFound(
-                "initialization cancelled".into(),
-            ))
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        let cleaning = self.cleaning.clone();
+        let release = self.release.clone();
+        ctx.effect(|| async move {
+            cleaning.notify_one();
+            release.notified().await;
+            Err(rutis::Error::from(ErrorKind::ServiceNotFound(
+                "rollback resource failure".into(),
+            )))
+        })?;
+        self.entered.notify_one();
+        ctx.cancelled().await;
+        Err(rutis::Error::from(ErrorKind::ServiceNotFound(
+            "initialization cancelled".into(),
+        )))
     }
 }
-fn framework_contains(error: &CordisError, message: &str) -> bool {
+fn framework_contains(error: &ErrorKind, message: &str) -> bool {
     match error {
-        CordisError::ServiceNotFound(value) => value == message,
-        CordisError::Aggregate { errors } => errors.iter().any(|e| framework_contains(e, message)),
+        ErrorKind::ServiceNotFound(value) => value == message,
+        ErrorKind::Aggregate { errors } => errors.iter().any(|e| framework_contains(e, message)),
         _ => false,
     }
 }
@@ -67,12 +58,12 @@ async fn agent_close_joins_cancelled_construction_and_retains_async_rollback_fai
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.require_feature(Feature::new("review.slow-initialization").session(
         "review.slow-initialization",
-        move |names| {
-            names.part(SlowInitialization {
+        move |_| {
+            Ok(Box::new(SlowInitialization {
                 entered: setup.0.clone(),
                 cleaning: setup.1.clone(),
                 release: setup.2.clone(),
-            })
+            }))
         },
     ));
     let agent = builder.build();
@@ -124,12 +115,12 @@ fn agent_close_freezes_build_ownership_before_the_close_task_can_be_polled() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.require_feature(Feature::new("review.slow-initialization").session(
         "review.slow-initialization",
-        move |names| {
-            names.part(SlowInitialization {
+        move |_| {
+            Ok(Box::new(SlowInitialization {
                 entered: setup.0.clone(),
                 cleaning: setup.1.clone(),
                 release: setup.2.clone(),
-            })
+            }))
         },
     ));
     let agent = {
@@ -172,41 +163,32 @@ fn agent_close_freezes_build_ownership_before_the_close_task_can_be_polled() {
 struct Unprovided;
 /// Stays Pending: it injects `Unprovided`.
 struct Dependent;
-impl TypedPlugin for Dependent {
+impl Plugin for Dependent {
     type Deps = Arc<Unprovided>;
     fn name(&self) -> &str {
         "review.dependent"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        _: Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async { Ok(Effect::Done) })
+    async fn apply(&self, _: &Ctx, _: Self::Deps) -> rutis::Result {
+        Ok(())
     }
 }
 struct Failing;
-impl TypedPlugin for Failing {
+impl Plugin for Failing {
     type Deps = ();
     fn name(&self) -> &str {
         "review.failing"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async { Err(CordisError::ServiceNotFound("required row failed".into())) })
+    async fn apply(&self, _: &Ctx, (): Self::Deps) -> rutis::Result {
+        Err(rutis::Error::from(ErrorKind::ServiceNotFound(
+            "required row failed".into(),
+        )))
     }
 }
 
 #[tokio::test]
 async fn a_failed_row_ends_the_wait_while_an_earlier_row_stays_pending() {
     let root = Ctx::root().unwrap();
-    let views = vec![
-        root.plugin(rutis::Typed::new(Dependent)),
-        root.plugin(rutis::Typed::new(Failing)),
-    ];
+    let views = vec![root.plugin(Dependent), root.plugin(Failing)];
     // The wait sits on the Pending row first; the timeout would only be
     // reached if the Failed row were not watched.
     let started = std::time::Instant::now();

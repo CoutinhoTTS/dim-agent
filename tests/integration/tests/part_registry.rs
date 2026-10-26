@@ -4,11 +4,12 @@
 //! itself has a registry of its own; a plugin of its own hands it to the
 //! test, which mounts producers that register there.
 use dim_agent_runtime::{
-    Agent, AgentBuilder, AgentConfig, BranchOptions, PartRegistry, PartScope, Session,
+    Agent, AgentBuilder, AgentConfig, BranchOptions, Names, PartRegistry, PartScope, Session,
     SessionConfig, SessionIdentity, TimelineIdentity,
 };
 use dim_agent_types::BranchSource;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberView, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberView, Key, TypeKey};
+use rutis::{Ctx, Plugin};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -25,19 +26,32 @@ fn builder() -> AgentBuilder {
 type Registries = tokio::sync::mpsc::UnboundedReceiver<Arc<PartRegistry>>;
 /// A plugin of the Agent's own that hands the test the Agent's registry
 /// when the Agent places itself, with its first Session.
-struct Host(tokio::sync::mpsc::UnboundedSender<Arc<PartRegistry>>);
-impl TypedPlugin for Host {
-    type Deps = (Keyed<PartRegistry>,);
+struct Host {
+    send: tokio::sync::mpsc::UnboundedSender<Arc<PartRegistry>>,
+    registry: Key<PartRegistry>,
+}
+impl Host {
+    fn new(
+        names: &Names<'_>,
+        send: tokio::sync::mpsc::UnboundedSender<Arc<PartRegistry>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            send,
+            registry: names.key()?,
+        })
+    }
+}
+impl DynPlugin for Host {
     fn name(&self) -> &str {
         "test.host"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(registry),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.registry.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let _ = self.0.send(registry);
+            let registry = ctx.require_at(&self.registry)?;
+            let _ = self.send.send(registry);
             Ok(Effect::Done)
         })
     }
@@ -45,7 +59,7 @@ impl TypedPlugin for Host {
 /// `builder` with [`Host`], and where its Agent's registry arrives.
 fn hosted(mut builder: AgentBuilder) -> (AgentBuilder, Registries) {
     let (send, registries) = tokio::sync::mpsc::unbounded_channel();
-    builder.plugin(move |names| names.part(Host(send.clone())));
+    builder.plugin(move |names| Ok(Box::new(Host::new(names, send.clone())?)));
     (builder, registries)
 }
 /// An Agent placing itself under `root`, placed by a first Session, and its
@@ -70,18 +84,16 @@ struct Producer {
     name: &'static str,
     generator: dim_agent_runtime::Generator,
 }
-impl TypedPlugin for Producer {
+impl Plugin for Producer {
     type Deps = ();
     fn name(&self) -> &str {
         "test.producer"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let generator = self.generator.clone();
-            self.registry
-                .register(ctx, self.scope, self.name, move |mount| generator(mount))?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        let generator = self.generator.clone();
+        self.registry
+            .register(ctx, self.scope, self.name, move |mount| generator(mount))?;
+        Ok(())
     }
 }
 async fn produce(
@@ -91,12 +103,12 @@ async fn produce(
     name: &'static str,
     generator: dim_agent_runtime::Generator,
 ) -> FiberView {
-    let view = root.plugin(rutis::Typed::new(Producer {
+    let view = root.plugin(Producer {
         registry,
         scope,
         name,
         generator,
-    }));
+    });
     dim_agent_runtime::wait_active(
         root,
         std::slice::from_ref(&view),
@@ -109,25 +121,33 @@ async fn produce(
 }
 
 /// Records where it is mounted and when it unloads.
-struct Recorder(Log);
-impl TypedPlugin for Recorder {
-    type Deps = (Keyed<SessionIdentity>,);
+struct Recorder {
+    log: Log,
+    identity: Key<SessionIdentity>,
+}
+impl Recorder {
+    fn new(names: &Names<'_>, log: Log) -> rutis::Result<Self> {
+        Ok(Self {
+            log,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for Recorder {
     fn name(&self) -> &str {
         "test.recorder"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(identity),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let (log, id) = (self.0.clone(), identity.session_id.clone());
+            let identity = ctx.require_at(&self.identity)?;
+            let (log, id) = (self.log.clone(), identity.session_id.clone());
             log.lock().unwrap().push(format!("mounted {id}"));
-            ctx.effect(move || {
-                Effect::Disposer(Box::new(move || {
-                    log.lock().unwrap().push(format!("unmounted {id}"));
-                    Ok(())
-                }))
+            ctx.effect(move || async move {
+                log.lock().unwrap().push(format!("unmounted {id}"));
+                Ok(())
             })?;
             Ok(Effect::Done)
         })
@@ -135,23 +155,37 @@ impl TypedPlugin for Recorder {
 }
 fn recorder(log: &Log) -> dim_agent_runtime::Generator {
     let log = log.clone();
-    Arc::new(move |mount| mount.names.part(Recorder(log.clone())).map(Some))
+    Arc::new(move |mount| {
+        Ok(Some(
+            Box::new(Recorder::new(mount.names, log.clone())?) as Box<dyn DynPlugin>
+        ))
+    })
 }
 
 /// A branch part that records its branch.
-struct BranchRecorder(Log);
-impl TypedPlugin for BranchRecorder {
-    type Deps = (Keyed<TimelineIdentity>,);
+struct BranchRecorder {
+    log: Log,
+    identity: Key<TimelineIdentity>,
+}
+impl BranchRecorder {
+    fn new(names: &Names<'_>, log: Log) -> rutis::Result<Self> {
+        Ok(Self {
+            log,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for BranchRecorder {
     fn name(&self) -> &str {
         "test.branch-recorder"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(identity),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            self.0.lock().unwrap().push(format!(
+            let identity = ctx.require_at(&self.identity)?;
+            self.log.lock().unwrap().push(format!(
                 "branch {}/{}",
                 identity.session_id, identity.branch_id
             ));
@@ -163,25 +197,25 @@ impl TypedPlugin for BranchRecorder {
 /// A part whose `apply` waits for a gate (or its unload: rutis does not
 /// abort an `apply`), or fails.
 struct Gated(Option<Arc<Notify>>);
-impl TypedPlugin for Gated {
+impl Plugin for Gated {
     type Deps = ();
     fn name(&self) -> &str {
         "test.gated"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            match &self.0 {
-                Some(gate) => {
-                    let cancel = ctx.cancellation_token();
-                    tokio::select! {
-                        _ = gate.notified() => {}
-                        _ = cancel.cancelled() => {}
-                    }
-                    Ok(Effect::Done)
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        match &self.0 {
+            Some(gate) => {
+                let cancel = ctx.cancellation_token();
+                tokio::select! {
+                    _ = gate.notified() => {}
+                    _ = cancel.cancelled() => {}
                 }
-                None => Err(CordisError::PluginFailed("gated part refused".into())),
+                Ok(())
             }
-        })
+            None => Err(rutis::Error::from(ErrorKind::PluginFailed(
+                "gated part refused".into(),
+            ))),
+        }
     }
 }
 
@@ -330,7 +364,11 @@ async fn a_required_part_gates_publication_and_its_failure_fails_the_session() {
         registry.clone(),
         PartScope::Session,
         "test.gated",
-        Arc::new(move |mount| mount.names.part(Gated(Some(held.clone()))).map(Some)),
+        Arc::new(move |_| {
+            Ok(Some(
+                Box::new(Gated(Some(held.clone()))) as Box<dyn DynPlugin>
+            ))
+        }),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -349,7 +387,7 @@ async fn a_required_part_gates_publication_and_its_failure_fails_the_session() {
         registry,
         PartScope::Session,
         "test.gated",
-        Arc::new(|mount| mount.names.part(Gated(None)).map(Some)),
+        Arc::new(|_| Ok(Some(Box::new(Gated(None)) as Box<dyn DynPlugin>))),
     )
     .await;
     let error = agent
@@ -371,7 +409,11 @@ async fn an_optional_part_neither_gates_nor_fails_its_session() {
         registry.clone(),
         PartScope::Session,
         "test.gated",
-        Arc::new(move |mount| mount.names.part(Gated(Some(never.clone()))).map(Some)),
+        Arc::new(move |_| {
+            Ok(Some(
+                Box::new(Gated(Some(never.clone()))) as Box<dyn DynPlugin>
+            ))
+        }),
     )
     .await;
     let _failing = produce(
@@ -379,7 +421,7 @@ async fn an_optional_part_neither_gates_nor_fails_its_session() {
         registry,
         PartScope::Session,
         "test.failing",
-        Arc::new(|mount| mount.names.part(Gated(None)).map(Some)),
+        Arc::new(|_| Ok(Some(Box::new(Gated(None)) as Box<dyn DynPlugin>))),
     )
     .await;
     let session = tokio::time::timeout(
@@ -390,12 +432,9 @@ async fn an_optional_part_neither_gates_nor_fails_its_session() {
     .expect("an optional part does not gate publication")
     .unwrap();
     eventually(|| {
-        session
-            .diagnostics()
-            .unwrap()
-            .plugins
-            .iter()
-            .any(|plugin| plugin.name == "test.gated" && plugin.state == rutis::FiberState::Failed)
+        session.diagnostics().unwrap().plugins.iter().any(|plugin| {
+            plugin.name == "test.gated" && plugin.state == rutis::host::FiberState::Failed
+        })
     })
     .await;
     assert!(mounted(&session, "test.gated"));
@@ -415,10 +454,10 @@ async fn a_branch_part_mounts_in_each_branch() {
         "test.branch-recorder",
         Arc::new(move |mount| {
             assert!(mount.branch_id.is_some());
-            mount
-                .names
-                .part(BranchRecorder(branch_log.clone()))
-                .map(Some)
+            Ok(Some(
+                Box::new(BranchRecorder::new(mount.names, branch_log.clone())?)
+                    as Box<dyn DynPlugin>,
+            ))
         }),
     )
     .await;

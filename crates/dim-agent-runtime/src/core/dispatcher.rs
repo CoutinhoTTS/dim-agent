@@ -2,7 +2,9 @@ use super::keys::KeyFilter;
 use crate::{AgentError, BoxFuture, Result, Timeline, panic_message};
 use dim_agent_types::AgentEvent;
 use futures_util::FutureExt;
-use rutis::{Call, CordisError, Ctx, Event, EventKey, InstanceId, Listener};
+use rutis::host::{ErrorKind, InstanceId};
+use rutis::service;
+use rutis::{Ctx, Error, Event};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::Arc,
@@ -10,19 +12,27 @@ use std::{
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-/// The committed timeline event delivered through the rutis event bus.
+/// The committed timeline event delivered through the rutis event bus, under
+/// its branch's private name ([`committed_name`]).
 #[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct Committed(pub Arc<AgentEvent>);
+pub(crate) struct Committed {
+    /// The name it is dispatched under, not part of the value.
+    #[serde(skip)]
+    name: String,
+    event: Arc<AgentEvent>,
+}
 impl Event for Committed {
-    // Dispatched only under the branch's private name ([`committed_key`]).
     const NAME: &'static str = "";
     type Value = ();
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// The branch's private channel. The bus is flat, so the name carries the
 /// branch instance; only the Dispatcher builds it.
-fn committed_key(instance: InstanceId) -> EventKey<Committed> {
-    EventKey::dynamic(format!("dim/timeline/{instance}/committed"))
+fn committed_name(instance: InstanceId) -> String {
+    format!("dim/timeline/{instance}/committed")
 }
 
 type Handler = dyn Fn(Arc<AgentEvent>) -> BoxFuture<'static, Result<()>> + Send + Sync;
@@ -36,45 +46,41 @@ struct SubscriptionListener {
     handler: Arc<Handler>,
     failures: Dispatcher,
 }
-impl Listener<Committed> for SubscriptionListener {
-    fn call<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        event: &'a Committed,
-        _call: Call<'a, ()>,
-    ) -> BoxFuture<'a, std::result::Result<Option<()>, CordisError>> {
-        if !self.keys.matches(event.0.kind.key()) {
-            return Box::pin(async { Ok(None) });
+impl SubscriptionListener {
+    async fn on_event(
+        &self,
+        ctx: &Ctx,
+        event: &Committed,
+    ) -> std::result::Result<Option<()>, Error> {
+        if !self.keys.matches(event.event.kind.key()) {
+            return Ok(None);
         }
-        let name = self.name.clone();
-        let handler = self.handler.clone();
-        let failures = self.failures.clone();
-        let event = event.0.clone();
+        let (name, failures) = (&self.name, &self.failures);
         // Unloading waits for running listeners; ending the call when the
         // registering part is cancelled keeps branch close prompt.
         let cancelled = ctx.cancelled();
-        Box::pin(async move {
-            let future = match catch_unwind(AssertUnwindSafe(|| handler(event))) {
-                Ok(future) => future,
-                Err(panic) => return Err(self::panic(&failures, &name, panic)),
-            };
-            tokio::select! {
-                _ = cancelled => {}
-                result = AssertUnwindSafe(future).catch_unwind() => match result {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => failures.fail(error),
-                    Err(panic) => return Err(self::panic(&failures, &name, panic)),
-                },
-            }
-            Ok(None)
-        })
+        let future = match catch_unwind(AssertUnwindSafe(|| (self.handler)(event.event.clone()))) {
+            Ok(future) => future,
+            Err(panic) => return Err(self::panic(failures, name, panic)),
+        };
+        tokio::select! {
+            _ = cancelled => {}
+            result = AssertUnwindSafe(future).catch_unwind() => match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failures.fail(error),
+                Err(panic) => return Err(self::panic(failures, name, panic)),
+            },
+        }
+        Ok(None)
     }
 }
 
 /// Records an attributed fault and returns the defect that stops dispatch.
-fn panic(failures: &Dispatcher, name: &str, payload: Box<dyn std::any::Any + Send>) -> CordisError {
+fn panic(failures: &Dispatcher, name: &str, payload: Box<dyn std::any::Any + Send>) -> Error {
     failures.fail(AgentError::fault(name, panic_message(payload)));
-    CordisError::PluginFailed(format!("{name} handler panicked").into())
+    rutis::Error::from(ErrorKind::PluginFailed(
+        format!("{name} handler panicked").into(),
+    ))
 }
 
 /// What an ordered consumer registered with [`Dispatcher::follow`] receives:
@@ -103,6 +109,7 @@ pub struct Dispatcher {
     instance: InstanceId,
     timeline: Timeline,
 }
+#[service]
 impl Dispatcher {
     pub(crate) fn new(instance: InstanceId, sequence: u64, timeline: Timeline) -> Self {
         Self {
@@ -127,6 +134,7 @@ impl Dispatcher {
     ///
     /// The listener lives on the branch's private channel and is removed
     /// with the registering plugin.
+    #[service(skip)]
     pub fn subscribe(
         &self,
         ctx: &Ctx,
@@ -136,17 +144,18 @@ impl Dispatcher {
     ) -> Result<()> {
         let keys = KeyFilter::new(keys)?;
         let handler: Arc<Handler> = Arc::new(handler);
-        ctx.events()
-            .on(
-                ctx,
-                &committed_key(self.instance),
-                SubscriptionListener {
-                    name: name.into(),
-                    keys,
-                    handler,
-                    failures: self.clone(),
-                },
-            )
+        let listener = Arc::new(SubscriptionListener {
+            name: name.into(),
+            keys,
+            handler,
+            failures: self.clone(),
+        });
+        ctx.listen::<Committed>()
+            .name(committed_name(self.instance))
+            .on(move |event, call| {
+                let listener = listener.clone();
+                async move { listener.on_event(call.ctx(), &event).await }
+            })
             .map_err(AgentError::from)?;
         Ok(())
     }
@@ -160,6 +169,7 @@ impl Dispatcher {
     /// terminals for open operations, is done in the replay call. A replay
     /// failure is returned and lets no live event through; live failures and
     /// the lifetime are [`Self::subscribe`]'s.
+    #[service(skip)]
     pub async fn follow(
         &self,
         ctx: &Ctx,
@@ -190,6 +200,7 @@ impl Dispatcher {
     }
     /// Registers a bus listener for every committed event of this branch;
     /// same failure and lifetime rules as [`Self::subscribe`].
+    #[service(skip)]
     pub fn subscribe_all(
         &self,
         ctx: &Ctx,
@@ -207,9 +218,7 @@ impl Dispatcher {
         name: String,
         keys: Vec<String>,
         handler: Arc<
-            dyn Fn(AgentEvent) -> BoxFuture<'static, std::result::Result<(), CordisError>>
-                + Send
-                + Sync,
+            dyn Fn(AgentEvent) -> BoxFuture<'static, std::result::Result<(), Error>> + Send + Sync,
         >,
     ) -> Result<()> {
         let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -228,9 +237,7 @@ impl Dispatcher {
         name: String,
         keys: Vec<String>,
         handler: Arc<
-            dyn Fn(Delivery) -> BoxFuture<'static, std::result::Result<(), CordisError>>
-                + Send
-                + Sync,
+            dyn Fn(Delivery) -> BoxFuture<'static, std::result::Result<(), Error>> + Send + Sync,
         >,
     ) -> std::result::Result<(), AgentError> {
         let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -267,6 +274,7 @@ impl Dispatcher {
     pub fn notify(&self) {
         self.state.send_modify(|_| {});
     }
+    #[service(skip)]
     pub fn fail(&self, error: AgentError) {
         self.state.send_modify(|s| {
             if s.failure.is_none() {
@@ -277,9 +285,11 @@ impl Dispatcher {
     pub fn sequence(&self) -> u64 {
         self.state.borrow().sequence
     }
+    #[service(skip)]
     pub fn failure(&self) -> Option<AgentError> {
         self.state.borrow().failure.clone()
     }
+    #[service(skip)]
     pub fn watch(&self) -> watch::Receiver<DispatchState> {
         self.state.subscribe()
     }
@@ -298,15 +308,11 @@ impl Dispatcher {
                 _=changed.changed()=>continue,
                 value=reader.next()=>match value{Ok(Some(e))=>e,Ok(None)=>return,Err(error)=>{self.fail(error);return;}},
             };
-            if let Err(error) = ctx
-                .events()
-                .serial(
-                    &ctx,
-                    &committed_key(self.instance),
-                    Arc::new(Committed(event.clone())),
-                )
-                .await
-            {
+            let committed = Committed {
+                name: committed_name(self.instance),
+                event: event.clone(),
+            };
+            if let Err(error) = ctx.serial(committed).await {
                 self.fail(AgentError::from(error));
                 return;
             }

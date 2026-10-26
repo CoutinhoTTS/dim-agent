@@ -1,7 +1,8 @@
 //! Row-scoped definition files; business parsing and enablement belong to Workflow.
 use super::SettingsService;
 use dim_agent_capabilities::file_storage::{EntryKind, FileStorageError};
-use rutis::{CordisError, Ctx, TypeKey};
+use rutis::host::{CtxHost, ErrorKind, Key};
+use rutis::{Ctx, Error};
 use rutis_bridge::session::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io, path::PathBuf, sync::Arc};
@@ -15,7 +16,7 @@ impl WorkflowPackages {
     pub(crate) fn from_config(
         config: &serde_json::Value,
         roots: &[PathBuf],
-    ) -> Result<Self, CordisError> {
+    ) -> Result<Self, Error> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Package {
@@ -26,21 +27,23 @@ impl WorkflowPackages {
         if let Some(declared) = config.get("packages") {
             let declared: Vec<Package> =
                 serde_json::from_value(declared.clone()).map_err(|error| {
-                    CordisError::PluginFailed(format!("invalid workflow packages: {error}").into())
+                    rutis::Error::from(ErrorKind::PluginFailed(
+                        format!("invalid workflow packages: {error}").into(),
+                    ))
                 })?;
             for package in declared {
                 let root = roots
                     .iter()
                     .position(|root| *root == package.root)
                     .ok_or_else(|| {
-                        CordisError::PluginFailed(
+                        rutis::Error::from(ErrorKind::PluginFailed(
                             "package root must be a canonical authorized host root".into(),
-                        )
+                        ))
                     })?;
                 if package.id.is_empty() || packages.insert(package.id, root).is_some() {
-                    return Err(CordisError::PluginFailed(
+                    return Err(rutis::Error::from(ErrorKind::PluginFailed(
                         "package ids must be nonempty and unique per row".into(),
-                    ));
+                    )));
                 }
             }
         }
@@ -156,9 +159,7 @@ impl WorkflowFiles {
             });
         }
         let packages = caller
-            .require_as::<WorkflowPackages>(TypeKey::instance::<WorkflowPackages>(
-                caller.instance(),
-            ))
+            .require_at(&Key::<WorkflowPackages>::of().instance(caller.instance()))
             .map_err(|_| {
                 WorkflowFilesError::invalid("workflow files require a configured process row")
             })?;

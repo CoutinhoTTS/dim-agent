@@ -1,10 +1,12 @@
 //! Rust parts that depend on names only (plugin contract P2): no layer type,
 //! no scope, no group in the part. Where the row is placed decides.
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, Feature, SessionConfig, SessionIdentity, Timeline, TimelineIdentity,
-    names, register_part,
+    AgentBuilder, AgentConfig, Feature, Modules, Names, SessionConfig, SessionIdentity, Timeline,
+    TimelineIdentity, names, register_part,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, InstanceId, Key, TypeKey};
+use rutis::{Ctx, Plugin};
+use rutis_bridge::session::HostDispatch;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,19 +14,29 @@ use std::time::Duration;
 type Log = Arc<Mutex<Vec<String>>>;
 
 /// Records the Session it runs in.
-struct SessionPart(Log);
-impl TypedPlugin for SessionPart {
-    type Deps = (Keyed<SessionIdentity>,);
+struct SessionPart {
+    log: Log,
+    identity: Key<SessionIdentity>,
+}
+impl SessionPart {
+    fn new(names: &Names<'_>, log: Log) -> rutis::Result<Self> {
+        Ok(Self {
+            log,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for SessionPart {
     fn name(&self) -> &str {
         "test.session-part"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(identity),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            self.0
+            let identity = ctx.require_at(&self.identity)?;
+            self.log
                 .lock()
                 .unwrap()
                 .push(format!("session {}", identity.session_id));
@@ -34,24 +46,40 @@ impl TypedPlugin for SessionPart {
 }
 
 /// Records the branch it runs in, reading a Session and a branch name.
-struct BranchPart(Log);
-impl TypedPlugin for BranchPart {
-    type Deps = (
-        Keyed<SessionIdentity>,
-        Keyed<TimelineIdentity>,
-        Keyed<Timeline>,
-    );
+struct BranchPart {
+    log: Log,
+    session: Key<SessionIdentity>,
+    branch: Key<TimelineIdentity>,
+    timeline: Key<Timeline>,
+}
+impl BranchPart {
+    fn new(names: &Names<'_>, log: Log) -> rutis::Result<Self> {
+        Ok(Self {
+            log,
+            session: names.key()?,
+            branch: names.key()?,
+            timeline: names.key()?,
+        })
+    }
+}
+impl DynPlugin for BranchPart {
     fn name(&self) -> &str {
         "test.branch-part"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(session), Keyed(branch), Keyed(timeline)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.session.erase(),
+            self.branch.erase(),
+            self.timeline.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let session = ctx.require_at(&self.session)?;
+            let branch = ctx.require_at(&self.branch)?;
+            let timeline = ctx.require_at(&self.timeline)?;
             assert_eq!(session.session_id, branch.session_id);
-            self.0.lock().unwrap().push(format!(
+            self.log.lock().unwrap().push(format!(
                 "branch {}/{} at {}",
                 branch.session_id,
                 branch.branch_id,
@@ -65,39 +93,62 @@ impl TypedPlugin for BranchPart {
 /// A Session service a Session part provides by name and a branch part
 /// injects by name: each Session's branches see their own Session's copy.
 struct Greeting(String);
-struct GreetingPart(rutis::DepKey<Greeting>);
-impl TypedPlugin for GreetingPart {
-    type Deps = (Keyed<SessionIdentity>,);
+struct GreetingPart {
+    greeting: Key<Greeting>,
+    identity: Key<SessionIdentity>,
+}
+impl GreetingPart {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            greeting: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for GreetingPart {
     fn name(&self) -> &str {
         "test.greeting"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(identity),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            ctx.provide_as(
-                self.0.key().clone(),
+            let identity = ctx.require_at(&self.identity)?;
+            ctx.provide_at(
+                self.greeting.clone(),
                 Arc::new(Greeting(format!("hello {}", identity.session_id))),
             )?;
             Ok(Effect::Done)
         })
     }
 }
-struct GreetedPart(Log);
-impl TypedPlugin for GreetedPart {
-    type Deps = (Keyed<Greeting>, Keyed<TimelineIdentity>);
+struct GreetedPart {
+    log: Log,
+    greeting: Key<Greeting>,
+    branch: Key<TimelineIdentity>,
+}
+impl GreetedPart {
+    fn new(names: &Names<'_>, log: Log) -> rutis::Result<Self> {
+        Ok(Self {
+            log,
+            greeting: names.key()?,
+            branch: names.key()?,
+        })
+    }
+}
+impl DynPlugin for GreetedPart {
     fn name(&self) -> &str {
         "test.greeted"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(greeting), Keyed(branch)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.greeting.erase(), self.branch.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            self.0
+            let greeting = ctx.require_at(&self.greeting)?;
+            let branch = ctx.require_at(&self.branch)?;
+            self.log
                 .lock()
                 .unwrap()
                 .push(format!("{} in {}", greeting.0, branch.session_id));
@@ -118,42 +169,62 @@ impl rutis_bridge::session::HostDispatch for Greeter {
         Some(self.0.clone())
     }
 }
-struct GreeterPart(rutis::InstanceId);
-impl TypedPlugin for GreeterPart {
-    type Deps = (Keyed<SessionIdentity>,);
+struct GreeterPart {
+    instance: InstanceId,
+    identity: Key<SessionIdentity>,
+}
+impl GreeterPart {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            instance: names.instance(dim_agent_runtime::SESSION_GROUP)?,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for GreeterPart {
     fn name(&self) -> &str {
         "test.greeter"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(identity),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
-                rutis_bridge::session::host_key_in("greeter", self.0),
+            let identity = ctx.require_at(&self.identity)?;
+            ctx.provide_at::<dyn HostDispatch>(
+                rutis_bridge::session::host_key_in("greeter", self.instance),
                 Arc::new(Greeter(format!("greeter of {}", identity.session_id))),
             )?;
             Ok(Effect::Done)
         })
     }
 }
-struct GreeterReader(Log);
-impl TypedPlugin for GreeterReader {
-    type Deps = (
-        Keyed<dyn rutis_bridge::session::HostDispatch>,
-        Keyed<TimelineIdentity>,
-    );
+struct GreeterReader {
+    log: Log,
+    greeter: Key<dyn HostDispatch>,
+    branch: Key<TimelineIdentity>,
+}
+impl GreeterReader {
+    fn new(names: &Names<'_>, log: Log) -> rutis::Result<Self> {
+        Ok(Self {
+            log,
+            greeter: names.named("greeter")?,
+            branch: names.key()?,
+        })
+    }
+}
+impl DynPlugin for GreeterReader {
     fn name(&self) -> &str {
         "test.greeter-reader"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(greeter), Keyed(branch)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.greeter.erase(), self.branch.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            self.0.lock().unwrap().push(format!(
+            let greeter = ctx.require_at(&self.greeter)?;
+            let branch = ctx.require_at(&self.branch)?;
+            self.log.lock().unwrap().push(format!(
                 "{} for {}",
                 greeter.provider().unwrap(),
                 branch.session_id
@@ -166,31 +237,42 @@ impl TypedPlugin for GreeterReader {
 /// A process service and its provider and consumer parts.
 struct Clock(u64);
 struct ClockPart;
-impl TypedPlugin for ClockPart {
+impl Plugin for ClockPart {
     type Deps = ();
     fn name(&self) -> &str {
         "test.clock"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide(Clock(7))?;
-            Ok(Effect::Done)
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        ctx.provide(Clock(7))?;
+        Ok(())
+    }
+}
+struct ProcessPart {
+    log: Log,
+    clock: Key<Clock>,
+}
+impl ProcessPart {
+    fn new(names: &Names<'_>, log: Log) -> rutis::Result<Self> {
+        Ok(Self {
+            log,
+            clock: names.key()?,
         })
     }
 }
-struct ProcessPart(Log);
-impl TypedPlugin for ProcessPart {
-    type Deps = (Keyed<Clock>,);
+impl DynPlugin for ProcessPart {
     fn name(&self) -> &str {
         "test.process-part"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        (Keyed(clock),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.clock.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            self.0.lock().unwrap().push(format!("process {}", clock.0));
+            let clock = ctx.require_at(&self.clock)?;
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("process {}", clock.0));
             Ok(Effect::Done)
         })
     }
@@ -211,10 +293,10 @@ async fn a_part_without_layer_types_mounts_in_every_group() {
     builder.require_feature(
         Feature::new("test.named-parts")
             .session("test.session-part", move |names| {
-                names.part(SessionPart(session_log.clone()))
+                Ok(Box::new(SessionPart::new(names, session_log.clone())?))
             })
             .branch("test.branch-part", move |names| {
-                names.part(BranchPart(branch_log.clone()))
+                Ok(Box::new(BranchPart::new(names, branch_log.clone())?))
             }),
     );
     let agent = builder.build();
@@ -237,11 +319,11 @@ async fn a_part_without_layer_types_mounts_in_every_group() {
     // At the process: a loader row with a process name.
     let mut catalog = names::catalog();
     names::register::<Clock>(&mut catalog, None);
-    let mut builtins = rutis_loader::Builtins::new();
-    let provider = register_part(&mut builtins, &catalog, |names| names.part(ClockPart)).unwrap();
+    let mut builtins = Modules::new();
+    let provider = register_part(&mut builtins, &catalog, |_| Ok(Box::new(ClockPart))).unwrap();
     let process_log = log.clone();
     let consumer = register_part(&mut builtins, &catalog, move |names| {
-        names.part(ProcessPart(process_log.clone()))
+        Ok(Box::new(ProcessPart::new(names, process_log.clone())?))
     })
     .unwrap();
     let root = Ctx::root().unwrap();
@@ -294,10 +376,10 @@ async fn a_part_provides_by_name_and_each_instance_sees_its_own_copy() {
     builder.require_feature(
         Feature::new("test.greeting")
             .session("test.greeting", |names| {
-                names.part(GreetingPart(names.key::<Greeting>()?))
+                Ok(Box::new(GreetingPart::new(names)?))
             })
             .branch("test.greeted", move |names| {
-                names.part(GreetedPart(greeted.clone()))
+                Ok(Box::new(GreetedPart::new(names, greeted.clone())?))
             }),
     );
     let agent = builder.build();
@@ -328,15 +410,10 @@ async fn a_rust_part_reads_a_crossing_name_at_its_catalog_key() {
     builder.require_feature(
         Feature::new("test.greeter")
             .session("test.greeter", |names| {
-                names.part(GreeterPart(
-                    names.instance(dim_agent_runtime::SESSION_GROUP)?,
-                ))
+                Ok(Box::new(GreeterPart::new(names)?))
             })
             .branch("test.greeter-reader", move |names| {
-                Ok(names.part_with(
-                    GreeterReader(read.clone()),
-                    (names.named("greeter")?, names.key::<TimelineIdentity>()?),
-                ))
+                Ok(Box::new(GreeterReader::new(names, read.clone())?))
             }),
     );
     let agent = builder.build();
@@ -369,7 +446,7 @@ async fn a_misplaced_part_fails_where_it_is_mounted_naming_the_group() {
     let mut builder = builder();
     builder.require_feature(
         Feature::new("test.misplaced").session("test.branch-part", move |names| {
-            names.part(BranchPart(log.clone()))
+            Ok(Box::new(BranchPart::new(names, log.clone())?))
         }),
     );
     let agent = builder.build();
@@ -392,9 +469,9 @@ async fn a_misplaced_part_fails_where_it_is_mounted_naming_the_group() {
     assert!(agent.sessions().is_empty());
     agent.close().await.unwrap();
 
-    let mut builtins = rutis_loader::Builtins::new();
+    let mut builtins = Modules::new();
     let error = register_part(&mut builtins, &names::catalog(), |names| {
-        names.part(SessionPart(Log::default()))
+        Ok(Box::new(SessionPart::new(names, Log::default())?))
     })
     .unwrap_err();
     assert!(
@@ -407,20 +484,29 @@ async fn a_misplaced_part_fails_where_it_is_mounted_naming_the_group() {
 
 /// Waits in `apply` for work that never comes, until its generation is
 /// cancelled: rutis waits for `apply` to return and never aborts it.
-struct Stuck;
-impl TypedPlugin for Stuck {
-    type Deps = (Keyed<SessionIdentity>,);
+struct Stuck {
+    identity: Key<SessionIdentity>,
+}
+impl Stuck {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for Stuck {
     fn name(&self) -> &str {
         "test.stuck"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        _: Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             ctx.cancelled().await;
-            Err(CordisError::PluginFailed("cancelled while waiting".into()))
+            Err(rutis::Error::from(ErrorKind::PluginFailed(
+                "cancelled while waiting".into(),
+            )))
         })
     }
 }
@@ -434,7 +520,8 @@ async fn a_row_blocking_in_apply_fails_creation_at_the_startup_deadline() {
     builder
         .startup_timeout(Duration::from_millis(100))
         .require_feature(
-            Feature::new("test.stuck").session("test.stuck", |names| names.part(Stuck)),
+            Feature::new("test.stuck")
+                .session("test.stuck", |names| Ok(Box::new(Stuck::new(names)?))),
         );
     let agent = builder.build();
     let started = std::time::Instant::now();

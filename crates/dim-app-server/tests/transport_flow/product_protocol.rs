@@ -1,4 +1,5 @@
 use super::*;
+use rutis::host::CtxHost;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configuration_management_preserves_live_intent_and_separates_save_acknowledgement() {
@@ -1449,15 +1450,17 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
 /// the test sets the cell as ModelProvider would.
 struct ProgressCapture {
     cells: ProgressCells,
+    cell: rutis::host::Key<dim_agent_runtime::StateCell<dim_agent_runtime::ModelProgress>>,
+    identity: rutis::host::Key<dim_agent_runtime::SessionIdentity>,
 }
 impl ProgressCapture {
     /// The branch's progress cell is a state cell, keyed by type there.
-    fn part(
-        names: &dim_agent_runtime::Names<'_>,
-        cells: ProgressCells,
-    ) -> Result<Box<dyn rutis::Plugin>, rutis::CordisError> {
-        let keys = (names.state_cell()?, names.key()?);
-        Ok(names.part_with(Self { cells }, keys))
+    fn new(names: &dim_agent_runtime::Names<'_>, cells: ProgressCells) -> rutis::Result<Self> {
+        Ok(Self {
+            cells,
+            cell: names.state_cell()?,
+            identity: names.key()?,
+        })
     }
 }
 type ProgressCells = Arc<
@@ -1468,23 +1471,23 @@ type ProgressCells = Arc<
         >,
     >,
 >;
-impl TypedPlugin for ProgressCapture {
-    type Deps = (
-        rutis::Keyed<dim_agent_runtime::StateCell<dim_agent_runtime::ModelProgress>>,
-        rutis::Keyed<dim_agent_runtime::SessionIdentity>,
-    );
+impl rutis::host::DynPlugin for ProgressCapture {
     fn name(&self) -> &str {
         "product-test.progress-capture"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.cell.erase(), self.identity.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        _: &'a rutis::Ctx,
-        (rutis::Keyed(cell), rutis::Keyed(identity)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let cell = ctx.require_at(&self.cell)?;
+            let identity = ctx.require_at(&self.identity)?;
             let session = identity.session_id.clone();
             self.cells.lock().unwrap().insert(session, cell);
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -1501,7 +1504,7 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
         builder.require_feature(
             Feature::new("product-test.progress-capture")
                 .branch("product-test.progress-capture", move |names| {
-                    ProgressCapture::part(names, captured.clone())
+                    Ok(Box::new(ProgressCapture::new(names, captured.clone())?))
                 }),
         );
     })
@@ -1610,49 +1613,39 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
 /// Provides the Session `PrepareContextHost` from a child plugin; restarting
 /// it reloads ContextPreparation and so ModelProvider.
 struct ContextHostOwner {
-    host: rutis::DepKey<dim_agent_capabilities::host::PrepareContextHost>,
-    views: Arc<std::sync::Mutex<Vec<rutis::FiberView>>>,
+    host: rutis::host::Key<dim_agent_capabilities::host::PrepareContextHost>,
+    views: Arc<std::sync::Mutex<Vec<rutis::host::FiberView>>>,
 }
-impl TypedPlugin for ContextHostOwner {
+impl Plugin for ContextHostOwner {
     type Deps = ();
     fn name(&self) -> &str {
         "ContextHostOwner"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            let view = ctx.plugin(rutis::Typed::new(ContextHostPlugin(self.host.clone())));
-            (&view).await.map_err(|error| {
-                rutis::CordisError::PluginFailed(format!("Context host failed: {error}").into())
-            })?;
-            self.views.lock().unwrap().push(view);
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
+        let view = ctx.plugin(ContextHostPlugin(self.host.clone()));
+        (&view).await.map_err(|error| {
+            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                format!("Context host failed: {error}").into(),
+            ))
+        })?;
+        self.views.lock().unwrap().push(view);
+        Ok(())
     }
 }
-struct ContextHostPlugin(rutis::DepKey<dim_agent_capabilities::host::PrepareContextHost>);
-impl TypedPlugin for ContextHostPlugin {
+struct ContextHostPlugin(rutis::host::Key<dim_agent_capabilities::host::PrepareContextHost>);
+impl Plugin for ContextHostPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "ContextHost"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(
-                self.0.key().clone(),
-                Arc::new(dim_agent_capabilities::host::PrepareContextHost(Arc::new(
-                    dim_agent_capabilities::host::IdentityContext,
-                ))),
-            )?;
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.provide_at(
+            self.0.clone(),
+            Arc::new(dim_agent_capabilities::host::PrepareContextHost(Arc::new(
+                dim_agent_capabilities::host::IdentityContext,
+            ))),
+        )?;
+        Ok(())
     }
 }
 
@@ -1678,23 +1671,23 @@ async fn model_progress_follows_a_reloaded_provider() {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         )
         .require_feature(Feature::new("ContextHostOwner").session(
             "ContextHostOwner",
             move |names| {
-                names.part(ContextHostOwner {
+                Ok(Box::new(ContextHostOwner {
                     host: names.key()?,
                     views: owners.clone(),
-                })
+                }))
             },
         ));
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     builder.require_feature(
         Feature::new("product-test.progress-capture")
             .branch("product-test.progress-capture", move |names| {
-                ProgressCapture::part(names, captured.clone())
+                Ok(Box::new(ProgressCapture::new(names, captured.clone())?))
             }),
     );
     let server = serve(

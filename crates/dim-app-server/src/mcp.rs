@@ -15,7 +15,9 @@ pub use session::{McpSession, McpSessionPlugin, McpSessionState, McpSourceState,
 use crate::settings::{SettingsError, SettingsScope, SettingsService};
 use config::{McpProjectEnablement, McpServerSettings, McpSettings};
 use dim_agent_capabilities::file_storage::FileStorage;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypeKey, TypedPlugin};
+use dim_agent_runtime::Names;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use server::{McpServer, McpServerError};
 use std::{
     collections::BTreeMap,
@@ -434,30 +436,45 @@ async fn set_project_enabled(
 /// Session part `McpSession`, which it registers.
 pub struct McpPlugin {
     home_root: usize,
+    settings: Key<SettingsService>,
+    publication: Key<publication::Publication>,
+    files: Key<FileStorage>,
+    methods: Key<crate::methods::ManagementMethods>,
+    parts: Key<dim_agent_runtime::PartRegistry>,
 }
 impl McpPlugin {
-    pub fn new(home_root: usize) -> Self {
-        Self { home_root }
+    pub fn new(names: &Names<'_>, home_root: usize) -> rutis::Result<Self> {
+        Ok(Self {
+            home_root,
+            settings: names.key()?,
+            publication: names.key()?,
+            files: names.key()?,
+            methods: names.key()?,
+            parts: names.key()?,
+        })
     }
 }
-impl TypedPlugin for McpPlugin {
-    type Deps = (
-        Keyed<SettingsService>,
-        Keyed<publication::Publication>,
-        Keyed<FileStorage>,
-        Keyed<crate::methods::ManagementMethods>,
-        Keyed<dim_agent_runtime::PartRegistry>,
-    );
+impl DynPlugin for McpPlugin {
     fn name(&self) -> &str {
         "Mcp"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(settings), Keyed(publication), Keyed(files), Keyed(methods), Keyed(parts)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.settings.erase(),
+            self.publication.erase(),
+            self.files.erase(),
+            self.methods.erase(),
+            self.parts.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let auth = McpAuth::new(files, self.home_root).map_err(CordisError::PluginFailed)?;
+            let settings = ctx.require_at(&self.settings)?;
+            let publication = ctx.require_at(&self.publication)?;
+            let files = ctx.require_at(&self.files)?;
+            let methods = ctx.require_at(&self.methods)?;
+            let parts = ctx.require_at(&self.parts)?;
+            let auth = McpAuth::new(files, self.home_root).map_err(ErrorKind::PluginFailed)?;
             let service = Arc::new(McpService {
                 settings,
                 publication,
@@ -467,18 +484,16 @@ impl TypedPlugin for McpPlugin {
             });
             let (owner, closing) = (service.clone(), auth.clone());
             ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let _guard = owner.gate.lock().unwrap();
-                            owner.tasks.close();
-                        }
-                        owner.tasks.wait().await;
-                        // Token requests already sent are settled first.
-                        closing.close().await;
-                        Ok(())
-                    })
-                }))
+                async move {
+                    {
+                        let _guard = owner.gate.lock().unwrap();
+                        owner.tasks.close();
+                    }
+                    owner.tasks.wait().await;
+                    // Token requests already sent are settled first.
+                    closing.close().await;
+                    Ok(())
+                }
             })?;
             management::provide(
                 ctx,
@@ -487,18 +502,13 @@ impl TypedPlugin for McpPlugin {
                 service.settings.clone(),
                 auth.clone(),
             )?;
-            ctx.provide_as(TypeKey::of::<McpAuth>(), auth)?;
-            ctx.provide_as(TypeKey::of::<McpService>(), service)?;
+            ctx.provide_as::<McpAuth>(auth)?;
+            ctx.provide_as::<McpService>(service)?;
             parts.register(
                 ctx,
                 dim_agent_runtime::PartScope::Session,
                 "McpSession",
-                |mount| {
-                    mount
-                        .names
-                        .part(McpSessionPlugin::new(mount.names)?)
-                        .map(Some)
-                },
+                |mount| Ok(Some(Box::new(McpSessionPlugin::new(mount.names)?))),
             )?;
             Ok(Effect::Done)
         })

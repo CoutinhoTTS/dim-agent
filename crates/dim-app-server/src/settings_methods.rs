@@ -10,7 +10,9 @@ use dim_agent_capabilities::{
     file_storage::FileStorageError,
     methods::{Interruption, MethodDecl, RpcError, params, reply},
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use dim_agent_runtime::Names;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::sync::Arc;
 
 /// The client path's wire errors (§4.3).
@@ -31,18 +33,29 @@ fn wire(error: SettingsError) -> RpcError {
 
 /// Process owner of the `settings` management namespace. A client write may
 /// change user-only fields.
-pub struct SettingsMethodsPlugin;
-impl TypedPlugin for SettingsMethodsPlugin {
-    type Deps = (Keyed<SettingsService>, Keyed<ManagementMethods>);
+pub struct SettingsMethodsPlugin {
+    service: Key<SettingsService>,
+    methods: Key<ManagementMethods>,
+}
+impl SettingsMethodsPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            service: names.key()?,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for SettingsMethodsPlugin {
     fn name(&self) -> &str {
         "SettingsMethods"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(service), Keyed(methods)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.service.erase(), self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let service = ctx.require_at(&self.service)?;
+            let methods = ctx.require_at(&self.methods)?;
             methods.register(
                 ctx,
                 "settings",

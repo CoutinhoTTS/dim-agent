@@ -114,7 +114,7 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
     let (restarted, ()) = tokio::join!(loader.restart("SessionNodeRuntime"), async {
         let mut changed = owner.watch();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while changed.borrow_and_update().state != rutis::FiberState::Unloading {
+            while changed.borrow_and_update().state != rutis::host::FiberState::Unloading {
                 changed.changed().await.unwrap();
             }
         })
@@ -276,7 +276,7 @@ async fn node_workflow_report_interrupted_send_reconciles_without_resend() {
     let (restarted, ()) = tokio::join!(loader.restart("workflow-report"), async {
         let mut changed = owner.watch();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while changed.borrow_and_update().state != rutis::FiberState::Unloading {
+            while changed.borrow_and_update().state != rutis::host::FiberState::Unloading {
                 changed.changed().await.unwrap();
             }
         })

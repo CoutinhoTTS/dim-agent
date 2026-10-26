@@ -13,7 +13,8 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -98,19 +99,23 @@ impl Probe {
         registry.contributed("ask_user").unwrap()
     }
 }
-struct ProbePlugin(Probe);
-impl TypedPlugin for ProbePlugin {
-    type Deps = (Keyed<ToolRegistry>,);
+struct ProbePlugin {
+    probe: Probe,
+    registry: Key<ToolRegistry>,
+}
+impl DynPlugin for ProbePlugin {
     fn name(&self) -> &str {
         "test.questions-probe"
     }
-    fn apply<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        (Keyed(registry),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        *self.0.0.lock().unwrap() = Some(registry);
-        Box::pin(async { Ok(Effect::Done) })
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.registry.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let registry = ctx.require_at(&self.registry)?;
+            *self.probe.0.lock().unwrap() = Some(registry);
+            Ok(Effect::Done)
+        })
     }
 }
 
@@ -135,7 +140,7 @@ impl Fixture {
             .session_value(Arc::new(CompactionStrategyHost(None)))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             );
         defaults::install(&mut builder);
@@ -143,11 +148,15 @@ impl Fixture {
         defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_agent_questions::install(&mut builder);
         let slot = probe.clone();
-        builder.require_feature(
-            Feature::new("test.questions-probe").session("test.questions-probe", move |names| {
-                names.part(ProbePlugin(slot.clone()))
-            }),
-        );
+        builder.require_feature(Feature::new("test.questions-probe").session(
+            "test.questions-probe",
+            move |names| {
+                Ok(Box::new(ProbePlugin {
+                    probe: slot.clone(),
+                    registry: names.key()?,
+                }))
+            },
+        ));
         let agent = builder.build_in(&root);
         Self {
             root,
@@ -167,7 +176,7 @@ impl Fixture {
             .unwrap()
     }
     /// Restarts the named plugin alone.
-    async fn restart(&self, diagnostics: rutis::RuntimeDiagnostics, name: &str) {
+    async fn restart(&self, diagnostics: rutis::host::diagnostics::RuntimeDiagnostics, name: &str) {
         let id = diagnostics
             .plugins
             .iter()

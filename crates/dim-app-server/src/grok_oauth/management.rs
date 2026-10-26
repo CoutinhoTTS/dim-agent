@@ -8,14 +8,14 @@ use crate::{
     protocol::Empty,
 };
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, params, reply};
-use rutis::{CordisError, Ctx};
+use rutis::{Ctx, Error};
 use std::sync::Arc;
 
 pub(super) fn provide(
     ctx: &Ctx,
     methods: &ManagementMethods,
     oauth: Arc<GrokOAuthService>,
-) -> Result<(), CordisError> {
+) -> Result<(), Error> {
     methods.register(
         ctx,
         "account.grok",
