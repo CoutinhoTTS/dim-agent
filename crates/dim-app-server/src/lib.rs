@@ -656,7 +656,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             rows.push(register_part(
                 &mut builtins,
                 builder.catalog(),
-                move |names| Ok(NodeRows(resolver.clone(), name, rows_row).part(names)),
+                move |names| NodeRows(resolver.clone(), name, rows_row).part(names),
             )?);
         }
     }
@@ -982,7 +982,7 @@ struct NodeRows(
 impl rutis::TypedPlugin for NodeRows {
     type Deps = (
         rutis::Keyed<rutis_bridge::runtime::Runtime>,
-        Arc<rutis_loader::Loader>,
+        rutis::Keyed<rutis_loader::Loader>,
     );
     fn name(&self) -> &str {
         self.2
@@ -998,10 +998,17 @@ impl rutis::TypedPlugin for NodeRows {
     }
 }
 impl NodeRows {
-    /// Gated on its runtime, which is registered under the runtime's name.
-    fn part(self, names: &dim_agent_runtime::Names<'_>) -> Box<dyn rutis::Plugin> {
-        let keys = (rutis::DepKey::dynamic(self.1), ());
-        names.part_with(self, keys)
+    /// Gated on its runtime, which is registered under the runtime's name, and
+    /// on the loader's catalog name.
+    fn part(
+        self,
+        names: &dim_agent_runtime::Names<'_>,
+    ) -> std::result::Result<Box<dyn rutis::Plugin>, rutis::CordisError> {
+        let keys = (
+            rutis::DepKey::dynamic(self.1),
+            names.key::<rutis_loader::Loader>()?,
+        );
+        Ok(names.part_with(self, keys))
     }
 }
 
