@@ -145,7 +145,7 @@ Every contract the designs define or use is a named service (ADR 002 D5): servic
 | `managementMethods` | process | — | same | [methods A.1](contracts/session-boundary.md#a1-method-contributions) |
 | `toolRegistry` | Session | — | `register(ToolDeclaration, execute): async`, where `execute(ToolCall, cancelled): async -> ToolResult` is the registering part's function | [methods A.5](contracts/session-boundary.md#a5-tool-contribution) |
 | `sessions` | process | — | `launch`, `input`, `lookup`, `history`, `withdraw`, `stop`, `idle`, `delete` | [session access A.1](contracts/session-access.md#a1-the-sessions-service) |
-| `scheduleJobs` (proposed) | process | — | Session-to-process job operations for the `schedule` tool | [Scheduler](plugins/Scheduler.md) |
+| `scheduleJobs` (optional package, [#317](https://github.com/arcships/dim/pull/317)) | process | — | Session-to-process job operations for the `schedule` tool | [Scheduler](plugins/Scheduler.md) |
 | `workflowRuns` (optional package) | process | — | Session-to-process run operations for the `workflow` tool | [Workflow](plugins/Workflow.md) |
 
 The runtime's existing typed services (Timeline, Dispatcher, ToolHost and others) stay as they are. [#4](https://github.com/arcships/dim/issues/4) is partially delivered: [C4 Session](session-typescript.md) and [C5 branch](branch-typescript.md) bindings expose their documented contract families by name. Additional typed services still need their owners' explicit bindings; rutis itself already calls across languages.
@@ -263,7 +263,7 @@ sequenceDiagram
 
 ### 5.5 Scheduled run through Agents
 
-[Scheduler](plugins/Scheduler.md) defines its own design status; its package is unimplemented. The diagram shows its owned create-mode run flow. S2, Settings and pluginFiles' [public composition](process-typescript.md#52-public-pluginfiles-binding) are available. Delivery requires the owner document's Appendix D business acceptance and Agents idle unloading before repeated-Session shipping.
+[Scheduler](plugins/Scheduler.md) defines its own design status; its optional package and its public-flow verification are implemented ([#317](https://github.com/arcships/dim/pull/317)), and installation remains explicit under its §1.3. The diagram shows its owned create-mode run flow. S2, Settings and pluginFiles' [public composition](process-typescript.md#52-public-pluginfiles-binding) are available.
 
 ```mermaid
 sequenceDiagram
@@ -405,7 +405,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | MCP stdio isolation | Open: whether MCP stdio processes are isolated by default |
 | Remote access trade-offs | Open: authentication, disconnection and TLS deployment, related to [#5](https://github.com/arcships/dim/issues/5) ([RemoteGateway](plugins/RemoteGateway.md)) |
 | TypeScript Session parts | C4 tools, Session methods/events and C5 published branch contracts are delivered ([C4](session-typescript.md), [C5](branch-typescript.md)). Provider's named [auxiliaryModel](appserver/auxiliary-model.md#43-named-binding) is available to SessionTitle; Scheduler/Workflow's process/package/management bindings and readiness follow their owner documents (§1.3). Other service families follow their owners' published bindings. |
-| Scheduled run outcome routing | Specified in [Scheduler A.6](plugins/Scheduler.md#a6-run-outcome-delivery): the run owner persists history and reports through existing Session input. Design readiness follows Scheduler's owner document; package implementation and business acceptance remain. |
+| Scheduled run outcome routing | Specified in [Scheduler A.6](plugins/Scheduler.md#a6-run-outcome-delivery): the run owner persists history and reports through existing Session input. Design readiness follows Scheduler's owner document; the optional package and its public-flow verification are implemented ([#317](https://github.com/arcships/dim/pull/317)). |
 | Scheduled task liveness | Decided: the daemon must be alive ([Scheduler](plugins/Scheduler.md)) |
 | FullAccess and new categories | Decided: allowed automatically (constraint 7) |
 | External agent permissions | Proposed (#145): an external member's asks use Collaboration's member-approval route; the leader's model decides with a Collaboration tool under the leader's Approval and Permission ([ExternalAgent §3.2](plugins/ExternalAgent.md#32-permission-asks)) |
