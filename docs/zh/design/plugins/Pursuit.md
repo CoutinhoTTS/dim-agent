@@ -88,7 +88,7 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 | `continue` | B，Goal 续跑 | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" evaluation="N" branch="B">` / `An evaluator checked your report that the goal for branch B is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status "completed" again.` |
 | `failed` | B，`goal:status` | Append | Goal 的暂停文本，原因短语 "the evaluator could not check the result" |
 
-评审裁判下，干活模型的 `completed` 块是请求，不改变折叠中的状态（目标运行时为 `active`）；在结局或变更取代它之前，它一直是最新的状态块。这是 Goal 折叠规则唯一的例外，记录在 Goal A16 中：重放出的状态块读作 `completed`，目标却是 active。结论输入与 Goal 自己的写入一样，没有 key，也没有 `user` 内容，所以不改变状态，不是操作者输入，也不重置计数（Goal A5）。
+评审裁判下，干活模型的 `completed` 块是请求，不改变折叠中的状态（目标运行时为 `active`）；在结局或变更取代它之前，它一直是最新的状态块。这是 Goal 折叠规则唯一的例外，记录在 Goal A16 中：重放出的状态块读作 `completed`，目标却是 active。结论输入与 Goal 自己的写入一样，没有 key，也没有 `user` 内容，所以不改变状态，不是操作者输入，也不重置计数（Goal A5）。它只有一个块，即报告本身：Goal 从第一个块读取写入的标记（[Goal A.5](Goal.md#a5-模型可见文本)），所以报告若不在其输入的第一个块中，不产生任何决定。
 
 ## 6. 规则检查
 

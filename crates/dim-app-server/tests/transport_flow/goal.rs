@@ -952,6 +952,31 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
     let done = goal_block(&session, "main", r#"by="evaluator""#).await;
     assert!(done.contains(r#"op="completed""#), "{done}");
     assert_eq!(block_value(&done, "Result:"), "all tests pass");
+    // The conclusion it decides on is one input of one block, and that
+    // block's marker is the report of this evaluation and evaluator
+    // (Pursuit §5).
+    let (blocks, marker) = session
+        .local("main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
+                let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                text.starts_with(r#"<dim-goal kind="report""#)
+                    .then(|| (data.blocks.len(), text.lines().next().unwrap().to_owned()))
+            }),
+            _ => None,
+        })
+        .expect("the evaluator's conclusion input");
+    assert_eq!(blocks, 1, "the conclusion input carries the report alone");
+    assert_eq!(
+        marker,
+        format!(
+            r#"<dim-goal kind="report" result="done" evaluation="{evaluation}" evaluator="{child}" branch="main">"#
+        ),
+        "the conclusion marker"
+    );
     assert_eq!(
         turn_ends(&session, child).await.len(),
         1,
