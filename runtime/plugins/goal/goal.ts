@@ -7,7 +7,7 @@ export const STATUS_KEY = 'goal:status'
 export type RawBlock = { type: 'raw'; text: string; key?: string; retire?: boolean }
 export type InputMessage = {
   submission_id?: string
-  user?: { content: unknown[] }
+  user?: { content: { type: string; text?: string }[] }
   blocks?: RawBlock[]
   mode?: 'queue' | 'steer' | 'append'
 }
@@ -21,12 +21,13 @@ export type AgentEvent = {
 
 export type Status = 'active' | 'paused' | 'completed' | 'blocked'
 export type Judge = 'model' | 'evaluator'
-export type PauseReason = 'user' | 'interrupted' | 'limit' | 'turn_failed'
+export type PauseReason = 'user' | 'interrupted' | 'limit' | 'turn_failed' | 'evaluation_failed'
 
 const REASONS: Record<Exclude<PauseReason, 'user'>, string> = {
   interrupted: 'the user interrupted the turn',
   limit: 'the automatic continuation limit was reached',
   turn_failed: 'the last turn failed',
+  evaluation_failed: 'the evaluator could not check the result',
 }
 
 /**
@@ -50,6 +51,17 @@ function value(text: string, label: string): string | undefined {
   const start = text.indexOf(`\n${label}\n`)
   const end = text.lastIndexOf('\n\n')
   if (start < 0 || end < start) return undefined
+  return unescape(text.slice(start + label.length + 2, end))
+}
+
+/**
+ * The decoded body a block carries after its `label` line, up to the block's
+ * closing marker: for a body with no fixed text after it (Pursuit's report).
+ */
+function body(text: string, label: string): string {
+  const start = text.indexOf(`\n${label}\n`)
+  const end = text.lastIndexOf('\n</dim-goal>')
+  if (start < 0 || end < start) return ''
   return unescape(text.slice(start + label.length + 2, end))
 }
 
@@ -126,6 +138,98 @@ export const writes = {
   ], 'append'),
   startClear: (branch: string, after: bigint) => cleared(branch, { reason: 'new_branch', after: String(after) },
     `Any goal above belongs to another branch, not to branch ${branch}. Disregard it; branch ${branch} has no goal.`),
+  // Pursuit's writes (§5): the follow-up on the evaluator, and the conclusion,
+  // outcome and continuation on the working branch.
+  evaluateAgain: (branch: string, after: bigint) => input([
+    block({ kind: 'evaluate-again', after: String(after), branch }, [
+      'Your reply did not end with a conclusion. End your reply with exactly one of DONE:, CONTINUE: or BLOCKED: as described above.',
+    ]),
+  ], 'queue'),
+  conclusion: (branch: string, evaluator: string, evaluation: string, result: ConclusionKind, text: string) => input([
+    block({ kind: 'report', result, evaluation, evaluator, branch }, ['Evaluator report:', escape(text)]),
+  ], 'append'),
+  evaluated: (branch: string, op: 'completed' | 'blocked', evaluation: string, text: string) => input([
+    block({ kind: 'goal', op, by: 'evaluator', evaluation, branch }, [
+      op === 'completed' ? 'Result:' : 'Blocker:', escape(text), '',
+      op === 'completed'
+        ? `An evaluator verified that the goal for branch ${branch} is completed. Do not continue working toward it on your own.`
+        : `An evaluator found that the goal for branch ${branch} cannot proceed without the user. Do not continue working toward it on your own.`,
+    ], STATUS_KEY),
+  ], 'append'),
+  evaluatedContinuation: (branch: string, count: number, limit: number, after: bigint, evaluation: string) => input([
+    block({ kind: 'continuation', count, limit, after: String(after), evaluation, branch }, [
+      `An evaluator checked your report that the goal for branch ${branch} is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status "completed" again.`,
+    ]),
+  ], 'queue'),
+}
+
+/** The result a conclusion states, and the evaluator's report of a failed turn. */
+export type ConclusionKind = 'done' | 'continue' | 'blocked' | 'failed'
+/** A conclusion input's attributes and decoded text. */
+export type Conclusion = { evaluation: string; evaluator: string; result: ConclusionKind; text: string }
+
+/** The operation id a `branch/create` records for evaluation `N` (§4.1). */
+export const evaluationOperation = (evaluation: string) => `goal:evaluate:${evaluation}`
+
+/** The evaluation a `branch/create` operation id names, if it is one. */
+export function evaluationOfOperation(operation: string | undefined): string | undefined {
+  const prefix = 'goal:evaluate:'
+  return operation?.startsWith(prefix) ? operation.slice(prefix.length) : undefined
+}
+
+const CONCLUSION = 4000
+const PREFIX: Record<ConclusionKind, string> = { done: 'DONE:', continue: 'CONTINUE:', blocked: 'BLOCKED:', failed: '' }
+
+/** Text cut to the 4000 characters a conclusion or a whole reply keeps (§4.2). */
+export function truncate(text: string): string {
+  return [...text].slice(0, CONCLUSION).join('')
+}
+
+/**
+ * The evaluator's prompt, the first Queue input of its branch (§4.2, §5). Its
+ * first line is the marker that gives Goal the evaluator role.
+ */
+export function evaluatorPrompt(branch: string, evaluation: string, objective: string, summary: string): string {
+  return [
+    `<dim-goal kind="evaluate" branch="${escape(branch)}" evaluation="${evaluation}">`,
+    `You are an evaluator. Branch ${branch} reported that its goal is completed. Only you decide whether it is. Do not continue the work, do not change files or settings, and do not call goal_update.`,
+    '',
+    'Objective:',
+    escape(objective),
+    '',
+    'Reported result:',
+    escape(summary),
+    '',
+    'Verify the facts yourself by reading files and running checks; do not rely on the report or on earlier messages. End your reply with exactly one of:',
+    'DONE: <the verified result>',
+    'CONTINUE: followed by the items that are at least still missing, one per line, each with its evidence',
+    'BLOCKED: <what only the user can provide>',
+  ].join('\n')
+}
+
+/**
+ * The conclusion an evaluator reply ends with: the reply's last line that
+ * begins `DONE:`, `CONTINUE:` or `BLOCKED:`, to the end (§4.2).
+ */
+export function replyConclusion(reply: string): { result: ConclusionKind; text: string } | undefined {
+  const lines = reply.split('\n')
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const result = (['done', 'continue', 'blocked'] as const).find(kind => lines[index].startsWith(PREFIX[kind]))
+    if (result) return { result, text: truncate(lines.slice(index).join('\n')) }
+  }
+}
+
+/** The conclusion a report block carries (§5). */
+export function conclusionOf(text: string): Conclusion | undefined {
+  const attrs = marker(text)
+  const result = attrs?.result as ConclusionKind | undefined
+  if (attrs?.kind !== 'report' || result === undefined || !(result in PREFIX)) return undefined
+  return { evaluation: attrs.evaluation, evaluator: attrs.evaluator, result, text: body(text, 'Evaluator report:') }
+}
+
+/** The result a `done` or `blocked` conclusion states, without its prefix. */
+export function conclusionResult(conclusion: Conclusion): string {
+  return conclusion.text.slice(PREFIX[conclusion.result].length).trim()
 }
 
 /** The attributes of a block's leading `<dim-goal ...>` marker, if any. */
@@ -188,12 +292,25 @@ export class Fold {
    * a status change (A16). Each carries the summary the evaluator is shown.
    */
   requests: { sequence: bigint; summary: string }[] = []
+  /** Evaluations created on this branch: `N` → the evaluator branch it names. */
+  evaluations = new Map<string, string>()
+  /** The first conclusion input from each evaluation's own evaluator: `N` → its sequence. */
+  conclusions = new Map<string, bigint>()
+  /** Sequence of the latest live keyed goal block: one after `N` supersedes `N`. */
+  lastBlock = -1n
+  /** The parent of this branch's `branch/start`, the only branch an evaluator may report for. */
+  openingParent: string | undefined
+  /** This branch's evaluator role, from its first local Queue input (§4.2). */
+  evaluate: { branch: string; evaluation: string } | undefined
+  /** Turn ends in this branch's local events, up to the latest. */
+  turnEnds = 0
   private interrupts: bigint[] = []
   private continuations: bigint[] = []
   private decided = new Set<string>()
   private driving = new Map<string, bigint>()
   private events: AgentEvent[] = []
   private deleted = new Set<string>()
+  private firstInput = false
 
   /** Applies one consumed local event; `input/deleted` refolds without the input. */
   apply(event: AgentEvent): void {
@@ -202,8 +319,10 @@ export class Fold {
     // the event list here is what makes a refold replay from the opening.
     if (isOpening(event)) {
       const copiedLive = event.type === 'session' ? this.objective !== undefined || this.status !== undefined : undefined
+      const parent = event.type === 'branch' ? event.data.parent : undefined
       Object.assign(this, new Fold())
       this.copiedLive = copiedLive
+      this.openingParent = typeof parent === 'string' ? parent : undefined
     }
     if (event.type === 'input' && event.name === 'deleted') {
       this.deleted.add(event.data.input_id)
@@ -216,10 +335,11 @@ export class Fold {
   }
 
   private refold(): void {
-    const { events, copiedLive } = this
+    const { events, copiedLive, openingParent } = this
     Object.assign(this, new Fold())
     this.events = events
     this.copiedLive = copiedLive
+    this.openingParent = openingParent
     this.deleted = new Set(events.filter(e => e.type === 'input' && e.name === 'deleted').map(e => e.data.input_id))
     for (const event of events) this.step(event)
   }
@@ -236,12 +356,27 @@ export class Fold {
         if (mode !== 'append') this.driving.set(event.id, sequence)
         const first = blocks[0] && marker(blocks[0].text)
         if (data.user && !(blocks[0]?.text.startsWith('<dim-'))) this.lastOperator = sequence
+        // The evaluator's role is its prompt, the branch's first Queue input
+        // (§4.2): a steer or append input neither takes it nor uses its slot.
+        // The prompt's first line names the branch its own opening names.
+        if (!this.firstInput && mode === 'queue') {
+          this.firstInput = true
+          const line = data.user?.content.find(content => content.type === 'text')?.text?.split('\n')[0]
+          const role = line && marker(line)
+          if (role?.kind === 'evaluate' && role.branch === this.openingParent) {
+            this.evaluate = { branch: role.branch, evaluation: role.evaluation }
+          }
+        }
         if (first?.after) this.decided.add(first.after)
         if (first?.kind === 'continuation') this.continuations.push(sequence)
+        if (first?.kind === 'report' && this.evaluations.get(first.evaluation) === first.evaluator) {
+          if (!this.conclusions.has(first.evaluation)) this.conclusions.set(first.evaluation, sequence)
+        }
         for (const raw of blocks) {
           const attrs = marker(raw.text)
           if (!attrs || (raw.key !== OBJECTIVE_KEY && raw.key !== STATUS_KEY)) continue
           this.localBlocks++
+          this.lastBlock = sequence
           if (raw.key === OBJECTIVE_KEY) {
             if (raw.retire) {
               this.objective = undefined
@@ -270,6 +405,16 @@ export class Fold {
         }
         return
       }
+      case 'branch/create': {
+        const data = event.data as { branch: string; source?: { kind?: string; operation_id?: string } }
+        const evaluation = data.source?.kind === 'host' ? evaluationOfOperation(data.source.operation_id) : undefined
+        if (evaluation === undefined) return
+        // The creation is `N`'s decision, so a reload creates no second
+        // evaluator, and the branch it names is the only one that may report.
+        this.evaluations.set(evaluation, data.branch)
+        this.decided.add(evaluation)
+        return
+      }
       case 'input/consumed':
         this.driving.delete(event.data.input_id)
         return
@@ -278,6 +423,7 @@ export class Fold {
         return
       case 'turn/end':
         this.turnEnd = { sequence, status: event.data.status }
+        this.turnEnds++
         return
       case 'stop/interrupt':
         if (event.data.scope === 'turn') this.interrupts.push(sequence)
@@ -305,6 +451,14 @@ export class Fold {
   /** The worker's completion request inside the turn that ends at `sequence` (§4.1). */
   requestInTurn(sequence: bigint): { sequence: bigint; summary: string } | undefined {
     return this.requests.filter(request => request.sequence > this.turnStart && request.sequence < sequence).at(-1)
+  }
+  /** The evaluation the branch `evaluator` was created for, if it is one of ours. */
+  evaluationOf(evaluator: string): string | undefined {
+    for (const [evaluation, branch] of this.evaluations) if (branch === evaluator) return evaluation
+  }
+  /** Whether evaluation `N` is still current: no goal block follows it (§4.1). */
+  isCurrent(evaluation: string): boolean {
+    return this.lastBlock <= BigInt(evaluation)
   }
   isDecided(sequence: bigint): boolean {
     return this.decided.has(String(sequence))
@@ -348,4 +502,31 @@ export function decideEvaluation(fold: Fold, sequence: bigint): boolean {
   if (!end || end.sequence !== sequence || fold.isDecided(sequence) || !fold.running) return false
   if (fold.interrupted || end.status !== 'completed' || fold.turnOpen) return false
   return fold.judge === 'evaluator' && fold.requestInTurn(sequence) !== undefined
+}
+
+export type ConclusionAction =
+  | { write: 'completed' | 'blocked'; text: string }
+  | { write: 'continue' | 'failed' }
+
+/**
+ * The action a conclusion input at `sequence` takes (Pursuit §4.1): the first
+ * conclusion of a current evaluation, from the branch its `branch/create`
+ * names. A later conclusion, another branch's, or one for a superseded
+ * evaluation decides nothing (§8).
+ */
+export function decideConclusion(fold: Fold, sequence: bigint, conclusion: Conclusion): ConclusionAction | undefined {
+  if (fold.conclusions.get(conclusion.evaluation) !== sequence) return undefined
+  if (!fold.isCurrent(conclusion.evaluation) || !fold.running) return undefined
+  switch (conclusion.result) {
+    case 'done': return { write: 'completed', text: conclusionResult(conclusion) }
+    case 'blocked': return { write: 'blocked', text: conclusionResult(conclusion) }
+    default: return { write: conclusion.result }
+  }
+}
+
+/** Goal's continuation for a `continue` conclusion: C1, C5 and C6 (§4.1). */
+export function decideEvaluatedContinuation(fold: Fold, limit: number): Decision {
+  if (!fold.running || fold.pendingDriving) return undefined
+  if (fold.count >= limit) return { write: 'pause', reason: 'limit' }
+  return { write: 'continuation', count: fold.count + 1 }
 }
