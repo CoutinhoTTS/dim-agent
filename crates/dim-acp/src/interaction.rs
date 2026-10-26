@@ -58,7 +58,7 @@ pub(crate) async fn question(
         let name = format!("q{index}");
         let choices: Vec<_> = question.options.iter().map(|choice|json!({"const":choice.label,"title":choice.label,"description":choice.description})).collect();
         let mut schema = if question.multi_select {
-            json!({"type":"array","items":{"type":"string","oneOf":choices},"minItems":0,"maxItems":question.options.len()})
+            json!({"type":"array","items":{"anyOf":choices},"minItems":1,"maxItems":question.options.len()})
         } else {
             json!({"type":"string","oneOf":choices})
         };
@@ -75,16 +75,16 @@ pub(crate) async fn question(
         }
     }
     let message = UntypedMessage::new("elicitation/create",json!({"mode":"form","sessionId":session,"toolCallId":tool_id(&call.branch_id,&call.request_id,&call.call_id),"message":"Answer the agent's questions","requestedSchema":{"type":"object","properties":properties,"required":required}})).ok()?;
-    let result: Value = tokio::select! {
+    let result: Option<Value> = tokio::select! {
         () = stop.cancelled() => return None,
-        result = outbox.request(&cx,&message.method,message.params) => result.ok()?,
+        result = outbox.request(&cx,&message.method,message.params) => result.ok(),
     };
-    match result["action"].as_str()? {
-        "decline" => Some(question::respond(session, call, None)),
-        "accept" => {
-            let content = result["content"].as_object()?;
-            let answers: Option<Vec<_>> = call
-                .questions
+    let answers: Option<Vec<_>> = result
+        .as_ref()
+        .filter(|result| result["action"] == "accept")
+        .and_then(|result| result["content"].as_object())
+        .and_then(|content| {
+            call.questions
                 .iter()
                 .enumerate()
                 .map(|(index, question)| {
@@ -103,11 +103,13 @@ pub(crate) async fn question(
                         .and_then(Value::as_str)
                         .filter(|value| !value.trim().is_empty())
                         .map(str::to_owned);
-                    if selected
-                        .iter()
-                        .any(|value| !question.options.iter().any(|choice| &choice.label == value))
-                        || (custom.is_some() && !question.allow_custom)
+                    if selected.iter().enumerate().any(|(index, value)| {
+                        !question.options.iter().any(|choice| &choice.label == value)
+                            || selected[..index].contains(value)
+                    }) || (custom.is_some() && !question.allow_custom)
                         || (selected.is_empty() && custom.is_none())
+                        || (!question.multi_select
+                            && selected.len() + usize::from(custom.is_some()) > 1)
                     {
                         return None;
                     }
@@ -117,9 +119,7 @@ pub(crate) async fn question(
                         custom,
                     })
                 })
-                .collect();
-            Some(question::respond(session, call, Some(&answers?)))
-        }
-        _ => None,
-    }
+                .collect()
+        });
+    Some(question::respond(session, call, answers.as_deref()))
 }

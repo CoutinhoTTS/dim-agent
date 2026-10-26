@@ -1,4 +1,5 @@
 use super::*;
+use agent_client_protocol_schema::v1 as acp;
 
 const METHODS: &[&str] = &[
     "session.attach",
@@ -37,6 +38,165 @@ fn recovery_hello(wire: &mut Wire, instance: &str) {
     let hello = wire.read("hello");
     assert_eq!(hello["params"]["clientName"], "AcpGateway");
     wire.reply(&hello,json!({"instanceId":instance,"serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.input_lookup"]}));
+}
+
+#[test]
+fn acp_stdio_distinguishes_rejected_and_uncertain_submissions_on_a_live_connection() {
+    let cases = [
+        Some("invalid_params"),
+        Some("session_invalid_input"),
+        Some("session_closed"),
+        Some("session_build_failed"),
+        Some("service_reloading"),
+        Some("unknown_method"),
+        Some("submission_unknown"),
+        None,
+        Some("storage_failed"),
+    ];
+    let home = Home::new();
+    let (submitted, received) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        wire.created();
+        let attach = wire.read("session.attach"); wire.reply(&attach, json!({}));
+        let history = wire.read("session.history"); wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        for (index, app) in cases.into_iter().enumerate() {
+            let submit = wire.read("session.submit");
+            submitted.send(submit["params"]["submissionId"].clone()).unwrap();
+            if index >= 6 {
+                wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":event(9+index as u64,&format!("accepted-{index}"),"input","message",json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}))}));
+            }
+            wire.send(json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":if app.is_some(){-32000}else{-32603},"message":"Submission failed","data":app.map(|app|json!({"appError":app}))}}));
+        }
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert!(peer.response(2).get("error").is_none());
+    for (index, app) in cases.into_iter().enumerate() {
+        let request = index as i64 + 3;
+        peer.send(request, "session/prompt", json!({"sessionId":"session","prompt":[{"type":"text","text":format!("Prompt {index}")}]}));
+        let response = peer.response(request);
+        let submission = received.recv_timeout(PATIENCE).unwrap();
+        let data = &response["error"]["data"];
+        if index < 6 {
+            assert_eq!(data["code"], "native_error", "{response}");
+            assert_eq!(data["nativeAppError"], app.unwrap());
+        } else {
+            assert_eq!(data["code"], "submission_unknown", "{response}");
+            assert_eq!(data["sessionId"], "session");
+            assert_eq!(data["submissionId"], submission);
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("before sending again")
+            );
+        }
+    }
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_rejects_an_oversized_native_frame_without_interrupting_pending_calls() {
+    let home = Home::new();
+    let (pending, pending_read) = std::sync::mpsc::sync_channel(0);
+    let (release, released) = std::sync::mpsc::sync_channel(0);
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        wire.created();
+        let attach = wire.read("session.attach"); wire.reply(&attach, json!({}));
+        let history = wire.read("session.history"); wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let list = wire.read("session.list");
+        pending.send(()).unwrap();
+        released.recv_timeout(PATIENCE).unwrap();
+        wire.reply(&list, json!([]));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["user"]["content"][0]["text"], "Small prompt");
+        wire.send(json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32602,"message":"Rejected","data":{"appError":"invalid_params"}}}));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert!(peer.response(2).get("error").is_none());
+    peer.send(3, "session/list", json!({}));
+    pending_read.recv_timeout(PATIENCE).unwrap();
+    let mut frame = json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"session","prompt":[{"type":"text","text":""}]}});
+    let overhead = serde_json::to_vec(&frame).unwrap().len();
+    frame["params"]["prompt"][0]["text"] = json!("x".repeat(16 * 1024 * 1024 - overhead - 1));
+    writeln!(peer.input, "{frame}").unwrap();
+    peer.input.flush().unwrap();
+    let rejected = peer.response(4);
+    assert_eq!(rejected["error"]["code"], -32602, "{rejected}");
+    assert_eq!(rejected["error"]["data"]["code"], "request_too_large");
+    release.send(()).unwrap();
+    assert_eq!(peer.response(3)["result"]["sessions"], json!([]));
+    peer.send(
+        5,
+        "session/prompt",
+        json!({"sessionId":"session","prompt":[{"type":"text","text":"Small prompt"}]}),
+    );
+    assert_eq!(
+        peer.response(5)["error"]["data"]["nativeAppError"],
+        "invalid_params"
+    );
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_context_usage_deserializes_as_protocol_integers() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let mut methods = METHODS.to_vec();
+        methods.push("session.methods");
+        wire.hello(&methods);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let methods = wire.read("session.methods");
+        wire.reply(
+            &methods,
+            json!({"methods":[{"name":"session.context.usage","mutating":false}]}),
+        );
+        let usage = wire.read("session.context.usage");
+        wire.reply(
+            &usage,
+            json!({"estimatedInputTokens":53000.125,"contextWindow":128000.9}),
+        );
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert!(peer.response(2).get("error").is_none());
+    let update = loop {
+        if let Some(index) = peer
+            .updates
+            .iter()
+            .position(|frame| frame["params"]["update"]["sessionUpdate"] == "usage_update")
+        {
+            break peer.updates.remove(index);
+        }
+        let frame = peer.frame();
+        peer.updates.push(frame);
+    };
+    let notification: acp::SessionNotification =
+        serde_json::from_value(update["params"].clone()).unwrap();
+    let acp::SessionUpdate::UsageUpdate(usage) = notification.update else {
+        panic!("Expected a usage update")
+    };
+    assert_eq!((usage.used, usage.size), (53001, 128000));
+    peer.close();
+    daemon.join().unwrap();
 }
 
 #[test]
@@ -708,7 +868,19 @@ fn acp_stdio_cancels_a_held_input_after_a_late_submit_reply() {
 #[test]
 fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners() {
     let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    let replies = [
+        json!({"action":"cancel"}),
+        json!({"action":"accept","content":{}}),
+        json!({"action":"unknown"}),
+        json!({"action":"accept","content":{"custom0":"Custom only"}}),
+        json!({"action":"accept","content":{"q0":["A","A"]}}),
+        json!({"action":"decline"}),
+        json!({"action":"accept","content":{"q0":[]}}),
+        json!({"action":"accept","content":{"q0":"A","custom0":"C"}}),
+        json!({"error":{"code":-32601,"message":"Unsupported form"}}),
+    ];
+    let additional_questions = replies.len();
+    let daemon = home.daemon(move |wire| {
         let mut methods = METHODS.to_vec(); methods.push("session.methods"); wire.hello(&methods);
         wire.created();
         let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
@@ -748,7 +920,23 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
         assert_eq!(answer["params"]["answers"],json!([{"questionId":"choice","selected":["A","B"],"custom":"C"}]));
         wire.reply(&answer,json!({}));
         fact(wire,event(13,"result","step","tool-result",json!({"turn_id":"turn","request_id":"model","call_event_id":"ask","results":[{"call_id":"question","result":{"content":"answered"}}]})));
-        fact(wire,event(14,"end","turn","end",json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
+        for index in 0..additional_questions {
+            let sequence = 14 + index as u64 * 2;
+            let request = format!("model-{index}");
+            let ask = format!("ask-{index}");
+            fact(wire,event(sequence,&ask,"step","tool-call",json!({"turn_id":"turn","request_id":request,"calls":[{"id":"question","name":"ask_user","input":{"questions":[{"id":"choice","question":"Choose","options":[{"label":"A"},{"label":"B"}],"multiSelect":index != 3 && index != 7,"allowCustom":index != 6}]}}]})));
+            let answer = wire.read("session.question.respond");
+            assert_eq!(answer["params"]["requestId"], request);
+            if index == 3 {
+                assert_eq!(answer["params"]["answers"], json!([{"questionId":"choice","selected":[],"custom":"Custom only"}]));
+            } else {
+                assert_eq!(answer["params"]["declined"], true);
+                assert!(answer["params"].get("answers").is_none());
+            }
+            wire.reply(&answer, json!({}));
+            fact(wire,event(sequence+1,&format!("result-{index}"),"step","tool-result",json!({"turn_id":"turn","request_id":request,"call_event_id":ask,"results":[{"call_id":"question","result":{"content":"settled"}}]})));
+        }
+        fact(wire,event(14+additional_questions as u64*2,"end","turn","end",json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
         detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
@@ -779,6 +967,7 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
         "permission_conflict"
     );
     peer.send(4,"session/prompt",json!({"sessionId":"session","prompt":[{"type":"image","mimeType":"image/png","data":"aW1hZ2U="},{"type":"resource","resource":{"uri":"test://text","text":"inline"}}]}));
+    let mut elicitation = 0;
     loop {
         let frame = peer.frame();
         match frame["method"].as_str() {
@@ -787,14 +976,36 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
                 json!({"outcome":{"outcome":"selected","optionId":"reject_once"}}),
             ),
             Some("elicitation/create") => {
+                let _: acp::CreateElicitationRequest =
+                    serde_json::from_value(frame["params"].clone()).unwrap();
+                let schema = &frame["params"]["requestedSchema"];
+                if schema["properties"]["q0"]["type"] == "array" {
+                    assert_eq!(schema["properties"]["q0"]["minItems"], 1);
+                }
                 assert_eq!(
-                    frame["params"]["requestedSchema"]["properties"]["q0"]["type"],
-                    "array"
+                    schema["required"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("q0")),
+                    elicitation == 7
                 );
-                peer.answer(
-                    &frame,
-                    json!({"action":"accept","content":{"q0":["A","B"],"custom0":"C"}}),
-                );
+                if elicitation == 0 {
+                    peer.answer(
+                        &frame,
+                        json!({"action":"accept","content":{"q0":["A","B"],"custom0":"C"}}),
+                    );
+                } else if let Some(error) = replies[elicitation - 1].get("error") {
+                    writeln!(
+                        peer.input,
+                        "{}",
+                        json!({"jsonrpc":"2.0","id":frame["id"],"error":error})
+                    )
+                    .unwrap();
+                    peer.input.flush().unwrap();
+                } else {
+                    peer.answer(&frame, replies[elicitation - 1].clone());
+                }
+                elicitation += 1;
             }
             Some("session/update") => peer.updates.push(frame),
             Some("$/cancel_request") => {}
@@ -805,6 +1016,7 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
             }
         }
     }
+    assert_eq!(elicitation, replies.len() + 1);
     assert!(
         peer.updates.iter().any(
             |frame| frame["params"]["update"]["configOptions"][0]["currentValue"] == "read-only"

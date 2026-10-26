@@ -1311,6 +1311,7 @@ dependencies = [
 name = "dimcode"
 version = "0.1.0-alpha.6"
 dependencies = [
+ "agent-client-protocol-schema",
  "base64 0.22.1",
  "dim-agent-types",
  "dim-app-server",

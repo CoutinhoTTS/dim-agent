@@ -175,6 +175,9 @@ async fn drive(
                 };
                 match sent {
                         Ok(id) => { pending.insert(id, call.reply); }
+                        Err(error) if error.downcast_ref::<dim_client::RequestTooLarge>().is_some() => {
+                            let _ = call.reply.send(Err(Error::new(-32602, "App Server request exceeds the 16 MiB frame limit").data(json!({"code":"request_too_large"}))));
+                        }
                         Err(error) => { let _ = call.reply.send(Err(boundary(error))); break; }
                     }
                 }

@@ -125,13 +125,15 @@ new/load/resume/fork 通过独立的 [TemporaryMcp](plugins/TemporaryMcp.md) Ses
 | --- | --- | --- |
 | `session/update` | 可接 | §7 的有序投影；普通客户端始终能消费标准更新，不要求 Lody |
 | `session/request_permission` | 可接 | `approval.request` → `allow_once` / `reject_once`，分别转 `approval.respond {sessionId,branchId,requestId,decision:"allow"|"deny"}`；不提供 always 选项。client cancelled 不替用户作决定；native resolved/cancelled 后忽略迟到答案 |
-| `elicitation/create` | 条件可接 | client 明确支持 form 且该 Session 存在 `session.question.respond`；从未结束的 `ask_user` tool-call 生成 form，使用 branchId/requestId/callId 关联。accept → native answers；decline → `declined:true`；turn cancel / EOF 只释放本地等待，不伪造回答。不是 MCP-server elicitation |
+| `elicitation/create` | 条件可接 | client 明确支持 form 且该 Session 存在 `session.question.respond`；从未结束的 `ask_user` tool-call 生成 form，使用 branchId/requestId/callId 关联。有效 accept → native answers；decline、client cancel、无效或空答案、client RPC error → `declined:true`；turn cancel / EOF 只释放本地等待，不伪造回答。不是 MCP-server elicitation |
 | `elicitation/complete` | 首版不发送 | 不支持 URL elicitation 或 out-of-band completion；form 请求正常响应即结算 |
 | `fs/read_text_file`、`fs/write_text_file` | 首版不调用 | 无现有客户端文件访问/未保存 buffer backend 接线；仍由 Dim 工作区工具访问资源节点 |
 | `terminal/create`、`terminal/output`、`terminal/wait_for_exit`、`terminal/kill`、`terminal/release` | 首版不调用 | 执行继续归 Dim 的 exec/BackgroundExec；不把客户端 terminal 接成第二个工具执行入口 |
 | `$/cancel_request` | 有限支持 | 可以取消本地只读准备/回放及 §4.4 的认证等待，按 SDK 返回 cancelled。已投递变更不回滚、不宣称未执行；认证只取消自己尚 pending 的 attempt。`session/prompt` 的运行取消通过 `session/cancel`；首版不承诺所有原生 RPC 都可按 request id 撤销 |
 
 提问表单沿用 [Questions](plugins/Questions.md) 的 options、multiSelect、allowCustom 及答案合同；优先复用 CLI 中与终端无关的 [question projection](../../crates/dim-cli/src/question/mod.rs)，不能复制另一套工具校验。仅存在真实 Lody question 字段时附加 elicitation metadata；answer notes、secret、preview、auto-answer 无来源，不发布。另一客户端先回答时服从 native `question_already_answered` / `question_cancelled`。
+
+多选数组使用 ACP 的 `items.anyOf`，`minItems:1`。没有自定义答案时，选择字段为 required；允许自定义答案时保留选择字段可选，以支持仅填自定义文本。每个已完成的客户端请求都会提交有效答案或 decline，不留下无法再次呈现的 pending call。
 
 ### 4.3 Draft / unstable 和内容边界
 
@@ -350,7 +352,7 @@ cancel 到达 submit reply 之前时保留 cancel 标志，等拿到 input id �
 | `step/tool-result` | 对应 tool_call_update completed/failed；只读 ToolResult.content 作为文本，最多 16 KiB；保留失败标记，不把 structuredContent 当模型结果 |
 | `approval.request`、`approval.resolved`、`approval.cancelled` | permission 请求和本地 waiter 结算；all branches 的审批均转交。显式保留 branchId/requestId，不能用 callId 单独关联 |
 | `SessionStore` title notice / native list metadata | 标准 session_info_update；按 revision 更新。manual 可映射 explicit；auto 不足以区分 generated/fallback，省略不可靠的 titleSource |
-| `session.context.usage` | 有值时 `usage_update {used:ceil(estimatedInputTokens),size:floor(contextWindow)}`，这是估算上下文量。缺数据时不发送，未知 cost 省略，不能写 cost:0。不要把累计 token 消耗当上下文占用 |
+| `session.context.usage` | 有值时 `usage_update {used:ceil(estimatedInputTokens),size:floor(contextWindow)}`，两个字段按 ACP 的 `u64` 输出 JSON 整数。这是估算上下文量。缺数据时不发送，未知 cost 省略，不能写 cost:0。不要把累计 token 消耗当上下文占用 |
 | `context/compaction-start`、`context/compaction` | 真正的 compaction activity；start/terminal 配对，completed/skipped/failed/cancelled 区分。只透传真实 diagnostics，不伪造节省量/耗时 |
 | `exec/started`、`exec/ended` | 后台任务的真实开始/终态，按 §8.3 生成独立 tool lifecycle + task metadata；不把原 exec 工具返回当后台结束 |
 | `collaboration/request`、`collaboration/delivered`、`collaboration/result` | 按 §8.3 投影最小 subagent snapshot 流；执行身份是 request，不能把可复用的 member Session 当作一次执行 |
@@ -423,11 +425,14 @@ Steering 的 handoff 允许上游换 turn，并不允许脱离 ACP prompt 槽启
 | native `service_reloading` / `service_unavailable` | 保留 appError 原因和消息；不把永久不可用当作无限重试 |
 | `permission_conflict` / question terminal errors | 刷新真实状态、结束本次操作；不自动替用户覆盖其他客户端决定 |
 | `submission_unknown` | 保留 submissionId 和可查询的 Session id，报告不确定；不能提示客户端盲重发 |
+| `request_too_large` | 原生帧编码后超过 16 MiB，在写入前拒绝，返回 invalid-params；只结算当前请求，保留连接及其他在途调用 |
 | `auth_required` | 仅在可确认所选 managed provider 缺账户时使用 ACP -32000；保留已发布的可执行 auth methods，不从泛化 provider_failed 文案猜认证状态 |
 | native mutation reply 丢失 | 报 operation outcome unknown；只做有合同的查询恢复，不自动重复动作 |
 | `turn_failed` / `daemon_unavailable` | 保留真实原因；不伪造 end_turn 或 cancelled |
 
 错误的 ACP `data.code` 是 Gateway 的外部错误分类，native appError 作为诊断保留，不再通过错误文本猜原因。原生 RPC 的 -32000 是通用 app error，**不能原样穿透为 ACP -32000**，因为后者专指 Authentication required。ACP 的 parse/invalid-request/method-not-found/invalid-params、request-cancelled、resource-not-found 按其标准 code 输出；可确认需要认证才用 -32000，其余已知业务失败用 Gateway 的 Other code -32001，意外内部错误用 -32603。这样 turn_failed、provider_failed 或存储错误不会错误触发客户端登录。stdout 只允许 ACP，stderr/日志不输出 auth headers、secret references、完整 prompt 或未授权的工具正文。
+
+live `session.submit` 仅将[原生保证集合](../../crates/dim-app-server/README.md#session-submission-errors)中的错误视为确定未提交；集合外的回复同样返回 `submission_unknown` 和两个标识。传输中断沿既有恢复路径查询，不重发输入；本地 `request_too_large` 则已确认未写入。
 
 ## 10. 交付单元和验收顺序
 
@@ -437,7 +442,7 @@ Steering 的 handoff 允许上游换 turn，并不允许脱离 ACP prompt 槽启
 | B. 插件与标准会话 | 已完成：dim-acp、CLI acp 入口、共享产品事件边界 | initialize/new/list/load/resume/prompt；3 个 ACP stdio flows 覆盖真实 daemon 与 loopback model、消费输入关联、emoji 去重、固定头空页和并发准备。受影响 CLI flows 共 97 通过，10 个额外环境用例未运行 |
 | C. 交互与结算 | 已完成：同一 Gateway 的 auth/permission/question/config/content | managed provider discovery、browser authenticate、terminal helper；输入撤回/stop、审批、form、mode/model、图片/文本资源和 close/delete。101 个 CLI flows 通过、10 个额外环境用例跳过；另有 2 个公共 Gateway 宿主流程验证真实 loopback callback、native exchange 和请求取消。RPC recovery 与输出/卸载结算在 E 验证 |
 | D. 有依据的 Lody 子集 | 已完成接线：history/forkAtTurn/compaction、startup model、后台 task、最小 subagent snapshots | 公开 stdio flows 覆盖固定头历史、真实终态锚点、task 与父工具独立、压缩取消、同 member 多次委派的 run 身份、startup model 优先级与非 new 覆盖拒绝，以及断线 unknown/恢复新 activation。Lody GUI 基本聊天通过；不能据协议流测试声明所有 GUI 扩展已验收 |
-| E. 连接恢复、宿主退出与实机 | 已完成：RPC recovery、dimcode 原生入口、文档和验收记录 | 本轮 CLI 回归 120 passed、11 ignored、1 个恢复截止用例 filtered；Node MCP stdio 流程单独通过。覆盖不重发不确定变更、请求取消、输出预算、卸载结算。macOS acpx 基本聊天通过；Lody GUI MCP 工具验收受登录页阻塞，真实 OAuth、Windows/Linux 和发布包待验收。证据见验收记录 |
+| E. 连接恢复、宿主退出与实机 | 已完成：RPC recovery、dimcode 原生入口、文档和验收记录 | 本轮 CLI 回归 123 passed、11 ignored、1 个恢复截止用例 filtered；Node MCP stdio 流程单独通过。覆盖不重发不确定变更、请求取消、输出预算、卸载结算。macOS acpx 基本聊天通过；Lody GUI MCP 工具验收受登录页阻塞，真实 OAuth、Windows/Linux 和发布包待验收。证据见验收记录 |
 
 这是串行交付范围，不为每个字段建立独立任务或 agent。实际实现路径引入 crate/依赖时运行 xtask check；装配变化按项目规则生成 graph，禁止手写 generated 输出。
 

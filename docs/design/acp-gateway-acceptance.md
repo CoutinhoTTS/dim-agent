@@ -19,10 +19,12 @@
 
 ## Automated public flows
 
+上表标识本机 acpx 验收使用的构建。以下公开协议回归使用 PR 当前源码，覆盖 live submission 不确定回复、原生帧超限隔离和固定版本 ACP schema 的反序列化。
+
 | 范围 | 结果 / 证据 |
 | --- | --- |
-| CLI compatibility | `cli_flow -- --skip acp_stdio_recovery_deadline`：120 passed，11 ignored，1 filtered；包括当前 CLI 的旧 daemon 替换行为。本轮没有复跑被过滤的恢复截止用例 |
-| ACP stdio | 回归覆盖现有 ACP 和 terminal-auth helper；两个临时 MCP stdio flows（含 Node opt-in）另行执行通过 |
+| CLI compatibility | `cli_flow -- --skip acp_stdio_recovery_deadline`：123 passed，11 ignored，1 filtered；包括当前 CLI 的旧 daemon 替换行为。本轮没有复跑被过滤的恢复截止用例 |
+| ACP stdio | 回归覆盖现有 ACP 和 terminal-auth helper；19 个非 ignored ACP 流程通过，Node MCP stdio 流程另行执行通过。表单和 usage 通知由固定版本 schema 1.12.0 实际反序列化 |
 | 临时 MCP | native MCP Session suite 13 passed，含真实 30 秒租约过期、失败清理、Session 隔离、无设置写入和真实工具调用；工具列表变更另行复核通过 |
 | 既有 MCP | `mcp_flow` 5 passed；`mcp_http_flow` 7 passed、4 ignored。原有配置、连接代际、HTTP/SSE、取消和关闭行为回归通过 |
 | 共享传输 | `dim-client` 两个公共连接/callback 测试通过；身份/profile 校验、交错响应、半帧取消和受限 loopback callback |
@@ -38,12 +40,13 @@
 cargo test --locked -p dimcode --test cli_flow
 cargo test --locked -p dim-client -p dim-acp
 cargo test --locked -p dim-app-server --test mcp_session_flow --test mcp_flow --test mcp_http_flow
+npm ci --prefix runtime --ignore-scripts
 cargo test --locked -p dimcode --test cli_flow acp_stdio_temporary_mcp -- --include-ignored
 cargo clippy --locked -p dim-app-server -p dim-acp -p dim-cli --all-targets -- -D warnings
 cargo run --locked -p xtask -- check
 ```
 
-恢复截止 flow 和 native MCP 过期 flow 各故意等待真实 30 秒。前者可用 `cargo test --locked -p dimcode --test cli_flow acp_stdio_recovery_deadline` 单独运行；本轮执行的是后者。Node MCP flow 需要已安装的 runtime MCP SDK，复用既有官方 SDK fixture。测试使用自己的隔离 home。
+恢复截止 flow 和 native MCP 过期 flow 各故意等待真实 30 秒。前者可用 `cargo test --locked -p dimcode --test cli_flow acp_stdio_recovery_deadline` 单独运行；临时 MCP 接线时执行了后者。Node MCP flow 需要已安装的 runtime MCP SDK，复用既有官方 SDK fixture；CI 在 CLI ignored profile 之前安装 runtime 依赖。测试使用自己的隔离 home。
 
 覆盖的行为包括：
 
@@ -53,6 +56,8 @@ cargo run --locked -p xtask -- check
 - 临时 MCP 首次请求即可见、模型实际调用及工具结果回到模型；headers/environment/cwd 接线；工具列表变更；同 bindingId 幂等、不同配置冲突；过期后重新建立资源且不重发输入；忙碌请求不改变绑定。
 - Gateway EOF 结算正在等待的 stdio MCP 调用，官方 SDK fixture 收到取消且子进程退出。native 失败准备撤销资源，30 秒未续租后关闭连接；Session close 同时释放既有和临时连接，持久 MCP 文件保持不变。
 - all-branch approval、form 多选/custom、图片和文本 resource；mode CAS 保留工具列表，冲突刷新且不重试；model 使用 catalog 的真实 provider 映射及采用结果。
+- live submit 的保证拒绝集合与已接受后的 `submission_unknown`、不透明错误区分；不确定回复包含真实 Session/submission id。16 MiB ACP 帧在原生封装后超限，只拒绝该请求，保留已在途的 list 调用和后续正常提交。
+- usage 的 ceil/floor 结果输出 JSON 整数；多选使用 ACP `items.anyOf`。客户端取消、空答案、无效选择或 RPC error 均提交 decline；仅自定义答案仍可正常回答。以上 payload 通过固定版本 ACP schema 反序列化。
 - auth discovery、已登录不重复 begin、terminal method 不走 authenticate；helper 用同一 home 重新发现 method，并复用 CLI device flow。
 - RPC 断线和 daemon instance 变化；丢失 submit reply 后 lookup 同一 submissionId，重建真实终态；丢失 create reply 后不补建 Session。重连、lookup 和 catch-up 共用 30 秒恢复截止点；排队 RPC 也按连接 generation 隔离。恢复 lookup 不回复时，到期先送达 cancelled + nativeCancellation:unconfirmed，再以连接不可用退出；不宣称 native stop 已执行。
 - Lody history、真实 terminal turn fork、startup model 优先级、非 new 覆盖拒绝；后台 task 与父工具分开；compaction cancelled；同 member 的两次委派得到不同 runId。无 capability / version 不匹配时无自定义 subagent 通知；观察中断产生 unknown/outputIncomplete，新 activation 使用新 runId。

@@ -1258,8 +1258,25 @@ impl Gateway {
                                 return Ok(());
                             }
                             let prompt = session.prompt.take().unwrap();
+                            let rejected = !sent
+                                || error.data.as_ref().is_some_and(|data| {
+                                    data["code"] == "request_too_large"
+                                        || matches!(
+                                            data["nativeAppError"].as_str(),
+                                            Some(
+                                                "invalid_params"
+                                                    | "session_invalid_input"
+                                                    | "session_closed"
+                                                    | "session_build_failed"
+                                                    | "service_reloading"
+                                                    | "unknown_method"
+                                            )
+                                        )
+                                });
                             if prompt.cancelled {
                                 prompt.reply.respond(json!({"stopReason":"cancelled"}))?;
+                            } else if !rejected {
+                                prompt.reply.respond_with_error(Error::new(-32001,"Submission outcome is unknown; load this Session before sending again").data(json!({"code":"submission_unknown","sessionId":id,"submissionId":prompt.submission})))?;
                             } else {
                                 prompt.reply.respond_with_error(error)?;
                             }
@@ -1415,7 +1432,7 @@ impl Gateway {
                         && usage.context_window.is_finite()
                         && usage.context_window > 0.0
                     {
-                        self.update(&id,json!({"sessionUpdate":"usage_update","used":usage.estimated_input_tokens.ceil(),"size":usage.context_window.floor()}))?;
+                        self.update(&id,json!({"sessionUpdate":"usage_update","used":usage.estimated_input_tokens.ceil() as u64,"size":usage.context_window.floor() as u64}))?;
                     }
                 }
             }
