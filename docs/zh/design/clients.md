@@ -8,6 +8,34 @@
 
 每个客户端都是 App Server daemon 的协议 v3 客户端。daemon 无界面、共享：每个产品 home 一个，一个执行者、多个查看者（[Tui §3.6](../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves)）。客户端只负责展示和本地交互；宿主配置、外部协议和持久化的 Session 归 App Server（[功能清单](../../feature-list.md)）。
 
+```mermaid
+flowchart TB
+  subgraph C["客户端"]
+    CLI["原生 CLI dimcode<br/>行模式、滚动式、全屏"]
+    WEB["Web 工作区<br/>第一阶段，回环入口"]
+    DESK["Desktop<br/>独立仓库"]:::outside
+    ACP["ACP<br/>P3 草案"]:::planned
+    REM["远程设备<br/>P3 草案"]:::planned
+  end
+  P["协议 v3：所有客户端共用的契约（§2）"]
+  subgraph D["App Server daemon：每个产品 home 一个，一个执行者，多个查看者"]
+    SM["Session 方法<br/>经 Session 分发"]
+    MM["管理方法<br/>进程级，按入口提供"]
+    N["广播通知<br/>不是 Timeline 事实"]
+    UI["UI 登记处<br/>终端界面是 UI 叶子"]
+  end
+  CLI --> P
+  WEB --> P
+  DESK --> P
+  ACP -.-> P
+  REM -.-> P
+  P --> D
+  classDef outside stroke-dasharray:4 3
+  classDef planned stroke-dasharray:4 3,color:#888
+```
+
+虚线框表示不在本仓库（Desktop）或还没有实现（ACP、远程设备）；虚线箭头表示还不存在的连接。
+
 | 客户端 | 位置 | 形态 | 状态 | 设计 |
 | --- | --- | --- | --- | --- |
 | 原生 CLI `dimcode` | `crates/dim-cli`、`crates/dimcode` | 一个可执行文件里有三种界面：行模式客户端（`--no-tui` 或没有终端）、滚动式终端界面（默认）和全屏终端界面；`/tui` 在进程内切换两种终端界面 | 已实现 | [Tui](../../design/plugins/Tui.md)、[CLI 命令](cli-commands.md)、[原生 CLI 契约](../../../crates/dim-cli/README.md) |
@@ -133,6 +161,14 @@ Desktop 在独立仓库里。本仓库负责 Desktop 使用的 App Server 契约
 Desktop 自己的能力覆盖和界面验收在它的仓库里跟踪。本仓库的契约支撑不了的能力，按同一规则在本仓库开 issue。
 
 ## 6. 需要维护者决定的事项
+
+```mermaid
+flowchart LR
+  G["§4 缺口<br/>没有设计的能力"] --> D["§6 决定<br/>下面六项"]
+  X["§4 冲突<br/>文档与代码不符"] --> D
+  D --> F["补设计、修订文档"]
+  D --> R["路线图 §3.7<br/>负责人与里程碑"]
+```
 
 1. **全屏终端界面。** 代码已经交付了它，总体设计却说不在范围内。要么接受它在范围内（更新总体设计和 CLI 命令文档，并决定回滚和 `/stats` 是否仍不做），要么冻结它。
 2. **Web 第二阶段的范围**，包括回环 web 入口能否为设置页面提供管理方法（Web 工作区 Q2），以及 Web 工作区是否必须支持提问。

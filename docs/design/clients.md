@@ -8,6 +8,34 @@ Client work has so far been designed per feature. This document collects those d
 
 Every client is a protocol v3 client of the App Server daemon. The daemon is headless and shared: one per product home, one executor with many viewers ([Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves)). A client owns presentation and local interaction only; the App Server owns host configuration, external protocols and persisted Sessions ([feature list](../feature-list.md)).
 
+```mermaid
+flowchart TB
+  subgraph C["Clients"]
+    CLI["Native CLI dimcode<br/>line, scrollback, fullscreen"]
+    WEB["Web workspace<br/>phase 1, loopback entry"]
+    DESK["Desktop<br/>own repository"]:::outside
+    ACP["ACP<br/>P3 draft"]:::planned
+    REM["Remote devices<br/>P3 draft"]:::planned
+  end
+  P["Protocol v3: the contract every client shares (§2)"]
+  subgraph D["App Server daemon: one per product home, one executor, many viewers"]
+    SM["Session methods<br/>dispatched through the Session"]
+    MM["Management methods<br/>process scope, served per entry"]
+    N["Broadcast notices<br/>not Timeline facts"]
+    UI["UI registry<br/>terminal UIs are UI leaves"]
+  end
+  CLI --> P
+  WEB --> P
+  DESK --> P
+  ACP -.-> P
+  REM -.-> P
+  P --> D
+  classDef outside stroke-dasharray:4 3
+  classDef planned stroke-dasharray:4 3,color:#888
+```
+
+Dashed boxes are outside this repository (Desktop) or not implemented (ACP, remote devices); dashed arrows are connections that do not exist yet.
+
 | Client | Where | Form | Status | Design |
 | --- | --- | --- | --- | --- |
 | Native CLI `dimcode` | `crates/dim-cli`, `crates/dimcode` | Three interfaces in one executable: the line client (`--no-tui` or no terminal), the scrollback terminal UI (default) and the fullscreen terminal UI; `/tui` switches the two terminal UIs in-process | Implemented | [Tui](plugins/Tui.md), [CLI commands](cli-commands.md), [native CLI contract](../../crates/dim-cli/README.md) |
@@ -133,6 +161,14 @@ Desktop lives in its own repository. This repository owns the App Server contrac
 Desktop's own feature coverage and UI acceptance are tracked in its repository. A capability that this repository's contracts cannot back becomes an issue here, under the same rule.
 
 ## 6. Decisions for the maintainer
+
+```mermaid
+flowchart LR
+  G["§4 gaps<br/>capabilities with no design"] --> D["§6 decisions<br/>the six items below"]
+  X["§4 conflicts<br/>documents versus code"] --> D
+  D --> F["Designs and document fixes"]
+  D --> R["Roadmap §3.7<br/>owner and milestones"]
+```
 
 1. **Fullscreen terminal UI.** The code ships it; the overview says it is out of scope. Either accept it in scope (update the overview and CLI commands, and decide whether rollback and `/stats` stay out) or freeze it.
 2. **Web phase 2 scope**, including whether the loopback web entry may carry management methods for settings pages (web-workspace Q2), and whether Questions is required in the Web workspace.
