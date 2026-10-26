@@ -9,11 +9,12 @@
 //! block and table against the diagnostics.
 use dim_agent_capabilities::{
     defaults,
+    file_storage::FileStorage,
     file_storage::FileStoragePlugin,
     host::{
         PutSessionFile, SessionFileError, SessionFileErrorCode, SessionFilesHost, StoredSessionFile,
     },
-    host_platform::{HostPlatform, HostPlatformPlugin, ShellStatus},
+    host_platform::{HostPlatform, ShellStatus},
     model_provider::ModelProviderPlugin,
     permission::{CommandRulesHost, NoCommandRules},
     skill_settings::SkillSettingsHost,
@@ -21,7 +22,8 @@ use dim_agent_capabilities::{
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -57,25 +59,26 @@ const INFRASTRUCTURE: [&str; 13] = [
 
 /// Graph-only host facts. Keep real local-execution dependencies but never scan
 /// the developer's home or make the graph depend on their installed skills.
-struct GraphPlatform(PathBuf);
-impl TypedPlugin for GraphPlatform {
-    type Deps = <HostPlatformPlugin as TypedPlugin>::Deps;
+struct GraphPlatform {
+    home: PathBuf,
+    storage: Key<FileStorage>,
+}
+impl DynPlugin for GraphPlatform {
     fn name(&self) -> &str {
         "HostPlatform"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        _: Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.storage.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let mut platform = HostPlatform::current(ShellStatus::Unavailable {
                 code: "GRAPH_ONLY",
                 reason: "Graph generation does not execute commands".into(),
             })
-            .map_err(|error| CordisError::PluginFailed(error.into()))?;
-            platform.home = self.0.clone();
-            ctx.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(platform))?;
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
+            platform.home = self.home.clone();
+            ctx.provide_as::<HostPlatform>(Arc::new(platform))?;
             Ok(Effect::Done)
         })
     }
@@ -130,24 +133,17 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     )?;
     let process = rutis::Ctx::root()?;
     // FileStorage refuses symlinked components such as macOS `/var`.
-    (&process.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        storage.canonicalize()?,
-    ]))))
-        .await?;
+    (&process.plugin(FileStoragePlugin::new(vec![storage.canonicalize()?]))).await?;
     // As the product's HostPlatform, with its local configuration sources.
-    (&process.plugin(rutis::Typed::with_keys(
-        GraphPlatform(storage.canonicalize()?),
-        (Some(rutis::DepKey::of()),),
-    )))
+    (&process.plugin(GraphPlatform {
+        home: storage.canonicalize()?,
+        storage: Key::of(),
+    }))
         .await?;
-    process.provide_as(
-        TypeKey::of::<SkillSettingsHost>(),
-        Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
-    )?;
-    process.provide_as(
-        TypeKey::of::<SessionFilesHost>(),
-        Arc::new(SessionFilesHost(Arc::new(GraphFiles))),
-    )?;
+    process.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
+        MemorySkillSettings::default(),
+    ))))?;
+    process.provide_as::<SessionFilesHost>(Arc::new(SessionFilesHost(Arc::new(GraphFiles))))?;
 
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_model_hosts(&mut builder);
@@ -164,7 +160,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     // The product profiles add Questions.
     dim_agent_questions::install(&mut builder);
     // The Agent's own plugin: the catalog and the Skills parts it registers.
-    builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
+    builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
     let agent = builder.build_in(&process);
     let session = agent
         .create_session(SessionConfig {
@@ -176,7 +172,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     let session_diagnostics = session.diagnostics()?;
     let main_diagnostics = session.branch_diagnostics("main")?;
     // Scoped keys carry the instance of the scope plugin's loader group.
-    let instance = |d: &rutis::RuntimeDiagnostics, name: &str| {
+    let instance = |d: &rutis::host::diagnostics::RuntimeDiagnostics, name: &str| {
         let scope = d
             .plugins
             .iter()

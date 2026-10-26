@@ -1509,6 +1509,30 @@
         "provider": 60,
         "generation": 1,
         "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#branchLifecycle@main",
+        "provider": 52,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#dispatcher@main",
+        "provider": 52,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#timeline@main",
+        "provider": 52,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#timelineIdentity@main",
+        "provider": 52,
+        "generation": 1,
+        "removing": false
       }
     ]
   },
@@ -1610,14 +1634,7 @@
             "generation": 1
           }
         ],
-        "reads": [
-          {
-            "service": "dim_agent_capabilities::file_storage::FileStorage",
-            "provider": 2,
-            "declared": true,
-            "external": true
-          }
-        ]
+        "reads": []
       },
       {
         "id": 2,
@@ -1646,6 +1663,12 @@
       {
         "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
         "provider": 25,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::runtime::definitions::PluginMounter",
+        "provider": 4,
         "generation": 1,
         "removing": false
       },
@@ -2825,6 +2848,24 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#sessionConfig@session",
+        "provider": 30,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#sessionIdentity@session",
+        "provider": 30,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#sessionLifecycle@session",
+        "provider": 30,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#sessionMethods@session",
         "provider": 42,
         "generation": 1,
@@ -2833,6 +2874,12 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#toolRegistry@session",
         "provider": 46,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#treeCommands@session",
+        "provider": 45,
         "generation": 1,
         "removing": false
       }

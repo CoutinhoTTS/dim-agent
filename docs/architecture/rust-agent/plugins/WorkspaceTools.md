@@ -36,7 +36,11 @@ waits for tracked calls, including handoff. File mutations stage complete bytes
 and retain coordinator admission through I/O/publication. Foreground commands
 release their process trees before returning; collaboration members do not
 background commands. Output files are not deleted simply by plugin unload.
-Permissions/approvals occur upstream: these native tools are not sandboxed.
+Before admission, `ToolHost.resolve_write` resolves a native `write` or `edit`
+target and returns that same call with an absolute canonical `path`. ToolExecutor
+uses it for approval and execution; the original model call remains in history.
+Resolution only reads metadata, honors cancellation and rejects unresolvable or
+non-UTF-8 paths. Permissions/approvals occur upstream of execution: these native tools are not sandboxed.
 Unsupported metadata preservation fails unchanged; post-install errors require
 re-reading before retry.
 

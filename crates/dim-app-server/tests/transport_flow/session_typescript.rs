@@ -12,7 +12,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::SESSION_GROUP;
 use dim_agent_types::{MessageContent, MessagePart, ModelRequest, Role};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
-use rutis::{InstanceId, Keyed};
+use rutis::host::{CtxHost, InstanceId};
 use std::path::PathBuf;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -282,63 +282,73 @@ fn observers(lifecycle_file: &std::path::Path) -> SessionTypeScriptConfig {
 
 /// Drain real bootstrap broadcasts before publication so the loading-time
 /// sampling assertion does not depend on scheduler timing.
-struct DrainLoadingBroadcast;
-struct LoadingFence(Arc<tokio::sync::Notify>);
-impl rutis::Listener<dim_agent_capabilities::session_broadcast::SessionBroadcastEvent>
-    for LoadingFence
-{
-    fn call<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        record: &'a dim_agent_capabilities::session_broadcast::SessionBroadcastEvent,
-        _: rutis::Call<'a, ()>,
-    ) -> rutis::BoxFuture<'a, Result<Option<()>, rutis::CordisError>> {
-        if matches!(record, dim_agent_capabilities::session_broadcast::SessionBroadcastEvent::Fence { recipient, .. } if recipient == "test.loading")
-        {
-            self.0.notify_one();
-        }
-        Box::pin(async { Ok(None) })
+struct DrainLoadingBroadcast {
+    dispatcher: rutis::host::Key<dim_agent_runtime::Dispatcher>,
+    identity: rutis::host::Key<dim_agent_runtime::TimelineIdentity>,
+    lifecycle: rutis::host::Key<dim_agent_runtime::SessionLifecycle>,
+}
+impl DrainLoadingBroadcast {
+    fn new(names: &dim_agent_runtime::Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            dispatcher: names.key()?,
+            identity: names.key()?,
+            lifecycle: names.key()?,
+        })
     }
 }
-impl TypedPlugin for DrainLoadingBroadcast {
-    type Deps = (
-        Keyed<dim_agent_runtime::Dispatcher>,
-        Keyed<dim_agent_runtime::TimelineIdentity>,
-        Keyed<dim_agent_runtime::SessionLifecycle>,
-    );
+impl rutis::host::DynPlugin for DrainLoadingBroadcast {
     fn name(&self) -> &str {
         "test.drain-loading-broadcast"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![
+            self.dispatcher.erase(),
+            self.identity.erase(),
+            self.lifecycle.erase(),
+        ]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (Keyed(dispatcher), Keyed(identity), Keyed(lifecycle)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let lifecycle = ctx.require_at(&self.lifecycle)?;
             let emitter = ctx.clone();
             let channel =
                 dim_agent_capabilities::session_broadcast::session_channel(&identity.session_id);
             let drained = Arc::new(tokio::sync::Notify::new());
-            ctx.events()
-                .on(ctx, &channel, LoadingFence(drained.clone()))?;
+            let fence = drained.clone();
+            ctx.listen::<dim_agent_capabilities::session_broadcast::SessionBroadcast>()
+                .name(channel.clone())
+                .on(move |event, _| {
+                    if matches!(&event.record, dim_agent_capabilities::session_broadcast::SessionBroadcastEvent::Fence { recipient, .. } if recipient == "test.loading")
+                    {
+                        fence.notify_one();
+                    }
+                    async { Ok(None) }
+                })?;
+            let session_id = identity.session_id.clone();
             dispatcher.subscribe_all(ctx, self.name(), move |_| {
                 let emitter = emitter.clone();
-                let channel = channel.clone();
+                let session_id = session_id.clone();
                 let lifecycle = lifecycle.clone();
                 let drained = drained.clone();
                 Box::pin(async move {
                     if lifecycle.phase() == dim_agent_runtime::SessionPhase::Loading {
-                        emitter.events().emit(&emitter, &channel, Arc::new(
+                        emitter.emit(dim_agent_capabilities::session_broadcast::SessionBroadcast::new(
+                            &session_id,
                             dim_agent_capabilities::session_broadcast::SessionBroadcastEvent::Fence {
                                 recipient: "test.loading".into(), token: 0,
-                            }
+                            },
                         )).map_err(|error| dim_agent_runtime::AgentError::fault("bootstrap fence", error.to_string()))?;
                         drained.notified().await;
                     }
                     Ok(())
                 })
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -358,7 +368,7 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     builder.require_feature(
         Feature::new("test.drain-loading-broadcast")
             .branch("test.drain-loading-broadcast", |names| {
-                names.part(DrainLoadingBroadcast)
+                Ok(Box::new(DrainLoadingBroadcast::new(names)?))
             }),
     );
     let mut parts = observers(&audit);
@@ -559,7 +569,7 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         .unwrap();
     let mut state = view.watch();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while state.borrow().state != rutis::FiberState::Active {
+        while state.borrow().state != rutis::host::FiberState::Active {
             state.changed().await.unwrap();
         }
     })
@@ -1014,7 +1024,7 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             })
             .unwrap();
         assert!(
-            matches!(&entry.status, rutis_loader::EntryStatus::Unresolved(error)
+            matches!(&entry.status, rutis_loader::report::EntryStatus::Unresolved(error)
                 if error.to_string().contains(r#"put the row in the "branch" group"#)),
             "{:?}",
             entry.status
@@ -1212,7 +1222,7 @@ pub(super) fn setup() -> (
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::tool_host(&mut builder, Arc::new(SlowTools(release.clone())));
@@ -1615,45 +1625,58 @@ pub(super) type Control = (
     Arc<rutis_loader::Loader>,
     Arc<dim_agent_capabilities::tool_registry::ToolRegistry>,
 );
-pub(super) struct ControlledGate(InstanceId, tokio::sync::mpsc::UnboundedSender<Control>);
+pub(super) struct ControlledGate {
+    instance: InstanceId,
+    controls: tokio::sync::mpsc::UnboundedSender<Control>,
+    loader: rutis::host::Key<rutis_loader::Loader>,
+    rows: rutis::host::Key<rutis_loader::runtime::RuntimeRows>,
+    registry: rutis::host::Key<dim_agent_capabilities::tool_registry::ToolRegistry>,
+}
 impl ControlledGate {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        controls: tokio::sync::mpsc::UnboundedSender<Control>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            instance: names.instance(SESSION_GROUP)?,
+            controls,
+            loader: names.key()?,
+            // Observe the settled initial metadata, rather than a fiber replaced
+            // by RuntimeRows' offline-to-online refresh (as in the C4 spike).
+            rows: rutis::host::Key::dynamic("session-node"),
+            registry: names.key()?,
+        })
+    }
     /// A feature whose Session part sends each Session's [`Control`].
     pub(super) fn feature(controls: tokio::sync::mpsc::UnboundedSender<Control>) -> Feature {
-        Feature::new("ControlledTypeScriptDependency").session(
-            "ControlledTypeScriptDependency",
-            move |names| {
-                // Observe the settled initial metadata, rather than a fiber replaced
-                // by RuntimeRows' offline-to-online refresh (as in the C4 spike).
-                let keys = (
-                    names.key()?,
-                    rutis::DepKey::dynamic("session-node"),
-                    names.key()?,
-                );
-                let gate = Self(names.instance(SESSION_GROUP)?, controls.clone());
-                Ok(names.part_with(gate, keys))
-            },
-        )
+        Feature::new("ControlledTypeScriptDependency")
+            .session("ControlledTypeScriptDependency", move |names| {
+                Ok(Box::new(Self::new(names, controls.clone())?))
+            })
     }
 }
-impl TypedPlugin for ControlledGate {
-    type Deps = (
-        Keyed<rutis_loader::Loader>,
-        rutis::KeyedGate<rutis_loader::RuntimeRows>,
-        Keyed<dim_agent_capabilities::tool_registry::ToolRegistry>,
-    );
+impl rutis::host::DynPlugin for ControlledGate {
     fn name(&self) -> &str {
         "ControlledTypeScriptDependency"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![
+            self.loader.erase(),
+            self.rows.erase(),
+            self.registry.erase(),
+        ]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (Keyed(loader), _, Keyed(registry)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
-            self.1
-                .send((self.0, ctx.clone(), loader, registry))
+            let loader = ctx.require_at(&self.loader)?;
+            let registry = ctx.require_at(&self.registry)?;
+            self.controls
+                .send((self.instance, ctx.clone(), loader, registry))
                 .unwrap();
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -1714,7 +1737,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
         .unwrap()
         .view
         .unwrap();
-    assert_eq!(view.state().state, rutis::FiberState::Pending);
+    assert_eq!(view.state().state, rutis::host::FiberState::Pending);
     assert_eq!(
         client
             .rpc("session.late.status", json!({"sessionId":session}))
@@ -1730,7 +1753,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
             .iter()
             .any(|part| part.name.ends_with("runtime/fixtures/session-part.ts"))
     );
-    ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
+    ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
         rutis_bridge::session::host_key_in("lateGate", session_instance),
         Arc::new(GateValue),
     )
@@ -1738,7 +1761,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
     let mut state = view.watch();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if state.borrow().state == rutis::FiberState::Active {
+            if state.borrow().state == rutis::host::FiberState::Active {
                 break;
             }
             state.changed().await.unwrap();
@@ -1865,7 +1888,7 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
             let view = entry.view.unwrap();
             let mut state = view.watch();
             tokio::time::timeout(Duration::from_secs(5), async {
-                while state.borrow().state != rutis::FiberState::Failed {
+                while state.borrow().state != rutis::host::FiberState::Failed {
                     state.changed().await.unwrap();
                 }
             })
@@ -1873,7 +1896,7 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
             .unwrap();
         } else {
             assert!(
-                matches!(entry.status, rutis_loader::EntryStatus::Unresolved(ref error) if error.to_string().contains("provides differs")),
+                matches!(entry.status, rutis_loader::report::EntryStatus::Unresolved(ref error) if error.to_string().contains("provides differs")),
                 "{:?}",
                 entry.status
             );
@@ -1935,7 +1958,7 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         let failed = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let snapshot = state.borrow_and_update().clone();
-                if snapshot.state == rutis::FiberState::Failed {
+                if snapshot.state == rutis::host::FiberState::Failed {
                     break snapshot;
                 }
                 state.changed().await.unwrap();
@@ -2019,7 +2042,7 @@ async fn node_session_typescript_failed_part_namespace_stays_unknown() {
     let published = part().status;
     let mut state = part().view.unwrap().watch();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while state.borrow().state != rutis::FiberState::Failed {
+        while state.borrow().state != rutis::host::FiberState::Failed {
             state.changed().await.unwrap();
         }
     })
@@ -2159,7 +2182,7 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
         .unwrap();
     let mut state = view.watch();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while state.borrow().state != rutis::FiberState::Active {
+        while state.borrow().state != rutis::host::FiberState::Active {
             state.changed().await.unwrap();
         }
     })

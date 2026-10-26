@@ -1,5 +1,6 @@
 use dim_agent_runtime::{BRANCH_GROUP, Names, names};
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, TypedPlugin};
+use rutis::host::{CtxHost, Key};
+use rutis::{Ctx, Plugin};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -16,28 +17,22 @@ pub fn register_names(catalog: &mut names::ServiceCatalog) {
     names::register::<Counter>(catalog, Some(BRANCH_GROUP));
 }
 pub struct Provider {
-    counter: DepKey<Counter>,
+    counter: Key<Counter>,
 }
 impl Provider {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             counter: names.key()?,
         })
     }
 }
-impl TypedPlugin for Provider {
+impl Plugin for Provider {
     type Deps = ();
     fn name(&self) -> &str {
         "ExternalProvider"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(self.counter.key().clone(), Arc::new(Counter::default()))?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.provide_at(self.counter.clone(), Arc::new(Counter::default()))?;
+        Ok(())
     }
 }

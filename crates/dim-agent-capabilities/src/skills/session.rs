@@ -1,4 +1,4 @@
-use super::{SkillSummary, SkillView, SkillsCatalog, SkillsError};
+use super::{CatalogChanged, SkillSummary, SkillView, SkillsCatalog, SkillsError};
 use crate::{
     host::{HostError, HostFuture, LoadPrompt, ToolExecutionContext},
     prompt_registry::{PromptRegistry, targets},
@@ -10,7 +10,8 @@ use dim_agent_runtime::{
     SessionConfig, SessionLifecycle, SessionLoader,
 };
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, InstanceId, Key, TypeKey};
+use rutis::{Ctx, Error};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -118,66 +119,73 @@ impl LoadPrompt for SessionSkills {
 pub struct SkillsPlugin {
     /// The Session instance its content services are keyed in.
     session: InstanceId,
-    skills: DepKey<SessionSkills>,
+    catalog: Key<SkillsCatalog>,
+    config: Key<SessionConfig>,
+    loader: Key<SessionLoader>,
+    lifecycle: Key<SessionLifecycle>,
+    prompts: Key<PromptRegistry>,
+    tools: Key<ToolRegistry>,
+    skills: Key<SessionSkills>,
 }
 impl SkillsPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
             session: names.instance(SESSION_GROUP)?,
+            catalog: names.key()?,
+            config: names.key()?,
+            loader: names.key()?,
+            lifecycle: names.key()?,
+            prompts: names.key()?,
+            tools: names.key()?,
             skills: names.key()?,
         })
     }
 }
-impl TypedPlugin for SkillsPlugin {
-    type Deps = (
-        Keyed<SkillsCatalog>,
-        Keyed<SessionConfig>,
-        Keyed<SessionLoader>,
-        Keyed<SessionLifecycle>,
-        Keyed<PromptRegistry>,
-        Keyed<ToolRegistry>,
-    );
+impl DynPlugin for SkillsPlugin {
     fn name(&self) -> &str {
         "Skills"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(catalog),
-            Keyed(config),
-            Keyed(loader),
-            Keyed(session),
-            Keyed(prompts),
-            Keyed(tools),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.catalog.erase(),
+            self.config.erase(),
+            self.loader.erase(),
+            self.lifecycle.erase(),
+            self.prompts.erase(),
+            self.tools.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let catalog = ctx.require_at(&self.catalog)?;
+            let config = ctx.require_at(&self.config)?;
+            let loader = ctx.require_at(&self.loader)?;
+            let session = ctx.require_at(&self.lifecycle)?;
+            let prompts = ctx.require_at(&self.prompts)?;
+            let tools = ctx.require_at(&self.tools)?;
             let cwd = PathBuf::from(&config.cwd);
             let lifecycle = ctx.cancellation_token();
             // Listen before the first query, so no later change goes unseen.
             let (wake, mut changes) = watch::channel(());
-            ctx.events()
-                .on(ctx, &super::catalog_changes(), super::Wake(wake))?;
+            // rutis awaits one channel's listeners in turn, so the owner works
+            // in its own task, never in the listener; wakes coalesce and the
+            // owner rereads current state.
+            ctx.listen::<CatalogChanged>()
+                .name(super::catalog_changes())
+                .on(move |_, _| {
+                    wake.send_replace(());
+                    async { Ok(None) }
+                })?;
             let contents = Arc::new(tokio::sync::Mutex::new(super::content::Contents::new(
                 self.session,
             )));
             let tasks = TaskTracker::new();
             let cleanup = contents.clone();
             let joined = tasks.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        joined.close();
-                        joined.wait().await;
-                        cleanup
-                            .lock()
-                            .await
-                            .close()
-                            .await
-                            .map_err(|error| CordisError::PluginFailed(Box::new(error)))
-                    })
-                }))
+            ctx.effect(move || async move {
+                joined.close();
+                joined.wait().await;
+                Ok(cleanup.lock().await.close().await?)
             })?;
             // Apply can be dropped on cancellation. The tracked task still settles
             // creation and rolls it back before the disposer finishes joining.
@@ -198,8 +206,7 @@ impl TypedPlugin for SkillsPlugin {
                             .await
                     }
                 })
-                .await
-                .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
+                .await?;
             let skills = Arc::new(SessionSkills::new(initial));
             let owner = skills.clone();
             let stopped = lifecycle.clone();
@@ -251,7 +258,7 @@ impl TypedPlugin for SkillsPlugin {
             for source in [INSTRUCTIONS_SOURCE, LIST] {
                 prompts.register(ctx, source, skills.clone())?;
             }
-            ctx.provide_as(self.skills.key().clone(), skills)?;
+            ctx.provide_at(self.skills.clone(), skills)?;
             Ok(Effect::Done)
         })
     }
@@ -359,30 +366,37 @@ impl SkillsBranch {
 }
 
 pub struct SkillsBranchPlugin {
-    branch: DepKey<SkillsBranch>,
+    skills: Key<SessionSkills>,
+    phase: Key<BranchLifecycle>,
+    configure: Key<dyn ConfigureControl>,
+    branch: Key<SkillsBranch>,
 }
 impl SkillsBranchPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
+            skills: names.key()?,
+            phase: names.key()?,
+            configure: names.key()?,
             branch: names.key()?,
         })
     }
 }
-impl TypedPlugin for SkillsBranchPlugin {
-    type Deps = (
-        Keyed<SessionSkills>,
-        Keyed<BranchLifecycle>,
-        Keyed<dyn ConfigureControl>,
-    );
+impl DynPlugin for SkillsBranchPlugin {
     fn name(&self) -> &str {
         "SkillsBranch"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(skills), Keyed(phase), Keyed(configure)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.skills.erase(),
+            self.phase.erase(),
+            self.configure.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let skills = ctx.require_at(&self.skills)?;
+            let phase = ctx.require_at(&self.phase)?;
+            let configure = ctx.require_at(&self.configure)?;
             let lifecycle = ctx.cancellation_token();
             let mut changed = skills.changed.subscribe();
             changed.mark_unchanged();
@@ -412,16 +426,12 @@ impl TypedPlugin for SkillsBranchPlugin {
                     }
                 }
             });
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        tasks.close();
-                        tasks.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                tasks.close();
+                tasks.wait().await;
+                Ok(())
             })?;
-            ctx.provide_as(self.branch.key().clone(), Arc::new(SkillsBranch { skills }))?;
+            ctx.provide_at(self.branch.clone(), Arc::new(SkillsBranch { skills }))?;
             Ok(Effect::Done)
         })
     }

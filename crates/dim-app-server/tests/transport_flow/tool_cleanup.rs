@@ -1,5 +1,6 @@
 use super::*;
 use dim_agent_capabilities::{host::HostError, tool_registry::definition};
+use rutis::host::CtxHost;
 use std::{net::SocketAddr, process::Stdio};
 use tokio::{net::TcpListener, process::Command};
 
@@ -8,37 +9,55 @@ struct SessionCleanup {
     release: Arc<tokio::sync::Notify>,
     fail: bool,
     faults: Arc<std::sync::Mutex<Option<Arc<dim_agent_runtime::FaultReporter>>>>,
+    reporter: rutis::host::Key<dim_agent_runtime::FaultReporter>,
 }
-impl TypedPlugin for SessionCleanup {
-    type Deps = rutis::Keyed<dim_agent_runtime::FaultReporter>;
-    fn name(&self) -> &'static str {
+impl SessionCleanup {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        fail: bool,
+        faults: Arc<std::sync::Mutex<Option<Arc<dim_agent_runtime::FaultReporter>>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            entered,
+            release,
+            fail,
+            faults,
+            reporter: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for SessionCleanup {
+    fn name(&self) -> &str {
         "test.session-cleanup"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.reporter.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        rutis::Keyed(faults): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         let entered = self.entered.clone();
         let release = self.release.clone();
         let fail = self.fail;
-        *self.faults.lock().unwrap() = Some(faults);
-        let result = ctx.effect(|| {
-            rutis::Effect::AsyncDisposer(Box::new(move || {
-                Box::pin(async move {
-                    entered.notify_one();
-                    release.notified().await;
-                    if fail {
-                        Err(rutis::CordisError::ServiceNotFound(
-                            "private cleanup detail".into(),
-                        ))
-                    } else {
-                        Ok(())
-                    }
-                })
-            }))
-        });
-        Box::pin(async move { result.map(|_| rutis::Effect::Done) })
+        Box::pin(async move {
+            let faults = ctx.require_at(&self.reporter)?;
+            *self.faults.lock().unwrap() = Some(faults);
+            ctx.effect(|| async move {
+                entered.notify_one();
+                release.notified().await;
+                if fail {
+                    Err(rutis::Error::from(rutis::host::ErrorKind::ServiceNotFound(
+                        "private cleanup detail".into(),
+                    )))
+                } else {
+                    Ok(())
+                }
+            })?;
+            Ok(rutis::host::Effect::Done)
+        })
     }
 }
 
@@ -64,12 +83,13 @@ async fn closed_notification_waits_for_session_resources_and_registry_removal() 
         builder.require_feature(Feature::new("test.session-cleanup").session(
             "test.session-cleanup",
             move |names| {
-                names.part(SessionCleanup {
-                    entered: start.clone(),
-                    release: finish.clone(),
+                Ok(Box::new(SessionCleanup::new(
+                    names,
+                    start.clone(),
+                    finish.clone(),
                     fail,
-                    faults: capture.clone(),
-                })
+                    capture.clone(),
+                )?))
             },
         ));
         let config = ServerConfig {

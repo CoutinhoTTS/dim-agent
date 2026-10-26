@@ -72,9 +72,9 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
 7. Provider 的 Desktop/CLI 完整管理由 [#329](https://github.com/arcships/dim/issues/329) 跟踪，负责人 zerob13；[方案](appserver/provider-management.md) 的实现与验收由 PR #349 交付。复用现有调用、重读和 CAS，无机制前置；Provider JSON 以可选字段保持 v19，接受旧 v19 二进制重写时丢失未知字段；v18 二进制拒绝 v19 数据库。客户端读取持久模型偏好后显式采用，服务端不自动应用；用量复用已交付的 account.usage 及原有包查询合同。S4 与 F3 已有 Session 采用流程保持，持久偏好取代 F3 原有的无持久偏好范围。
 8. 插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)）归 M1。M1 对外开放插件开发，按第 2 节第 5 条，插件作者直接使用的公开契约须在开放前就位；Dim 尚未发布，所以迁移不保留兼容路径。工作项见 §3.2 的“插件契约迁移”表，阶段与验收见[插件契约 §10](../zh/design/plugin-contract.md#10-迁移)。迁移已完成，只剩 P4 中 R5 的第二种形式（外来插件作为一行）等待 rutis#642（#403、#405）。P6 Scheduler（#70）的 loader 门槛所等的 rutis 0.16 升级（#379）已完成。对外开放前须满足 [#364](https://github.com/arcships/dim/issues/364)：第三方插件的部件注册工具后，模型就能看到这些工具，不需要写进配置。R6（#382）以可选的挂载列表 `SessionConfig.tools` 实现它：没有挂载列表的 Session（产品默认）声明全部宿主工具与部件注册的全部工具；有挂载列表的 Session 只声明其中列出的。工具调用是否执行仍由 Permission 决定，它不改变声明。
-9. 对外发布前处理：[#294](https://github.com/arcships/dim/issues/294)（workspace-write 是否限制写入路径，需维护者决定）、[#296](https://github.com/arcships/dim/issues/296)（依赖漏洞与许可证扫描）、[#297](https://github.com/arcships/dim/issues/297)（发布流水线的 action 固定到提交 SHA）、[#368](https://github.com/arcships/dim/issues/368)（发布包大小门槛）。
+9. 对外发布前处理：[#294](https://github.com/arcships/dim/issues/294) 的权限语义已确定，`workspace-write` 对工作区外写入和修改逐次询问，读取策略不变；实现由 [#419](https://github.com/arcships/dim/pull/419) 交付，待合入。其余事项：[#296](https://github.com/arcships/dim/issues/296)（依赖漏洞与许可证扫描）、[#297](https://github.com/arcships/dim/issues/297)（发布流水线的 action 固定到提交 SHA）、[#368](https://github.com/arcships/dim/issues/368)（发布包大小门槛）。
 
-归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)：Questions（#144/#178/#251）的设计已 Ready，实现由 [#417](https://github.com/arcships/dim/issues/417) 跟踪；Hooks（#143/#181）、ExternalAgent（#145/#182；[#254](https://github.com/arcships/dim/pull/254) 改为子 agent 形态，取代按模型的框架）的设计已合入，仍待各自 Ready 确认与实现；Pursuit（#146/#179/#252）的设计已于 2026-10-26 Ready，实现由 [#422](https://github.com/arcships/dim/issues/422) 跟踪；回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)，2026-10-21 已 Ready，实现由 #310 跟踪）、摘要提示词/思考与目标长度评估（#170）也归该里程碑。#2 动态事件不归 M2，已于 2026-10-20 移入 M1（C8）：M1 对外开放插件开发，插件写自己的事件属于公开契约。其设计已于同日收敛（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）：Timeline 只检查信封与核心保留领域，并以不透明数据承载核心未定义的事件类型，Dispatcher 订阅只做过滤，能力事件声明只是描述契约；现有 `EventKind` 事件（含 F1、S1 加入的 4 个）不迁移。F1 的研究 #165、#169 的修复 #172 和 #128 的运行时调参 #183 已合入；#170 保留独立评估范围。插件契约的 #380（R1：Dispatcher 先回放历史、再接实时事件的注册）与 #381（R4：xtask 生成服务目录并标出 Capability）也归 M2：它们只新增能力或工具，不改变插件作者的写法，已于 2026-10-25 合入（#409、#408）。用户安装与启用第三方插件（[#384](https://github.com/arcships/dim/issues/384)）、效率测量与预算门槛（#363、#365、#366、#367）也归 M2。启动改为没有进展才失败、不再用固定总时限（[#387](https://github.com/arcships/dim/issues/387)），以及 Workflow 的用户定义与 `runs.json` 可能超过 16 MiB 桥接帧（[#343](https://github.com/arcships/dim/issues/343)，由 Workflow 在自己的数据布局内解决）也归 M2。
+归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)：Questions（#144/#178/#251）已由 #262 实现（#269、#336、#351）；Hooks（#143/#181）、ExternalAgent（#145/#182；[#254](https://github.com/arcships/dim/pull/254) 改为子 agent 形态，取代按模型的框架）的设计已合入，仍待各自 Ready 确认与实现；Pursuit（#146/#179/#252）的设计已于 2026-10-26 Ready，实现由 [#422](https://github.com/arcships/dim/issues/422) 跟踪；回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)，2026-10-21 已 Ready，实现由 #310 跟踪）、摘要提示词/思考与目标长度评估（#170）也归该里程碑。#2 动态事件不归 M2，已于 2026-10-20 移入 M1（C8）：M1 对外开放插件开发，插件写自己的事件属于公开契约。其设计已于同日收敛（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）：Timeline 只检查信封与核心保留领域，并以不透明数据承载核心未定义的事件类型，Dispatcher 订阅只做过滤，能力事件声明只是描述契约；现有 `EventKind` 事件（含 F1、S1 加入的 4 个）不迁移。F1 的研究 #165、#169 的修复 #172 和 #128 的运行时调参 #183 已合入；#170 保留独立评估范围。插件契约的 #380（R1：Dispatcher 先回放历史、再接实时事件的注册）与 #381（R4：xtask 生成服务目录并标出 Capability）也归 M2：它们只新增能力或工具，不改变插件作者的写法，已于 2026-10-25 合入（#409、#408）。用户安装与启用第三方插件（[#384](https://github.com/arcships/dim/issues/384)）、效率测量与预算门槛（#363、#365、#366、#367）也归 M2。启动改为没有进展才失败、不再用固定总时限（[#387](https://github.com/arcships/dim/issues/387)），以及 Workflow 的用户定义与 `runs.json` 可能超过 16 MiB 桥接帧（[#343](https://github.com/arcships/dim/issues/343)，由 Workflow 在自己的数据布局内解决）也归 M2。
 
 已撤回：Notifications。提醒归客户端，定时任务结果通知归 Scheduler，对外沟通渠道由各平台各自的插件和工具负责。
 
@@ -85,7 +85,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 | ID | 内容 | 规模 | 负责线 | 前置 | 使用者 |
 | --- | --- | --- | --- | --- | --- |
 | C1 | `sessionMethods`：Session 门面按 namespace 查找，Rpc 经 Session 分发，含 Session 方法的每次调用进度（session-boundary A.2 只做 `progress`：方法声明 `progress` 后，Rpc 把调用期间的进度以 `management.progress` 只发给调用方连接，先于回复，断开后丢弃；`notify`、`closed`、`takeFinalReply` 不在内） | M | Rpc | #14 | ShellInput、Attachments、SessionTitle、Goal、S1 |
-| C2 | `SessionConfig.interactive` 与 `session.create` 参数（只做这一个字段；存储保持 v13，旧记录缺省为交互） | S | Rpc | — | SessionTitle、S2、Questions（重设计 #178 已合入、实现待办） |
+| C2 | `SessionConfig.interactive` 与 `session.create` 参数（只做这一个字段；存储保持 v13，旧记录缺省为交互） | S | Rpc | — | SessionTitle、S2、Questions（已由 #262 实现） |
 | C6 | Session 广播通知记录，Rpc 原样转发 | S | Rpc | — | S5b |
 | ~~C7~~ | ~~固定前缀读~~：不需要新接口，现有门面组合即可（#50，session-access §9.2） | — | — | — | — |
 | C3 | 部件把工具注册到 ToolRegistry（#382），注册在部件卸载时撤回；ToolRegistry 不硬依赖可选插件：分支初始化首次读取 ToolRegistry 时纳入当时已注册的工具，并沿既有 BranchOpening 在 Session 接受输入前完成采用；之后注册或撤回的工具由 ToolRegistry 跟随，从下一个请求起提供或撤下，不需要重载（#241）；Session 的挂载列表 `SessionConfig.tools` 可选，没有时声明全部宿主工具与部件注册的全部工具（#364），有时只声明其中列出的，列出但没有部件注册的工具直接省略（#34） | S | 装配 | — | Web、Goal、Scheduler、Workflow |
@@ -196,6 +196,20 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 - `docs/architecture/rust-agent/generated/` 下的生成文件不手工解冲突：rebase 后重跑 `xtask graph`。
 - 不给还没落地的接口打桩，等接口合入再开工。
 - 同时进行的工作数不超过维护者能确认的设计 PR 和实现 PR 数量。
+
+### 3.7 客户端
+
+客户端（原生 CLI、Web 工作区、Desktop、ACP、远程设备）的总体视图、能力覆盖、缺口与待决事项见[客户端](clients.md)（草案）。Desktop 在独立仓库，本仓库只负责它使用的 App Server 契约。负责人待定；里程碑待[客户端 §6](clients.md#6-decisions-for-the-maintainer) 的决定。
+
+| 工作 | Issue / 设计 | 状态 |
+| --- | --- | --- |
+| 成员 transcript 卡片、子 agent 模型策略的运行时 | [#263](https://github.com/arcships/dim/issues/263)；[成员会话](member-conversation.md) §7–9、[子 agent 模型策略](subagent-model-policy.md) | 已设计，未实现；任务面板的成员详情与停止已由 #324 交付 |
+| 任务面板中的 Workflow 运行 | [#264](https://github.com/arcships/dim/issues/264)；[Workflow 任务视图](workflow-task-view.md) | 提案，未 Ready |
+| UI 事件传给 agent | [#386](https://github.com/arcships/dim/issues/386)；[Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves) | 预留约定，未设计细节 |
+| Web 第二阶段（排队、附件、fork、设置页面等） | [Web 工作区](web-workspace.md) §4、Q2 | 未设计；Q2 待决定 |
+| 没有设计的 CLI 能力：`/timeline` 与消息操作、`/queue`、Skill 引用、排队消息的附件等 | [客户端 §4](clients.md#4-gaps-and-conflicts) | 待决定是否设计 |
+| 文档与代码不一致：全屏终端界面、`/web` 归属、web 入口的管理方法 | [客户端 §4](clients.md#4-gaps-and-conflicts) | 待决定后修订相关文档 |
+| ACP、远程设备 | [AcpGateway](plugins/AcpGateway.md)、[RemoteGateway](plugins/RemoteGateway.md) | 草案，P3 |
 
 ## 4. 依赖图
 

@@ -6,7 +6,7 @@ use dim_agent_capabilities::{adapters::MockTools, defaults, history::HistoryRend
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use futures_util::StreamExt;
-use rutis::{Keyed, TypedPlugin};
+use rutis::host::CtxHost;
 use serde_json::{Value, json};
 use std::{
     convert::Infallible,
@@ -174,8 +174,8 @@ impl ModelAgent {
 }
 fn model_agent(models: Arc<AimuxModels>, custom: Option<AgentBuilder>) -> ModelAgent {
     let root = rutis::Ctx::root().unwrap();
-    root.plugin(rutis::Typed::new(AimuxPlugin));
-    root.plugin(rutis::Typed::new(ConfiguredModelsPlugin(models.clone())));
+    root.plugin(AimuxPlugin);
+    root.plugin(ConfiguredModelsPlugin(models.clone()));
     let agent = custom
         .unwrap_or_else(|| builder(models, Arc::new(MockTools)))
         .build_in(&root);
@@ -202,7 +202,7 @@ async fn process_requests_use_connection_snapshots_and_release_retained_streams_
         let first = TestServer::start().await;
         let second = TestServer::start().await;
         let root = rutis::Ctx::root().unwrap();
-        root.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
+        root.plugin(AimuxPlugin).await.unwrap();
         let host = root.get::<ModelHost>().unwrap();
         let request = |text: &str| Arc::new(ModelRequest::new("logical-provider", "test-model", vec![Message::text(Role::User, text)]));
         let connection = |server: &TestServer, key: &str| ModelConnection::Http(HttpModelConnection {
@@ -252,7 +252,7 @@ async fn process_requests_use_connection_snapshots_and_release_retained_streams_
         assert!(matches!(host.0.invoke(request("text"), connection(&first, "old"), CancellationToken::new()).await,
             Err(HostError::Failed { kind: HostErrorKind::OwnerClosed, .. })));
         let next = rutis::Ctx::root().unwrap();
-        next.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
+        next.plugin(AimuxPlugin).await.unwrap();
         let mut stream = next.get::<ModelHost>().unwrap().0.invoke(request("text"), connection(&first, "new"), CancellationToken::new()).await.unwrap();
         while let Some(chunk) = stream.next().await { chunk.unwrap(); }
         next.shutdown().await.unwrap();
@@ -379,18 +379,21 @@ async fn model_configuration_rejects_unknown_models_before_session_start() {
 
 struct OverrideRequest {
     remove_tools: bool,
+    timeline: rutis::host::Key<Timeline>,
 }
-impl TypedPlugin for OverrideRequest {
-    type Deps = (Keyed<Timeline>,);
+impl rutis::host::DynPlugin for OverrideRequest {
     fn name(&self) -> &str {
         "test.final-model-request"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.timeline.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
             let remove_tools = self.remove_tools;
             timeline.before(ctx, self.name(), &["model/call"], move |mut event| {
                 let EventKind::ModelCall(call) = &mut event.kind else {
@@ -410,7 +413,7 @@ impl TypedPlugin for OverrideRequest {
                 }
                 Ok(event)
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -428,7 +431,7 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
         let models = Arc::new(AimuxModels::from_config(config).unwrap());
         for remove_tools in [false, true] {
             let mut builder = builder(models.clone(), Arc::new(MockTools));
-            builder.require_feature(Feature::new("test.final-model-request").branch("test.final-model-request", move |names| names.part(OverrideRequest { remove_tools })));
+            builder.require_feature(Feature::new("test.final-model-request").branch("test.final-model-request", move |names| Ok(Box::new(OverrideRequest { remove_tools, timeline: names.key()? }))));
             let agent = model_agent(models.clone(), Some(builder)); let session = agent.create_session(session_config()).await.unwrap();
             session.submit("tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();

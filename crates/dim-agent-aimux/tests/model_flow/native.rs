@@ -1,5 +1,6 @@
 use super::*;
 use axum::http::Uri;
+use rutis::host::CtxHost;
 
 const IMAGE: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=";
@@ -72,7 +73,7 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
             .mount(&server)
             .await;
         let root = rutis::Ctx::root().unwrap();
-        root.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
+        root.plugin(AimuxPlugin).await.unwrap();
         let host = root.get::<ModelHost>().unwrap();
         let connection = || {
             ModelConnection::Bedrock(BedrockModelConnection {
@@ -393,7 +394,7 @@ async fn xai_native_continuation_roundtrips_and_owner_releases_streams() {
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"visible\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
         .mount(&server).await;
     let root = rutis::Ctx::root().unwrap();
-    root.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
     let host = root.get::<ModelHost>().unwrap();
     let connection = |protocol| {
         ModelConnection::Http(HttpModelConnection {
@@ -587,7 +588,7 @@ async fn explicit_preferences_reach_chat_and_responses_for_model_aliases() {
     ] {
         let server = NativeServer::start(kind).await;
         let root = rutis::Ctx::root().unwrap();
-        root.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
+        root.plugin(AimuxPlugin).await.unwrap();
         let host = root.get::<ModelHost>().unwrap();
         for (tier, effort) in [
             (Some("priority"), Some("high")),
@@ -659,7 +660,7 @@ async fn explicit_preferences_reach_chat_and_responses_for_model_aliases() {
 async fn codex_request_profile_is_isolated_to_responses() {
     let server = NativeServer::start("openai-responses").await;
     let root = rutis::Ctx::root().unwrap();
-    root.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
     let host = root.get::<ModelHost>().unwrap();
     let request = || {
         let mut request = ModelRequest::new(
@@ -881,7 +882,7 @@ async fn malformed_native_block_lifecycle_is_a_classified_failure() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
     let root = rutis::Ctx::root().unwrap();
-    root.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
     let host = root.get::<ModelHost>().unwrap();
     let server = MockServer::start().await;
     let text_start =
@@ -984,7 +985,7 @@ async fn chat_reasoning_can_reopen_a_completed_segment_identity() {
         .mount(&server)
         .await;
     let root = rutis::Ctx::root().unwrap();
-    root.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
     let host = root.get::<ModelHost>().unwrap();
     let mut stream = host
         .0
@@ -1099,7 +1100,7 @@ async fn native_failures_expose_only_normalized_model_facts() {
     let responses = NativeServer::start("openai-responses").await;
     let anthropic = NativeServer::start("anthropic").await;
     let root = rutis::Ctx::root().unwrap();
-    root.plugin(rutis::Typed::new(AimuxPlugin)).await.unwrap();
+    root.plugin(AimuxPlugin).await.unwrap();
     let host = root.get::<ModelHost>().unwrap();
 
     let error = invoke_failure(
@@ -1646,18 +1647,21 @@ impl ToolDriver for ErrorEcho {
 }
 struct RewriteNative {
     complete: bool,
+    timeline: rutis::host::Key<Timeline>,
 }
-impl TypedPlugin for RewriteNative {
-    type Deps = (Keyed<Timeline>,);
+impl rutis::host::DynPlugin for RewriteNative {
     fn name(&self) -> &str {
         "test.rewrite-native"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.timeline.erase()]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
             let key = if self.complete {
                 "step/model-content"
             } else {
@@ -1673,7 +1677,7 @@ impl TypedPlugin for RewriteNative {
                 }
                 Ok(draft)
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -1684,7 +1688,7 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
         let models=server.models();
         for complete in [false,true]{
             let mut custom=builder(models.clone(),Arc::new(MockTools));
-            custom.require_feature(Feature::new("test.rewrite-native").branch("test.rewrite-native", move|names|names.part(RewriteNative{complete})));
+            custom.require_feature(Feature::new("test.rewrite-native").branch("test.rewrite-native", move|names|Ok(Box::new(RewriteNative{complete,timeline:names.key()?}))));
             let agent=model_agent(models.clone(),Some(custom));
             let session=agent.create_session(server.session_config()).await.unwrap();
             session.submit("tool".into(),InputMode::Queue,"main").await.unwrap();session.idle("main").await.unwrap();

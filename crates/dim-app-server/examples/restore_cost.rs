@@ -68,6 +68,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
+use rutis::host::CtxHost;
 use std::{
     collections::BTreeMap,
     future::Future,
@@ -412,12 +413,12 @@ fn product(builder: &mut AgentBuilder, root: &rutis::Ctx) -> std::result::Result
         )))))
         .require_feature(
             Feature::new("ProductSummaryStrategy").session("ProductSummaryStrategy", |names| {
-                names.part(ProductSummaryStrategyPlugin::new(names)?)
+                Ok(Box::new(ProductSummaryStrategyPlugin::new(names)?))
             }),
         )
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::tool_host(builder, Arc::new(MockTools));

@@ -9,7 +9,8 @@ use super::exec::{ExecProcess, Output, recovered_result};
 use crate::context_block;
 use dim_agent_runtime::{AgentError, Delivery, Dispatcher, Names, SessionLifecycle, Timeline};
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -451,24 +452,37 @@ pub(crate) fn wakes(data: &ExecEndedData) -> bool {
 }
 
 pub struct BackgroundExecPlugin {
-    exec: DepKey<BackgroundExec>,
+    exec: Key<BackgroundExec>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    session: Key<SessionLifecycle>,
 }
 impl BackgroundExecPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
-        Ok(Self { exec: names.key()? })
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            exec: names.key()?,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            session: names.key()?,
+        })
     }
 }
-impl TypedPlugin for BackgroundExecPlugin {
-    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>, Keyed<SessionLifecycle>);
+impl DynPlugin for BackgroundExecPlugin {
     fn name(&self) -> &str {
         "BackgroundExec"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(dispatcher), Keyed(session)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.session.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let session = ctx.require_at(&self.session)?;
             let service = Arc::new(BackgroundExec {
                 timeline,
                 session,
@@ -477,13 +491,9 @@ impl TypedPlugin for BackgroundExecPlugin {
                 state: Mutex::new(State::default()),
             });
             let owner = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owner.unload().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                owner.unload().await;
+                Ok(())
             })?;
             let consumer = service.clone();
             dispatcher
@@ -501,7 +511,7 @@ impl TypedPlugin for BackgroundExecPlugin {
                     },
                 )
                 .await?;
-            ctx.provide_as(self.exec.key().clone(), service)?;
+            ctx.provide_at(self.exec.clone(), service)?;
             Ok(Effect::Done)
         })
     }

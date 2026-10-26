@@ -5,8 +5,9 @@
 //! diverge. A part registers a namespace with its owner's table; the
 //! registration is withdrawn when the part unloads
 //! ([rutis usage R6](../../../docs/design/rutis-usage.md#r6-contributions-register-with-their-owner)).
-use dim_agent_runtime::{AgentError, Names, Registrations, When};
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, TypedPlugin};
+use dim_agent_runtime::{AgentError, Names, Registrations};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, InstanceId, Key, TypeKey};
+use rutis::{Ctx, Error};
 use rutis_bridge::session::{
     Error as BridgeError, HostDispatch, Reference, Reply, Value as BridgeValue, host_key_in, settle,
 };
@@ -255,7 +256,7 @@ impl MethodProvider {
         namespace: &str,
         declarations: Vec<MethodDecl>,
         handler: Handler,
-    ) -> Result<Arc<Self>, CordisError> {
+    ) -> Result<Arc<Self>, Error> {
         let mut unique = HashSet::new();
         if !valid_name(namespace)
             || declarations.is_empty()
@@ -265,9 +266,9 @@ impl MethodProvider {
                     || !unique.insert(&decl.name)
             })
         {
-            return Err(CordisError::PluginFailed(
+            return Err(rutis::Error::from(ErrorKind::PluginFailed(
                 format!("invalid methods for namespace {namespace}").into(),
-            ));
+            )));
         }
         let provider = Arc::new(Self {
             declarations,
@@ -277,18 +278,14 @@ impl MethodProvider {
             calls: TaskTracker::new(),
         });
         let owner = provider.clone();
-        ctx.effect(move || {
-            Effect::AsyncDisposer(Box::new(move || {
-                Box::pin(async move {
-                    {
-                        let _guard = owner.gate.lock().unwrap();
-                        owner.stopping.cancel();
-                        owner.calls.close();
-                    }
-                    owner.calls.wait().await;
-                    Ok(())
-                })
-            }))
+        ctx.effect(move || async move {
+            {
+                let _guard = owner.gate.lock().unwrap();
+                owner.stopping.cancel();
+                owner.calls.close();
+            }
+            owner.calls.wait().await;
+            Ok(())
         })?;
         Ok(provider)
     }
@@ -471,7 +468,7 @@ pub fn foreign_handler(call: Reference) -> Handler {
 
 /// Checks a namespace and its declarations before they are registered: the
 /// names an owner keeps to itself, such as the protocol's built-in methods.
-pub type Check = Arc<dyn Fn(&str, &[MethodDecl]) -> Result<(), CordisError> + Send + Sync>;
+pub type Check = Arc<dyn Fn(&str, &[MethodDecl]) -> Result<(), Error> + Send + Sync>;
 
 struct Entry {
     provider: Arc<MethodProvider>,
@@ -518,7 +515,7 @@ impl MethodTable {
         namespace: &str,
         declarations: Vec<MethodDecl>,
         handler: Handler,
-    ) -> Result<(), CordisError> {
+    ) -> Result<(), Error> {
         (self.check)(namespace, &declarations)?;
         let row = ctx.row();
         let provider = MethodProvider::new(ctx, namespace, declarations, handler)?;
@@ -527,13 +524,11 @@ impl MethodTable {
         // Runs before the registration is withdrawn, so a lookup between the
         // two still finds the provider, which refuses as it unloads.
         let (left, namespace) = (Arc::downgrade(&self.left), namespace.to_owned());
-        ctx.effect(move || {
-            Effect::Disposer(Box::new(move || {
-                if let Some(left) = left.upgrade() {
-                    left.lock().unwrap().insert(namespace, row);
-                }
-                Ok(())
-            }))
+        ctx.effect(move || async move {
+            if let Some(left) = left.upgrade() {
+                left.lock().unwrap().insert(namespace, row);
+            }
+            Ok(())
         })?;
         Ok(())
     }
@@ -616,9 +611,9 @@ impl MethodTable {
         namespace: &str,
         declarations: serde_json::Value,
         call: Reference,
-    ) -> Result<(), CordisError> {
+    ) -> Result<(), Error> {
         let declarations: Vec<MethodDecl> = serde_json::from_value(declarations)
-            .map_err(|error| CordisError::PluginFailed(error.into()))?;
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
         self.register(ctx, namespace, declarations, foreign_handler(call))
     }
 }
@@ -634,9 +629,27 @@ impl HostDispatch for ForeignMethods {
         if method != "register" {
             return Err(BridgeError::Value(format!("no method {method}")));
         }
-        let caller = rutis_bridge::exports::caller_ctx("register")?;
-        let mut args = rutis_bridge::exports::arguments(args, 3)?;
-        let namespace: String = rutis_bridge::exports::decode(args.next().expect("three"))?;
+        let caller = rutis_bridge::session::caller_row()
+            .map(|row| row.ctx().clone())
+            .ok_or_else(|| {
+                BridgeError::Value(
+                    "register needs the calling row's context: only a row of a language runtime can call it"
+                        .into(),
+                )
+            })?;
+        let mut args = match args {
+            BridgeValue::Undefined => Vec::new(),
+            args => args.list()?,
+        };
+        if args.len() > 3 {
+            return Err(BridgeError::Value(format!(
+                "expected at most 3 arguments, received {}",
+                args.len()
+            )));
+        }
+        args.resize(3, BridgeValue::Undefined);
+        let mut args = args.into_iter();
+        let namespace: String = rutis_bridge::session::decode_value(args.next().expect("three"))?;
         let declarations = args.next().expect("three").json()?;
         let Some(BridgeValue::Reference(call)) = args.next().filter(
             |call| matches!(call, BridgeValue::Reference(reference) if reference.is_function()),
@@ -676,45 +689,46 @@ impl std::ops::Deref for SessionMethods {
 /// other languages, at its dispatcher key.
 pub struct SessionMethodsPlugin {
     session: InstanceId,
-    table: DepKey<SessionMethods>,
+    table: Key<SessionMethods>,
+    reserved: Option<Key<ReservedMethods>>,
 }
 impl SessionMethodsPlugin {
     /// The table of this copy's Session. When the assembly names
     /// [`ReservedMethods`] (App Server does, with the names its protocol
     /// keeps), the table waits for them and refuses what they reserve.
-    pub fn part(names: &Names<'_>) -> Result<Box<dyn rutis::Plugin>, CordisError> {
-        let plugin = Self {
+    pub fn part(names: &Names<'_>) -> Result<Box<dyn DynPlugin>, Error> {
+        Ok(Box::new(Self {
             session: names.instance(dim_agent_runtime::SESSION_GROUP)?,
             table: names.key()?,
-        };
-        let keys = (names.when::<Keyed<ReservedMethods>>(names.registered::<ReservedMethods>())?,);
-        Ok(names.part_with(plugin, keys))
+            reserved: names
+                .registered::<ReservedMethods>()
+                .then(|| names.key::<ReservedMethods>())
+                .transpose()?,
+        }))
     }
 }
-impl TypedPlugin for SessionMethodsPlugin {
-    type Deps = (When<Keyed<ReservedMethods>>,);
+impl DynPlugin for SessionMethodsPlugin {
     fn name(&self) -> &str {
         "SessionMethods"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (When(reserved),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        self.reserved.iter().map(Key::erase).collect()
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let check: Check = match reserved {
-                Some(Keyed(reserved)) => reserved.0.clone(),
+            let check: Check = match &self.reserved {
+                Some(reserved) => ctx.require_at(reserved)?.0.clone(),
                 None => Arc::new(|_, _| Ok(())),
             };
             let table = Arc::new(MethodTable::new(check));
-            ctx.provide_as::<dyn HostDispatch>(
+            ctx.provide_at::<dyn HostDispatch>(
                 host_key_in(
                     &dim_agent_runtime::names::name_of::<SessionMethods>(),
                     self.session,
                 ),
                 Arc::new(ForeignMethods(table.clone())),
             )?;
-            ctx.provide_as(self.table.key().clone(), Arc::new(SessionMethods(table)))?;
+            ctx.provide_at(self.table.clone(), Arc::new(SessionMethods(table)))?;
             Ok(Effect::Done)
         })
     }

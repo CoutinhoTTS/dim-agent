@@ -23,7 +23,7 @@ Dim 是一个编程 agent。它的上下文工作只有一个总目标：**模�
 5. 用户需要在界面上看到分支的哪些东西、能对它做什么（跟进、比较、采用、丢弃）？
 6. 怎样算这件事做成了？
 
-**现有基础。** [设计规则](../architecture/rust-agent/principles.md)（分支是平等、并行的行为线）、[TimelineTree](../architecture/rust-agent/plugins/TimelineTree.md)、[Pursuit](plugins/Pursuit.md)、[Session 删除与 fork](appserver/session-deletion-and-fork.md)、[客户端总体设计](https://github.com/arcships/dim/pull/424)（#424，未合并）。需求跟踪：[#427](https://github.com/arcships/dim/issues/427)。
+**现有基础。** [设计规则](../architecture/rust-agent/principles.md)（分支是平等、并行的行为线）、[TimelineTree](../architecture/rust-agent/plugins/TimelineTree.md)、[Pursuit](plugins/Pursuit.md)（Ready，实现 [#422](https://github.com/arcships/dim/issues/422)）、[Session 删除与 fork](appserver/session-deletion-and-fork.md)、[客户端总体设计](clients.md)。需求跟踪：[#427](https://github.com/arcships/dim/issues/427)。
 
 ## 2. 压缩
 
@@ -33,16 +33,16 @@ Dim 是一个编程 agent。它的上下文工作只有一个总目标：**模�
 
 - 长任务不因为上下文满了而中断或跑偏。
 - 用户的目标、约束和已经做出的决定在压缩之后依然有效。
-- 被摘要省略的原话在需要时能找回来（[Recall](plugins/Recall.md)）。
+- 被摘要省略的原话在需要时能找回来（规划中的 [Recall](plugins/Recall.md)，Ready，实现 [#310](https://github.com/arcships/dim/issues/310)）。
 
 **要先回答的问题。**
 
-1. 压缩之后什么必须保住：目标、约束、已做的决定、当前步骤、改过的文件、用户偏好……哪些是必须的，哪些丢了可以接受（因为能用 Recall 找回）？
+1. 压缩之后什么必须保住：目标、约束、已做的决定、当前步骤、改过的文件、用户偏好……哪些是必须的，哪些丢了可以接受（前提是 Recall 实现后能找回）？
 2. 用户需要知道压缩发生了吗？需要能手动触发或控制它吗？
 3. 成本上的界限是什么：一次压缩的耗时和费用、长历史下每一轮的开销？
 4. 怎样判断压缩“做得好”：用哪些任务、什么样的通过标准？[#170](https://github.com/arcships/dim/issues/170) 的摘要评估是其中一种手段，它要服务于这里定下的标准。
 
-**现有基础。** [ContextCompaction](plugins/ContextCompaction.md)（机制已实现，效果未评估）、[压缩触发研究](research/compaction-trigger.md)、[Recall](plugins/Recall.md)（#310）。需求跟踪：[#428](https://github.com/arcships/dim/issues/428)。
+**现有基础。** [ContextCompaction](plugins/ContextCompaction.md)（机制已实现，效果未评估）、[压缩触发研究](research/compaction-trigger.md)、[Recall](plugins/Recall.md)（Ready，未实现，[#310](https://github.com/arcships/dim/issues/310)）。需求跟踪：[#428](https://github.com/arcships/dim/issues/428)。
 
 ## 3. 给模型的提示词
 

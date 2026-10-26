@@ -1,6 +1,6 @@
 # Questions
 
-Status: Ready (redesign, [#144](https://github.com/arcships/dim/issues/144)); the maintainer's confirmations are recorded in [§12](#12-ready-confirmation). Overall design: [overview §4](../overview.md#4-plugin-catalog). Milestone: M2. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
+Status: Implemented ([#262](https://github.com/arcships/dim/issues/262): #269, #336, #351; redesign [#144](https://github.com/arcships/dim/issues/144)); the maintainer's confirmations are recorded in [§12](#12-ready-confirmation). Overall design: [overview §4](../overview.md#4-plugin-catalog). Milestone: M2. Language: Rust. Scope: Session ([ADR 002](../../adr/002-plugin-scope.md)).
 
 The model asks the user one or more questions through the `ask_user` tool and waits for the answer: single choice, multiple choice, several questions in one call, custom answer, or a decline. **The question is the pending tool call, and the answer is its tool result.** A client sees the question as the committed `step/tool-call` of `ask_user` that has no `step/tool-result` yet, answers it with the Session method `session.question.respond`, and the waiting handler returns the answer as its `ToolResult`; ToolExecutor publishes it in the batch's `step/tool-result` like any other tool output. The model learns the user's choice only from `ToolResult.content`.
 

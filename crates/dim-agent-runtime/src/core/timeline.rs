@@ -6,7 +6,10 @@ use crate::{
 use dim_agent_types::{
     AgentEvent, EventDraft, ProjectionCheckpoint, RecoverySnapshot, TimelinePosition,
 };
-use rutis::{CordisError, Ctx, Disposer, Event, EventKey, InstanceId, SyncCall};
+use rutis::events::SyncCall;
+use rutis::host::{CtxHost, ErrorKind, InstanceId};
+use rutis::service;
+use rutis::{Ctx, Disposer, Event};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
@@ -24,14 +27,19 @@ use uuid::Uuid;
 /// `waterfall_sync`, in process, so listeners borrow this value.
 #[derive(Serialize, Deserialize)]
 struct BeforeCommit {
+    /// The branch's private name it is dispatched under (`before_name`).
+    #[serde(skip)]
+    name: String,
     draft: EventDraft,
     #[serde(skip)]
     steps: Mutex<Vec<TraceStep>>,
 }
 impl Event for BeforeCommit {
-    // Dispatched only under the branch's private name (`before_key`).
     const NAME: &'static str = "";
     type Value = EventDraft;
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceStep {
@@ -84,6 +92,7 @@ struct Data {
     failure: Option<AgentError>,
     reader_active: bool,
 }
+#[service]
 impl Timeline {
     /// A writable Timeline outside the branch tree, for tests that craft
     /// histories: it bypasses the branch's own commit lock and sequence, so
@@ -168,6 +177,7 @@ impl Timeline {
         self.append_registered(original, |_| Ok(()))
     }
     /// Registers producer state before queueing; publication follows store commit.
+    #[service(skip)]
     pub fn append_registered(
         &self,
         original: EventDraft,
@@ -177,6 +187,7 @@ impl Timeline {
             self.append_batch_registered(vec![original], |events| register(&events[0]))?;
         Ok(events.pop().expect("single-event batch returned one event"))
     }
+    #[service(skip)]
     pub fn append_batch_registered(
         &self,
         originals: Vec<EventDraft>,
@@ -200,19 +211,22 @@ impl Timeline {
         let mut records = Vec::new();
         let mut events = Vec::new();
         for original in originals {
-            let offered = BeforeCommit {
+            let offered = Arc::new(BeforeCommit {
+                name: self.before_name(),
                 draft: original.clone(),
                 steps: Mutex::default(),
-            };
+            });
             // Any failure, including a closing branch scope whose hooks
             // are unloading, commits the original without a trace.
-            let (original, draft, steps) = match self.0.ctx.events().waterfall_sync(
-                &self.0.ctx,
-                &self.before_key(),
-                &offered,
-                |_, offered| Ok(Some(offered.draft.clone())),
-            ) {
-                Ok(Some(draft)) => (original, draft, offered.steps.into_inner().unwrap()),
+            let result = self
+                .0
+                .ctx
+                .waterfall_sync(offered.clone(), |offered| Ok(Some(offered.draft.clone())));
+            let (original, draft, steps) = match result {
+                Ok(Some(draft)) => {
+                    let steps = std::mem::take(&mut *offered.steps.lock().unwrap());
+                    (original, draft, steps)
+                }
                 Ok(None) | Err(_) => (original.clone(), original, Vec::new()),
             };
             let event = Arc::new(AgentEvent {
@@ -310,6 +324,7 @@ impl Timeline {
         let data = self.0.data.lock().unwrap();
         data.failure.is_none() && data.allocated > data.published
     }
+    #[service(skip)]
     pub fn failure(&self) -> Option<AgentError> {
         self.0.data.lock().unwrap().failure.clone().or_else(|| {
             self.0
@@ -587,6 +602,7 @@ impl Timeline {
             .flatten()
             .collect())
     }
+    #[service(skip)]
     pub async fn local<R: RangeBounds<u64> + Send>(
         &self,
         range: R,
@@ -606,11 +622,13 @@ impl Timeline {
         self.records(&self.0.key.branch_id, start, end).await
     }
     /// Full fact replay; no interpreter or snapshot is required.
+    #[service(skip)]
     pub async fn context(&self, through: u64) -> Result<ContextHistory> {
         self.context_from(through, None).await
     }
     /// Select an interpreter-compatible cache before decoding or trimming facts.
     /// Invalid caches are disposable; failures reading required facts are not.
+    #[service(skip)]
     pub async fn context_with_checkpoint(
         &self,
         through: u64,
@@ -731,6 +749,7 @@ impl Timeline {
     }
     /// Waits for the anchor's durable publication, then writes only the cache.
     /// The owner tracks this future along with its other preparation work.
+    #[service(skip)]
     pub async fn save_snapshot(&self, snapshot: RecoverySnapshot) -> Result<()> {
         self.through(Some(snapshot.sequence))?;
         let mut changed = self.watch();
@@ -777,6 +796,7 @@ impl Timeline {
             data.hot.pop_front();
         }
     }
+    #[service(skip)]
     pub fn watch(&self) -> watch::Receiver<(u64, bool)> {
         self.0.changed.subscribe()
     }
@@ -837,6 +857,7 @@ impl Timeline {
     /// branch; it unloads with that plugin. `keys` follow the Dispatcher rules. Middleware registered earlier
     /// wraps later ones, so later registrations transform first. The wrapper
     /// always calls downstream: a handler cannot intercept the chain.
+    #[service(skip)]
     pub fn before(
         &self,
         ctx: &Ctx,
@@ -846,20 +867,21 @@ impl Timeline {
     ) -> Result<Disposer> {
         let name = name.into();
         let keys = KeyFilter::new(keys)?;
-        let middleware = move |_: &Ctx, offered: &BeforeCommit, next: SyncCall<'_, EventDraft>| {
+        let middleware = move |offered: Arc<BeforeCommit>, next: SyncCall<'_, BeforeCommit>| {
             let draft = next.next()?.ok_or_else(|| {
-                CordisError::PluginFailed("the before chain returned no draft".into())
+                rutis::Error::from(ErrorKind::PluginFailed(
+                    "the before chain returned no draft".into(),
+                ))
             })?;
             let key = draft.kind.key();
             if !keys.matches(key) {
                 return Ok(Some(draft));
             }
-            let result = handler(draft.clone())
-                .map_err(|error| CordisError::PluginFailed(Box::new(error)))?;
+            let result = handler(draft.clone())?;
             if result.kind.key() != key {
-                return Err(CordisError::PluginFailed(
+                return Err(rutis::Error::from(ErrorKind::PluginFailed(
                     format!("{name} changed the event kind").into(),
-                ));
+                )));
             }
             offered.steps.lock().unwrap().push(TraceStep {
                 handler: name.clone(),
@@ -867,12 +889,15 @@ impl Timeline {
             });
             Ok(Some(result))
         };
-        Ok(ctx.events().on_sync(ctx, &self.before_key(), middleware)?)
+        Ok(ctx
+            .listen::<BeforeCommit>()
+            .name(self.before_name())
+            .on_sync(middleware)?)
     }
     /// The branch's private channel: the bus is flat, so the name carries the
     /// branch instance. Only the Timeline builds it.
-    fn before_key(&self) -> EventKey<BeforeCommit> {
-        EventKey::dynamic(format!("dim/timeline/{}/before", self.0.instance))
+    fn before_name(&self) -> String {
+        format!("dim/timeline/{}/before", self.0.instance)
     }
 }
 

@@ -1,17 +1,19 @@
 //! C4 transport probe. This example installs no product bridge or protocol.
 use dim_agent_capabilities::{defaults, session_broadcast::*};
 use dim_agent_runtime::{
-    AGENT_GROUP, AgentBuilder, AgentConfig, Feature, SESSION_GROUP, SessionConfig, SessionIdentity,
-    register_part,
+    AGENT_GROUP, AgentBuilder, AgentConfig, Feature, Modules, Names, SESSION_GROUP, SessionConfig,
+    SessionIdentity, register_part,
 };
 use dim_agent_types::{InputMode, ToolCall, ToolDefinition, ToolResult};
 use futures_util::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, Plugin, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, InstanceId, Key, TypeKey};
 use rutis_bridge::{
     runtime::{LocalRuntime, Runtime, Stdio},
     session::{HostDispatch, Reply, Value, arg, host_key_in, settle},
 };
-use rutis_loader::{Builtins, Chain, Layer, LoaderOptions, LoaderPlugin, RuntimeResolver};
+use rutis_loader::runtime::RuntimeResolver;
+use rutis_loader::{Chain, Layer, LoaderOptions, LoaderPlugin};
 use serde_json::{Value as Json, json};
 use std::{
     panic::AssertUnwindSafe,
@@ -26,48 +28,68 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 struct Node(Arc<LocalRuntime>);
-impl TypedPlugin for Node {
-    type Deps = ();
+impl DynPlugin for Node {
     fn name(&self) -> &str {
         "C4Node"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Plugin::apply(self.0.as_ref(), ctx)
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        DynPlugin::apply(self.0.as_ref(), ctx)
     }
 }
 
-struct NodeRows(Arc<RuntimeResolver>);
-impl TypedPlugin for NodeRows {
-    type Deps = (Keyed<Runtime>, Arc<rutis_loader::Loader>);
+/// The Node runtime's rows, given the runtime at its own key.
+struct NodeRows {
+    resolver: Arc<RuntimeResolver>,
+    runtime: Key<Runtime>,
+}
+impl NodeRows {
+    fn new(_: &Names<'_>, resolver: Arc<RuntimeResolver>) -> rutis::Result<Self> {
+        Ok(Self {
+            resolver,
+            runtime: Key::dynamic("node"),
+        })
+    }
+}
+impl DynPlugin for NodeRows {
     fn name(&self) -> &str {
         "C4NodeRows"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        _: Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.runtime.erase(), TypeKey::of::<rutis_loader::Loader>()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            Plugin::apply(&rutis_loader::RuntimeRowsPlugin::new(self.0.clone()), ctx).await
+            let rows = rutis_loader::runtime::RuntimeRowsPlugin::new(self.resolver.clone());
+            DynPlugin::apply(&rows, ctx).await
         })
     }
 }
 
-struct Anchor(mpsc::UnboundedSender<Ctx>);
-impl TypedPlugin for Anchor {
-    type Deps = (Keyed<rutis_loader::RuntimeRows>,);
+/// Sends its context once the Node rows are up.
+struct Anchor {
+    contexts: mpsc::UnboundedSender<Ctx>,
+    rows: Key<rutis_loader::runtime::RuntimeRows>,
+}
+impl Anchor {
+    fn new(_: &Names<'_>, contexts: mpsc::UnboundedSender<Ctx>) -> rutis::Result<Self> {
+        Ok(Self {
+            contexts,
+            rows: Key::dynamic("node"),
+        })
+    }
+}
+impl DynPlugin for Anchor {
     fn name(&self) -> &str {
         "C4Anchor"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        _: Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.rows.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            self.0
+            self.contexts
                 .send(ctx.clone())
-                .map_err(|error| CordisError::PluginFailed(error.into()))?;
+                .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
             Ok(Effect::Done)
         })
     }
@@ -80,7 +102,11 @@ struct Loaded {
     closed: Arc<AtomicUsize>,
 }
 /// The probe of one Session, built for its instance.
-struct SessionProbe(InstanceId, mpsc::UnboundedSender<Loaded>);
+struct SessionProbe(
+    InstanceId,
+    mpsc::UnboundedSender<Loaded>,
+    rutis::host::Key<SessionIdentity>,
+);
 struct SessionHost(String, Arc<AtomicUsize>);
 impl HostDispatch for SessionHost {
     fn invoke(&self, method: &str, _: Value) -> Reply {
@@ -100,57 +126,67 @@ impl HostDispatch for SessionHost {
     }
 }
 struct BroadcastProbe(InstanceId);
-impl rutis::Listener<SessionBroadcastEvent> for BroadcastProbe {
-    fn call<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        record: &'a SessionBroadcastEvent,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            let record = match record {
-                SessionBroadcastEvent::Event { branch_id, event } => {
-                    json!({"kind":"event","branchId":branch_id,"event":event})
-                }
-                SessionBroadcastEvent::Fence { recipient, token } if recipient == "c4-spike" => {
-                    json!({"kind":"fence","token":token})
-                }
-                SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {
-                    return Ok(None);
-                }
-                SessionBroadcastEvent::Closed => json!({"kind":"closed"}),
-            };
-            // Probe-only encoding and optional run-time lookup on the existing bus.
-            if let Some(target) = ctx.get_as::<dyn HostDispatch>(host_key_in("c4Probe", self.0)) {
-                call(&target, "notice", vec![record.into()]).await?;
+impl BroadcastProbe {
+    async fn on_record(
+        &self,
+        ctx: &Ctx,
+        record: &SessionBroadcastEvent,
+    ) -> rutis::Result<Option<()>> {
+        let record = match record {
+            SessionBroadcastEvent::Event { branch_id, event } => {
+                json!({"kind":"event","branchId":branch_id,"event":event})
             }
-            Ok(None)
-        })
+            SessionBroadcastEvent::Fence { recipient, token } if recipient == "c4-spike" => {
+                json!({"kind":"fence","token":token})
+            }
+            SessionBroadcastEvent::Notice(_) | SessionBroadcastEvent::Fence { .. } => {
+                return Ok(None);
+            }
+            SessionBroadcastEvent::Closed => json!({"kind":"closed"}),
+        };
+        // Probe-only encoding and optional run-time lookup on the existing bus.
+        if let Some(target) = ctx.get_at(&host_key_in("c4Probe", self.0)) {
+            call(&target, "notice", vec![record.into()]).await?;
+        }
+        Ok(None)
     }
 }
 
-impl TypedPlugin for SessionProbe {
-    type Deps = (Keyed<SessionIdentity>,);
+impl SessionProbe {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        a0: InstanceId,
+        a1: mpsc::UnboundedSender<Loaded>,
+    ) -> rutis::Result<Self> {
+        Ok(Self(a0, a1, names.key()?))
+    }
+}
+impl rutis::host::DynPlugin for SessionProbe {
     fn name(&self) -> &str {
         "C4SessionProbe"
     }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.2.erase()]
+    }
     fn apply<'a>(
         &'a self,
-        ctx: &'a Ctx,
-        (Keyed(identity),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let identity = ctx.require_at(&self.2)?;
             let closed = Arc::new(AtomicUsize::new(0));
-            ctx.provide_as::<dyn HostDispatch>(
+            ctx.provide_at::<dyn HostDispatch>(
                 host_key_in("c4Session", self.0),
                 Arc::new(SessionHost(identity.session_id.clone(), closed.clone())),
             )?;
             let session = self.0;
-            ctx.events().on(
-                ctx,
-                &session_channel(&identity.session_id),
-                BroadcastProbe(session),
-            )?;
+            let probe = Arc::new(BroadcastProbe(session));
+            ctx.listen::<SessionBroadcast>()
+                .name(session_channel(&identity.session_id))
+                .on(move |event, call| {
+                    let probe = probe.clone();
+                    async move { probe.on_record(call.ctx(), &event.record).await }
+                })?;
             self.1
                 .send(Loaded {
                     session_id: identity.session_id.clone(),
@@ -158,8 +194,8 @@ impl TypedPlugin for SessionProbe {
                     ctx: ctx.clone(),
                     closed,
                 })
-                .map_err(|error| CordisError::PluginFailed(error.into()))?;
-            Ok(Effect::Done)
+                .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -175,7 +211,7 @@ async fn call(
 fn service(loaded: &Loaded, name: &str) -> Arc<dyn HostDispatch> {
     loaded
         .ctx
-        .get_as(host_key_in(name, loaded.session))
+        .get_at(&host_key_in(name, loaded.session))
         .expect("probe service Active")
 }
 async fn fence(
@@ -191,14 +227,13 @@ async fn fence(
             .is_err(),
         "a fence must stay pending until its notice arrives"
     );
-    loaded.ctx.events().emit(
-        &loaded.ctx,
-        &session_channel(&loaded.session_id),
-        Arc::new(SessionBroadcastEvent::Fence {
+    loaded.ctx.emit(SessionBroadcast::new(
+        &loaded.session_id,
+        SessionBroadcastEvent::Fence {
             recipient: "c4-spike".into(),
             token,
-        }),
-    )?;
+        },
+    ))?;
     tokio::time::timeout(Duration::from_secs(5), waiting).await??;
     Ok(())
 }
@@ -283,25 +318,26 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     builder.require_feature(Feature::new("C4SessionProbe").session(
         "C4SessionProbe",
         move |names| {
-            names.part(SessionProbe(
+            Ok(Box::new(SessionProbe::new(
+                names,
                 names.instance(SESSION_GROUP)?,
                 loaded_send.clone(),
-            ))
+            )?))
         },
     ));
     // The Node runtime and its rows are rutis's, at the runtime's own keys.
-    let mut builtins = Builtins::new();
+    let mut builtins = Modules::new();
     let node = register_part(&mut builtins, builder.catalog(), {
         let runtime = runtime.clone();
-        move |names| names.part(Node(runtime.clone()))
+        move |_| Ok(Box::new(Node(runtime.clone())))
     })?;
     let rows = register_part(&mut builtins, builder.catalog(), {
         let resolver = resolver.clone();
-        move |names| Ok(names.part_with(NodeRows(resolver.clone()), (DepKey::dynamic("node"), ())))
+        move |names| Ok(Box::new(NodeRows::new(names, resolver.clone())?))
     })?;
     let (anchor_send, mut anchors) = mpsc::unbounded_channel();
     let anchor = register_part(&mut builtins, builder.catalog(), move |names| {
-        Ok(names.part_with(Anchor(anchor_send.clone()), (DepKey::dynamic("node"),)))
+        Ok(Box::new(Anchor::new(names, anchor_send.clone())?))
     })?;
     // The features' plugins are rows of this host, as the App Server's are.
     let plugins = builder.plugin_rows(&mut builtins).await?;

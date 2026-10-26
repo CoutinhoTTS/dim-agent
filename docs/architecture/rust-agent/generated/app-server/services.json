@@ -2009,6 +2009,12 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::runtime::definitions::PluginMounter",
+        "provider": 2,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#auxiliaryModel",
         "provider": 13,
         "generation": 1,

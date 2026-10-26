@@ -1,4 +1,5 @@
 use super::*;
+use rutis::host::CtxHost;
 use std::sync::Mutex;
 
 #[tokio::test]
@@ -144,28 +145,41 @@ enum Edit {
     BrokenCursor,
 }
 
-struct RewriteCompaction(Arc<Mutex<Edit>>);
-fn rewrite(edit: Edit) -> RewriteCompaction {
-    RewriteCompaction(Arc::new(Mutex::new(edit)))
+struct RewriteCompaction {
+    edit: Arc<Mutex<Edit>>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
 }
-impl TypedPlugin for RewriteCompaction {
-    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>);
+impl RewriteCompaction {
+    fn new(names: &Names<'_>, edit: Arc<Mutex<Edit>>) -> rutis::Result<Self> {
+        Ok(Self {
+            edit,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+        })
+    }
+}
+fn rewrite(names: &Names<'_>, edit: Edit) -> rutis::Result<RewriteCompaction> {
+    RewriteCompaction::new(names, Arc::new(Mutex::new(edit)))
+}
+impl DynPlugin for RewriteCompaction {
     fn name(&self) -> &str {
         "test.rewrite-compaction"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(dispatcher)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase(), self.dispatcher.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
             let source = Arc::new(Mutex::new(Vec::<Arc<AgentEvent>>::new()));
             let observed = source.clone();
             dispatcher.subscribe_all(ctx, "test.compaction-history", move |event| {
                 observed.lock().unwrap().push(event);
                 Box::pin(async { Ok(()) })
             })?;
-            let current = self.0.clone();
+            let current = self.edit.clone();
             timeline.before(
                 ctx,
                 self.name(),
@@ -257,7 +271,7 @@ impl TypedPlugin for RewriteCompaction {
                     Ok(draft)
                 },
             )?;
-            Ok(rutis::Effect::Done)
+            Ok(Effect::Done)
         })
     }
 }
@@ -274,7 +288,7 @@ async fn committed_summary_drives_current_and_following_model_requests() {
     );
     builder.require_feature(
         Feature::new("test.rewrite-compaction").branch("test.rewrite-compaction", |names| {
-            names.part(rewrite(Edit::Summary))
+            Ok(Box::new(rewrite(names, Edit::Summary)?))
         }),
     );
     let agent = builder.build();
@@ -347,7 +361,7 @@ async fn committed_cursor_preserves_the_history_after_its_cutoff() {
     );
     builder.require_feature(
         Feature::new("test.rewrite-compaction").branch("test.rewrite-compaction", |names| {
-            names.part(rewrite(Edit::FirstCursor))
+            Ok(Box::new(rewrite(names, Edit::FirstCursor)?))
         }),
     );
     let agent = builder.build();
@@ -431,7 +445,7 @@ async fn final_outcome_controls_normal_preparation_and_budget_recovery() {
             builder.require_feature(
                 Feature::new("test.rewrite-compaction")
                     .branch("test.rewrite-compaction", move |names| {
-                        names.part(rewrite(edit))
+                        Ok(Box::new(rewrite(names, edit)?))
                     }),
             );
             let agent = builder.build();
@@ -508,11 +522,15 @@ async fn a_damaged_compaction_fails_replay_without_silently_regenerating_history
         },
     );
     let plugin_edit = edit.clone();
-    builder.require_feature(
-        Feature::new("test.rewrite-compaction").branch("test.rewrite-compaction", move |names| {
-            names.part(RewriteCompaction(plugin_edit.clone()))
-        }),
-    );
+    builder.require_feature(Feature::new("test.rewrite-compaction").branch(
+        "test.rewrite-compaction",
+        move |names| {
+            Ok(Box::new(RewriteCompaction::new(
+                names,
+                plugin_edit.clone(),
+            )?))
+        },
+    ));
     let agent = builder.build();
     let session = agent
         .create_session(SessionConfig::default())

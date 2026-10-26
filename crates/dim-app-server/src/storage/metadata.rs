@@ -10,6 +10,7 @@ use rusqlite::{
     types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef},
 };
 use rutis::Ctx;
+use rutis::host::CtxHost;
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value as RpcValue};
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};

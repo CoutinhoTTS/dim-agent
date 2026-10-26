@@ -4,7 +4,8 @@
 //! An owner such as ToolRegistry keeps one table of the contributions parts
 //! register with it. A registration is an effect of its caller: it is
 //! withdrawn when the caller unloads.
-use rutis::{CordisError, Ctx, Effect};
+use rutis::host::ErrorKind;
+use rutis::{Ctx, Error};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -50,14 +51,14 @@ impl<T: Send + Sync + 'static> Registrations<T> {
         ctx: &Ctx,
         name: impl Into<String>,
         value: T,
-    ) -> Result<Arc<Registration<T>>, CordisError> {
+    ) -> Result<Arc<Registration<T>>, Error> {
         let name = name.into();
         let registration = {
             let mut state = self.state.lock().unwrap();
             if state.entries.contains_key(&name) {
-                return Err(CordisError::PluginFailed(
+                return Err(rutis::Error::from(ErrorKind::PluginFailed(
                     format!("{name} is registered already").into(),
-                ));
+                )));
             }
             state.next += 1;
             let registration = Arc::new(Registration {
@@ -70,13 +71,11 @@ impl<T: Send + Sync + 'static> Registrations<T> {
         };
         let table = Arc::downgrade(self);
         let (name, id) = (registration.name.clone(), registration.id);
-        let registered = ctx.effect(move || {
-            Effect::Disposer(Box::new(move || {
-                if let Some(table) = table.upgrade() {
-                    table.withdraw(&name, id);
-                }
-                Ok(())
-            }))
+        let registered = ctx.effect(move || async move {
+            if let Some(table) = table.upgrade() {
+                table.withdraw(&name, id);
+            }
+            Ok(())
         });
         match registered {
             Ok(_) => {
