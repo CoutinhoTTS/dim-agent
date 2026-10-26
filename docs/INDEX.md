@@ -15,6 +15,7 @@
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
+- [Owner-independent Timeline instances](design/collaboration-timeline.md) (proposed, #335)
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
