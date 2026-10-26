@@ -137,14 +137,19 @@ async fn session_methods_does_not_list_a_name_management_holds() {
     assert_ok(
         &client
             .rpc(
-                "provider.save",
-                json!({"provider":{
-                    "providerId":"listing-fixture","displayName":"Fixture","driverKind":"openai-compatible",
-                    "baseUrl":"http://localhost/v1","auth":{"type":"anonymous"},
+                "provider.create",
+                json!({
+                    "providerId":"018ec73f-0000-7000-8000-000000000004",
+                    "displayName":"Fixture",
+                    "connection":{
+                        "driverKind":"openai-compatible",
+                        "baseUrl":"http://localhost/v1",
+                        "auth":{"type":"anonymous"}
+                    },
                     "models":[{"modelId":"fixture","displayName":"fixture","status":"active",
                         "capabilities":dim_agent_types::ModelCapabilities::default()}],
                     "enabled":true
-                }}),
+                }),
             )
             .await,
     );
@@ -152,7 +157,10 @@ async fn session_methods_does_not_list_a_name_management_holds() {
         &client
             .rpc(
                 "provider.select",
-                json!({"providerId":"listing-fixture","modelId":"fixture"}),
+                json!({
+                    "providerId":"018ec73f-0000-7000-8000-000000000004",
+                    "modelId":"fixture"
+                }),
             )
             .await,
     );
