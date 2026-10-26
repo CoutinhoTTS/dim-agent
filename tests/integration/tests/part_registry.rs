@@ -400,10 +400,11 @@ async fn a_required_part_gates_publication_and_its_failure_fails_the_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_optional_part_neither_gates_nor_fails_its_session() {
+async fn an_optional_part_settles_before_publication_and_its_failure_stays_local() {
     let root = Ctx::root().unwrap();
     let (agent, registry) = placed(builder(), &root).await;
-    let never = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+    let held = gate.clone();
     let _waiting = produce(
         &root,
         registry.clone(),
@@ -411,7 +412,7 @@ async fn an_optional_part_neither_gates_nor_fails_its_session() {
         "test.gated",
         Arc::new(move |_| {
             Ok(Some(
-                Box::new(Gated(Some(never.clone()))) as Box<dyn DynPlugin>
+                Box::new(Gated(Some(held.clone()))) as Box<dyn DynPlugin>
             ))
         }),
     )
@@ -424,20 +425,39 @@ async fn an_optional_part_neither_gates_nor_fails_its_session() {
         Arc::new(|_| Ok(Some(Box::new(Gated(None)) as Box<dyn DynPlugin>))),
     )
     .await;
-    let session = tokio::time::timeout(
-        Duration::from_secs(5),
-        agent.create_session(SessionConfig::default()),
-    )
-    .await
-    .expect("an optional part does not gate publication")
-    .unwrap();
-    eventually(|| {
-        session.diagnostics().unwrap().plugins.iter().any(|plugin| {
-            plugin.name == "test.gated" && plugin.state == rutis::host::FiberState::Failed
-        })
-    })
-    .await;
-    assert!(mounted(&session, "test.gated"));
+    let creating = {
+        let agent = agent.clone();
+        tokio::spawn(async move { agent.create_session(SessionConfig::default()).await })
+    };
+    // A part registered when the Session opens is still loading: what it
+    // registers would be missing from the published Session.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !creating.is_finished(),
+        "published before an optional part it opened with settled"
+    );
+    gate.notify_waiters();
+    let session = tokio::time::timeout(Duration::from_secs(5), creating)
+        .await
+        .expect("a settled optional part releases publication")
+        .unwrap()
+        .expect("an optional part's failure does not fail its Session");
+    let states: Vec<_> = session
+        .diagnostics()
+        .unwrap()
+        .plugins
+        .into_iter()
+        .filter(|plugin| plugin.name == "test.gated")
+        .map(|plugin| plugin.state)
+        .collect();
+    assert!(
+        states.contains(&rutis::host::FiberState::Active),
+        "{states:?}"
+    );
+    assert!(
+        states.contains(&rutis::host::FiberState::Failed),
+        "{states:?}"
+    );
     close(agent, root).await;
 }
 

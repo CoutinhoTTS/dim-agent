@@ -10123,6 +10123,7 @@
         "path crate::PartScope::Session",
         "path crate::parts::Copies",
         "path crate::parts::MountSite",
+        "path crate::parts::Opened",
         "path crate::parts::PartMounter",
         "path crate::parts::PartMounter::is_module",
         "path crate::parts::PartMounter::is_row",
