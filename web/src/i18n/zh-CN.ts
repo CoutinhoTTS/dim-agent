@@ -43,6 +43,7 @@ const zhCN: Messages = {
   "message.collapse": "收起",
   "message.copy": "复制整个消息",
   "message.expand": "展示全部",
+  "message.quote": "引用到输入框",
   "newThread.pathLabel": "目录的绝对路径",
   "newThread.pathPlaceholder": "/path/to/project",
   "newThread.selectWorkspace": "选择工作区...",
