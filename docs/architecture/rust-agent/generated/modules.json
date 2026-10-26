@@ -11288,9 +11288,9 @@
         "mod collaboration",
         "path CollaborationPlugin::new",
         "path collaboration::Collaboration",
-        "path collaboration::CollaborationCapability",
         "path collaboration::CollaborationDirectory",
         "path collaboration::CollaborationDirectoryPlugin",
+        "path collaboration::CollaborationSession",
         "use collaboration::CollaborationPlugin"
       ]
     },
@@ -11672,6 +11672,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
+        "path Names::copy",
         "use dim_agent_runtime::Names"
       ]
     },
