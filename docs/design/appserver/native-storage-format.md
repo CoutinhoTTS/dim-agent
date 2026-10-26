@@ -352,8 +352,9 @@ ProjectionCheckpoint = {
 
 - **状态**：由 #427 决定，随其实现生效。在那之前当前格式仍是 v19，本文其余部分描述的都是 v19。
 - **只增两种核心事件**：两者都以 `encoding: "event"` 写入普通 `event` 行，不进输出行、不带请求引用。行结构、内容寻址和其他记录的字节不变。
-  - `branch/end` 写在要结束的分支上，`data` 为 `{by: "self" | "user" | "ancestor"}`。
-  - `branch/ended` 写在其父分支上，`data` 为 `{branch, endEvent, by}`：`endEvent` 是 `branch/end` 在结束分支上的序号（安全整数），`by` 取自 `branch/end`（[Timeline 分支 §10](../timeline-branches.md#10-ending-a-line)）。
+  - `branch/end` 写在要结束的分支上，`data` 为 `{source, ancestor?}`。`source` 是 `branch/create` 已在用的 `BranchSource`：`{kind: "tool", turn_id, request_id, call_id}` 或 `{kind: "host", operation_id}`。`ancestor` 是分支 ID，只在因祖先结束而结束时出现。
+  - `branch/ended` 写在其父分支上，`data` 为 `{branch, endEvent, source, ancestor?}`。`endEvent` 是 `branch/end` 在结束分支上的序号（安全整数），`source` 与 `ancestor` 取自 `branch/end`（[Timeline 分支 §10](../timeline-branches.md#10-ending-a-line)）。
+- **目录行不变**：`timeline_branches.info` 照旧是不含 `source` 的 `TimelineInfo` JSON。运行时的 `TimelineInfo` 新增 `source`，但存储写目录行时不写它；恢复时由 TimelineTree 从父分支的 `branch/create` 补齐（[Timeline 分支 §5](../timeline-branches.md#5-parts)）。
 - **不能留在 v19**：
   - v19 读取器对核心保留领域只按类型解码（见上文 [#2 v18 决定](#2-v18-格式决定)），解码不了 `branch/end` 与 `branch/ended` 行。
   - #193 的 v17 起，能打开某版本库的守护进程都能解码其中每一行；留在 v19 就打破这一点，为不兼容的已提交格式沿用了版本号。
@@ -372,6 +373,7 @@ ProjectionCheckpoint = {
   - v18、v17、v16、v15、v13 库一次升级到 v20。
   - 标记不符的 v19、v20 结构和升级到一半的库被拒绝并保留。
   - `branch/end` 与 `branch/ended` 各占一行，经 Session 恢复原样读出；已结束的分支恢复后不再打开。
+  - 新子分支的目录行不含 `source`，与 v19 的写法逐字节相同。
   - 从不打开用户已有的库。
 
   对应 `storage_flow.rs` 的 `a_v19_store_upgrades_in_place_once` 及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与 `branch_end_events_restore_unchanged_and_the_line_stays_ended`。

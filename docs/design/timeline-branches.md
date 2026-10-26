@@ -23,7 +23,7 @@ Answers to #427:
 | 1 | Which scenarios, in what order | Three, in order (§3): plugin lines (delivered), lines the agent opens from main (this design), and lines the user opens from a history point and then compares and adopts (later) |
 | 2 | Branch versus Collaboration member versus fork | §2. A branch is the same agent. A member or a fork is another Session |
 | 3 | When a branch finishes, who needs its result, and in what form | No line owes another a result. Lines tell each other what matters while they work (§6). A line the agent opened ends with a final message to main (§10). A plugin line follows its creator's protocol, for example Pursuit's conclusion |
-| 4 | When is a branch over, and is it visible afterwards | When it ends itself or the user ends it (§10). An ended line stays in the branch directory. Its history stays readable to clients and to main |
+| 4 | When is a branch over, and is it visible afterwards | When it ends itself, its opener ends it, or the user ends it (§10). An ended line stays in the branch directory. Its history stays readable to clients and to main |
 | 5 | What users see and do | Follow any line, talk to it, answer its questions and approvals, and end it (§9, §14). Compare and adopt come with scenario 3 |
 | 6 | What "done" means | The acceptance flows (§20) pass. The evaluation scenarios (§12.3) have been run locally on real models and reported. The release demo ([#439](https://github.com/arcships/dim/issues/439)) shows main opening lines that talk with it and then end |
 
@@ -43,7 +43,7 @@ The rule from design rules §2 still holds. When the work needs a different iden
 
 | # | Scenario | Status |
 | --- | --- | --- |
-| S1 | **Plugin lines.** A plugin opens a line under its own design. Example: [Pursuit](plugins/Pursuit.md)'s evaluator, a host-sourced child cut at the worker's turn end, whose conclusion goes back as input (implemented, [#422](https://github.com/arcships/dim/issues/422); `runtime/plugins/goal`) | Delivered. This design adds only the identity block (§7.1) |
+| S1 | **Plugin lines.** A plugin opens a line under its own design. Example: [Pursuit](plugins/Pursuit.md)'s evaluator, a host-sourced child cut at the worker's turn end, whose conclusion goes back as input (implemented, [#422](https://github.com/arcships/dim/issues/422); `runtime/plugins/goal`) | Delivered. This design adds the identity block (§7.1). Goal's recognition and end of the evaluator change with it ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)) |
 | S2 | **The agent opens lines from main.** Examples: test two hypotheses for a bug on two lines while main keeps reading; implement on main while a line reviews each change as it lands; research an API or one area of the code while main continues; try a second approach on separate files | This design |
 | S3 | **The user opens a line from a history point, compares it, adopts it.** `session.branch_create` already opens host lines. With this design the user can follow those lines, talk to them and end them. Compare and adopt need a design of their own: what adopting a line means for main's context and for a shared workspace | Later, after this design |
 
@@ -59,18 +59,22 @@ These needs are not branches:
 ## 4. Tree and roles
 
 - **Depth.** The architecture allows lines at any depth. `session.branch_create` takes any parent. Goal accepts any `branchId`, so an evaluator opened under a child is a grandchild.
-- **Kinship.** Parent and child is the only relation along which lines communicate. A parent and each of its children write input to each other. Siblings and more distant relatives do not (§6).
+- **Kinship.** Parent and child is the only relation along which lines communicate. A parent and each of its children write input to each other. Siblings and more distant relatives do not (§6). The rule covers one line acting on another, which here means the `branch` tool. A capability that decides on its own is a capability affecting a branch, and this rule does not limit it ([design rules §2](../architecture/rust-agent/principles.md#2-作用域的含义)). Examples are Goal writing an evaluation result, and a plugin opening a line at any cut.
 - **The agent's tool.** The `branch` tool opens lines only from `main`, the root line, which has no parent. The lines it opens are leaves: they cannot open lines of their own. The agent therefore has one coordinator, `main`, and every line the tool opened talks with `main`.
 - **Sources.** Every line has a source, recorded in its parent's `branch/create`:
   - A **tool line** was opened by the `branch` tool.
   - A **host line** was opened by a plugin (`TreeCommands.create`) or a client (`session.branch_create`). Its creator owns its protocol.
+
+  The source can be read as `TimelineInfo.source`, returned by `TreeCommands.list` and `info` and absent on `main` (§5). For a host line it is `{kind: "host", operation_id}`: the opener's opaque tag, which the core never interprets. An opener finds its own lines by its own operation-id convention, for example Goal's `goal:evaluate:` prefix. Clients' lines carry App Server's ids.
 - **Reach of the tool.** The tool's `message`, `read` and `end` actions work only on tool lines. A host line is not on main's roster, and the tool neither messages it nor ends it.
 
-| Line | Opens lines with the tool | Messages, with the tool | Reads, with the tool | Ended by |
+| Line | Opens lines with the tool | Messages, with the tool | Reads, with the tool | Ended by, by convention |
 | --- | --- | --- | --- | --- |
 | `main` | Yes | Its tool lines | Its tool lines, open or ended | Never; the Session's close is not an end |
 | Tool line | No (the tool result refuses) | `main`, its parent | — | Itself (`end`), the user, or an ancestor's end |
-| Host line | No | — (its creator's protocol) | — | The user, an ancestor's end, or itself through its creator's part (`TreeCommands.end`) |
+| Host line | No | — (its creator's protocol) | — | Its creator (Goal ends its evaluator, [Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)), the user, or an ancestor's end |
+
+Who ends which line is a convention among callers. The runtime checks only the target: it exists, it is open, and it is not `main` (§10).
 
 ## 5. Parts
 
@@ -78,14 +82,21 @@ Every part belongs to the TimelineTree plugin ([timeline_tree.rs](../../crates/d
 
 | Part | Scope | Capability | Owns in this design |
 | --- | --- | --- | --- |
-| TimelineTree | Session | No | The line lifecycle: the identity block in every child's opening input, the end of a line (`branch/end` → `branch/ended`), refusing input once a line is ending, the restore rule, and reads of an ended line's history |
-| TreeTimeline | Branch | Yes | Routes `branch/end` and the turn end that a self end waits for to TimelineTree, as it routes `branch/create` today |
+| TimelineTree | Session | No | The line lifecycle: the identity block in every child's opening input, `TimelineInfo.source`, the end of a line (`branch/end` → `branch/ended`), refusing input once a line is ending, the restore rule, and reads of an ended line's history |
+| TreeTimeline | Branch | Yes | Routes `branch/end` to TimelineTree, as it routes `branch/create` today. For an end issued by a tool call, it also routes the turn end that the close waits for |
 | BranchTool | Session | No | The action-based `branch` tool (§11). It finds the calling line's BranchLine per call, the way WorkspaceTools finds FileReads |
-| **BranchLine** (new) | Branch | Yes | One line's view of its lines. It folds its own facts: its role (main, tool line or host line, read from the marker of its own opening input), its parent, its open tool lines, and the state of its current turn. It writes the roster, the idle notice and the ended notice |
+| **BranchLine** (new) | Branch | Yes | One line's view of its lines. Its role (main, tool line or host line) and its parent come from `TreeCommands.info(own id)`. From its own facts it folds its open tool lines and the state of its current turn. It writes the roster, the idle notice and the ended notice |
 
 BranchLine injects `B:Dispatcher`, `B:TimelineIdentity`, `B:BranchLifecycle` and `S:TreeCommands`, and provides `B:BranchLine`.
 
 It decides the way Goal does: from consumed state, through an owned write task that rechecks before writing, and only on live events after its load cutoff. A reload therefore writes nothing twice.
+
+**Line sources.** TimelineTree fills `TimelineInfo.source` from the parent's `branch/create`:
+
+- at creation, from the create itself;
+- at restore, from the resumed parent's history read.
+
+That read already exists. A resumed parent's build reads its history up to its head and reports the creates it recorded as failed (`Opening::Resume`'s `failed_creates` in [timeline_tree.rs](../../crates/dim-agent-capabilities/src/timeline_tree.rs)). It now also reports each create's source, and each `branch/ended`, which the restore rule uses (§10). The stored directory row does not change ([storage format](appserver/native-storage-format.md#427-v20-格式决定)).
 
 ## 6. Messages between lines
 
@@ -136,6 +147,19 @@ Until then, the safeguards are:
 - ended lines refusing messages;
 - the user's end and interrupt;
 - the flooding, over-splitting and ping-pong scenarios in §12.3, measured locally and reported in the implementing PR, never as CI thresholds.
+
+What open lines do cost:
+
+- An open line keeps its loaded parts.
+- Every open line is reloaded on restart. Neither Session close nor idle unload ends a line.
+- Open tool lines grow main's roster, which lists only open tool lines. Each end of a tool line from outside it adds one notice on `main`.
+
+A tool line that never ends is the responsibility of its own protocol (`end`) and of the user, and main's roster keeps it visible. Goal ends Pursuit's evaluators ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)).
+
+### 6.2 Known costs
+
+- **A restart can lose an idle notice.** If the process stops between a tool line's turn end and its idle notice, the notice is never written, because BranchLine decides only on live events after load. Pursuit §4.2 leaves the same window open. `main` still has the line on its roster and can `read` it, and the user sees it idle.
+- **The roster is short after compaction.** After `main` compacts, the roster keeps only each line's id and the first line of its purpose. What `main` told a line survives only in the compaction summary or through `read`, and `read` brings that line's raw events into main's context, one page at a time.
 
 ## 7. Identity and context
 
@@ -203,7 +227,7 @@ Why this changes no Goal behavior (verified on main, `runtime/plugins/goal/goal.
 | The operator test (:373) | This is the one field it changes: the opening input no longer sets `lastOperator` |
 | `count` (:460-461) | `lastOperator` is used only here: `since = max(active, lastOperator)` |
 | The count window | The fold is local and starts over at the line's own opening (:282, :335). A child starts with no goal, and Goal writes the start `clear` ([Goal §3.4](plugins/Goal.md#34-a-new-branch-clears-the-inherited-goal)). `active` moves only on a later local `set` or `resume`, and both always come after the opening input. So the opening input never changes `since`, and the count stays the same |
-| Evaluator recognition (:376-384) | Unchanged. Goal reads the first line of the first Queue input's `user` text. The identity goes in `blocks`, and `render_input` renders raw blocks before the operator's words ([history.rs:181](../../crates/dim-agent-capabilities/src/history.rs)), so the model sees the identity before the prompt |
+| Evaluator recognition (:376-384) | Unchanged. Goal reads the first line of the first Queue input's `user` text. The identity goes in `blocks`, and `render_input` renders raw blocks before the operator's words ([history.rs:181](../../crates/dim-agent-capabilities/src/history.rs)), so the model sees the identity before the prompt. After the [Pursuit amendment](plugins/Pursuit.md#13-ending-the-evaluator-with-427), Goal recognizes the evaluator from `TimelineInfo.source` and `parent`, and no longer reads the `user` text. The A5 rule above stays as written |
 
 ## 8. Workspace
 
@@ -234,42 +258,49 @@ WorkspaceTools is unchanged.
 
 | Event | Timeline | Data | Role |
 | --- | --- | --- | --- |
-| `branch/end` | The line that ends | `{by: "self" \| "user" \| "ancestor"}` | Command |
-| `branch/ended` | Its parent | `{branch, endEvent, by}` | Result, written by TimelineTree |
+| `branch/end` | The line that ends | `{source, ancestor?}` | Command |
+| `branch/ended` | Its parent | `{branch, endEvent, source, ancestor?}` | Result, written by TimelineTree |
 
 This pair mirrors `branch/create` and `branch/create-failed`: a command on one Timeline, routed by TreeTimeline, and a result from the tree. `endEvent` is the sequence of `branch/end` on the ending line.
 
-Who ends a line:
+`source` is the existing `BranchSource`, the same type `branch/create` uses, so a create and an end record their issuer the same way:
 
-| By | Entry |
+| Source | Issuer |
 | --- | --- |
-| `self` | `TreeCommands.end(id)` for the calling line: the tool's `end` on a tool line, or a plugin part on its own line |
-| `user` | `session.branch_end {sessionId, branchId}` through the Session facade |
-| `ancestor` | TimelineTree, which ends a line's descendants before the line itself |
+| `{kind: "tool", turn_id, request_id, call_id}` | A tool call on the ending line itself: the `branch` tool's `end` |
+| `{kind: "host", operation_id}` | A host operation. Either App Server's `session.branch_end`, which mints `operation_id` the way `session.branch_create` does (a uuid, [connection/tree.rs](../../crates/dim-app-server/src/connection/tree.rs)), or a plugin with its own id, such as Goal's `goal:evaluate:N` |
 
-- `main` never ends. Closing the Session is not an end.
-- A parent does not end a child. It asks the child, by message.
+`ancestor` is present when the line ends because that ancestor ended, and `source` is then copied from the ancestor's `branch/end`. `branch/ended` copies `source` and `ancestor` from the line's `branch/end`.
+
+**A general operation.** `TreeCommands.end(id, source)` and `Session::end_branch(id)` check only the target: it exists, it is open, and it is not `main`. Ending `main` would close the Session, so that check is about the target, not the caller. They never check who calls.
+
 - Ending a line that has already ended writes nothing, and the reply is `branch_ended`.
+- Closing the Session is not an end.
+- "The opener manages its line" is a convention among callers, not a runtime rule:
+  - the `branch` tool's `end` takes no target, so it ends the calling line, by the tool's design;
+  - a parent that wants a child to end asks it with a steer, which is the tool's convention.
 
 Sequence:
 
 1. The entry commits `branch/end` on the line. From then on the line accepts no new input: any entry fails with `branch_ended`.
 2. TreeTimeline on the line consumes `branch/end` and hands it to TimelineTree.
-3. TimelineTree ends the line's descendants first (`by: "ancestor"`), each through these same steps.
+3. TimelineTree ends the line's descendants first, each with `ancestor` set to this line and with this `source`, through these same steps.
 4. The close happens:
-   - for `self`: at the line's first turn end after `branch/end` (the `end` call is part of that turn), or at once if the line is idle;
-   - for `user` and `ancestor`: at once, interrupting the current turn.
+   - for a `tool` source: at the line's first turn end after `branch/end`, because the call is part of that turn, or at once if the line is idle;
+   - for a `host` source, and for a line ending because of an ancestor: at once, interrupting the current turn.
 5. `Branch::close()` interrupts the line, settles its work and unloads it ([branch.rs](../../crates/dim-agent-runtime/src/branch.rs)).
 6. TimelineTree writes `branch/ended` on the parent, last.
 
-On the parent, BranchLine:
+On the parent, BranchLine acts only for tool lines; host lines belong to their creators:
 
-- updates the roster with an Append, or retires the key;
-- for `by: "user"`, writes the ended notice in the same input, as a steer.
+- When a tool line ended itself through the tool (a `tool` source and no `ancestor`), it writes the roster update only. The line's final message already reached `main` as a steer before `branch/end`.
+- For any other end of a tool line, it writes the roster update plus the ended notice (§12.1), as a steer, in the same input.
 
-For `by: "self"`, the line's final message already reached `main` as a steer before `branch/end`.
+Clients show "ended itself" for a `tool` source, and otherwise the operation that ended the line.
 
-**Restore.** A child is inactive when its parent has a `branch/ended` for it. This joins the existing rules: the parent is inactive, the parent has a `branch/create-failed` for the child, or the child's creation never completed. A line that has `branch/end` but whose parent has no `branch/ended` for it is not opened. Restore completes such ends deepest line first, writing each missing `branch/ended` on the parent with `by` taken from `branch/end`.
+**Restore.** A child is inactive when its parent has a `branch/ended` for it. The resumed parent's history read reports these (§5). This joins the existing rules: the parent is inactive, the parent has a `branch/create-failed` for the child, or the child's creation never completed.
+
+A line that has `branch/end` but whose parent has no `branch/ended` for it is not opened. Restore completes such ends deepest line first, writing each missing `branch/ended` on the parent with `source` and `ancestor` taken from `branch/end`.
 
 **After the end:**
 
@@ -278,9 +309,7 @@ For `by: "self"`, the line's final message already reached `main` as a steer bef
 - Deleting the Session removes the line along with it.
 - Session close and idle unload are not ends: lines restore as open.
 
-**Plugin lines.** Pursuit's evaluator does not end itself yet. Letting it end its own line after its conclusion is a later amendment to Goal, which owns that protocol.
-
-If the user ends an evaluator, the interrupt ends its turn `cancelled`. If Goal on the evaluator does not write `failed` before the line closes, the goal is left in the state that [Pursuit §4.2](plugins/Pursuit.md#42-evaluator-branch) already hands to the user: pause, then resume.
+**Plugin lines.** Each opener ends its own lines under its own protocol. Goal ends its Pursuit evaluator once the evaluation is settled, and treats an outside end before the conclusion as `failed` ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)).
 
 ## 11. The `branch` tool
 
@@ -291,7 +320,7 @@ The tool takes one action-based input, which replaces `{prompt, at?}`. Its risk 
 | `create` | `prompt`, `at?` | `main` | Opens a tool line cut at `at` (default: before this request's model start, as today) | `Line created: C` |
 | `message` | `to`, `content`, `mode?` (`append` \| `steer`) | `main` → its open tool line; tool line → its parent | One `input/message` on `to` | `Sent to C.` |
 | `read` | `branch`, `after?`, `limit?` (1–200) | `main`, on its tool lines | One page from the store | The page as JSON: items, `nextCursor`, `done` |
-| `end` | `content` | A tool line, on itself | A final message (steer) to the parent, then `TreeCommands.end` | `Line C is ending; your final message was sent to P.` |
+| `end` | `content` | A tool line, on itself | A final message (steer) to the parent, then `TreeCommands.end(C, source)`, where `source` is this call | `Line C is ending; your final message was sent to P.` |
 
 The input schema is `{action, prompt?, at?, to?, content?, mode?, branch?, after?, limit?}`, with `action` required and `additionalProperties: false`.
 
@@ -304,6 +333,8 @@ Refusals come back as error results (code in `structuredContent`) and write noth
 | `message` or `read` on a host line | `Line C was not opened with this tool; it follows its own protocol.` | `branch_not_tool_line` |
 | `message` to an ended line, or a race with an end | `Line C has ended. Read it to see what it did.` | `branch_ended` |
 | `end` on `main` or a host line | `Only a line opened with create can end itself.` | `branch_cannot_end` |
+
+These refusals are the tool's own rules. `TreeCommands.end` itself checks only the target (§10).
 
 ## 12. Prompts
 
@@ -320,7 +351,7 @@ Refusals come back as error results (code in `structuredContent`) and write noth
 | Message | Receiver, no key | `append` or `steer` | `<dim-branch-message from="C" to="P">` / `<content>` / `</dim-branch-message>` |
 | Final message | `P`, no key | Steer | `<dim-branch-message from="C" to="P" final="true">` / `<content>` / blank / `Line C ends with this message.` / `</dim-branch-message>` |
 | Idle notice | `P`, no key | Steer | `<dim-branch-idle branch="C" status="completed\|failed\|cancelled">` / `Line C's turn ended (<status>) without a message to you, and C is waiting. Read it if you need its state; message it with mode "steer" to give it more work, or leave it.` / `</dim-branch-idle>` |
-| Ended notice | `P`, no key, in the roster's input | Steer | `<dim-branch-ended branch="C" by="user">` / `The user ended line C. It no longer receives messages; read it if you need what it did.` / `</dim-branch-ended>` |
+| Ended notice | `P`, no key, in the roster's input, for any end of a tool line other than its own `end` | Steer | `<dim-branch-ended branch="C">` / `Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages; read it if you need what it did.` / `</dim-branch-ended>` |
 | Tool description | Every line | — | `Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed while you work.` / `- create (main only): open a line to work on prompt in parallel. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Open a line only for work that can go on without you. Returns the line's id.` / `- message: send content to a line you opened, or to the line that opened you. Mode "append" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use "steer" when the receiver must act now or is idle.` / `- read: show the recent activity of a line you opened, also after it ended. Pass nextCursor as after to continue.` / `- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.` / `Lines talk only with the line that opened them and the lines they opened.` |
 
 These texts replace the delegation wording in the code today: the `dim-branch-task` block in `first_input` ("That branch delegated this task to you") and the tool description ("works on prompt as a task you delegate").
@@ -360,7 +391,7 @@ These are run locally on real models, and the results are reported in the implem
 | Feature | Interaction |
 | --- | --- |
 | Goal | Code unchanged. A line's opening input is a sourced input under A5 (§7.4), and Goal's conflict table records it. A new line clears the inherited goal as before |
-| Pursuit | The evaluator gets the host-line identity block. Recognition, conclusion and decisions are unchanged. Self end comes later (§10) |
+| Pursuit | The evaluator gets the host-line identity block. Goal recognizes its evaluator from the line's source and ends it once the evaluation is settled ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)) |
 | Fork, delete | Unchanged. Ended lines follow their facts (§10) |
 | Session close, idle unload | Not an end. Lines restore as open |
 | Interrupt | A turn interrupt, or a stop on a line, ends a turn and never a line. An interrupt on `main` does not touch its lines |
@@ -370,7 +401,7 @@ These are run locally on real models, and the results are reported in the implem
 
 **TUI.** Lines get their own view and controls:
 
-- The tasks panel already lists child branches. It becomes the list of lines, each with its state: working, waiting or ended (with the `by` value).
+- The tasks panel already lists child branches. It becomes the list of lines, each with its state: working, waiting, ended itself, or ended by an operation.
 - Opening a line shows its conversation. The composer submits to the line being viewed.
 - Ending is a confirmed command on the viewed line, refused on `main`.
 - Questions and approvals keep their line label (the CLI already shows `(branch NAME)`).
@@ -381,12 +412,12 @@ These are run locally on real models, and the results are reported in the implem
 │ … main's conversation …                                         │
 │ ▸ to b-7c (steer)  Stop on parser.rs: its API changed on main.  │
 │ ◂ from b-91        Review: cache.rs:88 drops the guard on reload│
-│ ◂ b-02 ended (self) Docs updated in README and INDEX.           │
+│ ◂ b-02 ended itself  Docs updated in README and INDEX.          │
 ├ lines ──────────────────────────────────────────────────────────┤
 │ ● main                                       working            │
 │   b-7c  parser race hypothesis               working            │
 │   b-91  review the cache change              waiting            │
-│   b-02  docs pass                            ended (self)       │
+│   b-02  docs pass                            ended itself       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -397,13 +428,14 @@ These are run locally on real models, and the results are reported in the implem
 | Module | Change | Why |
 | --- | --- | --- |
 | [Design rules §2](../architecture/rust-agent/principles.md#2-作用域的含义) | Rewritten: lines of one subject, shared facts, parent and child as the only communication relation, and the shared interaction surface. Relations row: "only between parent and child". Session row: adds "end" | The current text, "equal lines, the relation only records the source", has no communication relation |
-| TimelineTree | The identity block in `first_input` for every source. `TreeCommands.end(id)` and `TreeCommands.page(id, after, limit)`. The end flow, refusing input once a line is ending, `branch/ended`, the restore rule, and reads of ended lines | It owns the line lifecycle and the opening input |
-| TreeTimeline | Consumes `branch/end`, plus the line's next turn end for a self end, and routes them to TimelineTree | It routes `branch/create` the same way |
+| TimelineTree | The identity block in `first_input` for every source. `TreeCommands.end(id, source)` and `TreeCommands.page(id, after, limit)`. `TimelineInfo.source`, filled from the parent's `branch/create` (§5). The end flow, refusing input once a line is ending, `branch/ended`, the restore rule, and reads of ended lines | It owns the line lifecycle and the opening input |
+| TreeTimeline | Consumes `branch/end`, plus the line's next turn end for an end issued by a tool call, and routes them to TimelineTree | It routes `branch/create` the same way |
 | BranchTool | The action-based tool, plus the new BranchLine branch part | The tool's actions and one line's view of its lines |
 | Session facade | `Session::end_branch(id)`. History reads of an ended line (`local_page`, `sequence`) from the store, at its fixed head | §17 |
-| App Server | `session.branch_end` (v3, listed in `hello.features` under the conditions that list `session.branch_create`). `session.history` on an ended line returns immediately, at its stored head. `ProductEvent::new` carries the two kinds in v3 and leaves them out of v1 and v2 | An entry and a read, no business logic |
+| App Server | `session.branch_end` (v3, a host source with a minted `operation_id`, listed in `hello.features` under the conditions that list `session.branch_create`). `session.history` on an ended line returns immediately, at its stored head. `ProductEvent::new` carries the two kinds in v3 and leaves them out of v1 and v2 | An entry and a read, no business logic |
 | dim-agent-types | `branch/end` and `branch/ended` in `EventKind` and the v1 exclusion list, registered in the contract tests. The frozen fixtures are unchanged | Two core facts (§16) |
-| `npm/branch-services.d.ts` | Regenerated: TreeCommands gains `end` and `page` | TreeCommands is an exported service |
+| Goal (Pursuit amendment) | Recognizes its evaluator from the line's source and ends it ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)) | Goal owns its evaluator's protocol |
+| Branch TypeScript binding | Regenerated `npm/branch-services.d.ts`: TreeCommands gains `end` and `page`, and `TimelineInfo` gains `source`. The `treeCommands` row of the [binding table](branch-typescript.md) lists `end` | TreeCommands is an exported service |
 | CLI TUI | §14 | Users follow, talk to and end lines |
 | Plugin pages | TimelineTree.md and BranchTool.md, updated with the implementation (`xtask check`) | Pages follow the code |
 
@@ -411,7 +443,8 @@ New public content:
 
 - two events;
 - one RPC method;
-- two TreeCommands methods;
+- two TreeCommands methods: `end(id, source)` and `page(id, after, limit)`;
+- `TimelineInfo.source`, read by BranchLine and by Goal;
 - the `branch` tool's new input.
 
 BranchLine's service is read only by the tool, inside the same plugin.
@@ -422,8 +455,8 @@ BranchLine's service is read only by the tool, inside the same plugin.
 
 | Event | Data |
 | --- | --- |
-| `branch/end` | `{by: "self" \| "user" \| "ancestor"}` |
-| `branch/ended` | `{branch, endEvent, by}`. `endEvent` is the sequence of `branch/end` on the ended line |
+| `branch/end` | `{source, ancestor?}`. `source` is a `BranchSource` (`{kind: "tool", turn_id, request_id, call_id}` or `{kind: "host", operation_id}`); `ancestor` is a line id |
+| `branch/ended` | `{branch, endEvent, source, ancestor?}`. `endEvent` is the sequence of `branch/end` on the ended line; `source` and `ancestor` are copied from it |
 
 The format decision for them is recorded in the storage contract: [#427 v20 decision](appserver/native-storage-format.md#427-v20-格式决定). It takes effect with this design's implementation.
 
@@ -442,15 +475,16 @@ The format decision for them is recorded in the storage contract: [#427 v20 deci
   - A plugin-owned event cannot work, because restore belongs to TimelineTree and cannot read plugin facts (rules 4 and 7).
   - Reading the store directly from App Server would bypass the facade.
 - **Generic capability.** It carries no business meaning:
-  - a command `branch/end {by}` on the line and a result `branch/ended {branch, endEvent, by}` on its parent;
-  - `TreeCommands.end(id)` and `Session::end_branch(id)`;
+  - a command `branch/end {source, ancestor?}` on the line and a result `branch/ended {branch, endEvent, source, ancestor?}` on its parent;
+  - `TreeCommands.end(id, source)` and `Session::end_branch(id)`, which check only the target;
+  - `TimelineInfo.source`, filled from the parent's `branch/create`;
   - no new input once `branch/end` is committed;
   - descendants end first;
   - restore treats an ended line as inactive and completes a `branch/end` that has no `branch/ended`;
   - an ended line's committed history stays readable at its fixed head, through `Session::local_page` and `TreeCommands.page`.
 - **Effect on sequences, batches, interrupt and reload.**
   - Each event is its own batch: `branch/end` on the line, and `branch/ended` on the parent after the close.
-  - A `user` or `ancestor` end interrupts the line through `Branch::close()`.
+  - An end with a `host` source, or because of an ancestor, interrupts the line through `Branch::close()`.
   - On reload, the restore rule above applies.
   - The Timeline, the Dispatcher and batching are unchanged.
 
@@ -459,7 +493,8 @@ The format decision for them is recorded in the storage contract: [#427 v20 deci
 - Lines share the Session's permission policy and Approval. A line is not isolation ([ADR 003](../adr/003-approval-scope.md)).
 - Only TimelineTree and BranchLine write the markers. Other producers that write blocks (plugins, through `TreeCommands.input`) are trusted in-process parts. RPC writes no blocks.
 - `session.branch_end` is a trusted user entry, as `session.branch_create` is. It needs no approval, because it is not an agent action.
-- Diagnostics record ids, sequences and `by`, never message or purpose text.
+- Any trusted in-process part can end any open line except `main`, just as it can write input to any line. Approval governs the tool's `end` like any other call.
+- Diagnostics record ids, sequences and the source kind, never message or purpose text.
 
 ## 19. Rule check
 
@@ -468,14 +503,14 @@ Rules: [design rules §1, §2 and §4](../architecture/rust-agent/principles.md)
 | Rule | How this design complies |
 | --- | --- |
 | §1 Capabilities, App Server boundary | Capabilities: TreeTimeline (existing) and BranchLine (new). TimelineTree and BranchTool's Session part are ordinary parts. App Server gains one entry and one read path, with no business code |
-| §2 Scopes | The line lifecycle stays the Session's (TimelineTree). One line's view of its lines is branch state (BranchLine). Lines influence each other only by writing input, now only between parent and child (§2 rewritten) |
+| §2 Scopes | The line lifecycle stays the Session's (TimelineTree). One line's view of its lines is branch state (BranchLine). Lines influence each other only by writing input, now only between parent and child (§2 rewritten). Capabilities affecting a branch are not bound by that rule (§4) |
 | §4.1 Command events | An end is `branch/end`. TimelineTree decides and writes `branch/ended`. A message is input whose receiver's InputQueue and Loop decide. An end of an ended line, or a refused message, writes nothing, and the reply says why |
 | §4.2 No recall after handoff | A committed message belongs to the receiver. A `branch/end` is not withdrawn |
 | §4.3 Before callbacks | None |
 | §4.4 No business meaning in core | Timeline, Dispatcher, `before` and batches are unchanged. The identity text is TimelineTree's own domain, the lines of a Session. A tool line's protocol is written where `first_input` already writes tool-specific text, in the module that owns the tool |
 | §4.5 Batches | `branch/end` stands alone. `branch/ended` comes last, after the close. The roster and the ended notice are one input |
 | §4.6 Context | Identity, roster, messages and notices are adopted inputs. `read` returns a tool result. Nothing else enters the context |
-| §4.7 Public events and services | BranchLine folds its own line's public events. The tool reads BranchLine (same plugin) and TreeCommands. `read` returns committed events as a tool result, the way Collaboration's `read` does, and no part folds another line's facts. Goal classifies the opening input by its own published A5 convention (§7.4) |
+| §4.7 Public events and services | BranchLine folds its own line's public events. The tool reads BranchLine (same plugin) and TreeCommands. `read` returns committed events as a tool result, the way Collaboration's `read` does, and no part folds another line's facts. Goal classifies the opening input by its own published A5 convention (§7.4). BranchLine and Goal read `TimelineInfo.source` through TreeCommands, a public service |
 | §4.8 Infrastructure | The facade and format changes are R1 (§17). They come from the line lifecycle itself and close within the runtime |
 | §4.9 Only facts later decisions use | `branch/end` decides the close and the restore. `branch/ended` decides restore inactivity and the roster. No UI-only event |
 | ADR 002 D1 Scope | As in §5 |
@@ -493,8 +528,8 @@ These are flows with a fake model, in `branch_flow.rs`, `flows.rs` and the App S
 2. A child sends `main` an Append: it does not wake `main`, and `main` sees it at its next request. A Steer wakes `main`'s `wait`, or starts a turn when `main` is idle. A Steer from `main` wakes an idle child.
 3. These are refused and write nothing: a sibling message, `create` on a child, `message` or `read` on a host line, and `end` on `main`.
 4. When a child's turn ends without a steer, one idle notice reaches `main`, with the turn's status. None is written when the turn steered `main`, called `end`, or left a driving input pending.
-5. Self end: the final message (steer) and `branch/end` are written, the close comes at the turn end, then `branch/ended` on `main` and the roster update. A later message is refused (`branch_ended`). The tool's `read` and `session.history` return the ended line's history.
-6. User end through `session.branch_end`: the line's turn is interrupted, and `main` gets the ended notice as a steer. `main` cannot be ended. A second end returns `branch_ended`. Submitting to an ended line returns `branch_ended`.
+5. A tool line ends itself: the final message (steer) and `branch/end` with a `tool` source are written, the close comes at the turn end, then `branch/ended` on `main` and the roster update, with no ended notice. A later message is refused (`branch_ended`). The tool's `read` and `session.history` return the ended line's history.
+6. User end through `session.branch_end`: `branch/end` has a `host` source with App Server's id, the line's turn is interrupted, and `main` gets the ended notice as a steer. `main` cannot be ended. A second end returns `branch_ended`. Submitting to an ended line returns `branch_ended`.
 7. Restore: an ended line is not opened, and neither are its descendants. A `branch/end` without a `branch/ended` gets its result written at restart.
 8. A Pursuit evaluator gets the host-line identity, and the existing Pursuit flows pass unchanged.
 9. Two lines edit the same file: the second gets `file_modified_since_read` (existing behavior).
@@ -505,6 +540,12 @@ Goal flows, in `goal.test.mjs` and `transport_flow/goal.rs` (§7.4):
 11. A line opened with `session.branch_create`, whose opening input carries the identity block, behaves exactly as `main` does: `set` on that line, its continuations, and a later operator input that resets the count.
 12. A Pursuit evaluator created under the new opening input is recognized and its conclusion is applied. The working line's count is unchanged.
 13. The identity block changes nothing in the objective and status fold, the decided set or the continuation list.
+
+Line end and sources:
+
+14. `TreeCommands.end` ends any open line except `main`, whoever calls it, for example a plugin part with a `host` source on a tool line, which gives `main` the ended notice. It refuses `main`, an unknown line and an ended line, and writes nothing.
+15. Ending a host line that has a child ends the child first, with `ancestor` set and `source` copied, then the line.
+16. `TreeCommands.list` and `info` return `source` for a new child and for a restored one, and none for `main`. The stored directory rows are byte-for-byte unchanged.
 
 ## 21. Ablation review
 
@@ -518,6 +559,8 @@ What is left, and why each piece is needed:
 | `read` for `main` | `main` checks a line's work without asking for it |
 | The idle notice | Without it `main` waits on a line that stopped silently |
 | `branch/end` and `branch/ended` | Without them a line cannot end durably, and restore reopens it |
+| `source` on the end (`BranchSource`) | A create and an end record their issuer the same way, so a plugin's end is not recorded as the line's own |
+| `TimelineInfo.source` | An opener finds its own lines without parsing prompt text |
 | The tool restricted to `main` and to tool lines | One coordinator, and creators keep their own protocols |
 | The prompt rules on files | The only guard is FileReads; the rest is protocol |
 
@@ -531,4 +574,15 @@ Removed:
 - a result contract and hand-back;
 - a line reading `main`;
 - separate events or concepts for messages (they are InputQueue modes);
-- a parent ending its children.
+- a parent ending its children through the tool;
+- a `by` field with fixed values (the existing `BranchSource` records the issuer);
+- a category field on host lines (`operation_id` already is the opener's tag);
+- a runtime check of who ends a line.
+
+## 22. Later options
+
+**Per-line narrowing within the Session's limits.** Narrowing within the Session's limits keeps the same subject, so it is compatible with design rules §2. It is not part of this design. When it is built:
+
+- **Fewer tools:** refusal at call time, as `create` on a child is refused now. The tool definitions and the cache prefix stay identical.
+- **Lower permission:** a per-line policy intersected with the Session's. It needs the per-branch Permission narrowing that [Pursuit §10](plugins/Pursuit.md#10-later-options) already names.
+- **Cheaper model:** per-line configuration set at create, before the first input. A different model shares no cache with its parent, so it trades the inherited prefix for cost.
