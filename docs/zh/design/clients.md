@@ -6,7 +6,7 @@
 
 ## 1. 客户端
 
-每个客户端都是 App Server daemon 的协议 v3 客户端。daemon 无界面、共享：每个产品 home 一个，一个执行者、多个查看者（[Tui §3.6](../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves)）。客户端只负责展示和本地交互；宿主配置、外部协议和持久化的 Session 归 App Server（[功能清单](../../feature-list.md)）。
+每个客户端都是 App Server daemon 的协议 v3 客户端。daemon 无界面、共享：每个产品 home 一个，一个执行者、多个查看者（[Tui §3.6](../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves)）。客户端负责展示、协议适配和本地交互；执行、宿主配置和持久化的 Session 归 App Server（[功能清单](../../feature-list.md)）。
 
 ```mermaid
 flowchart TB
@@ -14,7 +14,7 @@ flowchart TB
     CLI["原生 CLI dimcode<br/>行模式、滚动式、全屏"]
     WEB["Web 工作区<br/>第一阶段，回环入口"]
     DESK["Desktop<br/>独立仓库"]:::outside
-    ACP["ACP<br/>P3 草案"]:::planned
+    ACP["ACP<br/>支持子集已实现"]
     REM["远程设备<br/>P3 草案"]:::planned
   end
   P["协议 v3：所有客户端共用的契约（§2）"]
@@ -27,21 +27,21 @@ flowchart TB
   CLI --> P
   WEB --> P
   DESK --> P
-  ACP -.-> P
+  ACP --> P
   REM -.-> P
   P --> D
   classDef outside stroke-dasharray:4 3
   classDef planned stroke-dasharray:4 3,color:#888
 ```
 
-虚线框表示不在本仓库（Desktop）或还没有实现（ACP、远程设备）；虚线箭头表示还不存在的连接。
+虚线框表示不在本仓库（Desktop）或还没有实现（远程设备）；虚线箭头表示还不存在的连接。
 
 | 客户端 | 位置 | 形态 | 状态 | 设计 |
 | --- | --- | --- | --- | --- |
 | 原生 CLI `dimcode` | `crates/dim-cli`、`crates/dimcode` | 一个可执行文件里有三种界面：行模式客户端（`--no-tui` 或没有终端）、滚动式终端界面（默认）和全屏终端界面；`/tui` 在进程内切换两种终端界面 | 已实现 | [Tui](../../design/plugins/Tui.md)、[CLI 命令](cli-commands.md)、[原生 CLI 契约](../../../crates/dim-cli/README.md) |
 | Web 工作区 | `web/`（Vue 3），入口在 `crates/dim-app-server/src/web_entry.rs` | 经仅限回环地址的 web 入口访问的浏览器前端，由 `dimcode web` 或 `/web` 打开 | 第一阶段已实现 | [Web 工作区](../../design/web-workspace.md) |
 | Desktop | 独立仓库 | 桌面应用 | 不在本仓库 | 本仓库只负责它使用的 App Server 契约（§5） |
-| ACP | 计划 `crates/dim-acp` | 可复用接入方宿主 rutis 插件；`dimcode acp` 是 stdio 入口，经公开 RPC v3 连接不变的 daemon | Draft，P3，未实现（#436） | [AcpGateway](plugins/AcpGateway.md)、[实施计划](../../design/acp-gateway-implementation.md) |
+| ACP | `crates/dim-acp` | 可复用接入方宿主 rutis 插件；`dimcode acp` 是 stdio 入口，经公开 RPC v3 连接不变的 daemon | 支持子集已实现，未发布（#436，Draft PR #441）；Lody 完整聊天受客户端 MCP 阻塞 | [AcpGateway](plugins/AcpGateway.md)、[验收](../../design/acp-gateway-acceptance.md) |
 | 远程设备 | — | 经 RemoteGateway 配对的设备；将吸收第一阶段的 web 入口 | 草案，P3，未实现 | [RemoteGateway](plugins/RemoteGateway.md) |
 
 ## 2. 客户端共用的部分

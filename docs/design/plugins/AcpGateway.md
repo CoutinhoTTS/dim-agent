@@ -1,6 +1,6 @@
 # AcpGateway
 
-Status: implementation in progress; delivery evidence is in the [implementation plan](../acp-gateway-implementation.md#10-交付单元和验收顺序). Requirement: [#436](https://github.com/arcships/dim/issues/436). Scope: the client host process, outside the App Server daemon. Language: Rust. The plan defines the complete first-delivery method matrix, wiring, connection state machines, unsupported features, acceptance and issue dependencies. [中文](../../zh/design/plugins/AcpGateway.md)
+Status: the supported first-delivery subset is implemented in [Draft PR #441](https://github.com/arcships/dim/pull/441), unreleased; evidence and limits are in the [acceptance record](../acp-gateway-acceptance.md). Requirement: [#436](https://github.com/arcships/dim/issues/436). Scope: the client host process, outside the App Server daemon. Language: Rust. The [implementation contract](../acp-gateway-implementation.md) defines the method matrix, wiring, connection state machines and unsupported features. [中文](../../zh/design/plugins/AcpGateway.md)
 
 `AcpGateway` is a reusable rutis plugin that serves Dim as an ACP agent. It owns the ACP connection and its independent public-RPC connection to the existing App Server. `dimcode acp` is its first host and stdio entry; another host can mount the same implementation or launch that command. The gateway has no TUI dependency. Desktop continues to use the same daemon and persisted Sessions; it needs no separate ACP protocol implementation.
 
@@ -131,7 +131,7 @@ None for the first delivery. It does not reserve future mechanism changes as hid
 
 ### A.1 CLI entry
 
-Planned entry: `dimcode acp [--agent ID]` with the existing explicit home/cwd/server/model-profile options. It mounts the gateway in a client rutis tree, without Tui, UiLeaf or a daemon-side ACP part. It does not run a terminal update prompt or read stdin as a one-shot chat prompt. Stdout contains protocol only.
+`dimcode acp [--agent ID]` uses the existing explicit home/cwd/server/model-profile options. It mounts the gateway in a client rutis tree, without Tui, UiLeaf or a daemon-side ACP part. It does not run a terminal update prompt or read stdin as a one-shot chat prompt. Stdout contains protocol only. The separate `--auth-setup METHOD_ID` helper uses the existing interactive login flow.
 
 ### A.2 ACP methods
 
@@ -143,7 +143,7 @@ Content mappings are in plan §4.3; event projections are in §7. The existing C
 
 ### A.4 Acceptance
 
-[Plan §10](../acp-gateway-implementation.md#10-交付单元和验收顺序) defines the serial implementation units and public-flow checks, including Lody/acpx commands, isolated homes, real stdio-to-daemon integration and failure injection. Current local tools are an environment inventory, not an acceptance result. Desktop UI, Dim consuming external ACP agents, resource nodes and full Lody parity are not first-version completion claims.
+[Plan §10](../acp-gateway-implementation.md#10-交付单元和验收顺序) defines public-flow checks and isolated client commands. The [acceptance record](../acp-gateway-acceptance.md) contains actual results: acpx chat passes; Lody's initialize/new/close probe passes, but full chat is blocked by a nonempty client MCP configuration. Desktop UI, Dim consuming external ACP agents, resource nodes and full Lody parity are outside this delivery.
 
 ### A.5 Client labels
 

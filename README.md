@@ -30,6 +30,25 @@ export OPENAI_API_KEY=your-key
   --model-config crates/dim-agent-aimux/examples/openai.json
 ```
 
+## ACP clients
+
+Run the native stdio gateway from an ACP client such as acpx:
+
+```sh
+./target/debug/dimcode acp \
+  --home /absolute/path/to/isolated-home \
+  --model-config /absolute/path/to/model.json
+```
+
+The gateway connects to the existing local App Server; it owns protocol I/O,
+session projection and connection recovery. Mode/model options and managed
+account login depend on the daemon's installed capabilities. Client-supplied MCP
+servers and additional workspace roots are unsupported. Lody Nightly's automatic
+MCP injection currently blocks its full chat flow. See the
+[implementation contract](docs/design/acp-gateway-implementation.md) and
+[acceptance record](docs/design/acp-gateway-acceptance.md) for supported methods,
+limits and verification.
+
 ## Daily development
 
 With `DIMCODE_MODEL_CONFIG` set, run `./dev` to incrementally build both Rust executables, normally stop the isolated development daemon and start the new CLI. Session files are retained. The default development home is a short stable path under `~/.dimcode-dev`; `DIMCODE_HOME` selects a custom home.
@@ -73,7 +92,9 @@ The default product home is `~/.dimcode`; first-time development and tests shoul
 | Path | Responsibility |
 | --- | --- |
 | `crates/dimcode` | The single `dimcode` executable: the CLI, with the App Server as its `app-server` subcommand |
-| `crates/dim-cli` | Native scrollback client and local RPC transport |
+| `crates/dim-cli` | Native scrollback/TUI clients, ACP stdio host and daemon startup policy |
+| `crates/dim-client` | Shared protected RPC transport, product-event/Questions boundary and callback I/O |
+| `crates/dim-acp` | Client-host rutis ACP gateway and conditional Lody projection |
 | `crates/dim-app-server` | RPC, persistence, provider configuration, account-plugin bridge and daemon |
 | `crates/dim-agent-types` | Public event and data contracts |
 | `crates/dim-agent-runtime` | Agent, sessions, timelines, dispatch and lifecycle |

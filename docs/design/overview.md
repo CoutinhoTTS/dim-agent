@@ -167,7 +167,7 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 | Workflow | Process + Session | Multi-stage runs across Sessions; `workflow` tool | P2 | TypeScript first | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | Delivery to channels; `notify` tool | P2 | TypeScript first | [Notifications](plugins/Notifications.md) (withdrawn) |
 | ExternalAgent | Process | External agents as Collaboration sub-agents (a member kind) | P3 | TypeScript first | [ExternalAgent](plugins/ExternalAgent.md) |
-| AcpGateway | client host process | ACP server over existing local RPC; no daemon change in the first delivery | P3 | Rust | [AcpGateway](plugins/AcpGateway.md), [implementation plan](acp-gateway-implementation.md) |
+| AcpGateway | client host process | ACP server over existing local RPC; daemon unchanged | Supported subset implemented, unreleased (Draft PR #441) | Rust | [AcpGateway](plugins/AcpGateway.md), [acceptance](acp-gateway-acceptance.md) |
 | RemoteGateway | Process | Remote entry, pairing, devices | P3 | Rust | [RemoteGateway](plugins/RemoteGateway.md) |
 | Modality | Process | Multimodal tasks and realtime connections | P3 | TypeScript first | [Modality](plugins/Modality.md) |
 | PluginManager | Process | Marketplaces, packages, `PluginContents` | P3 | Rust | [PluginManager](plugins/PluginManager.md) |

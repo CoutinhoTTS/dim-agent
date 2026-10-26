@@ -1,6 +1,6 @@
 # AcpGateway
 
-状态：实施中，交付证据见[实施计划 §10](../../../design/acp-gateway-implementation.md#10-交付单元和验收顺序)。需求：[#436](https://github.com/arcships/dim/issues/436)。作用域：接入方宿主进程，位于 App Server daemon 之外。语言：Rust。实施计划定义首版的完整方法矩阵、接线、连接状态机、不支持项、验收和 issue 依赖。[English](../../../design/plugins/AcpGateway.md)
+状态：合同明确支持的首版子集已实现于 [Draft PR #441](https://github.com/arcships/dim/pull/441)，未发布；证据和限制见[验收记录](../../../design/acp-gateway-acceptance.md)。需求：[#436](https://github.com/arcships/dim/issues/436)。作用域：接入方宿主进程，位于 App Server daemon 之外。语言：Rust。[实施合同](../../../design/acp-gateway-implementation.md) 定义方法矩阵、接线、连接状态机和不支持项。[English](../../../design/plugins/AcpGateway.md)
 
 `AcpGateway` 是将 Dim 作为 ACP agent 提供的可复用 rutis 插件。它拥有 ACP 连接和通往现有 App Server 的独立公开 RPC 连接。`dimcode acp` 是第一个宿主和 stdio 入口；其他宿主装载同一实现，或启动该命令。网关不依赖 TUI。Desktop 继续使用同一个 daemon 和持久 Session，无须另写 ACP 协议实现。
 
@@ -131,7 +131,7 @@ stdout 仅 ACP。诊断不泄漏凭据、账户 secret、完整 prompt 或无关
 
 ### A.1 CLI 入口
 
-计划 `dimcode acp [--agent ID]`，复用明确 home/cwd/server/model-profile 选项。在客户端 rutis tree 装载 Gateway，不装 Tui、UiLeaf 或 daemon ACP 部件，不触发终端升级提示、不把 stdin 当一次性 chat prompt。
+`dimcode acp [--agent ID]` 复用明确 home/cwd/server/model-profile 选项。在客户端 rutis tree 装载 Gateway，不装 Tui、UiLeaf 或 daemon ACP 部件，不触发终端升级提示、不把 stdin 当一次性 chat prompt。stdout 只有协议；独立的 `--auth-setup METHOD_ID` helper 使用已有交互登录流程。
 
 ### A.2 ACP 方法
 
@@ -143,7 +143,7 @@ stdout 仅 ACP。诊断不泄漏凭据、账户 secret、完整 prompt 或无关
 
 ### A.4 验收
 
-[计划 §10](../../../design/acp-gateway-implementation.md#10-交付单元和验收顺序) 定义串行单元、公开 flow、Lody/acpx 命令、隔离 home、真实 stdio → daemon 和故障注入。工具盘点不是验收通过。Desktop UI、Dim 调用外部 ACP agent、资源节点和全量 Lody parity 不在首版完成声明中。
+[计划 §10](../../../design/acp-gateway-implementation.md#10-交付单元和验收顺序) 定义公开 flow 和隔离客户端命令。[验收记录](../../../design/acp-gateway-acceptance.md) 记录实际结果：acpx 聊天通过；Lody initialize/new/close 探测通过，完整聊天被非空客户端 MCP 配置阻塞。Desktop UI、Dim 调用外部 ACP agent、资源节点和全量 Lody parity 不在本次交付中。
 
 ### A.5 Client label
 

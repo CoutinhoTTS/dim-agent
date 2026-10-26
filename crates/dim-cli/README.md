@@ -7,6 +7,11 @@ and exits; redirected stdin supplies the prompt when `-p` is absent.
 `dimcode exec resume SESSION_ID -p TEXT` continues a persisted Session. Existing
 `--prompt`, piped stdin and `--resume` entries remain available.
 
+`dimcode acp [--agent ID]` mounts the reusable [ACP Gateway](../dim-acp/README.md)
+over stdin/stdout, using the same home, server and model-profile options. It has
+no terminal UI; stdout contains ACP frames. Supported methods, lifecycle and
+client limitations are in the [ACP contract](../../docs/design/acp-gateway-implementation.md).
+
 `exec --json` writes one public JSON-RPC notification per line for the selected
 Session. Session handles and diagnostics go to stderr. The stream preserves
 public fields, includes live observations after attach and does not replay stored
