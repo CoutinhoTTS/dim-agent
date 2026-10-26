@@ -75,9 +75,17 @@ pub trait Document {
     fn estimate(&self, index: usize, cols: usize) -> usize;
     /// The text of block `index` when it is a user message.
     fn message(&self, index: usize) -> Option<&str>;
-    /// How many times a block was rewritten in place (a streamed code block
-    /// grows line by line) and the stable id of the newest.
-    fn rewritten(&self) -> (u64, usize);
+    /// The member cards of block `index` a pick can stop on, by delegation.
+    fn cards(&self, index: usize) -> Vec<String>;
+    /// Rows `[start, end)` of block `index` at `cols` that card `card` takes.
+    fn card_rows(&self, index: usize, cols: usize, card: &str) -> Option<(usize, usize)>;
+    /// The member card that row `row` of block `index` at `cols` opens.
+    fn card_at(&self, index: usize, cols: usize, row: usize) -> Option<String>;
+    /// How many times blocks were rewritten in place (a streamed code block
+    /// grows line by line, a delegation card changes), and the stable ids
+    /// rewritten after rewrite `since`; `None` when those are no longer
+    /// known.
+    fn rewritten(&self, since: u64) -> (u64, Option<Vec<usize>>);
 }
 
 /// What a mouse report did.
@@ -225,8 +233,10 @@ pub struct FullScreen {
     /// The last frame had an overlay: the wheel belongs to it.
     overlay_open: bool,
     selection: Option<Selection>,
-    /// Block id of the user message picked with Tab.
+    /// Block id of the user message or member card picked with Tab.
     focus: Option<usize>,
+    /// The picked member card in that block, by delegation id.
+    focus_card: Option<String>,
     /// Rows as last painted; `None` entries are unknown (repaint).
     painted: Vec<Option<String>>,
     cursor_visible: bool,
@@ -255,6 +265,7 @@ impl FullScreen {
             overlay_open: false,
             selection: None,
             focus: None,
+            focus_card: None,
             painted: Vec::new(),
             cursor_visible: true,
             cursor_at: None,
@@ -361,51 +372,81 @@ impl FullScreen {
         }
     }
 
-    /// True while a user message is picked.
+    /// True while a user message or member card is picked.
     pub fn focused(&self) -> bool {
         self.focus.is_some()
     }
 
-    /// Picks the user message before the picked one (the newest when none
-    /// is), Amp's Tab. Stays on the oldest.
+    /// Picks the message or card before the picked one (the newest when
+    /// none is), Amp's Tab. Stays on the oldest.
     pub fn focus_older(&mut self, doc: &dyn Document) {
         let from = match self.focus {
-            Some(id) => id.saturating_sub(doc.dropped()),
+            Some(id) => {
+                let index = id.saturating_sub(doc.dropped()).min(doc.len());
+                let stops = if index < doc.len() {
+                    stops(doc, index)
+                } else {
+                    Vec::new()
+                };
+                if let Some(at) = stops.iter().position(|stop| *stop == self.focus_card)
+                    && at > 0
+                {
+                    self.focus_card = stops[at - 1].clone();
+                    self.reveal_focus(doc);
+                    return;
+                }
+                index
+            }
             None => doc.len(),
         };
-        if let Some(index) = (0..from.min(doc.len()))
-            .rev()
-            .find(|&i| doc.message(i).is_some())
-        {
-            self.focus = Some(doc.dropped() + index);
-            self.reveal_focus(doc);
+        for index in (0..from.min(doc.len())).rev() {
+            if let Some(stop) = stops(doc, index).pop() {
+                self.focus = Some(doc.dropped() + index);
+                self.focus_card = stop;
+                self.reveal_focus(doc);
+                return;
+            }
         }
     }
 
-    /// Picks the user message after the picked one; past the newest the
+    /// Picks the message or card after the picked one; past the newest the
     /// pick ends and the view follows the bottom again (Amp's Shift+Tab).
     pub fn focus_newer(&mut self, doc: &dyn Document) {
         let Some(id) = self.focus else { return };
-        let from = id.saturating_sub(doc.dropped()) + 1;
-        match (from..doc.len()).find(|&i| doc.message(i).is_some()) {
-            Some(index) => {
-                self.focus = Some(doc.dropped() + index);
+        let index = id.saturating_sub(doc.dropped());
+        if index < doc.len() {
+            let stops = stops(doc, index);
+            if let Some(at) = stops.iter().position(|stop| *stop == self.focus_card)
+                && at + 1 < stops.len()
+            {
+                self.focus_card = stops[at + 1].clone();
                 self.reveal_focus(doc);
-            }
-            None => {
-                self.focus = None;
-                self.follow();
+                return;
             }
         }
+        for index in index + 1..doc.len() {
+            if let Some(stop) = stops(doc, index).into_iter().next() {
+                self.focus = Some(doc.dropped() + index);
+                self.focus_card = stop;
+                self.reveal_focus(doc);
+                return;
+            }
+        }
+        self.clear_focus();
+        self.follow();
     }
 
     /// Ends the pick, leaving the view where it is.
     pub fn clear_focus(&mut self) {
         self.focus = None;
+        self.focus_card = None;
     }
 
     /// The picked message's text.
     pub fn focused_text(&self, doc: &dyn Document) -> Option<String> {
+        if self.focus_card.is_some() {
+            return None;
+        }
         let index = self.focus?.checked_sub(doc.dropped())?;
         (index < doc.len())
             .then(|| doc.message(index))
@@ -413,15 +454,37 @@ impl FullScreen {
             .map(str::to_owned)
     }
 
-    /// Scrolls so the picked message's box is on screen, its top border at
-    /// the top of the viewport when it was not.
+    /// The picked member card's delegation.
+    pub fn focused_card(&self) -> Option<&str> {
+        self.focus_card.as_deref()
+    }
+
+    /// The member card a click on row `row` of block `block` (stable id)
+    /// opens.
+    pub fn card_at(&self, doc: &dyn Document, block: usize, row: usize) -> Option<String> {
+        let index = block
+            .checked_sub(doc.dropped())
+            .filter(|index| *index < doc.len())?;
+        doc.card_at(index, self.layout_cols, row)
+    }
+
+    /// Scrolls so the picked message's box or member card is on screen, its
+    /// top at the top of the viewport when it was not: a card inside a tall
+    /// tool group is revealed itself, not the group's first row.
     fn reveal_focus(&mut self, doc: &dyn Document) {
         self.sync(doc);
         let Some(index) = self.focus.and_then(|id| id.checked_sub(self.base)) else {
             return;
         };
-        let (Some(&start), Some(&end)) = (self.starts.get(index), self.starts.get(index + 1))
-        else {
+        let rows = match self.focus_card {
+            Some(_) => self.card_focus_rows(doc),
+            None => self
+                .starts
+                .get(index)
+                .zip(self.starts.get(index + 1))
+                .map(|(s, e)| (*s, *e)),
+        };
+        let Some((start, end)) = rows else {
             return;
         };
         let top = self.top();
@@ -557,6 +620,7 @@ impl FullScreen {
             palette,
         );
         let focus = self.focus_rows();
+        let card = self.card_focus_rows(doc);
         let mut screen: Vec<String> = Vec::with_capacity(rows);
         for y in 0..self.view_rows {
             let body = match self.at(y) {
@@ -566,6 +630,9 @@ impl FullScreen {
                     match focus {
                         Some((start, end)) if (start..=end).contains(&index) => {
                             focus_row(row, index - start, end - start, cols, palette)
+                        }
+                        _ if card.is_some_and(|(start, end)| (start..end).contains(&index)) => {
+                            card_focus_row(row, width, palette)
                         }
                         _ => match self.selection.and_then(|s| s.columns(index)) {
                             Some(range) => highlight(row, range, width),
@@ -682,7 +749,7 @@ impl FullScreen {
             };
         }
         if self.focus.is_some_and(|id| id < dropped) {
-            self.focus = None;
+            self.clear_focus();
         }
         self.base = dropped;
         if self.heights.len() > doc.len() {
@@ -690,15 +757,18 @@ impl FullScreen {
             self.measured.truncate(doc.len());
             changed = true;
         }
-        // A block rewritten in place is measured again.
-        let (rewrites, id) = doc.rewritten();
+        // Blocks rewritten in place are measured again.
+        let (rewrites, ids) = doc.rewritten(self.rewrites);
         if rewrites != self.rewrites {
             self.rewrites = rewrites;
-            if let Some(index) = id.checked_sub(dropped).filter(|i| *i < self.heights.len()) {
-                self.heights[index] = doc.estimate(index, self.layout_cols);
-                self.measured[index] = false;
-                self.cache.remove(&id);
-                changed = true;
+            let ids = ids.unwrap_or_else(|| (dropped..dropped + self.heights.len()).collect());
+            for id in ids {
+                if let Some(index) = id.checked_sub(dropped).filter(|i| *i < self.heights.len()) {
+                    self.heights[index] = doc.estimate(index, self.layout_cols);
+                    self.measured[index] = false;
+                    self.cache.remove(&id);
+                    changed = true;
+                }
             }
         }
         while self.heights.len() < doc.len() {
@@ -845,10 +915,22 @@ impl FullScreen {
     /// block's leading blank row, its rows, and the next block's leading
     /// blank row.
     fn focus_rows(&self) -> Option<(usize, usize)> {
+        if self.focus_card.is_some() {
+            return None;
+        }
         let index = self.focus?.checked_sub(self.base)?;
         let start = *self.starts.get(index)?;
         let end = *self.starts.get(index + 1)?;
         Some((start, end.min(self.content_rows())))
+    }
+
+    /// Rows `[start, end)` of the picked member card.
+    fn card_focus_rows(&self, doc: &dyn Document) -> Option<(usize, usize)> {
+        let card = self.focus_card.as_deref()?;
+        let index = self.focus?.checked_sub(self.base)?;
+        let start = *self.starts.get(index)?;
+        let (first, last) = doc.card_rows(index, self.layout_cols, card)?;
+        Some((start + first, start + last))
     }
 
     fn selected_text(&self, selection: &Selection, doc: &dyn Document) -> String {
@@ -1036,6 +1118,27 @@ fn focus_row(row: &str, offset: usize, last: usize, cols: usize, p: &Palette) ->
         " ".repeat(pad),
         edge("┃")
     )
+}
+
+/// A row of the picked member card: an accent bar in its margin column,
+/// the row itself unchanged.
+fn card_focus_row(row: &str, width: usize, p: &Palette) -> String {
+    let rest = row.strip_prefix(' ').unwrap_or(row);
+    format!(
+        "{}{}",
+        fg("▌", &p.accent),
+        clip(rest, width.saturating_sub(1)).0
+    )
+}
+
+/// What a pick can stop on in block `index`: a user message, or each of
+/// its member cards.
+fn stops(doc: &dyn Document, index: usize) -> Vec<Option<String>> {
+    if doc.message(index).is_some() {
+        vec![None]
+    } else {
+        doc.cards(index).into_iter().map(Some).collect()
+    }
 }
 
 /// Where an overlay's top-left cell goes: centred across the screen, and
@@ -1229,8 +1332,17 @@ mod tests {
         fn estimate(&self, _index: usize, _cols: usize) -> usize {
             2
         }
-        fn rewritten(&self) -> (u64, usize) {
-            (0, 0)
+        fn rewritten(&self, _since: u64) -> (u64, Option<Vec<usize>>) {
+            (0, Some(Vec::new()))
+        }
+        fn cards(&self, _index: usize) -> Vec<String> {
+            Vec::new()
+        }
+        fn card_rows(&self, _index: usize, _cols: usize, _card: &str) -> Option<(usize, usize)> {
+            None
+        }
+        fn card_at(&self, _index: usize, _cols: usize, _row: usize) -> Option<String> {
+            None
         }
         fn message(&self, index: usize) -> Option<&str> {
             let (user, rows) = &self.blocks[index];

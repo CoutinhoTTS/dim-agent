@@ -316,6 +316,21 @@ fn delivery(id: &str, sequence: u64, request: &str) -> Value {
     )
 }
 
+/// The delegation's terminal fact: its card no longer keeps the member observed.
+fn ended(id: &str, sequence: u64, request: &str) -> Value {
+    fact(
+        id,
+        sequence,
+        sequence * 1000,
+        "collaboration",
+        "result",
+        json!({
+            "request_event_id":request,"agent_id":"reviewer","session_id":"member",
+            "status":"completed","text":"ended before viewing",
+        }),
+    )
+}
+
 fn state(wire: &mut Wire, branch: &str) {
     wire.notice(
         "session.state",
@@ -678,8 +693,13 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
             command("finished-command",7,7000,"finished retained command"),
             fact("finished-end",8,8000,"exec","ended",json!({"task_id":"finished-command","status":"completed","result":{"content":"already complete"}})),
         ],"through":8,"nextAfter":8,"done":true}));
+        // The cards' one shared member observation; refusing it leaves the
+        // stop targets as they are.
+        let observe = wire.read("session.attach");
+        assert_eq!(observe["params"], json!({"sessionId":"member"}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
+        wire.send(json!({"jsonrpc":"2.0","id":observe["id"],"error":{"code":-32000,"message":"observation refused"}}));
         state(wire, "child");
         let child = wire.read("session.history");
         wire.reply(&child, json!({"events":[command("child-command",1,10000,"child running command")],"through":1,"nextAfter":1,"done":true}));
@@ -1028,10 +1048,11 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[delegation("leader-member",1,"Inspect member code"),delivery("leader-delivery",2,"leader-member")],"through":2,"nextAfter":2,"done":true}));
-        let providers = wire.read("account.providers");
-        wire.reply(&providers, json!([]));
+        // The unfinished delegation's card observes its member at once.
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"member"}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
         wire.reply(&attach, json!({}));
         let first = wire.read("session.history");
         assert_eq!(first["params"], json!({"sessionId":"member","branchId":"main","after":0,"limit":256}));
@@ -1129,11 +1150,13 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
             let attach = wire.read("session.attach");
             wire.reply(&attach, json!({}));
             let history = wire.read("session.history");
+            // Ended delegations: only the selected detail observes a member.
             wire.reply(&history, json!({"events":[
                 delegation("request-a",1,"old member detail"),delivery("delivery-a",2,"request-a"),
                 delegation("request-b",3,"new member detail"),
                 fact("delivery-b",4,4000,"collaboration","delivered",json!({"op_event_id":"request-b","status":"ok","agent_id":"reviewer-b","session_id":"member-b"})),
-            ],"through":4,"nextAfter":4,"done":true}));
+                ended("result-b",5,"request-b"),ended("result-a",6,"request-a"),
+            ],"through":6,"nextAfter":6,"done":true}));
             let providers = wire.read("account.providers");
             wire.reply(&providers, json!([]));
             let first_attach = wire.read("session.attach");
@@ -1146,16 +1169,19 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
             };
             ready.send(()).unwrap();
             control.recv_timeout(Duration::from_secs(10)).unwrap();
-            wire.quiet(Duration::from_millis(200));
-            ready.send(()).unwrap();
-            wire.reply(&held, if close_during_attach { json!({}) } else { json!({"events":[fact("obsolete-text",1,1000,"step","text",json!({"turn_id":"old","request_id":"old","delta":"obsolete member history"}))],"through":1,"nextAfter":1,"done":true}) });
-            let detach = wire.read("session.detach");
-            assert_eq!(detach["params"], json!({"sessionId":"member"}));
-            wire.reply(&detach, json!({}));
+            // Another member is its own observation: it need not wait for
+            // the old one, whose late reply cannot reach it.
             let attach = wire.read("session.attach");
             assert_eq!(attach["params"], json!({"sessionId":"member-b"}));
+            ready.send(()).unwrap();
+            wire.reply(&held, if close_during_attach { json!({}) } else { json!({"events":[fact("obsolete-text",1,1000,"step","text",json!({"turn_id":"old","request_id":"old","delta":"obsolete member history"}))],"through":1,"nextAfter":1,"done":true}) });
             wire.reply(&attach, json!({}));
-            let history = wire.read("session.history");
+            let mut requests = [wire.read_any(), wire.read_any()];
+            requests.sort_by_key(|request| request["method"].as_str().unwrap().to_owned());
+            let [detach, history] = requests;
+            assert_eq!(detach["method"], "session.detach");
+            assert_eq!(detach["params"], json!({"sessionId":"member"}));
+            wire.reply(&detach, json!({}));
             assert_eq!(history["params"], json!({"sessionId":"member-b","branchId":"main","after":0,"limit":256}));
             wire.reply(&history, json!({"events":[fact("new-text",1,1000,"step","text",json!({"turn_id":"new","request_id":"new","delta":"only the new member"}))],"through":1,"nextAfter":1,"done":true}));
             let detach = wire.read("session.detach");
@@ -1198,7 +1224,7 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
             let attach = wire.read("session.attach");
             wire.reply(&attach, json!({}));
             let history = wire.read("session.history");
-            wire.reply(&history, json!({"events":[delegation("request",1,"member detail"),delivery("delivered",2,"request")],"through":2,"nextAfter":2,"done":true}));
+            wire.reply(&history, json!({"events":[delegation("request",1,"member detail"),delivery("delivered",2,"request"),ended("result",3,"request")],"through":3,"nextAfter":3,"done":true}));
             let providers = wire.read("account.providers");
             wire.reply(&providers, json!([]));
             let attach = wire.read("session.attach");
@@ -1246,7 +1272,7 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
             assert_eq!(submit["params"]["sessionId"], "session");
             assert_eq!(submit["params"]["text"], "leader survives member error");
             wire.reply(&submit, json!({"event":{}}));
-            wire.event(3,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader continued after member detail"}));
+            wire.event(4,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader continued after member detail"}));
             let mut line = String::new();
             assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected automatic reopen or member mutation: {line}");
         });
@@ -1291,7 +1317,7 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
         let attach = wire.read("session.attach");
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
-        wire.reply(&history, json!({"events":[delegation("request",1,"member approval detail"),delivery("delivered",2,"request")],"through":2,"nextAfter":2,"done":true}));
+        wire.reply(&history, json!({"events":[delegation("request",1,"member approval detail"),delivery("delivered",2,"request"),ended("result",3,"request")],"through":3,"nextAfter":3,"done":true}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let attach = wire.read("session.attach");
@@ -1301,7 +1327,7 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
         wire.notice("approval.request", json!({"sessionId":"member","branchId":"main","requestId":"member-approval","call":{"name":"exec","input":{"command":"member must not be approved here"}},"reason":"member approval is read-only"}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"leader-approval","call":{"name":"exec","input":{"command":"leader command"}},"reason":"leader approval takes priority"}));
         wire.notice("approval.cancelled", json!({"sessionId":"member","branchId":"main","requestId":"leader-approval","reason":"member request cancelled"}));
-        wire.event(3,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader live after member cancellation"}));
+        wire.event(4,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader live after member cancellation"}));
         let approval = wire.read("approval.respond");
         assert_eq!(approval["params"]["sessionId"], "session");
         assert_eq!(approval["params"]["requestId"], "leader-approval");
@@ -1315,7 +1341,7 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
         assert_eq!(submit["params"]["sessionId"], "session");
         assert_eq!(submit["params"]["text"], "leader after approval");
         wire.reply(&submit, json!({"event":{}}));
-        wire.event(4,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader input after observation cleanup"}));
+        wire.event(5,"text",json!({"turn_id":"leader","request_id":"leader","delta":"leader input after observation cleanup"}));
         let mut line = String::new();
         assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected member action or reopen: {line}");
     });
@@ -1640,6 +1666,252 @@ fn tui_workflow_inventory_errors_block_stop_all_until_reopen_and_stops_follow_ot
     terminal.until("nightly-check");
     terminal.until("Stopped");
     daemon.join().unwrap();
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}
+
+/// The leader's `agent` request call and the delegation it made.
+fn agent_request(
+    sequence: u64,
+    request: &str,
+    call: &str,
+    target: Value,
+    prompt: &str,
+) -> [Value; 3] {
+    [
+        fact(
+            &format!("use-{sequence}"),
+            sequence,
+            sequence * 1000,
+            "step",
+            "tool-use",
+            json!({"turn_id":"turn","request_id":request,"call":{"id":call,"name":"agent","input":{"action":"request","prompt":prompt}}}),
+        ),
+        fact(
+            &format!("req-{sequence}"),
+            sequence + 1,
+            (sequence + 1) * 1000,
+            "collaboration",
+            "request",
+            json!({"turn_id":"turn","request_id":request,"call_id":call,"target":target,"prompt":prompt}),
+        ),
+        fact(
+            &format!("result-{sequence}"),
+            sequence + 2,
+            (sequence + 2) * 1000,
+            "step",
+            "tool-result",
+            json!({"turn_id":"turn","request_id":request,"results":[{"call_id":call,"result":{"content":"{\"status\":\"accepted\"}"}}]}),
+        ),
+    ]
+}
+
+fn delivered(sequence: u64, request: &str, agent: &str, session: &str) -> Value {
+    fact(
+        &format!("delivered-{sequence}"),
+        sequence,
+        sequence * 1000,
+        "collaboration",
+        "delivered",
+        json!({"op_event_id":request,"status":"ok","agent_id":agent,"session_id":session}),
+    )
+}
+
+fn member_event(wire: &mut Wire, member: &str, event: Value) {
+    wire.notice(
+        "session.event",
+        json!({"sessionId":member,"branchId":"main","event":event}),
+    );
+}
+
+#[test]
+fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
+    let home = Home::new();
+    let (opened, wait_opened) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["agent.list"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        let mut events = Vec::new();
+        // A named Agent and a temporary profile reuse one call id in two batches.
+        events.extend(agent_request(1, "r1", "call-1", json!({"kind":"agent","agent_id":"reviewer"}), "Check crate dependencies"));
+        events.push(delivered(4, "req-1", "reviewer", "member-a"));
+        events.extend(agent_request(5, "r2", "call-1", json!({"kind":"temporary","profile":{"name":"inspect tests","description":"","systemPrompt":""}}), "Review the integration coverage"));
+        events.push(delivered(8, "req-5", "temporary-agent", "member-b"));
+        // A provider member's opaque ID looks like a Session ID.
+        events.extend(agent_request(9, "r3", "call-3", json!({"kind":"agent","agent_id":"external-agent:node:agent"}), "Inspect the repository"));
+        events.push(delivered(12, "req-9", "external-agent:node:agent", "member-c"));
+        wire.reply(&history, json!({"events":events,"through":12,"nextAfter":12,"done":true}));
+        // One shared Agent list names the cards; each native member is
+        // attached once; the provider member never is.
+        let mut requests = [wire.read_any(), wire.read_any(), wire.read_any()];
+        requests.sort_by_key(|request| format!("{}{}", request["method"], request["params"]));
+        let [list, attach_a, attach_b] = requests;
+        assert_eq!(list["method"], "agent.list");
+        assert_eq!(attach_a["params"], json!({"sessionId":"member-a"}));
+        assert_eq!(attach_b["params"], json!({"sessionId":"member-b"}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.reply(&list, json!([{"agentId":"reviewer","default":false,"name":"Code Reviewer","description":"","sessions":1}]));
+        wire.reply(&attach_a, json!({}));
+        wire.reply(&attach_b, json!({}));
+        // Members read their history through one page slot.
+        for _ in 0..2 {
+            let page = wire.read("session.history");
+            wire.quiet(Duration::from_millis(150));
+            let events = if page["params"]["sessionId"] == "member-a" {
+                json!([
+                    fact("configured-a",1,1000,"context","configured",json!({"timeline":"main","revision":"a","previous":null,"prompt":null,"provider_id":"member-provider","model_id":"member-model"})),
+                    fact("read-a",2,2000,"step","tool-use",json!({"turn_id":"a","request_id":"a","call":{"id":"read","name":"read","input":{"path":"Cargo.toml"}}})),
+                ])
+            } else {
+                assert_eq!(page["params"]["sessionId"], "member-b");
+                json!([])
+            };
+            wire.reply(&page, json!({"events":events,"through":2,"nextAfter":2,"done":true}));
+        }
+        // A live model change is the member's own fact.
+        member_event(wire, "member-a", fact("configured-a2",3,3000,"context","configured",json!({"timeline":"main","revision":"a2","previous":"a","prompt":null,"provider_id":"member-provider","model_id":"member-model-2"})));
+        wait_opened.recv_timeout(PATIENCE).unwrap();
+        // The opened detail shares the card's observation: no second attach.
+        wire.quiet(Duration::from_millis(150));
+        event(wire, "main", fact("leader-result",13,20000,"collaboration","result",json!({"request_event_id":"req-5","agent_id":"temporary-agent","session_id":"member-b","status":"completed","text":"Found two missing restart cases"})));
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"member-b"}));
+        wire.reply(&detach, json!({}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(!line.contains("member-c"), "provider member addressed as a Session: {line}");
+            assert!(!line.contains("session.attach"), "unexpected observation: {line}");
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.arg("--fullscreen");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("Agent: Code Reviewer");
+    terminal.until("member-provider / member-model-2");
+    // Drawn with the first frame; it has no conversation or Session stop.
+    assert!(
+        terminal
+            .transcript
+            .contains("Provider member: external-agent:node:agent")
+    );
+    // Tab picks the newest Session card; Enter opens its member read-only.
+    terminal.write(b"\t\r");
+    terminal.until("Member Session: member-b");
+    terminal.until("Member model: No model observed");
+    terminal.write(b"\x1b[27u");
+    // Back on the card: the next older card opens its own member.
+    terminal.write(b"\x1b[A\r");
+    terminal.until("Member Session: member-a");
+    terminal.until("Member model: member-provider / member-model-2");
+    terminal.write(b"\x1b[27u");
+    opened.send(()).unwrap();
+    // The real result ends the card, while its detail is closed.
+    terminal.until("Completed");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    assert!(!terminal.transcript.contains("Member Session: member-c"));
+}
+
+#[test]
+fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavailable() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        let mut events = Vec::new();
+        events.extend(agent_request(1, "r1", "call-1", json!({"kind":"agent","agent_id":"finished"}), "Restored ended delegation"));
+        events.push(delivered(4, "req-1", "finished", "member-ended"));
+        events.push(fact("ended",5,5000,"collaboration","result",json!({"request_event_id":"req-1","agent_id":"finished","session_id":"member-ended","status":"completed","text":"restored result text"})));
+        events.extend(agent_request(6, "r2", "call-2", json!({"kind":"agent","agent_id":"running"}), "Still running delegation"));
+        events.push(delivered(9, "req-6", "running", "member-running"));
+        wire.reply(&history, json!({"events":events,"through":9,"nextAfter":9,"done":true}));
+        // Only the unfinished delegation's member is observed.
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"], json!({"sessionId":"member-running"}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.send(json!({"jsonrpc":"2.0","id":attach["id"],"error":{"code":-32000,"message":"member unavailable"}}));
+        // The unfinished card does not reattach after a known failure.
+        let mut line = String::new();
+        assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected observation: {line}");
+    });
+    let mut command = home.command();
+    command.arg("--fullscreen");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("No model observed");
+    terminal.until("(observation unavailable)");
+    assert!(terminal.transcript.contains("restored result text"));
+    // The ended card has no observation to show, and no model is copied in.
+    assert!(!terminal.transcript.contains("test / model · Completed"));
+    thread::sleep(Duration::from_millis(300));
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["agent.list"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        // A failed request and a still-starting one name Agents the list
+        // never returns.
+        let mut events = Vec::new();
+        events.extend(agent_request(
+            1,
+            "r1",
+            "call-1",
+            json!({"kind":"agent","agent_id":"deleted-agent"}),
+            "Ask a deleted Agent",
+        ));
+        events.push(fact(
+            "failed-4",
+            4,
+            4000,
+            "collaboration",
+            "delivered",
+            json!({"op_event_id":"req-1","status":"error","error":"agent_not_found"}),
+        ));
+        events.extend(agent_request(
+            5,
+            "r2",
+            "call-2",
+            json!({"kind":"agent","agent_id":"unlisted-agent"}),
+            "Ask an unlisted Agent",
+        ));
+        wire.reply(
+            &history,
+            json!({"events":events,"through":7,"nextAfter":7,"done":true}),
+        );
+        let mut requests = [wire.read_any(), wire.read_any()];
+        requests.sort_by_key(|request| request["method"].to_string());
+        let [providers, list] = requests;
+        assert_eq!(providers["method"], "account.providers");
+        assert_eq!(list["method"], "agent.list");
+        wire.reply(&providers, json!([]));
+        wire.reply(&list, json!([]));
+        // One read covered both ids; a reply without them is not retried.
+        wire.quiet(Duration::from_millis(1000));
+    });
+    let mut command = home.command();
+    command.arg("--fullscreen");
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("Agent: unlisted-agent");
+    daemon.join().unwrap();
+    assert!(terminal.transcript.contains("agent_not_found"));
     terminal.signal(libc::SIGKILL);
     terminal.wait();
 }

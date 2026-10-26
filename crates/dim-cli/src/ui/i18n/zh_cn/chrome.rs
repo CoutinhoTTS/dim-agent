@@ -73,6 +73,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Agent is starting; no member Session to stop yet" => {
             "智能体正在启动，尚无可停止的成员会话"
         }
+        "Provider members are controlled by the leader; no stop here" => {
+            "提供方成员由主智能体控制，此处不能停止"
+        }
+        "Provider members have no conversation to open here" => "提供方成员没有可在此打开的会话",
+        "That delegation is no longer in this transcript" => "该委派已不在当前对话记录中",
+        "Member model" => "成员模型",
+        "No model observed" => "尚未观察到模型",
+        "Observing member..." => "正在观察成员…",
+        "{model} (observation unavailable)" => "{model}（观察不可用）",
+        "{model} (Session closed)" => "{model}（会话已关闭）",
+        "{model} (last observed)" => "{model}（最后观察到）",
+        "Agent: {name}" => "智能体：{name}",
+        "Provider member: {name}" => "提供方成员：{name}",
+        "Task: {task}" => "任务：{task}",
+        "Activity: {activity}" => "活动：{activity}",
+        "Activity: not observed on this attachment" => "活动：本次连接未观察到",
+        "Result: {result}" => "结果：{result}",
+        "Controlled by the leader" => "由主智能体控制",
+        "› Open member conversation" => "› 打开成员会话",
         "Copied to clipboard" => "已复制到剪贴板",
         "Opened link" => "已打开链接",
         "Link: {url}" => "链接：{url}",
@@ -277,6 +296,22 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "current" => "当前",
         "Edit models" => "编辑模型",
         "Editing models is not available yet" => "暂不支持编辑模型",
+        "Enter select · Esc back" => "Enter 选择 · Esc 返回",
+        "Subagent models" => "子代理模型",
+        "Subagent models: {policy}" => "子代理模型：{policy}",
+        "Fixed subagent model" => "固定子代理模型",
+        "Agent choice (default)" => "由 Agent 决定（默认）",
+        "Agent choice" => "由 Agent 决定",
+        "Inherit requesting branch" => "继承发起请求的分支",
+        "Fixed model" => "固定模型",
+        "Applies to new members, including named Agents." => "适用于新成员，包括具名 Agent。",
+        "Existing members keep their models." => "已有成员保留其模型。",
+        "unknown" => "未知",
+        "Subagent model policy saved" => "子代理模型策略已保存",
+        "Subagent model policy changed elsewhere; choose again to reread it" => {
+            "子代理模型策略已在别处更改；再次选择以重新读取"
+        }
+        "Subagent model policy: {error}" => "子代理模型策略：{error}",
         "drawing diagram… {count} lines" => "正在绘制图表…已收到 {count} 行",
         // notify.rs
         "Task complete" => "任务已完成",

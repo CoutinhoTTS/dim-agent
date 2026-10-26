@@ -199,6 +199,20 @@ instead use `mcp::install` and the declared Session loader. Its typed port is a
 dependency of `McpPlugin`; connection leases never become a second lifecycle engine. No second
 loader, editable-layer target or SQLite dependency is required by this port.
 
+### Subagent model policy
+
+With local execution, `collaboration.model_policy({})` returns `{revision, policy}` and
+`collaboration.set_model_policy({expectedRevision, policy})` replaces it and returns the new
+`revision` (`collaboration_model_policy_conflict` for a stale revision, invalid params for an
+unknown field or mode, an empty ID or a model with another mode). `policy` is
+`{"mode":"agent"}` (default), `{"mode":"inherit"}` or
+`{"mode":"fixed","model":{"providerId","modelId"}}`, stored as the user source `collaboration`.
+Collaboration reads it once for each new member: `inherit` copies the requesting branch's adopted
+model selection (captured when the request is consumed) and `fixed` resolves its model as a
+profile model would; both override the requested profile's model. A failed read or resolution
+refuses the request with `member_create_failed`. See
+[subagent model policy](../../docs/design/subagent-model-policy.md).
+
 ### Permission command rules
 
 With local execution, `permission.rules({})` returns `{revision, commandRules}` and

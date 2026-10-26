@@ -47,7 +47,9 @@ use crate::ui::transcript::blocks::{THINKING_ROWS, settled_thinking};
 use crate::ui::transcript::commit::CommitState;
 use crate::ui::transcript::reveal::Reveal;
 use crate::ui::transcript::stream::{StreamPlanner, TextBlock, render_open};
-use crate::ui::transcript::tool_group::{Detail, project_group, render_group};
+use crate::ui::transcript::tool_group::{
+    Detail, action_at, card_actions, card_rows, project_group, render_group,
+};
 use crate::ui::upgrade_dialog::UpgradeDialog;
 
 /// The stop reason and the note committed when the user interrupts a run.
@@ -65,6 +67,8 @@ const RESIZE_MAX_DELAY: Duration = Duration::from_millis(500);
 const HISTORY_MAX_BLOCKS: usize = 5_000;
 /// Rows of history a scrollback rewrite lays out at most.
 const REWRITE_MAX_ROWS: usize = 10_000;
+/// In-place rewrites fullscreen can catch up on before it lays out again.
+const REWRITE_LOG: usize = 64;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// How often the loop looks at session updates while input is idle.
 const SESSION_POLL: Duration = Duration::from_millis(40);
@@ -424,6 +428,16 @@ fn run_terminal(
                         app.set_notice(t("Copied to clipboard"));
                         dirty = true;
                     }
+                    MouseOutcome::Click {
+                        block: Some(block),
+                        row,
+                    } if full.card_at(&app, block, row).is_some() => {
+                        // A delegation card opens its member, by the card's
+                        // own identity rather than the row it was drawn on.
+                        let card = full.card_at(&app, block, row).expect("clicked card");
+                        app.open_card(&card);
+                        dirty = true;
+                    }
                     MouseOutcome::Click { block, row } => {
                         // A committed group opens in place: the view holds
                         // still rather than following the bottom. The press
@@ -465,6 +479,12 @@ fn run_terminal(
                     KeyCode::BackTab | KeyCode::Down => full.focus_newer(&app),
                     KeyCode::Tab => full.focus_newer(&app),
                     KeyCode::Esc => full.clear_focus(),
+                    // A picked card opens its member; the pick stays for Esc
+                    // to come back to.
+                    KeyCode::Enter if key.mods.0 == 0 && full.focused_card().is_some() => {
+                        let card = full.focused_card().expect("picked card").to_owned();
+                        app.open_card(&card);
+                    }
                     KeyCode::Char('e') if key.mods.0 == 0 => {
                         if let Some(text) = full.focused_text(&app) {
                             app.composer.set_draft(&text);
@@ -688,8 +708,15 @@ struct App {
     /// The history id of the block the newest stream batch began; its next
     /// batches rewrite it.
     stream_block: Option<usize>,
-    /// How many times a history block was rewritten, and the newest one.
-    rewritten: (u64, usize),
+    /// How many times history blocks were rewritten, and the ids of the
+    /// newest rewrites (bounded by `REWRITE_LOG`).
+    rewrites: u64,
+    rewrite_log: std::collections::VecDeque<usize>,
+    /// Committed groups (history ids) whose delegation cards still change:
+    /// fullscreen redraws them from the snapshot.
+    card_blocks: Vec<usize>,
+    /// The second their running time was last drawn for.
+    card_second: u64,
     session_id: String,
     /// The default tool-approval mode (wire name).
     approvals: String,
@@ -833,7 +860,10 @@ impl App {
             history: Default::default(),
             dropped: 0,
             stream_block: None,
-            rewritten: (0, 0),
+            rewrites: 0,
+            rewrite_log: Default::default(),
+            card_blocks: Vec::new(),
+            card_second: 0,
             session_id: String::new(),
             approvals: "workspace-write".to_owned(),
             approvals_toast: false,
@@ -1043,8 +1073,17 @@ impl App {
         if self.exit_armed_until.is_some_and(|until| now >= until) {
             self.exit_armed_until = None;
         }
-        // A running command's elapsed time ticks.
+        // A running command's elapsed time ticks, and a running card's.
         if self.failure.is_none() && self.shell.is_some() {
+            changed = true;
+        }
+        let second = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if !self.card_blocks.is_empty() && second != self.card_second {
+            self.card_second = second;
+            self.refresh_cards();
             changed = true;
         }
         if self.composer.mention_tick() {
@@ -1108,6 +1147,7 @@ impl App {
                 }
                 self.runs.observe(&snapshot);
                 self.snapshot = Some(*snapshot);
+                self.refresh_cards();
                 if self.running() && !was_running {
                     self.run_started = Some(Instant::now());
                     self.last_pulse = 0;
@@ -1160,11 +1200,12 @@ impl App {
                 session_id,
                 snapshot,
                 state,
+                model,
             } => {
                 if let Some(Prompt::Tasks(panel)) = &mut self.prompt
                     && panel.projection_id == projection_id
                 {
-                    panel.member(&session_id, snapshot, state);
+                    panel.member(&session_id, snapshot, state, model);
                 }
             }
             Update::FilesChanged(count) => {
@@ -1256,6 +1297,13 @@ impl App {
             Update::Models(models) => {
                 if let Some(Prompt::Models(panel)) = &mut self.prompt {
                     panel.set_models(models);
+                }
+            }
+            Update::ModelPolicy(update) => {
+                if let Some(Prompt::Models(panel)) = &mut self.prompt
+                    && let Some(notice) = panel.set_policy(update)
+                {
+                    self.set_notice(notice);
                 }
             }
             Update::ShellProgress {
@@ -1892,6 +1940,14 @@ impl App {
                     model_id,
                 });
             }
+            Effect::ReadModelPolicy => self.host.send(Command::ReadModelPolicy),
+            Effect::SetModelPolicy {
+                expected_revision,
+                policy,
+            } => self.host.send(Command::SetModelPolicy {
+                expected_revision,
+                policy,
+            }),
         }
         // A picker opened from `/settings` goes back to its row once closed.
         if self.prompt.is_none()
@@ -2294,6 +2350,12 @@ impl App {
         }
         let (commits, sources, tail) = self.transcript(width);
         for (text, (source, placement)) in commits.into_iter().zip(sources) {
+            if let Block::ToolGroup(group) = &source
+                && !group.cards.is_empty()
+                && self.fullscreen
+            {
+                self.card_blocks.push(self.dropped + self.history.len());
+            }
             match placement {
                 Placement::New => self.record(source),
                 Placement::Stream => {
@@ -2971,6 +3033,7 @@ impl App {
         // a clean view under the banner, which the next frame commits (the
         // session may attach before the first frame). Scrollback keeps what
         // the terminal already shows.
+        self.card_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
@@ -3044,8 +3107,92 @@ impl App {
             Some(Block::Thinking { expanded, .. }) => *expanded = !*expanded,
             _ => return false,
         }
-        self.rewritten = (self.rewritten.0 + 1, id);
+        self.mark_rewritten(id);
         true
+    }
+
+    /// Block `id` changed in place: fullscreen lays it out again.
+    fn mark_rewritten(&mut self, id: usize) {
+        self.rewrites += 1;
+        self.rewrite_log.push_back(id);
+        if self.rewrite_log.len() > REWRITE_LOG {
+            self.rewrite_log.pop_front();
+        }
+    }
+
+    /// Fullscreen redraws committed delegation cards as their facts and
+    /// observations change and their time runs; a card stops changing once
+    /// its delegation ended. Scrollback keeps what it printed.
+    fn refresh_cards(&mut self) {
+        if !self.fullscreen || self.card_blocks.is_empty() {
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let mut changed = Vec::new();
+        let mut open = Vec::new();
+        for id in &self.card_blocks {
+            let Some(Block::ToolGroup(group)) = id
+                .checked_sub(self.dropped)
+                .and_then(|index| self.history.get(index))
+            else {
+                continue;
+            };
+            let Some(mut index) = snapshot.rows.iter().position(|row| {
+                row.member
+                    .as_ref()
+                    .is_some_and(|card| group.cards.first() == Some(&card.task.id))
+            }) else {
+                continue;
+            };
+            while !opens_group(&snapshot.rows, index) {
+                index -= 1;
+            }
+            let rows = group_rows(&snapshot.rows, index);
+            if rows
+                .iter()
+                .filter_map(|row| row.member.as_ref())
+                .any(|card| card.task.finished.is_none())
+            {
+                open.push(*id);
+            }
+            let fresh = project_group(&rows, group.detail);
+            if fresh != *group {
+                changed.push((*id, fresh));
+            }
+        }
+        self.card_blocks = open;
+        for (id, group) in changed {
+            if let Some(block) = id
+                .checked_sub(self.dropped)
+                .and_then(|index| self.history.get_mut(index))
+            {
+                *block = Block::ToolGroup(group);
+                self.mark_rewritten(id);
+            }
+        }
+    }
+
+    /// Opens a delegation card's member: its read-only conversation, or its
+    /// result when there is no member Session to read.
+    fn open_card(&mut self, request_event_id: &str) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let Some(card) = snapshot.rows.iter().find_map(|row| {
+            row.member
+                .as_ref()
+                .filter(|card| card.task.id == request_event_id)
+        }) else {
+            self.set_notice(t("That delegation is no longer in this transcript"));
+            return;
+        };
+        let mut panel = TasksPanel::new(snapshot);
+        match panel.open_card(card.task.clone()) {
+            Effect::Notice(text) => self.set_notice(text),
+            _ => self.prompt = Some(Prompt::Tasks(panel)),
+        }
     }
 
     fn rewrite_stream_block(&mut self, source: Block) {
@@ -3055,7 +3202,7 @@ impl App {
         match index.and_then(|index| self.history.get_mut(index)) {
             Some(block) => {
                 *block = source;
-                self.rewritten = (self.rewritten.0 + 1, self.stream_block.unwrap_or(0));
+                self.mark_rewritten(self.stream_block.unwrap_or(0));
             }
             None => self.record(source),
         }
@@ -3180,8 +3327,36 @@ impl App {
 }
 
 impl Document for App {
-    fn rewritten(&self) -> (u64, usize) {
-        self.rewritten
+    fn rewritten(&self, since: u64) -> (u64, Option<Vec<usize>>) {
+        let count = (self.rewrites - since) as usize;
+        let ids = (count <= self.rewrite_log.len())
+            .then(|| self.rewrite_log.iter().rev().take(count).copied().collect());
+        (self.rewrites, ids)
+    }
+
+    fn cards(&self, index: usize) -> Vec<String> {
+        match &self.history[index] {
+            Block::ToolGroup(group) => card_actions(group).into_iter().map(str::to_owned).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn card_rows(&self, index: usize, cols: usize, card: &str) -> Option<(usize, usize)> {
+        let Block::ToolGroup(group) = &self.history[index] else {
+            return None;
+        };
+        let width = cols.saturating_sub(2 + MARGIN).max(1);
+        // Under the blank row that opens the block.
+        let (start, end) = card_rows(group, width, &self.palette, card)?;
+        Some((start + 1, end + 1))
+    }
+
+    fn card_at(&self, index: usize, cols: usize, row: usize) -> Option<String> {
+        let Block::ToolGroup(group) = &self.history[index] else {
+            return None;
+        };
+        let width = cols.saturating_sub(2 + MARGIN).max(1);
+        action_at(group, width, &self.palette, row.checked_sub(1)?).map(str::to_owned)
     }
 
     fn dropped(&self) -> usize {

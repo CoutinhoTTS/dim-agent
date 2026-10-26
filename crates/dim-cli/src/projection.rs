@@ -8,15 +8,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dim_agent_types::{
-    CollaborationDelivery, CollaborationOutcome, ContentBlock, ExecStatus, InputMode, JsonObject,
-    ModelOutputOutcome, ToolContent, ToolResult, TurnOutcome, UserInput,
+    CollaborationDelivery, CollaborationOutcome, CollaborationTarget, ContentBlock, ExecStatus,
+    InputMode, JsonObject, ModelOutputOutcome, ToolContent, ToolResult, TurnOutcome, UserInput,
 };
 use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, QueuedInput, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView,
-    TurnEnd, ViewRow, ViewSnapshot, WorkflowView,
+    ApprovalView, MemberCard, MemberConversationState, MemberTarget, QueuedInput, RowKind, RowTone,
+    TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd, ViewRow, ViewSnapshot, WorkflowView,
 };
 use crate::wire::{Event, EventContent, Progress, WorkflowRun, WorkflowState};
 
@@ -56,6 +56,13 @@ pub struct Projection {
     background: HashMap<TaskTarget, String>,
     /// The newest turn end: its sequence and how the turn ended.
     ended: Option<(u64, TurnEnd)>,
+    /// The call row carrying each delegation's card, by request event id.
+    cards: HashMap<String, usize>,
+    /// Native Agent names from `agent.list`, by Agent id.
+    agent_names: HashMap<String, String>,
+    /// Agent ids a finished `agent.list` read was asked to name, whether or
+    /// not it returned them: only a card naming another id reads again.
+    agents_read: std::collections::HashSet<String>,
 }
 
 impl Projection {
@@ -195,35 +202,66 @@ impl Projection {
                 }
             }
             EventContent::CollaborationRequest(data) => {
-                self.tasks.push(TaskView {
+                let task = TaskView {
                     id: event.id.clone(),
                     branch_id: branch_id.to_owned(),
-                    kind: TaskKind::Member { session_id: None },
+                    kind: TaskKind::Member(MemberTarget::Starting),
                     label: data.prompt.lines().next().unwrap_or("").to_owned(),
                     started_at: event.create_at,
                     finished: None,
-                });
-            }
-            EventContent::CollaborationDelivered(data) => match &data.delivery {
-                CollaborationDelivery::Ok { session_id, .. } => {
-                    if let Some(task) = self.tasks.iter_mut().find(|task| {
-                        task.branch_id == branch_id
-                            && task.id == data.op_event_id
-                            && task.finished.is_none()
-                            && matches!(task.kind, TaskKind::Member { .. })
-                    }) {
-                        task.kind = TaskKind::Member {
-                            session_id: Some(session_id.clone()),
-                        };
-                    }
+                };
+                // The open call that made the request, in its own batch: a
+                // call id can repeat in another batch.
+                if branch_id == "main"
+                    && let Some(index) = self.tool_rows.get(&data.call_id).copied()
+                    && self.rows[index].batch.as_deref() == Some(data.request_id.as_str())
+                    && self.rows[index].member.is_none()
+                {
+                    let (agent, agent_id) = match &data.target {
+                        CollaborationTarget::Agent { agent_id }
+                        | CollaborationTarget::Member { agent_id, .. } => {
+                            let name = self.agent_names.get(agent_id).unwrap_or(agent_id);
+                            // A provider member's id is no native Agent to name.
+                            (
+                                name.clone(),
+                                (!agent_id.contains(':')).then(|| agent_id.clone()),
+                            )
+                        }
+                        CollaborationTarget::Temporary { profile } => (profile.name.clone(), None),
+                    };
+                    self.row(index).member = Some(Box::new(MemberCard {
+                        task: task.clone(),
+                        agent,
+                        agent_id,
+                        prompt: data.prompt.clone(),
+                        model: None,
+                        activity: None,
+                        observation: None,
+                    }));
+                    self.cards.insert(event.id.clone(), index);
                 }
-                CollaborationDelivery::Error { error } => {
-                    if let Some(task) = self.tasks.iter_mut().find(|task| {
-                        task.branch_id == branch_id
-                            && task.id == data.op_event_id
-                            && task.finished.is_none()
-                            && matches!(task.kind, TaskKind::Member { .. })
-                    }) {
+                self.tasks.push(task);
+            }
+            EventContent::CollaborationDelivered(data) => {
+                let starting = |task: &TaskView| {
+                    task.branch_id == branch_id
+                        && task.id == data.op_event_id
+                        && task.finished.is_none()
+                        && task.kind == TaskKind::Member(MemberTarget::Starting)
+                };
+                let update = |task: &mut TaskView| match &data.delivery {
+                    CollaborationDelivery::Ok {
+                        agent_id,
+                        session_id,
+                        ..
+                    } => {
+                        task.kind = TaskKind::Member(if agent_id.contains(':') {
+                            MemberTarget::Provider
+                        } else {
+                            MemberTarget::Session(session_id.clone())
+                        });
+                    }
+                    CollaborationDelivery::Error { error } => {
                         task.finished = Some(TaskFinish {
                             at: event.create_at,
                             status: "Failed",
@@ -236,30 +274,60 @@ impl Projection {
                             exit_code: None,
                         });
                     }
+                };
+                if let Some(task) = self.tasks.iter_mut().find(|task| starting(task)) {
+                    update(task);
                 }
-            },
+                let delivered = match &data.delivery {
+                    CollaborationDelivery::Ok { agent_id, .. } => Some((
+                        self.agent_names.get(agent_id).unwrap_or(agent_id).clone(),
+                        (!agent_id.contains(':')).then(|| agent_id.clone()),
+                    )),
+                    CollaborationDelivery::Error { .. } => None,
+                };
+                if let Some(card) = self.card(branch_id, &data.op_event_id)
+                    && starting(&card.task)
+                {
+                    update(&mut card.task);
+                    // The Agent that actually took the request; a temporary
+                    // profile keeps its own name.
+                    match delivered {
+                        Some((name, agent_id)) if card.agent_id.is_some() => {
+                            card.agent = name;
+                            card.agent_id = agent_id;
+                        }
+                        Some(_) => {}
+                        // No member took the request: its id names no Agent to read.
+                        None => card.agent_id = None,
+                    }
+                }
+            }
             EventContent::CollaborationResult(data) => {
+                let (status, failed, text) = match &data.outcome {
+                    CollaborationOutcome::Completed => ("Completed", false, data.text.clone()),
+                    CollaborationOutcome::Failed { reason } => {
+                        ("Failed", true, format!("{reason}\n{}", data.text))
+                    }
+                    CollaborationOutcome::Cancelled { reason } => {
+                        ("Cancelled", false, format!("{reason}\n{}", data.text))
+                    }
+                };
+                let finish = TaskFinish {
+                    at: event.create_at,
+                    status,
+                    failed,
+                    text,
+                    exit_code: None,
+                };
                 if let Some(task) = self.tasks.iter_mut().find(|task| {
                     task.branch_id == branch_id
                         && task.id == data.request_event_id
-                        && matches!(task.kind, TaskKind::Member { .. })
+                        && matches!(task.kind, TaskKind::Member(_))
                 }) {
-                    let (status, failed, text) = match &data.outcome {
-                        CollaborationOutcome::Completed => ("Completed", false, data.text.clone()),
-                        CollaborationOutcome::Failed { reason } => {
-                            ("Failed", true, format!("{reason}\n{}", data.text))
-                        }
-                        CollaborationOutcome::Cancelled { reason } => {
-                            ("Cancelled", false, format!("{reason}\n{}", data.text))
-                        }
-                    };
-                    task.finished = Some(TaskFinish {
-                        at: event.create_at,
-                        status,
-                        failed,
-                        text,
-                        exit_code: None,
-                    });
+                    task.finished = Some(finish.clone());
+                }
+                if let Some(card) = self.card(branch_id, &data.request_event_id) {
+                    card.task.finished = Some(finish);
                 }
                 if branch_id != "main" {
                     self.retain_tasks();
@@ -321,7 +389,14 @@ impl Projection {
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
-                let index = self.push(data.call.id.clone(), RowKind::ToolCall, String::new());
+                // A call id another batch already used still needs its own
+                // row: the screen commits rows by id.
+                let row_id = if self.rows.iter().any(|row| row.row_id == data.call.id) {
+                    format!("{}-{}", data.call.id, self.rows.len())
+                } else {
+                    data.call.id.clone()
+                };
+                let index = self.push(row_id, RowKind::ToolCall, String::new());
                 let row = self.row(index);
                 row.tool_name = Some(data.call.name.clone());
                 row.tool_input = Some(Value::Object(data.call.input.clone()));
@@ -580,6 +655,128 @@ impl Projection {
         self.tasks.truncate(unfinished + 50);
     }
 
+    /// A main-branch delegation's card.
+    fn card(&mut self, branch_id: &str, request_event_id: &str) -> Option<&mut MemberCard> {
+        if branch_id != "main" {
+            return None;
+        }
+        let index = *self.cards.get(request_event_id)?;
+        self.row(index).member.as_deref_mut()
+    }
+
+    /// Native Sessions with an unfinished delegation: the members whose
+    /// cards this client keeps observed.
+    pub fn unfinished_members(&self) -> impl Iterator<Item = &str> {
+        self.tasks
+            .iter()
+            .filter_map(|task| match (&task.kind, &task.finished) {
+                (TaskKind::Member(MemberTarget::Session(id)), None) => Some(id.as_str()),
+                _ => None,
+            })
+    }
+
+    /// What this client now observes of a member: its unfinished cards show
+    /// it; ended cards keep what they last had.
+    pub fn observe_member(
+        &mut self,
+        session_id: &str,
+        model: Option<&str>,
+        activity: Option<&str>,
+        observation: &MemberConversationState,
+    ) {
+        let indexes: Vec<usize> = self.cards.values().copied().collect();
+        for index in indexes {
+            let Some(card) = &self.rows[index].member else {
+                continue;
+            };
+            let observed = card.task.finished.is_none()
+                && card.task.kind == TaskKind::Member(MemberTarget::Session(session_id.to_owned()));
+            // A failed read keeps the last model it saw.
+            let model = model.map(str::to_owned).or_else(|| card.model.clone());
+            if !observed
+                || (card.model == model
+                    && card.activity.as_deref() == activity
+                    && card.observation.as_ref() == Some(observation))
+            {
+                continue;
+            }
+            let card = self.row(index).member.as_deref_mut().expect("card row");
+            card.model = model;
+            card.activity = activity.map(str::to_owned);
+            card.observation = Some(observation.clone());
+        }
+    }
+
+    /// Names native Agents on their cards, from one shared `agent.list`
+    /// that was asked to name `asked`.
+    pub fn name_agents(&mut self, names: HashMap<String, String>, asked: Vec<String>) {
+        self.agents_read.extend(asked);
+        let indexes: Vec<usize> = self.cards.values().copied().collect();
+        for index in indexes {
+            let Some(name) = self.rows[index]
+                .member
+                .as_ref()
+                .and_then(|card| names.get(card.agent_id.as_ref()?))
+                .filter(|name| !name.is_empty())
+                .cloned()
+            else {
+                continue;
+            };
+            self.row(index)
+                .member
+                .as_deref_mut()
+                .expect("card row")
+                .agent = name;
+        }
+        self.agent_names = names;
+    }
+
+    /// Native Agents the cards name that no `agent.list` read covered yet.
+    pub fn unnamed_agents(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .cards
+            .values()
+            .filter_map(|index| self.rows[*index].member.as_ref()?.agent_id.clone())
+            .filter(|id| !self.agent_names.contains_key(id) && !self.agents_read.contains(id))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// The member's latest activity as one line: what it runs or says now.
+    pub fn activity(&self) -> Option<String> {
+        let row = self.rows.iter().rev().find(|row| {
+            matches!(
+                row.kind,
+                RowKind::ToolCall
+                    | RowKind::Thinking
+                    | RowKind::StreamingAssistant
+                    | RowKind::AssistantMessage
+            )
+        })?;
+        let line = match row.kind {
+            RowKind::ToolCall => {
+                let name = row.tool_name.as_deref().unwrap_or("tool");
+                let detail = row
+                    .tool_input
+                    .as_ref()
+                    .and_then(Value::as_object)
+                    .and_then(|input| input.values().find_map(Value::as_str))
+                    .and_then(|text| text.lines().next())
+                    .unwrap_or("");
+                format!("{name} {detail}")
+            }
+            RowKind::Thinking => "thinking".to_owned(),
+            _ => row
+                .text
+                .lines()
+                .rfind(|line| !line.trim().is_empty())?
+                .to_owned(),
+        };
+        Some(line.trim().to_owned())
+    }
+
     fn row(&mut self, index: usize) -> &mut ViewRow {
         Arc::make_mut(&mut self.rows[index])
     }
@@ -601,6 +798,7 @@ impl Projection {
             result_is_error: false,
             diff: None,
             exit_code: None,
+            member: None,
         }));
         self.rows.len() - 1
     }

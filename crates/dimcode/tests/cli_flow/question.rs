@@ -816,7 +816,9 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
         wire.reply(&history,json!({"events":[
             {"id":"request","sequence":1,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r","call_id":"agent","target":{"kind":"agent","agent_id":"reviewer"},"prompt":"Inspect readonly member question"}},
             {"id":"delivery","sequence":2,"create_at":2,"type":"collaboration","name":"delivered","data":{"op_event_id":"request","status":"ok","agent_id":"reviewer","session_id":"member"}},
-        ],"through":2,"nextAfter":2,"done":true}));
+            // Ended: only the opened detail observes the member.
+            {"id":"result","sequence":3,"create_at":3,"type":"collaboration","name":"result","data":{"request_event_id":"request","agent_id":"reviewer","session_id":"member","status":"completed","text":"done"}},
+        ],"through":3,"nextAfter":3,"done":true}));
         let providers = wire.read("account.providers");
         wire.reply(&providers,json!([]));
         let attach = wire.read("session.attach");
@@ -834,7 +836,7 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
         wire.quiet(Duration::from_millis(100));
         let mut leader = today();
         leader["question"] = json!("Leader question takes priority");
-        step(wire,"main",3,"tool-call",asked("leader-request","c1",json!([leader])));
+        step(wire,"main",4,"tool-call",asked("leader-request","c1",json!([leader])));
         let mut detached = false;
         let mut leader_answered = false;
         while !detached || !leader_answered {
@@ -857,8 +859,8 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
                 other => panic!("Unexpected member/leader action: {other}"),
             }
         }
-        step(wire,"main",4,"tool-result",answered("main-3","leader-request","c1",false));
-        step(wire,"main",5,"text",json!({"turn_id":"leader-turn","request_id":"after","delta":"leader answer preserved readonly boundary"}));
+        step(wire,"main",5,"tool-result",answered("main-4","leader-request","c1",false));
+        step(wire,"main",6,"text",json!({"turn_id":"leader-turn","request_id":"after","delta":"leader answer preserved readonly boundary"}));
         let mut line=String::new();
         assert_eq!(wire.0.read_line(&mut line).unwrap(),0,"unexpected peer action: {line}");
     });
