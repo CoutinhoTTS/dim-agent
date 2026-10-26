@@ -104,7 +104,7 @@ Session 定义注入 `scheduleJobs` 与 `toolRegistry`，不提供服务，在 a
 sessionPermissions 与 sessions 由同一稳定 Agents 目录提供，按调用查询当前索引；
 不硬依赖 Permission、运行 Session 或可替换的 Agents 索引。Settings 变更走声明的来源与现有事件，
 不重载进程行。owner 结算已接受操作和原生 I/O 后才关闭既有 pluginFiles scope。
-A.6 的 drain 同样依赖 [#267](https://github.com/arcships/dim/pull/267) 的已准入输入生命周期；
+清理会 join 自身已准入的报告调用（A.6），[#267](https://github.com/arcships/dim/pull/267) 的 S2 已准入输入生命周期让此类写入跨索引重载继续；
 索引重载中丢失 bridge 回复不代表可以提前清理。
 
 工具从宿主的 ToolCall.sessionId、branchId、config.cwd 构造 A.2 caller，

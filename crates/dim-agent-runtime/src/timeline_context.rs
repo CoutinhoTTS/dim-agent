@@ -310,8 +310,10 @@ impl TimelineContext {
         control.configure(update).await
     }
     /// Validates input from outside the branch and appends it. Whether it
-    /// starts a turn is Loop's decision when the input is dispatched.
-    pub(crate) fn input(&self, data: InputMessageData) -> Result<Arc<AgentEvent>> {
+    /// starts a turn is Loop's decision when the input is dispatched. An
+    /// input whose submission id the branch already holds writes nothing and
+    /// returns the committed input.
+    pub(crate) async fn input(&self, data: InputMessageData) -> Result<Arc<AgentEvent>> {
         // A dispatch defect is the root cause of any concurrent close: report
         // it before the generic closed rejection so callers keep the context.
         if let Some(error) = self.dispatcher.failure() {
@@ -322,7 +324,35 @@ impl TimelineContext {
         }
         data.validate()
             .map_err(|reason| AgentError::InvalidInput(reason.into()))?;
-        self.timeline.append(EventKind::InputMessage(data).into())
+        match self.timeline.input(data)? {
+            crate::core::Appended::Written(event) => Ok(event),
+            crate::core::Appended::Existing(sequence) => self.committed_input(sequence).await,
+        }
+    }
+    /// The committed input with submission id `id`, once it is published.
+    pub(crate) async fn lookup(&self, id: &str) -> Result<Option<Arc<AgentEvent>>> {
+        let Some(sequence) = self.timeline.submission(id)? else {
+            return Ok(None);
+        };
+        let _ = self
+            .timeline
+            .watch()
+            .wait_for(|&(published, closed)| published >= sequence || closed)
+            .await;
+        if self.timeline.sequence() < sequence {
+            return Err(self
+                .timeline
+                .failure()
+                .unwrap_or_else(|| AgentError::Closed(self.id().into())));
+        }
+        self.committed_input(sequence).await.map(Some)
+    }
+    async fn committed_input(&self, sequence: u64) -> Result<Arc<AgentEvent>> {
+        self.timeline
+            .local(sequence..=sequence)
+            .await?
+            .pop()
+            .ok_or_else(|| AgentError::Storage(format!("committed input {sequence} is missing")))
     }
     /// Waits until Loop has dispatched the Timeline tail and has no unclosed
     /// turn; returns that dispatched sequence.

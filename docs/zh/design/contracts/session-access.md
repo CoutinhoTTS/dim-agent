@@ -92,7 +92,7 @@ sequenceDiagram
   C->>C: 在进程存储中记录结果
 ```
 
-调用方不持有锁。在其读取之后提交的事实排在其写入之前，由输入所有者处理。可能在结果不确定后重试的调用方，先以其 `submissionId` 调用 `lookup`。
+调用方不持有锁。在其读取之后提交的事实排在其写入之前，由输入所有者处理。可能在结果不确定后重试的调用方，以同一 `submissionId` 重新提交：分支对每个标识只接受一次，并回复第一条输入的回执。
 
 ### 3.2 撤回
 
@@ -224,7 +224,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | 方法 | 模式 | 请求 | 回复 | 错误 |
 | --- | --- | --- | --- | --- |
 | `launch` | async | `LaunchRequest` | `{sessionId, policy}` | `rejected`、`agent_unknown`、`session_closed`、`branch_missing`（启动方）、`reloading`、`failed` |
-| `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`、`session_closed`、`branch_missing`、`reloading`、`publication_unknown`、`failed` |
+| `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`、`ambiguous`、`session_closed`、`branch_missing`、`reloading`、`publication_unknown`、`failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`、`session_closed`、`branch_missing`、`reloading` |
 | `history` | async | `HistoryRequest` | `HistoryPage` | `rejected`、`future_sequence`、`session_closed`、`branch_missing`、`reloading` |
 | `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`、`session_closed`、`branch_missing`、`reloading`、`publication_unknown` |
@@ -282,7 +282,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 | --- | --- |
 | 标记 | 第一个 raw 块是现有上下文块格式中的元素 `<dim-<source> kind="..." ...>body</dim-<source>>`。它是生产方插件写给模型看的文本；共享组件从不解析它，只有生产方插件可以解释自己写的内容（例如 Goal 折叠自己的块） |
 | Key | `RawBlock.key`，`use` 为 `live` 或 `retire`，按分支 Timeline 区分。完整的 key 由写入方自己起；按约定以写入方自己的前缀开头（总览约束 14），不做检查 |
-| 提交标识 | `<source>:<uuid>`，每次逻辑提交生成一个。写入不去重；`sessions.lookup`（与 `session.input_lookup` 语义相同）查找已提交的输入（`accepted`、`unknown`，错误 `ambiguous`）。标识是已提交 `input/message` 的 `submission_id` 字段，随输入一起提交、分叉和删除，没有单独的记录（[sessions 服务 §6.3](../appserver/sessions-service.md#提交标识存放在哪里)，#32） |
+| 提交标识 | `<source>:<uuid>`，每次逻辑提交生成一个。分支对每个标识只接受一次：重复提交不写入，回复第一条输入的回执，输入被消费或撤回后也是如此。`sessions.lookup`（与 `session.input_lookup` 语义相同）查找已提交的输入（`accepted`、`unknown`），不写入。错误 `ambiguous`（来自 `input` 或 `lookup`）表示多条输入共用该标识，写于分支只接受一次之前。标识是已提交 `input/message` 的 `submission_id` 字段，随输入一起提交、分叉和删除，没有单独的记录（[sessions 服务 §6.3](../appserver/sessions-service.md#提交标识存放在哪里)，#32） |
 | 绝不可能 | 写入 `input/message`、经 `withdraw` 的 `input/withdraw` 和经 `stop` 的 `stop/interrupt` 之外的事件；写入 `input/deleted`；编辑历史 |
 
 ### A.3 SessionConfig 字段
@@ -335,15 +335,15 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | --- | --- |
 | `session_closed`、`branch_missing` | 未写入任何内容（对 `launch` 而言，是启动方已关闭或不存在） |
 | `agent_unknown` | `launch` 指定的 Agent 没有装载 |
-| `reloading` | Agents 索引、模型选择宿主或该 Session 的 Capability 未激活或正在重载；先 `lookup` 再重试 |
+| `reloading` | Agents 索引、模型选择宿主或该 Session 的 Capability 未激活或正在重载；可重试（`input` 用同一 `submissionId`） |
 | `rejected` | 参数格式以及该方法的边界检查（输入校验、位于批次中间的 history 游标、撤回服务的检查）；未写入任何内容 |
 | `future_sequence` | 固定前缀读取超出已发布 head |
-| `ambiguous` | `lookup` 匹配到多个输入 |
-| `publication_unknown` | 已提交（一条 `input`，或 `withdraw` 写下的 `input/deleted`），发布失败；恢复后 `lookup` 或 `history` |
+| `ambiguous` | 多条输入使用该 `submissionId`，写于分支只接受一次之前；`input` 不写入 |
+| `publication_unknown` | 已提交（一条 `input`，或 `withdraw` 写下的 `input/deleted`），发布失败；恢复后重新提交、`lookup` 或 `history` |
 | `node_unavailable` | 不由 `sessions` 返回：对离线资源节点的调用在该 Session 的工具内部失败 |
 | `failed` | Session 故障、存储、模型解析、项目授权或 Session 构建 |
 
-**input 生命周期：** 按 [S2 §6.2](../appserver/sessions-service.md#62-input)，input 准入前的索引停止，或原 row effect 登记失败，回复 `reloading` 且未写入。row 调用在最终交接检查捕获的 generation 令牌：即使 effect 已登记，租约/恢复准备期间的 row 停止仍拒绝 input。准入后，类型化 Rust 和具名调用都跨索引重载等待任务自身结果。只有原始 runtime row 另有 S2 §8.4 的 drain。回复丢失不能证明写入者已结束。`publication_unknown` 和回复丢失仍须 lookup。
+**input 生命周期：** 按 [S2 §6.2](../appserver/sessions-service.md#62-input)，input 准入前的索引停止或调用 row 已停止回复 `reloading` 且未写入。准入后，类型化 Rust 和具名调用都跨索引重载等待任务自身结果。调用方自身的生命周期与写入无关：调用的 row 重载时不等待它，回复丢失是可接受的损失。下一代以同一 `submissionId` 重新提交，得到同一回执，第一次写入尚未发布时也是如此。
 
 ## 附录 B. 完整冲突表
 
@@ -395,8 +395,8 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | `sessions` | 基于 `Session` 门面的 `AgentIndex`（Agents）类型化方法（[agent.rs](../../../../crates/dim-agent-runtime/src/agent.rs)、[branch.rs](../../../../crates/dim-agent-runtime/src/branch.rs)）；由 Agents 的目录部分按名称暴露（[sessions 服务附录 A](../appserver/sessions-service.md#附录-a-rust-绑定)） |
 | `launch` | `AgentIndex::launch(LaunchRequest) -> Result<LaunchReply, SessionsError>` |
 | 逐次调用的 acquire | `AgentIndex::acquire(id)`（已有，crate 内部使用），返回 `SessionUse` 租约 |
-| `input` | `Session::input(InputMessageData, branch)`（已有）；key 为 `InputBlock::Raw { key: Some(name), retire }` |
-| `lookup` | Agents 中与 `session.input_lookup` 共用的查找：先等待待发布事件，再扫描已发布的页 |
+| `input` | `Session::input(InputMessageData, branch)`（已有；对分支已持有的标识返回已提交的输入）；key 为 `InputBlock::Raw { key: Some(name), retire }` |
+| `lookup` | `Session::lookup(branch, submission_id)`，与 `session.input_lookup` 共用：读分支的提交标识索引，等待找到的输入发布 |
 | `history` | `Session::sequence(branch)`，低于 `at_least` 时以 `future_sequence` 失败，然后 `Session::local_page(branch, after, limit, through)` |
 | `withdraw` | `Session::service::<InputQueue>(branch)`，然后 `InputQueue::withdraw(InputWithdrawData { input_id, reason }, None) -> Result<(Withdrawal, Option<Arc<AgentEvent>>), AgentError>`（S1）：追加 `input/withdraw`，在 InputQueue 写下决定后回复；`Withdrawal::Deleted { sequence }` 或 `Withdrawal::NotHeld`。Agents 等该 `input/deleted` 发布后才回复 `deleted` |
 | `stop`、`idle` | `Session::stop`、`Session::idle`（已有） |

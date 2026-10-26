@@ -120,13 +120,14 @@ impl TreeCommands {
             .ok_or(AgentError::UnknownBranch(id))
     }
     /// Commits `input` to branch `id` through its validating `Branch::input`
-    /// and returns the committed event.
-    pub fn input(
+    /// and returns the committed event, or the input already committed with
+    /// its submission id.
+    pub async fn input(
         &self,
         id: String,
         input: InputMessageData,
     ) -> std::result::Result<Arc<AgentEvent>, AgentError> {
-        self.get(&id)?.input(input)
+        self.get(&id)?.input(input).await
     }
     /// Creates a child of `parent` cut at `at` and returns its id.
     /// `cancelled` is the caller's cancellation as an explicit argument, the
@@ -420,7 +421,7 @@ impl TimelineTree {
                     _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into())),
                 }
                 if let Some(first) = first {
-                    context.branch().input(first)?;
+                    context.branch().input(first).await?;
                     started = true;
                 }
                 if owner.cancel.is_cancelled() {

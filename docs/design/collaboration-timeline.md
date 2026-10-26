@@ -103,10 +103,10 @@ notifications or public history and records the facts its own decisions require,
 within its own module; no separate wiring plugin is introduced.
 
 A successful input reply means publication, not adoption or completed work.
-Correlation is not deduplication: existing `sessions.lookup` can report
-`ambiguous` for duplicate submission identities. A lost reply does not prove that
+A branch accepts each `submissionId` once, so resubmitting an input with the
+same id after a lost reply writes nothing new; a lost reply does not prove that
 a write failed. The initiating owner follows its command's settlement contract,
-records uncertainty where needed and does not blindly replay an uncertain write.
+records uncertainty where needed and does not replay other uncertain writes.
 This proposal adds no generic idempotency key, exactly-once guarantee or retry
 manager.
 

@@ -9,19 +9,17 @@ use dim_agent_capabilities::{
     input_queue::{InputQueue, Withdrawal},
     permission::PermissionState,
 };
-use dim_agent_runtime::{AgentError, Publication, Session};
+use dim_agent_runtime::{AgentError, Publication};
 use dim_agent_types::{
-    AgentEvent, ContentBlock, EventKind, InputBlock, InputMessageData, InputMode,
-    InputWithdrawData, ModelId, ModelSelection, PermissionPolicy, PermissionPreset, UserInput,
+    AgentEvent, ContentBlock, InputBlock, InputMessageData, InputMode, InputWithdrawData, ModelId,
+    ModelSelection, PermissionPolicy, PermissionPreset, UserInput,
 };
-use futures_util::future::Either;
 use rutis::Ctx;
 use rutis::host::CtxHost;
 use rutis_bridge::session::{HostDispatch, Reply, Value, caller_row};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use std::{future::Future, sync::Arc};
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 /// A branch of a Session.
@@ -103,7 +101,7 @@ pub struct InputWrite {
     pub session_id: String,
     pub branch_id: String,
     pub mode: InputMode,
-    /// `<source>:<uuid>` by convention; writes are not deduplicated.
+    /// `<source>:<uuid>` by convention; the branch accepts each id once.
     pub submission_id: String,
     /// Model-facing blocks; the first is the caller's marker.
     pub raw_blocks: Vec<RawBlock>,
@@ -258,6 +256,7 @@ impl From<AgentError> for SessionsError {
             AgentError::UnknownBranch(_) => Self::BranchMissing { message },
             AgentError::Reloading(_) => Self::Reloading { message },
             AgentError::InvalidInput(_) => Self::Rejected { message },
+            AgentError::AmbiguousSubmission(_) => Self::Ambiguous { message },
             _ => Self::Failed { message },
         }
     }
@@ -291,58 +290,6 @@ fn settlement(error: AgentError) -> SessionsError {
             message: error.to_string(),
         },
     }
-}
-
-/// What a branch holds for one `submission_id`.
-pub(crate) enum Lookup {
-    Accepted(Arc<AgentEvent>),
-    Unknown,
-    Ambiguous,
-}
-/// Finds the `input/message` with `submission_id` on a branch: first waits
-/// until nothing committed is unpublished, so `Unknown` is final for every
-/// write that returned before the call, then scans the published pages. On
-/// a branch that keeps committing, the wait lasts until its commits pause
-/// (sessions service §6.3).
-/// `sessions.lookup` and Rpc's `session.input_lookup` share it.
-pub(crate) async fn find_input(
-    session: &Session,
-    branch: &str,
-    submission_id: &str,
-) -> dim_agent_runtime::Result<Lookup> {
-    let publication = session.publication(branch)?;
-    let mut published = publication.watch();
-    loop {
-        published.borrow_and_update();
-        if !publication.has_pending() || published.changed().await.is_err() {
-            break;
-        }
-    }
-    if let Some(error) = publication.failure() {
-        return Err(error);
-    }
-    let through = session.sequence(branch)?;
-    let mut after = 0;
-    let mut found = None;
-    // ponytail: O(n) native scan; add a store-owned index only if lookup latency requires it.
-    while after < through {
-        let events = session.local_page(branch, after, 256, through).await?;
-        after = events
-            .last()
-            .ok_or_else(|| AgentError::Storage("published input page is missing".into()))?
-            .sequence;
-        for event in events {
-            if matches!(&event.kind, EventKind::InputMessage(data)
-                if data.submission_id.as_deref() == Some(submission_id))
-            {
-                if found.is_some() {
-                    return Ok(Lookup::Ambiguous);
-                }
-                found = Some(event);
-            }
-        }
-    }
-    Ok(found.map_or(Lookup::Unknown, Lookup::Accepted))
 }
 
 /// The launch cap (sessions service §6.1): the lower preset, the union of the
@@ -509,11 +456,15 @@ impl AgentIndex {
         })
     }
 
-    /// Writes input and retains admitted append/publication work if the caller leaves.
+    /// Writes input, or replies the receipt of the input the branch already
+    /// holds with this `submissionId`. Admitted append/publication work runs
+    /// to its own outcome if the caller leaves.
     pub async fn input(&self, write: InputWrite) -> Result<InputReceipt, SessionsError> {
         self.input_from(write, None).await
     }
 
+    /// [`Self::input`] for a call from runtime row `row`: a row that stops
+    /// before the handoff writes nothing (`reloading`).
     async fn input_from(
         &self,
         write: InputWrite,
@@ -577,16 +528,19 @@ impl AgentIndex {
                 return Err(SessionsError::rejected("submissionId must not be empty"));
             }
             let lease = self.acquire(&request.session_id).await?;
-            match find_input(&lease.session, &request.branch_id, &request.submission_id).await? {
-                Lookup::Accepted(event) => Ok(LookupReply::Accepted {
-                    input_id: event.id.clone(),
-                    sequence: event.sequence,
-                }),
-                Lookup::Unknown => Ok(LookupReply::Unknown),
-                Lookup::Ambiguous => Err(SessionsError::Ambiguous {
-                    message: "more than one input has this submissionId".into(),
-                }),
-            }
+            Ok(
+                match lease
+                    .session
+                    .lookup(&request.branch_id, &request.submission_id)
+                    .await?
+                {
+                    Some(event) => LookupReply::Accepted {
+                        input_id: event.id.clone(),
+                        sequence: event.sequence,
+                    },
+                    None => LookupReply::Unknown,
+                },
+            )
         })
         .await
     }
@@ -719,59 +673,21 @@ impl HostDispatch for SessionsService {
         }))
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
-        // Capture the original runtime row before returning a future.
-        let input = method == "input";
-        let caller = if input { caller_row() } else { None };
+        // The calling runtime row, captured before returning a future: input
+        // from a row that is already stopping is refused at the handoff.
+        let row = (method == "input")
+            .then(caller_row)
+            .flatten()
+            .map(|caller| caller.ctx().cancellation_token());
         let index = self.0.get::<AgentIndex>();
         let method = method.to_owned();
         let args = args.json();
-        let (finished, drain, row) = match caller {
-            Some(caller) => {
-                let (finished, settled) = oneshot::channel::<()>();
-                let drain = caller.ctx().effect(move || async move {
-                    let _ = settled.await;
-                    Ok(())
-                });
-                let drain = match drain {
-                    Ok(drain) => drain,
-                    Err(_) => {
-                        return Ok(Value::future(async {
-                            Ok(envelope(Err(SessionsError::reloading("the calling row"))))
-                        }));
-                    }
-                };
-                (
-                    Some(finished),
-                    Some(drain),
-                    Some(caller.ctx().cancellation_token()),
-                )
-            }
-            None => (None, None, None),
-        };
         let operation = async move {
-            let result = match (index, args) {
+            match (index, args) {
                 (None, _) => Err(SessionsError::reloading("the Agents index")),
                 (_, Err(error)) => Err(SessionsError::rejected(error.to_string())),
                 (Some(index), Ok(args)) => call(&index, &method, args, row.as_ref()).await,
-            };
-            // The task's native work and lease have settled before its row can clean up.
-            drop(finished);
-            if let Some(drain) = drain
-                && let Err(error) = drain.dispose().await
-            {
-                tracing::warn!(%error, "sessions input row cleanup failed after settlement");
             }
-            result
-        };
-        let operation = if input {
-            let task = tokio::spawn(operation);
-            Either::Left(async move {
-                task.await.map_err(|error| SessionsError::Failed {
-                    message: error.to_string(),
-                })?
-            })
-        } else {
-            Either::Right(operation)
         };
         Ok(Value::future(async move { Ok(envelope(operation.await)) }))
     }

@@ -367,8 +367,9 @@ impl ShellInput {
             }
             progress.send(item);
         }
-        // Whether to write is decided here, and no await follows before
-        // `record`. A run the Session part ended never writes, since
+        // Whether to write is decided here, and nothing yields before
+        // `record` commits: an input without a submission id is written in
+        // the first poll of `Branch::input`. A run the Session part ended never writes, since
         // `ending()` stays true. A Session that starts closing after this
         // check gets the input like any input sent just before its close,
         // and once its branch's close has started `Branch::input` refuses it
@@ -411,18 +412,20 @@ impl ShellInput {
             }
             let exit = code.map(|code| code.to_string()).or(signal);
             if run.mode == Mode::Record {
-                result["recorded"] =
-                    match self.record(&run, status, exit.as_deref(), truncated, &output) {
-                        Ok(sequence) => json!({ "sequence": sequence }),
-                        Err(error) => {
-                            let error = RpcError::from(error);
-                            let mut rejected = json!({ "message": error.message });
-                            if let Some(data) = error.data {
-                                rejected["appError"] = data.app_error.into();
-                            }
-                            json!({ "error": rejected })
+                result["recorded"] = match self
+                    .record(&run, status, exit.as_deref(), truncated, &output)
+                    .await
+                {
+                    Ok(sequence) => json!({ "sequence": sequence }),
+                    Err(error) => {
+                        let error = RpcError::from(error);
+                        let mut rejected = json!({ "message": error.message });
+                        if let Some(data) = error.data {
+                            rejected["appError"] = data.app_error.into();
                         }
-                    };
+                        json!({ "error": rejected })
+                    }
+                };
             }
             let outcome = match exit {
                 Some(exit) => format!("{status}:{exit}"),
@@ -440,7 +443,7 @@ impl ShellInput {
 
     /// Writes the run's result once, as the Append input of design A.3 on
     /// its branch; never retried.
-    fn record(
+    async fn record(
         &self,
         run: &RunInfo,
         status: &str,
@@ -459,11 +462,15 @@ impl ShellInput {
             &attributes,
             &text(&format!("$ {}\n{output}", run.command)),
         );
-        let event = self.tree.get(&run.branch_id)?.input(InputMessageData {
-            blocks: vec![raw(marker, None)],
-            mode: Some(InputMode::Append),
-            ..InputMessageData::default()
-        })?;
+        let event = self
+            .tree
+            .get(&run.branch_id)?
+            .input(InputMessageData {
+                blocks: vec![raw(marker, None)],
+                mode: Some(InputMode::Append),
+                ..InputMessageData::default()
+            })
+            .await?;
         Ok(event.sequence)
     }
 

@@ -19,6 +19,10 @@ pub enum AgentError {
     /// A capability the operation needs is reloading; the operation did not run.
     #[error("{0} is reloading")]
     Reloading(String),
+    /// More than one input on the branch has this submission id, written
+    /// before branches accepted each id once; nothing was written.
+    #[error("more than one input has submission id {0}")]
+    AmbiguousSubmission(String),
     #[error("{component}: {message}")]
     Fault { component: String, message: String },
     #[error("framework: {0}")]

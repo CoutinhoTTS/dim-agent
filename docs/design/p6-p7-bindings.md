@@ -21,7 +21,7 @@ owner's design; the storage binding does not implement either business package.
 | --- | --- | --- | --- |
 | Scheduler authorizing saves and reuse | Read the dispatched branch policy and the host default bound | `Session::get<PermissionState>`, native `session.permission.get`, Agents' Session defaults | A generated export of Agents' read-only `SessionPermissions` type |
 | Workflow definitions | Read user, project and installed-package definitions; save project definitions within file authority | Settings owner reads/CAS and project authorization; `FileStorage` read/list/replace/create-directory | A native, row-scoped file binding restricted to definition directories |
-| Workflow report recovery | Know that an earlier report writer has ended before retrying an unknown open attempt | S2 input/lookup, rutis row-owned effects, `caller_row()` and `CallerRow::ctx()` | Retain admitted native input work through settlement; prove the replacement-row boundary in actual Node flows |
+| Workflow report recovery | Retry a report whose reply was lost without writing it twice | S2 input with the branch accepting each `submissionId` once | Retain admitted native input work through settlement; verify resubmission across row and runtime replacement in actual Node flows |
 
 Creation configuration is not live Permission state. Published history is not a
 replacement for the owner's dispatched state. `pluginFiles` is a versioned
@@ -30,9 +30,7 @@ does not prove that its native write ended.
 
 The locked rutis 0.16.0 release already exposes
 [`caller_row` and `CallerRow`](https://github.com/arcships/rutis/blob/v0.16.0/crates/rutis-bridge/src/session/services.rs).
-The input lifetime contract keeps `sessions.input` hand-written and captures
-the caller synchronously inside `HostDispatch::invoke` (§4); its future cannot
-recover that thread-local context later. New services use generated exports, which capture
+`sessions` stays hand-written and does not capture its caller (§4). New services use generated exports, which capture
 the row context for a Rust `&Ctx` parameter. An effect on that context belongs
 to its original loader row. No rutis
 upgrade, new lifecycle event, cancellation protocol or host-epoch service is
@@ -254,72 +252,41 @@ is atomic, with the current last-writer behavior; it adds no project CAS.
 
 ## 4. Native report settlement
 
-### 4.1 Admission belongs to the original row
+### 4.1 One report per submission id
 
-Use the existing S2 `input`/`lookup` operations and Workflow's inner-v2
-`attempt_open` record. No new report service or operation id is introduced.
-
-For a call through a leased runtime-row `sessions` service, capture
-`caller_row()` in `invoke`. Before starting the native input task, register its
-drain effect on that row's `Ctx`. If registration fails because the row is
-unloading, return S2 `reloading` (`retryable:true`), with nothing written, and do
-not start the task. The bridge result and the effect join the same
-native task; dropping the remote result does not abandon it. On ordinary
-completion dispose that effect, so completed calls do not accumulate until row
-unload. This is native I/O ownership, not business state or a second report log.
+Use the existing S2 `input` operation and Workflow's inner-v2 report record. No
+new report service or operation id is introduced. The destination branch accepts
+each `submissionId` once ([sessions §6.2](appserver/sessions-service.md#62-input)):
+a resubmission writes nothing and replies the first input's receipt, also while
+that input is still unpublished. A report retry therefore needs no proof that an
+earlier writer ended.
 
 The S2 contract is in [sessions §6.2](appserver/sessions-service.md#62-input)
 and [§8.3–8.4](appserver/sessions-service.md#83-agents-index-reload), with matching
 [session-access A.6 / Appendix B](contracts/session-access.md#a6-errors) and Chinese
-copies. Preparation validates the request,
-acquires the Session lease and obtains its publication watch. Admission is the
-synchronous handoff of that prepared input and lease to its owned task, which
-calls `Session::input`. At the final admission check immediately before handoff,
-check index stopping and, for a row call, the captured original row generation's
-`Ctx::cancellation_token()`. There is no intervening await. Cancellation observed
-there returns `reloading`, nothing written, even if the drain effect was already
-registered before lease/restore preparation. Cancellation after that decision
-does not recall the admitted task. Typed Rust calls have no invented row token.
-
-For every caller, typed Rust or named service, the admitted task retains the
-actual append/publication work and lease until its own outcome. Index reload
-cannot substitute an early `reloading` reply. Dropping a Rust result still leaves
-that admitted task running; it supplies no writer-termination proof. Only calls
-with an actual `CallerRow` additionally get the original-row drain guarantee;
-native Rust owners must join their own work before handing it over. No fake row
-is fabricated. Request, reply, input event and publication contracts are unchanged.
-
-Native drain effects run before the original row's foreign cleanup. Row retirement
-cancels its generation token before draining effects, so a still-preparing call
-is refused by the final admission check; already-admitted calls finish.
-Normal loader replacement cannot apply that same process row's next generation
-before its effects settle. A complete host-process restart also leaves no old
-native writer. The new Workflow owner may rely on this guarantee only for its
-own fixed process row and run store, after the acceptance below proves it.
-Moving a store to another owner while the first owner runs is not a reload;
-the old owner must be fully disposed before that transfer.
+copies. For every caller, typed Rust or named service, the admitted task retains
+the actual append/publication work and lease until its own outcome; index reload
+cannot substitute an early `reloading` reply, and dropping a result does not end
+it. `sessions` captures its calling row only to refuse input from a row that stopped
+before admission (`reloading`, nothing written); it does not hold the row: a row
+reloads without waiting for the inputs it admitted, and its next generation
+resubmits. Request, reply, input
+event and publication contracts are unchanged.
 
 ### 4.2 Recovery order
 
 One configured Workflow process row owns its run store and report tasks. The
 next generation starts recovery after the ordinary row lifecycle allows its
-business work to start. It first performs `lookup`, as
-[Workflow §3.4](plugins/Workflow.md#34-report-ownership-and-recovery) requires:
-
-1. `accepted` or `ambiguous` settles the record as specified there, without
-   resending.
-2. For an open attempt with `unknown`, the completed original-row drain above
-   proves that no previous native input task can still write. Persist
-   `attempt_open:false`; then use the existing persist-open-before-input path.
-3. Without that proven boundary, retain the open marker and remain lookup-only.
-   A JavaScript exception, elapsed time, fresh Node process or closed FileScope
-   is never the evidence.
+business work to start. It resubmits each pending report with its stored
+`submissionId`, as [Workflow §3.4](plugins/Workflow.md#34-report-ownership-and-recovery)
+requires; the reply settles the record. `ambiguous` (several inputs written before
+branches accepted each id once) settles it delivered with a violation log.
 
 No host epoch or row key is stored. The persisted file stays inner v2; no field,
-version reuse or migration changes. The row boundary is a binding guarantee,
-not a durable identity inferred from a handle. Workflow still owns record
-writes and waits for their success/error before closing storage. If cleanup
-cannot persist a reply, the existing open marker remains for recovery.
+version reuse or migration changes. `attempt_open` is still written but no
+longer decides recovery; removing it needs an explicit format decision.
+Workflow still owns record writes and waits for their success/error before
+closing storage.
 
 ## 5. Implementation ownership and acceptance
 
@@ -327,7 +294,7 @@ cannot persist a reply, the existing open marker remains for recovery.
 | --- | --- |
 | Agents / S2 | Provide `SessionPermissions`; make the existing owner error exportable with stable codes; preserve S2's envelope; implement admitted `input` lifetime |
 | Settings / FileStorage | Provide plain `WorkflowFiles` with row-authorized definition directories, serde requests/errors and Bytes; keep FileStorage internal |
-| TypeScript assembly / SDK | List the two types in existing `build.rs` exports; commit generated declarations and SDK re-exports; retain original-row effects only on the existing hand-written `sessions.input` |
+| TypeScript assembly / SDK | List the two types in existing `build.rs` exports; commit generated declarations and SDK re-exports |
 | Workflow / Scheduler | Concrete Settings/source/package rows and business flows; actual recovery evidence |
 
 Use the existing `rutis_bridge::build::Exports` list in
@@ -337,8 +304,8 @@ Use the existing `rutis_bridge::build::Exports` list in
 `catalog.export_all(exports::all())` already installs that route. The owner
 plugins provide the typed values; no hand-written dispatch or additional wiring
 plugin is introduced. New exports use `&Ctx` wherever the original caller's row
-is needed. The existing `sessions.input` keeps its dispatcher and manual caller
-capture under §4, rather than changing the S2 service's binding contract.
+is needed. The existing `sessions` service keeps its hand-written dispatcher under §4,
+rather than changing the S2 service's binding contract.
 
 Implementation regenerates [`npm/branch-services.d.ts`](../../npm/branch-services.d.ts)
 through the same Exports list and re-exports its generated service/data types
@@ -382,21 +349,18 @@ business assertions are completed with the subsequent plugin implementation):
    collisions, invalid YAML/UTF-8, absent project directory, denied traversal,
    no S10 wrapping, and source edits preserving an accepted snapshot.
 3. Hold report input before admission, after admission before append and during
-   publication. Index stop before admission and failed row-effect registration
-   return `reloading` with no write. Also register the effect, hold lease/restore
-   preparation, start row retirement and then release preparation: the captured
-   row token refuses input at handoff. After admission, typed Rust and named calls
-   return their own result across index reload. Dropping a Rust result does not
-   cancel admitted input. Row unload joins native work before its replacement
-   can write; Rust callers get no invented row-drain guarantee.
-4. Crash Node with `attempt_open:true`, holding the old native call. A replacement
-   row must not recover past its original-row drain. Release it: lookup observes
-   one report. Crash between the marker write and native invocation: after the
-   proven boundary, unknown permits one submission. Repeat over host restart.
+   publication. Index stop before admission returns `reloading` with no write.
+   After admission, typed Rust and named calls return their own result across
+   index reload. Dropping a Rust result does not cancel admitted input. A row
+   reload does not wait for its admitted input; the next generation's
+   resubmission, during and after the held write, replies the same receipt.
+4. Crash Node while the old native report write is held. The replacement row
+   resubmits; once the write is released it is answered with that input, and the
+   branch holds one report. Crash between the marker write and native invocation:
+   recovery writes the report once. Repeat over host restart.
 5. Hold a store replacement during unload, including a failed replacement of
    the reply state. Storage closes only after admitted writes settle; recovery
-   retains the open marker and does not duplicate a report. Finished native-call
-   effects do not grow with successive reports.
+   resubmits and does not duplicate a report.
 
 Compile the packed SDK fixtures against regenerated types, using both permission
 methods and all four file methods. Verify the export list and methods are present;
@@ -419,13 +383,13 @@ enablement and dependency reload. The non-UTF-8 name case is Linux-only and is n
 covered by local macOS verification. Definition parsing, precedence, collisions and
 accepted snapshots belong to the business package’s acceptance.
 
-Native input flows cover original-row retirement during Session restoration,
-index reload during publication, row reload before append, failed effect
-registration during foreign cleanup, and a real Node crash while native append is
-held. After the old row drains, the replacement becomes available and lookup finds
-one committed input. Rust named-service calls retain admitted work when
-their result is dropped; a native full-server flow also directly drops the typed
-Rust future after admission and verifies its input still publishes once. Completed-call effects are removed.
+Native input flows cover a row reload during Session restoration, index reload
+during publication, row reload before append, input from a cleanup during unload,
+and a real Node crash while native append is held. A resubmission during and after
+the held write replies the first receipt, and the branch holds one input. Rust
+named-service calls retain admitted work when their result is dropped; a native
+full-server flow also directly drops the typed Rust future after admission and
+verifies its input still publishes once.
 
 The native input tests hold the public TimelineStore I/O port and existing Session
 restore assembly, with no production hook. Workflow records its report-specific
@@ -465,12 +429,11 @@ One immutable package scope on the original row is required for per-row file
 authority; it is not a global root registry. Reuse the native EntryKind instead
 of defining a second wire enum. Root equality with canonical host roots already
 guarantees absolute paths, so no second absolute-path check is needed.
-The named input task owns preparation and its row effect across a dropped bridge
-result; the admitted task separately keeps typed Rust I/O alive across a
-dropped Rust future. Other S2 methods keep their existing cancellation behavior.
-Native input effects replace a separate scope service, pending-call registry,
-host epoch and report queue. Keep the attempt marker and existing transactions:
-they guard actual uncertain writes and are already the agreed format.
+The admitted input task keeps native I/O alive across a dropped bridge result or
+Rust future. Other S2 methods keep their existing cancellation behavior. The
+branch accepting each `submissionId` once replaces a row drain, pending-call
+registry, host epoch and report queue. Keep the existing transactions; the
+attempt marker stays in the agreed format until a format decision removes it.
 
 ## 7. Requirements raised to mechanism owners
 
@@ -479,7 +442,7 @@ they guard actual uncertain writes and are already the agreed format.
 | Public run-store binding | Process-typescript §5.2 supplies the existing provider at the authorized product root, preserving the API and FileStorage authority. Public Node storage acceptance is implemented; report-specific evidence and package acceptance follow Workflow §3.4/Appendix D. | App Server binding delivered; business acceptance remains under #70/#71 |
 | Permission reads | Config/history do not provide dispatched Permission; launch-only capture does not meet Scheduler save/reuse. Agents supplies `SessionPermissions` through generated exports (§2). | Binding delivered by #259; Scheduler save/reuse acceptance remains under #70 |
 | Workflow file export | Private `pluginFiles` cannot read raw project/package YAML; exposing native roots allows writes to other owners' state. Settings supplies generated `WorkflowFiles` scoped to project definitions and the calling row's read-only packages (§3). | Before P7 source acceptance; Settings/FileStorage and TS binding owners, #71 |
-| Native input settlement | An early index-unload reply or dropped bridge result is not a writer-termination proof. Retain admitted native input and join it on its original row using existing caller context/effects, then verify §5. | Before P7 report acceptance; Agents and TS binding owners, #71 |
+| Native input settlement | An early index-unload reply or dropped bridge result is not a writer-termination proof. Retain admitted native input; the destination branch accepts each `submissionId` once, so a retry resubmits; verify §5. | Before P7 report acceptance; Agents and TS binding owners, #71 |
 
 No external capability request is established. If an actual acceptance flow
 cannot be implemented with the locked APIs, record the reproduction, the

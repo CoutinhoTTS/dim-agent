@@ -82,10 +82,11 @@ existing later-turn race and retained applied input limits remain in force.
 
 Completed, failed and interrupted runs report to their recorded destination as one raw Steer block;
 explicit stops and management runs without a destination do not report. Before submission, the
-inner run record persists `pending` with `attempt_open:true`. Replacement first uses lookup after
-the old row's native writers have drained. A complete host restart is the other settlement boundary.
-An unknown lookup alone never proves that a live writer has stopped. Accepted or ambiguous lookup
-prevents resubmission; ambiguous lookup records a violation. Missing destinations are undeliverable.
+inner run record persists `pending` with `attempt_open:true` (kept in the format; it decides
+nothing). Every retry, including a replacement generation's recovery, resubmits the same
+`submissionId`; the destination branch accepts it once and replies the first input's receipt.
+An `ambiguous` reply (duplicates written before branches accepted each id once) settles the report
+delivered and records a violation. Missing destinations are undeliverable.
 
 Run storage is `workflow/runs.json`, with inner `{version:2,runs:[...]}` inside the host's S10 v1
 wrapper. Invalid, v1, unknown-version or missing-marker records return `invalid_data` and preserve
@@ -109,7 +110,7 @@ node --test runtime/plugins/workflow/workflow.test.mjs
 Actual Node/App Server flows are in
 [workflow.rs](../../../crates/dim-app-server/tests/transport_flow/workflow.rs), using public Node CI's
 `DIM_TEST_NODE`, `DIM_TEST_JS_RUNTIME` and `DIM_TEST_RUTIS_SDK` settings and disposable homes.
-They exercise stage Sessions, published reports, original-row/runtime drain, crashes and failed
+They exercise stage Sessions, published reports, resubmission across row/runtime replacement, crashes and failed
 record replacement. Native retention flows use actual Session deletion, file read/replace failures,
 fixed-row replacement and the existing one-minute maintenance timer. The acceptance mapping below
 separates native coverage from SDK coverage.
@@ -136,7 +137,7 @@ Node rows, Settings, file authority, S2 calls, publication and Session history. 
 | 7 | Native running-stage Node crash, row/runtime report replacement, complete host restart and Agents-index reload; no stage relaunch |
 | 8–11 | Native live first-admission narrowing with the sibling launch gated, cap persistence before siblings, starter loss, non-interactive/default-profile stage Sessions with and without `workflow` in the mount list, ReadOnly denial and handler refusal when it is declared |
 | 12 | Native retention keeps the latest 100 terminal records, newer active/pending work and retained references; SDK flows prove that older active/pending records also survive the terminal limit; user forks and external Sessions survive owned-parent deletion. Real deletion/read/atomic-replace failures preserve ownership, minute maintenance retries without active runs or definitions, and Node restart reconciles deletion before record removal. Native terminal/report-settlement triggers continue with an unreadable definition source; native source CAS and invalid-file preservation are also covered |
-| 13 | Native background append drain, before/after-input crashes, failed atomic replacement, duplicate publication/ambiguous lookup and host restart; SDK rejected, failed, reloading and publication-unknown replies |
+| 13 | Native resubmission across row/runtime replacement with the append held, before/after-input crashes, failed atomic replacement, a resubmitted report written once and host restart; SDK rejected, failed, ambiguous, reloading and publication-unknown replies |
 
 Scope cleanup also exercises a failing parallel reader while another native launch is admitted:
 the original task joins its siblings before its file scope can close. No additional lock or owner

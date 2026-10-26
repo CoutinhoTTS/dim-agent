@@ -4,7 +4,8 @@ use crate::{
     TimelineStore,
 };
 use dim_agent_types::{
-    AgentEvent, EventDraft, ProjectionCheckpoint, RecoverySnapshot, TimelinePosition,
+    AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
+    TimelinePosition,
 };
 use rutis::events::SyncCall;
 use rutis::host::{CtxHost, ErrorKind, InstanceId};
@@ -12,7 +13,7 @@ use rutis::service;
 use rutis::{Ctx, Disposer, Event};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     ops::{Bound, RangeBounds},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, OnceLock, Weak},
@@ -79,8 +80,40 @@ struct Inner {
     opening: OnceLock<Weak<Opening>>,
     data: Mutex<Data>,
     commit: Mutex<()>,
+    /// The submission ids of the inputs the branch was restored with, set
+    /// before the branch accepts input.
+    restored: OnceLock<HashMap<String, Submission>>,
+    /// The submission ids of the inputs committed since, written under the
+    /// commit lock.
+    submissions: Mutex<HashMap<String, Submission>>,
     changed: watch::Sender<(u64, bool)>,
     faults: FaultReporter,
+}
+/// The inputs a branch holds for one submission id: one, by its sequence,
+/// or several, written before the branch accepted each id once.
+#[derive(Debug, Clone, Copy)]
+enum Submission {
+    Input(u64),
+    Ambiguous,
+}
+fn index_submission(index: &mut HashMap<String, Submission>, event: &AgentEvent) {
+    if let EventKind::InputMessage(InputMessageData {
+        submission_id: Some(id),
+        ..
+    }) = &event.kind
+    {
+        index
+            .entry(id.clone())
+            .and_modify(|found| *found = Submission::Ambiguous)
+            .or_insert(Submission::Input(event.sequence));
+    }
+}
+/// What [`Timeline::input`] did.
+pub(crate) enum Appended {
+    Written(Arc<AgentEvent>),
+    /// An input with the same submission id is already committed at this
+    /// sequence; nothing was written.
+    Existing(u64),
 }
 #[derive(Default)]
 struct Data {
@@ -158,6 +191,13 @@ impl Timeline {
                 ..Default::default()
             }),
             commit: Mutex::new(()),
+            // A new branch has no inputs to index.
+            restored: if sequence == 0 {
+                OnceLock::from(HashMap::new())
+            } else {
+                OnceLock::new()
+            },
+            submissions: Mutex::default(),
             changed: watch::channel((sequence, false)).0,
             faults,
         }))
@@ -195,6 +235,58 @@ impl Timeline {
     ) -> Result<Vec<Arc<AgentEvent>>> {
         let _append = AppendGuard::enter()?;
         let _commit = self.0.commit.lock().unwrap();
+        self.commit(originals, register)
+    }
+    /// Appends `data` as one `input/message`, unless an input with its
+    /// submission id is already committed on this branch: the branch accepts
+    /// each id once. The check and the append hold the commit lock, so of
+    /// concurrent inputs with one id exactly one is written.
+    pub(crate) fn input(&self, data: InputMessageData) -> Result<Appended> {
+        let _append = AppendGuard::enter()?;
+        let _commit = self.0.commit.lock().unwrap();
+        if let Some(id) = &data.submission_id
+            && let Some(sequence) = self.submission(id)?
+        {
+            return Ok(Appended::Existing(sequence));
+        }
+        let mut events = self.commit(vec![EventKind::InputMessage(data).into()], |_| Ok(()))?;
+        Ok(Appended::Written(
+            events.pop().expect("single-event batch returned one event"),
+        ))
+    }
+    /// The sequence of the committed input with submission id `id`.
+    pub(crate) fn submission(&self, id: &str) -> Result<Option<u64>> {
+        let restored = self.0.restored.get().ok_or_else(|| {
+            AgentError::fault("timeline.input", "restored submissions are not indexed")
+        })?;
+        let committed = self.0.submissions.lock().unwrap();
+        match (restored.get(id), committed.get(id)) {
+            (None, None) => Ok(None),
+            (Some(Submission::Input(sequence)), None)
+            | (None, Some(Submission::Input(sequence))) => Ok(Some(*sequence)),
+            _ => Err(AgentError::AmbiguousSubmission(id.into())),
+        }
+    }
+    /// Indexes the submission ids of the inputs the branch was restored
+    /// with. The branch's build calls it before the branch accepts input; it
+    /// reads the opening's copy of the branch's own history.
+    pub(crate) async fn index_submissions(&self) -> Result<()> {
+        if self.0.restored.get().is_some() {
+            return Ok(());
+        }
+        let mut restored = HashMap::new();
+        for event in self.local(1..=self.0.restored_sequence).await? {
+            index_submission(&mut restored, &event);
+        }
+        let _ = self.0.restored.set(restored);
+        Ok(())
+    }
+    /// Commits a batch; the caller holds the append guard and commit lock.
+    fn commit(
+        &self,
+        originals: Vec<EventDraft>,
+        register: impl FnOnce(&[Arc<AgentEvent>]) -> Result<()>,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
         if let Some(error @ AgentError::Storage(_)) = self.0.faults.failure() {
             return Err(error);
         }
@@ -268,6 +360,12 @@ impl Timeline {
             }
             data.allocated = last_sequence;
             data.hot.extend(records.iter().cloned());
+        }
+        {
+            let mut submissions = self.0.submissions.lock().unwrap();
+            for event in &events {
+                index_submission(&mut submissions, event);
+            }
         }
         let weak = Arc::downgrade(&self.0);
         let result = self.0.store.append(

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{agents::Lookup, tree_protocol as wire};
+use crate::tree_protocol as wire;
 use dim_agent_runtime::BranchOptions;
 use dim_agent_types::BranchSource;
 
@@ -61,19 +61,13 @@ impl Connection {
         let session = self.session(rpc, &params.session_id)?;
         let branch = params.branch_id.as_deref().expect("validated branchId");
         Ok(Reply::InputLookup(
-            match crate::agents::find_input(&session, branch, &params.submission_id)
+            match session
+                .lookup(branch, &params.submission_id)
                 .await
                 .map_err(RpcError::from)?
             {
-                Lookup::Accepted(event) => InputLookupResult::Accepted { event },
-                Lookup::Unknown => InputLookupResult::Unknown,
-                Lookup::Ambiguous => {
-                    return Err(RpcError::app(
-                        -32000,
-                        "submission_ambiguous",
-                        "Submission identity belongs to multiple inputs",
-                    ));
-                }
+                Some(event) => InputLookupResult::Accepted { event },
+                None => InputLookupResult::Unknown,
             },
         ))
     }

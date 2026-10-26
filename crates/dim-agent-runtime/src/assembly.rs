@@ -1361,6 +1361,9 @@ impl TimelineFactory {
                 let scope = branch.scope.scope;
                 // Publication requires Loop; the context looks it up per call.
                 required::<dyn LoopState>(ctx, scope.key::<dyn LoopState>())?;
+                // Input deduplication covers the restored history from the
+                // first input on.
+                branch.timeline.index_submissions().await?;
                 Ok(TimelineContext::start(
                     id,
                     ctx.clone(),

@@ -74,7 +74,7 @@ async fn count(session: &Session) -> usize {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery() {
+async fn node_workflow_report_crash_recovery_resubmits_and_gets_the_first_input() {
     let home = home();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let Served {
@@ -88,7 +88,6 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
     let target = client_session(&mut client, &agent, host_policy()).await;
     seed(&home, target.id());
     let (_, _, loader, _) = controls.recv().await.unwrap();
-    let owner = loader.get("workflow-report").unwrap().view.unwrap();
     let before = ready(&mut client).await;
     let connection = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
     // Release the fault before the native writer's five-second busy timeout.
@@ -102,7 +101,6 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
     })
     .await
     .unwrap();
-    assert_eq!(stored(&home)["runs"][0]["report"]["attempt_open"], true);
     assert!(
         std::process::Command::new("kill")
             .args(["-KILL", &before["pid"].as_u64().unwrap().to_string()])
@@ -111,22 +109,19 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
             .success()
     );
     assert!(client.response(request).await.get("error").is_some());
-    let (restarted, ()) = tokio::join!(loader.restart("SessionNodeRuntime"), async {
-        let mut changed = owner.watch();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while changed.borrow_and_update().state != rutis::host::FiberState::Unloading {
-                changed.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
-        assert!(
-            super::unload_held(&owner).await,
-            "the original admitted write still owns its drain while SQLite holds it"
-        );
-        connection.execute_batch("COMMIT").unwrap();
-    });
-    restarted.unwrap();
+    // The runtime restarts without waiting for the write SQLite holds.
+    loader.restart("SessionNodeRuntime").await.unwrap();
+    assert_ne!(ready(&mut client).await["pid"], before["pid"]);
+    // Recovery resubmits while the first write is unpublished; it is
+    // answered with that input once SQLite commits.
+    let recover = client.send("report.recover", json!({})).await;
+    phase(&mut client, recover, "input").await;
+    connection.execute_batch("COMMIT").unwrap();
+    assert_ok(&client.response(recover).await);
+    assert_eq!(
+        stored(&home)["runs"][0]["report"],
+        json!({"state":"delivered"})
+    );
     assert_eq!(count(&target).await, 1);
     let lookup = sessions
         .ok(
@@ -135,43 +130,36 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
         )
         .await;
     assert_eq!(lookup["status"], "accepted");
-    assert_ne!(ready(&mut client).await["pid"], before["pid"]);
-    let reply = client.rpc("report.recover", json!({})).await;
-    assert_ok(&reply);
-    assert_eq!(
-        stored(&home)["runs"][0]["report"],
-        json!({"state":"delivered"})
-    );
-    assert_eq!(count(&target).await, 1);
     loader.restart("workflow-report").await.unwrap();
     ready(&mut client).await;
     assert_ok(&client.rpc("report.recover", json!({})).await);
     assert_eq!(count(&target).await, 1);
-    // Existing duplicate inputs settle delivered and emit a violation, never a third input.
-    let duplicate = client_session(&mut client, &agent, host_policy()).await;
-    seed(&home, duplicate.id());
-    for _ in 0..2 {
+    // A destination that already holds the report: recovery writes nothing.
+    let holder = client_session(&mut client, &agent, host_policy()).await;
+    seed(&home, holder.id());
+    let first = sessions
+        .ok(
+            "input",
+            input(&holder, "workflow:report:binding-report", json!([])),
+        )
+        .await;
+    loader.restart("workflow-report").await.unwrap();
+    ready(&mut client).await;
+    assert_ok(&client.rpc("report.recover", json!({})).await);
+    assert_eq!(
+        stored(&home)["runs"][0]["report"],
+        json!({"state":"delivered"})
+    );
+    assert_eq!(count(&holder).await, 1);
+    assert_eq!(
         sessions
             .ok(
                 "input",
-                input(&duplicate, "workflow:report:binding-report", json!([])),
+                input(&holder, "workflow:report:binding-report", json!([]))
             )
-            .await;
-    }
-    loader.restart("workflow-report").await.unwrap();
-    ready(&mut client).await;
-    let recover = client.send("report.recover", json!({})).await;
-    phase(&mut client, recover, "duplicate_report_violation").await;
-    assert_ok(&client.response(recover).await);
-    assert_eq!(
-        stored(&home)["runs"][0]["report"],
-        json!({"state":"delivered"})
+            .await,
+        first
     );
-    assert_eq!(count(&duplicate).await, 2);
-    loader.restart("workflow-report").await.unwrap();
-    ready(&mut client).await;
-    assert_ok(&client.rpc("report.recover", json!({})).await);
-    assert_eq!(count(&duplicate).await, 2);
     server.shutdown();
     server.join().await.unwrap();
     drop(connection);
@@ -180,7 +168,7 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_workflow_report_crash_before_input_retries_after_the_original_row_drains() {
+async fn node_workflow_report_crash_before_input_writes_it_on_recovery() {
     let home = home();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let Served {
@@ -226,8 +214,7 @@ async fn node_workflow_report_crash_before_input_retries_after_the_original_row_
 }
 
 /// The owner restarts while a send waits to write its outcome: the send is
-/// interrupted, and the next generation reconciles the open attempt without
-/// sending the report again.
+/// interrupted, and the next generation's resubmission writes nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_workflow_report_interrupted_send_reconciles_without_resend() {

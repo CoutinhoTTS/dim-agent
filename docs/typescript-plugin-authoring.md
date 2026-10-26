@@ -384,8 +384,8 @@ The caller does not own or close the Session by dropping a handle.
 | Method | Use and result |
 | --- | --- |
 | `launch` | Create a Session; reply includes its stable id and effective policy. |
-| `input` | Write marked model-facing blocks and optional user content; reply confirms publication. |
-| `lookup` | Resolve an uncertain input by `submissionId`; writes are not deduplicated. |
+| `input` | Write marked model-facing blocks and optional user content; reply confirms publication. The branch accepts each `submissionId` once: a resubmission writes nothing and replies the first receipt. |
+| `lookup` | Read the input with a `submissionId` without writing. |
 | `history` | Page local events through a fixed published prefix; carry `through` across pages. |
 | `withdraw` | Withdraw a held input; `notHeld` means nothing was deleted. |
 | `stop` | Interrupt the branch and wait for settlement. |
@@ -395,8 +395,9 @@ The caller does not own or close the Session by dropping a handle.
 Methods return `SessionsResult<T>`. Branch calls take both `sessionId` and
 `branchId`; there is no implicit current branch. Input must include the caller's
 source marker as its first raw block and a nonempty `submissionId`, conventionally
-`<source>:<uuid>`. That id is a correlation key, not idempotency. After a lost reply,
-`reloading` or `publication_unknown`, look up the write before submitting again.
+`<source>:<uuid>`, generated once per logical submission and stored before the call.
+After a lost reply, `reloading` or `publication_unknown`, including in a new generation,
+submit again with the same id; you get the first input's receipt.
 `retryable` alone is not authority to repeat a side effect. A lost launch reply
 can leave an empty Session: launch has no deduplication key.
 
