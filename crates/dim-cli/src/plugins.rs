@@ -7,7 +7,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::host::ErrorKind;
+use rutis::{Ctx, Plugin};
 use tokio::sync::oneshot;
 
 use crate::args::Options;
@@ -56,21 +57,19 @@ pub struct DaemonLink {
     pub start: bool,
 }
 
-impl TypedPlugin for DaemonLink {
+impl Plugin for DaemonLink {
     type Deps = ();
 
     fn name(&self) -> &str {
         "DaemonLink"
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let client = client::connect_inner(&self.options, self.start)
-                .await
-                .map_err(CordisError::PluginFailed)?;
-            ctx.provide(Connection(Mutex::new(client)))?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        let client = client::connect_inner(&self.options, self.start)
+            .await
+            .map_err(ErrorKind::PluginFailed)?;
+        ctx.provide(Connection(Mutex::new(client)))?;
+        Ok(())
     }
 }
 
@@ -84,62 +83,56 @@ pub struct Tui {
     pub leave: Mutex<Option<oneshot::Sender<Leave>>>,
 }
 
-impl TypedPlugin for Tui {
+impl Plugin for Tui {
     type Deps = (Arc<Connection>,);
 
     fn name(&self) -> &str {
         "Tui"
     }
 
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (connection,): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            // Registered before the render thread enters raw mode, so every
-            // way out of the tree hands the terminal back.
-            ctx.effect(|| {
-                Effect::Disposer(Box::new(|| {
-                    ui::terminal::restore_if_held();
-                    Ok(())
-                }))
+    async fn apply(&self, ctx: &Ctx, (connection,): Self::Deps) -> rutis::Result {
+        // Registered before the render thread enters raw mode, so every
+        // way out of the tree hands the terminal back.
+        ctx.effect(|| async move {
+            ui::terminal::restore_if_held();
+            Ok(())
+        })?;
+        let client = connection
+            .take()
+            .ok_or_else(|| rutis::Error::from(ErrorKind::PluginFailed(CONNECTION_TAKEN.into())))?;
+        let leave = self
+            .leave
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| {
+                rutis::Error::from(ErrorKind::PluginFailed("Tui was loaded twice".into()))
             })?;
-            let client = connection
-                .take()
-                .ok_or_else(|| CordisError::PluginFailed(CONNECTION_TAKEN.into()))?;
-            let leave = self
-                .leave
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
-                .ok_or_else(|| CordisError::PluginFailed("Tui was loaded twice".into()))?;
-            let host = SessionHost::start(self.options.clone(), client);
-            let env = self.env.clone();
-            let render = std::thread::Builder::new()
-                .name("dim-tui".into())
-                .spawn(move || {
-                    // The interface shuts the session thread down before it
-                    // returns; a dropped sender means the root stopped waiting.
-                    let _ = leave.send(ui::tui::run(Box::new(host), env));
-                })
-                .map_err(|error| CordisError::PluginFailed(error.into()))?;
-            ctx.effect(|| {
-                Effect::Disposer(Box::new(move || {
-                    // Finished once `leave` was sent; bounded for an unload
-                    // that did not wait for it.
-                    let deadline = std::time::Instant::now() + Duration::from_secs(1);
-                    while !render.is_finished() && std::time::Instant::now() < deadline {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    if render.is_finished() {
-                        let _ = render.join();
-                    }
-                    Ok(())
-                }))
-            })?;
-            Ok(Effect::Done)
-        })
+        let host = SessionHost::start(self.options.clone(), client);
+        let env = self.env.clone();
+        let render = std::thread::Builder::new()
+            .name("dim-tui".into())
+            .spawn(move || {
+                // The interface shuts the session thread down before it
+                // returns; a dropped sender means the root stopped waiting.
+                let _ = leave.send(ui::tui::run(Box::new(host), env));
+            })
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
+        ctx.effect(|| {
+            async move {
+                // Finished once `leave` was sent; bounded for an unload
+                // that did not wait for it.
+                let deadline = std::time::Instant::now() + Duration::from_secs(1);
+                while !render.is_finished() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if render.is_finished() {
+                    let _ = render.join();
+                }
+                Ok(())
+            }
+        })?;
+        Ok(())
     }
 }
 
@@ -156,55 +149,56 @@ pub struct WebHold {
     pub done: Mutex<Option<oneshot::Sender<crate::Result<i32>>>>,
 }
 
-impl TypedPlugin for WebHold {
+impl Plugin for WebHold {
     type Deps = (Arc<Connection>,);
 
     fn name(&self) -> &str {
         "WebHold"
     }
 
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (connection,): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let mut client = connection
-                .take()
-                .ok_or_else(|| CordisError::PluginFailed(CONNECTION_TAKEN.into()))?;
-            let done = self
-                .done
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take()
-                .ok_or_else(|| CordisError::PluginFailed("WebHold was loaded twice".into()))?;
-            // The signals are listened for before the panel says how to
-            // stop, so a Ctrl+C that follows it at once is ours.
-            let signals =
-                Signals::listen().map_err(|error| CordisError::PluginFailed(error.into()))?;
-            self.open(&mut client)
-                .await
-                .map_err(CordisError::PluginFailed)?;
-            // The entry stays open while this connection does: the task
-            // owns it until a signal or the daemon's end, then reports.
-            let wait = tokio::spawn(async move {
-                let _ = done.send(hold(client, signals).await);
-            });
-            ctx.effect(|| {
-                Effect::Disposer(Box::new(move || {
-                    wait.abort();
-                    Ok(())
-                }))
+    async fn apply(&self, ctx: &Ctx, (connection,): Self::Deps) -> rutis::Result {
+        let mut client = connection
+            .take()
+            .ok_or_else(|| rutis::Error::from(ErrorKind::PluginFailed(CONNECTION_TAKEN.into())))?;
+        let done = self
+            .done
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| {
+                rutis::Error::from(ErrorKind::PluginFailed("WebHold was loaded twice".into()))
             })?;
-            Ok(Effect::Done)
-        })
+        // The signals are listened for before the panel says how to
+        // stop, so a Ctrl+C that follows it at once is ours.
+        let signals = Signals::listen()
+            .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
+        let opened = self
+            .open(&mut client)
+            .await
+            .map_err(ErrorKind::PluginFailed)?;
+        if !opened {
+            // The hint is printed; there is nothing to hold.
+            let _ = done.send(Ok(1));
+            return Ok(());
+        }
+        // The entry stays open while this connection does: the task
+        // owns it until a signal or the daemon's end, then reports.
+        let wait = tokio::spawn(async move {
+            let _ = done.send(hold(client, signals).await);
+        });
+        ctx.effect(|| async move {
+            wait.abort();
+            Ok(())
+        })?;
+        Ok(())
     }
 }
 
 impl WebHold {
-    /// Opens the entry and shows where it is. Only `dimcode web` loads this
-    /// holder; TUI `/web` uses the daemon switch.
-    async fn open(&self, client: &mut Client) -> crate::Result<()> {
+    /// Opens the entry and shows where it is; `false` when the daemon has no
+    /// Web workspace, after saying how to get it. Only `dimcode web` loads
+    /// this holder; TUI `/web` uses the daemon switch.
+    async fn open(&self, client: &mut Client) -> crate::Result<bool> {
         #[derive(serde::Deserialize)]
         struct Opened {
             url: String,
@@ -216,22 +210,16 @@ impl WebHold {
         };
         let opened: Opened = match client.typed("web.open", params).await {
             Ok(opened) => opened,
-            Err(error) if client::app_error(&error) == Some("web_assets_missing") => {
+            Err(error) => {
+                // A frontend that is missing or of another version is not
+                // an error of this command: say how to get it, exit 1.
                 let executable = std::env::current_exe().unwrap_or_default();
-                return Err(format!(
-                    "The Web workspace is not installed: {}",
-                    client::web_assets_hint(&executable, &self.home)
-                )
-                .into());
+                let Some((problem, fix)) = client::web_hint(&error, &executable, &self.home) else {
+                    return Err(error);
+                };
+                eprintln!("{problem}.\n{fix}.");
+                return Ok(false);
             }
-            Err(error) if client::app_error(&error) == Some("web_assets_incompatible") => {
-                return Err(format!(
-                    "{error}; install the dimcode-web package of version {}",
-                    env!("CARGO_PKG_VERSION")
-                )
-                .into());
-            }
-            Err(error) => return Err(error),
         };
         let fragment = opened.url.split_once('#').map_or("", |(_, f)| f);
         let url = format!("http://{}/", opened.address);
@@ -244,7 +232,7 @@ impl WebHold {
             sign_in: (!opened_browser).then_some(sign_in.as_str()),
             session_id: None,
         });
-        Ok(())
+        Ok(true)
     }
 }
 

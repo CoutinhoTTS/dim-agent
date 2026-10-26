@@ -31,14 +31,15 @@ use crate::{
     storage::SqliteStorage,
 };
 use dim_agent_capabilities::host::*;
-use dim_agent_runtime::{AgentError, Names, When, names::ServiceCatalog};
+use dim_agent_runtime::{AgentError, Names};
 use dim_agent_types::{
     ModelCapabilitySnapshot, ModelConfig, ModelId, ModelRequest, ModelSelection,
 };
 use futures_util::future::BoxFuture as SharedFuture;
 use reqwest::Client;
 use rusqlite::{OptionalExtension, params};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, Plugin, TypeKey, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -2093,103 +2094,95 @@ fn oauth_rejection(error: &HostError, phase: CredentialRecoveryPhase) -> Credent
     }
 }
 
-#[derive(Default)]
 pub struct ProviderPlugin {
-    secret_host: bool,
+    db: Key<SqliteStorage>,
+    oauth: Key<ManagedProviders>,
+    codex: Key<OpenAICodexOAuthService>,
+    grok: Key<GrokOAuthService>,
+    /// ProviderSecretHost only when a plugin supplies it.
+    secret_host: Option<Key<ProviderSecretHost>>,
+    host: Key<ModelHost>,
+    methods: Key<crate::methods::ManagementMethods>,
 }
 impl ProviderPlugin {
+    /// The Provider part without a ProviderSecretHost.
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Self::keyed(names, false)
+    }
     /// The supplying plugin must provide ProviderSecretHost before activation.
-    pub fn with_secret_host() -> Self {
-        Self { secret_host: true }
+    pub fn with_secret_host(names: &Names<'_>) -> rutis::Result<Self> {
+        Self::keyed(names, true)
     }
-    /// This part with its keys from `names`: ProviderSecretHost only when
-    /// a plugin supplies it.
-    pub fn part(self, names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
-        let keys = self.keys(names)?;
-        Ok(names.part_with(self, keys))
-    }
-    /// This part keyed from `catalog`, to mount it directly.
-    pub fn typed(self, catalog: &ServiceCatalog) -> Result<rutis::Typed<Self>, CordisError> {
-        let build = Default::default();
-        let keys = self.keys(&Names::copy(catalog, &build))?;
-        Ok(rutis::Typed::with_keys(self, keys))
-    }
-    fn keys(
-        &self,
-        names: &Names<'_>,
-    ) -> Result<<<Self as TypedPlugin>::Deps as rutis::Deps>::Keys, CordisError> {
-        Ok((
-            names.key()?,
-            names.key()?,
-            names.key()?,
-            names.key()?,
-            names.when::<Keyed<ProviderSecretHost>>(self.secret_host)?,
-            names.key()?,
-            names.key()?,
-        ))
+    fn keyed(names: &Names<'_>, secret_host: bool) -> rutis::Result<Self> {
+        Ok(Self {
+            db: names.key()?,
+            oauth: names.key()?,
+            codex: names.key()?,
+            grok: names.key()?,
+            secret_host: secret_host.then(|| names.key()).transpose()?,
+            host: names.key()?,
+            methods: names.key()?,
+        })
     }
 }
-impl TypedPlugin for ProviderPlugin {
-    type Deps = (
-        Keyed<SqliteStorage>,
-        Keyed<ManagedProviders>,
-        Keyed<OpenAICodexOAuthService>,
-        Keyed<GrokOAuthService>,
-        When<Keyed<ProviderSecretHost>>,
-        Keyed<ModelHost>,
-        Keyed<crate::methods::ManagementMethods>,
-    );
+impl DynPlugin for ProviderPlugin {
     fn name(&self) -> &str {
         "Provider"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(db),
-            Keyed(oauth),
-            Keyed(codex),
-            Keyed(grok),
-            When(secret_host),
-            Keyed(host),
-            Keyed(methods),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        let mut keys = vec![
+            self.db.erase(),
+            self.oauth.erase(),
+            self.codex.erase(),
+            self.grok.erase(),
+            self.host.erase(),
+            self.methods.erase(),
+        ];
+        keys.extend(self.secret_host.as_ref().map(Key::erase));
+        keys
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let service = Arc::new(ProviderService {
-                db,
-                oauth,
-                codex,
-                grok,
-                secret_host: secret_host.map(|Keyed(host)| host),
-                bundled: Arc::new(
-                    BundledCatalog::load()
-                        .map_err(|error| CordisError::PluginFailed(error.into()))?,
-                ),
-                client: remote::client(&ModelNetwork::default())
-                    .map_err(|error| CordisError::PluginFailed(error.to_string().into()))?,
-                stop: CancellationToken::new(),
-                tasks: TaskTracker::new(),
-                admission: Mutex::new(()),
-            });
+            let db = ctx.require_at(&self.db)?;
+            let oauth = ctx.require_at(&self.oauth)?;
+            let codex = ctx.require_at(&self.codex)?;
+            let grok = ctx.require_at(&self.grok)?;
+            let secret_host = match &self.secret_host {
+                Some(key) => Some(ctx.require_at(key)?),
+                None => None,
+            };
+            let host = ctx.require_at(&self.host)?;
+            let methods = ctx.require_at(&self.methods)?;
+            let service =
+                Arc::new(ProviderService {
+                    db,
+                    oauth,
+                    codex,
+                    grok,
+                    secret_host,
+                    bundled: Arc::new(BundledCatalog::load().map_err(|error| {
+                        rutis::Error::from(ErrorKind::PluginFailed(error.into()))
+                    })?),
+                    client: remote::client(&ModelNetwork::default()).map_err(|error| {
+                        rutis::Error::from(ErrorKind::PluginFailed(error.to_string().into()))
+                    })?,
+                    stop: CancellationToken::new(),
+                    tasks: TaskTracker::new(),
+                    admission: Mutex::new(()),
+                });
             let owner = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let _guard = owner.admission.lock().unwrap();
-                            owner.stop.cancel();
-                            owner.tasks.close();
-                        }
-                        owner.tasks.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                {
+                    let _guard = owner.admission.lock().unwrap();
+                    owner.stop.cancel();
+                    owner.tasks.close();
+                }
+                owner.tasks.wait().await;
+                Ok(())
             })?;
-            service
-                .seed_bundled()
-                .await
-                .map_err(|error| CordisError::PluginFailed(error.to_string().into()))?;
+            service.seed_bundled().await.map_err(|error| {
+                rutis::Error::from(ErrorKind::PluginFailed(error.to_string().into()))
+            })?;
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
             ctx.provide(ModelSelectionHost(resolver))?;
@@ -2198,12 +2191,12 @@ impl TypedPlugin for ProviderPlugin {
                 host,
             });
             ctx.provide(AuxiliaryModelHost(auxiliary.clone()))?;
-            ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
+            ctx.provide_at(
                 rutis_bridge::session::host_key("auxiliaryModel"),
-                auxiliary,
+                auxiliary as Arc<dyn rutis_bridge::session::HostDispatch>,
             )?;
             management::provide(ctx, &methods, service.clone())?;
-            ctx.provide_as(TypeKey::of::<ProviderService>(), service)?;
+            ctx.provide_as::<ProviderService>(service)?;
             Ok(Effect::Done)
         })
     }

@@ -31,6 +31,9 @@ test('packed plugin service types compile the author guide and enforce the publi
   });
   const branchFixture = path.join(directory, 'branch-part.mts');
   writeFileSync(branchFixture, readFileSync(path.join(root, 'runtime/fixtures/branch-part.ts'), 'utf8')
+    .replace("'../../npm/plugin.js'", "'dimcode/plugin'").replace("'./part-row.ts'", "'./part-row.mjs'"));
+  const partRow = path.join(directory, 'part-row.mts');
+  writeFileSync(partRow, readFileSync(path.join(root, 'runtime/fixtures/part-row.ts'), 'utf8')
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const permissionsFixture = path.join(directory, 'session-permissions.mts');
   writeFileSync(permissionsFixture, readFileSync(path.join(root, 'runtime/fixtures/session-permissions.ts'), 'utf8')
@@ -235,6 +238,6 @@ const lossyCut: number = cutoff;
   assert.equal(declarations.status, 0, declarations.stdout + declarations.stderr);
   const checked = spawnSync(process.execPath, [compiler,
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
-    ...files, calls, branchFixture, permissionsFixture, workflowFixture], { encoding: 'utf8' });
+    ...files, calls, branchFixture, partRow, permissionsFixture, workflowFixture], { encoding: 'utf8' });
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
 });

@@ -2,6 +2,7 @@
 
 use dim_acp::{AcpGateway, Io, auth::Login};
 use dim_client::{Client, ConnectionConfig, DaemonProfile, Server};
+use rutis::host::CtxHost;
 use serde_json::{Value, json};
 use std::{os::unix::fs::PermissionsExt, time::Duration};
 use tokio::{
@@ -115,7 +116,7 @@ async fn browser_flow(cancel: bool, eof: bool) {
         terminal: false,
     });
     let root = rutis::Ctx::root().unwrap();
-    let mounted = root.plugin(rutis::Typed::new(gateway));
+    let mounted = root.plugin(gateway);
     (&mounted).await.unwrap();
     let (read, mut write) = tokio::io::split(peer);
     let mut read = BufReader::new(read);

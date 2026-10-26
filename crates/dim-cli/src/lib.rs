@@ -25,9 +25,11 @@ mod session_host;
 mod ui;
 mod update;
 mod usage;
+mod web_install;
 mod wire;
 
 use args::{Action, Options};
+use rutis::host::CtxHost;
 use std::io::{IsTerminal, Read};
 use std::sync::Arc;
 
@@ -84,11 +86,11 @@ async fn daemon_link(
     root: &rutis::Ctx,
     options: &Options,
     start: bool,
-) -> Result<(rutis::FiberView, Arc<plugins::Connection>)> {
-    let link = root.plugin(rutis::Typed::new(plugins::DaemonLink {
+) -> Result<(rutis::host::FiberView, Arc<plugins::Connection>)> {
+    let link = root.plugin(plugins::DaemonLink {
         options: options.clone(),
         start,
-    }));
+    });
     (&link).await.map_err(plugin_error)?;
     let connection = root
         .get::<plugins::Connection>()
@@ -102,7 +104,7 @@ async fn daemon_link(
 async fn run_tui_with_connection(
     root: &rutis::Ctx,
     options: &Options,
-    link: rutis::FiberView,
+    link: rutis::host::FiberView,
     _connection: Arc<plugins::Connection>,
 ) -> Result<i32> {
     let env = ui::Env {
@@ -113,11 +115,11 @@ async fn run_tui_with_connection(
             .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
     };
     let (leave, left) = tokio::sync::oneshot::channel();
-    let tui = root.plugin(rutis::Typed::new(plugins::Tui {
+    let tui = root.plugin(plugins::Tui {
         env,
         options: options.clone(),
         leave: std::sync::Mutex::new(Some(leave)),
-    }));
+    });
     (&tui).await.map_err(plugin_error)?;
     let leave = left
         .await
@@ -306,12 +308,12 @@ async fn hold_web(
 ) -> Result<i32> {
     daemon_link(root, options, true).await?;
     let (done, held) = tokio::sync::oneshot::channel();
-    let hold = root.plugin(rutis::Typed::new(plugins::WebHold {
+    let hold = root.plugin(plugins::WebHold {
         port,
         open_browser,
         home: options.home.clone(),
         done: std::sync::Mutex::new(Some(done)),
-    }));
+    });
     (&hold).await.map_err(plugin_error)?;
     held.await
         .map_err(|_| "the Web workspace hold ended without a result")?
@@ -344,9 +346,9 @@ async fn disable_web(root: &rutis::Ctx, options: &Options) -> Result<i32> {
 }
 
 /// A failed load as the plugin reported it, without the framework's framing.
-fn plugin_error(error: Arc<rutis::CordisError>) -> Error {
+fn plugin_error(error: Arc<rutis::host::ErrorKind>) -> Error {
     match &*error {
-        rutis::CordisError::PluginFailed(source) => source.to_string().into(),
+        rutis::host::ErrorKind::PluginFailed(source) => source.to_string().into(),
         other => other.to_string().into(),
     }
 }
@@ -435,7 +437,7 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
         },
         terminal: true,
     });
-    let gateway = root.plugin(rutis::Typed::new(gateway));
+    let gateway = root.plugin(gateway);
     (&gateway).await.map_err(plugin_error)?;
     let (code, result) = tokio::select! {
         result = finished => (0, result.map_err(|_| "ACP gateway ended without a result")?),
@@ -472,6 +474,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 .and_then(|preset| permission::parse_preset(&preset).ok());
         }
         return open_tui_leaf(root, &options).await;
+    }
+    if matches!(options.action, Action::WebInstall) {
+        return web_install::install(&options.home).await;
     }
     if let Action::Web {
         port,
@@ -689,6 +694,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         | Action::DaemonStop
         | Action::Timeline { .. }
         | Action::Web { .. }
+        | Action::WebInstall
         | Action::DefaultTerminalMode { .. } => unreachable!(),
     }
 }

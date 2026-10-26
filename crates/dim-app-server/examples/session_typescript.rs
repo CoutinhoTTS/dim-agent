@@ -52,18 +52,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts(&mut builder);
-    let server = serve(builder, ServerConfig {
-        unix_path: Some(socket.clone()), websocket_address: None,
-        database_path: Some(home.join("sessions.sqlite")),
-        session_typescript: Some(SessionTypeScriptConfig {
-            node, js_runtime, anchor: workspace.join("runtime/package.json"), python: None,
-            rows: vec![json!({
-                "id":"typescript", "name":workspace.join("runtime/fixtures/session-part.ts"),
-                "group":"session",
-                "provides":serde_json::from_str::<Value>(include_str!("../../../runtime/fixtures/session-part.json"))?,
-            })],
-        }), ..Default::default()
-    }).await?;
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(socket.clone()),
+            websocket_address: None,
+            database_path: Some(home.join("sessions.sqlite")),
+            session_typescript: Some(SessionTypeScriptConfig {
+                node,
+                js_runtime,
+                anchor: workspace.join("runtime/package.json"),
+                python: None,
+                rows: vec![json!({
+                    "id":"typescript", "name":workspace.join("runtime/fixtures/session-part.ts"),
+                    "provides":{},
+                })],
+            }),
+            ..Default::default()
+        },
+    )
+    .await?;
     let mut stream = BufReader::new(UnixStream::connect(&socket).await?);
     println!(
         "{}",

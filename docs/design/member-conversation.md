@@ -1,15 +1,16 @@
 # Read-only member conversations in the CLI
 
 Base detail contract: accepted in [#300](https://github.com/arcships/dim/pull/300),
-with its implementation in review in [#324](https://github.com/arcships/dim/pull/324).
+implemented in [#324](https://github.com/arcships/dim/pull/324).
 Sections 1–6 describe that single selected Session-member view. Their base-only
 observation-count and selection-lifetime constraints are identified below;
-§7 defines their replacement lifetime after approval.
+§7 replaces that lifetime.
 
-Sections 7–9 propose the remaining transcript-card slice of
-[#263](https://github.com/arcships/dim/issues/263); this extension is **not Ready
-or implemented**. Its observation lifetime extends the base contract only after
-approval. Model-policy configuration remains separate business scope in #263.
+Sections 7–9 define the transcript-card slice of
+[#263](https://github.com/arcships/dim/issues/263), accepted in
+[#333](https://github.com/arcships/dim/pull/333) and implemented in the CLI;
+§8 records what the flows verify. Model-policy configuration is separate
+business scope in #263.
 
 ## 1. Existing mechanisms
 
@@ -23,7 +24,7 @@ native Agents' IDs, which never contain `:`. For a provider member, the field
 named `session_id` carries an opaque member ID, not a dim Session. Never pass
 it to `session.attach`, `session.history`, `session.stop` or `session.detach`,
 even if its text resembles a Session ID. This compatibility boundary is part
-of the proposed extension; #254's provider implementation/notice availability
+of the §7 extension; #254's provider implementation/notice availability
 is not delivered by this document.
 
 | Existing interface | Use |
@@ -115,7 +116,7 @@ not establish completion of a particular delegation.
 3. Send history requests without blocking the Session worker's handling of leader
    notifications and controls. At most one member-history page is outstanding;
    no periodic history polling or second connection is needed. **Base only:**
-   keep one selected member observation. The proposed §7 lifetime instead shares
+   keep one selected member observation. The §7 lifetime instead shares
    one observation per needed Session across cards and the one selected detail.
 4. **Base only:** leaving the detail stops further page requests and releases only
    its member attachment with `session.detach`. An admitted attach/page request settles;
@@ -233,7 +234,7 @@ or risk writing to the member.
 Reuse the existing connection, attachment table, pagination and row rendering;
 no extra output stream, polling timer, persistent copy, capability or lock.
 
-## 7. Proposed transcript member cards
+## 7. Transcript member cards
 
 The leader's `agent` request block shows member identity/name, the requested task,
 observed member model/activity where exposed, delegation state, elapsed time and the
@@ -247,7 +248,8 @@ Reuse the branch-local delegation identity and task records from the
 [task list](background-task-list.md). Pair a request with its originating tool
 call by leader branch plus `request_id` and `call_id`; identify the delegation
 itself by its request event ID. Reused tool call IDs, request batches and member
-Sessions must not merge separate delegations.
+Sessions must not merge separate delegations: a call whose ID an earlier batch
+already used gets its own transcript row identity.
 
 | Existing source | Card data |
 | --- | --- |
@@ -261,7 +263,8 @@ Sessions must not merge separate delegations.
 
 Temporary profile names already exist on the leader's request. For an existing
 native Agent, read the public Agent list after identities are known and share that
-result across cards. A missing entry/read error shows the Agent ID rather than
+result across cards; it is read again only when a card names a native Agent the
+last read did not cover. A missing entry/read error shows the Agent ID rather than
 an invented name; the delivered Session ID remains available in detail. Do not
 read Agent records or private Collaboration state. A provider card uses its
 leader-side target/delivered Agent identity; `agent.list` is not assumed to
@@ -301,11 +304,13 @@ later turn cannot complete or reopen that delegation.
 ### Observation lifetime
 
 The base-only selected-observation constraint in §3/§6 is replaced by this
-proposed lifetime after approval. The worker owns one observation per distinct
+lifetime. The worker owns one observation per distinct
 delivered Session that has an unfinished leader delegation or is selected for detail.
 Multiple delegations and the selected detail share that member observation;
 they do not issue competing attaches/detaches. There is still one selected
-read-only detail and one editable leader.
+read-only detail and one editable leader. Observations are keyed by Session:
+a new observation of the same member starts only after the released one has
+settled, while another member's observation does not wait for it.
 
 Each automatic Session attachment takes the existing [usage lease](appserver/idle-unload.md#4-what-holds-a-session) and can
 restore an unloaded member. Live unfinished cards therefore keep those member
@@ -406,12 +411,27 @@ actually observed one. A provider card has no dim model/conversation button;
 its result summary is the leader's actual collaboration result. Later member
 activity does not turn an ended card's metadata into a claim about that task.
 
-In fullscreen mode, add member cards to the existing transcript keyboard focus
-order alongside user messages. Tab/Up selects older items, Shift+Tab/Down newer;
+In fullscreen mode, add Session-member cards to the existing transcript keyboard
+focus order alongside user messages; a provider card or a failed delivery has
+no action to stop on. Tab/Up selects older items, Shift+Tab/Down newer;
 Esc returns to the composer without modifying its draft. Enter on a focused
 Session-member card opens the base read-only detail; a provider card has no such
-action. Editing a selected user message with `e` keeps its current behavior;
-a member card cannot be copied into the composer by that action. Ordinary text
+action. Editing a selected user message with `e` keeps its current behavior,
+and `q` appends it to the draft as a Markdown quote; a member card cannot be
+copied into the composer by either action. `q` does nothing in a shell draft
+(`!`, `!!`), where the quote would run as part of the command, and says so.
+
+The Web workspace offers the same quote as an action on a user message, shown
+while its composer is. Both clients write one format, pinned by the cases in
+`web/src/features/chat/quote-cases.json`, and submit the draft as it stands:
+
+- CRLF becomes LF and one trailing newline is dropped; a message that is then
+  empty leaves the draft unchanged.
+- Each line becomes `> line`, an empty line `>`, each followed by a newline.
+- The block follows the draft after a separator that makes one blank line: none
+  for an empty draft or one ending in two newlines, one newline for a draft
+  ending in one, two otherwise. A newline follows the block, so typing starts
+  on a fresh line after a blank one. Ordinary text
 ends focus and returns to existing
 composer input rather than controlling a member.
 
@@ -419,8 +439,10 @@ A fullscreen click on a Session card's conversation action opens the same detail
 using its stable delegation identity. Drag selection/copy and existing tool
 group header expansion retain their behavior; a changing row height cannot
 retarget an action to another member. Inline scrollback renders the same card
-data and uses the existing `/tasks` keyboard path to reach member detail;
-it gains no mouse or transcript-focus mode. Provider cards expose no Session
+data as of the frame that commits it and uses the existing `/tasks` keyboard
+path to reach member detail; it gains no mouse or transcript-focus mode.
+Fullscreen redraws a committed card from the snapshot until its delegation
+ends, including its running time. Provider cards expose no Session
 open/stop through either path. Historical scrollback rewrites
 keep the existing terminal rewrite limits.
 
@@ -443,10 +465,9 @@ user setting for inherit/fixed/agent-choice behavior, and `agent.list` returns
 Agent summaries rather than a policy configuration.
 
 This presentation displays what the member actually adopted. User configuration
-is covered separately by the proposed [subagent model policy](subagent-model-policy.md),
+is covered separately by the [subagent model policy](subagent-model-policy.md),
 owned by Collaboration: inherit/fixed applies to every newly created native member,
-including named Agents, while existing members retain their configuration. Its
-concrete policy/source/method contract requires review before implementation.
+including named Agents, while existing members retain their configuration.
 Provider's client preferences do not supply this policy; no core, Prompt,
 Provider or rutis capability is requested.
 
@@ -489,9 +510,23 @@ the creation model and leader's configuration must not overwrite it.
   observation. Keep the known case where no terminal collaboration fact arrives
   visible as unfinished/unavailable rather than inventing completion.
 
-These are implementation gates for the proposed extension, not passing evidence.
-The base #324 acceptance remains applicable only to its delivered scope. #263
-stays open for this extension and model-policy configuration.
+### Verified boundaries
+
+The CLI PTY flows `tui_member_cards_share_observations_and_show_the_members_actual_model`
+and `tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavailable`
+cover: a named Agent named by one shared `agent.list`, a temporary profile and a
+call ID reused across batches as separate cards; one attach per unfinished
+native member and none for an ended card or a provider member whose opaque ID
+resembles a Session ID; one member-history page at a time; the member's own
+`context/configured` and a live model change as the displayed model, with
+`No model observed` otherwise; fullscreen Tab/Up and Enter opening the correct
+read-only member through the shared observation; a real result ending its card
+and releasing the observation while detail is closed; and a failed read staying
+unavailable without reattaching. The base detail, stop and stop-all flows now
+use ended delegations or a refused card observation where they assert the base
+selection lifetime, and the native App Server stop-all flow passes with card
+observations. Provider activity notices are not delivered (#254), so provider
+cards show only leader facts.
 
 ## 9. Extension rule check and ablation
 
@@ -527,6 +562,6 @@ and the existing delegation projection remain. No progress-forwarding service,
 periodic read, separate client tree, lock, generation protocol or server field
 is needed. Actual model facts are read instead of inventing a default.
 Provider cards need no member observation or usage lease. The base has one
-selected observer; this proposal needs per-Session observations to show live
+selected observer; the §7 cards need per-Session observations to show live
 cards while detail is closed, with pinning stated rather than hidden behind a
 new passive-observer mechanism.

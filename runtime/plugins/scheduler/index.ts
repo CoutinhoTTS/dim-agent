@@ -1,10 +1,11 @@
 import { definePlugin } from '@arcships/rutis'
 import { z } from 'zod'
-import type { JsonObject, ManagementMethods, PluginFiles, SessionPermissions, Sessions, Settings } from '../../../npm/plugin.js'
+import type { JsonObject, ManagementMethods, PartRegistry, PluginFiles, SessionPermissions, Sessions, Settings } from '../../../npm/plugin.js'
 import { ScheduleError, type Job } from './data.ts'
 import { Scheduler } from './engine.ts'
 import { Jobs } from './jobs.ts'
 import { bounded, management, unloadingBeforeCall, type ScheduleJobs } from './requests.ts'
+import session from './session.ts'
 import { RunStore, type Run } from './store.ts'
 import { windowAfter } from './windows.ts'
 
@@ -17,7 +18,7 @@ function runPreview(run: Run) { return { ...run, detail: bounded(run.detail, 512
 
 export default definePlugin({
   name: 'Scheduler', config: z.toJSONSchema(z.strictObject({})),
-  inject: ['sessions', 'sessionPermissions', 'settings', 'pluginFiles', 'managementMethods'],
+  inject: ['sessions', 'sessionPermissions', 'settings', 'pluginFiles', 'managementMethods', 'partRegistry'],
   provides: { scheduleJobs: { call: 'async' } },
   async apply(ctx) {
     const jobs = new Jobs(ctx.use<Settings>('settings'), ctx.use<SessionPermissions>('sessionPermissions'))
@@ -142,6 +143,8 @@ export default definePlugin({
     )
     if (scheduler.fault) throw scheduler.fault
     ctx.provide('scheduleJobs', owner)
+    // Each Session mounts the `schedule` tool part (session.ts).
+    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'SchedulerSession', session)
     ctx.on('settings/schedule', () => scheduler.changed())
     scheduler.startTimer()
   },

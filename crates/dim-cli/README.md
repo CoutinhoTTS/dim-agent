@@ -616,7 +616,7 @@ Interactive recovery displays main-branch history. Noninteractive recovery emits
 
 ## Terminal UI modes
 
-The interactive terminal UI has two modes over the same session. Scrollback (the default) commits the transcript into the terminal's native scrollback and repaints only the composer region at the bottom. Its ground rule: a committed row is never taken back. Nothing above the live region is erased, shortened or redrawn to fewer rows, because the composer sits at the bottom of the screen and the terminal would pull it up by every row removed; corrections append or rewrite a row in place, never shrink. When the live region itself gets shorter it keeps its bottom row and gives back its top rows, so the composer stays put. Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves. A transcript shorter than the viewport sits on the dock and grows upwards, as in Amp:
+The interactive terminal UI has two modes over the same session. Scrollback (the default) commits the transcript into the terminal's native scrollback and repaints only the composer region at the bottom. Its ground rule: a committed row is never taken back. Nothing above the live region is erased, shortened or redrawn to fewer rows, because the composer sits at the bottom of the screen and the terminal would pull it up by every row removed; corrections append or rewrite a row in place, never shrink. Inside the live region the composer (or the question or approval in its place) is the anchor and never moves up while the region has room below: fewer rows above it (the live tail, the queue strip) give back the region's top rows, blank, as a gap above it, and fewer rows below it (a menu or picker closing, a question changing tab or answered) give back its bottom rows, blank, under the status row. Scrolling the screen cannot be undone, so the region grows into those blank rows first, below or back up into the gap, and scrolls only for rows that fit nowhere; a menu or question opened and closed again and again scrolls history once, the first time. The next commit fills the gap, so no blank rows are left in history. No row is ever blanked and then drawn again in the same frame: rows are written over in place, a row wider than the screen is written once and wrapped by the terminal over the rows below it, and a row exactly as wide as the screen gets no trailing erase (it would blank its last cell). Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves. A transcript shorter than the viewport sits on the dock and grows upwards, as in Amp:
 
 ```text
  answer row                                                     ▁   scrollbar: last column,
@@ -798,7 +798,47 @@ the leader.
 
 The implementation follows the [task-inventory contract](https://github.com/arcships/dim/blob/main/docs/design/background-task-list.md)
 and the [member-conversation contract](../../docs/design/member-conversation.md).
-Workflow presentation remains separate package integration.
+
+### Workflow runs
+
+When the connection advertises `workflow.status`, the same list shows Workflow
+runs of the attached Session: runs its `workflow` tool started on any branch and
+management runs that report to it. Run IDs come from `workflow` tool results'
+structured fields and `dim-workflow kind="report"` inputs; the worker reads one
+known unfinished run at a time, at most once a second, and stops at its terminal
+state. Opening `/tasks` asks for the retained run array once; nothing reads the
+whole array while the panel is closed. One status read is outstanding at a time.
+
+```text
++-- Background tasks --------------------------------------------+
+| > nightly-check       workflow · Running · 133s                |
+|   cargo build         command · Running · 18s                  |
+|   managed run         workflow · Completed · 120s              |
+| Enter details · x stop selected · Ctrl+X stop all · Esc close  |
++----------------------------------------------------------------+
+
++-- nightly-check - workflow ------------------------------------+
+| Run: <run_id> · Source: user · Running                         |
+| Stages                                                         |
+| 1  analyze  completed  <stage session>                         |
+| 2  tests  running  -                                           |
+| analyze result                                                 |
+| <stored result text>                                           |
+| Log                                                            |
+| Report: none                                                   |
+| x stop workflow · Esc back                                     |
++----------------------------------------------------------------+
+```
+
+`x` sends `workflow.stop` for a `running` run and is disabled while that request
+is pending or the run is `stopping`; only the owner's returned run changes the
+row. Ctrl+X adds known running runs after the command and member stops, because
+a Workflow stop waits for its stages. A read sent before a stop reply cannot
+replace that reply's run. While discovery is loading or failed, stop-all is
+unavailable; a failure keeps the last observed rows and stops automatic reads
+until `/tasks` is reopened. Without `workflow.status` the panel shows no Workflow
+rows; without `workflow.stop` the runs are read-only. The contract is the
+[Workflow task view](../../docs/design/workflow-task-view.md).
 
 Native App Server flows verify restored child/nested branch discovery, local
 command histories, addressed stops and continued leader input. Built-in member
@@ -843,7 +883,7 @@ The terminal UI reaches the same Session methods as the line client:
 | `/mcp logout ID` | Signs out and reports whether the token was revoked |
 | `/login` | Opens the Dim sign-in panel. It shows the account from `account.status` as a status line; signed out, its entries are browser, enterprise-email or device sign-in through `account.login.*` at the entry's account directory (below), each entering its own flow (`Esc` after a failure returns to the entries); signed in, it shows the account's name and email, its plan, credits, token windows and feature meters from `account.usage` (`Ctrl+R` asks again; a plugin without the method shows why), and its entries open `/models`, open the plan page at the account directory's `/console/subscription` in the browser, or sign out with `account.logout`, after which the panel shows the sign-in entries again. Browser sign-in redirects to `http://localhost:54321/auth/callback` (`--redirect-uri` overrides it), catches the callback on a loopback listener when that port is free and opens the authorization URL (neither over SSH); a callback URL pasted in the panel completes it too; device sign-in shows the code and polls the attempt every second. `Esc` closes the panel and cancels a pending attempt. On success the catalog is refreshed with `provider.refresh` and `/models` opens |
 | `/connect` | Reads safe connection snapshots with `provider.management`. `Test + apply` probes the unsaved draft, then updates only changed fields at the form's original version with `provider.update`; unsupported model listing still permits saving and reports that the key was not tested. Other probe failures keep the draft. `Disconnect` atomically clears credentials and disables the record; Enable/Disable update only that flag. `Add custom provider` probes a Name, Base URL and API Key draft, then calls `provider.create` with the form's retained UUID and discovered defaults. IDs never derive from names. Failures retain edits; rereads update the safe status/version and require confirmation before retrying. `Ctrl+R` rereads without discarding the draft. Fields and filters use the composer's line editor. Account sign-in retains its existing owner |
-| `/models` | Lists enabled, executable models from `provider.list`/`provider.catalog`. An explicit pick sends the saved effort/tier preferences for that exact `{providerId, modelId}` with `session.create` or `session.model.update`, then saves the scoped default with `provider.select`. Unsupported saved preferences are reported and retained for the user to edit or clear; there is no silent fallback |
+| `/models` | Lists enabled, executable models from `provider.list`/`provider.catalog`. An explicit pick sends the saved effort/tier preferences for that exact `{providerId, modelId}` with `session.create` or `session.model.update`, then saves the scoped default with `provider.select`. Unsupported saved preferences are reported and retained for the user to edit or clear; there is no silent fallback. When the daemon advertises `collaboration.model_policy`/`collaboration.set_model_policy`, a "Subagent models" row chooses Agent choice, Inherit requesting branch or a fixed model (from the same model list) for new Collaboration members; it writes only `collaboration.set_model_policy` with the revision it read, and after a revision conflict the next choice rereads before saving ([subagent model policy](../../docs/design/subagent-model-policy.md#5-native-cli-interaction)) |
 | `/usage` | Reports the branch's context window from `session.context.usage`: estimated input tokens against the window, the output allowance and the compaction threshold; before a model has answered it says so |
 | `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
 | Paste of local file paths | An image becomes an `[Image: name]` token sent as an image block; another file is inserted as its path. At most 20 images, a group all or nothing |
@@ -911,7 +951,7 @@ Device login prints the verification address and device code, then polls the att
 
 `models PROVIDER` reads the cached catalog; `--refresh` obtains and persists a fresh catalog through the provider. Each line contains the model ID, display name and `available`, `disabled` or `unavailable`, separated by tabs. Credential/account fields and private failure details are not printed. A missing cached catalog gives sign-in and refresh guidance. Select an available model with `--provider PROVIDER --model MODEL_ID` for a new session.
 
-An existing shared daemon is reused. Plugin paths apply when starting a new product daemon; use an isolated home when changing a plugin/runtime configuration. Explicit `--model-config` and account plugin options cannot be combined.
+An existing shared daemon of the CLI's own version is reused. A daemon of another version that this executable would start (one left running across an upgrade) is stopped with verified shutdown and replaced, which disconnects other clients attached to it; one without verified shutdown is reported for `dimcode daemon stop` from its matching CLI. A `--server PATH` daemon is reused whatever its version. Plugin paths apply when starting a new product daemon; use an isolated home when changing a plugin/runtime configuration. Explicit `--model-config` and account plugin options cannot be combined.
 
 The repository root `./dev` prepares the local provider package, builds incrementally and restarts only its development daemon. See [local development](../../docs/architecture/development.md) for setup and source selection.
 
@@ -923,7 +963,7 @@ dimcode --home /path/to/plugin-home daemon stop
 
 ## Web workspace
 
-`dimcode web` holds the daemon's local web entry open, `/web` toggles the daemon-owned switch, and both serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. `dimcode web --off` clears the switch without disconnecting a foreground holder. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. Without one, `dimcode web` and `/web` fail with where to put it; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`.
+`dimcode web` holds the daemon's local web entry open, `/web` toggles the daemon-owned switch, and both serve the [Web workspace](../../docs/design/web-workspace.md) frontend, which is not inside the executable. `dimcode web --off` clears the switch without disconnecting a foreground holder. The CLI finds it, in this order, and names it to the daemon it starts: the directory in `DIMCODE_WEB_ASSETS` (the npm wrapper sets it to the installed optional dependency `dimcode-web`), `web/` beside the executable's `bin/` (the native archive `dimcode-web-VERSION.tar.gz` unpacked next to it), then `<home>/web`. `dimcode web install` downloads this version's `dimcode-web` from the npm registry (`DIMCODE_NPM_REGISTRY` names a mirror), checks it against the registry's integrity and puts it in `<home>/web`, which a running daemon started without another source serves from its next open; running it again after an upgrade installs the matching frontend, and it names a frontend in an earlier source that still comes first. Without one, `dimcode web` (exit status 1) and `/web` say to run it; a daemon started before a frontend appeared in another source is restarted with `dimcode daemon stop`; a frontend recorded for another App Server protocol version (`web/dimcode-web.json`) is refused with `web_assets_incompatible`, and the CLI says to run `dimcode web install`.
 
 When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface registers itself after every `session.attach` as `kind: tui`; a `ui.shutdown` notification for its id draws one last frame with the reason, then the interface exits 0 and the Session carries on. Any number of interfaces view one Session. When the daemon offers `ui.leaf`, interactive `dimcode` is itself a UI leaf (`crate::leaf`): it creates or resumes the Session, mounts a rutis node in its client tree (a socket `ui-<8 hex>` in the private native home, as long as `daemon.sock`, that accepts one connection, and `PeerPlugin` with `host { Tui }`) and calls the internal `ui.open`; the daemon links to it and hosts `Tui` there with this invocation's options. The process ends when the `Tui` leaves (its exit code, or a restart) or when the daemon closes the link (exit 0). An older daemon without `ui.leaf` keeps the direct TUI. Initial product setup without a usable model also uses the existing direct TUI, so `/connect` and `/login` remain available before a Session exists; explicit model targets, `--model-config`, resume and other error codes keep their errors ([Tui §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-and-ui-leaves)).
 

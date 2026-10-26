@@ -87,9 +87,13 @@ The App Server takes the directory with `--web-assets DIR`. The CLI finds it, in
 | --- | --- |
 | `DIMCODE_WEB_ASSETS` | the npm wrapper (the installed `dimcode-web` package's `web/`), or a developer's `vite build --watch` output (`./dev` passes the variable through) |
 | `<executable directory>/../web` | a native archive unpacked beside `bin/` |
-| `<product home>/web` | a user who unpacked the archive into the product home |
+| `<product home>/web` | `dimcode web install`, or a user who unpacked the archive into the product home |
 
-A directory counts when it holds `index.html`. One carrying `dimcode-web.json` with another `protocolVersion` is refused when the entry opens (`web_assets_incompatible`); without any directory, or without `index.html`, `web.open` fails with `web_assets_missing`, and the CLI says where the Web workspace is found and how to install it. The CLI never downloads it.
+A directory counts when it holds `index.html`. One carrying `dimcode-web.json` with another `protocolVersion` is refused when the entry opens (`web_assets_incompatible`); without any directory, or without `index.html`, `web.open` fails with `web_assets_missing`. A daemon started without `--web-assets` but with `--product-home` looks at `<product home>/web` each time the entry opens, so a frontend installed there while it runs is used without a restart.
+
+`dimcode web install` installs the frontend of the CLI's own version into `<product home>/web`, without a daemon: the Web workspace and the App Server protocol move together for now, so it never installs another version. It reads `dimcode-web@VERSION` from the npm registry (`https://registry.npmjs.org`, or `DIMCODE_NPM_REGISTRY` for a mirror), downloads `dist.tarball`, verifies it against `dist.integrity` (`sha512-…`), unpacks the package's `web/` beside the target and replaces the previous directory only once `index.html` is there. Running it again repairs or, after the CLI was upgraded, upgrades the frontend in the product home; when `DIMCODE_WEB_ASSETS` or `web/` beside `bin/` holds a frontend, that one comes first, and the command names it. It is the one place the CLI downloads the frontend; nothing installs it implicitly.
+
+When the entry fails, the CLI says what to do instead of reporting an error. For `web_assets_missing` and `web_assets_incompatible` it is `dimcode web install`; when the CLI itself finds a directory that the daemon lacks, the daemon was started with another source before the frontend was installed, and the CLI says to restart it with `dimcode daemon stop`. `dimcode web` exits 1 after the hint; TUI `/web` shows it as a notice.
 
 For development against the repository checkout, and for a build that must carry the frontend (a single file to copy around), the Cargo feature `embedded-web` of `dim-app-server` (forwarded by `dimcode`) compiles the build in: `build.rs` then runs `npm ci` in `web/` when `package-lock.json` changed and `npm run build` when the frontend sources changed, gzip-compresses the output (fonts and images stay as built) and embeds it, and the entry answers with `Content-Encoding: gzip` or expands the file for a browser that does not accept it. With the feature, a build host without npm fails the build; without it, the build never touches `web/` or npm. A directory, when found, replaces the embedded build either way.
 
@@ -121,10 +125,11 @@ Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` onl
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
-│   ▓▓▓▓                                                       │
-│ ▓▓    ▓▓  DIM Web is ready                                   │
-│ ░░    ░░  Opened in your browser                             │
-│   ░░░░                                                       │
+│ ██████╗ ██╗███╗   ███╗                                       │
+│ ██╔══██╗██║████╗ ████║  DIM Web is ready                     │
+│ ██║  ██║██║██╔████╔██║  Opened in your browser               │
+│ ██████╔╝██║██║╚██╔╝██║                                       │
+│ ╚═════╝ ╚═╝╚═╝ ╚═╝ ╚═╝                                       │
 │                                                              │
 │ Web     http://127.0.0.1:43201/chat/<sessionId>              │
 │ Resume  dimcode --resume <sessionId>                         │
@@ -135,7 +140,7 @@ Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` onl
 Web workspace stopped.
 ```
 
-The daemon serves the frontend directory it was started with (§2.4); a running daemon keeps that directory, or its embedded build, until `dimcode daemon stop`.
+The frontend directory is fixed when the daemon starts (§2.4); a daemon started without `--web-assets` reads `<product home>/web` on each open, so a frontend installed or replaced there is used without a restart, and an embedded build serves only while that directory has no `index.html`.
 
 ## 4. Frontend
 

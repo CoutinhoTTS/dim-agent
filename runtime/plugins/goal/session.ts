@@ -1,11 +1,10 @@
 import { definePlugin } from '@arcships/rutis'
-import provides from './session.json' with { type: 'json' }
 import { type InputMessage, changes } from './goal.ts'
 import type { SessionMethods, ToolRegistry } from '../../../npm/plugin.js'
 
 type TreeCommands = { input(id: string, input: InputMessage): Promise<{ sequence: number | bigint }> }
 type Call = { branchId: string; arguments: { status?: unknown; summary?: unknown } }
-type MethodCall = { method: string; params: { sessionId: string; branchId?: unknown; objective?: unknown } }
+type MethodCall = { method: string; params: { sessionId: string; branchId?: unknown; objective?: unknown; judge?: unknown } }
 type Reply = { kind: 'value'; value: unknown } | { code: string; message: string }
 
 const OBJECTIVE_LIMIT = 4000
@@ -20,7 +19,7 @@ const text = (value: unknown, limit: number) =>
 // never read Goal's state; the branch part decides what a change does.
 export default definePlugin({
   name: 'GoalSession',
-  provides,
+  provides: {},
   inject: ['treeCommands', 'toolRegistry', 'sessionMethods'],
   async apply(ctx) {
     const tree = ctx.use<TreeCommands>('treeCommands')
@@ -63,7 +62,14 @@ export default definePlugin({
         if (op === 'set' || op === 'edit') {
           const objective = text(call.params.objective, OBJECTIVE_LIMIT)
           if (!objective) return invalid(`objective must be 1 to ${OBJECTIVE_LIMIT} characters`)
-          input = changes[op](branchId, objective)
+          if (op === 'edit') {
+            input = changes.edit(branchId, objective)
+          } else {
+            // The judge is per goal; `model` when the caller does not choose.
+            const judge = call.params.judge ?? 'model'
+            if (judge !== 'model' && judge !== 'evaluator') return invalid('judge must be "model" or "evaluator"')
+            input = changes.set(branchId, objective, judge)
+          }
         } else if (op === 'pause' || op === 'resume' || op === 'clear') {
           input = changes[op](branchId)
         } else {

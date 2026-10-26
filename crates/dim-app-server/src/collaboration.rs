@@ -1,16 +1,19 @@
 //! Team collaboration, see `docs/design/appserver/collaboration.md`.
 //!
 //! `CollaborationDirectoryPlugin` (process) owns member relations and temporary
-//! Agent records across reloads. `CollaborationCapability` (Session) provides the `agent` tool and
+//! Agent records across reloads. `CollaborationSession` (Session) provides the `agent` tool and
 //! registers each branch; `CollaborationTimeline` (branch) binds the branch's
 //! Dispatcher to the business that writes its collaboration facts. Peers are
 //! only reached through their public Session interface, on their main branch.
 //! An open request holds its leader (`SessionLifecycle::take_hold`) until its
 //! `result` is written, so an idle unload never ends it.
 use crate::agents::{AgentIndex, AgentProfile, SessionRestored, UnloadedSessionDeleted};
+use crate::collaboration_model_policy::ModelPolicy;
+use crate::settings::{SettingsScope, SettingsService};
 use dim_agent_capabilities::{
     context_block,
     host::{HostError, HostFuture, ToolExecutionContext},
+    prompt_state::PromptSnapshot,
     timeline_tree::TreeCommands,
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
@@ -23,7 +26,8 @@ use futures_util::{
     FutureExt,
     future::{BoxFuture as WorkFuture, Shared},
 };
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, Listener, TypeKey, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Plugin};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -67,7 +71,7 @@ fn member_create_failed(detail: String) -> Failure {
 pub fn install(builder: &mut AgentBuilder) {
     crate::register_names(builder.catalog_mut());
     builder
-        .require_part("CollaborationCapability")
+        .require_part("CollaborationSession")
         .require_part("CollaborationTimeline");
 }
 
@@ -98,16 +102,14 @@ pub(crate) struct CollaborationDirectory {
 
 /// Provides collaboration records without depending on reloadable services.
 pub(crate) struct CollaborationDirectoryPlugin;
-impl TypedPlugin for CollaborationDirectoryPlugin {
+impl Plugin for CollaborationDirectoryPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "CollaborationDirectory"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, _: ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide(CollaborationDirectory::default())?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, _: ()) -> rutis::Result {
+        ctx.provide(CollaborationDirectory::default())?;
+        Ok(())
     }
 }
 
@@ -117,6 +119,8 @@ impl TypedPlugin for CollaborationDirectoryPlugin {
 pub struct Collaboration {
     index: Arc<AgentIndex>,
     directory: Arc<CollaborationDirectory>,
+    /// The subagent model policy's source; local execution only.
+    settings: Option<Arc<SettingsService>>,
     tasks: TaskTracker,
     stop: CancellationToken,
 }
@@ -138,13 +142,32 @@ struct Participant {
 }
 impl Collaboration {
     /// Creates a member Session under the target Agent (created first when
-    /// temporary) and records the relation.
+    /// temporary) and records the relation. `adopted` is the requesting
+    /// branch's model selection, captured when its request was consumed.
     async fn establish(
         self: &Arc<Self>,
         leader_id: &str,
         target: NewMember,
+        adopted: Option<ModelSelection>,
     ) -> Result<Peer, Failure> {
         let (leader_host, leader) = self.index.session(leader_id).ok_or(Refusal::Closed)?;
+        // One policy snapshot per creation, read before any Agent exists.
+        let policy = match &self.settings {
+            Some(settings) => {
+                settings
+                    .read::<ModelPolicy>(SettingsScope::User, &self.stop)
+                    .await
+                    .map_err(|error| member_create_failed(error.to_string()))?
+                    .document
+            }
+            None => ModelPolicy::Agent {},
+        };
+        let inherited = match policy {
+            ModelPolicy::Inherit {} => Some(adopted.ok_or_else(|| {
+                member_create_failed("the requesting branch has no adopted model".into())
+            })?),
+            _ => None,
+        };
         let (host, owned) = match target {
             // A temporary Agent belongs to the Team of the leader that created it.
             NewMember::Agent(id) if !self.visible(&id, leader_id) => {
@@ -182,15 +205,17 @@ impl Collaboration {
         config.cwd = leader.config().cwd.clone();
         config.permission_policy = leader.config().permission_policy.clone();
         config.collaboration_role = CollaborationRole::Member;
-        if self.index.selects_models() {
+        if let Some(model) = inherited {
+            config.model = model;
+        } else if self.index.selects_models() {
+            let explicit = match policy {
+                ModelPolicy::Fixed { model } => Some(model),
+                _ => host.profile.model.clone(),
+            };
             let selected = match self.index.model_selection() {
                 Some(selection) => selection
                     .0
-                    .resolve(
-                        host.profile.model.clone(),
-                        Some(config.cwd.clone().into()),
-                        self.stop.clone(),
-                    )
+                    .resolve(explicit, Some(config.cwd.clone().into()), self.stop.clone())
                     .await
                     .map_err(|error| error.to_string()),
                 None => Err("model selection is unavailable while its provider reloads".into()),
@@ -519,16 +544,11 @@ impl Collaboration {
     }
 }
 
-impl Listener<SessionRestored> for Arc<Collaboration> {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        event: &'a SessionRestored,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+impl Collaboration {
+    fn session_restored(self: &Arc<Self>, event: &SessionRestored) {
         // The restored Session is already in its Agent's entries.
         let Some((_, session)) = self.index.session(&event.session_id) else {
-            return Box::pin(async { Ok(None) });
+            return;
         };
         let participates = {
             let relations = self.directory.relations.lock().unwrap();
@@ -547,73 +567,84 @@ impl Listener<SessionRestored> for Arc<Collaboration> {
         {
             self.watch(&event.agent_id, session);
         }
-        Box::pin(async { Ok(None) })
     }
-}
-/// No close announces the end of an unloaded Session, and its watch ended
-/// with the unload, so Collaboration ends it here.
-impl Listener<UnloadedSessionDeleted> for Arc<Collaboration> {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        event: &'a UnloadedSessionDeleted,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+    /// No close announces the end of an unloaded Session, and its watch ended
+    /// with the unload, so Collaboration ends it here.
+    fn unloaded_session_deleted(self: &Arc<Self>, event: &UnloadedSessionDeleted) {
         let this = self.clone();
         let (agent_id, id) = (event.agent_id.clone(), event.session_id.clone());
         self.tasks
             .spawn(async move { this.session_ended(&agent_id, &id).await });
-        Box::pin(async { Ok(None) })
     }
 }
 
 /// The plugin: the process service, which loads after `Agents` and reloads
 /// with it, and the Session and branch parts it registers.
-pub(crate) struct CollaborationPlugin {}
+pub(crate) struct CollaborationPlugin {
+    /// The subagent model policy's source; local execution only, as Agents.
+    settings: Option<Key<SettingsService>>,
+    index: Key<AgentIndex>,
+    directory: Key<CollaborationDirectory>,
+    parts: Key<dim_agent_runtime::PartRegistry>,
+}
 impl CollaborationPlugin {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(names: &Names<'_>, local_execution: bool) -> rutis::Result<Self> {
+        Ok(Self {
+            settings: local_execution
+                .then(|| names.key::<SettingsService>())
+                .transpose()?,
+            index: names.key()?,
+            directory: names.key()?,
+            parts: names.key()?,
+        })
     }
 }
-impl TypedPlugin for CollaborationPlugin {
-    type Deps = (
-        Keyed<AgentIndex>,
-        Keyed<CollaborationDirectory>,
-        Keyed<dim_agent_runtime::PartRegistry>,
-    );
+impl DynPlugin for CollaborationPlugin {
     fn name(&self) -> &str {
         "Collaboration"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(index), Keyed(directory), Keyed(parts)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        let mut injects: Vec<_> = self.settings.iter().map(Key::erase).collect();
+        injects.extend([
+            self.index.erase(),
+            self.directory.erase(),
+            self.parts.erase(),
+        ]);
+        injects
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let index = ctx.require_at(&self.index)?;
+            let directory = ctx.require_at(&self.directory)?;
+            let parts = ctx.require_at(&self.parts)?;
+            let settings = match &self.settings {
+                Some(settings) => Some(ctx.require_at(settings)?),
+                None => None,
+            };
             let service = Arc::new(Collaboration {
                 index,
                 directory,
+                settings,
                 tasks: TaskTracker::new(),
                 stop: CancellationToken::new(),
             });
             let owner = service.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owner.stop.cancel();
-                        owner.tasks.close();
-                        owner.tasks.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                owner.stop.cancel();
+                owner.tasks.close();
+                owner.tasks.wait().await;
+                Ok(())
             })?;
-            ctx.events()
-                .on(ctx, &service.index.session_restored, service.clone())?;
-            ctx.events().on(
-                ctx,
-                &service.index.unloaded_session_deleted,
-                service.clone(),
-            )?;
+            let restored = service.clone();
+            ctx.on::<SessionRestored>(move |event, _| {
+                restored.session_restored(&event);
+                async { Ok(None) }
+            })?;
+            let deleted = service.clone();
+            ctx.on::<UnloadedSessionDeleted>(move |event, _| {
+                deleted.unloaded_session_deleted(&event);
+                async { Ok(None) }
+            })?;
             // Retain handles across the reload gap: even a Session that closed
             // while no observer ran must still clean up its relation/Agent.
             let watched: Vec<_> = service
@@ -630,21 +661,17 @@ impl TypedPlugin for CollaborationPlugin {
             // Before the service is provided, so no member is being
             // established meanwhile.
             service.reconcile().await;
-            ctx.provide_as(TypeKey::of::<Collaboration>(), service)?;
+            ctx.provide_as::<Collaboration>(service)?;
             use dim_agent_runtime::PartScope;
-            parts.register(
-                ctx,
-                PartScope::Session,
-                "CollaborationCapability",
-                |mount| {
-                    mount
-                        .names
-                        .part(CollaborationCapabilityPlugin::new(mount.names)?)
-                        .map(Some)
-                },
-            )?;
+            parts.register(ctx, PartScope::Session, "CollaborationSession", |mount| {
+                Ok(Some(
+                    Box::new(CollaborationSessionPlugin::new(mount.names)?) as Box<dyn DynPlugin>,
+                ))
+            })?;
             parts.register(ctx, PartScope::Branch, "CollaborationTimeline", |mount| {
-                mount.names.part(CollaborationTimelinePlugin).map(Some)
+                Ok(Some(
+                    Box::new(CollaborationTimelinePlugin::new(mount.names)?) as Box<dyn DynPlugin>,
+                ))
             })?;
             Ok(Effect::Done)
         })
@@ -708,7 +735,7 @@ struct State {
 
 /// Per-Session collaboration: operations this Session starts and the
 /// collaboration facts of its Timeline.
-pub struct CollaborationCapability {
+pub struct CollaborationSession {
     collaboration: Arc<Collaboration>,
     session_id: String,
     role: CollaborationRole,
@@ -729,7 +756,7 @@ fn op_turn(kind: &EventKind) -> Option<(&str, bool)> {
     }
 }
 
-impl CollaborationCapability {
+impl CollaborationSession {
     // ------------------------------------------------------------ tool entry
 
     /// Writes the operation event and waits for its `delivered`; cancelling
@@ -1289,6 +1316,15 @@ impl CollaborationCapability {
         turn_id: String,
         request: bool,
     ) {
+        // Captured here, at the request's position: a later adoption on the
+        // branch cannot be applied before this handler returns.
+        let adopted = match &event.kind {
+            EventKind::CollaborationRequest(CollaborationRequestData {
+                target: CollaborationTarget::Agent { .. } | CollaborationTarget::Temporary { .. },
+                ..
+            }) if self.collaboration.settings.is_some() => self.adopted_model(branch_id),
+            _ => None,
+        };
         let mut state = self.state.lock().unwrap();
         let Some(branch) = state.branches.get_mut(branch_id) else {
             return;
@@ -1351,7 +1387,7 @@ impl CollaborationCapability {
             }
             let delivered = match refused {
                 Some(code) => Err(Failure::from(code)),
-                None => this.deliver(&branch_key, &event, cancel).await,
+                None => this.deliver(&branch_key, &event, cancel, adopted).await,
             };
             let (delivery, detail) = match delivered {
                 Ok(delivery) => (delivery, None),
@@ -1424,11 +1460,35 @@ impl CollaborationCapability {
         }
     }
 
+    /// The model selection the branch has adopted, without the request
+    /// identities its own requests carried; the member produces its own.
+    fn adopted_model(&self, branch_id: &str) -> Option<ModelSelection> {
+        let (_, session) = self.collaboration.index.session(&self.session_id)?;
+        let adopted = session
+            .get::<PromptSnapshot>(branch_id)
+            .ok()??
+            .configuration?;
+        Some(ModelSelection {
+            provider_id: adopted.provider_id,
+            model_id: adopted.model_id,
+            capability_snapshot: adopted.capability_snapshot,
+            config: adopted.config,
+            metadata: adopted.metadata.map(|metadata| RequestMetadata {
+                session_id: None,
+                run_id: None,
+                trace_id: None,
+                turn_id: None,
+                extensions: metadata.extensions,
+            }),
+        })
+    }
+
     async fn deliver(
         self: &Arc<Self>,
         branch_id: &str,
         event: &AgentEvent,
         cancel: CollaborationCancelOutcome,
+        adopted: Option<ModelSelection>,
     ) -> Result<CollaborationDelivery, Failure> {
         let delivered = |peer: &Peer, input: Option<String>, outcome| CollaborationDelivery::Ok {
             agent_id: peer.agent_id.clone(),
@@ -1437,7 +1497,9 @@ impl CollaborationCapability {
             outcome,
         };
         match &event.kind {
-            EventKind::CollaborationRequest(data) => self.request(branch_id, event, data).await,
+            EventKind::CollaborationRequest(data) => {
+                self.request(branch_id, event, data, adopted).await
+            }
             EventKind::CollaborationMessage(data) => {
                 let sender = self.sender()?;
                 let peer = self
@@ -1518,18 +1580,27 @@ impl CollaborationCapability {
         branch_id: &str,
         event: &AgentEvent,
         data: &CollaborationRequestData,
+        adopted: Option<ModelSelection>,
     ) -> Result<CollaborationDelivery, Failure> {
         let sender = self.sender()?;
         let (peer, new) = match &data.target {
             CollaborationTarget::Agent { agent_id } => (
                 self.collaboration
-                    .establish(&self.session_id, NewMember::Agent(agent_id.clone()))
+                    .establish(
+                        &self.session_id,
+                        NewMember::Agent(agent_id.clone()),
+                        adopted,
+                    )
                     .await?,
                 true,
             ),
             CollaborationTarget::Temporary { profile } => (
                 self.collaboration
-                    .establish(&self.session_id, NewMember::Temporary(profile.clone()))
+                    .establish(
+                        &self.session_id,
+                        NewMember::Temporary(profile.clone()),
+                        adopted,
+                    )
                     .await?,
                 true,
             ),
@@ -2228,7 +2299,8 @@ enum Input {
 const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
 - request: give a task to a new member (agentId or profile) or to one of your members
   (agentId + sessionId). Returns immediately; the member's final result arrives later
-  as an input. One task per member at a time.
+  as an input. One task per member at a time. The user's subagent model policy may
+  override the model a new member's profile requests.
 - cancel / close: stop a member's current task / remove the member from your team.
 - message: send information to a team member. Default mode \"append\" adds context the
   receiver sees in its next step without interrupting it. Use mode \"steer\" only when the
@@ -2295,7 +2367,7 @@ fn agent_definition(role: CollaborationRole) -> ToolDefinition {
 }
 
 struct AgentTool {
-    capability: Arc<CollaborationCapability>,
+    session: Arc<CollaborationSession>,
     stopping: CancellationToken,
 }
 impl ToolHandler for AgentTool {
@@ -2309,47 +2381,56 @@ impl ToolHandler for AgentTool {
             if self.stopping.is_cancelled() {
                 return Err(HostError::Cancelled(RELOADING.into()));
             }
-            self.capability.run(call, context, cancel).await
+            self.session.run(call, context, cancel).await
         })
     }
 }
 
-struct CollaborationCapabilityPlugin {
-    service: DepKey<CollaborationCapability>,
+struct CollaborationSessionPlugin {
+    collaboration: Key<Collaboration>,
+    identity: Key<SessionIdentity>,
+    config: Key<SessionConfig>,
+    tree: Key<TreeCommands>,
+    lifecycle: Key<SessionLifecycle>,
+    tools: Key<ToolRegistry>,
+    service: Key<CollaborationSession>,
 }
-impl CollaborationCapabilityPlugin {
-    fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+impl CollaborationSessionPlugin {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
-            service: names.key::<CollaborationCapability>()?,
+            collaboration: names.key()?,
+            identity: names.key()?,
+            config: names.key()?,
+            tree: names.key()?,
+            lifecycle: names.key()?,
+            tools: names.key()?,
+            service: names.key()?,
         })
     }
 }
-impl TypedPlugin for CollaborationCapabilityPlugin {
-    type Deps = (
-        Keyed<Collaboration>,
-        Keyed<SessionIdentity>,
-        Keyed<SessionConfig>,
-        Keyed<TreeCommands>,
-        Keyed<SessionLifecycle>,
-        Keyed<ToolRegistry>,
-    );
+impl DynPlugin for CollaborationSessionPlugin {
     fn name(&self) -> &str {
-        "CollaborationCapability"
+        "CollaborationSession"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(collaboration),
-            Keyed(identity),
-            Keyed(config),
-            Keyed(tree),
-            Keyed(lifecycle),
-            Keyed(tools),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.collaboration.erase(),
+            self.identity.erase(),
+            self.config.erase(),
+            self.tree.erase(),
+            self.lifecycle.erase(),
+            self.tools.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let service = Arc::new(CollaborationCapability {
+            let collaboration = ctx.require_at(&self.collaboration)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let config = ctx.require_at(&self.config)?;
+            let tree = ctx.require_at(&self.tree)?;
+            let lifecycle = ctx.require_at(&self.lifecycle)?;
+            let tools = ctx.require_at(&self.tools)?;
+            let service = Arc::new(CollaborationSession {
                 collaboration,
                 session_id: identity.session_id.clone(),
                 role: config.collaboration_role,
@@ -2362,52 +2443,62 @@ impl TypedPlugin for CollaborationCapabilityPlugin {
                 ToolContribution {
                     definition: agent_definition(config.collaboration_role),
                     handler: Arc::new(AgentTool {
-                        capability: service.clone(),
+                        session: service.clone(),
                         stopping: ctx.cancellation_token(),
                     }),
                 },
             )?;
-            ctx.provide_as(self.service.key().clone(), service)?;
+            ctx.provide_at(self.service.clone(), service)?;
             Ok(Effect::Done)
         })
     }
 }
 
-/// Binds one branch's collaboration events to the Session capability.
-struct CollaborationTimelinePlugin;
-impl TypedPlugin for CollaborationTimelinePlugin {
-    type Deps = (
-        Keyed<CollaborationCapability>,
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-        Keyed<TimelineIdentity>,
-        Keyed<BranchLifecycle>,
-    );
+/// Binds one branch's collaboration events to the Session part.
+struct CollaborationTimelinePlugin {
+    service: Key<CollaborationSession>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    identity: Key<TimelineIdentity>,
+    phase: Key<BranchLifecycle>,
+}
+impl CollaborationTimelinePlugin {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            service: names.key()?,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            identity: names.key()?,
+            phase: names.key()?,
+        })
+    }
+}
+impl DynPlugin for CollaborationTimelinePlugin {
     fn name(&self) -> &str {
         "CollaborationTimeline"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(service),
-            Keyed(timeline),
-            Keyed(dispatcher),
-            Keyed(identity),
-            Keyed(phase),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.service.erase(),
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.identity.erase(),
+            self.phase.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let service = ctx.require_at(&self.service)?;
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let phase = ctx.require_at(&self.phase)?;
             let branch_id = identity.branch_id.clone();
             let owner = service.clone();
             let unloading = branch_id.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        owner.unload(&unloading).await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                owner.unload(&unloading).await;
+                Ok(())
             })?;
             // Subscribe, then rebuild under the gate: see the capability
             // reload protocol. Handlers skip events the rebuild covered.

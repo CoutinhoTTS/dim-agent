@@ -2,7 +2,7 @@
 
 The Rust CLI uses this server over a private Unix socket (NDJSON) or Windows named pipe. The server owns Agent v4 execution, approvals, model/provider selection and native storage. Product and configured profiles require protected local transports for execution and management; their WebSocket endpoint supports only `hello` and `ping`. The explicit mock profile permits WebSocket execution for protocol testing.
 
-The local web entry for the [Web workspace](../../docs/design/web-workspace.md) is opened at runtime by `web.open` (a holder) or `web.toggle` (the daemon-owned switch); `dimcode web --off` calls `web.disable`. It binds loopback only, serves the frontend from the directory given with `--web-assets DIR` (the separate `dimcode-web` artifact, which the CLI finds; a directory whose `dimcode-web.json` names another protocol version is refused with `web_assets_incompatible`) or, in a build with the `embedded-web` feature, the one `build.rs` built from `web/` and embedded, and admits browsers that exchanged the bootstrap token from the returned URL for a cookie. Its connections speak protocol v3 and get Session methods (including execution Session methods) plus read-only `provider.list`, `provider.catalog` and `provider.selection`; other management methods and `daemon.shutdown` are `unknown_method`. The entry stays open while the switch is on or any holder is connected; when both are gone, every token is revoked and web connections detach.
+The local web entry for the [Web workspace](../../docs/design/web-workspace.md) is opened at runtime by `web.open` (a holder) or `web.toggle` (the daemon-owned switch); `dimcode web --off` calls `web.disable`. It binds loopback only, serves the frontend from the directory given with `--web-assets DIR` (the separate `dimcode-web` artifact, which the CLI finds; without it, `<product home>/web`; the directory is looked at on each open; a directory whose `dimcode-web.json` names another protocol version is refused with `web_assets_incompatible`) or, in a build with the `embedded-web` feature, the one `build.rs` built from `web/` and embedded, and admits browsers that exchanged the bootstrap token from the returned URL for a cookie. Its connections speak protocol v3 and get Session methods (including execution Session methods) plus read-only `provider.list`, `provider.catalog` and `provider.selection`; other management methods and `daemon.shutdown` are `unknown_method`. The entry stays open while the switch is on or any holder is connected; when both are gone, every token is revoked and web connections detach.
 
 The UI registry ([Tui design §3.6](../../docs/design/plugins/Tui.md#36-ui-registry-and-ui-leaves)) is the daemon's record of the interfaces viewing its Sessions, any number per Session. `UiHostPlugin` is a process `Capability` providing `UiHost`. A terminal interface is a UI leaf: the interactive `dimcode` process is a rutis node waiting on a private address, and `ui.open` makes the daemon link to it with `PeerPlugin` and host the ordinary `Tui` plugin there with `plugins.load("Tui", {uiId, token, sessionId})`, unloading it in the same row's effect. The daemon starts no process and runs no UI control protocol; a leaf lives as long as its link. The hosted `Tui` keeps the ordinary protocol v3 business connection and registers it with `ui.attach {sessionId, kind, uiId, token}`.
 
@@ -199,6 +199,20 @@ instead use `mcp::install` and the declared Session loader. Its typed port is a
 dependency of `McpPlugin`; connection leases never become a second lifecycle engine. No second
 loader, editable-layer target or SQLite dependency is required by this port.
 
+### Subagent model policy
+
+With local execution, `collaboration.model_policy({})` returns `{revision, policy}` and
+`collaboration.set_model_policy({expectedRevision, policy})` replaces it and returns the new
+`revision` (`collaboration_model_policy_conflict` for a stale revision, invalid params for an
+unknown field or mode, an empty ID or a model with another mode). `policy` is
+`{"mode":"agent"}` (default), `{"mode":"inherit"}` or
+`{"mode":"fixed","model":{"providerId","modelId"}}`, stored as the user source `collaboration`.
+Collaboration reads it once for each new member: `inherit` copies the requesting branch's adopted
+model selection (captured when the request is consumed) and `fixed` resolves its model as a
+profile model would; both override the requested profile's model. A failed read or resolution
+refuses the request with `member_create_failed`. See
+[subagent model policy](../../docs/design/subagent-model-policy.md).
+
 ### Permission command rules
 
 With local execution, `permission.rules({})` returns `{revision, commandRules}` and
@@ -266,7 +280,7 @@ The public server runs without a managed provider. API-key and supported native 
 // `dimcode app-server …`, run by the CLI as its daemon from this same executable.
 dim_app_server::cli::run_with(args, Some(ManagedProviderRow(Arc::new(|builtins, root| {
     dim_agent_runtime::register_part(builtins, &dim_app_server::catalog(), move |names| {
-        names.part(MyProviderPlugin::new(root))
+        Ok(Box::new(MyProviderPlugin::new(names, root)?))
     }).expect("managed provider dependencies")
 }))))
 ```
@@ -446,17 +460,19 @@ It installs no production capability bridge or Session RPC methods.
 `ServerConfig.session_typescript` accepts `SessionTypeScriptConfig` with absolute Node executable,
 runtime package and anchor paths, an optional Python runtime (`python`: an interpreter with the
 `rutis` package and the directory its `py:<module>` rows are imported from), plus ordinary loader
-rows. Each row declares its group: `"group": "session"` or `"branch"`, or none for a process owner;
-the host places it there. The runtimes' standard error reaches the process log; their standard
-output is discarded.
-A Session row registers its tools
+rows. Each row is one plugin, placed in the process. From its `apply` the plugin registers its
+Session and branch parts with `partRegistry` as plugin definitions, and every Session or branch
+mounts a copy; the row lists in `instanceNames` the names those parts provide in their instances.
+A row has no `group`. The runtimes' standard error reaches the process log; their standard output
+is discarded.
+A Session part registers its tools
 and Session method namespaces from its own `apply`, with the `toolRegistry` and `sessionMethods`
-services it injects; its `RowSchema.provides` lists only the services it provides by name. See the [binding contract](../../docs/design/session-typescript.md)
+services it injects; the row's `RowSchema.provides` lists only the process services it provides by name. See the [binding contract](../../docs/design/session-typescript.md)
 and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
 
 The `dim-app-server` binary builds this configuration from `--session-rows FILE` with the
 existing `--node` and `--js-runtime` flags, and `--python PATH` for `py:` rows. `FILE` is a JSON
-array of ordinary loader rows, each with its group; it is also the anchor, so package names in the
+array of ordinary loader rows, one per plugin; it is also the anchor, so package names in the
 rows resolve from its location and `py:` modules are imported from its directory. Rows are
 validated as they are for an embedding host; nothing is installed by default. Optional packages such as
 [SessionTitle](../../runtime/plugins/session-title/README.md) and Goal are enabled this way:

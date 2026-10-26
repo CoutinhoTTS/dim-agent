@@ -1,8 +1,9 @@
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import provides from './session-tool-only.json' with { type: 'json' }
 import type { ToolRegistry } from '../../npm/plugin.js'
 
-export default definePlugin({
+export const part = definePlugin({
   name: 'SessionToolOnlyFixture',
   inject: ['toolRegistry'],
   provides,
@@ -16,3 +17,5 @@ export default definePlugin({
     )
   },
 })
+
+export default partRow('session', part)

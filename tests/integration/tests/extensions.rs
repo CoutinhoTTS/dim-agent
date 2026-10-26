@@ -1,7 +1,8 @@
 use dim_agent_runtime::*;
 use dim_agent_types::BranchSource;
 use dim_agent_types::InputMode;
-use rutis::{Keyed, TypedPlugin};
+use rutis::Plugin;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::time::Duration;
 use test_extension_a::Provider;
 use test_extension_b::{Consumer, Snapshot};
@@ -20,7 +21,7 @@ fn consumer(declare: bool) -> Feature {
 /// The external provider as a feature of one branch part.
 fn provider() -> Feature {
     Feature::new("ExternalProvider").branch("ExternalProvider", |names| {
-        names.part(Provider::new(names)?)
+        Ok(Box::new(Provider::new(names)?))
     })
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -91,24 +92,35 @@ async fn external_cross_crate_capabilities_are_isolated_and_installed_in_every_b
     assert!(agent.sessions().is_empty());
 }
 /// Tags each input with the branch whose `before` chain it passed.
-struct TagOwnBranch;
-impl TypedPlugin for TagOwnBranch {
-    type Deps = (Keyed<Timeline>, Keyed<TimelineIdentity>);
+struct TagOwnBranch {
+    timeline: Key<Timeline>,
+    identity: Key<TimelineIdentity>,
+}
+impl TagOwnBranch {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            timeline: names.key()?,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for TagOwnBranch {
     fn name(&self) -> &str {
         "test.tag-own-branch"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (Keyed(timeline), Keyed(identity)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase(), self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let identity = ctx.require_at(&self.identity)?;
             let tag = format!("{}/{}", identity.session_id, identity.branch_id);
             timeline.before(ctx, "TagOwnBranch", &["input/message"], move |mut draft| {
                 draft.tags.get_or_insert_with(Vec::new).push(tag.clone());
                 Ok(draft)
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(Effect::Done)
         })
     }
 }
@@ -119,8 +131,9 @@ impl TypedPlugin for TagOwnBranch {
 async fn before_runs_only_on_its_own_branch() {
     let mut b = builder();
     b.require_feature(
-        Feature::new("test.tag-own-branch")
-            .branch("test.tag-own-branch", |names| names.part(TagOwnBranch)),
+        Feature::new("test.tag-own-branch").branch("test.tag-own-branch", |names| {
+            Ok(Box::new(TagOwnBranch::new(names)?))
+        }),
     );
     let agent = b.build();
     let one = agent
@@ -192,7 +205,7 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
             b.require_feature(Feature::new("test.required-owner").when(
                 scope,
                 "test.required-owner",
-                |mount| mount.names.part(UnawaitedChild).map(Some),
+                |_| Ok(Some(Box::new(UnawaitedChild))),
             ));
             let agent = b.build();
             let error = agent
@@ -286,32 +299,28 @@ struct FailingRollback {
     fail_apply: bool,
     cleanups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
-impl TypedPlugin for FailingRollback {
+impl Plugin for FailingRollback {
     type Deps = ();
     fn name(&self) -> &str {
         "test.failing-rollback"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            for _ in 0..if self.fail_apply { 2 } else { 1 } {
-                let cleanups = self.cleanups.clone();
-                ctx.effect(|| {
-                    rutis::Effect::Disposer(Box::new(move || {
-                        cleanups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        Err(rutis::CordisError::ServiceNotFound("cleanup-marker".into()))
-                    }))
-                })?;
-            }
-            if self.fail_apply {
-                Err(rutis::CordisError::ServiceNotFound("build-marker".into()))
-            } else {
-                Ok(rutis::Effect::Done)
-            }
-        })
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
+        for _ in 0..if self.fail_apply { 2 } else { 1 } {
+            let cleanups = self.cleanups.clone();
+            ctx.effect(|| async move {
+                cleanups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(rutis::Error::from(rutis::host::ErrorKind::ServiceNotFound(
+                    "cleanup-marker".into(),
+                )))
+            })?;
+        }
+        if self.fail_apply {
+            Err(rutis::Error::from(rutis::host::ErrorKind::ServiceNotFound(
+                "build-marker".into(),
+            )))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -323,17 +332,17 @@ async fn initialization_preserves_each_distinct_cleanup_failure_once() {
     let mut builder = builder();
     builder.require_feature(
         Feature::new("test.failing-rollback")
-            .branch("test.failing-rollback.branch", move |names| {
-                names.part(FailingRollback {
+            .branch("test.failing-rollback.branch", move |_| {
+                Ok(Box::new(FailingRollback {
                     fail_apply: true,
                     cleanups: timeline.clone(),
-                })
+                }))
             })
-            .session("test.failing-rollback.session", move |names| {
-                names.part(FailingRollback {
+            .session("test.failing-rollback.session", move |_| {
+                Ok(Box::new(FailingRollback {
                     fail_apply: false,
                     cleanups: session.clone(),
-                })
+                }))
             }),
     );
     let agent = builder.build();
@@ -356,33 +365,27 @@ struct Marker;
 /// Provides `Marker` under its Session's key and reads the marker of the
 /// first Session that loaded a probe.
 struct ScopeProbe {
-    provide: Option<rutis::TypeKey>,
-    read: std::sync::Arc<std::sync::Mutex<Option<rutis::TypeKey>>>,
+    provide: Option<Key<Marker>>,
+    read: std::sync::Arc<std::sync::Mutex<Option<Key<Marker>>>>,
     seen: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
-impl TypedPlugin for ScopeProbe {
+impl Plugin for ScopeProbe {
     type Deps = ();
     fn name(&self) -> &str {
         "test.scope-probe"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            if let Some(key) = &self.provide {
-                ctx.provide_as(key.clone(), std::sync::Arc::new(Marker))?;
-                self.read.lock().unwrap().get_or_insert(key.clone());
-            }
-            if let Some(key) = self.read.lock().unwrap().clone() {
-                self.seen.store(
-                    ctx.get_as::<Marker>(key).is_some(),
-                    std::sync::atomic::Ordering::SeqCst,
-                );
-            }
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
+        if let Some(key) = &self.provide {
+            ctx.provide_at(key.clone(), std::sync::Arc::new(Marker))?;
+            self.read.lock().unwrap().get_or_insert(key.clone());
+        }
+        if let Some(key) = self.read.lock().unwrap().clone() {
+            self.seen.store(
+                ctx.get_at(&key).is_some(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+        Ok(())
     }
 }
 
@@ -396,11 +399,11 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_fail_publica
     scoped.require_feature(Feature::new("test.scope-probe").session(
         "test.scope-probe",
         move |names| {
-            names.part(ScopeProbe {
-                provide: Some(names.key::<Marker>()?.key().clone()),
+            Ok(Box::new(ScopeProbe {
+                provide: Some(names.key::<Marker>()?),
                 read: read.clone(),
                 seen: observed.clone(),
-            })
+            }))
         },
     ));
     let agent = scoped.build();
@@ -424,16 +427,15 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_fail_publica
         return;
     }
     let mut unkeyed = builder();
-    unkeyed.require_feature(Feature::new("test.scope-probe").session(
-        "test.scope-probe",
-        |names| {
-            names.part(ScopeProbe {
-                provide: Some(rutis::TypeKey::of::<Marker>()),
+    unkeyed.require_feature(
+        Feature::new("test.scope-probe").session("test.scope-probe", |_| {
+            Ok(Box::new(ScopeProbe {
+                provide: Some(Key::of()),
                 read: Default::default(),
                 seen: Default::default(),
-            })
-        },
-    ));
+            }))
+        }),
+    );
     let agent = unkeyed.build();
     let error = agent
         .create_session(SessionConfig::default())
@@ -479,8 +481,10 @@ async fn closed_session_and_branch_subtrees_leave_no_plugins_or_bindings() {
     // What remains is the Agent's own: the root, its loader, the Agent
     // instance with its anchor and process values, the row providing its
     // registry and the 13 plugins of the profile's features; and the
-    // loader's service, the process ModelHost and `partRegistry`.
-    assert_eq!(baseline, Some((19, 3)));
+    // loader's service and its mounter of other languages' plugin
+    // definitions, the process ModelHost, and `partRegistry` at its type's
+    // key and, as a marked service, by name for other languages.
+    assert_eq!(baseline, Some((19, 5)));
     agent.close().await.unwrap();
 }
 
@@ -492,48 +496,38 @@ struct NamedCapability {
 }
 
 struct UnawaitedChild;
-impl TypedPlugin for UnawaitedChild {
+impl Plugin for UnawaitedChild {
     type Deps = ();
     fn name(&self) -> &str {
         "test.required-owner"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            ctx.plugin(NamedCapability::plugin(NamedCapability {
-                name: "unawaited-child",
-                bit: 0,
-                installed: Default::default(),
-                pending: true,
-            }));
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, ctx: &rutis::Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.plugin(NamedCapability {
+            name: "unawaited-child",
+            bit: 0,
+            installed: Default::default(),
+            pending: true,
+        });
+        Ok(())
     }
 }
-impl NamedCapability {
-    /// Pending until a never-provided gate opens when `pending` is set.
-    fn plugin(self) -> rutis::Typed<Self> {
-        let keys = self.pending.then_some(());
-        rutis::Typed::with_keys(self, keys)
-    }
-}
-impl TypedPlugin for NamedCapability {
-    type Deps = When<rutis::Gate<NamedCapability>>;
+/// Pending until a never-provided gate opens when `pending` is set.
+impl DynPlugin for NamedCapability {
     fn name(&self) -> &str {
         self.name
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        _: Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        if self.pending {
+            vec![TypeKey::of::<NamedCapability>()]
+        } else {
+            Vec::new()
+        }
+    }
+    fn apply<'a>(&'a self, _: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             self.installed
                 .fetch_or(self.bit, std::sync::atomic::Ordering::SeqCst);
-            Ok(rutis::Effect::Done)
+            Ok(Effect::Done)
         })
     }
 }
@@ -565,21 +559,21 @@ async fn plugin_names_cannot_replace_other_capabilities_or_loader_groups() {
         // is the colliding one.
         let feature = format!("test.named-{i}");
         b.require_feature(Feature::new(feature.clone()).session(feature, move |_| {
-            Ok(Box::new(NamedCapability::plugin(NamedCapability {
+            Ok(Box::new(NamedCapability {
                 name,
                 bit: 1 << i,
                 installed: installed.clone(),
                 pending: false,
-            })))
+            }))
         }));
     }
     b.session_extension_part("trace", "Probe", |_, installed: &Arc<AtomicUsize>| {
-        Ok(Box::new(NamedCapability::plugin(NamedCapability {
+        Ok(Box::new(NamedCapability {
             name: "Probe",
             bit: 1 << 9,
             installed: installed.clone(),
             pending: false,
-        })))
+        }))
     });
     let agent = b.build();
     agent
@@ -609,12 +603,12 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
                     panic_at,
                     "factory failure"
                 );
-                Ok(Box::new(NamedCapability::plugin(NamedCapability {
+                Ok(Box::new(NamedCapability {
                     name: "factory",
                     bit: 1,
                     installed: Arc::default(),
                     pending: false,
-                })))
+                }))
             }),
         );
         let agent = b.build();
@@ -636,12 +630,12 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
     }
     let mut b = builder();
     b.session_extension_part("extension", "declared", |_, _: &u32| {
-        Ok(Box::new(NamedCapability::plugin(NamedCapability {
+        Ok(Box::new(NamedCapability {
             name: "actual",
             bit: 1,
             installed: Arc::default(),
             pending: false,
-        })))
+        }))
     });
     let agent = b.build();
     let missing_value = agent
@@ -667,12 +661,12 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
     let mut b = builder();
     b.startup_timeout(Duration::from_millis(50));
     b.session_extension_part("pending", "pending", |_, _: &()| {
-        Ok(Box::new(NamedCapability::plugin(NamedCapability {
+        Ok(Box::new(NamedCapability {
             name: "pending",
             bit: 1,
             installed: Arc::default(),
             pending: true,
-        })))
+        }))
     });
     let agent = b.build();
     assert!(
@@ -686,51 +680,38 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
 }
 
 struct AssemblyAnchor(tokio::sync::mpsc::UnboundedSender<rutis::Ctx>);
-impl TypedPlugin for AssemblyAnchor {
+impl Plugin for AssemblyAnchor {
     type Deps = ();
     fn name(&self) -> &str {
         "test.assembly-anchor"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): (),
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            self.0.send(ctx.clone()).unwrap();
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, ctx: &rutis::Ctx, (): ()) -> rutis::Result {
+        self.0.send(ctx.clone()).unwrap();
+        Ok(())
     }
 }
 
 struct OptionalResource(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-impl TypedPlugin for OptionalResource {
+impl Plugin for OptionalResource {
     type Deps = ();
     fn name(&self) -> &str {
         "test.optional-resource"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a rutis::Ctx,
-        (): (),
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
-        Box::pin(async move {
-            let closed = self.0.clone();
-            ctx.effect(move || {
-                rutis::Effect::Disposer(Box::new(move || {
-                    closed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Ok(())
-                }))
-            })?;
-            Ok(rutis::Effect::Done)
-        })
+    async fn apply(&self, ctx: &rutis::Ctx, (): ()) -> rutis::Result {
+        let closed = self.0.clone();
+        ctx.effect(move || async move {
+            closed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })?;
+        Ok(())
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_close_with_the_scope()
  {
-    use rutis_loader::{Builtins, Chain, Layer, LoaderOptions, LoaderPlugin, RuntimeResolver};
+    use rutis_loader::runtime::RuntimeResolver;
+    use rutis_loader::{Chain, Layer, LoaderOptions, LoaderPlugin};
     use serde_json::json;
     use std::sync::{
         Arc,
@@ -740,38 +721,38 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
     let store = Arc::new(MemoryTimelineStore::default());
     let closed = Arc::new(AtomicUsize::new(0));
     let rolled_back = Arc::new(AtomicUsize::new(0));
-    let mut builtins = Builtins::new();
+    let mut builtins = Modules::new();
     let mut b = builder();
     b.timeline_store(store);
     let catalog = b.catalog();
     // A display-name collision must not change which row the builder requires.
     let pending = register_part(&mut builtins, catalog, |_| {
-        Ok(Box::new(NamedCapability::plugin(NamedCapability {
+        Ok(Box::new(NamedCapability {
             name: "SessionScope",
             bit: 0,
             installed: Arc::default(),
             pending: true,
-        })))
+        }))
     })
     .unwrap();
     let failed = register_part(&mut builtins, catalog, {
         let rolled_back = rolled_back.clone();
-        move |names| {
-            names.part(FailingRollback {
+        move |_| {
+            Ok(Box::new(FailingRollback {
                 fail_apply: true,
                 cleanups: rolled_back.clone(),
-            })
+            }))
         }
     })
     .unwrap();
     let resource = register_part(&mut builtins, catalog, {
         let closed = closed.clone();
-        move |names| names.part(OptionalResource(closed.clone()))
+        move |_| Ok(Box::new(OptionalResource(closed.clone())))
     })
     .unwrap();
     let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
-    let anchor = register_part(&mut builtins, catalog, move |names| {
-        names.part(AssemblyAnchor(send.clone()))
+    let anchor = register_part(&mut builtins, catalog, move |_| {
+        Ok(Box::new(AssemblyAnchor(send.clone())))
     })
     .unwrap();
     // The features' plugins are this host's rows, as the App Server's are.
@@ -851,14 +832,15 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
                     .iter()
                     .filter(|row| row.id.ends_with(suffix))
                     .all(|row| row.view.as_ref().unwrap().state().state
-                        == rutis::FiberState::Pending)
+                        == rutis::host::FiberState::Pending)
             );
         }
         assert!(
             entries
                 .iter()
                 .filter(|row| row.id.ends_with("failed"))
-                .all(|row| row.view.as_ref().unwrap().state().state == rutis::FiberState::Failed)
+                .all(|row| row.view.as_ref().unwrap().state().state
+                    == rutis::host::FiberState::Failed)
         );
         assert!(
             entries
@@ -884,7 +866,7 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
             entries
                 .iter()
                 .filter_map(|row| row.view.as_ref())
-                .all(|view| view.state().state == rutis::FiberState::Disposed)
+                .all(|view| view.state().state == rutis::host::FiberState::Disposed)
         );
         assert_eq!(closed.load(Ordering::SeqCst), (round + 1) * 2);
         assert_eq!(rolled_back.load(Ordering::SeqCst), (round + 1) * 4);

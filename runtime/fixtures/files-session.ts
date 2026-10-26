@@ -1,9 +1,10 @@
 import { createConnection } from 'node:net'
 import { once } from 'node:events'
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import type { PluginFiles, SessionMethods } from '../../npm/plugin.js'
 
-export default definePlugin({
+export const part = definePlugin({
   name: 'PublicFilesSessionFixture',
   inject: ['pluginFiles', 'sessionMethods'],
   provides: {},
@@ -42,3 +43,5 @@ export default definePlugin({
     )
   },
 })
+
+export default partRow('session', part)

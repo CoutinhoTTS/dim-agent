@@ -50,7 +50,7 @@ cargo run --locked -p xtask -- check
 - initialize、new/list/load/resume、prompt、close；固定头空页、load/load 和 load/resume 共享准备；标题元数据刷新；resume 不重放旧消息。
 - submission reply 与 consumed/turn-end 的竞态、另一 turn 提前结束、Unicode scalar progress/committed 去重；撤回持有输入、无本地 prompt 的 addressed stop、stop/close 的顺序。
 - read request 取消不结算其他 waiter；迟到准备不能覆盖关闭后新建的准备；128 个在途请求准入与结算后的释放；慢客户端可靠输出溢出明确失败，原生端只观察到 detach。
-- 临时 MCP 首次请求即可见、模型实际调用及工具结果回到模型；headers/environment/cwd 接线；工具列表变更；同 bindingId 幂等、不同配置冲突；过期后重新建立资源且不重发输入；忙碌请求不改变绑定；history read 不启动 MCP。
+- 临时 MCP 首次请求即可见、模型实际调用及工具结果回到模型；headers/environment/cwd 接线；工具列表变更；同 bindingId 幂等、不同配置冲突；过期后重新建立资源且不重发输入；忙碌请求不改变绑定。
 - Gateway EOF 结算正在等待的 stdio MCP 调用，官方 SDK fixture 收到取消且子进程退出。native 失败准备撤销资源，30 秒未续租后关闭连接；Session close 同时释放既有和临时连接，持久 MCP 文件保持不变。
 - all-branch approval、form 多选/custom、图片和文本 resource；mode CAS 保留工具列表，冲突刷新且不重试；model 使用 catalog 的真实 provider 映射及采用结果。
 - auth discovery、已登录不重复 begin、terminal method 不走 authenticate；helper 用同一 home 重新发现 method，并复用 CLI device flow。
@@ -76,7 +76,7 @@ EOF -> local cleanup and native detach
 ## Limits and unverified environments
 
 - 私有 OAuth 插件的真实账户、浏览器授权与令牌交换未实机验收；公开 managed-provider RPC、callback 和取消路径已有测试。私有 realm/token 实现不进入本仓库。
-- Windows/Linux 实机、npm 发布包、其余环境依赖 ignored flows 和被过滤的恢复截止用例未在本轮验收。本次没有执行 release、publish 或 merge。
+- Windows/Linux 实机、npm 发布包、其余环境依赖 ignored flows 和被过滤的恢复截止用例未在本轮验收。本次没有 release、publish 或合入 main。
 - 本次运行受影响范围的测试和 Clippy；workspace 全量 Clippy/test 及 CI 的 ignored profiles 没有在本机运行，仍须按 AGENTS.md 在合入前完成。
 - Lody GUI 的图片、审批、form、model/mode 和扩展展示未实机验收；对应 Gateway 协议流由公开 stdio 测试验证。
 - `providers/*`、Goal、steer/handoff、Lody 精确 token usage、quota、subagent 查询/输出/取消、scheduled tasks、client terminal/fs backend 和 MCP-over-ACP 等维持合同中的不支持/延期状态。临时 MCP 只承接服务器及工具，不新增 OAuth 登录或持久凭据管理。

@@ -8,7 +8,8 @@ use crate::{
 };
 use dim_agent_runtime::{ConfigureUpdate, Names, PromptSourceTarget, Registrations, SessionConfig};
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Error};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -23,7 +24,7 @@ impl PromptRegistry {
         ctx: &Ctx,
         name: impl Into<String>,
         source: Arc<dyn LoadPrompt>,
-    ) -> Result<(), CordisError> {
+    ) -> Result<(), Error> {
         self.0.register(ctx, name, source).map(|_| ())
     }
     /// The names registered now, in name order.
@@ -68,30 +69,31 @@ pub fn targets<'a>(sources: impl IntoIterator<Item = &'a str>) -> Vec<PromptSour
 }
 
 pub struct PromptRegistryPlugin {
-    registry: DepKey<PromptRegistry>,
-    host: DepKey<PromptHost>,
-    initial: DepKey<InitialPromptConfiguration>,
+    config: Key<SessionConfig>,
+    registry: Key<PromptRegistry>,
+    host: Key<PromptHost>,
+    initial: Key<InitialPromptConfiguration>,
 }
 impl PromptRegistryPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
+            config: names.key()?,
             registry: names.key()?,
             host: names.key()?,
             initial: names.key()?,
         })
     }
 }
-impl TypedPlugin for PromptRegistryPlugin {
-    type Deps = (Keyed<SessionConfig>,);
+impl DynPlugin for PromptRegistryPlugin {
     fn name(&self) -> &str {
         "PromptRegistry"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(config),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.config.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let config = ctx.require_at(&self.config)?;
             let registry = Arc::new(PromptRegistry::default());
             // A branch adopts every source registered when it opens; a new
             // Session also adopts its selected model.
@@ -102,12 +104,9 @@ impl TypedPlugin for PromptRegistryPlugin {
                     model: Some(config.model.clone()),
                 })
             });
-            ctx.provide_as(
-                self.host.key().clone(),
-                Arc::new(PromptHost(registry.clone())),
-            )?;
-            ctx.provide_as(self.initial.key().clone(), Arc::new(initial))?;
-            ctx.provide_as(self.registry.key().clone(), registry)?;
+            ctx.provide_at(self.host.clone(), Arc::new(PromptHost(registry.clone())))?;
+            ctx.provide_at(self.initial.clone(), Arc::new(initial))?;
+            ctx.provide_at(self.registry.clone(), registry)?;
             Ok(Effect::Done)
         })
     }

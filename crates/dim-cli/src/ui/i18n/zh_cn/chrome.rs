@@ -36,9 +36,62 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Completed" => "已完成",
         "Failed" => "失败",
         "Cancelled" => "已取消",
+        "workflow" => "工作流",
+        "Stopping" => "正在停止",
+        "Stopped" => "已停止",
+        "Interrupted" => "已中断",
+        "last observed" => "最后观测",
+        "Loading Workflow runs... Stop-all unavailable" => "正在读取工作流运行… 暂不能停止全部",
+        "Workflow: last observed; refresh failed, reopen to retry" => {
+            "工作流：显示最后观测结果；刷新失败，重新打开重试"
+        }
+        "Workflow runs unavailable; reopen to retry" => "工作流运行不可用；重新打开重试",
+        "The selected Workflow run is no longer available" => "所选工作流运行已不可用",
+        "Workflow inventory is incomplete; stop-all unavailable" => {
+            "工作流列表尚未读完，暂不能停止全部"
+        }
+        "Workflow stop unavailable" => "无法停止工作流",
+        "Run no longer available; last observed record" => "运行已不可用；显示最后观测记录",
+        "x stop workflow · Esc back" => "x 停止工作流 · Esc 返回",
+        "Run" => "运行",
+        "Source" => "来源",
+        "Stages" => "阶段",
+        "result" => "结果",
+        "Log" => "日志",
+        "Report" => "报告",
+        "waiting" => "等待中",
+        "launching" => "启动中",
+        "completed" => "已完成",
+        "failed" => "失败",
+        "stopped" => "已停止",
+        "skipped" => "已跳过",
+        "lost" => "已丢失",
+        "none" => "无",
+        "pending" => "待发送",
+        "delivered" => "已送达",
+        "undeliverable" => "无法送达",
         "Agent is starting; no member Session to stop yet" => {
             "智能体正在启动，尚无可停止的成员会话"
         }
+        "Provider members are controlled by the leader; no stop here" => {
+            "提供方成员由主智能体控制，此处不能停止"
+        }
+        "Provider members have no conversation to open here" => "提供方成员没有可在此打开的会话",
+        "That delegation is no longer in this transcript" => "该委派已不在当前对话记录中",
+        "Member model" => "成员模型",
+        "No model observed" => "尚未观察到模型",
+        "Observing member..." => "正在观察成员…",
+        "{model} (observation unavailable)" => "{model}（观察不可用）",
+        "{model} (Session closed)" => "{model}（会话已关闭）",
+        "{model} (last observed)" => "{model}（最后观察到）",
+        "Agent: {name}" => "智能体：{name}",
+        "Provider member: {name}" => "提供方成员：{name}",
+        "Task: {task}" => "任务：{task}",
+        "Activity: {activity}" => "活动：{activity}",
+        "Activity: not observed on this attachment" => "活动：本次连接未观察到",
+        "Result: {result}" => "结果：{result}",
+        "Controlled by the leader" => "由主智能体控制",
+        "› Open member conversation" => "› 打开成员会话",
         "Copied to clipboard" => "已复制到剪贴板",
         "Opened link" => "已打开链接",
         "Link: {url}" => "链接：{url}",
@@ -60,6 +113,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Run a shell command · Esc to exit" => "输入 shell 命令 · Esc 退出",
         "! shell mode" => "! shell 模式",
         "!! shell mode · not sent to the model" => "!! shell 模式 · 不发送给模型",
+        "Leave shell mode to quote a message" => "退出 shell 模式后才能引用消息",
         "A shell command is already running" => "已有 shell 命令在运行",
         "Running… · Ctrl+C to interrupt · {seconds}s" => "运行中… · Ctrl+C 中断 · {seconds}s",
         "exit code {code}" => "退出码 {code}",
@@ -157,7 +211,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "steer with the next queued message" => "用下一条队列消息 steer",
         "scroll to the top" => "滚动到顶部",
         "scroll to the bottom" => "滚动到底部",
-        "pick an earlier message to edit" => "选择较早的消息进行编辑",
+        "pick an earlier message to edit or quote" => "选择较早的消息进行编辑或引用",
         "collapse or expand tool details and thoughts" => "折叠或展开工具详情与思考",
         "switch between fullscreen and scrollback" => "在全屏和回滚界面之间切换",
         "switch theme" => "切换主题",
@@ -242,6 +296,22 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "current" => "当前",
         "Edit models" => "编辑模型",
         "Editing models is not available yet" => "暂不支持编辑模型",
+        "Enter select · Esc back" => "Enter 选择 · Esc 返回",
+        "Subagent models" => "子代理模型",
+        "Subagent models: {policy}" => "子代理模型：{policy}",
+        "Fixed subagent model" => "固定子代理模型",
+        "Agent choice (default)" => "由 Agent 决定（默认）",
+        "Agent choice" => "由 Agent 决定",
+        "Inherit requesting branch" => "继承发起请求的分支",
+        "Fixed model" => "固定模型",
+        "Applies to new members, including named Agents." => "适用于新成员，包括具名 Agent。",
+        "Existing members keep their models." => "已有成员保留其模型。",
+        "unknown" => "未知",
+        "Subagent model policy saved" => "子代理模型策略已保存",
+        "Subagent model policy changed elsewhere; choose again to reread it" => {
+            "子代理模型策略已在别处更改；再次选择以重新读取"
+        }
+        "Subagent model policy: {error}" => "子代理模型策略：{error}",
         "drawing diagram… {count} lines" => "正在绘制图表…已收到 {count} 行",
         // notify.rs
         "Task complete" => "任务已完成",
@@ -261,8 +331,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+C 清空，连按两次退出 · 草稿为空时 Ctrl+D 退出"
         }
         "Fullscreen" => "全屏",
-        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it" => {
-            "PageUp/PageDown 滚动 · Home/End 到顶部或底部 · Tab 选择消息，e 编辑"
+        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown 滚动 · Home/End 到顶部或底部 · Tab 选择消息，e 编辑，q 引用"
         }
         "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
             "滚轮滚动 · 拖动选择并复制 · 点击链接打开，点击工具组展开"

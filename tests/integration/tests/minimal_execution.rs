@@ -19,7 +19,8 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use process_support::{alive, gone, pid_in};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use rutis::host::CtxHost;
+use rutis::{Ctx, Plugin};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -100,20 +101,14 @@ impl ModelDriver for Script {
 
 /// Provides the process HostPlatform the design lets tests construct.
 struct PlatformPlugin(Arc<HostPlatform>);
-impl TypedPlugin for PlatformPlugin {
+impl Plugin for PlatformPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "TestHostPlatform"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(TypeKey::of::<HostPlatform>(), self.0.clone())?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.provide_as::<HostPlatform>(self.0.clone())?;
+        Ok(())
     }
 }
 
@@ -155,10 +150,10 @@ impl Harness {
         platform.env.retain(|(name, _)| name != "HOME");
         platform.env.push(("HOME".into(), cwd.as_os_str().into()));
         let root = Ctx::root_with(tokio::runtime::Handle::current());
-        let view = root.plugin(rutis::Typed::new(PlatformPlugin(Arc::new(platform))));
+        let view = root.plugin(PlatformPlugin(Arc::new(platform)));
         Self::with_platform(root, view, cwd).await
     }
-    async fn with_platform(root: Ctx, view: rutis::FiberView, cwd: PathBuf) -> Self {
+    async fn with_platform(root: Ctx, view: rutis::host::FiberView, cwd: PathBuf) -> Self {
         wait_active(
             &root,
             &[view],
@@ -167,10 +162,9 @@ impl Harness {
         )
         .await
         .unwrap();
-        root.provide_as(
-            TypeKey::of::<SkillSettingsHost>(),
-            Arc::new(SkillSettingsHost(Arc::new(MemorySkillSettings::default()))),
-        )
+        root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
+            MemorySkillSettings::default(),
+        ))))
         .unwrap();
         let model = Arc::new(Script::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -184,7 +178,7 @@ impl Harness {
             .session_value(Arc::new(CompactionStrategyHost(None)))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             );
         dim_agent_capabilities::defaults::install_minimal_execution(
@@ -192,7 +186,7 @@ impl Harness {
             ModelProviderPlugin::new,
         );
         // The Agent's own plugin: the catalog and the Skills parts.
-        builder.plugin(|names| names.part(SkillsCatalogPlugin::new()));
+        builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
         let agent = builder.build_in(&root);
         Self {
             root,
@@ -412,16 +406,19 @@ async fn persistent_isolation_preserves_policy_and_job_control() {
     )
     .unwrap();
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        home.clone(),
-    ])));
+    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     (&storage).await.unwrap();
     let view = root.plugin(
-        HostPlatformPlugin::new(HostPlatformConfig {
-            exec_shell_file: Some((0, "exec-shell.json".into())),
-            isolation_file: Some((0, "host-isolation.json".into())),
-        })
-        .typed(&dim_agent_capabilities::catalog())
+        HostPlatformPlugin::new(
+            &Names::copy(
+                &dim_agent_capabilities::catalog(),
+                &rutis_loader::resolve::Build::default(),
+            ),
+            HostPlatformConfig {
+                exec_shell_file: Some((0, "exec-shell.json".into())),
+                isolation_file: Some((0, "host-isolation.json".into())),
+            },
+        )
         .unwrap(),
     );
     let harness = Harness::with_platform(root, view, cwd).await;
@@ -734,16 +731,19 @@ async fn new_persistent_shells_and_environment_refresh_use_current_preferences()
     };
     set_shell("/bin/bash");
     let root = Ctx::root_with(tokio::runtime::Handle::current());
-    let storage = root.plugin(rutis::Typed::new(FileStoragePlugin::new(vec![
-        home.clone(),
-    ])));
+    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     (&storage).await.unwrap();
     let view = root.plugin(
-        HostPlatformPlugin::new(HostPlatformConfig {
-            exec_shell_file: Some((0, "exec-shell.json".into())),
-            ..HostPlatformConfig::default()
-        })
-        .typed(&dim_agent_capabilities::catalog())
+        HostPlatformPlugin::new(
+            &Names::copy(
+                &dim_agent_capabilities::catalog(),
+                &rutis_loader::resolve::Build::default(),
+            ),
+            HostPlatformConfig {
+                exec_shell_file: Some((0, "exec-shell.json".into())),
+                ..HostPlatformConfig::default()
+            },
+        )
         .unwrap(),
     );
     let harness = Harness::with_platform(root, view, scratch("cwd")).await;

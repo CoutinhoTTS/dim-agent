@@ -8,7 +8,7 @@ use crate::{
     settings::{SettingsError, SettingsScope, SettingsService},
 };
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
-use rutis::{CordisError, Ctx};
+use rutis::{Ctx, Error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -194,7 +194,7 @@ pub(super) fn provide(
     directory: Arc<McpService>,
     settings: Arc<SettingsService>,
     auth: Arc<McpAuth>,
-) -> Result<(), CordisError> {
+) -> Result<(), Error> {
     methods.register(
         ctx,
         "mcp",

@@ -1,6 +1,8 @@
 # Subagent model policy
 
-Status: **Proposed**, not implemented. Business owner: Collaboration.
+Status: **Implemented** (Collaboration creation path, `collaboration` Settings source and
+`CollaborationModelPolicyPlugin` management owner, `/models` "Subagent models" action).
+Business owner: Collaboration.
 Scope: the model-policy part of [#263](https://github.com/arcships/dim/issues/263)
 and [the feature list](../feature-list.md#providers-and-models).
 
@@ -9,8 +11,8 @@ Collaboration member Session**, including a named Agent such as `reviewer`. Work
 stages and Scheduler runs keep their `sessions.launch` model precedence; leader
 `/agent` profile adoption is unchanged. Collaboration members cannot delegate, so
 there is no nested-member policy. Existing member Sessions retain their
-configuration. The concrete configuration and interfaces
-below require architecture review before implementation.
+configuration. The configuration and interfaces below were approved in
+[#352](https://github.com/arcships/dim/pull/352).
 
 ## 1. Behavior
 
@@ -45,7 +47,7 @@ decision by an LLM. `agent` means the existing request/profile selection behavio
 | Need | Existing mechanism |
 | --- | --- |
 | Own the decision | `Collaboration::establish`, reached for both named and temporary new members |
-| Identify the requesting branch | `CollaborationCapability::request` already receives `branch_id`; pass it within Collaboration, without changing an event or tool request |
+| Identify the requesting branch | `CollaborationSession::request` already receives `branch_id`; pass it within Collaboration, without changing an event or tool request |
 | Read the adopted leader model | `Session::get<PromptSnapshot>(branch_id)` while consuming `collaboration/request`, before starting its delivery task |
 | Resolve an explicit model | The existing `AgentIndex` model-selection host and configured/non-catalog profile paths |
 | Persist and edit policy | Native `BusinessDocument`, `SettingsService::read/update`, source CAS and owner management methods, as used by `permission_rules.rs` |
@@ -227,7 +229,14 @@ Extend existing Collaboration/native CLI public flows to cover:
 - Inherit from disabled/deleted/stale-route/unstamped legacy selections retains
   the copy semantics and first-request outcomes stated in §2.
 
-These are implementation acceptance requirements, not completed runtime evidence.
+The Collaboration and native CLI flow tests cover named and temporary members under
+all three modes, inheritance of an adoption made after Session creation without
+request identities, two-client CAS, invalid policies, a missing fixed model without an
+orphan temporary Agent, unrooted hosts exposing no namespace, and CLI selection,
+cancellation and conflict writing only `collaboration.set_model_policy`. Restart,
+invalid persisted sources, owner reload, child-branch requests and stale-route
+inheritance rely on the existing Settings, reload, Prompt and Provider flows and have no
+dedicated policy test.
 Native transcript cards still follow their separate integration dependency on
 [#324](https://github.com/arcships/dim/pull/324).
 
@@ -246,8 +255,7 @@ fresh selection resolved by Provider still receives a stamp. Only Provider-owned
 selection metadata is copied; member request identities are produced independently.
 
 The same contract applies to #349. Fixed-mode effort/tier extension is outside
-this cut and raises no resolver-port requirement. The model-policy design still
-requires architecture approval before runtime implementation.
+this cut and raises no resolver-port requirement.
 
 ## 8. Rule check
 

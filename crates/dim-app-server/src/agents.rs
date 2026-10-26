@@ -7,17 +7,19 @@ use crate::{
 };
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
-    AGENT_GROUP, Agent, AgentBuilder, AgentError, Names, NoConfig, Session, SessionConfig,
-    TimelineKey, When,
+    AGENT_GROUP, Agent, AgentBuilder, AgentError, Modules, Names, NoConfig, Session, SessionConfig,
+    TimelineKey,
 };
 pub use dim_agent_types::AgentProfile;
 use dim_agent_types::{ContentBlock, EventKind};
-use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, Event, EventKey, FiberState, FiberView, Keyed, Plugin,
-    TypeKey, TypedFactory, TypedPlugin, TypedPluginFactory,
+use rutis::host::{
+    BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key, TypeKey,
 };
+use rutis::{Ctx, Error, Event, Plugin};
 use rutis_bridge::session::{HostDispatch, host_key};
-use rutis_loader::{Builtins, InstanceResult, Loader};
+use rutis_loader::Loader;
+use rutis_loader::edit::InstanceResult;
+use rutis_loader::resolve::Build;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Component, Path},
@@ -111,7 +113,7 @@ pub enum AgentOpError {
     #[error("agent settlement failed: {0}")]
     Settle(AgentError),
     #[error("agent unload failed: {0}")]
-    Unload(Arc<CordisError>),
+    Unload(Arc<ErrorKind>),
 }
 
 /// A Session's admission state ([idle unload §6.4](../../../docs/design/appserver/idle-unload.md#64-admission-slots)).
@@ -271,35 +273,23 @@ impl AgentDirectory {
 /// Provides the [`AgentDirectory`] and the `sessions` service. Neither
 /// reloads, so consumers of `sessions` never reload with the index.
 pub(crate) struct AgentDirectoryPlugin;
-impl TypedPlugin for AgentDirectoryPlugin {
+impl Plugin for AgentDirectoryPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "AgentDirectory"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(
-                TypeKey::of::<AgentDirectory>(),
-                Arc::new(AgentDirectory {
-                    inner: Mutex::new(Inner::default()),
-                    default_agent_id: OnceLock::new(),
-                    server_instance_id: uuid::Uuid::new_v4().to_string(),
-                }),
-            )?;
-            ctx.provide_as::<dyn HostDispatch>(
-                host_key("sessions"),
-                Arc::new(sessions::SessionsService(ctx.clone())),
-            )?;
-            ctx.provide_as(
-                TypeKey::of::<SessionPermissions>(),
-                Arc::new(SessionPermissions(ctx.clone())),
-            )?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.provide_as::<AgentDirectory>(Arc::new(AgentDirectory {
+            inner: Mutex::new(Inner::default()),
+            default_agent_id: OnceLock::new(),
+            server_instance_id: uuid::Uuid::new_v4().to_string(),
+        }))?;
+        ctx.provide_at::<dyn HostDispatch>(
+            host_key("sessions"),
+            Arc::new(sessions::SessionsService(ctx.clone())),
+        )?;
+        ctx.provide_as::<SessionPermissions>(Arc::new(SessionPermissions(ctx.clone())))?;
+        Ok(())
     }
 }
 
@@ -308,8 +298,6 @@ impl TypedPlugin for AgentDirectoryPlugin {
 /// loader. A reload of it is a reload of the directory logic only.
 pub struct AgentIndex {
     directory: Arc<AgentDirectory>,
-    pub(crate) session_restored: EventKey<SessionRestored>,
-    pub(crate) unloaded_session_deleted: EventKey<UnloadedSessionDeleted>,
     builder: AgentBuilder,
     session_defaults: SessionConfig,
     /// Protected profiles resolve Session models through a `ModelSelectionHost`.
@@ -514,9 +502,17 @@ impl AgentIndex {
                 .into_iter()
                 .filter(|record| !self.running(&record.id))
             {
+                // The process seeds the default Agent, so a readable stored
+                // default follows the current process default profile: tools
+                // added since it was stored are mounted. A damaged one stays
+                // unavailable rather than being replaced.
                 let profile = record
                     .profile
-                    .and_then(|profile| self.check_profile(&profile).map(|_| profile));
+                    .and_then(|profile| self.check_profile(&profile).map(|_| profile))
+                    .map(|profile| match record.default {
+                        true => process_default(&self.session_defaults),
+                        false => profile,
+                    });
                 let loaded = match profile {
                     Ok(profile) => self
                         .load(record.id.clone(), record.default, profile)
@@ -730,16 +726,11 @@ impl AgentIndex {
                 }
                 let session = host.agent.restore_session(id.into()).await?;
                 let ctx = self.ctx.get().expect("AgentsPlugin apply sets its context");
-                ctx.events()
-                    .parallel(
-                        ctx,
-                        &self.session_restored,
-                        Arc::new(SessionRestored {
-                            agent_id: host.agent_id.clone(),
-                            session_id: id.to_owned(),
-                        }),
-                    )
-                    .await?;
+                ctx.parallel(SessionRestored {
+                    agent_id: host.agent_id.clone(),
+                    session_id: id.to_owned(),
+                })
+                .await?;
                 session
             }
             None => return Err(AgentError::Closed(id.into())),
@@ -1101,11 +1092,7 @@ impl AgentIndex {
                 agent_id,
                 session_id: id.to_owned(),
             });
-            if let Err(error) = root
-                .events()
-                .parallel(root, &self.unloaded_session_deleted, deleted)
-                .await
-            {
+            if let Err(error) = root.parallel(deleted).await {
                 // The rows are gone: the delete stands.
                 tracing::warn!(%error, session_id = id, "Deletion of an unloaded Session was not announced");
             }
@@ -1471,47 +1458,71 @@ pub(crate) struct AgentsPlugin {
     config: Arc<ServerConfig>,
     /// The process root: top-level loader instances are created from it.
     root: Ctx,
+    /// Native storage only with a database.
+    stored: Option<(Key<SessionStore>, Key<SqliteStorage>)>,
+    /// Settings only with local execution.
+    settings: Option<Key<SettingsService>>,
+    loader: Key<Loader>,
+    directory: Key<AgentDirectory>,
+    parts: Key<dim_agent_runtime::PartRegistry>,
 }
 impl AgentsPlugin {
-    pub fn new(builder: AgentBuilder, config: Arc<ServerConfig>, root: Ctx) -> Self {
-        Self {
+    pub fn new(
+        names: &Names<'_>,
+        builder: AgentBuilder,
+        config: Arc<ServerConfig>,
+        root: Ctx,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            stored: config
+                .database_path
+                .is_some()
+                .then(|| Ok::<_, Error>((names.key()?, names.key()?)))
+                .transpose()?,
+            settings: config
+                .local_execution()
+                .then(|| names.key::<SettingsService>())
+                .transpose()?,
+            loader: names.key()?,
+            directory: names.key()?,
+            parts: names.key()?,
             builder,
             config,
             root,
-        }
-    }
-    /// This part with its keys: native storage only with a database, and
-    /// settings only with local execution.
-    pub fn part(self, names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
-        let keys = (
-            names.when::<(Keyed<SessionStore>, Keyed<SqliteStorage>)>(
-                self.config.database_path.is_some(),
-            )?,
-            names.when::<Keyed<SettingsService>>(self.config.local_execution())?,
-            names.key::<Loader>()?,
-            names.key::<AgentDirectory>()?,
-            names.key::<dim_agent_runtime::PartRegistry>()?,
-        );
-        Ok(names.part_with(self, keys))
+        })
     }
 }
-impl TypedPlugin for AgentsPlugin {
-    type Deps = (
-        When<(Keyed<SessionStore>, Keyed<SqliteStorage>)>,
-        When<Keyed<SettingsService>>,
-        Keyed<Loader>,
-        Keyed<AgentDirectory>,
-        Keyed<dim_agent_runtime::PartRegistry>,
-    );
+impl DynPlugin for AgentsPlugin {
     fn name(&self) -> &str {
         "Agents"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (When(stored), When(settings), Keyed(loader), Keyed(directory), Keyed(parts)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        let mut injects = Vec::new();
+        if let Some((store, storage)) = &self.stored {
+            injects.push(store.erase());
+            injects.push(storage.erase());
+        }
+        if let Some(settings) = &self.settings {
+            injects.push(settings.erase());
+        }
+        injects.push(self.loader.erase());
+        injects.push(self.directory.erase());
+        injects.push(self.parts.erase());
+        injects
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let stored = match &self.stored {
+                Some((store, storage)) => Some((ctx.require_at(store)?, ctx.require_at(storage)?)),
+                None => None,
+            };
+            let settings = match &self.settings {
+                Some(settings) => Some(ctx.require_at(settings)?),
+                None => None,
+            };
+            let loader = ctx.require_at(&self.loader)?;
+            let directory = ctx.require_at(&self.directory)?;
+            let parts = ctx.require_at(&self.parts)?;
             // Its Session part, which reads the index this generation
             // provides below.
             parts.register(
@@ -1519,16 +1530,15 @@ impl TypedPlugin for AgentsPlugin {
                 dim_agent_runtime::PartScope::Session,
                 "AgentsSession",
                 |mount| {
-                    mount
-                        .names
-                        .part(configuration::AgentsSessionPlugin)
-                        .map(Some)
+                    Ok(Some(
+                        Box::new(configuration::AgentsSessionPlugin::new(mount.names)?)
+                            as Box<dyn DynPlugin>,
+                    ))
                 },
             )?;
-            let settings = settings.map(|Keyed(settings)| settings);
             let mut builder = self.builder.clone();
             let (records, session_store) = match stored {
-                Some((Keyed(store), Keyed(storage))) => {
+                Some((store, storage)) => {
                     builder.timeline_store(store.timeline_store());
                     (Some(Arc::new(AgentRecords(storage))), Some(store))
                 }
@@ -1550,8 +1560,6 @@ impl TypedPlugin for AgentsPlugin {
             let _ = directory.default_agent_id.set(default_id);
             let index = AgentIndex {
                 directory,
-                session_restored: EventKey::of(),
-                unloaded_session_deleted: EventKey::of(),
                 builder,
                 session_defaults: self.config.session_defaults.clone(),
                 ctx: OnceLock::from(ctx.clone()),
@@ -1566,25 +1574,25 @@ impl TypedPlugin for AgentsPlugin {
             let index = Arc::new(index);
             let cleanup = index.clone();
             ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        // Agents do not depend on the index: they keep
-                        // running, and the next generation finds them in
-                        // the directory.
-                        cleanup.stopping.cancel();
-                        Ok(())
-                    })
-                }))
+                async move {
+                    // Agents do not depend on the index: they keep
+                    // running, and the next generation finds them in
+                    // the directory.
+                    cleanup.stopping.cancel();
+                    Ok(())
+                }
             })?;
             // Stored Agents and Session owners are installed before the
             // index is visible: until then `sessions` replies `reloading`,
             // never that a healthy stored Session has no owner.
             if self.config.session_execution {
                 index.install_default().await.map_err(|error| {
-                    CordisError::PluginFailed(format!("default Agent failed: {error}").into())
+                    rutis::Error::from(ErrorKind::PluginFailed(
+                        format!("default Agent failed: {error}").into(),
+                    ))
                 })?;
             }
-            ctx.provide_as(TypeKey::of::<AgentIndex>(), index.clone())?;
+            ctx.provide_as::<AgentIndex>(index.clone())?;
             // Idle unload (§6): one pass every grace period. rutis runs the
             // effect factory at once, during this apply, so the task starts
             // here and makes its first pass one grace period later; the
@@ -1605,18 +1613,16 @@ impl TypedPlugin for AgentsPlugin {
                             index.unload_idle(&mut marks).await;
                         }
                     });
-                    Effect::AsyncDisposer(Box::new(move || {
-                        Box::pin(async move {
-                            stopping.cancel();
-                            // A release under way finishes before the
-                            // generation ends; the next one marks again.
-                            pass.await.map_err(|error| {
-                                CordisError::PluginFailed(
-                                    format!("idle unload pass failed: {error}").into(),
-                                )
-                            })
+                    async move {
+                        stopping.cancel();
+                        // A release under way finishes before the
+                        // generation ends; the next one marks again.
+                        pass.await.map_err(|error| {
+                            rutis::Error::from(ErrorKind::PluginFailed(
+                                format!("idle unload pass failed: {error}").into(),
+                            ))
                         })
-                    }))
+                    }
                 })?;
             }
             Ok(Effect::Done)
@@ -1645,23 +1651,17 @@ struct AgentSpec {
 }
 
 /// Registers the module of the Agent instance's plugin.
-pub(crate) fn register(builtins: &mut Builtins) {
-    builtins.register_with::<NoConfig, _, _>("AgentScope", |build| {
-        let spec = build.value::<AgentSpec>().ok_or_else(|| {
-            CordisError::PluginFailed("Agent created without its specification".into())
-        })?;
-        Ok(TypedFactory::new(AgentScopeFactory(spec)))
-    });
-}
-struct AgentScopeFactory(Arc<AgentSpec>);
-impl TypedPluginFactory<NoConfig> for AgentScopeFactory {
-    type Plugin = AgentScopePlugin;
-    fn name(&self) -> &str {
-        "AgentScope"
-    }
-    fn build(&self, _: &NoConfig) -> Result<AgentScopePlugin, CordisError> {
-        Ok(AgentScopePlugin(self.0.clone()))
-    }
+pub(crate) fn register(builtins: &mut Modules) {
+    builtins
+        .builtins
+        .register_with("AgentScope", |build: &Build, _: &NoConfig| {
+            let spec = build.value::<AgentSpec>().ok_or_else(|| {
+                rutis::Error::from(ErrorKind::PluginFailed(
+                    "Agent created without its specification".into(),
+                ))
+            })?;
+            Ok(AgentScopePlugin(spec))
+        });
 }
 
 /// One Agent: the plugin of its loader instance. Its Sessions are instances
@@ -1671,52 +1671,44 @@ impl TypedPluginFactory<NoConfig> for AgentScopeFactory {
 /// own cleanup repeats that settlement idempotently; effects unload in
 /// reverse order.
 struct AgentScopePlugin(Arc<AgentSpec>);
-impl TypedPlugin for AgentScopePlugin {
+impl Plugin for AgentScopePlugin {
     type Deps = (Arc<AgentDirectory>, Arc<Loader>);
     fn name(&self) -> &str {
         "AgentScope"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (directory, loader): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let spec = &self.0;
-            let slot = Arc::new(Mutex::new(None));
-            let sessions = ctx.plugin(rutis::Typed::new(Sessions(slot.clone())));
-            (&sessions).await.map_err(|error| {
-                CordisError::PluginFailed(format!("Session host failed: {error}").into())
-            })?;
-            let sessions = match (sessions.state().state, slot.lock().unwrap().take()) {
-                (FiberState::Active, Some(sessions)) => sessions,
-                (state, _) => {
-                    return Err(CordisError::PluginFailed(
-                        format!("Session host is {state:?}").into(),
-                    ));
-                }
-            };
-            let host = Arc::new(AgentHost {
-                agent: spec.builder.build_at((*loader).clone(), ctx),
-                agent_id: spec.agent_id.clone(),
-                default: spec.default,
-                profile: spec.profile.clone(),
-                ctx: sessions,
-            });
-            let owner = host.clone();
-            let unloading = directory.clone();
-            let agent_id = spec.agent_id.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        unloading.forget(&agent_id);
-                        owner.agent.close().await.map_err(Into::into)
-                    })
-                }))
-            })?;
-            directory.register(host);
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (directory, loader): Self::Deps) -> rutis::Result {
+        let spec = &self.0;
+        let slot = Arc::new(Mutex::new(None));
+        let sessions = ctx.plugin(Sessions(slot.clone()));
+        (&sessions).await.map_err(|error| {
+            rutis::Error::from(ErrorKind::PluginFailed(
+                format!("Session host failed: {error}").into(),
+            ))
+        })?;
+        let sessions = match (sessions.state().state, slot.lock().unwrap().take()) {
+            (FiberState::Active, Some(sessions)) => sessions,
+            (state, _) => {
+                return Err(rutis::Error::from(ErrorKind::PluginFailed(
+                    format!("Session host is {state:?}").into(),
+                )));
+            }
+        };
+        let host = Arc::new(AgentHost {
+            agent: spec.builder.build_at((*loader).clone(), ctx),
+            agent_id: spec.agent_id.clone(),
+            default: spec.default,
+            profile: spec.profile.clone(),
+            ctx: sessions,
+        });
+        let owner = host.clone();
+        let unloading = directory.clone();
+        let agent_id = spec.agent_id.clone();
+        ctx.effect(move || async move {
+            unloading.forget(&agent_id);
+            owner.agent.close().await.map_err(Into::into)
+        })?;
+        directory.register(host);
+        Ok(())
     }
 }
 
@@ -1724,20 +1716,14 @@ impl TypedPlugin for AgentScopePlugin {
 /// plugin registered before its settlement, it unloads after the Sessions
 /// closed.
 struct Sessions(Arc<Mutex<Option<Ctx>>>);
-impl TypedPlugin for Sessions {
+impl Plugin for Sessions {
     type Deps = ();
     fn name(&self) -> &str {
         "Sessions"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            *self.0.lock().unwrap() = Some(ctx.clone());
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        *self.0.lock().unwrap() = Some(ctx.clone());
+        Ok(())
     }
 }
 

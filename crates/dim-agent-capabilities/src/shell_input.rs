@@ -19,10 +19,12 @@ use crate::{
     },
 };
 use dim_agent_runtime::{
-    AgentBuilder, SessionConfig, SessionHold, SessionIdentity, SessionLifecycle, SessionPhase,
+    AgentBuilder, Names, SessionConfig, SessionHold, SessionIdentity, SessionLifecycle,
+    SessionPhase,
 };
 use dim_agent_types::{InputMessageData, InputMode};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -49,8 +51,9 @@ const PROGRESS_MAX_BYTES: usize = 64 * 1024;
 /// Installs ShellInput in every Session.
 pub fn install(builder: &mut AgentBuilder) {
     builder.require_feature(
-        dim_agent_runtime::Feature::new("ShellInput")
-            .session("ShellInput", |names| names.part(ShellInputPlugin)),
+        dim_agent_runtime::Feature::new("ShellInput").session("ShellInput", |names| {
+            Ok(Box::new(ShellInputPlugin::new(names)?))
+        }),
     );
 }
 
@@ -555,32 +558,48 @@ impl RunOutput {
 }
 
 /// Session plugin providing `sessionMethods` key `shell`.
-pub struct ShellInputPlugin;
-impl TypedPlugin for ShellInputPlugin {
-    type Deps = (
-        Keyed<HostPlatform>,
-        Keyed<SessionConfig>,
-        Keyed<TreeCommands>,
-        Keyed<SessionLifecycle>,
-        Keyed<SessionIdentity>,
-        Keyed<SessionMethods>,
-    );
+pub struct ShellInputPlugin {
+    platform: Key<HostPlatform>,
+    config: Key<SessionConfig>,
+    tree: Key<TreeCommands>,
+    lifecycle: Key<SessionLifecycle>,
+    identity: Key<SessionIdentity>,
+    methods: Key<SessionMethods>,
+}
+impl ShellInputPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            platform: names.key()?,
+            config: names.key()?,
+            tree: names.key()?,
+            lifecycle: names.key()?,
+            identity: names.key()?,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ShellInputPlugin {
     fn name(&self) -> &str {
         "ShellInput"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (
-            Keyed(platform),
-            Keyed(config),
-            Keyed(tree),
-            Keyed(lifecycle),
-            Keyed(identity),
-            Keyed(methods),
-        ): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.platform.erase(),
+            self.config.erase(),
+            self.tree.erase(),
+            self.lifecycle.erase(),
+            self.identity.erase(),
+            self.methods.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let platform = ctx.require_at(&self.platform)?;
+            let config = ctx.require_at(&self.config)?;
+            let tree = ctx.require_at(&self.tree)?;
+            let lifecycle = ctx.require_at(&self.lifecycle)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let methods = ctx.require_at(&self.methods)?;
             let shell = Arc::new(ShellInput {
                 platform,
                 // `session.create` validated and canonicalized the cwd.
@@ -593,17 +612,13 @@ impl TypedPlugin for ShellInputPlugin {
                 registry: Mutex::default(),
             });
             let owner = shell.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let _registry = owner.registry.lock().unwrap();
-                            owner.runs.close();
-                        }
-                        owner.runs.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                {
+                    let _registry = owner.registry.lock().unwrap();
+                    owner.runs.close();
+                }
+                owner.runs.wait().await;
+                Ok(())
             })?;
             // After the effect above, so the provider's unload, which settles
             // the calls, runs before the runs are awaited.

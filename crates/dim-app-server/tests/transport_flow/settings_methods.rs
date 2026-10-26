@@ -7,7 +7,7 @@ use dim_app_server::{
     session_typescript::SessionTypeScriptConfig,
     settings::{SettingsChanged, settings_changes},
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect};
+use rutis::Ctx;
 use std::path::PathBuf;
 
 const OWNER: &str = "example-owner";
@@ -24,8 +24,7 @@ fn owner_row(id: &str) -> Value {
     json!({
         "id": id,
         "name": repository().join("runtime/fixtures/settings-owner.ts"),
-        "group": "session",
-        "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.json")).unwrap(),
+        "provides": {},
         "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.settings.json")).unwrap(),
     })
 }
@@ -60,34 +59,25 @@ fn config(home: &std::path::Path, session_typescript: SessionTypeScriptConfig) -
 
 #[derive(Clone)]
 struct Changes(Arc<tokio::sync::watch::Sender<Vec<SettingsChanged>>>);
-impl rutis::Listener<SettingsChanged> for Changes {
-    fn call<'a>(
-        &'a self,
-        _: &'a Ctx,
-        event: &'a SettingsChanged,
-        _: rutis::Call<'a, ()>,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        self.0.send_modify(|log| log.push(event.clone()));
-        Box::pin(async { Ok(None) })
-    }
-}
 /// A Session part with a Rust listener on `settings_changes("example")`.
 struct Probe(Changes);
-impl TypedPlugin for Probe {
+impl Plugin for Probe {
     type Deps = ();
     fn name(&self) -> &str {
         "test.settings-probe"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.events()
-                .on(ctx, &settings_changes("example"), self.0.clone())?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        let changes = self.0.clone();
+        ctx.listen::<SettingsChanged>()
+            .name(settings_changes("example"))
+            .on(move |event, _| {
+                let changes = changes.clone();
+                async move {
+                    changes.0.send_modify(|log| log.push((*event).clone()));
+                    Ok(None)
+                }
+            })?;
+        Ok(())
     }
 }
 
@@ -114,8 +104,8 @@ async fn node_settings_typescript_owner_reads_and_writes() {
         config(&home, rows(vec![owner_row(OWNER)])),
         move |builder| {
             builder.require_feature(
-                Feature::new("test.settings-probe").session("test.settings-probe", move |names| {
-                    names.part(Probe(probe.clone()))
+                Feature::new("test.settings-probe").session("test.settings-probe", move |_| {
+                    Ok(Box::new(Probe(probe.clone())))
                 }),
             );
         },

@@ -1,7 +1,8 @@
 use dim_agent_capabilities::defaults;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
     sync::{
         Arc, OnceLock,
@@ -19,19 +20,32 @@ async fn soon<T>(future: impl std::future::Future<Output = T>) -> T {
 struct PanicFlowProbe {
     delivered: Arc<AtomicUsize>,
     dispatcher: Arc<OnceLock<Arc<Dispatcher>>>,
+    dispatcher_key: Key<Dispatcher>,
 }
-impl TypedPlugin for PanicFlowProbe {
-    type Deps = (Keyed<Dispatcher>,);
+impl PanicFlowProbe {
+    fn new(
+        names: &Names<'_>,
+        delivered: Arc<AtomicUsize>,
+        dispatcher: Arc<OnceLock<Arc<Dispatcher>>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            delivered,
+            dispatcher,
+            dispatcher_key: names.key()?,
+        })
+    }
+}
+impl DynPlugin for PanicFlowProbe {
     fn name(&self) -> &str {
         "test.panic-flow-probe"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher_key.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         let counter = self.delivered.clone();
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher_key)?;
             // One apply registers both listeners in order; independent plugins
             // have no initialization ordering without an injects dependency.
             dispatcher.subscribe(
@@ -67,10 +81,11 @@ async fn handler_panic_is_attributed_and_freezes_the_dispatch_cursor() {
     builder.require_feature(Feature::new("test.panic-flow-probe").branch(
         "test.panic-flow-probe",
         move |names| {
-            names.part(PanicFlowProbe {
-                delivered: counted.clone(),
-                dispatcher: captured.clone(),
-            })
+            Ok(Box::new(PanicFlowProbe::new(
+                names,
+                counted.clone(),
+                captured.clone(),
+            )?))
         },
     ));
     let agent = builder.build();
@@ -111,19 +126,27 @@ async fn handler_panic_is_attributed_and_freezes_the_dispatch_cursor() {
 
 struct DomainProbe {
     seen: Arc<std::sync::Mutex<Vec<String>>>,
+    dispatcher: Key<Dispatcher>,
 }
-impl TypedPlugin for DomainProbe {
-    type Deps = (Keyed<Dispatcher>,);
+impl DomainProbe {
+    fn new(names: &Names<'_>, seen: Arc<std::sync::Mutex<Vec<String>>>) -> rutis::Result<Self> {
+        Ok(Self {
+            seen,
+            dispatcher: names.key()?,
+        })
+    }
+}
+impl DynPlugin for DomainProbe {
     fn name(&self) -> &str {
         "test.domain-probe"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         let seen = self.seen.clone();
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
             let rejected = dispatcher.subscribe(ctx, "test.bad-wildcard", &["input*"], |_| {
                 Box::pin(async { Ok(()) })
             });
@@ -144,14 +167,11 @@ async fn domain_wildcard_subscribes_to_every_key_in_that_domain() {
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
     let recorded = seen.clone();
-    builder.require_feature(Feature::new("test.domain-probe").branch(
-        "test.domain-probe",
-        move |names| {
-            names.part(DomainProbe {
-                seen: recorded.clone(),
-            })
-        },
-    ));
+    builder.require_feature(
+        Feature::new("test.domain-probe").branch("test.domain-probe", move |names| {
+            Ok(Box::new(DomainProbe::new(names, recorded.clone())?))
+        }),
+    );
     let agent = builder.build();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
@@ -170,20 +190,22 @@ async fn domain_wildcard_subscribes_to_every_key_in_that_domain() {
 /// Reads Loop's published state while handling each event after Loop did.
 struct PhaseProbe {
     seen: Arc<std::sync::Mutex<Vec<(String, LoopPhase)>>>,
+    dispatcher: Key<Dispatcher>,
+    state: Key<StateCell<LoopSnapshot>>,
 }
-impl TypedPlugin for PhaseProbe {
-    // Loop provides the state cell: this probe handles each event after it.
-    type Deps = (Keyed<Dispatcher>, Keyed<StateCell<LoopSnapshot>>);
+impl DynPlugin for PhaseProbe {
     fn name(&self) -> &str {
         "test.phase-probe"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher), Keyed(state)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    // Loop provides the state cell: this probe handles each event after it.
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase(), self.state.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         let seen = self.seen.clone();
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let state = ctx.require_at(&self.state)?;
             dispatcher.subscribe(ctx, "test.phase-probe", &["*"], move |event| {
                 seen.lock()
                     .unwrap()
@@ -205,10 +227,11 @@ async fn loop_publishes_running_only_once_turn_start_is_dispatched() {
     builder.require_feature(Feature::new("test.phase-probe").branch(
         "test.phase-probe",
         move |names| {
-            let probe = PhaseProbe {
+            Ok(Box::new(PhaseProbe {
                 seen: recorded.clone(),
-            };
-            Ok(names.part_with(probe, (names.key()?, names.state_cell()?)))
+                dispatcher: names.key()?,
+                state: names.state_cell()?,
+            }))
         },
     ));
     let agent = builder.build();

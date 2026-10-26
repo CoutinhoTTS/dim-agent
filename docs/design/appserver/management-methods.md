@@ -131,7 +131,7 @@ status of the row that registered it   reply                         client
 (loader.get) or that row's copy
 ------------------------------------   ---------------------------   ----------------------------------
 owner row absent, or row Disabled      -32601 unknown_method         stop: nothing serves the name
-Session row has no copy in the         -32000 service_reloading      retry: the part or the Session
+Session part has no copy in the        -32000 service_reloading      retry: the part or the Session
   Session                                                              is coming back
 Inactive: not started yet,             -32000 service_reloading      retry: the owner is coming back
   or between generations

@@ -4,7 +4,7 @@
 
 ## 贡献工具与分支初始化
 
-固定表含宿主的全部工具，按宿主的顺序，在 ToolRegistry `apply` 时确定。其他工具都是注册的：部件在自己的 `apply` 中调用 `register(ctx, ToolContribution)` 注册一个工具，调用 `register_source(ctx, name, provider)` 注册一个动态来源；注册是调用方的 effect，在该部件卸载时撤回。其他语言的 Session 行经桥调用 `toolRegistry.register(declaration, execute)`，注册属于调用方行（桥的 `caller_row`）。宿主不预先登记任何名称，注册表也不去发现提供方。Session 声明哪些宿主工具与注册的工具由其可选的挂载列表 `SessionConfig.tools` 决定（第 2 节）：没有挂载列表时全部声明，部件注册的工具不需修改配置即可使用（#364）。每个挂载的注册工具（`branch`、`agent`、`wait` 与 C4 TypeScript 行等）是注册表自有的带版本集合，键为 `#contributed:<tool>`，与其他动态来源走同一刷新、校验、采用与请求快照路径（#241）。
+固定表含宿主的全部工具，按宿主的顺序，在 ToolRegistry `apply` 时确定。其他工具都是注册的：部件在自己的 `apply` 中调用 `register(ctx, ToolContribution)` 注册一个工具，调用 `register_source(ctx, name, provider)` 注册一个动态来源；注册是调用方的 effect，在该部件卸载时撤回。其他语言的 Session 部件经桥调用 `toolRegistry.register(declaration, execute)`，注册属于调用方（桥的 `caller_row`，即该部件在这个 Session 里的副本）。宿主不预先登记任何名称，注册表也不去发现提供方。Session 声明哪些宿主工具与注册的工具由其可选的挂载列表 `SessionConfig.tools` 决定（第 2 节）：没有挂载列表时全部声明，部件注册的工具不需修改配置即可使用（#364）。每个挂载的注册工具（`branch`、`agent`、`wait` 与 C4 TypeScript 部件等）是注册表自有的带版本集合，键为 `#contributed:<tool>`，与其他动态来源走同一刷新、校验、采用与请求快照路径（#241）。
 
 ```text
 part apply: tools.register(ctx, ToolContribution)
@@ -36,7 +36,7 @@ Session 能力向本 Session 的 `ToolRegistry` 注册模型可调用的工具�
 | 工具来源 | 提供方式 |
 | --- | --- |
 | 宿主工具 | `ToolHost`（产品根由 `WorkspaceToolsPlugin` 提供；审批在执行时由分支 ToolExecutor 经 Approval 准入，不包装 ToolHost） |
-| Session 能力工具 | 本文的 `ToolContribution`，由部件注册；`branch`、`wait`、`skill`、`ask_user`、`agent` 分别由 `BranchTool`、`Wait`、`Skills`、`Questions`、`CollaborationCapability` 以同一方式注册 |
+| Session 能力工具 | 本文的 `ToolContribution`，由部件注册；`branch`、`wait`、`skill`、`ask_user`、`agent` 分别由 `BranchTool`、`Wait`、`Skills`、`Questions`、`CollaborationSession` 以同一方式注册 |
 
 ## 2. 结构
 
@@ -79,7 +79,7 @@ impl ToolRegistry {
 | --- | --- |
 | 注册 | 部件注入 `ToolRegistry`（`Keyed<ToolRegistry>`），在自身状态就绪后于 `apply` 中调用 `register(ctx, ToolContribution)`；注册是 `ctx` 的 effect，该部件卸载时撤回。`definition` 可按本 Session 配置生成，`definition.name` 即注册名 |
 | 名称 | 须满足 `[A-Za-z0-9_-]{1,64}`；宿主工具名与已被注册的名称不能再注册 |
-| 其他语言 | Session 行注入 `toolRegistry`，调用 `register(declaration, execute)`：`declaration` 是 `ToolDefinition` 数据，须带非空 `risk`；`execute(call, cancelled)` 是该行自己的函数，经桥以中立 ToolCall `{sessionId, branchId, turnId, callId, arguments, config}` 和取消 Promise 回调。注册属于调用方行，该行卸载时撤回；行的 `provides` 不列工具 |
+| 其他语言 | Session 部件注入 `toolRegistry`，调用 `register(declaration, execute)`：`declaration` 是 `ToolDefinition` 数据，须带非空 `risk`；`execute(call, cancelled)` 是该部件自己的函数，经桥以中立 ToolCall `{sessionId, branchId, turnId, callId, arguments, config}` 和取消 Promise 回调。注册属于调用方，它卸载时撤回；`provides` 不列工具 |
 | 宿主工具 | 来自 `ToolHost` 的定义，在 `apply` 时读取；没有另外登记宿主工具名的步骤 |
 | 收集 | 不发现提供方：每次读取纳入当时已注册的内容；Session 发布后由注册表自有任务随注册与撤回重读，Session 开始关闭时该任务结束；ToolRegistry 不依赖注册它的部件 |
 | 挂载 | `SessionConfig.tools` 是 Session 可选的挂载列表，创建时确定。没有挂载列表时，声明全部宿主工具与全部注册的工具，部件注册的工具不需修改配置即可使用（#364）；产品默认没有挂载列表。有挂载列表时，只声明其中列出的宿主工具与注册工具，`[]` 不声明任何宿主工具或注册工具。列出但没有部件注册的工具省略，并记录一次 `tool.attach` 进程日志 span；之后才注册的工具从其注册后的下一个请求起声明。Agent profile 与 Collaboration 成员用挂载列表限定 agent 看到的工具，有列表的成员总是挂载 `agent` |
@@ -148,7 +148,7 @@ New bindings automatically adopt the replacement through the existing flow below
 
 | 组件 | 作用域 | 注入 | 提供 | 被谁注入 |
 | --- | --- | --- | --- | --- |
-| `ToolRegistryPlugin` | Session | `S:ToolHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle` | `S:ToolRegistry`、`S:ToolSourcesView` | ToolBinding、PrepareModelHost；注册工具或来源的部件（BranchTool、Questions、Skills、Wait、CollaborationCapability、McpSession） |
+| `ToolRegistryPlugin` | Session | `S:ToolHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle` | `S:ToolRegistry`、`S:ToolSourcesView` | ToolBinding、PrepareModelHost；注册工具或来源的部件（BranchTool、Questions、Skills、Wait、CollaborationSession、McpSession） |
 | `ToolBindingPlugin` | 分支 | `S:ToolRegistry`、`B:Prompt`（采用入口）、`B:Timeline`、`B:BranchLifecycle`、`B:Dispatcher`、`B:BranchOpening` | `B:ToolBinding` | Loop、ToolExecutor |
 
 - 来源方注入 ToolRegistry 以注册来源（沿用第 3 节），不注入 ToolBinding。

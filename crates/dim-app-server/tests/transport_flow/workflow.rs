@@ -1,24 +1,21 @@
-//! Workflow's actual process/Session rows through Settings, files, S2 and C1.
+//! Workflow's actual row, which registers its Session part, through Settings,
+//! files, S2 and C1.
 use super::*;
 use std::path::{Path, PathBuf};
 
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut config = session_typescript::fixture();
-    // The process row first: tests address it as `rows[0]`.
+    // Tests address the row as `rows[0]`.
     config.rows = vec![
         serde_json::from_str(include_str!(
             "../../../../runtime/plugins/workflow/process.json"
-        ))
-        .unwrap(),
-        serde_json::from_str(include_str!(
-            "../../../../runtime/plugins/workflow/session.json"
         ))
         .unwrap(),
     ];
     config
 }
 
-async fn kill_node(pid: u64) {
+pub(super) async fn kill_node(pid: u64) {
     let pid = pid.to_string();
     assert!(
         std::process::Command::new("kill")
@@ -187,17 +184,14 @@ async fn report_restart(kill_runtime: bool) {
     let (restarted, ()) = tokio::join!(loader.restart(name), async {
         let mut state = owner.watch();
         tokio::time::timeout(Duration::from_secs(3), async {
-            while state.borrow_and_update().state != rutis::FiberState::Unloading {
+            while state.borrow_and_update().state != rutis::host::FiberState::Unloading {
                 state.changed().await.unwrap();
             }
         })
         .await
         .unwrap();
         assert!(
-            owner
-                .effects()
-                .iter()
-                .any(|effect| effect.label == "sessions.input"),
+            super::unload_held(&owner).await,
             "the real background report retains its original-row native writer"
         );
         assert_eq!(stored(&home)["runs"][0]["report"]["attempt_open"], true);
@@ -1313,7 +1307,7 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
         let original_instance = first.instance().unwrap();
         let owner = loader.get("workflow").unwrap().view.unwrap();
         server.restart("Agents").await.unwrap();
-        assert_eq!(owner.state().state, rutis::FiberState::Active);
+        assert_eq!(owner.state().state, rutis::host::FiberState::Active);
         assert_eq!(
             agent.get_session(first.id()).unwrap().instance().unwrap(),
             original_instance
@@ -1739,7 +1733,7 @@ async fn node_workflow_report_wakes_wait_and_is_adopted_after_its_start_batch() 
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::tool_host(

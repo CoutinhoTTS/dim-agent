@@ -323,8 +323,8 @@ impl Client {
         serde_json::from_value(value).map_err(|_| format!("Invalid {method} response").into())
     }
 
-    /// Negotiates RPC v3 and checks the host's explicit model profile.
-    pub async fn hello(&mut self) -> Result<()> {
+    /// Negotiates RPC v3, checks the host's explicit model profile and returns the server version.
+    pub async fn hello(&mut self) -> Result<String> {
         let hello: Hello = tokio::time::timeout(Duration::from_secs(5), self.typed("hello", json!({"protocolVersion":PROTOCOL_VERSION,"clientKind":self.config.client_kind,"clientName":self.config.client_name}))).await??;
         if hello.protocol_version != PROTOCOL_VERSION
             || hello.instance_id.is_empty()
@@ -350,7 +350,7 @@ impl Client {
         }
         self.features = hello.features;
         self.instance_id = hello.instance_id;
-        Ok(())
+        Ok(hello.server_version)
     }
 
     /// Whether the server's hello offered `feature` (a method name, or a

@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use dim_agent_types::BranchCreateFailedData;
 
 use super::*;
-use crate::model::view::TaskKind;
+use crate::model::view::{MemberTarget, TaskKind};
 
 #[derive(Default)]
 pub(super) struct BranchHistory {
@@ -27,8 +27,10 @@ pub(super) struct HistoryRequest {
 
 pub(super) struct StopBatch {
     session_id: String,
+    projection_id: u64,
     targets: VecDeque<TaskKind>,
-    pub request: Option<(u64, String)>,
+    /// The outstanding request, its label and the Workflow run it stops.
+    pub request: Option<(u64, String, Option<String>)>,
     attempted: usize,
     errors: usize,
     unavailable: usize,
@@ -37,13 +39,14 @@ pub(super) struct StopBatch {
 impl Worker {
     /// The replacement releases this attachment after creating or finding its Session.
     pub(super) fn invalidate_projection(&mut self) -> String {
-        self.watch_member(None);
+        self.release_members();
         self.projection_id += 1;
         let attached_session = std::mem::take(&mut self.session_id);
         self.projection = Projection::default();
         self.cursors.clear();
         self.task_history.clear();
         self.task_history_queue.clear();
+        self.workflow.clear();
         if let Some(request) = &mut self.task_history_request {
             request.current = false;
         }
@@ -256,8 +259,17 @@ impl Worker {
             ));
             return;
         }
+        if self.workflow_incomplete() {
+            self.send(Update::Notice(
+                "Workflow inventory is incomplete; stop-all unavailable".into(),
+            ));
+            return;
+        }
+        let stop_workflows = self.client.supports(&["workflow.stop"]);
         let mut members = HashSet::new();
         let mut targets = VecDeque::new();
+        // Workflow stops can wait without bound; they follow the others.
+        let mut workflows = Vec::new();
         let mut unavailable = 0;
         for task in self
             .projection
@@ -267,15 +279,28 @@ impl Worker {
         {
             match &task.kind {
                 TaskKind::Command(_) => targets.push_back(task.kind.clone()),
-                TaskKind::Member {
-                    session_id: Some(id),
-                } if members.insert(id.clone()) => targets.push_back(task.kind.clone()),
-                TaskKind::Member { session_id: None } => unavailable += 1,
+                TaskKind::Member(MemberTarget::Session(id)) if members.insert(id.clone()) => {
+                    targets.push_back(task.kind.clone())
+                }
+                TaskKind::Member(MemberTarget::Session(_)) => {}
+                // Not delivered yet, or a provider member: no Session to stop.
+                TaskKind::Member(MemberTarget::Starting | MemberTarget::Provider) => {
+                    unavailable += 1
+                }
+                TaskKind::Workflow(view)
+                    if stop_workflows
+                        && view.run.state == crate::wire::WorkflowState::Running
+                        && !view.stop_pending =>
+                {
+                    workflows.push(task.kind.clone())
+                }
                 _ => {}
             }
         }
+        targets.extend(workflows);
         self.task_stops = Some(StopBatch {
             session_id,
+            projection_id,
             targets,
             request: None,
             attempted: 0,
@@ -299,7 +324,17 @@ impl Worker {
             ), batch.errors != 0);
             return;
         };
+        let mut workflow = None;
         let (label, method, params) = match target {
+            TaskKind::Workflow(view) => {
+                let run_id = view.run.run_id;
+                workflow = Some(run_id.clone());
+                (
+                    format!("workflow {run_id}"),
+                    "workflow.stop",
+                    json!({"run_id": run_id}),
+                )
+            }
             TaskKind::Command(target) => (
                 format!("command {}/{}", target.branch_id, target.task_id),
                 "session.exec.stop",
@@ -307,22 +342,27 @@ impl Worker {
                     "sessionId": batch.session_id, "branchId": target.branch_id, "taskId": target.task_id,
                 }),
             ),
-            TaskKind::Member {
-                session_id: Some(session_id),
-            } => (
+            TaskKind::Member(MemberTarget::Session(session_id)) => (
                 format!("member {session_id}"),
                 "session.stop",
                 json!({
                     "sessionId": session_id, "branchId": "main", "reason": "stopped by the user",
                 }),
             ),
-            TaskKind::Member { session_id: None } => {
-                unreachable!("admission excludes undelivered targets")
+            TaskKind::Member(MemberTarget::Starting | MemberTarget::Provider) => {
+                unreachable!("admission excludes targets without a member Session")
             }
         };
         batch.attempted += 1;
+        let current = batch.projection_id == self.projection_id;
         match self.client.send(method, params).await {
-            Ok(id) => batch.request = Some((id, label)),
+            Ok(id) => {
+                if current && let Some(run_id) = &workflow {
+                    self.projection.workflow_stop_pending(run_id, true);
+                    self.changed();
+                }
+                self.task_stops.as_mut().expect("stop batch").request = Some((id, label, workflow));
+            }
             Err(error) => {
                 batch.errors += 1;
                 self.send(Update::Notice(format!("Stop-all {label}: {error}")));
@@ -333,9 +373,15 @@ impl Worker {
 
     pub(super) fn task_stop_reply(&mut self, result: Result<serde_json::Value, client::RpcError>) {
         let batch = self.task_stops.as_mut().expect("matched stop reply");
-        let (_, target) = batch.request.take().expect("matched stop target");
+        let (_, target, workflow) = batch.request.take().expect("matched stop target");
+        let result = match workflow {
+            Some(run_id) if batch.projection_id == self.projection_id => {
+                self.workflow_stopped(&run_id, result)
+            }
+            _ => result.map(drop).map_err(|error| error.to_string()),
+        };
         if let Err(error) = result {
-            batch.errors += 1;
+            self.task_stops.as_mut().expect("stop batch").errors += 1;
             self.send(Update::Notice(format!("Stop-all {target}: {error}")));
         }
     }

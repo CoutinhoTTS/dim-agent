@@ -47,7 +47,9 @@ use crate::ui::transcript::blocks::{THINKING_ROWS, settled_thinking};
 use crate::ui::transcript::commit::CommitState;
 use crate::ui::transcript::reveal::Reveal;
 use crate::ui::transcript::stream::{StreamPlanner, TextBlock, render_open};
-use crate::ui::transcript::tool_group::{Detail, project_group, render_group};
+use crate::ui::transcript::tool_group::{
+    Detail, action_at, card_actions, card_rows, project_group, render_group,
+};
 use crate::ui::upgrade_dialog::UpgradeDialog;
 
 /// The stop reason and the note committed when the user interrupts a run.
@@ -65,6 +67,8 @@ const RESIZE_MAX_DELAY: Duration = Duration::from_millis(500);
 const HISTORY_MAX_BLOCKS: usize = 5_000;
 /// Rows of history a scrollback rewrite lays out at most.
 const REWRITE_MAX_ROWS: usize = 10_000;
+/// In-place rewrites fullscreen can catch up on before it lays out again.
+const REWRITE_LOG: usize = 64;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// How often the loop looks at session updates while input is idle.
 const SESSION_POLL: Duration = Duration::from_millis(40);
@@ -424,6 +428,16 @@ fn run_terminal(
                         app.set_notice(t("Copied to clipboard"));
                         dirty = true;
                     }
+                    MouseOutcome::Click {
+                        block: Some(block),
+                        row,
+                    } if full.card_at(&app, block, row).is_some() => {
+                        // A delegation card opens its member, by the card's
+                        // own identity rather than the row it was drawn on.
+                        let card = full.card_at(&app, block, row).expect("clicked card");
+                        app.open_card(&card);
+                        dirty = true;
+                    }
                     MouseOutcome::Click { block, row } => {
                         // A committed group opens in place: the view holds
                         // still rather than following the bottom. The press
@@ -449,8 +463,9 @@ fn run_terminal(
             }
             // Amp's message navigation: Tab (or Up while a message is
             // picked) goes to older user messages, Shift+Tab or Down to newer
-            // ones and back to the composer past the newest; Esc ends it and
-            // `e` takes the message into the composer.
+            // ones and back to the composer past the newest; Esc ends it,
+            // `e` takes the message into the composer and `q` quotes it
+            // at the end of the draft.
             Wait::Event(InputEvent::Key(key))
                 if full.is_some()
                     && app.keyboard_free()
@@ -464,9 +479,25 @@ fn run_terminal(
                     KeyCode::BackTab | KeyCode::Down => full.focus_newer(&app),
                     KeyCode::Tab => full.focus_newer(&app),
                     KeyCode::Esc => full.clear_focus(),
+                    // A picked card opens its member; the pick stays for Esc
+                    // to come back to.
+                    KeyCode::Enter if key.mods.0 == 0 && full.focused_card().is_some() => {
+                        let card = full.focused_card().expect("picked card").to_owned();
+                        app.open_card(&card);
+                    }
                     KeyCode::Char('e') if key.mods.0 == 0 => {
                         if let Some(text) = full.focused_text(&app) {
                             app.composer.set_draft(&text);
+                        }
+                        full.clear_focus();
+                        full.follow();
+                    }
+                    KeyCode::Char('q') if key.mods.0 == 0 => {
+                        if let Some(text) = full.focused_text(&app)
+                            && !app.composer.quote(&text)
+                            && app.composer.shell().is_some()
+                        {
+                            app.set_notice(t("Leave shell mode to quote a message"));
                         }
                         full.clear_focus();
                         full.follow();
@@ -677,8 +708,15 @@ struct App {
     /// The history id of the block the newest stream batch began; its next
     /// batches rewrite it.
     stream_block: Option<usize>,
-    /// How many times a history block was rewritten, and the newest one.
-    rewritten: (u64, usize),
+    /// How many times history blocks were rewritten, and the ids of the
+    /// newest rewrites (bounded by `REWRITE_LOG`).
+    rewrites: u64,
+    rewrite_log: std::collections::VecDeque<usize>,
+    /// Committed groups (history ids) whose delegation cards still change:
+    /// fullscreen redraws them from the snapshot.
+    card_blocks: Vec<usize>,
+    /// The second their running time was last drawn for.
+    card_second: u64,
     session_id: String,
     /// The default tool-approval mode (wire name).
     approvals: String,
@@ -822,7 +860,10 @@ impl App {
             history: Default::default(),
             dropped: 0,
             stream_block: None,
-            rewritten: (0, 0),
+            rewrites: 0,
+            rewrite_log: Default::default(),
+            card_blocks: Vec::new(),
+            card_second: 0,
             session_id: String::new(),
             approvals: "workspace-write".to_owned(),
             approvals_toast: false,
@@ -1032,8 +1073,17 @@ impl App {
         if self.exit_armed_until.is_some_and(|until| now >= until) {
             self.exit_armed_until = None;
         }
-        // A running command's elapsed time ticks.
+        // A running command's elapsed time ticks, and a running card's.
         if self.failure.is_none() && self.shell.is_some() {
+            changed = true;
+        }
+        let second = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if !self.card_blocks.is_empty() && second != self.card_second {
+            self.card_second = second;
+            self.refresh_cards();
             changed = true;
         }
         if self.composer.mention_tick() {
@@ -1097,6 +1147,7 @@ impl App {
                 }
                 self.runs.observe(&snapshot);
                 self.snapshot = Some(*snapshot);
+                self.refresh_cards();
                 if self.running() && !was_running {
                     self.run_started = Some(Instant::now());
                     self.last_pulse = 0;
@@ -1149,11 +1200,12 @@ impl App {
                 session_id,
                 snapshot,
                 state,
+                model,
             } => {
                 if let Some(Prompt::Tasks(panel)) = &mut self.prompt
                     && panel.projection_id == projection_id
                 {
-                    panel.member(&session_id, snapshot, state);
+                    panel.member(&session_id, snapshot, state, model);
                 }
             }
             Update::FilesChanged(count) => {
@@ -1245,6 +1297,13 @@ impl App {
             Update::Models(models) => {
                 if let Some(Prompt::Models(panel)) = &mut self.prompt {
                     panel.set_models(models);
+                }
+            }
+            Update::ModelPolicy(update) => {
+                if let Some(Prompt::Models(panel)) = &mut self.prompt
+                    && let Some(notice) = panel.set_policy(update)
+                {
+                    self.set_notice(notice);
                 }
             }
             Update::ShellProgress {
@@ -1783,6 +1842,15 @@ impl App {
                 session_id,
                 projection_id,
             }),
+            Effect::StopWorkflow {
+                session_id,
+                projection_id,
+                run_id,
+            } => self.host.send(Command::StopWorkflow {
+                session_id,
+                projection_id,
+                run_id,
+            }),
             Effect::LanguagePreview(locale) => {
                 i18n::set(locale.unwrap_or_else(i18n::system_locale));
             }
@@ -1872,6 +1940,14 @@ impl App {
                     model_id,
                 });
             }
+            Effect::ReadModelPolicy => self.host.send(Command::ReadModelPolicy),
+            Effect::SetModelPolicy {
+                expected_revision,
+                policy,
+            } => self.host.send(Command::SetModelPolicy {
+                expected_revision,
+                policy,
+            }),
         }
         // A picker opened from `/settings` goes back to its row once closed.
         if self.prompt.is_none()
@@ -2274,6 +2350,12 @@ impl App {
         }
         let (commits, sources, tail) = self.transcript(width);
         for (text, (source, placement)) in commits.into_iter().zip(sources) {
+            if let Block::ToolGroup(group) = &source
+                && !group.cards.is_empty()
+                && self.fullscreen
+            {
+                self.card_blocks.push(self.dropped + self.history.len());
+            }
             match placement {
                 Placement::New => self.record(source),
                 Placement::Stream => {
@@ -2399,6 +2481,9 @@ impl App {
                 live.extend(queue_strip(&queued, self.queue_rows, cols, &self.palette));
             }
         }
+        // The composer (or the prompt in its place) never moves up: the queue
+        // above it gives back its rows above it.
+        frame.anchor = live.len();
         // One blank row above the composer, always: the run status lives in
         // the composer's top border rather than on a row of its own, so the
         // composer does not hop when a run starts or ends.
@@ -2948,6 +3033,7 @@ impl App {
         // a clean view under the banner, which the next frame commits (the
         // session may attach before the first frame). Scrollback keeps what
         // the terminal already shows.
+        self.card_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
@@ -3021,8 +3107,92 @@ impl App {
             Some(Block::Thinking { expanded, .. }) => *expanded = !*expanded,
             _ => return false,
         }
-        self.rewritten = (self.rewritten.0 + 1, id);
+        self.mark_rewritten(id);
         true
+    }
+
+    /// Block `id` changed in place: fullscreen lays it out again.
+    fn mark_rewritten(&mut self, id: usize) {
+        self.rewrites += 1;
+        self.rewrite_log.push_back(id);
+        if self.rewrite_log.len() > REWRITE_LOG {
+            self.rewrite_log.pop_front();
+        }
+    }
+
+    /// Fullscreen redraws committed delegation cards as their facts and
+    /// observations change and their time runs; a card stops changing once
+    /// its delegation ended. Scrollback keeps what it printed.
+    fn refresh_cards(&mut self) {
+        if !self.fullscreen || self.card_blocks.is_empty() {
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let mut changed = Vec::new();
+        let mut open = Vec::new();
+        for id in &self.card_blocks {
+            let Some(Block::ToolGroup(group)) = id
+                .checked_sub(self.dropped)
+                .and_then(|index| self.history.get(index))
+            else {
+                continue;
+            };
+            let Some(mut index) = snapshot.rows.iter().position(|row| {
+                row.member
+                    .as_ref()
+                    .is_some_and(|card| group.cards.first() == Some(&card.task.id))
+            }) else {
+                continue;
+            };
+            while !opens_group(&snapshot.rows, index) {
+                index -= 1;
+            }
+            let rows = group_rows(&snapshot.rows, index);
+            if rows
+                .iter()
+                .filter_map(|row| row.member.as_ref())
+                .any(|card| card.task.finished.is_none())
+            {
+                open.push(*id);
+            }
+            let fresh = project_group(&rows, group.detail);
+            if fresh != *group {
+                changed.push((*id, fresh));
+            }
+        }
+        self.card_blocks = open;
+        for (id, group) in changed {
+            if let Some(block) = id
+                .checked_sub(self.dropped)
+                .and_then(|index| self.history.get_mut(index))
+            {
+                *block = Block::ToolGroup(group);
+                self.mark_rewritten(id);
+            }
+        }
+    }
+
+    /// Opens a delegation card's member: its read-only conversation, or its
+    /// result when there is no member Session to read.
+    fn open_card(&mut self, request_event_id: &str) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let Some(card) = snapshot.rows.iter().find_map(|row| {
+            row.member
+                .as_ref()
+                .filter(|card| card.task.id == request_event_id)
+        }) else {
+            self.set_notice(t("That delegation is no longer in this transcript"));
+            return;
+        };
+        let mut panel = TasksPanel::new(snapshot);
+        match panel.open_card(card.task.clone()) {
+            Effect::Notice(text) => self.set_notice(text),
+            _ => self.prompt = Some(Prompt::Tasks(panel)),
+        }
     }
 
     fn rewrite_stream_block(&mut self, source: Block) {
@@ -3032,7 +3202,7 @@ impl App {
         match index.and_then(|index| self.history.get_mut(index)) {
             Some(block) => {
                 *block = source;
-                self.rewritten = (self.rewritten.0 + 1, self.stream_block.unwrap_or(0));
+                self.mark_rewritten(self.stream_block.unwrap_or(0));
             }
             None => self.record(source),
         }
@@ -3157,8 +3327,36 @@ impl App {
 }
 
 impl Document for App {
-    fn rewritten(&self) -> (u64, usize) {
-        self.rewritten
+    fn rewritten(&self, since: u64) -> (u64, Option<Vec<usize>>) {
+        let count = (self.rewrites - since) as usize;
+        let ids = (count <= self.rewrite_log.len())
+            .then(|| self.rewrite_log.iter().rev().take(count).copied().collect());
+        (self.rewrites, ids)
+    }
+
+    fn cards(&self, index: usize) -> Vec<String> {
+        match &self.history[index] {
+            Block::ToolGroup(group) => card_actions(group).into_iter().map(str::to_owned).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn card_rows(&self, index: usize, cols: usize, card: &str) -> Option<(usize, usize)> {
+        let Block::ToolGroup(group) = &self.history[index] else {
+            return None;
+        };
+        let width = cols.saturating_sub(2 + MARGIN).max(1);
+        // Under the blank row that opens the block.
+        let (start, end) = card_rows(group, width, &self.palette, card)?;
+        Some((start + 1, end + 1))
+    }
+
+    fn card_at(&self, index: usize, cols: usize, row: usize) -> Option<String> {
+        let Block::ToolGroup(group) = &self.history[index] else {
+            return None;
+        };
+        let width = cols.saturating_sub(2 + MARGIN).max(1);
+        action_at(group, width, &self.palette, row.checked_sub(1)?).map(str::to_owned)
     }
 
     fn dropped(&self) -> usize {
@@ -3535,9 +3733,16 @@ fn border_line(
     line
 }
 
-/// Hard wrap by display width.
-const STARTUP_LOGO: [&str; 4] = ["  ▓▓▓▓  ", "▓▓    ▓▓", "░░    ░░", "  ░░░░  "];
-const STARTUP_LOGO_WIDTH: usize = 8;
+/// "DIM" in the ANSI Shadow block style (port of `startup-logo.ts`); every
+/// glyph is one cell wide.
+const STARTUP_LOGO: [&str; 5] = [
+    "██████╗ ██╗███╗   ███╗",
+    "██╔══██╗██║████╗ ████║",
+    "██║  ██║██║██╔████╔██║",
+    "██████╔╝██║██║╚██╔╝██║",
+    "╚═════╝ ╚═╝╚═╝ ╚═╝ ╚═╝",
+];
+const STARTUP_LOGO_WIDTH: usize = 22;
 const STARTUP_LOGO_GAP: usize = 2;
 
 /// The greeting beside the logo, vertically centred against it (port of
@@ -3549,7 +3754,7 @@ fn startup_header(greeting: &[String], body_width: usize) -> Vec<String> {
             .flat_map(|line| wrap_words(line, body_width))
             .collect();
     }
-    let text_width = body_width - STARTUP_LOGO_WIDTH - STARTUP_LOGO_GAP;
+    let text_width = body_width.saturating_sub(STARTUP_LOGO_WIDTH + STARTUP_LOGO_GAP);
     if text_width < 16 {
         return STARTUP_LOGO
             .iter()
@@ -3659,6 +3864,193 @@ mod tests {
         assert!(!row.contains("Paragraph 1 "), "{row:?}");
     }
 
+    /// A session that never answers: the interface alone is under test.
+    struct Idle;
+
+    impl SessionPort for Idle {
+        fn send(&self, _: Command) {}
+        fn drain(&self) -> Vec<Update> {
+            Vec::new()
+        }
+        fn shutdown(self: Box<Self>) {}
+    }
+
+    /// The interface drawn into an emulated terminal, frame by frame.
+    struct Drawn {
+        app: App,
+        screen: Screen,
+        emu: crate::ui::render::testterm::Emu,
+        size: (u16, u16),
+        _home: tempfile::TempDir,
+    }
+
+    impl Drawn {
+        fn new(size: (u16, u16), origin: Option<u16>, synchronized: bool) -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let theme = test_theme();
+            let app = App::new(
+                Box::new(Idle),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                home.path().to_path_buf(),
+                "/work".into(),
+            );
+            let mut screen = Screen::new(size, synchronized);
+            if let Some(row) = origin {
+                screen.set_origin(row);
+            }
+            let emu = crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+            let mut drawn = Self {
+                app,
+                screen,
+                emu,
+                size,
+                _home: home,
+            };
+            drawn.draw();
+            drawn
+        }
+
+        fn draw(&mut self) {
+            let frame = self.app.frame(self.size);
+            let bytes = self.screen.render(&frame, self.size);
+            self.emu.feed(&bytes);
+        }
+
+        fn key(&mut self, code: KeyCode) {
+            let key = crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE);
+            let _ = self.app.handle(InputEvent::Key(key));
+            self.draw();
+        }
+
+        fn ask(&mut self, call: crate::question::Call) {
+            self.app.prompt = Some(Prompt::Ask(AskUserPrompt::new(call)));
+            self.draw();
+        }
+
+        fn answered(&mut self) {
+            self.app.prompt = None;
+            self.draw();
+        }
+
+        /// Screen row of the composer's top border, or the prompt's in its
+        /// place: the first box under the history.
+        fn anchor(&self) -> usize {
+            let rows = self.emu.rows_text();
+            let banner = rows
+                .iter()
+                .rposition(|r| r.contains("Git branch"))
+                .map_or(0, |b| b + 2);
+            rows.iter()
+                .enumerate()
+                .skip(banner)
+                .find(|(_, r)| r.trim_start().starts_with('╭'))
+                .map(|(y, _)| y)
+                .unwrap_or_else(|| panic!("no box on screen: {rows:#?}"))
+        }
+
+        fn scrolled(&self) -> usize {
+            self.emu.scrollback.len()
+        }
+    }
+
+    fn questions() -> crate::question::Call {
+        use crate::question::{Call, Choice, Question};
+        let choices = |n: usize| {
+            (0..n)
+                .map(|i| Choice {
+                    label: format!("option {i}"),
+                    description: (i % 2 == 0).then(|| format!("about option {i}")),
+                })
+                .collect()
+        };
+        let question = |id: &str, n: usize| Question {
+            id: id.into(),
+            header: Some(id.into()),
+            question: format!("Which {id}?"),
+            options: choices(n),
+            multi_select: false,
+            allow_custom: true,
+        };
+        Call {
+            branch_id: "main".into(),
+            request_id: "ask".into(),
+            call_id: "call".into(),
+            questions: vec![question("tall", 6), question("short", 2)],
+        }
+    }
+
+    /// The command menu and a question, opened and closed again and again,
+    /// at the bottom of the screen or with room below: the composer never
+    /// moves up while there is room, history scrolls at most once, and every
+    /// round after the first leaves the screen exactly as the first did.
+    #[test]
+    fn menus_and_questions_never_lift_the_composer_twice() {
+        for (origin, synchronized) in [
+            (None, true),
+            (None, false),
+            (Some(0), true),
+            (Some(3), false),
+        ] {
+            let mut drawn = Drawn::new((80, 40), origin, synchronized);
+            let start = drawn.anchor();
+            let round = |drawn: &mut Drawn| {
+                let scrolled = drawn.scrolled();
+                let mut last = drawn.anchor();
+                // Only a region that runs to the bottom row may lift it.
+                let mut check = |drawn: &Drawn, what: &str| {
+                    let at = drawn.anchor();
+                    let bottom = !drawn.emu.row(drawn.size.1 as usize - 1).is_empty();
+                    assert!(
+                        at >= last || bottom,
+                        "{what}: the composer moved up from {last} to {at}: {:#?}",
+                        drawn.emu.rows_text()
+                    );
+                    last = at;
+                };
+                drawn.key(KeyCode::Char('/'));
+                check(drawn, "menu opened");
+                drawn.key(KeyCode::Down);
+                drawn.key(KeyCode::Esc);
+                drawn.key(KeyCode::Esc);
+                check(drawn, "menu closed");
+                drawn.ask(questions());
+                check(drawn, "question asked");
+                drawn.key(KeyCode::Tab);
+                check(drawn, "short question");
+                drawn.key(KeyCode::Tab);
+                check(drawn, "review");
+                drawn.key(KeyCode::BackTab);
+                drawn.key(KeyCode::BackTab);
+                check(drawn, "tall question again");
+                drawn.answered();
+                check(drawn, "answered");
+                (
+                    drawn.scrolled() - scrolled,
+                    drawn.anchor(),
+                    drawn.emu.rows_text(),
+                )
+            };
+            let first = round(&mut drawn);
+            let label = format!("origin {origin:?} sync {synchronized}");
+            if origin.is_some() {
+                assert_eq!(first.0, 0, "{label}: room below, nothing scrolls");
+                assert_eq!(
+                    first.1, start,
+                    "{label}: the composer stayed: {:#?}",
+                    first.2
+                );
+            }
+            for _ in 0..4 {
+                let again = round(&mut drawn);
+                assert_eq!(again.0, 0, "{label}: scrolled again: {:#?}", again.2);
+                assert_eq!(again.1, first.1, "{label}");
+                assert_eq!(again.2, first.2, "{label}");
+            }
+            assert_eq!(drawn.emu.flickers, 0, "{label}");
+        }
+    }
+
     /// The queue strip keeps the height it reached while messages leave.
     #[test]
     fn the_queue_strip_holds_its_height_as_the_queue_drains() {
@@ -3714,6 +4106,29 @@ mod tests {
             "{:?}",
             goodbye_panel(None)
         );
+    }
+
+    #[test]
+    fn startup_panels_keep_their_greeting_and_width_in_narrow_terminals() {
+        let theme = test_theme();
+        let opened = WebOpened {
+            url: "http://127.0.0.1:43201/",
+            sign_in: None,
+            session_id: None,
+        };
+        for cols in [120, 31, 30, 29, 24, 15] {
+            let welcome = banner(cols, &theme.palette, "main");
+            let web = web_panel(cols, &theme.palette, &opened);
+            for panel in [&welcome, &web] {
+                for row in panel.lines() {
+                    assert_eq!(width_of(row), cols - 2, "{cols}: {row:?}");
+                }
+            }
+            if cols >= 29 {
+                assert!(welcome.contains(env!("CARGO_PKG_VERSION")), "{welcome}");
+                assert!(web.contains(t("DIM Web is ready")), "{web}");
+            }
+        }
     }
 
     #[test]

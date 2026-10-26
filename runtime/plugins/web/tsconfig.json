@@ -7,6 +7,7 @@
     "moduleResolution": "NodeNext",
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
+    "paths": { "@arcships/rutis": ["./node_modules/@arcships/rutis/src/index.d.ts"] },
     "types": ["node"]
   }
 }

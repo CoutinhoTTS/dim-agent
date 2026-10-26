@@ -7,7 +7,8 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use futures_util::StreamExt;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Plugin};
 use std::{
     sync::{
         Arc,
@@ -193,7 +194,7 @@ fn builder_with_context(
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::install(&mut builder);
@@ -532,18 +533,26 @@ async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() 
     .unwrap();
 }
 
-struct RewriteBaseline;
-impl TypedPlugin for RewriteBaseline {
-    type Deps = (Keyed<Timeline>,);
+struct RewriteBaseline {
+    timeline: Key<Timeline>,
+}
+impl RewriteBaseline {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            timeline: names.key()?,
+        })
+    }
+}
+impl DynPlugin for RewriteBaseline {
     fn name(&self) -> &str {
         "test.rewrite-baseline"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
             timeline.before(ctx, self.name(), &["context/compaction"], |mut draft| {
                 if let EventKind::ContextCompaction(ContextCompactionData {
                     outcome:
@@ -656,8 +665,9 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
     let mut forged_builder =
         builder_with_context(Arc::new(EchoModel), HistoryRenderer::default(), context);
     forged_builder.require_feature(
-        Feature::new("test.rewrite-baseline")
-            .branch("test.rewrite-baseline", |names| names.part(RewriteBaseline)),
+        Feature::new("test.rewrite-baseline").branch("test.rewrite-baseline", |names| {
+            Ok(Box::new(RewriteBaseline::new(names)?))
+        }),
     );
     let forged_agent = forged_builder.build();
     let forged_session = forged_agent
@@ -715,18 +725,26 @@ mod product_summary;
 #[path = "context_flow/retention.rs"]
 mod retention;
 
-struct ExpandFinal;
-impl TypedPlugin for ExpandFinal {
-    type Deps = (Keyed<Timeline>,);
+struct ExpandFinal {
+    timeline: Key<Timeline>,
+}
+impl ExpandFinal {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            timeline: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ExpandFinal {
     fn name(&self) -> &str {
         "ExpandFinal"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline),): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
             timeline.before(ctx, "expand-final", &["model/call"], |mut draft| {
                 if let EventKind::ModelCall(call) = &mut draft.kind {
                     Arc::make_mut(&mut call.request)
@@ -744,9 +762,9 @@ async fn before_modified_request_is_budget_checked_before_native_model_invocatio
     tokio::time::timeout(Duration::from_secs(10), async {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut builder = builder(Arc::new(BudgetFailure(calls.clone())));
-        builder.require_feature(
-            Feature::new("ExpandFinal").branch("ExpandFinal", |names| names.part(ExpandFinal)),
-        );
+        builder.require_feature(Feature::new("ExpandFinal").branch("ExpandFinal", |names| {
+            Ok(Box::new(ExpandFinal::new(names)?))
+        }));
         let agent = builder.build();
         let session = agent
             .create_session(SessionConfig::default())
@@ -1228,7 +1246,7 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
         .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(context)))))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::install(&mut builder);

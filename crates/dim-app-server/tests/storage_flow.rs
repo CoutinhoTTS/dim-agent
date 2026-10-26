@@ -6,6 +6,7 @@ use dim_agent_runtime::{
 use dim_agent_types::*;
 use dim_app_server::storage::{NodeLoads, SqliteStorage, SqliteTimelineStore};
 use rusqlite::{Connection, params};
+use rutis::host::CtxHost;
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -2662,12 +2663,13 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
 async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     let database = Database::new();
     let root = rutis::Ctx::root().unwrap();
-    let sqlite = root.plugin(rutis::Typed::new(
-        dim_app_server::storage::SqliteStoragePlugin::new(database.0.clone()),
+    let sqlite = root.plugin(dim_app_server::storage::SqliteStoragePlugin::new(
+        database.0.clone(),
     ));
-    let session = root.plugin(rutis::Typed::new(
-        dim_app_server::storage::SessionStorePlugin::new(0),
-    ));
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let session = root.plugin(dim_app_server::storage::SessionStorePlugin::new(&names, 0).unwrap());
     (&sqlite).await.unwrap();
     (&session).await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
@@ -2741,10 +2743,8 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     replacement.close().await.unwrap();
 
-    let plugin = rutis::Typed::new(dim_app_server::storage::SqliteStoragePlugin::new(
-        database.0.clone(),
-    ));
-    assert!(rutis::Plugin::apply(&plugin, &root).await.is_err());
+    let plugin = dim_app_server::storage::SqliteStoragePlugin::new(database.0.clone());
+    assert!(rutis::host::DynPlugin::apply(&plugin, &root).await.is_err());
     let reopened = SqliteStorage::open(database.0.clone()).unwrap();
     reopened.close().await.unwrap();
 }

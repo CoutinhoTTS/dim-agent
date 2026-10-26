@@ -2,11 +2,13 @@
 pub mod management;
 use crate::model_catalog::{MAX_MODEL_TOKENS, ModelEntry};
 use dim_agent_capabilities::host::ModelProtocol;
+use dim_agent_runtime::Names;
 use management::{
     BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
     ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
 };
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -139,7 +141,7 @@ pub type ManagedFuture<T> = BoxFuture<'static, Result<T, ManagedError>>;
 /// row name. The row provides `Arc<dyn ManagedProvider>`.
 #[derive(Clone)]
 pub struct ManagedProviderRow(pub Arc<RegisterRow>);
-pub type RegisterRow = dyn Fn(&mut rutis_loader::Builtins, usize) -> String + Send + Sync;
+pub type RegisterRow = dyn Fn(&mut dim_agent_runtime::Modules, usize) -> String + Send + Sync;
 impl std::fmt::Debug for ManagedProviderRow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ManagedProviderRow")
@@ -518,72 +520,85 @@ fn checked_lease(lease: CredentialLease) -> Result<CredentialLease, ManagedProvi
     Ok(lease)
 }
 
-pub struct ManagedProvidersPlugin;
-impl TypedPlugin for ManagedProvidersPlugin {
-    type Deps = (Keyed<crate::methods::ManagementMethods>,);
+pub struct ManagedProvidersPlugin {
+    methods: Key<crate::methods::ManagementMethods>,
+}
+impl ManagedProvidersPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ManagedProvidersPlugin {
     fn name(&self) -> &str {
         "ManagedProviders"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(methods),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.methods.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let methods = ctx.require_at(&self.methods)?;
             let service = Arc::new(ManagedProviders {
                 provider: Mutex::new(None),
                 stop: CancellationToken::new(),
             });
             let owner = service.clone();
-            ctx.effect(move || {
-                Effect::Disposer(Box::new(move || {
-                    owner.stop.cancel();
-                    Ok(())
-                }))
+            ctx.effect(move || async move {
+                owner.stop.cancel();
+                Ok(())
             })?;
             management::provide(ctx, &methods, service.clone())?;
-            ctx.provide_as(rutis::TypeKey::of::<ManagedProviders>(), service)?;
+            ctx.provide_as::<ManagedProviders>(service)?;
             Ok(Effect::Done)
         })
     }
 }
 /// Publishes a provider to ManagedProviders while both are active.
-pub struct ManagedProviderBinding;
-impl TypedPlugin for ManagedProviderBinding {
-    type Deps = (Keyed<ManagedProviders>, Keyed<dyn ManagedProvider>);
+pub struct ManagedProviderBinding {
+    owner: Key<ManagedProviders>,
+    provider: Key<dyn ManagedProvider>,
+}
+impl ManagedProviderBinding {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            owner: names.key()?,
+            provider: names.key()?,
+        })
+    }
+}
+impl DynPlugin for ManagedProviderBinding {
     fn name(&self) -> &str {
         "ManagedProviderBinding"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(owner), Keyed(provider)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.owner.erase(), self.provider.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let owner = ctx.require_at(&self.owner)?;
+            let provider = ctx.require_at(&self.provider)?;
             if !valid_descriptors(&provider.providers()) {
-                return Err(CordisError::PluginFailed(
+                return Err(rutis::Error::from(ErrorKind::PluginFailed(
                     "Invalid managed provider description".into(),
-                ));
+                )));
             }
             let binding = NEXT_BINDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *owner.provider.lock().unwrap() = Some(Bound {
                 provider: provider.clone(),
                 binding,
             });
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        {
-                            let mut slot = owner.provider.lock().unwrap();
-                            if slot.as_ref().is_some_and(|bound| bound.binding == binding) {
-                                *slot = None;
-                            }
-                        }
-                        // The provider's own disposer joins its accepted work.
-                        provider.quiesce().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                {
+                    let mut slot = owner.provider.lock().unwrap();
+                    if slot.as_ref().is_some_and(|bound| bound.binding == binding) {
+                        *slot = None;
+                    }
+                }
+                // The provider's own disposer joins its accepted work.
+                provider.quiesce().await;
+                Ok(())
             })?;
             Ok(Effect::Done)
         })

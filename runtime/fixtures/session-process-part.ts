@@ -1,9 +1,11 @@
 import { definePlugin } from '@arcships/rutis'
-import part from './session-part.ts'
+import { partRow } from './part-row.ts'
+import { part } from './session-part.ts'
 
-export default definePlugin({
+// The Session part of `session-part.ts`, gated on the process owner's
+// `exampleProcess`.
+export default partRow('session', definePlugin({
+  ...part,
   name: 'ProcessDependentSessionFixture',
-  inject: ['exampleProcess', 'toolRegistry', 'sessionMethods'],
-  provides: part.provides,
-  apply: part.apply,
-})
+  inject: ['exampleProcess', ...part.inject],
+}))

@@ -44,7 +44,7 @@ plugin with the same name.
 | [HostPlatform](HostPlatform.md) | HostPlatform | — | — |
 | [FileStorage](FileStorage.md) | FileStorage | — | — |
 
-Optional TypeScript packages are outside this native profile. [Web](../../../design/plugins/Web.md) provides `web_search` and `web_fetch` through existing Session rows; its [package documentation](../../../../runtime/plugins/web/README.md) describes installation and verification. It adds no service to the assembly recorded here.
+Optional TypeScript packages are outside this native profile. [Web](../../../design/plugins/Web.md) provides `web_search` and `web_fetch` through a Session part its one row registers; its [package documentation](../../../../runtime/plugins/web/README.md) describes installation and verification. It adds no service to the assembly recorded here.
 
 Process infrastructure rows are also outside this local-execution index. `UiHost` owns UI leaf links: per leaf, a `PeerPlugin` link to the interactive `dimcode` process and the row hosting `Tui` there. Its contract is [Tui design §3.6](../../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) and its current assembly is in the generated [App Server services](../generated/app-server/services.md). The hosted `Tui` runs in the CLI's client tree and is not a local-execution capability.
 

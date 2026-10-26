@@ -9,15 +9,16 @@ jobs, windows, run tracking, reports and retention. The Session part offers
 ## Install
 
 Install the package into the runtime that resolves the configured rows. Put
-`process.json` and `session.json` into `SessionTypeScriptConfig.rows`.
-The process row has no group; the Session row declares `"group": "session"`.
-Both structural configurations are `{}`. The rows declare the same
-`inject` dependencies as their modules, matching the Workflow package. The
-process row declares the `schedule` Settings source with user file
+`process.json` into `SessionTypeScriptConfig.rows`. The plugin is that one row; from its
+`apply` it registers its Session part (`session.ts`, as `SchedulerSession`) with
+`partRegistry`, and each Session mounts a copy.
+The structural configuration is `{}`. The row declares the same
+`inject` dependencies as its module, matching the Workflow package. It
+declares the `schedule` Settings source with user file
 `schedule.json`, no project source and protected `/max_concurrent_runs`.
 
-The package uses rutis 0.16.0 with the host's coordinated upgrade
-([upgrade contract](../../../docs/design/rutis-0.16-upgrade.md)). Row-level
+The package uses rutis 0.17.1, the host's pinned runtime; its TypeScript code
+is unchanged from 0.16.0 ([upgrade contract](../../../docs/design/rutis-0.16-upgrade.md)). Row-level
 dependencies stay declared. Invalid run data fails the owner and preserves the
 original bytes; calls return `service_unavailable`. The native invalid-record
 acceptance checks this behavior without a package-level loader workaround.

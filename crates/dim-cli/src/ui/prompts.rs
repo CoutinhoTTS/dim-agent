@@ -77,6 +77,12 @@ pub enum Effect {
         session_id: String,
         projection_id: u64,
     },
+    /// Ask Workflow to stop this run.
+    StopWorkflow {
+        session_id: String,
+        projection_id: u64,
+        run_id: String,
+    },
     /// Set the default tool-approval mode.
     SetApprovals(String),
     /// Paint with this theme without saving it.
@@ -124,6 +130,12 @@ pub enum Effect {
     SelectModel {
         provider_id: String,
         model_id: String,
+    },
+    /// Reread the subagent model policy before another save.
+    ReadModelPolicy,
+    SetModelPolicy {
+        expected_revision: String,
+        policy: crate::model::session::SubagentModelPolicy,
     },
 }
 

@@ -1,6 +1,6 @@
 //! Disposable Session bindings; configured MCP sources and their publisher are unchanged.
 use super::{
-    McpAuth, McpConnection,
+    McpConnection,
     config::McpServerSettings,
     server::{McpServer, McpServerPlugin},
     session::contribution,
@@ -13,7 +13,10 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::{Names, SESSION_GROUP, SessionConfig, SessionLifecycle};
 use futures_util::future::{select_all, try_join_all};
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, FiberView, Keyed, TypeKey, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{
+    BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberView, InstanceId, Key, TypeKey,
+};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
@@ -66,61 +69,58 @@ fn missing() -> RpcError {
 }
 
 pub(super) struct TemporaryMcp {
-    session: rutis::InstanceId,
-    auth: DepKey<McpAuth>,
-    tools: DepKey<ToolRegistry>,
-    lifecycle: DepKey<SessionLifecycle>,
+    session: InstanceId,
+    methods: Key<SessionMethods>,
+    config: Key<SessionConfig>,
+    tools: Key<ToolRegistry>,
+    lifecycle: Key<SessionLifecycle>,
 }
 impl TemporaryMcp {
-    pub(super) fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub(super) fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             session: names.instance(SESSION_GROUP)?,
-            auth: names.key()?,
+            methods: names.key()?,
+            config: names.key()?,
             tools: names.key()?,
             lifecycle: names.key()?,
         })
     }
 }
-impl TypedPlugin for TemporaryMcp {
-    type Deps = (
-        Keyed<SessionMethods>,
-        Keyed<SessionLifecycle>,
-        Keyed<SessionConfig>,
-    );
+impl DynPlugin for TemporaryMcp {
     fn name(&self) -> &str {
         "TemporaryMcp"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(methods), Keyed(lifecycle), Keyed(config)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.methods.erase(),
+            self.lifecycle.erase(),
+            self.config.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let methods = ctx.require_at(&self.methods)?;
+            let lifecycle = ctx.require_at(&self.lifecycle)?;
+            let config = ctx.require_at(&self.config)?;
             let bindings: Bindings = Arc::default();
             let changed = Arc::new(Notify::new());
             let mutation = Arc::new(tokio::sync::Mutex::new(()));
             let tasks = TaskTracker::new();
             let stop = ctx.cancellation_token();
             let (cleanup, draining) = (bindings.clone(), tasks.clone());
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        draining.close();
-                        draining.wait().await;
-                        let pending = std::mem::take(&mut *cleanup.lock().unwrap());
-                        let mut failed = false;
-                        for binding in pending.into_values() {
-                            failed |= binding.view.shutdown().await.is_err();
-                        }
-                        if failed {
-                            Err(CordisError::PluginFailed(
-                                "Temporary MCP cleanup failed".into(),
-                            ))
-                        } else {
-                            Ok(())
-                        }
-                    })
-                }))
+            ctx.effect(move || async move {
+                draining.close();
+                draining.wait().await;
+                let pending = std::mem::take(&mut *cleanup.lock().unwrap());
+                let mut failed = false;
+                for binding in pending.into_values() {
+                    failed |= binding.view.shutdown().await.is_err();
+                }
+                if failed {
+                    Err(ErrorKind::PluginFailed("Temporary MCP cleanup failed".into()).into())
+                } else {
+                    Ok(())
+                }
             })?;
             let (expires, wake, expiry_mutation) =
                 (bindings.clone(), changed.clone(), mutation.clone());
@@ -145,14 +145,10 @@ impl TypedPlugin for TemporaryMcp {
                 }
             });
             let context = ctx.clone();
-            let (session, auth, tools, lifecycle) = (
-                self.session,
-                self.auth.clone(),
-                self.tools.clone(),
-                self.lifecycle.clone(),
-            );
+            let (session, tools, lifecycle) =
+                (self.session, self.tools.clone(), self.lifecycle.clone());
             methods.register(ctx, NAMESPACE, ["attach","renew","detach"].into_iter().map(|name| MethodDecl::new(&format!("{NAMESPACE}.{name}"), true, Interruption::Drain)).collect(), Arc::new(move |method, params, cancelled, _| {
-                let (bindings, changed, mutation, ctx, cwd, auth, tools, lifecycle) = (bindings.clone(), changed.clone(), mutation.clone(), context.clone(), config.cwd.clone(), auth.clone(), tools.clone(), lifecycle.clone());
+                let (bindings, changed, mutation, ctx, cwd, tools, lifecycle) = (bindings.clone(), changed.clone(), mutation.clone(), context.clone(), config.cwd.clone(), tools.clone(), lifecycle.clone());
                 Box::pin(async move {
                     if method.ends_with(".attach") {
                         let mut input: Attach = methods::params(params)?;
@@ -160,7 +156,7 @@ impl TypedPlugin for TemporaryMcp {
                         for (name, configuration) in &mut input.servers {
                             if name.trim().is_empty() { return Err(RpcError::invalid("Empty MCP server name")); }
                             if let McpServerSettings::Stdio { cwd: directory, .. } = configuration { *directory = Some(cwd.clone()); }
-                            McpServerPlugin::new(name, configuration.clone(), TypeKey::of::<McpServer>()).map_err(|_| RpcError::invalid("Invalid temporary MCP configuration"))?;
+                            McpServerPlugin::new(name, configuration.clone(), Key::of()).map_err(|_| RpcError::invalid("Invalid temporary MCP configuration"))?;
                         }
                         let guard = mutation.lock().await;
                         let stale = {
@@ -177,8 +173,8 @@ impl TypedPlugin for TemporaryMcp {
                                 binding.clone()
                             } else {
                                 let (ready, received) = watch::channel(None);
-                                let plugin = BindingPlugin { id: input.binding_id, session, servers: input.servers.clone(), auth, ready, changed: changed.clone() };
-                                let view = ctx.plugin(rutis::Typed::with_keys(plugin, (tools, lifecycle)));
+                                let plugin = BindingPlugin { id: input.binding_id, session, servers: input.servers.clone(), tools, lifecycle, ready, changed: changed.clone() };
+                                let view = ctx.plugin(Box::new(plugin) as Box<dyn DynPlugin>);
                                 let binding = Arc::new(Binding { servers: input.servers, view, ready: received, deadline: Mutex::new(Instant::now()+LEASE) });
                                 bindings.insert(input.binding_id, binding.clone());
                                 binding
@@ -235,35 +231,32 @@ impl ToolProvider for Tools {
 }
 struct BindingPlugin {
     id: uuid::Uuid,
-    session: rutis::InstanceId,
+    session: InstanceId,
     servers: BTreeMap<String, McpServerSettings>,
-    auth: DepKey<McpAuth>,
+    tools: Key<ToolRegistry>,
+    lifecycle: Key<SessionLifecycle>,
     ready: watch::Sender<Option<Result<(), RpcError>>>,
     changed: Arc<Notify>,
 }
-impl TypedPlugin for BindingPlugin {
-    type Deps = (Keyed<ToolRegistry>, Keyed<SessionLifecycle>);
+impl DynPlugin for BindingPlugin {
     fn name(&self) -> &str {
         "TemporaryMcpBinding"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(registry), Keyed(lifecycle)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.tools.erase(), self.lifecycle.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let registry = ctx.require_at(&self.tools)?;
+            let lifecycle = ctx.require_at(&self.lifecycle)?;
             let stop = ctx.cancellation_token();
             let tasks = TaskTracker::new();
             let (closing, draining) = (stop.clone(), tasks.clone());
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        closing.cancel();
-                        draining.close();
-                        draining.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                closing.cancel();
+                draining.close();
+                draining.wait().await;
+                Ok(())
             })?;
             let prefix = format!("temporary_mcp_{}", self.id.simple());
             let sets = Arc::new(Mutex::new(Vec::new()));
@@ -271,18 +264,15 @@ impl TypedPlugin for BindingPlugin {
             let mut connections = Vec::new();
             for (name, configuration) in &self.servers {
                 let id = format!("temporary:{}:{name}", self.id);
-                let key =
-                    TypeKey::keyed_dynamic::<McpServer>(id.clone()).with_instance(self.session);
+                let key = Key::<McpServer>::dynamic(id.clone()).instance(self.session);
                 let plugin = McpServerPlugin::new(&id, configuration.clone(), key.clone())
-                    .map_err(|_| {
-                        CordisError::PluginFailed("Invalid temporary MCP server".into())
-                    })?;
-                let view = ctx.plugin(rutis::Typed::with_keys(plugin, (self.auth.clone(),)));
+                    .map_err(|_| ErrorKind::PluginFailed("Invalid temporary MCP server".into()))?;
+                let view = ctx.plugin(plugin);
                 (&view).await.map_err(|_| {
-                    CordisError::PluginFailed("Temporary MCP server failed to load".into())
+                    ErrorKind::PluginFailed("Temporary MCP server failed to load".into())
                 })?;
-                let service = ctx.get_as::<McpServer>(key).ok_or_else(|| {
-                    CordisError::PluginFailed("Temporary MCP server did not publish".into())
+                let service = ctx.get_at(&key).ok_or_else(|| {
+                    ErrorKind::PluginFailed("Temporary MCP server did not publish".into())
                 })?;
                 connections.push((id, Arc::new(McpConnection::temporary(service))));
             }
@@ -306,7 +296,7 @@ impl TypedPlugin for BindingPlugin {
                             tools: tools.iter().map(|tool| contribution(id,tool,connection.clone(),stop.clone())).collect(),
                         })).collect();
                         *sets.lock().unwrap() = next;
-                        ctx.events().emit(&ctx, &tool_provider_changes(session), Arc::new(ToolProviderChanged)).map_err(|_| failed())?;
+                        ctx.emit(ToolProviderChanged { name: tool_provider_changes(session) }).map_err(|_| failed())?;
                         previous = Some(lists);
                         }
                         ready.send_replace(Some(Ok(())));

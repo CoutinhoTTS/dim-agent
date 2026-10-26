@@ -70,7 +70,7 @@ dim-client 提供共享 RPC、产品事件和 Questions 边界以及 callback I/
 
 宿主提供两个明确的进程级输入：独占的 ACP reader/writer；App Server endpoint、server executable 和预期 model profile 等连接配置。可选登录输入复用现有宿主账户登录配置与 browser/terminal 能力，见 §4.4；不把实际账户 realm、client ID 或 token 流程写入 Gateway。I/O 只交出一次。宿主提供自己的错误报告/退出入口，协议正文只写 ACP writer。上述为本地宿主输入，不是 daemon 新服务、loader 配置或跨语言 API。
 
-实现使用 rutis 现有 TypedPlugin 和 effect，不新建插件容器。客户端树没有 Dim 的 Session/branch group，也不需要 AgentBuilder。AcpGateway 的连接、连接配置和 ACP I/O 都由宿主在构造时一次性交出，插件不读取外部服务，因此 Deps 为 `()`；不存在以 raw Arc 或手工 key 绕过 catalog 的服务依赖。#434 U3 中既有 CLI 插件是否迁移的讨论仍独立，不在此重写 TUI、引入 AcpHost 服务或等待 #403/#405。
+实现使用 rutis 现有 Plugin 和 effect，不新建插件容器。客户端树没有 Dim 的 Session/branch group，也不需要 AgentBuilder。AcpGateway 的连接、连接配置和 ACP I/O 都由宿主在构造时一次性交出，插件不读取外部服务，因此 Deps 为 `()`；不存在以 raw Arc 或手工 key 绕过 catalog 的服务依赖。#434 U3 中既有 CLI 插件是否迁移的讨论仍独立，不在此重写 TUI、引入 AcpHost 服务或等待 #403/#405。
 
 ```text
 parse CLI options (including isolated --home / --cwd / --server / --agent)
@@ -504,7 +504,7 @@ acpx --agent "$ACP_TEST_COMMAND" --cwd "$ACP_TEST_ROOT/workspace" \
 
 ## 11. Issues 对照
 
-范围核对为 2026-10-26 仓库的全部 36 个开放 issue、跨状态 ACP/Lody 搜索，以及相关已关闭契约 issue 的裁定。开放 issue 的交付描述可能落后于代码；以下以源码和 owner 合同判断能力，不把旧提案当作新 API。这里的关联不表示本 PR 关闭这些 issue。
+关联范围包括 ACP/Lody 需求、相关开放 issue 和已关闭契约 issue 的裁定。开放 issue 的交付描述可能落后于代码；以下以源码和 owner 合同判断能力，不把旧提案当作新 API。这里的关联不表示本 PR 关闭这些 issue。
 
 | Issue | 与首版的关系 / 本计划的处理 |
 | --- | --- |
@@ -516,7 +516,7 @@ acpx --agent "$ACP_TEST_COMMAND" --cwd "$ACP_TEST_ROOT/workspace" \
 | [#329](https://github.com/arcships/dim/issues/329)、[#349](https://github.com/arcships/dim/pull/349) | Provider 管理插件、版本化安全视图、局部更新及 CLI 迁移已存在；ACP 的全量配置和进程作用域另见 §4.5，不把原生持久化编辑直接宣称为临时路由覆盖 |
 | [#61](https://github.com/arcships/dim/issues/61)、[#26](https://github.com/arcships/dim/issues/26)、[#279](https://github.com/arcships/dim/issues/279) | native fork/delete 与 cut 的边界；fork 不重置 Permission，不等于文件撤销，附件读取/归档不在此新增 |
 | [#277](https://github.com/arcships/dim/issues/277)、[#384](https://github.com/arcships/dim/issues/384)、[#432](https://github.com/arcships/dim/issues/432)、[#3](https://github.com/arcships/dim/issues/3) | daemon 可选插件的实际安装/启用另归产品机制；Gateway 不安装业务插件，不因 first-party client plugin 必须等待 marketplace 或结构管理实现 |
-| [#403](https://github.com/arcships/dim/issues/403)、[#405](https://github.com/arcships/dim/issues/405) | 外语插件整行生成器；首版为 native client plugin，无 Session/branch parts，不构成依赖 |
+| [#403](https://github.com/arcships/dim/issues/403)、[#405](https://github.com/arcships/dim/issues/405) | 外语插件部件定义与 rutis 机制；main 已接入 rutis 0.17.1。Gateway 为 native client plugin，TemporaryMcp 为 native Session part，均直接使用现有机制，不构成外语运行时依赖 |
 | [#145](https://github.com/arcships/dim/issues/145)、[#5](https://github.com/arcships/dim/issues/5) | 反向 ACP client 和远程节点不是此交付；共享协议 schema/一致性场景即可，不拉入运行时生命周期 |
 | [#263](https://github.com/arcships/dim/issues/263)、[#264](https://github.com/arcships/dim/issues/264) | 复用已有 collaboration facts 投影最小执行状态；查询、输出和 addressed stop 另按每执行归属接入，不能因 snapshot 可读就宣称完整 Lody subagent/task 支持 |
 | [#143](https://github.com/arcships/dim/issues/143)、[#422](https://github.com/arcships/dim/issues/422) | Hooks/Pursuit 各自交付；Gateway 不实现 prompt hooks、Goal evaluator 或 Goal 的续轮结算 |

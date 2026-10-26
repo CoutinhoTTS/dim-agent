@@ -20,6 +20,8 @@ use dim_app_server::{
     settings::{SettingsPlugin, SettingsScope, SettingsService},
 };
 use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis_loader::resolve::Build;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
@@ -268,14 +270,14 @@ impl Env {
         );
         let (publication, _) = mcp_host::Host::start(&root).await;
         let views = vec![
-            root.plugin(rutis::Typed::new(
-                dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
-            )),
             root.plugin(
-                SettingsPlugin::new(0, vec![])
-                    .typed(&dim_app_server::catalog())
-                    .unwrap(),
+                dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
             ),
+            root.plugin({
+                let catalog = dim_app_server::catalog();
+                let build = Build::default();
+                SettingsPlugin::new(&Names::copy(&catalog, &build), 0, vec![]).unwrap()
+            }),
         ];
         wait_active(
             &root,
@@ -300,7 +302,7 @@ impl Env {
             .session_value(Arc::new(CompactionStrategyHost(None)))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             );
         defaults::tool_host(&mut builder, Arc::new(MockTools));
@@ -314,7 +316,7 @@ impl Env {
         );
         mcp::install(&mut builder);
         // The Agent's own plugin: it registers McpSession with the Agent.
-        builder.plugin(|names| names.part(McpPlugin::new(0)));
+        builder.plugin(|names| Ok(Box::new(McpPlugin::new(names, 0)?)));
         configure(&mut builder, &remote);
         let agent = builder.build_in(&root);
         // The directory runs before any Session does.
@@ -389,17 +391,24 @@ impl Env {
 /// during assembly would have reached the server.
 struct FailAfterMcp {
     remote: Arc<Remote>,
+    mcp: Key<McpSession>,
 }
-impl rutis::TypedPlugin for FailAfterMcp {
-    type Deps = rutis::KeyedGate<McpSession>;
+impl FailAfterMcp {
+    fn new(names: &Names<'_>, remote: Arc<Remote>) -> rutis::Result<Self> {
+        Ok(Self {
+            remote,
+            mcp: names.key()?,
+        })
+    }
+}
+impl DynPlugin for FailAfterMcp {
     fn name(&self) -> &str {
         "FailAfterMcp"
     }
-    fn apply<'a>(
-        &'a self,
-        _: &'a Ctx,
-        _: Self::Deps,
-    ) -> rutis::BoxFuture<'a, std::result::Result<rutis::Effect, rutis::CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.mcp.erase()]
+    }
+    fn apply<'a>(&'a self, _: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let _ = tokio::time::timeout(Duration::from_millis(500), async {
                 while self.remote.initializes.load(Ordering::SeqCst) == 0 {
@@ -407,9 +416,9 @@ impl rutis::TypedPlugin for FailAfterMcp {
                 }
             })
             .await;
-            Err(rutis::CordisError::PluginFailed(
+            Err(rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
                 "assembly failed after McpSession".into(),
-            ))
+            )))
         })
     }
 }
@@ -1464,14 +1473,11 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
 async fn an_unpublished_session_never_starts_discovery() {
     let env = Env::with(|builder, remote| {
         let remote = remote.clone();
-        builder.require_feature(Feature::new("FailAfterMcp").session(
-            "FailAfterMcp",
-            move |names| {
-                names.part(FailAfterMcp {
-                    remote: remote.clone(),
-                })
-            },
-        ));
+        builder.require_feature(
+            Feature::new("FailAfterMcp").session("FailAfterMcp", move |names| {
+                Ok(Box::new(FailAfterMcp::new(names, remote.clone())?))
+            }),
+        );
     })
     .await;
     let created = env

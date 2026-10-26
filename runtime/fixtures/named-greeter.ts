@@ -1,4 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import provides from './named-greeter.json' with { type: 'json' }
 import type { SessionMethods } from '../../npm/plugin.js'
 
@@ -7,7 +8,7 @@ type Greeter = { hello(): Promise<string> }
 // Reads `testGreeter`, which a Rust part provides by name in each Session,
 // and answers `session.greeter.ask` with what that Session's copy says. It
 // provides `namedGreeter` in each Session for a Rust part to read.
-export default definePlugin({
+export const part = definePlugin({
   name: 'NamedGreeterFixture',
   provides,
   inject: ['testGreeter', 'sessionMethods'],
@@ -22,3 +23,5 @@ export default definePlugin({
     )
   },
 })
+
+export default partRow('session', part)

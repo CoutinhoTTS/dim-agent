@@ -114,17 +114,14 @@ async fn node_workflow_report_crash_keeps_the_marker_and_drains_before_recovery(
     let (restarted, ()) = tokio::join!(loader.restart("SessionNodeRuntime"), async {
         let mut changed = owner.watch();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while changed.borrow_and_update().state != rutis::FiberState::Unloading {
+            while changed.borrow_and_update().state != rutis::host::FiberState::Unloading {
                 changed.changed().await.unwrap();
             }
         })
         .await
         .unwrap();
         assert!(
-            owner
-                .effects()
-                .iter()
-                .any(|effect| effect.label == "sessions.input"),
+            super::unload_held(&owner).await,
             "the original admitted write still owns its drain while SQLite holds it"
         );
         connection.execute_batch("COMMIT").unwrap();
@@ -213,13 +210,7 @@ async fn node_workflow_report_crash_before_input_retries_after_the_original_row_
     phase(&mut client, request, "opened").await;
     assert_eq!(stored(&home)["runs"][0]["report"]["attempt_open"], true);
     assert_eq!(count(&target).await, 0);
-    assert!(
-        std::process::Command::new("kill")
-            .args(["-KILL", &before["pid"].as_u64().unwrap().to_string()])
-            .status()
-            .unwrap()
-            .success()
-    );
+    super::super::workflow::kill_node(before["pid"].as_u64().unwrap()).await;
     assert!(client.response(request).await.get("error").is_some());
     loader.restart("SessionNodeRuntime").await.unwrap();
     assert_ne!(ready(&mut client).await["pid"], before["pid"]);
@@ -276,7 +267,7 @@ async fn node_workflow_report_interrupted_send_reconciles_without_resend() {
     let (restarted, ()) = tokio::join!(loader.restart("workflow-report"), async {
         let mut changed = owner.watch();
         tokio::time::timeout(Duration::from_secs(5), async {
-            while changed.borrow_and_update().state != rutis::FiberState::Unloading {
+            while changed.borrow_and_update().state != rutis::host::FiberState::Unloading {
                 changed.changed().await.unwrap();
             }
         })

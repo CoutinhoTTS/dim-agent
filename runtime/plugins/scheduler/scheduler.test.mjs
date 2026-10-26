@@ -59,6 +59,8 @@ async function host(t, initial = {}) {
   }
   const services = {
     managementMethods: { async register(namespace, declarations, call) { h.methods = call } },
+    // The row registers its Session part; the test mounts that copy.
+    partRegistry: { async registerDefinition(scope, name, definition) { h.part = { scope, name, definition } } },
     settings: {
       async read() {
         h.settingsReads++
@@ -161,7 +163,8 @@ async function host(t, initial = {}) {
   }
   h.owner = await load(processPlugin, { services, config: {} })
   const toolRegistry = { async register(declaration, execute) { h.contribution = { declaration, execute } } }
-  h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry } })
+  assert.equal(h.part.scope, 'session')
+  h.session = await load(h.part.definition, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry } })
   h.call = async (name, params = {}) => {
     const reply = await h.methods({ callId: 'm', method: `schedule.${name}`, params }, pending.promise, () => {})
     assert.equal(reply.kind, 'value', JSON.stringify(reply))
@@ -188,7 +191,7 @@ async function host(t, initial = {}) {
     await h.close()
     pending = Promise.withResolvers()
     h.owner = await load(processPlugin, { services, config: {} })
-    h.session = await load(sessionPlugin, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry } })
+    h.session = await load(h.part.definition, { services: { scheduleJobs: h.owner.service('scheduleJobs'), toolRegistry } })
     await flush()
   }
   t.after(async () => {

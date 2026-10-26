@@ -1,9 +1,8 @@
 {
   "id": "web",
   "name": "@dimcode/web",
-  "group": "session",
   "config": {},
-  "inject": ["settings", "toolRegistry"],
+  "inject": ["partRegistry"],
   "provides": {},
   "settings": [{
     "source": "web",

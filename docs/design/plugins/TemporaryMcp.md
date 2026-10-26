@@ -55,6 +55,9 @@ and list-change observation reuse existing MCP implementation. Static headers
 and stdio environment are connection inputs; this surface does not start OAuth
 login or persist credentials.
 
+A server setup or connection failure disposes its whole temporary binding.
+Other bindings and configured MCP sources keep their own lifetimes.
+
 ## Gateway and lifetime
 
 The Gateway converts ACP stdio/HTTP/SSE configuration at the protocol boundary,

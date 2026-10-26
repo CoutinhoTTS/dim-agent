@@ -1,4 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import provides from './session-part.json' with { type: 'json' }
 import type { SessionMethods, ToolRegistry } from '../../npm/plugin.js'
 
@@ -8,7 +9,7 @@ type Call = {
 }
 type MethodCall = { callId: string; method: string; params: { sessionId: string } }
 
-export default definePlugin({
+export const part = definePlugin({
   name: 'SessionTypeScriptFixture',
   inject: ['toolRegistry', 'sessionMethods'],
   provides,
@@ -90,3 +91,5 @@ export default definePlugin({
     )
   },
 })
+
+export default partRow('session', part)

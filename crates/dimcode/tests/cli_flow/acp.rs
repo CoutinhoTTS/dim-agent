@@ -36,7 +36,7 @@ fn accept_native(listener: &UnixListener) -> Wire {
 fn recovery_hello(wire: &mut Wire, instance: &str) {
     let hello = wire.read("hello");
     assert_eq!(hello["params"]["clientName"], "AcpGateway");
-    wire.reply(&hello,json!({"instanceId":instance,"serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.input_lookup"]}));
+    wire.reply(&hello,json!({"instanceId":instance,"serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.input_lookup"]}));
 }
 
 #[test]
@@ -1405,7 +1405,7 @@ fn acp_stdio_correlates_the_consumed_input_and_deduplicates_unicode_progress() {
         assert_eq!(hello["params"]["clientName"], "AcpGateway");
         let mut methods = vec!["session.create", "session.history"];
         methods.extend_from_slice(METHODS);
-        wire.reply(&hello, json!({"instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":methods}));
+        wire.reply(&hello, json!({"instanceId":"fixture","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":methods}));
         let create = wire.read("session.create");
         wire.reply(&create, json!({"sessionId":"session","sequence":7,"model":{"providerId":"fixture","modelId":"fixture"}}));
         let attach = wire.read("session.attach");

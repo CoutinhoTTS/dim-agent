@@ -21,18 +21,21 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, DraftPart, ModelItem, ModelList, OauthEvent, OauthStart, ProviderAction,
-    ProviderEntry, SessionItem, SessionPort, SwitchKind, Update,
+    Account, Command, DraftPart, ModelItem, ModelList, ModelPolicyUpdate, OauthEvent, OauthStart,
+    ProviderAction, ProviderEntry, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
+    Update,
 };
-use crate::model::view::{TaskOutputState, TaskTarget};
+use crate::model::view::{TaskOutputState, TaskTarget, WorkflowInventory};
 use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
 use crate::{configure, mcp, permission, update};
 
 mod member;
 mod tasks;
-use member::MemberObservation;
+mod workflow;
+use member::Members;
 use tasks::{BranchHistory, HistoryRequest, StopBatch};
+use workflow::WorkflowReads;
 
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const HISTORY_PAGE: u64 = 256;
@@ -87,6 +90,11 @@ struct ManagementError {
     provider_id: String,
     message: String,
 }
+/// The subagent model policy's management methods (`/models`).
+const MODEL_POLICY_METHODS: [&str; 2] = [
+    "collaboration.model_policy",
+    "collaboration.set_model_policy",
+];
 const LOGIN_POLL: Duration = Duration::from_secs(1);
 const NO_SESSION: &str = "Sign in with /login or choose a model with /models to start a session.";
 const PLUGIN_MISSING: &str = "The DimAgent account plugin is not installed in this build";
@@ -173,8 +181,8 @@ struct Worker {
     /// A stale request still occupies this slot until its reply arrives.
     task_history_request: Option<HistoryRequest>,
     task_stops: Option<StopBatch>,
-    member: Option<MemberObservation>,
-    desired_member: Option<(u64, String)>,
+    workflow: WorkflowReads,
+    members: Members,
     output: Option<OutputWatch>,
     /// The admitted read can outlive its detail; false discards that old reply.
     output_request: Option<(u64, bool)>,
@@ -269,8 +277,8 @@ async fn run(
         task_history_queue: Default::default(),
         task_history_request: None,
         task_stops: None,
-        member: None,
-        desired_member: None,
+        workflow: WorkflowReads::default(),
+        members: Members::default(),
         output: None,
         output_request: None,
         publish_at: None,
@@ -309,6 +317,11 @@ async fn run(
             break;
         }
         worker.poll_task_stops().await;
+        worker.poll_workflow().await;
+        let workflow_poll = worker
+            .workflow
+            .next_at
+            .filter(|_| worker.workflow.request.is_none());
         let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
         let output_poll = worker
             .output
@@ -347,6 +360,9 @@ async fn run(
                 },
             _ = tokio::time::sleep_until(login_poll.unwrap_or_else(tokio::time::Instant::now)),
                 if login_poll.is_some() => worker.poll_login().await,
+            // The next pass sends the due status read.
+            _ = tokio::time::sleep_until(workflow_poll.unwrap_or_else(tokio::time::Instant::now)),
+                if workflow_poll.is_some() => {},
             // The deadline is set by the first change and kept: a sleep made
             // afresh on every pass would restart with each event and hold the
             // snapshot back until the stream paused.
@@ -448,7 +464,12 @@ impl Worker {
     /// Creates or resumes the session the process was started for.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
-            return self.attach(id, SwitchKind::Resumed).await;
+            let kind = if self.options.created_session {
+                SwitchKind::New
+            } else {
+                SwitchKind::Resumed
+            };
+            return self.attach(id, kind).await;
         }
         let attached_session = self.invalidate_projection();
         let mut params = self.create_params();
@@ -808,12 +829,46 @@ impl Worker {
                             url: state.url,
                         });
                     }
-                    Err(error) => self.send(Update::Notice(format!("Web: {error}"))),
+                    Err(error) => {
+                        let executable = std::env::current_exe().unwrap_or_default();
+                        self.send(Update::Notice(
+                            match client::web_hint(&error, &executable, &self.options.home) {
+                                Some((problem, fix)) => format!("{problem}. {fix}."),
+                                None => format!("Web: {error}"),
+                            },
+                        ));
+                    }
                 }
             }
             Command::ListModels => {
                 let models = self.models().await.map_err(|error| error.to_string());
                 self.send(Update::Models(models));
+                self.read_model_policy(false).await;
+            }
+            Command::ReadModelPolicy => self.read_model_policy(false).await,
+            Command::SetModelPolicy {
+                expected_revision,
+                policy,
+            } => {
+                let result = self
+                    .client
+                    .rpc(
+                        "collaboration.set_model_policy",
+                        json!({"expectedRevision": expected_revision, "policy": policy}),
+                    )
+                    .await;
+                match result {
+                    Ok(_) => self.read_model_policy(true).await,
+                    Err(error)
+                        if client::app_error(&error)
+                            == Some("collaboration_model_policy_conflict") =>
+                    {
+                        self.send(Update::ModelPolicy(ModelPolicyUpdate::Conflict));
+                    }
+                    Err(error) => self.send(Update::ModelPolicy(ModelPolicyUpdate::Failed(
+                        error.to_string(),
+                    ))),
+                }
             }
             Command::ClearModelPreferences {
                 provider_id,
@@ -1038,8 +1093,14 @@ impl Worker {
             Command::TaskHistory { projection_id } => {
                 if projection_id == self.projection_id {
                     self.retry_task_history();
+                    self.discover_workflows();
                 }
             }
+            Command::StopWorkflow {
+                session_id,
+                projection_id,
+                run_id,
+            } => self.stop_workflow(session_id, projection_id, run_id).await,
             Command::StopTasks {
                 session_id,
                 projection_id,
@@ -1241,7 +1302,7 @@ impl Worker {
                 if notice.session_id == self.session_id {
                     self.task_event(&notice.branch_id, notice.event);
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
-                    self.member_notice(member::Notice::Event(notice.event));
+                    self.member_notice(&notice.session_id, member::Notice::Event(notice.event));
                 }
             }
             "session.model.progress" => {
@@ -1250,7 +1311,8 @@ impl Worker {
                     self.projection.progress(&notice);
                     self.changed();
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
-                    self.member_notice(member::Notice::Progress(notice));
+                    let session_id = notice.session_id.clone();
+                    self.member_notice(&session_id, member::Notice::Progress(notice));
                 }
             }
             "session.state" => {
@@ -1266,7 +1328,7 @@ impl Worker {
                     }
                     self.changed();
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
-                    self.member_notice(member::Notice::State(notice.running));
+                    self.member_notice(&notice.session_id, member::Notice::State(notice.running));
                 }
             }
             "approval.request" => {
@@ -1317,7 +1379,7 @@ impl Worker {
             "session.closed" => {
                 let notice: ClosedNotice = serde_json::from_value(params)?;
                 if self.observes_member(&notice.session_id) {
-                    self.member_closed();
+                    self.member_closed(&notice.session_id);
                 } else if notice.session_id == self.session_id {
                     return Err("Session closed while attached".into());
                 }
@@ -1810,6 +1872,31 @@ impl Worker {
         Ok(ModelList { models, current })
     }
 
+    /// Reports the subagent model policy, only to a daemon that manages it.
+    async fn read_model_policy(&mut self, saved: bool) {
+        #[derive(Deserialize)]
+        struct Read {
+            revision: String,
+            policy: SubagentModelPolicy,
+        }
+        if !self.client.supports(&MODEL_POLICY_METHODS) {
+            return;
+        }
+        let update = match self
+            .client
+            .typed::<Read>("collaboration.model_policy", json!({}))
+            .await
+        {
+            Ok(read) => ModelPolicyUpdate::Read {
+                revision: read.revision,
+                policy: read.policy,
+                saved,
+            },
+            Err(error) => ModelPolicyUpdate::Failed(error.to_string()),
+        };
+        self.send(Update::ModelPolicy(update));
+    }
+
     /// Switches the session's model, or starts a session on it when there is
     /// none yet, then makes it the default for new ones.
     async fn select_model(&mut self, provider_id: String, model_id: String) -> crate::Result<()> {
@@ -2208,12 +2295,8 @@ impl Worker {
             });
             return Ok(());
         }
-        if self
-            .member
-            .as_ref()
-            .is_some_and(|member| member.request_id() == Some(id))
-        {
-            self.member_reply(result);
+        if self.members.owns(id) {
+            self.member_reply(id, result);
             return Ok(());
         }
         if self
@@ -2227,9 +2310,22 @@ impl Worker {
             batch
                 .request
                 .as_ref()
-                .is_some_and(|(request, _)| *request == id)
+                .is_some_and(|(request, _, _)| *request == id)
         }) {
             self.task_stop_reply(result);
+            return Ok(());
+        }
+        if self
+            .workflow
+            .request
+            .as_ref()
+            .is_some_and(|request| request.id == id)
+        {
+            self.workflow_reply(result);
+            return Ok(());
+        }
+        if let Some(index) = self.workflow.stops.iter().position(|stop| stop.id == id) {
+            self.workflow_stop_reply(index, result);
             return Ok(());
         }
         if self
@@ -2309,6 +2405,7 @@ impl Worker {
             return;
         }
         *cursor = event.sequence;
+        self.discover_workflow(&event);
         if branch_id == "main"
             && let EventContent::Configuration(configuration) = &event.content
         {
@@ -2391,6 +2488,10 @@ impl Worker {
             .filter_map(|(id, branch)| branch.error.as_ref().map(|error| format!("{id}: {error}")))
             .collect();
         snapshot.task_history_errors.sort();
+        snapshot.workflow = self
+            .workflow
+            .inventory(self.client.supports(&["workflow.status"]));
+        snapshot.workflow_stop = self.client.supports(&["workflow.stop"]);
         self.send(Update::Snapshot(Box::new(snapshot)));
         self.publish_member();
     }

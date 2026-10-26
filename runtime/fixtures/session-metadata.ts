@@ -1,4 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import provides from './session-metadata.json' with { type: 'json' }
 import type { SessionMethods } from '../../npm/plugin.js'
 
@@ -9,7 +10,7 @@ type MethodCall = { method: string; params: { sessionId: string; [key: string]: 
 // Uses `sessionMetadata` as SessionTitle does (session-title-metadata §12):
 // each method passes its Session's request through and returns the envelope
 // unchanged.
-export default definePlugin({
+export const part = definePlugin({
   name: 'SessionMetadataFixture',
   provides,
   inject: ['sessionMetadata', 'sessionMethods'],
@@ -29,3 +30,5 @@ export default definePlugin({
     )
   },
 })
+
+export default partRow('session', part)

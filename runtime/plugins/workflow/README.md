@@ -1,8 +1,9 @@
 # Workflow
 
 Optional TypeScript package implementing the [Workflow contract](../../../docs/design/plugins/Workflow.md).
-The process row owns definitions, runs and report settlement; the Session row provides the `workflow`
-tool through the declared `workflowRuns` dependency. All native I/O uses existing `sessions`,
+The plugin is one process row. It owns definitions, runs and report settlement, and registers its
+Session part (`session.ts`, as `WorkflowSession`) with `partRegistry`; each Session's copy provides
+the `workflow` tool through the declared `workflowRuns` dependency. All native I/O uses existing `sessions`,
 `settings`, `workflowFiles` and `pluginFiles` ports. The package does not install itself in the CLI.
 
 ## Loading
@@ -13,10 +14,9 @@ npm ci --prefix runtime/plugins/workflow --ignore-scripts
 (cd runtime && npm install --no-save --package-lock=false --ignore-scripts --install-links ./plugins/workflow)
 ```
 
-Pass the complete [process.json](process.json) row (a process row, without a group) and
-[session.json](session.json) (in the `session` group) to `ServerConfig.session_typescript.rows`, with
+Pass the complete [process.json](process.json) row to `ServerConfig.session_typescript.rows`, with
 `anchor` pointing to the host's `package.json` (`runtime/package.json` here). A Session without a
-mount list (`SessionConfig.tools`) declares `workflow` once the row registers it; a Session with one
+mount list (`SessionConfig.tools`) declares `workflow` once its Session part registers it; a Session with one
 declares it when the list names it. The host must authorize and provision the product-root `workflow/`
 directory before enabling the process row. A stage Session takes the stage agent's or default
 profile's mount list: a profile without one exposes `workflow` inside a stage, and one whose list

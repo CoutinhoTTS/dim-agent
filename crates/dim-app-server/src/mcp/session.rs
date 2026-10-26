@@ -18,7 +18,8 @@ use dim_agent_runtime::{
 use dim_agent_types::{
     ToolCall, ToolContent, ToolDefinition, ToolMetadata, ToolResult, ToolSource,
 };
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, InstanceId, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, InstanceId, Key, TypeKey};
+use rutis::{Ctx, Error};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -37,7 +38,7 @@ pub fn install(builder: &mut AgentBuilder) {
         .session_extension_part::<super::publication::ConnectionConfig>(
             super::publication::GROUP,
             "McpServer",
-            |names, value| names.part(super::publication::ConnectionPlugin::new(value)),
+            |_, value| Ok(Box::new(super::publication::ConnectionPlugin::new(value))),
         )
         .require_part("McpSession")
         .require_part("TemporaryMcp");
@@ -154,11 +155,9 @@ impl McpSession {
         self.tools_changed();
     }
     fn tools_changed(&self) {
-        if let Err(error) = self.ctx.events().emit(
-            &self.ctx,
-            &tool_provider_changes(self.session),
-            Arc::new(ToolProviderChanged),
-        ) {
+        if let Err(error) = self.ctx.emit(ToolProviderChanged {
+            name: tool_provider_changes(self.session),
+        }) {
             tracing::warn!(%error, "failed to publish tools.provider_changed");
         }
     }
@@ -173,33 +172,46 @@ impl ToolProvider for Sources {
 
 pub struct McpSessionPlugin {
     session: InstanceId,
-    mcp: DepKey<McpSession>,
+    mcp: Key<McpSession>,
+    directory: Key<McpService>,
+    config: Key<SessionConfig>,
+    loader: Key<SessionLoader>,
+    lifecycle: Key<SessionLifecycle>,
+    tools: Key<ToolRegistry>,
 }
 impl McpSessionPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
             session: names.instance(SESSION_GROUP)?,
             mcp: names.key()?,
+            directory: names.key()?,
+            config: names.key()?,
+            loader: names.key()?,
+            lifecycle: names.key()?,
+            tools: names.key()?,
         })
     }
 }
-impl TypedPlugin for McpSessionPlugin {
-    type Deps = (
-        Keyed<McpService>,
-        Keyed<SessionConfig>,
-        Keyed<SessionLoader>,
-        Keyed<SessionLifecycle>,
-        Keyed<ToolRegistry>,
-    );
+impl DynPlugin for McpSessionPlugin {
     fn name(&self) -> &str {
         "McpSession"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(directory), Keyed(config), Keyed(loader), Keyed(session), Keyed(tools)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.directory.erase(),
+            self.config.erase(),
+            self.loader.erase(),
+            self.lifecycle.erase(),
+            self.tools.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let directory = ctx.require_at(&self.directory)?;
+            let config = ctx.require_at(&self.config)?;
+            let loader = ctx.require_at(&self.loader)?;
+            let session = ctx.require_at(&self.lifecycle)?;
+            let tools = ctx.require_at(&self.tools)?;
             let project = directory.settings.project_root(Path::new(&config.cwd));
             // Subscribe before any file reads, including the first discovery.
             let settings = super::config::settings_changes(ctx)?;
@@ -225,26 +237,24 @@ impl TypedPlugin for McpSessionPlugin {
             let drain = tasks.clone();
             let publication = directory.publication.clone();
             ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        drain.close();
-                        drain.wait().await;
-                        // The registration is withdrawn before this runs;
-                        // shutdown needs no change notice.
-                        cleanup.sets.lock().unwrap().clear();
-                        cleanup.state.set(McpSessionState {
-                            closed: true,
-                            ..Default::default()
-                        });
-                        // Wake eligibility bookkeeping even when stale bindings
-                        // keep every lease alive. Never await the coordinator:
-                        // Session tree disposal already owns these instances.
-                        publication.refresh();
-                        Ok(())
-                    })
-                }))
+                async move {
+                    drain.close();
+                    drain.wait().await;
+                    // The registration is withdrawn before this runs;
+                    // shutdown needs no change notice.
+                    cleanup.sets.lock().unwrap().clear();
+                    cleanup.state.set(McpSessionState {
+                        closed: true,
+                        ..Default::default()
+                    });
+                    // Wake eligibility bookkeeping even when stale bindings
+                    // keep every lease alive. Never await the coordinator:
+                    // Session tree disposal already owns these instances.
+                    publication.refresh();
+                    Ok(())
+                }
             })?;
-            ctx.provide_as(self.mcp.key().clone(), owner.clone())?;
+            ctx.provide_at(self.mcp.clone(), owner.clone())?;
             tools.register_source(ctx, "mcp", Arc::new(Sources(owner.clone())))?;
             // No network await in apply, and all owned resources have a disposer.
             // Discovery creates Session-owned instances and may start servers,

@@ -12,7 +12,7 @@ pub use catalog::{
 pub use session::{SessionSkills, SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
 
 use dim_agent_runtime::{AgentBuilder, PartRegistry, PartScope};
-use rutis::{CordisError, Ctx};
+use rutis::{Ctx, Error};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -29,7 +29,7 @@ pub fn install(builder: &mut AgentBuilder) {
     builder.session_extension_part::<content::ContentConfig>(
         content::GROUP,
         "SkillContent",
-        |names, config| names.part(content::ContentPlugin(config.clone())),
+        |_, config| Ok(Box::new(content::ContentPlugin(config.clone()))),
     );
     for part in PARTS {
         builder.require_part(part);
@@ -38,15 +38,12 @@ pub fn install(builder: &mut AgentBuilder) {
 
 /// Registers the Session and branch parts of Skills on behalf of the plugin
 /// that owns `ctx`, which holds the catalog they read.
-pub fn register_parts(ctx: &Ctx, parts: &std::sync::Arc<PartRegistry>) -> Result<(), CordisError> {
+pub fn register_parts(ctx: &Ctx, parts: &std::sync::Arc<PartRegistry>) -> Result<(), Error> {
     parts.register(ctx, PartScope::Session, PARTS[0], |mount| {
-        mount.names.part(SkillsPlugin::new(mount.names)?).map(Some)
+        Ok(Some(Box::new(SkillsPlugin::new(mount.names)?)))
     })?;
     parts.register(ctx, PartScope::Branch, PARTS[1], |mount| {
-        mount
-            .names
-            .part(SkillsBranchPlugin::new(mount.names)?)
-            .map(Some)
+        Ok(Some(Box::new(SkillsBranchPlugin::new(mount.names)?)))
     })
 }
 
@@ -122,22 +119,6 @@ pub struct RefreshTarget {
     pub user: bool,
     /// The Session cwd whose project root is rescanned.
     pub project: Option<PathBuf>,
-}
-
-/// Wakes its owner's task on each event it listens to. rutis awaits one
-/// channel's listeners in turn, so the owner works in its own task, never in
-/// the listener; wakes coalesce and the owner rereads current state.
-struct Wake(tokio::sync::watch::Sender<()>);
-impl<E: rutis::Event<Value = ()>> rutis::Listener<E> for Wake {
-    fn call<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        _: &'a E,
-        _: rutis::Call<'a, ()>,
-    ) -> rutis::BoxFuture<'a, Result<Option<()>, rutis::CordisError>> {
-        self.0.send_replace(());
-        Box::pin(async { Ok(None) })
-    }
 }
 
 /// What a Session's model may see and load. `version` digests every Skill's

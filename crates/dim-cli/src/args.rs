@@ -29,7 +29,8 @@ Commands:\n\
                                    this workspace's stored enablement\n\
   daemon stop                      Gracefully stop an existing daemon\n\
   web [--port N] [--no-open]       Hold the Web workspace until Ctrl+C
-  web --off                        Turn off the daemon-owned Web switch\n\
+web --off                        Turn off the daemon-owned Web switch
+web install                      Install this version's Web workspace\n\
 Options:\n\
   -p, --prompt TEXT                Run one prompt and exit\n\
   --image PATH                     Add a local image to exec (repeatable)\n\
@@ -104,6 +105,8 @@ pub enum Action {
         /// `--off`: clear the daemon-owned switch and exit.
         off: bool,
     },
+    /// `web install`: this version's Web workspace into `<home>/web`.
+    WebInstall,
     /// `--fullscreen default` / `--scrollback default`: save the terminal
     /// UI mode used when neither flag is given.
     DefaultTerminalMode {
@@ -138,6 +141,9 @@ pub struct Options {
     pub device: bool,
     /// Set only for a hosted leaf `Tui`.
     pub ui_identity: Option<UiIdentity>,
+    /// The hosted leaf's Session was created by this invocation, so `resume`
+    /// names a new Session rather than one the user chose to resume.
+    pub created_session: bool,
     /// Use the scrollback client instead of the full terminal UI.
     pub no_tui: bool,
     /// Terminal UI mode for this run; `None` uses the saved default.
@@ -167,6 +173,7 @@ impl Options {
             directory: None,
             device: false,
             ui_identity: None,
+            created_session: false,
             no_tui: false,
             fullscreen: None,
             refresh: false,
@@ -359,6 +366,18 @@ impl Options {
                         open_browser: true,
                         off: false,
                     };
+                }
+                "install"
+                    if matches!(
+                        options.action,
+                        Action::Web {
+                            port: None,
+                            open_browser: true,
+                            off: false
+                        }
+                    ) =>
+                {
+                    options.action = Action::WebInstall;
                 }
                 "--port" if matches!(options.action, Action::Web { .. }) => {
                     let value = value(&mut args)?;

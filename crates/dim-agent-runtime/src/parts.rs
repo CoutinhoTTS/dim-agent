@@ -1,18 +1,21 @@
 //! The part registry and the instances' mounters
 //! ([ADR 006 D3](../../../docs/adr/006-plugin-contract.md#d3-a-plugin-is-one-row-each-instance-mounts-the-parts-registered-for-it)).
 //!
-//! A plugin registers part generators for the Session or branch scope while
-//! it runs; the registration is an effect of the caller, withdrawn when the
-//! caller unloads. Every Session and branch holds two mounters. The required
+//! A plugin registers parts for the Session or branch scope while it runs:
+//! a Rust plugin a generator, whose registration is an effect of the caller
+//! and is withdrawn when the caller unloads; a plugin of another language a
+//! rutis plugin definition, which ends with the row that handed it over. Every Session and branch holds two mounters. The required
 //! one mounts the parts the assembly profile requires and hands them to the
 //! instance, which publishes only once they are Active. The optional one
 //! mounts every other registered part, which nothing waits for. Both
 //! follow registrations and withdrawals while the instance is open, and a
 //! mounted part closes with its instance.
 use crate::{Names, SessionConfig};
-use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Keyed, Plugin, TypeKey, TypedPlugin,
+use rutis::host::{
+    BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key, TypeKey,
 };
+use rutis::{Ctx, Definition, Error, Plugin, service};
+use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -20,7 +23,8 @@ use std::{
 use tokio::sync::watch;
 
 /// The scope a part is registered for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PartScope {
     Session,
     Branch,
@@ -42,13 +46,35 @@ pub struct Mount<'a> {
 /// Builds a part for one instance, or nothing when that instance does not
 /// need one, such as a Session whose configuration turns the feature off.
 pub type Generator =
-    Arc<dyn Fn(&Mount<'_>) -> Result<Option<Box<dyn Plugin>>, CordisError> + Send + Sync>;
+    Arc<dyn Fn(&Mount<'_>) -> Result<Option<Box<dyn DynPlugin>>, Error> + Send + Sync>;
+
+/// What an instance mounts a registered part from.
+enum Source {
+    /// A Rust plugin's generator.
+    Generator(Generator),
+    /// A plugin definition another language handed over: each instance
+    /// mounts one copy, in that language's runtime.
+    Definition(Definition),
+}
 
 struct Entry {
     id: u64,
     scope: PartScope,
     name: String,
-    generator: Generator,
+    source: Source,
+}
+
+impl Entry {
+    /// The part for the instance of `site`, mounted on `ctx`, or nothing
+    /// when the generator builds none there.
+    fn build(&self, ctx: &Ctx, site: &MountSite) -> Result<Option<Box<dyn DynPlugin>>, Error> {
+        match &self.source {
+            Source::Generator(generator) => site.with_mount(|mount| generator(mount)),
+            Source::Definition(definition) => {
+                Ok(Some(Box::new(definition.at(ctx, serde_json::json!({}))?)))
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -63,7 +89,12 @@ struct State {
 /// The parts plugins register for Sessions and branches. One registry serves
 /// every Agent built from an [`AgentBuilder`](crate::AgentBuilder); the host
 /// hands it to its process plugins ([`AgentBuilder::parts`](crate::AgentBuilder::parts)).
+/// Plugins of other languages reach it by the process name `partRegistry`.
 pub struct PartRegistry {
+    shared: Arc<Shared>,
+}
+
+struct Shared {
     state: Mutex<State>,
     version: watch::Sender<u64>,
 }
@@ -71,15 +102,17 @@ pub struct PartRegistry {
 impl Default for PartRegistry {
     fn default() -> Self {
         Self {
-            state: Mutex::default(),
-            version: watch::channel(0).0,
+            shared: Arc::new(Shared {
+                state: Mutex::default(),
+                version: watch::channel(0).0,
+            }),
         }
     }
 }
 
 impl std::fmt::Debug for PartRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = self.state.lock().unwrap();
+        let state = self.shared.state.lock().unwrap();
         let entries: Vec<_> = state
             .entries
             .iter()
@@ -105,30 +138,51 @@ impl PartRegistry {
         ctx: &Ctx,
         scope: PartScope,
         name: impl Into<String>,
-        generator: impl Fn(&Mount<'_>) -> Result<Option<Box<dyn Plugin>>, CordisError>
+        generator: impl Fn(&Mount<'_>) -> Result<Option<Box<dyn DynPlugin>>, Error>
         + Send
         + Sync
         + 'static,
-    ) -> Result<(), CordisError> {
-        let registry = self.clone();
-        let id = self.add(scope, name.into(), Arc::new(generator));
-        let registered = ctx.effect(move || {
-            Effect::AsyncDisposer(Box::new(move || {
-                Box::pin(async move {
-                    registry.withdraw(id).await;
-                    Ok(())
-                })
-            }))
+    ) -> Result<(), Error> {
+        let id = self
+            .shared
+            .add(scope, name.into(), Source::Generator(Arc::new(generator)));
+        let shared = self.shared.clone();
+        let registered = ctx.effect(move || async move {
+            shared.withdraw(id).await;
+            Ok(())
         });
         if registered.is_err() {
             // The caller is already unloading: nothing of it may stay.
-            let registry = self.clone();
-            tokio::spawn(async move { registry.withdraw(id).await });
+            let shared = self.shared.clone();
+            tokio::spawn(async move { shared.withdraw(id).await });
         }
         registered.map(|_| ())
     }
+}
 
-    fn add(&self, scope: PartScope, name: String, generator: Generator) -> u64 {
+/// The part registry as other languages call it.
+#[service]
+impl PartRegistry {
+    /// Registers a plugin definition for `scope`: every open instance of the
+    /// scope mounts one copy of it, and so does every later one, each in the
+    /// runtime that defined it with its `inject` resolved in that instance.
+    /// `name` is the part's name, as for a generator.
+    ///
+    /// The definition belongs to the row that handed it over. When that row
+    /// unloads, rutis ends every copy first; the registration then goes.
+    pub fn register_definition(&self, scope: PartScope, name: String, definition: Definition) {
+        let ended = definition.ended();
+        let id = self.shared.add(scope, name, Source::Definition(definition));
+        let shared = self.shared.clone();
+        tokio::spawn(async move {
+            ended.await;
+            shared.withdraw(id).await;
+        });
+    }
+}
+
+impl Shared {
+    fn add(&self, scope: PartScope, name: String, source: Source) -> u64 {
         let id = {
             let mut state = self.state.lock().unwrap();
             state.next_entry += 1;
@@ -137,7 +191,7 @@ impl PartRegistry {
                 id,
                 scope,
                 name,
-                generator,
+                source,
             }));
             id
         };
@@ -205,7 +259,7 @@ pub(crate) struct MountSite {
     /// Registered parts the profile requires, by name.
     pub required: Arc<HashSet<String>>,
     pub catalog: Arc<rutis_loader::ServiceCatalog>,
-    pub build: rutis_loader::Build,
+    pub build: rutis_loader::resolve::Build,
     pub session: SessionConfig,
     pub session_id: String,
     pub restored: bool,
@@ -289,7 +343,7 @@ impl PartMounter {
         id: u64,
         seen: &mut HashMap<u64, Option<FiberView>>,
         snapshot: &[Arc<Entry>],
-    ) -> Result<Vec<FiberView>, CordisError> {
+    ) -> Result<Vec<FiberView>, Error> {
         let site = &self.site;
         let entries: Vec<_> = snapshot
             .iter()
@@ -303,7 +357,7 @@ impl PartMounter {
             if !self.owns(&entry) || seen.contains_key(&entry.id) {
                 continue;
             }
-            let part = match site.with_mount(|mount| (entry.generator)(mount)) {
+            let part = match entry.build(ctx, site) {
                 Ok(part) => part,
                 Err(error) if self.required => return Err(error),
                 Err(error) => {
@@ -317,7 +371,7 @@ impl PartMounter {
                 continue;
             };
             let view = mount(ctx, part, &site.copies)?;
-            if !site.registry.attach(entry.id, id, view.clone()) {
+            if !site.registry.shared.attach(entry.id, id, view.clone()) {
                 tokio::spawn(async move {
                     let _ = view.dispose().await;
                 });
@@ -334,7 +388,7 @@ impl PartMounter {
 /// cascade does (effects run last in, first out). A copy that already failed
 /// showed its failure when it happened and is not reported again; a cleanup
 /// error of a running copy is the mounter's, as a row's would be.
-fn mount(ctx: &Ctx, part: Box<dyn Plugin>, copies: &Copies) -> Result<FiberView, CordisError> {
+fn mount(ctx: &Ctx, part: Box<dyn DynPlugin>, copies: &Copies) -> Result<FiberView, Error> {
     let view = ctx.plugin(part);
     {
         let mut copies = copies.lock().unwrap();
@@ -342,24 +396,19 @@ fn mount(ctx: &Ctx, part: Box<dyn Plugin>, copies: &Copies) -> Result<FiberView,
         copies.push(view.clone());
     }
     let owned = view.clone();
-    let registered = ctx.effect(move || {
-        Effect::AsyncDisposer(Box::new(move || {
-            Box::pin(async move {
-                match owned.state().state {
-                    FiberState::Disposed => Ok(()),
-                    FiberState::Failed => {
-                        let _ = owned.dispose().await;
-                        Ok(())
-                    }
-                    _ => owned
-                        .dispose()
-                        .await
-                        .map_err(|error| CordisError::Aggregate {
-                            errors: vec![error],
-                        }),
-                }
-            })
-        }))
+    let registered = ctx.effect(move || async move {
+        match owned.state().state {
+            FiberState::Disposed => Ok(()),
+            FiberState::Failed => {
+                let _ = owned.dispose().await;
+                Ok(())
+            }
+            _ => owned.dispose().await.map_err(|error| {
+                rutis::Error::from(ErrorKind::Aggregate {
+                    errors: vec![error],
+                })
+            }),
+        }
     });
     if let Err(error) = registered {
         // The mounter is unloading: the copy must not outlive it.
@@ -372,21 +421,21 @@ fn mount(ctx: &Ctx, part: Box<dyn Plugin>, copies: &Copies) -> Result<FiberView,
     Ok(view)
 }
 
-impl Plugin for PartMounter {
+impl DynPlugin for PartMounter {
     fn name(&self) -> &str {
         Self::module(self.site.scope, self.required)
     }
 
-    fn injects(&self) -> &[TypeKey] {
-        &[]
+    fn injects(&self) -> Vec<TypeKey> {
+        Vec::new()
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
             let site = self.site.clone();
-            let id = site.registry.mounter();
+            let id = site.registry.shared.mounter();
             let mut waiting = vec![];
-            let mut changes = site.registry.version.subscribe();
+            let mut changes = site.registry.shared.version.subscribe();
             changes.mark_unchanged();
             let mut seen = HashMap::new();
             let cancel = ctx.cancellation_token();
@@ -396,7 +445,7 @@ impl Plugin for PartMounter {
             // a registration between the check and the mounting cannot be
             // left out of what the instance waits for.
             let snapshot = loop {
-                let snapshot = site.registry.snapshot();
+                let snapshot = site.registry.shared.snapshot();
                 let missing = if self.required {
                     self.missing(&snapshot)
                 } else {
@@ -408,10 +457,10 @@ impl Plugin for PartMounter {
                 tokio::select! {
                     changed = changes.changed() => if changed.is_err() { break snapshot },
                     () = cancel.cancelled() => {
-                        return Err(CordisError::PluginFailed(
+                        return Err(Error::from(ErrorKind::PluginFailed(
                             format!("required parts not registered: {}", missing.join(", "))
                                 .into(),
-                        ));
+                        )));
                     }
                 }
             };
@@ -429,7 +478,7 @@ impl Plugin for PartMounter {
                             _ = cancel.cancelled() => return,
                         }
                         // After publication a late part never fails the instance.
-                        let snapshot = this.site.registry.snapshot();
+                        let snapshot = this.site.registry.shared.snapshot();
                         if let Err(error) = this.reconcile(&ctx, id, &mut seen, &snapshot) {
                             tracing::warn!(%error, "a registered part failed to build");
                         }
@@ -437,15 +486,11 @@ impl Plugin for PartMounter {
                 })
             };
             let registry = site.registry.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        cancel.cancel();
-                        let _ = follow.await;
-                        registry.detach(id);
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                cancel.cancel();
+                let _ = follow.await;
+                registry.shared.detach(id);
+                Ok(())
             })?;
             if self.required {
                 // Not awaited here: the loader waits for a Loading row, so
@@ -489,11 +534,11 @@ impl Feature {
 
     /// A part of every Session named `name`: `make` builds a Session's copy
     /// from the names its dependencies resolve to there, usually
-    /// `|names| names.part(MyPart)`.
+    /// `|names| Ok(Box::new(MyPart::new(names)?))`.
     pub fn session(
         self,
         name: impl Into<String>,
-        make: impl Fn(&Names<'_>) -> Result<Box<dyn Plugin>, CordisError> + Send + Sync + 'static,
+        make: impl Fn(&Names<'_>) -> Result<Box<dyn DynPlugin>, Error> + Send + Sync + 'static,
     ) -> Self {
         self.when(PartScope::Session, name, move |mount| {
             make(mount.names).map(Some)
@@ -504,7 +549,7 @@ impl Feature {
     pub fn branch(
         self,
         name: impl Into<String>,
-        make: impl Fn(&Names<'_>) -> Result<Box<dyn Plugin>, CordisError> + Send + Sync + 'static,
+        make: impl Fn(&Names<'_>) -> Result<Box<dyn DynPlugin>, Error> + Send + Sync + 'static,
     ) -> Self {
         self.when(PartScope::Branch, name, move |mount| {
             make(mount.names).map(Some)
@@ -517,7 +562,7 @@ impl Feature {
         mut self,
         scope: PartScope,
         name: impl Into<String>,
-        generator: impl Fn(&Mount<'_>) -> Result<Option<Box<dyn Plugin>>, CordisError>
+        generator: impl Fn(&Mount<'_>) -> Result<Option<Box<dyn DynPlugin>>, Error>
         + Send
         + Sync
         + 'static,
@@ -541,25 +586,30 @@ impl Feature {
     }
 
     /// Its plugin, keyed from `names`.
-    pub fn plugin(&self, names: &Names<'_>) -> Result<Box<dyn Plugin>, CordisError> {
-        names.part(FeaturePlugin(self.clone()))
+    pub fn plugin(&self, names: &Names<'_>) -> Result<Box<dyn DynPlugin>, Error> {
+        Ok(Box::new(FeaturePlugin {
+            feature: self.clone(),
+            registry: names.key()?,
+        }))
     }
 }
 
-struct FeaturePlugin(Feature);
+struct FeaturePlugin {
+    feature: Feature,
+    registry: Key<PartRegistry>,
+}
 
-impl TypedPlugin for FeaturePlugin {
-    type Deps = (Keyed<PartRegistry>,);
+impl DynPlugin for FeaturePlugin {
     fn name(&self) -> &str {
-        &self.0.name
+        &self.feature.name
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(registry),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.registry.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
-            for part in &self.0.parts {
+            let registry = ctx.require_at(&self.registry)?;
+            for part in &self.feature.parts {
                 let generator = part.generator.clone();
                 registry.register(ctx, part.scope, part.name.clone(), move |mount| {
                     generator(mount)
@@ -574,18 +624,16 @@ impl TypedPlugin for FeaturePlugin {
 /// `partRegistry`.
 pub(crate) struct PartRegistryPlugin {
     pub registry: Arc<PartRegistry>,
-    pub key: rutis::DepKey<PartRegistry>,
+    pub key: Key<PartRegistry>,
 }
 
-impl TypedPlugin for PartRegistryPlugin {
+impl Plugin for PartRegistryPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "PartRegistry"
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide_as(self.key.key().clone(), self.registry.clone())?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        ctx.provide_at(self.key.clone(), self.registry.clone())?;
+        Ok(())
     }
 }

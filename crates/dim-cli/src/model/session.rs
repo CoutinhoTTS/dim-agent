@@ -85,6 +85,12 @@ pub enum Command {
         projection_id: u64,
         member_id: String,
     },
+    /// Ask Workflow to stop one run of the displayed Session.
+    StopWorkflow {
+        session_id: String,
+        projection_id: u64,
+        run_id: String,
+    },
     /// Start a fresh session in the same directory.
     NewSession,
     /// Switch to a stored session.
@@ -139,6 +145,13 @@ pub enum Command {
     SelectModel {
         provider_id: String,
         model_id: String,
+    },
+    /// Read the subagent model policy and its revision.
+    ReadModelPolicy,
+    /// Replace the subagent model policy if it is still at `expected_revision`.
+    SetModelPolicy {
+        expected_revision: String,
+        policy: SubagentModelPolicy,
     },
     /// Install the offered version (the update dialog's "Update now").
     UpgradeInstall(crate::update::Install),
@@ -283,6 +296,30 @@ pub struct ModelItem {
     pub display_name: String,
 }
 
+/// Which model new Collaboration members use (`collaboration.model_policy`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+pub enum SubagentModelPolicy {
+    Agent,
+    Inherit,
+    Fixed { model: dim_agent_types::ModelId },
+}
+
+/// What became of the subagent model policy.
+#[derive(Debug, Clone)]
+pub enum ModelPolicyUpdate {
+    /// The source as read; `saved` after this client's own write.
+    Read {
+        revision: String,
+        policy: SubagentModelPolicy,
+        saved: bool,
+    },
+    /// Another write won; reread before saving again.
+    Conflict,
+    /// A read failed or a write's outcome is unknown; reread before saving.
+    Failed(String),
+}
+
 /// The models and which one is in effect.
 #[derive(Debug, Clone, Default)]
 pub struct ModelList {
@@ -338,6 +375,8 @@ pub enum Update {
         session_id: String,
         snapshot: Box<ViewSnapshot>,
         state: MemberConversationState,
+        /// The member's latest adopted model, as observed.
+        model: Option<String>,
     },
     /// How many files the run that just ended changed.
     FilesChanged(usize),
@@ -358,6 +397,8 @@ pub enum Update {
         result: Result<(), String>,
     },
     Models(Result<ModelList, String>),
+    /// Sent only by a daemon that advertises the policy methods.
+    ModelPolicy(ModelPolicyUpdate),
     /// A transient status-line message.
     Toast(String),
     /// The default tool-approval mode (wire name).

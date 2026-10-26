@@ -185,7 +185,6 @@ async fn node_public_plugin_files_session_only_configuration() {
     let mut parts = session_typescript::fixture();
     parts.rows = vec![json!({
         "id":"files-session", "name":parts.anchor.parent().unwrap().join("fixtures/files-session.ts"),
-        "group":"session",
         "provides":{},
         "config":{"gate":{"host":"127.0.0.1", "port":gate.local_addr().unwrap().port()}},
     })];
@@ -273,13 +272,30 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
     }
     // A `py:` row needs the configured Python runtime.
     cases.push(vec![
-        json!({"id":"python", "name":"py:module", "group":"session", "provides":{}}),
+        json!({"id":"python", "name":"py:module", "provides":{}}),
     ]);
-    for group in [json!("process"), json!(true)] {
+    // A plugin row is a process row: it has no group, even a valid one.
+    for group in [json!("process"), json!(true), json!("session")] {
         let mut row = process.clone();
         row["group"] = group;
         cases.push(vec![row]);
     }
+    // `instanceNames` gives each name a Session or branch group, names a
+    // service the catalog does not hold yet, and declares a name once.
+    for names in [
+        json!(["exampleName"]),
+        json!({"exampleName": "process"}),
+        json!({"toolRegistry": "session"}),
+    ] {
+        let mut row = process.clone();
+        row["instanceNames"] = names;
+        cases.push(vec![row]);
+    }
+    let mut first = process.clone();
+    first["instanceNames"] = json!({"exampleName": "session"});
+    let mut second = first.clone();
+    second["id"] = json!("other");
+    cases.push(vec![first, second]);
     for rows in cases {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::install(&mut builder);
@@ -616,7 +632,7 @@ async fn node_process_typescript_dependency_reload_settles_calls_and_keeps_failu
     // Rpc publishes namespace status independently of the loader's failure.
     unavailable(&mut client).await;
     assert!(matches!(loader.get("process-example").unwrap().status,
-        rutis_loader::EntryStatus::Running(ref state) if state.state == rutis::FiberState::Failed));
+        rutis_loader::report::EntryStatus::Running(ref state) if state.state == rutis::host::FiberState::Failed));
     for plugin in ["Rpc", "Agents"] {
         tokio::time::timeout(Duration::from_secs(10), server.restart(plugin))
             .await
@@ -633,8 +649,8 @@ async fn node_process_typescript_dependency_reload_settles_calls_and_keeps_failu
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled_owners() {
-    use rutis::FiberState;
-    use rutis_loader::EntryStatus;
+    use rutis::host::FiberState;
+    use rutis_loader::report::EntryStatus;
     for mode in ["pending", "failed", "unresolved", "disabled", "bad_methods"] {
         let home = home();
         let mut parts = parts();

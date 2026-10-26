@@ -325,8 +325,8 @@ wake, must neither reopen it nor create another delegation row without a new req
 Reuse a real App Server flow to confirm that initial state watches discover
 restored published children and nested branches, local history reconstructs their
 command/member targets, and named stops leave the leader usable. These are required implementation checks; this
-documentation supplies no passing UI/runtime evidence. Workflow presentation
-and its controls still require P7's delivered package contract.
+documentation supplies no passing UI/runtime evidence. Workflow runs and their
+controls follow the [Workflow task view](workflow-task-view.md).
 
 ## 6. Rule check and ablation
 

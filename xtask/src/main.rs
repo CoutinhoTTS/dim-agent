@@ -3,10 +3,12 @@ mod app_server;
 mod catalog;
 mod modules;
 mod plugins;
+mod types;
 #[global_allocator]
 static ALLOCATOR: allocation::MeasuredAllocator = allocation::MeasuredAllocator;
 use dim_agent_runtime::*;
-use rutis::RuntimeDiagnostics;
+use rutis::host::CtxHost;
+use rutis::host::diagnostics::RuntimeDiagnostics;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 
@@ -18,10 +20,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("check") => {
             boundaries()?;
             catalog::check(&root()).await?;
+            types::check(&root())?;
         }
+        Some("types") => types::write(&root())?,
         _ => {
             return Err(
-                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|check".into(),
+                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|check|types"
+                    .into(),
             );
         }
     }
@@ -40,8 +45,8 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 /// Instance identities are allocated per process; the graph names their scope instead.
-fn diagnostics(mut d: RuntimeDiagnostics, scopes: &[(rutis::InstanceId, &str)]) -> Value {
-    let describe = |key: &rutis::TypeKey| {
+fn diagnostics(mut d: RuntimeDiagnostics, scopes: &[(rutis::host::InstanceId, &str)]) -> Value {
+    let describe = |key: &rutis::host::TypeKey| {
         let text = key.describe();
         match key.instance_id() {
             Some(id) => {
@@ -104,8 +109,8 @@ fn configured_agent()
             .session_value(Arc::new(ToolHost(Arc::new(MockTools))));
         dim_agent_aimux::install(&mut builder);
         let process = rutis::Ctx::root()?;
-        process.plugin(rutis::Typed::new(AimuxPlugin));
-        process.plugin(rutis::Typed::new(ConfiguredModelsPlugin(models)));
+        process.plugin(AimuxPlugin);
+        process.plugin(ConfiguredModelsPlugin(models));
         (
             builder.build_in(&process),
             SessionConfig {

@@ -18,9 +18,10 @@ use dim_agent_capabilities::{
     methods::{Interruption, MethodDecl, RpcError, SessionMethods, params},
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
-use dim_agent_runtime::{AgentBuilder, CAPABILITY_RELOADING, SessionConfig};
+use dim_agent_runtime::{AgentBuilder, CAPABILITY_RELOADING, Names, SessionConfig};
 use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -49,8 +50,9 @@ const CANCELLED: &str = "The question was cancelled before the user answered.";
 /// reads `interactive`.
 pub fn install(builder: &mut AgentBuilder) {
     builder.require_feature(
-        dim_agent_runtime::Feature::new("Questions")
-            .session("Questions", |names| names.part(QuestionsPlugin)),
+        dim_agent_runtime::Feature::new("Questions").session("Questions", |names| {
+            Ok(Box::new(QuestionsPlugin::new(names)?))
+        }),
     );
 }
 
@@ -435,37 +437,49 @@ fn ask_user_definition() -> ToolDefinition {
     definition
 }
 
-/// The Questions Session part: `toolContribution` `ask_user` and
-/// `sessionMethods` `session.question`.
-pub struct QuestionsPlugin;
-impl TypedPlugin for QuestionsPlugin {
-    type Deps = (
-        Keyed<SessionConfig>,
-        Keyed<ToolRegistry>,
-        Keyed<SessionMethods>,
-    );
+/// The Questions Session part: `ask_user` registered with `toolRegistry` and
+/// `session.question` with `sessionMethods`.
+pub struct QuestionsPlugin {
+    config: Key<SessionConfig>,
+    tools: Key<ToolRegistry>,
+    methods: Key<SessionMethods>,
+}
+impl QuestionsPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            config: names.key()?,
+            tools: names.key()?,
+            methods: names.key()?,
+        })
+    }
+}
+impl DynPlugin for QuestionsPlugin {
     fn name(&self) -> &str {
         "Questions"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(config), Keyed(tools), Keyed(methods)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.config.erase(),
+            self.tools.erase(),
+            self.methods.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let config = ctx.require_at(&self.config)?;
+            let tools = ctx.require_at(&self.tools)?;
+            let methods = ctx.require_at(&self.methods)?;
             let questions = Arc::new(Questions {
                 config,
                 waiters: Mutex::default(),
             });
             let owner = questions.clone();
-            ctx.effect(move || {
-                Effect::Disposer(Box::new(move || {
-                    // Dropping the senders ends every waiting call as reloading.
-                    let mut waiters = owner.waiters.lock().unwrap();
-                    waiters.closed = true;
-                    waiters.table.clear();
-                    Ok(())
-                }))
+            ctx.effect(move || async move {
+                // Dropping the senders ends every waiting call as reloading.
+                let mut waiters = owner.waiters.lock().unwrap();
+                waiters.closed = true;
+                waiters.table.clear();
+                Ok(())
             })?;
             tools.register(
                 ctx,

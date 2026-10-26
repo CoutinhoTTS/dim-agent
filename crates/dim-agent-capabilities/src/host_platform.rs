@@ -5,8 +5,9 @@
 //! Process facts are captured at apply; exec shell preferences are read at use
 //! time. Shell problems are returned as data, never raised during assembly.
 use crate::file_storage::{FileStorage, FileStorageError};
-use dim_agent_runtime::When;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypeKey, TypedPlugin};
+use dim_agent_runtime::Names;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use std::{
     ffi::{OsStr, OsString},
     io,
@@ -685,57 +686,34 @@ pub struct HostPlatformConfig {
 /// Process plugin providing `P:HostPlatform`.
 pub struct HostPlatformPlugin {
     config: HostPlatformConfig,
+    /// File storage only when a local configuration source is configured.
+    storage: Option<Key<FileStorage>>,
 }
 impl HostPlatformPlugin {
-    pub fn new(config: HostPlatformConfig) -> Self {
-        Self { config }
+    pub fn new(names: &Names<'_>, config: HostPlatformConfig) -> rutis::Result<Self> {
+        let storage = uses_storage(&config)
+            .then(|| names.key::<FileStorage>())
+            .transpose()?;
+        Ok(Self { config, storage })
     }
 }
-impl TypedPlugin for HostPlatformPlugin {
-    /// File storage only when a local configuration source is configured.
-    type Deps = (When<rutis::Keyed<FileStorage>>,);
+/// File storage only when a local configuration source is configured.
+fn uses_storage(config: &HostPlatformConfig) -> bool {
+    config.exec_shell_file.is_some() || (cfg!(unix) && config.isolation_file.is_some())
+}
+impl DynPlugin for HostPlatformPlugin {
     fn name(&self) -> &str {
         "HostPlatform"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (When(storage),): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        let storage = storage.map(|rutis::Keyed(storage)| storage);
-        self.apply_with(ctx, storage)
+    fn injects(&self) -> Vec<TypeKey> {
+        self.storage.iter().map(|storage| storage.erase()).collect()
     }
-}
-impl HostPlatformPlugin {
-    /// File storage only when a local configuration source is configured.
-    fn uses_storage(&self) -> bool {
-        self.config.exec_shell_file.is_some()
-            || (cfg!(unix) && self.config.isolation_file.is_some())
-    }
-    /// This part with its keys at the process.
-    pub fn part(
-        self,
-        names: &dim_agent_runtime::Names<'_>,
-    ) -> Result<Box<dyn rutis::Plugin>, CordisError> {
-        let keys = (names.when::<rutis::Keyed<FileStorage>>(self.uses_storage())?,);
-        Ok(names.part_with(self, keys))
-    }
-    /// This part keyed from `catalog`, to mount it directly.
-    pub fn typed(
-        self,
-        catalog: &dim_agent_runtime::names::ServiceCatalog,
-    ) -> Result<rutis::Typed<Self>, CordisError> {
-        let build = Default::default();
-        let names = dim_agent_runtime::Names::copy(catalog, &build);
-        let keys = (names.when::<rutis::Keyed<FileStorage>>(self.uses_storage())?,);
-        Ok(rutis::Typed::with_keys(self, keys))
-    }
-    fn apply_with<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        storage: Option<Arc<FileStorage>>,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let storage = match &self.storage {
+                Some(storage) => Some(ctx.require_at(storage)?),
+                None => None,
+            };
             let shell_file = self
                 .config
                 .exec_shell_file
@@ -749,7 +727,7 @@ impl HostPlatformPlugin {
             let env: Vec<_> = std::env::vars_os().collect();
             let shell = resolve_shell(config.clone(), &env).await;
             let mut platform = HostPlatform::current(shell)
-                .map_err(|error| CordisError::PluginFailed(error.into()))?;
+                .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
             platform.shell_file = shell_file;
             #[cfg(unix)]
             {
@@ -761,7 +739,7 @@ impl HostPlatformPlugin {
                     .map(|((root, relative), storage)| (storage, root, relative));
             }
             platform.shell.lock().await.config = config;
-            ctx.provide_as(TypeKey::of::<HostPlatform>(), Arc::new(platform))?;
+            ctx.provide_as::<HostPlatform>(Arc::new(platform))?;
             Ok(Effect::Done)
         })
     }

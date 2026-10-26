@@ -42,7 +42,7 @@ All model-visible effects are `input/message` facts consumed by the existing Inp
 | `GoalPlugin` | Session | `treeCommands`, `toolRegistry`, `sessionMethods` (Session exports) | Registers `goal_update` with `toolRegistry` and `session.goal` with `sessionMethods`; writes change inputs by branch id through `treeCommands.input` |
 | `GoalBranchPlugin` | Branch | `dispatcher`, `timelineIdentity`, `branchLifecycle` (branch exports), `treeCommands`, process service `settings` (S8b) for its source `goal` | No service; it owns the fold, the continuation decision and Goal's own writes |
 
-The Session part registers its tool with `toolRegistry` and its method namespace `session.goal` with `sessionMethods` from its apply. The branch part provides nothing; injecting `dispatcher` places it in every branch (C5). Every Session of an assembly that installs Goal runs Goal's Session part, so every such Session has `session.goal` once that part is active ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). `maxContinuations` is a field of the document in Goal's Settings source `goal`, business configuration ([ADR 002](../../adr/002-plugin-scope.md) D4). Goal is a TypeScript plugin and reads it only through the language-neutral process service `settings` of S8b ([settings service](../appserver/settings-service.md)), never through App Server types. Goal's branch row declares the source in its `settings` member as S8b §3.1 specifies: `source: "goal"`, a user file, no project file (user scope only), no user-only fields, and a JSON Schema in which `maxContinuations` is an integer with `minimum: 1`, `maximum: 1000` and `default: 20` (A4). Settings applies the default and validates on write and when reading a persisted file, so Goal uses the document as delivered; a change is a data update, never a reload. The Dispatcher callback registers owned work and returns without awaiting Settings. After branch publication, each turn-end task reads `settings.read {source: "goal", scope: "user"}` at use, then rechecks its deciding turn and the current consumed fold before writing (A.6). There is no cached limit or `settings.changed` listener. Changes committed before that read are visible without a reload, including direct user-document edits in the file-backed Settings profile. An unreadable source stops that decision without an automatic input or fallback limit (Appendix C). Interrupt pauses and the inherited start clear do not need the limit. No Goal tool writes it; clients write it through `settings.read`/`settings.update`. Goal reads only public data contracts of `branch/start`, `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
+The Session part registers its tool with `toolRegistry` and its method namespace `session.goal` with `sessionMethods` from its apply. The branch part provides nothing; registered as a branch definition, it has a copy in every branch (C5). Every Session of an assembly that installs Goal runs Goal's Session part, so every such Session has `session.goal` once that part is active ([session-boundary A.1](../contracts/session-boundary.md#a1-method-contributions)). `maxContinuations` is a field of the document in Goal's Settings source `goal`, business configuration ([ADR 002](../../adr/002-plugin-scope.md) D4). Goal is a TypeScript plugin and reads it only through the language-neutral process service `settings` of S8b ([settings service](../appserver/settings-service.md)), never through App Server types. Goal's row declares the source in its `settings` member as S8b §3.1 specifies: `source: "goal"`, a user file, no project file (user scope only), no user-only fields, and a JSON Schema in which `maxContinuations` is an integer with `minimum: 1`, `maximum: 1000` and `default: 20` (A4). Settings applies the default and validates on write and when reading a persisted file, so Goal uses the document as delivered; a change is a data update, never a reload. The Dispatcher callback registers owned work and returns without awaiting Settings. After branch publication, each turn-end task reads `settings.read {source: "goal", scope: "user"}` at use, then rechecks its deciding turn and the current consumed fold before writing (A.6). There is no cached limit or `settings.changed` listener. Changes committed before that read are visible without a reload, including direct user-document edits in the file-backed Settings profile. An unreadable source stops that decision without an automatic input or fallback limit (Appendix C). Interrupt pauses and the inherited start clear do not need the limit. No Goal tool writes it; clients write it through `settings.read`/`settings.update`. Goal reads only public data contracts of `branch/start`, `input/message`, `input/consumed`, `input/deleted`, `turn/start`, `turn/end` and `stop/interrupt`; it never reads another plugin's state.
 
 ## 2. Data and state
 
@@ -68,17 +68,17 @@ flowchart TB
 
 Goal owns no persistent state. The goal of branch `B` is a pure function of the local events of `B` consumed so far, from `B`'s own opening on: its `branch/start`, or, for a forked Session's `main`, the `session/forked` the fork writes after the copied facts (A11). The inherited ancestor prefix (a child branch) or the copied facts (a forked Session's `main`) precede that opening and never contribute a goal. The branch part folds the local events at load and advances the fold on each Dispatcher delivery. Compaction does not change it because the fold is built from events, not model context. Compaction ([ContextCompaction](ContextCompaction.md), F1, implemented in #108) is a Loop step, not a turn: inside a turn it is a step of that turn and the turn continues, and a manual compaction with no turn running writes only `context/compact`, `context/compaction-start` and `context/compaction`, with no `turn/start` or `turn/end`. It therefore never triggers a Goal decision (§4.3).
 
-A change takes effect at the sequence of its `input/message`. A change that InputQueue later deletes (`input/deleted`) is removed and the fold is recomputed without it, because a deleted input never takes effect ([session access](../contracts/session-access.md#a2-source-input-conventions)). Fixed fold rules, applied in sequence order to `B`'s local events, with no exceptions; Pursuit (Ready, not implemented) specifies one for its evaluator judge (A16): the current objective is the latest live local `goal:objective` block and the current status is the latest live local `goal:status` block, exactly the latest block of each key the model context shows after any compaction ([§5](#5-context-mapping)) once a new branch's inherited keys are retired by its start `clear` (§3.4), so the replay equals the fold (A16). A goal exists only while `goal:objective` is live. A status block written while no objective is live still becomes the current status, but there is no goal and C1 fails until an objective is live again:
+A change takes effect at the sequence of its `input/message`. A change that InputQueue later deletes (`input/deleted`) is removed and the fold is recomputed without it, because a deleted input never takes effect ([session access](../contracts/session-access.md#a2-source-input-conventions)). Fixed fold rules, applied in sequence order to `B`'s local events, with one exception: under the evaluator judge of [Pursuit](Pursuit.md) (implemented) a worker's `completed` block is a request, not a status change (A16). Otherwise the current objective is the latest live local `goal:objective` block and the current status is the latest live local `goal:status` block, exactly the latest block of each key the model context shows after any compaction ([§5](#5-context-mapping)) once a new branch's inherited keys are retired by its start `clear` (§3.4), so the replay equals the fold (A16). A goal exists only while `goal:objective` is live. A status block written while no objective is live still becomes the current status, but there is no goal and C1 fails until an objective is live again:
 
 | Change (`op` in the marker) | Written by | Keys | Effect on the fold |
 | --- | --- | --- | --- |
-| `set {objective}` | `session.goal.set` | `goal:objective`, `goal:status` (active) | Objective and status live: `objective`, `status = active`; count restarts |
-| `edit {objective}` | `session.goal.edit` | `goal:objective` | Objective live: `objective` replaced; status stays the latest live `goal:status` block (`none` if no status is live, for example after `clear`) |
+| `set {objective, judge?}` | `session.goal.set` | `goal:objective` (with `judge="evaluator"` when chosen), `goal:status` (active) | Objective and status live: `objective`, `status = active`, `judge`; count restarts |
+| `edit {objective}` | `session.goal.edit` | `goal:objective` | Objective live: `objective` replaced, `judge` kept; status stays the latest live `goal:status` block (`none` if no status is live, for example after `clear`) |
 | `pause` (reason `user`) | `session.goal.pause` | `goal:status` | `status = paused (user)`, whatever it was |
 | `resume` | `session.goal.resume` | `goal:status` | `status = active`, whatever it was (a `completed` or `blocked` goal reopens); count restarts; the Queue input drives a turn |
-| `clear` | `session.goal.clear` | Both retired | No goal and no status |
-| `clear` (reason `new_branch`) | Goal itself, on a new branch (§3.4) | Both retired | No goal and no status; retires the inherited keys in the model context |
-| `completed` / `blocked {summary}` | `goal_update` | `goal:status` | `status = completed` / `blocked` with `summary`, whatever it was; a repeated report restates it. It changes only the fold of the branch written on. Under Pursuit's proposed evaluator judge a worker `completed` is a request and leaves the status unchanged (A16) |
+| `clear` | `session.goal.clear` | Both retired | No goal, no status and no `judge` |
+| `clear` (reason `new_branch`) | Goal itself, on a new branch (§3.4) | Both retired | No goal, no status and no `judge`; retires the inherited keys in the model context |
+| `completed` / `blocked {summary}` | `goal_update` | `goal:status` | `status = completed` / `blocked` with `summary`, whatever it was; a repeated report restates it. It changes only the fold of the branch written on. Under [Pursuit](Pursuit.md)'s evaluator judge a worker `completed` is a request and leaves the status unchanged, and the evaluator's own block sets it (A16) |
 | `pause` (reason `interrupted`, `limit`, `turn_failed`) | Goal itself | `goal:status` | `status = paused (reason)`; Goal writes it only after C1 held (A.4) |
 | continuation (not a change) | Goal itself | None | Counted only: count + 1 |
 
@@ -92,7 +92,11 @@ Derived values over the consumed events:
 | `inherited_live` | No local goal block exists yet and the prefix before `B`'s `branch/start` has a live `goal:objective` or `goal:status` block (§3.4) |
 | `last_operator` | Latest operator input: `input/message` with `user` content not marked by a source (A5) |
 | `count` | Goal continuation inputs (marker `kind="continuation"`, no key) with sequence greater than `max(A, last_operator)` |
-| `decided` | For each `turn/end` sequence `N`, whether a Goal write marked `after="N"` exists (continuation or automatic pause); for `B`'s `branch/start` at `S`, whether the start `clear` marked `after="S"` exists |
+| `decided` | For each `turn/end` sequence `N`, whether a Goal write marked `after="N"` exists (continuation or automatic pause), or, under [Pursuit](Pursuit.md)'s evaluator judge, the `branch/create` for `goal:evaluate:N`; for `B`'s `branch/start` at `S`, whether the start `clear` marked `after="S"` exists |
+| `judge` | The `judge` attribute of the latest live local `goal:objective` block (`set`); `edit` keeps it, `clear` retires it; `model` when absent ([Pursuit](Pursuit.md) §3) |
+| `request` | Under the evaluator judge, a `goal:status` block written by `goal_update` with `op="completed"` and without `by="evaluator"`: a completion request, which leaves `status` and `A` unchanged (A16) |
+| `evaluation` | Under the evaluator judge, the latest local `branch/create` whose source is host with operation id `goal:evaluate:N`: evaluation `N` and the evaluator branch it names. It is still current while no keyed goal block follows `N` |
+| `conclusion` | The first local input whose first block's marker is a valid report ([Pursuit](Pursuit.md) §5): `kind="report"`, `result` one of the four kinds, a decimal `evaluation`, and an `evaluator` equal to the branch the `branch/create` of `evaluation` names. A report missing any of them is not a conclusion |
 | `pending_driving` | Local `input/message` with effective mode Queue or Steer that has neither `input/consumed` nor `input/deleted` (session access §2 pending rule). Goal does not interpret `input/withdraw`, InputQueue's command; only InputQueue's result `input/deleted` removes an input |
 | `turn_open` | A `turn/start` after the latest `turn/end` |
 
@@ -142,7 +146,7 @@ sequenceDiagram
   Note over G: next turn/end: C1 false, no continuation
 ```
 
-The block commits before the batch's `step/tool-result`, so after a later compaction the latest `goal:status` block the model sees is `completed` (verbatim in the retained turns, or through the keyed baseline once the block lies before `retain_from`), the same as the fold (under Pursuit's proposed evaluator judge the worker's block is a request instead, A16), until a later status block replaces it. The tool confirms the write; the block becomes the current status by the fold rule, visible through the goal blocks.
+The block commits before the batch's `step/tool-result`, so after a later compaction the latest `goal:status` block the model sees is `completed` (verbatim in the retained turns, or through the keyed baseline once the block lies before `retain_from`), the same as the fold (under [Pursuit](Pursuit.md)'s evaluator judge the worker's block is a request instead and stays out of the fold, A16), until a later status block replaces it. The tool confirms the write; the block becomes the current status by the fold rule, visible through the goal blocks.
 
 ### 3.3 Interrupt pauses the goal
 
@@ -239,7 +243,7 @@ Exact texts: [Appendix A.5](#a5-model-visible-texts).
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `goal_update {status, summary}` | Tool registered with `toolRegistry` (Session), risk `session` | Model reports completion or blocking; writes one change input and confirms the write |
-| `session.goal.set/edit/pause/resume/clear` | `sessionMethods` (Session, namespace `session.goal`) | User changes the goal; each writes one change input and replies with its sequence |
+| `session.goal.set/edit/pause/resume/clear` | `sessionMethods` (Session, namespace `session.goal`) | User changes the goal; each writes one change input and replies with its sequence. `set` also takes `judge`, the [Pursuit](Pursuit.md) evaluator judge |
 | Reading the goal | The branch's events | The latest live `goal:objective` and `goal:status` blocks of the branch's local events are its objective and status (§2, A16), the same blocks the model sees. Clients read them from the branch history and live events they already receive; there is no query method (A8) |
 | `goal` source: `maxContinuations` | Business configuration (Settings) | Continuation limit; each turn-end decision reads the document at use (§1) |
 
@@ -277,16 +281,17 @@ None. The earlier requirement, runtime services exposed by name to non-Rust part
 
 ## 10. Implementation
 
-TypeScript, in `runtime/plugins/goal` (C4 tool/method row, C5 branch row):
+TypeScript, in `runtime/plugins/goal`, one row whose `index.ts` registers `session.ts` as the Session definition `GoalSession` (C4) and `branch.ts` as the branch definition `GoalBranch` (C5) with `partRegistry`:
 
-| File | Part | Row |
+| File | Part | Declaration |
 | --- | --- | --- |
 | `goal.ts` | Shared: change and continuation inputs (A.5), marker parsing, the fold (§2) and the decisions (A.4) | — |
-| `session.ts`, `session.json` | `GoalPlugin`: registers `goal_update` with `toolRegistry`, registers `session.goal` with `sessionMethods`; writes with `treeCommands.input` | Session row, `inject: ["treeCommands", "toolRegistry", "sessionMethods"]` |
-| `branch.ts`, `settings.json` | `GoalBranchPlugin`: registers with `dispatcher.consume`, folds the replay, decides on live events, and writes owned tasks; reads `maxContinuations`; declares the `goal` source | Branch row, `inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]`, `settings` from `settings.json` |
+| `index.ts` | The row: registers the two definitions | `inject: ["partRegistry"]`, `provides: {}`, `settings` from `settings.json` |
+| `session.ts` | `GoalPlugin`: registers `goal_update` with `toolRegistry`, registers `session.goal` with `sessionMethods`; writes with `treeCommands.input` | Session definition, `inject: ["treeCommands", "toolRegistry", "sessionMethods"]` |
+| `branch.ts` | `GoalBranchPlugin`: registers with `dispatcher.consume`, folds the replay, decides on live events, and writes owned tasks; reads `maxContinuations` from the `goal` source. Under [Pursuit](Pursuit.md)'s evaluator judge it also creates the evaluator and takes the evaluator role | Branch definition, `inject: ["dispatcher", "timelineIdentity", "treeCommands", "settings", "branchLifecycle"]` |
 
 The new-branch check (§3.4) reads the inherited prefix with `dispatcher.history(S)` and excludes the
-branch's local events. An embedder installs Goal by adding the two rows to
+branch's local events. An embedder installs Goal by adding its one row to
 `ServerConfig.session_typescript`; product packaging belongs to PluginManager.
 
 Verification covers exact event orders and the actual plugin across its public ports.
@@ -311,8 +316,8 @@ one start `clear` after the opening, the source unchanged), D8 (an unloaded Sess
 then resume continues to the new limit), the method boundary and order of `pause`/`resume`/`clear`,
 and the A.5 encoding round trip.
 
-The Goal rows are ordinary optional rows in these flows, with no dependency forcing Goal
-before the tool snapshot: ToolRegistry offers `goal_update` once the Goal row has registered it
+The Goal row is an ordinary optional row in these flows, with no dependency forcing Goal
+before the tool snapshot: ToolRegistry offers `goal_update` once the Session part has registered it
 ([Session boundary A.5](../contracts/session-boundary.md#a5-tool-contribution), #241).
 
 The keyed-baseline half of D6 is F1's contract and is covered by its
@@ -328,7 +333,7 @@ Registered with the Session's `toolRegistry` by `register(declaration, execute)`
 | Item | Value |
 | --- | --- |
 | Parameters | `{status: "completed" \| "blocked", summary: string}`; `summary` 1..=2000 characters (A10) |
-| Result | `ToolResult.content`: `goal_update recorded: completed.` or `goal_update recorded: blocked.` The result confirms the write only; the block becomes the current status by the fold rule (A15), except for a worker `completed` under Pursuit's proposed evaluator judge (A16). Errors are parameter errors only |
+| Result | `ToolResult.content`: `goal_update recorded: completed.` or `goal_update recorded: blocked.` The result confirms the write only; the block becomes the current status by the fold rule (A15), except for a worker `completed` under [Pursuit](Pursuit.md)'s evaluator judge, which is a request (A16). Errors are parameter errors only |
 | Risk category | `session` (writes only branch input) (A9) |
 | Offered | In every Session of an assembly that installs Goal, all roles (A9) |
 | Handler | Validates the parameters, writes one change input (`op` = status, Append) on the calling branch (`ToolCall.branchId`) through `treeCommands.input`, awaits its commit, returns. It does not read the fold. On cancellation before the append nothing is written; once appended the write stands |
@@ -339,7 +344,7 @@ Namespace `session.goal`, registered with the Session's `sessionMethods`. Its de
 
 | Method | Params | Result | Write |
 | --- | --- | --- | --- |
-| `session.goal.set` | `{sessionId, branchId?, objective}` | `{sequence}` | `set`, Queue |
+| `session.goal.set` | `{sessionId, branchId?, objective, judge?}` | `{sequence}` | `set`, Queue; `judge` is `"model"` (default) or `"evaluator"`, any other value is `invalid_params` ([Pursuit](Pursuit.md) §3) |
 | `session.goal.edit` | `{sessionId, branchId?, objective}` | `{sequence}` | `edit`, Append (A1) |
 | `session.goal.pause` | `{sessionId, branchId?}` | `{sequence}` | `pause` (reason `user`), Append |
 | `session.goal.resume` | `{sessionId, branchId?}` | `{sequence}` | `resume`, Queue (A12) |
@@ -354,7 +359,7 @@ client can read: on the branch's local events, the latest live block keyed `goal
 objective (none if retired), and the latest live block keyed `goal:status` is the status, whose
 marker gives it: `kind="status" status="active"`, `op="resume"` (active), `op="pause" reason=...`,
 `op="completed"` / `op="blocked"` with the summary in its body, or retired (no status). A goal exists
-only while an objective is live (A16). Under Pursuit's proposed evaluator judge, a worker `op="completed"` block without `by="evaluator"` is a request and does not change the status (A16). The marker formats and the reversible encoding in A.5 are the contract; values are read decoded. The continuation
+only while an objective is live (A16). Under [Pursuit](Pursuit.md)'s evaluator judge, a worker `op="completed"` block without `by="evaluator"` is a request and does not change the status (A16). The marker formats and the reversible encoding in A.5 are the contract; values are read decoded. The continuation
 count and limit are in each continuation marker (`count`, `limit`).
 
 ### A.4 Continuation decision
@@ -387,7 +392,7 @@ Encoding: the objective, the summary and every attribute value are written with 
 
 | Write | Blocks (key use) | Mode | Text |
 | --- | --- | --- | --- |
-| `set` | 1: `goal:objective` live; 2: `goal:status` live | Queue | 1: `<dim-goal kind="goal" op="set" branch="B">` / `Objective:` / `<objective>` / blank / `This is the user's standing goal for branch B. If you are working on a delegated sub-task started from branch B, treat this goal as background and do not call goal_update.` / `</dim-goal>`; 2: `<dim-goal kind="status" status="active" branch="B">` / `The goal for branch B is active. Keep working toward it across turns. When it is fully achieved, call goal_update with status "completed". If you cannot make progress without the user, call goal_update with status "blocked" and explain why.` / `</dim-goal>` |
+| `set` | 1: `goal:objective` live; 2: `goal:status` live | Queue | 1: `<dim-goal kind="goal" op="set" branch="B">`, with `judge="evaluator"` after `branch` when the goal is judged by an evaluator ([Pursuit](Pursuit.md) §3) / `Objective:` / `<objective>` / blank / `This is the user's standing goal for branch B. If you are working on a delegated sub-task started from branch B, treat this goal as background and do not call goal_update.` / `</dim-goal>`; 2: `<dim-goal kind="status" status="active" branch="B">` / `The goal for branch B is active. Keep working toward it across turns. When it is fully achieved, call goal_update with status "completed". If you cannot make progress without the user, call goal_update with status "blocked" and explain why.` / `</dim-goal>` |
 | `edit` | `goal:objective` live | Append | `op="edit"`; `Objective:` / `<objective>` / blank / `The user set the objective of the goal for branch B. This does not change its status.` |
 | `pause` (user) | `goal:status` live | Append | `op="pause" reason="user"`; `The user set the goal status for branch B to paused. Do not continue working toward a goal for branch B on your own; respond only to the user's latest input.` |
 | `resume` | `goal:status` live | Queue | `op="resume"`; `The user set the goal status for branch B to active. If branch B has a goal objective, keep working toward it across turns; when it is completed or blocked, call goal_update.` |
@@ -415,7 +420,7 @@ Status blocks state only the status and the objective is a separate block, so a 
 
 | Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
-| Optional Goal Session row still Pending when the Session starts | first request < registration | `goal_update` is absent from requests before the row registers it and offered from the next one ([A.5](../contracts/session-boundary.md#a5-tool-contribution), #241); a continuation in between cannot report through it | Goal; ToolRegistry |
+| Optional Goal Session part still Pending when the Session starts | first request < registration | `goal_update` is absent from requests before the part registers it and offered from the next one ([A.5](../contracts/session-boundary.md#a5-tool-contribution), #241); a continuation in between cannot report through it | Goal; ToolRegistry |
 | User Queue input while a goal turn runs | input < `turn/end` N, unconsumed | C5 fails; the user's turn runs; its end continues with count reset | Goal, InputQueue |
 | User input committed after N, before the continuation | N < input < continuation | Both run in order: user turn, then continuation turn; count reset | InputQueue, Loop |
 | User input after the continuation | continuation < input | Continuation turn first; Queue next; Steer joins the continuation turn | InputQueue, Loop |
@@ -438,7 +443,7 @@ Status blocks state only the status and the objective is a separate block, so a 
 | Branch-scoped interrupt or branch close | close < write | Nothing written; branch part ends | Runtime facade |
 | Tool batch not settled | terminal block < `step/tool-result` | Block consumed after the batch result; `turn/end` sees a non-active goal | ToolExecutor, Loop |
 | Two `goal_update` calls in one batch | first < second | Both written, both confirm the write; the fold applies both in order, so the second is the current status | Goal |
-| `goal_update` while the goal is not active | — | Written; the block becomes the current status (a `paused` goal becomes `completed` or `blocked`; under Pursuit's proposed evaluator judge a `completed` is a request and the goal stays paused, A16); with no live objective there is no goal; the result confirms the write | Goal |
+| `goal_update` while the goal is not active | — | Written; the block becomes the current status (a `paused` goal becomes `completed` or `blocked`; under [Pursuit](Pursuit.md)'s evaluator judge a `completed` is a request and the goal stays paused, A16); with no live objective there is no goal; the result confirms the write | Goal |
 | `completed` after `blocked`, the reverse, or `pause` after either | first < second | Latest wins; a repeated report restates the status with its new summary | Goal |
 | `resume` after `completed` or `blocked` | terminal block < resume | Reopens: `active`, count restarts, the Queue input drives a turn; compaction replays the resume block | Goal |
 | `goal_update` vs `edit`/`clear`/`pause` | sequence order | The fold applies them in sequence; a later change overrides an earlier one | Goal |
@@ -520,15 +525,15 @@ Flow tests through Session methods, the `goal_update` tool and Timeline events (
 | A12 | `resume` always drives one turn (reopening a completed or blocked goal, or restarting an active idle one); duplicate `set` and `resume` are not deduplicated | Judgment; a method cannot see `turn_open` or pending inputs | Restarted goals need `set` again, or duplicate resumes would need state reads |
 | A13 | `branchId` defaults to `main`; any branch may hold its own goal | Judgment | Goal limited to `main` |
 | A14 | A change takes effect at its `input/message` sequence and is removed from the fold when InputQueue deletes it | Judgment: a pause written during a turn must stop that turn's continuation before the Append is applied | Changes would take effect at `input/applied`, and a pause written during a turn would not stop its continuation |
-| A15 | A second `goal_update`, or one without an active goal, returns the write confirmation, not an error, and its block becomes the current status (A16; under Pursuit's proposed evaluator judge a worker `completed` is a request) | Decision G1 (behaviour change; answers the PR review "Goal calls observe earlier committed writes" by removing caller-side decisions) | The tool would have to read the fold and wait for it, which reintroduces caller-side decisions |
-| A16 | The fold rule: the latest live local block of each key is the current objective and status, and a goal exists only while a local `goal:objective` block is live. Proposed exception, applied when [Pursuit](Pursuit.md) (Ready, not implemented) is implemented: under its evaluator judge, a worker `completed` block (without `by="evaluator"`) is a request, not a status change; the status stays the one the latest other `goal:status` block gives (`active` while the goal runs) until the evaluator's outcome or a change replaces it, so the replayed latest block can read `completed` while the goal is active | User decision (answers the PR review "Keep replayed Goal status consistent with the fold"); the proposed Pursuit exception is a maintainer decision (2026-10-22) for that design | A status replayed after compaction could disagree with the fold |
+| A15 | A second `goal_update`, or one without an active goal, returns the write confirmation, not an error, and its block becomes the current status (A16; under [Pursuit](Pursuit.md)'s evaluator judge a worker `completed` is a request) | Decision G1 (behaviour change; answers the PR review "Goal calls observe earlier committed writes" by removing caller-side decisions) | The tool would have to read the fold and wait for it, which reintroduces caller-side decisions |
+| A16 | The fold rule: the latest live local block of each key is the current objective and status, and a goal exists only while a local `goal:objective` block is live. Exception, applied under [Pursuit](Pursuit.md)'s evaluator judge (implemented): a worker `completed` block (without `by="evaluator"`) is a request, not a status change; the status stays the one the latest other `goal:status` block gives (`active` while the goal runs) until the evaluator's outcome or a change replaces it, so the replayed latest block can read `completed` while the goal is active | User decision (answers the PR review "Keep replayed Goal status consistent with the fold"); the Pursuit exception is a maintainer decision (2026-10-22) for that design | A status replayed after compaction could disagree with the fold |
 
 ## Appendix F. Open questions
 
 | Question | Description |
 | --- | --- |
 | `edit` of an active idle goal | `edit` is Append (A1) and starts no work on an idle branch; the user resumes to restart. A Goal-side rule that starts a continuation on consuming an `edit` is possible if users need it |
-| Evaluator judge | [Pursuit](Pursuit.md) (#146, Ready, not implemented) specifies `judge: "evaluator"` on `set`, under which `goal_update completed` is a request that an evaluator branch decides; the goal stays active meanwhile, the exception proposed in A16. Elsewhere this document describes the model judge, the only one implemented, and is amended when that design is implemented |
+| ~~Evaluator judge~~ | Resolved: [Pursuit](Pursuit.md) adds `judge: "evaluator"` on `set`, under which `goal_update completed` is a request that an evaluator branch decides while the goal stays active, the exception in A16. The model judge is the default and is unchanged |
 | ~~A11 against the fork design~~ | Resolved: the fork writes `session/forked` after the copied facts, and Goal folds from after it (A11) |
 
 ## Appendix G. Rust binding
@@ -541,6 +546,6 @@ Goal is implemented in TypeScript (§10); a Rust implementation would bind the n
 | Namespace `session.goal` registered with `sessionMethods` | `Keyed<SessionMethods>`; `methods.register(ctx, "session.goal", Vec<MethodDecl>, Handler)` in the Session part's `apply`. the declarations are the `MethodDecl` list (`name`, `mutating`, `interruption: Report`, `progress: false`); `call` = the `Handler` `(method, params, CancellationToken, Progress)` returning `Result<Value, RpcError>` ([session-boundary Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
 | Keys | `const OBJECTIVE_KEY: &str = "objective"` and `const STATUS_KEY: &str = "status"`, written as `KeyUse::Live(name)` / `KeyUse::Retire(name)` and stored as `goal:objective` / `goal:status`; continuations carry no `KeyUse` |
 | Unload disposer | `ctx.effect` |
-| `goal` Settings source | Not bound in Rust: even a Rust start reads it at each turn-end decision through the named service `settings` (S8b `read`); the source is declared in Goal's branch row `settings`, not as a Rust document type |
+| `goal` Settings source | Not bound in Rust: even a Rust start reads it at each turn-end decision through the named service `settings` (S8b `read`); the source is declared in Goal's row `settings`, not as a Rust document type |
 | Write task | A task registered on the branch part's `ctx` by the Dispatcher handler, keyed by the deciding sequence; ended by unload |
 | Writes | `Branch::input` through `S:TreeCommands`, from the Session part's calls and from the write tasks |

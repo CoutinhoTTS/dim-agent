@@ -16,7 +16,8 @@ use dim_agent_types::{
     AgentEvent, ApprovalCallData, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData,
     ApprovalRespondData, BranchSource, EventKind,
 };
-use rutis::{BoxFuture, CordisError, Ctx, DepKey, Effect, Keyed, TypedPlugin};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use rutis::{Ctx, Error};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -320,37 +321,46 @@ fn take(inner: &mut Inner, approval_id: &str) -> Option<Pending> {
 }
 
 pub struct ApprovalPlugin {
-    approval: DepKey<Approval>,
+    approval: Key<Approval>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    permission: Key<Permission>,
 }
 impl ApprovalPlugin {
-    pub fn new(names: &Names<'_>) -> Result<Self, CordisError> {
+    pub fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
             approval: names.key()?,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            permission: names.key()?,
         })
     }
 }
-impl TypedPlugin for ApprovalPlugin {
-    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>, Keyed<Permission>);
+impl DynPlugin for ApprovalPlugin {
     fn name(&self) -> &str {
         "Approval"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(dispatcher), Keyed(permission)): Self::Deps,
-    ) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.timeline.erase(),
+            self.dispatcher.erase(),
+            self.permission.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let permission = ctx.require_at(&self.permission)?;
             let service = Arc::new(Approval {
                 timeline,
                 permission,
                 inner: Mutex::new(Inner::default()),
             });
             let closing = service.clone();
-            ctx.effect(move || {
-                Effect::Disposer(Box::new(move || {
-                    closing.close();
-                    Ok(())
-                }))
+            ctx.effect(move || async move {
+                closing.close();
+                Ok(())
             })?;
             let owner = service.clone();
             dispatcher
@@ -365,7 +375,7 @@ impl TypedPlugin for ApprovalPlugin {
                     Box::pin(async { result })
                 })
                 .await?;
-            ctx.provide_as(self.approval.key().clone(), service)?;
+            ctx.provide_at(self.approval.clone(), service)?;
             Ok(Effect::Done)
         })
     }

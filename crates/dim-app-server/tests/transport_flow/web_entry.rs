@@ -202,6 +202,31 @@ async fn a_web_assets_directory_without_a_build_is_reported() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_frontend_installed_while_the_daemon_runs_is_served_without_a_restart() {
+    // `dimcode web install` writes `<product home>/web`, the daemon's
+    // directory when it was started without `--web-assets`.
+    let home = std::env::temp_dir().join(format!("dim-web-home-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            web_assets: Some(home.join("web")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut local = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        local.rpc("web.open", json!({})).await["error"]["data"]["appError"],
+        "web_assets_missing"
+    );
+    std::fs::rename(frontend_fixture(), home.join("web")).unwrap();
+    assert!(local.rpc("web.open", json!({})).await["result"]["url"].is_string());
+    server.shutdown();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_web_assets_directory_built_for_another_protocol_is_refused() {
     let assets = std::env::temp_dir().join(format!("dim-web-old-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&assets).unwrap();

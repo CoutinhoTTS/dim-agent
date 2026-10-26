@@ -8,7 +8,7 @@ SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 Se
 
 C1/C2、C4 工具/方法 #150、S2 #98/#159、S4 Rust 宿主 #89、
 Settings #166/#175/#177、C6 通知 #85、S5b 标题元数据 #96 和 S4 具名绑定 #225 已交付。
-可选 [SessionTitle 包](../../../../runtime/plugins/session-title/README.md) 使用这些所有者实现 Session row
+可选 [SessionTitle 包](../../../../runtime/plugins/session-title/README.md) 使用这些所有者实现 Session 部分
 和附录 D 行为。通过 SessionTypeScriptConfig 显式安装；默认 CLI profile 安装不属于本合同。
 
 验证沿实际插件声明的 SDK 端口，以及真实 Node/App Server 的
@@ -27,7 +27,7 @@ SDK 流程覆盖固定前缀分页、输入排除、Unicode 上限、并发采�
 | 辅助请求 | Provider 已实现 AuxiliaryModelHost 及具名 `auxiliaryModel.complete` HostDispatch/catalog 绑定。通过普通 C4 依赖注入；凭据仍归 Provider（[S4 §4.3](../appserver/auxiliary-model.md#43-具名绑定)）。 |
 | 策略 | A1–A12 定义首版实现。附录 D 要求公开流程验收；文档 CI 不表示运行时验收。 |
 
-C7 #50 已确认无需新增机制（#86）。S4 自行持有凭据/连接解析。所需提供者缺失沿用既有 Pending 规则，包括 rename 在内整行
+C7 #50 已确认无需新增机制（#86）。S4 自行持有凭据/连接解析。所需提供者缺失沿用既有 Pending 规则，包括 rename 在内整个 Session 部分
 不可用，原生 Session 继续工作；不增加可选查找或另一条 rename 路径。
 
 C4 叶子回调在自身 Session 的通道上筛选 main 采用记录，登记自持任务后返回，不等待 Settings、历史或
@@ -37,9 +37,10 @@ Core API。保留 T，后续用 through=T 和上一页最后 sequence 作为 aft
 atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目录每次读取索引，
 索引重载不会重载消费方。
 
-沿用 [C4 绑定合同](../../../design/session-typescript.md)：该行属于 `session` 组，注入
+沿用 [C4 绑定合同](../../../design/session-typescript.md)：包的唯一一行注入 `partRegistry`，
+把 Session 部分注册为 Session 定义，每个 Session 挂载一份副本。该部分注入
 `sessionMethods`，并在 `apply` 中把 `session.rename` 注册到它；它的 provides 为空。`apply` 读取 Session 标识和创建配置，
-登记观察/清理，不启动异步初始化任务；创建配置不可变。同一行在 `inject` 声明全部依赖：进程服务
+登记观察/清理，不启动异步初始化任务；创建配置不可变。同一部分在 `inject` 声明全部依赖：进程服务
 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`，以及 Session 服务 `sessionIdentity`、
 `sessionConfig`、`sessionLifecycle` 和 `sessionMethods`。包为可选安装，沿用 Web 的 `ServerConfig.session_typescript.rows` 入口；
 不加入默认产品配置，也不增加 SessionTitle 专用 App Server 接线。
@@ -287,7 +288,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 
 | 步骤 | 路径 |
 | --- | --- |
-| 监听 | Session 行在 `apply` 中监听自身 Session 的 `session/{sessionId}`，筛选 main input/applied，登记自持任务后返回；`sessionLifecycle.closing()` 或行清理结束自持工作 |
+| 监听 | 该部分在每个 Session 的副本于 `apply` 中监听自身 Session 的 `session/{sessionId}`，筛选 main input/applied，登记自持任务后返回；`sessionLifecycle.closing()` 或副本清理结束自持工作 |
 | 资格 | C4 创建快照：`interactive !== false && collaborationRole === "leader"`；原生省略值表示 true |
 | 触发 | 收到位于 `N` 的 `input/applied` 时：若不具资格、已禁用、有在途生成或失败次数 ≥ 3（A5）则跳过；否则启动一个归属插件生命周期的生成任务 |
 | 检查 | `sessionMetadata.read({sessionId})`：已有任何标题则跳过；记下 revision `r` |
@@ -377,7 +378,7 @@ A1–A12 是首版实现采用的策略。
 
 | 语言中立 | Rust |
 | --- | --- |
-| 注册到 `sessionMethods` 的命名空间 `session.rename` | TypeScript 行调用 `ctx.use('sessionMethods').register('session.rename', declarations, call)`，注册属于该行；Rust 提供者在 `Keyed<SessionMethods>` 依赖上调用 `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` |
+| 注册到 `sessionMethods` 的命名空间 `session.rename` | TypeScript Session 部分调用 `ctx.use('sessionMethods').register('session.rename', declarations, call)`，注册属于该副本；Rust 提供者在 `Keyed<SessionMethods>` 依赖上调用 `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` |
 | Session 广播监听器 | `session_channel(session_id)` 上针对 `Event` 记录的监听器，由 `ctx.effect` 移除 |
 | 生成任务 | 在 `ctx.effect` 下派生 |
 

@@ -14,7 +14,8 @@ mod rpc;
 use agent_client_protocol::{Agent, Error, UntypedMessage};
 use dim_client::Client;
 use futures_util::{SinkExt, StreamExt};
-use rutis::{BoxFuture, CordisError, Ctx, Effect, TypedPlugin};
+use rutis::host::ErrorKind;
+use rutis::{Ctx, Plugin};
 use std::{io, sync::Mutex};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -70,45 +71,40 @@ impl AcpGateway {
     }
 }
 
-impl TypedPlugin for AcpGateway {
+impl Plugin for AcpGateway {
     type Deps = ();
 
     fn name(&self) -> &str {
         "AcpGateway"
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx, (): ()) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let inputs = self.0.lock().unwrap().take().ok_or_else(|| {
-                CordisError::PluginFailed("AcpGateway I/O was already taken".into())
+    async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
+        let inputs =
+            self.0.lock().unwrap().take().ok_or_else(|| {
+                ErrorKind::PluginFailed("AcpGateway I/O was already taken".into())
             })?;
-            let stop = CancellationToken::new();
-            let tasks = TaskTracker::new();
-            let closing = stop.clone();
-            let draining = tasks.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        closing.cancel();
-                        draining.close();
-                        draining.wait().await;
-                        Ok(())
-                    })
-                }))
-            })?;
-            tasks.spawn(async move {
-                let Inputs {
-                    client,
-                    io,
-                    agent_id,
-                    done,
-                    login,
-                } = inputs;
-                let result = serve(client, io, agent_id, login, stop).await;
-                let _ = done.send(result);
-            });
-            Ok(Effect::Done)
-        })
+        let stop = CancellationToken::new();
+        let tasks = TaskTracker::new();
+        let closing = stop.clone();
+        let draining = tasks.clone();
+        ctx.effect(move || async move {
+            closing.cancel();
+            draining.close();
+            draining.wait().await;
+            Ok(())
+        })?;
+        tasks.spawn(async move {
+            let Inputs {
+                client,
+                io,
+                agent_id,
+                done,
+                login,
+            } = inputs;
+            let result = serve(client, io, agent_id, login, stop).await;
+            let _ = done.send(result);
+        });
+        Ok(())
     }
 }
 

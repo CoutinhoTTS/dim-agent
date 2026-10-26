@@ -1,6 +1,6 @@
 # Pursuit
 
-状态：Ready，未实现（[#146](https://github.com/arcships/dim/issues/146)，里程碑 M2；维护者的确认记录在 [§12](#12-ready-确认)）。作用域：对 [Goal](Goal.md) 的 Session 部分与分支部分的修订，不新增 Capability（[ADR 002](../../adr/002-plugin-scope.md)）。语言：TypeScript，放在 Goal 的包 `runtime/plugins/goal` 里（[Goal §10](Goal.md#10-实现)）。依赖：Goal（P5，已由 [#199](https://github.com/arcships/dim/pull/199) 实现）、C5（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）；都已交付。里程碑 M2，不在当前计划内（[路线图](../../../design/roadmap.md) D3）。
+状态：已实现（[#422](https://github.com/arcships/dim/issues/422)，里程碑 M2；维护者的确认记录在 [§12](#12-ready-确认)）。作用域：对 [Goal](Goal.md) 的 Session 部分与分支部分的修订，不新增 Capability（[ADR 002](../../adr/002-plugin-scope.md)）。语言：TypeScript，放在 Goal 的包 `runtime/plugins/goal` 里（[Goal §10](Goal.md#10-实现)）。依赖：Goal（P5，已由 [#199](https://github.com/arcships/dim/pull/199) 实现）、C5（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）；都已交付。里程碑 M2，不在当前计划内（[路线图](../../../design/roadmap.md) D3）。
 
 需求（[功能列表](../../../feature-list.md)，Agent 行为）：朝明确的目标持续工作，记录完成或受阻，**并且由评审者而不是干活的模型判断是否完成**。
 
@@ -13,7 +13,7 @@
 | P1 | Goal 的裁判模式，不是独立插件 | 续跑只有一个所有者；独立插件会和 Goal 在同一个 `turn/end` 上竞争，或要读 Goal 的状态（§4 规则 7） |
 | P2 | 裁判由 `set` 按目标选择，记在 `set` 块上 | 它是用户对这个目标的意图，属于 Timeline 事实 |
 | P3 | 在干活模型的完成报告让 Goal 停下时评审 | 只有这个点是干活的模型认为目标已完成。干活模型的 `blocked` 直接生效（需要用户处理）；上限，以及用户自己的中断或暂停，都不是完成，不启动任何东西 |
-| P4 | 评审裁判下干活模型的 `completed` 是请求，状态保持 `active` | 只有评审者能使目标完成。这是 Goal 折叠规则唯一的例外，随本设计在 [Goal A16](Goal.md#附录-e-假设) 中提议（维护者决定，2026-10-22） |
+| P4 | 评审裁判下干活模型的 `completed` 是请求，状态保持 `active` | 只有评审者能使目标完成。这是 Goal 折叠规则唯一的例外，随本设计记录在 [Goal A16](Goal.md#附录-e-假设) 中（维护者决定，2026-10-22） |
 | P5 | 评审者是在该 `turn/end` 处切出的子分支 | 它能看到做了什么、为什么做，在同一策略下运行，是用 `treeCommands.create` 创建的普通分支 |
 | P6 | 评审者把结论作为输入写到工作分支；由那里的 Goal 决定 | 分支只读自己的事件；跨分支通信就是按 id 写输入（[分支 TypeScript 绑定](../../../design/branch-typescript.md#subscription-rebuild-and-recovery) 第 6 条）。调用方写，所有者决定 |
 
@@ -40,7 +40,7 @@
 | 部分 | 修改 |
 | --- | --- |
 | `session.ts` | `session.goal.set` 接受 `judge?: "model" \| "evaluator"`（默认 `model`；其他值返回 `invalid_params`），在 `set` 目标块上标记 `judge="evaluator"` |
-| `goal.ts` | 折叠读取 `judge`（来自 `set`，`edit` 保留）；评审裁判下，干活模型的 `completed` 块是请求，不改变状态，目标运行时为 `active`（Goal A16 中提议的例外）。请求既不是 `set` 也不是 `resume`，所以不移动 `A`：计数仍是 `max(A, last_operator)` 之后的续跑数（[Goal §2](Goal.md#2-数据与状态)）。Goal 的 `decided` 也把 `goal:evaluate:N` 的 `branch/create` 算作 `N` 的决定。以及下面的决策和文本 |
+| `goal.ts` | 折叠读取 `judge`（来自 `set`，`edit` 保留）；评审裁判下，干活模型的 `completed` 块是请求，不改变状态，目标运行时为 `active`（Goal A16 中的例外）。请求既不是 `set` 也不是 `resume`，所以不移动 `A`：计数仍是 `max(A, last_operator)` 之后的续跑数（[Goal §2](Goal.md#2-数据与状态)）。Goal 的 `decided` 也把 `goal:evaluate:N` 的 `branch/create` 算作 `N` 的决定。以及下面的决策和文本 |
 | `branch.ts` | Dispatcher key 新增 `branch/create` 和 `branch/create-failed`；创建评审分支；在评审分支上承担评审角色（§4.2） |
 
 不新增服务、注入、Settings 字段或事件类型。评审分支是普通的 host 来源子分支；它的第一条 Queue 输入是提示词（[TimelineTree `first_input`](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs)）。那里的 Goal 没有属于自己的目标，并像在任何子分支上一样写入起始 `clear`（[Goal §3.4](Goal.md#34-新分支清除继承的目标)），所以它不会续跑。
@@ -88,7 +88,7 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 | `continue` | B，Goal 续跑 | Queue | `<dim-goal kind="continuation" count="k" limit="L" after="N" evaluation="N" branch="B">` / `An evaluator checked your report that the goal for branch B is completed and found it is not achieved yet. Its report above lists items that are at least still missing; the list may be incomplete. Assess yourself how far the goal still is, then continue working toward it. When you think it is achieved, call goal_update with status "completed" again.` |
 | `failed` | B，`goal:status` | Append | Goal 的暂停文本，原因短语 "the evaluator could not check the result" |
 
-评审裁判下，干活模型的 `completed` 块是请求，不改变折叠中的状态（目标运行时为 `active`）；在结局或变更取代它之前，它一直是最新的状态块。这是 Goal 折叠规则唯一的例外，在 Goal A16 中提议：重放出的状态块读作 `completed`，目标却是 active。结论输入与 Goal 自己的写入一样，没有 key，也没有 `user` 内容，所以不改变状态，不是操作者输入，也不重置计数（Goal A5）。
+评审裁判下，干活模型的 `completed` 块是请求，不改变折叠中的状态（目标运行时为 `active`）；在结局或变更取代它之前，它一直是最新的状态块。这是 Goal 折叠规则唯一的例外，记录在 Goal A16 中：重放出的状态块读作 `completed`，目标却是 active。结论输入与 Goal 自己的写入一样，没有 key，也没有 `user` 内容，所以不改变状态，不是操作者输入，也不重置计数（Goal A5）。它只有一个块，即报告本身：Goal 从第一个块读取写入的标记（[Goal A.5](Goal.md#a5-模型可见文本)），所以报告若不在其输入的第一个块中，不产生任何决定。
 
 ## 6. 规则检查
 
@@ -151,7 +151,7 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 | 部分 | 原因 |
 | --- | --- |
 | `set` 上的 `judge` | 区分哪些目标由评审者判定 |
-| 评审裁判下干活模型的 `completed` 是请求 | 只有评审者能使目标完成（Goal A16 中提议的例外） |
+| 评审裁判下干活模型的 `completed` 是请求 | 只有评审者能使目标完成（Goal A16 中的例外） |
 | 在停下的 `turn/end` 处创建 | 这是触发点；`branch/create` 也让重载不会重复创建 |
 | Goal 分支部分中的评审角色 | 评审分支必须报告结论，而只有那个分支上的部件能读到它的回复 |
 | 写给工作分支的结论输入 | 唯一的跨分支途径；由那里的 Goal 决定 |
@@ -163,4 +163,4 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 
 ## 12. Ready 确认
 
-没有待定的产品决策。维护者已于 2026-10-26 确认本设计 Ready（[#146](https://github.com/arcships/dim/issues/146)），包括 [Goal](Goal.md#附录-e-假设) 中 A16 的折叠例外（2026-10-22 决定）。Goal 描述已实现的模型裁判，本设计实现时再修订 Goal。
+没有待定的产品决策。维护者已于 2026-10-26 确认本设计 Ready（[#146](https://github.com/arcships/dim/issues/146)），包括 [Goal](Goal.md#附录-e-假设) 中 A16 的折叠例外（2026-10-22 决定）。它已由 [#422](https://github.com/arcships/dim/issues/422) 实现，[Goal](Goal.md) 现在描述两种裁判。

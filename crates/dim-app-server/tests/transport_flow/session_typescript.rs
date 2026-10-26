@@ -12,7 +12,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::SESSION_GROUP;
 use dim_agent_types::{MessageContent, MessagePart, ModelRequest, Role};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
-use rutis::{InstanceId, Keyed};
+use rutis::host::{CtxHost, InstanceId};
 use std::path::PathBuf;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -69,8 +69,7 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
     let mut parts = fixture();
     parts.rows = vec![json!({
         "id":"auxiliary", "name":parts.anchor.parent().unwrap().join("fixtures/auxiliary-model.ts"),
-        "group":"session",
-        "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/auxiliary-model.json")).unwrap(),
+        "provides":{},
         "config":{},
     })];
     let (server, agent) = launch_with_agent(
@@ -246,8 +245,7 @@ pub(super) fn fixture() -> SessionTypeScriptConfig {
         anchor: root.join("runtime/package.json"),
         rows: vec![json!({
             "id": "typescript", "name": root.join("runtime/fixtures/session-part.ts"),
-            "group": "session",
-            "provides": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/session-part.json")).unwrap(),
+            "provides": {},
             "config": {},
         })],
     }
@@ -257,22 +255,13 @@ fn observers(lifecycle_file: &std::path::Path) -> SessionTypeScriptConfig {
     let mut parts = fixture();
     let root = parts.anchor.parent().unwrap().join("fixtures");
     parts.rows = [
-        (
-            "observer",
-            "session-observer",
-            include_str!("../../../../runtime/fixtures/session-observer.json"),
-        ),
-        (
-            "second",
-            "session-observer-second",
-            include_str!("../../../../runtime/fixtures/session-observer-second.json"),
-        ),
+        ("observer", "session-observer"),
+        ("second", "session-observer-second"),
     ]
     .into_iter()
-    .map(|(id, module, provides)| {
+    .map(|(id, module)| {
         json!({
-            "id":id, "name":root.join(format!("{module}.ts")), "group":"session",
-            "provides":serde_json::from_str::<Value>(provides).unwrap(),
+            "id":id, "name":root.join(format!("{module}.ts")), "provides":{},
             "config":{"lifecycleFile":lifecycle_file},
         })
     })
@@ -282,63 +271,73 @@ fn observers(lifecycle_file: &std::path::Path) -> SessionTypeScriptConfig {
 
 /// Drain real bootstrap broadcasts before publication so the loading-time
 /// sampling assertion does not depend on scheduler timing.
-struct DrainLoadingBroadcast;
-struct LoadingFence(Arc<tokio::sync::Notify>);
-impl rutis::Listener<dim_agent_capabilities::session_broadcast::SessionBroadcastEvent>
-    for LoadingFence
-{
-    fn call<'a>(
-        &'a self,
-        _: &'a rutis::Ctx,
-        record: &'a dim_agent_capabilities::session_broadcast::SessionBroadcastEvent,
-        _: rutis::Call<'a, ()>,
-    ) -> rutis::BoxFuture<'a, Result<Option<()>, rutis::CordisError>> {
-        if matches!(record, dim_agent_capabilities::session_broadcast::SessionBroadcastEvent::Fence { recipient, .. } if recipient == "test.loading")
-        {
-            self.0.notify_one();
-        }
-        Box::pin(async { Ok(None) })
+struct DrainLoadingBroadcast {
+    dispatcher: rutis::host::Key<dim_agent_runtime::Dispatcher>,
+    identity: rutis::host::Key<dim_agent_runtime::TimelineIdentity>,
+    lifecycle: rutis::host::Key<dim_agent_runtime::SessionLifecycle>,
+}
+impl DrainLoadingBroadcast {
+    fn new(names: &dim_agent_runtime::Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            dispatcher: names.key()?,
+            identity: names.key()?,
+            lifecycle: names.key()?,
+        })
     }
 }
-impl TypedPlugin for DrainLoadingBroadcast {
-    type Deps = (
-        Keyed<dim_agent_runtime::Dispatcher>,
-        Keyed<dim_agent_runtime::TimelineIdentity>,
-        Keyed<dim_agent_runtime::SessionLifecycle>,
-    );
+impl rutis::host::DynPlugin for DrainLoadingBroadcast {
     fn name(&self) -> &str {
         "test.drain-loading-broadcast"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![
+            self.dispatcher.erase(),
+            self.identity.erase(),
+            self.lifecycle.erase(),
+        ]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (Keyed(dispatcher), Keyed(identity), Keyed(lifecycle)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let lifecycle = ctx.require_at(&self.lifecycle)?;
             let emitter = ctx.clone();
             let channel =
                 dim_agent_capabilities::session_broadcast::session_channel(&identity.session_id);
             let drained = Arc::new(tokio::sync::Notify::new());
-            ctx.events()
-                .on(ctx, &channel, LoadingFence(drained.clone()))?;
+            let fence = drained.clone();
+            ctx.listen::<dim_agent_capabilities::session_broadcast::SessionBroadcast>()
+                .name(channel.clone())
+                .on(move |event, _| {
+                    if matches!(&event.record, dim_agent_capabilities::session_broadcast::SessionBroadcastEvent::Fence { recipient, .. } if recipient == "test.loading")
+                    {
+                        fence.notify_one();
+                    }
+                    async { Ok(None) }
+                })?;
+            let session_id = identity.session_id.clone();
             dispatcher.subscribe_all(ctx, self.name(), move |_| {
                 let emitter = emitter.clone();
-                let channel = channel.clone();
+                let session_id = session_id.clone();
                 let lifecycle = lifecycle.clone();
                 let drained = drained.clone();
                 Box::pin(async move {
                     if lifecycle.phase() == dim_agent_runtime::SessionPhase::Loading {
-                        emitter.events().emit(&emitter, &channel, Arc::new(
+                        emitter.emit(dim_agent_capabilities::session_broadcast::SessionBroadcast::new(
+                            &session_id,
                             dim_agent_capabilities::session_broadcast::SessionBroadcastEvent::Fence {
                                 recipient: "test.loading".into(), token: 0,
-                            }
+                            },
                         )).map_err(|error| dim_agent_runtime::AgentError::fault("bootstrap fence", error.to_string()))?;
                         drained.notified().await;
                     }
                     Ok(())
                 })
             })?;
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -358,7 +357,7 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     builder.require_feature(
         Feature::new("test.drain-loading-broadcast")
             .branch("test.drain-loading-broadcast", |names| {
-                names.part(DrainLoadingBroadcast)
+                Ok(Box::new(DrainLoadingBroadcast::new(names)?))
             }),
     );
     let mut parts = observers(&audit);
@@ -379,7 +378,7 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     .unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     let first = new_session(&mut client, json!(["echo"])).await;
-    let (session_instance, _, loader, _) = controls.recv().await.unwrap();
+    let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
     let second = new_session(&mut client, json!(["echo"])).await;
     let first_session = server.agent().unwrap().get_session(&first).unwrap();
     let first_after = first_session.sequence("main").unwrap();
@@ -541,25 +540,19 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         .map(|event| json!({"sessionId":first,"branchId":child,"event":event}))
         .collect();
     assert_eq!(actual_child, expected_child);
-    let view = loader
-        .entries()
-        .into_iter()
-        .find(|entry| {
-            entry.id == "observer"
-                && entry.instance.as_ref().is_some_and(|instance| {
-                    instance.chain.iter().any(|(_, id)| *id == session_instance)
-                })
-        })
-        .unwrap()
-        .view
-        .unwrap();
+    let view = session_copy(
+        &ctx,
+        session_instance,
+        "SessionObserverFixture(session.observer)",
+    )
+    .await;
     tokio::time::timeout(Duration::from_secs(5), view.restart())
         .await
         .unwrap()
         .unwrap();
     let mut state = view.watch();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while state.borrow().state != rutis::FiberState::Active {
+        while state.borrow().state != rutis::host::FiberState::Active {
             state.changed().await.unwrap();
         }
     })
@@ -764,7 +757,7 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
 
     // Released by the row's unload.
     let id = new_session(&mut client, json!(["echo"])).await;
-    let (session_instance, _, loader, _) = controls.recv().await.unwrap();
+    let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
     let session = server.agent().unwrap().get_session(&id).unwrap();
     let hold = when_served(
         &mut client,
@@ -775,18 +768,12 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
         .clone();
     assert!(hold.is_u64(), "{hold}");
     assert!(!session.unload_if_idle().await.unwrap());
-    let view = loader
-        .entries()
-        .into_iter()
-        .find(|entry| {
-            entry.id == "observer"
-                && entry.instance.as_ref().is_some_and(|instance| {
-                    instance.chain.iter().any(|(_, id)| *id == session_instance)
-                })
-        })
-        .unwrap()
-        .view
-        .unwrap();
+    let view = session_copy(
+        &ctx,
+        session_instance,
+        "SessionObserverFixture(session.observer)",
+    )
+    .await;
     tokio::time::timeout(Duration::from_secs(5), view.restart())
         .await
         .unwrap()
@@ -974,15 +961,15 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
     server.join().await.unwrap();
     std::fs::remove_file(&audit).unwrap();
 
-    // A Session row naming a branch service is misplaced: it fails at
-    // composition, naming the group it needs, and nothing else is affected.
+    // A Session part naming a branch service is misplaced: its copy cannot
+    // be built in a Session, so it never mounts there, and nothing else is
+    // affected: the row that registered it keeps running.
     {
         let mut parts = observers(&audit);
         let root = parts.anchor.parent().unwrap().join("fixtures");
         parts.rows[0] = json!({
-            "id":"observer", "name":root.join("branch-part.ts"), "group":"session",
-            "provides":{}, "inject":["dispatcher", "timelineIdentity", "treeCommands"],
-            "config":{},
+            "id":"observer", "name":root.join("misplaced-branch-part.ts"),
+            "provides":{}, "config":{},
         });
         let (mut builder, mut requests, _) = setup();
         let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
@@ -1003,22 +990,21 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
         let mut client = Client::new_version(&server, false, 3).await;
         let id = new_session(&mut client, json!(["echo"])).await;
         let (session_instance, _, loader, _) = controls.recv().await.unwrap();
-        let entry = loader
+        let row = loader
             .entries()
             .into_iter()
-            .find(|entry| {
-                entry.id == "observer"
-                    && entry.instance.as_ref().is_some_and(|instance| {
-                        instance.chain.iter().any(|(_, id)| *id == session_instance)
-                    })
-            })
+            .find(|entry| entry.id == "observer" && entry.instance.is_none())
+            .unwrap()
+            .view
             .unwrap();
-        assert!(
-            matches!(&entry.status, rutis_loader::EntryStatus::Unresolved(error)
-                if error.to_string().contains(r#"put the row in the "branch" group"#)),
-            "{:?}",
-            entry.status
-        );
+        let mut state = row.watch();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while state.borrow_and_update().state != rutis::host::FiberState::Active {
+                state.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the registering row is Active: {:?}", row.state()));
         // The row records only what it sees after it starts listening, and a
         // Session is published without waiting for its optional rows: wait
         // until it serves before the input it is asked about.
@@ -1068,6 +1054,12 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         assert_ok(&reply);
+        // A mounted copy would have marked the turn's end.
+        let agent = server.agent().unwrap();
+        assert_eq!(
+            super::branch_typescript::count(&agent, &id, "main", "<c5-marker").await,
+            0
+        );
         server.shutdown();
         server.join().await.unwrap();
     }
@@ -1212,7 +1204,7 @@ pub(super) fn setup() -> (
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::tool_host(&mut builder, Arc::new(SlowTools(release.clone())));
@@ -1243,6 +1235,47 @@ pub(super) fn waiting(reply: &Value) -> bool {
             .as_str()
             .unwrap_or_default(),
     )
+}
+
+/// The copies of the registered part `part` that the Session `session`
+/// mounted so far: a part registered by a TypeScript row is a plugin
+/// definition, and each Session's mounter mounts its own copy.
+pub(super) fn session_copies(
+    ctx: &rutis::Ctx,
+    session: InstanceId,
+    part: &str,
+) -> Vec<rutis::host::FiberView> {
+    let plugins = ctx.diagnostics().plugins;
+    let parent = |id: Option<rutis::host::PluginId>| plugins.iter().find(|p| Some(p.id) == id);
+    plugins
+        .iter()
+        .filter(|plugin| plugin.name == part)
+        .filter(|plugin| {
+            parent(plugin.parent)
+                .filter(|mounter| mounter.name.starts_with("Session"))
+                .and_then(|mounter| parent(mounter.parent))
+                .is_some_and(|instance| instance.instance == session)
+        })
+        .filter_map(|plugin| ctx.view(plugin.id))
+        .collect()
+}
+
+/// The one copy of `part` in the Session `session`, once it is mounted.
+pub(super) async fn session_copy(
+    ctx: &rutis::Ctx,
+    session: InstanceId,
+    part: &str,
+) -> rutis::host::FiberView {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(view) = session_copies(ctx, session, part).pop() {
+                return view;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the Session mounts a copy of {part}"))
 }
 
 pub(super) async fn new_session(client: &mut Client, tools: Value) -> String {
@@ -1292,6 +1325,19 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
     let mut client = Client::new_version(&server, false, 3).await;
     let first = new_session(&mut client, json!(["ts_echo", "native_slow", "echo"])).await;
     let second = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    // An optional part's copy mounts without holding its Session's
+    // publication: wait until each Session's copy serves (it registers its
+    // tool first).
+    for id in [&first, &second] {
+        assert_ok(
+            &when_served(
+                &mut client,
+                "session.typescript.status",
+                json!({"sessionId":id}),
+            )
+            .await,
+        );
+    }
     submit(&mut client, &first, r#"tool:ts_echo {"text":"first"}"#).await;
     assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
     let status = client
@@ -1498,6 +1544,15 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     let (server, mut requests, _) = start(config.clone()).await;
     assert!(server.agent().unwrap().get_session(&session_id).is_none());
     let mut client = Client::new_version(&server, false, 3).await;
+    // The call restores the Session; its part's new copy then serves.
+    assert_ok(
+        &when_served(
+            &mut client,
+            "session.typescript.status",
+            json!({"sessionId":session_id}),
+        )
+        .await,
+    );
     submit(
         &mut client,
         &session_id,
@@ -1523,9 +1578,12 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     let source_status = client
         .rpc("session.typescript.status", json!({"sessionId":session_id}))
         .await;
-    let fork_status = client
-        .rpc("session.typescript.status", json!({"sessionId":fork_id}))
-        .await;
+    let fork_status = when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId":fork_id}),
+    )
+    .await;
     assert_ok(&fork_status);
     assert_eq!(source_status["result"]["pid"], fork_status["result"]["pid"]);
     assert_ne!(
@@ -1596,13 +1654,6 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
             .await["error"]["data"]["appError"],
         "unknown_method"
     );
-    assert!(
-        !server
-            .diagnostics()
-            .plugins
-            .iter()
-            .any(|part| part.name.ends_with("runtime/fixtures/session-part.ts"))
-    );
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
@@ -1615,45 +1666,58 @@ pub(super) type Control = (
     Arc<rutis_loader::Loader>,
     Arc<dim_agent_capabilities::tool_registry::ToolRegistry>,
 );
-pub(super) struct ControlledGate(InstanceId, tokio::sync::mpsc::UnboundedSender<Control>);
+pub(super) struct ControlledGate {
+    instance: InstanceId,
+    controls: tokio::sync::mpsc::UnboundedSender<Control>,
+    loader: rutis::host::Key<rutis_loader::Loader>,
+    rows: rutis::host::Key<rutis_loader::runtime::RuntimeRows>,
+    registry: rutis::host::Key<dim_agent_capabilities::tool_registry::ToolRegistry>,
+}
 impl ControlledGate {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        controls: tokio::sync::mpsc::UnboundedSender<Control>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            instance: names.instance(SESSION_GROUP)?,
+            controls,
+            loader: names.key()?,
+            // Observe the settled initial metadata, rather than a fiber replaced
+            // by RuntimeRows' offline-to-online refresh (as in the C4 spike).
+            rows: rutis::host::Key::dynamic("session-node"),
+            registry: names.key()?,
+        })
+    }
     /// A feature whose Session part sends each Session's [`Control`].
     pub(super) fn feature(controls: tokio::sync::mpsc::UnboundedSender<Control>) -> Feature {
-        Feature::new("ControlledTypeScriptDependency").session(
-            "ControlledTypeScriptDependency",
-            move |names| {
-                // Observe the settled initial metadata, rather than a fiber replaced
-                // by RuntimeRows' offline-to-online refresh (as in the C4 spike).
-                let keys = (
-                    names.key()?,
-                    rutis::DepKey::dynamic("session-node"),
-                    names.key()?,
-                );
-                let gate = Self(names.instance(SESSION_GROUP)?, controls.clone());
-                Ok(names.part_with(gate, keys))
-            },
-        )
+        Feature::new("ControlledTypeScriptDependency")
+            .session("ControlledTypeScriptDependency", move |names| {
+                Ok(Box::new(Self::new(names, controls.clone())?))
+            })
     }
 }
-impl TypedPlugin for ControlledGate {
-    type Deps = (
-        Keyed<rutis_loader::Loader>,
-        rutis::KeyedGate<rutis_loader::RuntimeRows>,
-        Keyed<dim_agent_capabilities::tool_registry::ToolRegistry>,
-    );
+impl rutis::host::DynPlugin for ControlledGate {
     fn name(&self) -> &str {
         "ControlledTypeScriptDependency"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![
+            self.loader.erase(),
+            self.rows.erase(),
+            self.registry.erase(),
+        ]
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-        (Keyed(loader), _, Keyed(registry)): Self::Deps,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
-            self.1
-                .send((self.0, ctx.clone(), loader, registry))
+            let loader = ctx.require_at(&self.loader)?;
+            let registry = ctx.require_at(&self.registry)?;
+            self.controls
+                .send((self.instance, ctx.clone(), loader, registry))
                 .unwrap();
-            Ok(rutis::Effect::Done)
+            Ok(rutis::host::Effect::Done)
         })
     }
 }
@@ -1674,15 +1738,9 @@ impl rutis_bridge::session::HostDispatch for GateValue {
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_session_typescript_pending_parts_keep_native_sessions_available() {
     let mut parts = fixture();
-    let mut gate = parts.rows.remove(0);
-    let entry = PathBuf::from(gate["name"].as_str().unwrap());
-    // The disabled row makes `lateGate` a Session name that nothing provides
-    // until the test does.
-    gate["id"] = json!("disabled-gate");
-    gate["disabled"] = json!(true);
-    gate["provides"] = json!({"lateGate":{"declaration":"sync","execute":"async"}});
-    parts.rows.push(json!({"id":"typescript", "name":entry.with_file_name("session-late.ts"), "group":"session", "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/session-late.json")).unwrap()}));
-    parts.rows.push(gate);
+    let entry = PathBuf::from(parts.rows.remove(0)["name"].as_str().unwrap());
+    // `lateGate` is a Session name that nothing provides until the test does.
+    parts.rows.push(json!({"id":"typescript", "name":entry.with_file_name("session-late.ts"), "provides":{}, "instanceNames":{"lateGate":"session"}}));
     let (mut builder, mut requests, _) = setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     builder.require_feature(ControlledGate::feature(send));
@@ -1701,20 +1759,9 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
     .unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     let session = new_session(&mut client, json!(["late", "echo"])).await;
-    let (session_instance, ctx, loader, _) = controls.recv().await.unwrap();
-    let view = loader
-        .entries()
-        .into_iter()
-        .find(|entry| {
-            entry.id == "typescript"
-                && entry.instance.as_ref().is_some_and(|instance| {
-                    instance.chain.iter().any(|(_, id)| *id == session_instance)
-                })
-        })
-        .unwrap()
-        .view
-        .unwrap();
-    assert_eq!(view.state().state, rutis::FiberState::Pending);
+    let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
+    let view = session_copy(&ctx, session_instance, "LateSessionTypeScriptFixture").await;
+    assert_eq!(view.state().state, rutis::host::FiberState::Pending);
     assert_eq!(
         client
             .rpc("session.late.status", json!({"sessionId":session}))
@@ -1723,14 +1770,7 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
     );
     submit(&mut client, &session, r#"tool:echo {"text":"before"}"#).await;
     assert!(!requests.recv().await.unwrap().contains(&"late".into()));
-    assert!(
-        !server
-            .diagnostics()
-            .plugins
-            .iter()
-            .any(|part| part.name.ends_with("runtime/fixtures/session-part.ts"))
-    );
-    ctx.provide_as::<dyn rutis_bridge::session::HostDispatch>(
+    ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
         rutis_bridge::session::host_key_in("lateGate", session_instance),
         Arc::new(GateValue),
     )
@@ -1738,31 +1778,14 @@ async fn node_session_typescript_pending_parts_keep_native_sessions_available() 
     let mut state = view.watch();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if state.borrow().state == rutis::FiberState::Active {
+            if state.borrow().state == rutis::host::FiberState::Active {
                 break;
             }
             state.changed().await.unwrap();
         }
     })
     .await
-    .unwrap_or_else(|error| {
-        let current = loader
-            .entries()
-            .into_iter()
-            .filter(|entry| entry.id == "typescript")
-            .map(|entry| {
-                (
-                    entry.instance,
-                    entry.status,
-                    entry.view.map(|view| view.state()),
-                )
-            })
-            .collect::<Vec<_>>();
-        panic!(
-            "late provider: {error}; view={:?}; current={current:?}",
-            view.state()
-        )
-    });
+    .unwrap_or_else(|error| panic!("late provider: {error}; view={:?}", view.state()));
     assert_eq!(
         client
             .rpc("session.late.status", json!({"sessionId":session}))
@@ -1823,8 +1846,9 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     server.shutdown();
     server.join().await.unwrap();
 
-    // Refused declarations fail the row, and a row whose provides differs
-    // from its module's is Unresolved: neither registers its namespace.
+    // Refused declarations fail the Session's copy, and a row whose provides
+    // differs from its module's is Unresolved: neither registers its
+    // namespace.
     for bad_methods in [json!(true), json!("unsupported"), Value::Null] {
         let mut parts = fixture();
         if !bad_methods.is_null() {
@@ -1850,30 +1874,25 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         .unwrap();
         let mut client = Client::new_version(&server, false, 3).await;
         let session = new_session(&mut client, json!(["ts_echo", "echo"])).await;
-        let (session_instance, _, loader, _) = controls.recv().await.unwrap();
-        let entry = loader
-            .entries()
-            .into_iter()
-            .find(|entry| {
-                entry.id == "typescript"
-                    && entry.instance.as_ref().is_some_and(|instance| {
-                        instance.chain.iter().any(|(_, id)| *id == session_instance)
-                    })
-            })
-            .unwrap();
+        let (session_instance, ctx, loader, _) = controls.recv().await.unwrap();
         if !bad_methods.is_null() {
-            let view = entry.view.unwrap();
+            let view = session_copy(&ctx, session_instance, "SessionTypeScriptFixture").await;
             let mut state = view.watch();
             tokio::time::timeout(Duration::from_secs(5), async {
-                while state.borrow().state != rutis::FiberState::Failed {
+                while state.borrow().state != rutis::host::FiberState::Failed {
                     state.changed().await.unwrap();
                 }
             })
             .await
             .unwrap();
         } else {
+            let entry = loader
+                .entries()
+                .into_iter()
+                .find(|entry| entry.id == "typescript" && entry.instance.is_none())
+                .unwrap();
             assert!(
-                matches!(entry.status, rutis_loader::EntryStatus::Unresolved(ref error) if error.to_string().contains("provides differs")),
+                matches!(entry.status, rutis_loader::report::EntryStatus::Unresolved(ref error) if error.to_string().contains("provides differs")),
                 "{:?}",
                 entry.status
             );
@@ -1918,24 +1937,13 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         .unwrap();
         let mut client = Client::new_version(&server, false, 3).await;
         new_session(&mut client, json!(["echo"])).await;
-        let (session_instance, _, loader, _) = controls.recv().await.unwrap();
-        let view = loader
-            .entries()
-            .into_iter()
-            .find(|entry| {
-                entry.id == "typescript"
-                    && entry.instance.as_ref().is_some_and(|instance| {
-                        instance.chain.iter().any(|(_, id)| *id == session_instance)
-                    })
-            })
-            .unwrap()
-            .view
-            .unwrap();
+        let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
+        let view = session_copy(&ctx, session_instance, "SessionTypeScriptFixture").await;
         let mut state = view.watch();
         let failed = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let snapshot = state.borrow_and_update().clone();
-                if snapshot.state == rutis::FiberState::Failed {
+                if snapshot.state == rutis::host::FiberState::Failed {
                     break snapshot;
                 }
                 state.changed().await.unwrap();
@@ -2003,23 +2011,12 @@ async fn node_session_typescript_failed_part_namespace_stays_unknown() {
     .unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     let session = new_session(&mut client, json!(["echo"])).await;
-    let (session_instance, _, loader, _) = controls.recv().await.unwrap();
-    let part = || {
-        loader
-            .entries()
-            .into_iter()
-            .find(|entry| {
-                entry.id == "typescript"
-                    && entry.instance.as_ref().is_some_and(|instance| {
-                        instance.chain.iter().any(|(_, id)| *id == session_instance)
-                    })
-            })
-            .unwrap()
-    };
-    let published = part().status;
-    let mut state = part().view.unwrap().watch();
+    let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
+    let part = session_copy(&ctx, session_instance, "SessionTypeScriptFixture").await;
+    let published = part.state();
+    let mut state = part.watch();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while state.borrow().state != rutis::FiberState::Failed {
+        while state.borrow().state != rutis::host::FiberState::Failed {
             state.changed().await.unwrap();
         }
     })
@@ -2040,7 +2037,7 @@ async fn node_session_typescript_failed_part_namespace_stays_unknown() {
         replies,
         vec![(json!(-32601), json!("unknown_method")); 3],
         "part once session.create replied {published:?}, now {:?}",
-        part().status
+        part.state()
     );
     server.shutdown();
     server.join().await.unwrap();
@@ -2064,7 +2061,18 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
     };
     let mut saved: Option<String> = None;
     for text in ["created", "restored"] {
-        let (server, mut requests, _) = start(config.clone()).await;
+        // The tool is in the first request because the profile requires
+        // the part: the Session waits for it (ADR 006 D3, Publication). An
+        // optional part's tool is offered from the request after it
+        // registers.
+        let (mut builder, mut requests, _) = setup();
+        builder.require_part("SessionToolOnlyFixture");
+        let mut config = config.clone();
+        config.unix_path = Some(std::env::temp_dir().join(format!(
+            "dm-ts-{}/server.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        )));
+        let server = serve(builder, config).await.unwrap();
         let mut client = Client::new_version(&server, false, 3).await;
         let session_id = match &saved {
             Some(id) => {
@@ -2127,7 +2135,17 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
     .unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     let session_id = new_session(&mut client, json!(["ts_echo", "echo"])).await;
-    let (session_instance, _, loader, registry) = controls.recv().await.unwrap();
+    let (session_instance, ctx, _, registry) = controls.recv().await.unwrap();
+    // The part registers its tool before its methods: once they are served,
+    // the contribution is the one this copy registered.
+    assert_ok(
+        &when_served(
+            &mut client,
+            "session.typescript.status",
+            json!({"sessionId":session_id}),
+        )
+        .await,
+    );
     let retained = registry.contributed("ts_echo").unwrap();
     let old = client
         .rpc("session.typescript.status", json!({"sessionId":session_id}))
@@ -2141,25 +2159,14 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
             )
             .await,
     );
-    let view = loader
-        .entries()
-        .into_iter()
-        .find(|entry| {
-            entry.id == "typescript"
-                && entry.instance.as_ref().is_some_and(|instance| {
-                    instance.chain.iter().any(|(_, id)| *id == session_instance)
-                })
-        })
-        .unwrap()
-        .view
-        .unwrap();
+    let view = session_copy(&ctx, session_instance, "SessionTypeScriptFixture").await;
     tokio::time::timeout(Duration::from_secs(5), view.restart())
         .await
         .unwrap()
         .unwrap();
     let mut state = view.watch();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while state.borrow().state != rutis::FiberState::Active {
+        while state.borrow().state != rutis::host::FiberState::Active {
             state.changed().await.unwrap();
         }
     })

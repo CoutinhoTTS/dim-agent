@@ -7,7 +7,10 @@
     "moduleResolution": "NodeNext",
     "allowImportingTsExtensions": true,
     "types": ["node"],
-    "paths": { "@dimcode/scheduler": ["./index.ts"] }
+    "paths": {
+      "@dimcode/scheduler": ["./index.ts"],
+      "@arcships/rutis": ["./node_modules/@arcships/rutis/src/index.d.ts"]
+    }
   },
   "include": ["*.ts", "../../fixtures/scheduler-package.ts"]
 }

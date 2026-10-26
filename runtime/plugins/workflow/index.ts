@@ -1,10 +1,11 @@
 import { definePlugin } from '@arcships/rutis'
 import { z } from 'zod'
-import type { ManagementMethods, MethodReply, PluginFiles, Sessions, Settings, WorkflowFiles } from '../../../npm/plugin.js'
+import type { ManagementMethods, MethodReply, PartRegistry, PluginFiles, Sessions, Settings, WorkflowFiles } from '../../../npm/plugin.js'
 import { Catalog, type DefinitionEntry } from './catalog.ts'
 import { WorkflowError } from './definition.ts'
 import { Workflow } from './engine.ts'
 import { management, unloadingAfterCall, type RunReply, type RunRequest, type WorkflowRuns } from './requests.ts'
+import session from './session.ts'
 import { bounded, RunStore, type Run } from './store.ts'
 
 const options = z.strictObject({ packages: z.array(z.strictObject({ id: z.string().min(1), root: z.string().min(1) })) })
@@ -21,7 +22,7 @@ function visible(entries: DefinitionEntry[]) {
 export default definePlugin({
   name: 'Workflow',
   config: z.toJSONSchema(options),
-  inject: ['sessions', 'settings', 'pluginFiles', 'workflowFiles', 'managementMethods'],
+  inject: ['sessions', 'settings', 'pluginFiles', 'workflowFiles', 'managementMethods', 'partRegistry'],
   provides,
   async apply(ctx, config: z.infer<typeof options>) {
     const catalog = new Catalog(ctx.use<Settings>('settings'), ctx.use<WorkflowFiles>('workflowFiles'), config.packages)
@@ -67,6 +68,8 @@ export default definePlugin({
       },
     }
     ctx.provide('workflowRuns', owner)
+    // Each Session mounts the `workflow` tool part (session.ts).
+    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'WorkflowSession', session)
 
     await ctx.use<ManagementMethods>('managementMethods').register(
       'workflow',

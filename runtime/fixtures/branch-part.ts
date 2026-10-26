@@ -1,4 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
+import { partRow } from './part-row.ts'
 import type { BranchEvent, Services } from '../../npm/plugin.js'
 
 // A branch part on the exported branch services (branch-typescript.md): it
@@ -8,7 +9,7 @@ import type { BranchEvent, Services } from '../../npm/plugin.js'
 // once, on its first live turn end. It keeps the hand-written form of
 // ordered consumption (`listen`, `committed`, `local`), which stays valid
 // beside `consume`.
-export default definePlugin({
+export const part = definePlugin({
   name: 'BranchPartFixture',
   provides: {},
   inject: ['dispatcher', 'timelineIdentity', 'treeCommands'],
@@ -55,3 +56,5 @@ export default definePlugin({
     rebuilt()
   },
 })
+
+export default partRow('branch', part)

@@ -10,7 +10,8 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Keyed, KeyedGate, Plugin, TypedPlugin};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
     sync::{
         Arc, Mutex,
@@ -160,35 +161,47 @@ struct ExtensionBarrier {
     release: Notify,
     once: AtomicBool,
 }
-struct Extension(Arc<ExtensionBarrier>);
-impl TypedPlugin for Extension {
-    type Deps = (
-        Keyed<Dispatcher>,
-        KeyedGate<ContextPreparation>,
-        KeyedGate<ModelProvider>,
-        KeyedGate<ToolExecutor>,
-    );
+struct Extension {
+    barrier: Arc<ExtensionBarrier>,
+    dispatcher: Key<Dispatcher>,
+    context_preparation: Key<ContextPreparation>,
+    model_provider: Key<ModelProvider>,
+    tool_executor: Key<ToolExecutor>,
+}
+impl Extension {
+    fn new(names: &Names<'_>, barrier: Arc<ExtensionBarrier>) -> rutis::Result<Self> {
+        Ok(Self {
+            barrier,
+            dispatcher: names.key()?,
+            context_preparation: names.key()?,
+            model_provider: names.key()?,
+            tool_executor: names.key()?,
+        })
+    }
+}
+impl DynPlugin for Extension {
     fn name(&self) -> &str {
         "test.interrupt-extension"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher), ..): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.dispatcher.erase(),
+            self.context_preparation.erase(),
+            self.model_provider.erase(),
+            self.tool_executor.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
             let tasks = TaskTracker::new();
             let cleanup = tasks.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        cleanup.close();
-                        cleanup.wait().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                cleanup.close();
+                cleanup.wait().await;
+                Ok(())
             })?;
-            let signal = self.0.clone();
+            let signal = self.barrier.clone();
             dispatcher.subscribe(
                 ctx,
                 "test.interrupt-extension",
@@ -237,7 +250,7 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
             .session_value(Arc::new(CompactionStrategyHost(None)))
             .require_feature(
                 Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                    names.part(DefaultPrepareModelPlugin::new(names)?)
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             );
         defaults::install(&mut builder);
@@ -245,7 +258,7 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
         builder.require_feature(
             Feature::new("test.interrupt-extension")
                 .branch("test.interrupt-extension", move |names| {
-                    names.part(Extension(extension_plugin.clone()))
+                    Ok(Box::new(Extension::new(names, extension_plugin.clone())?))
                 }),
         );
         let agent = builder.build();
@@ -345,8 +358,15 @@ enum After {
     /// InputQueue and Loop.
     Loop,
 }
-/// Holds the first dispatch of its event key (`.1`) until released.
-struct InputGate(Arc<Gate>, &'static str);
+/// Holds the first dispatch of its event key (`event`) until released.
+struct InputGate {
+    gate: Arc<Gate>,
+    event: &'static str,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+    input_queue: Option<Key<InputQueue>>,
+    loop_state: Option<Key<dyn LoopState>>,
+}
 impl InputGate {
     /// The gate as a branch part loading after `after`.
     fn part(
@@ -354,35 +374,36 @@ impl InputGate {
         gate: Arc<Gate>,
         after: After,
         key: &'static str,
-    ) -> std::result::Result<Box<dyn Plugin>, CordisError> {
-        let keys = (
-            names.key()?,
-            names.key()?,
-            names.when::<KeyedGate<InputQueue>>(after != After::Dispatcher)?,
-            names.when::<KeyedGate<dyn LoopState>>(after == After::Loop)?,
-        );
-        Ok(names.part_with(InputGate(gate, key), keys))
+    ) -> rutis::Result<Box<dyn DynPlugin>> {
+        Ok(Box::new(InputGate {
+            gate,
+            event: key,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+            input_queue: (after != After::Dispatcher)
+                .then(|| names.key())
+                .transpose()?,
+            loop_state: (after == After::Loop).then(|| names.key()).transpose()?,
+        }))
     }
 }
-impl TypedPlugin for InputGate {
-    type Deps = (
-        Keyed<Timeline>,
-        Keyed<Dispatcher>,
-        When<KeyedGate<InputQueue>>,
-        When<KeyedGate<dyn LoopState>>,
-    );
+impl DynPlugin for InputGate {
     fn name(&self) -> &str {
         "test.input-gate"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(dispatcher), ..): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        let mut keys = vec![self.timeline.erase(), self.dispatcher.erase()];
+        keys.extend(self.input_queue.as_ref().map(Key::erase));
+        keys.extend(self.loop_state.as_ref().map(Key::erase));
+        keys
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            *self.0.timeline.lock().unwrap() = Some((*timeline).clone());
-            let gate = self.0.clone();
-            dispatcher.subscribe(ctx, "test.input-gate", &[self.1], move |_| {
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            *self.gate.timeline.lock().unwrap() = Some((*timeline).clone());
+            let gate = self.gate.clone();
+            dispatcher.subscribe(ctx, "test.input-gate", &[self.event], move |_| {
                 let gate = gate.clone();
                 Box::pin(async move {
                     if !gate.once.swap(true, Ordering::SeqCst) {
@@ -603,7 +624,7 @@ async fn a_tool_call_already_committed_when_the_interrupt_arrives_is_not_execute
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::install(&mut builder);
@@ -675,7 +696,7 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::install(&mut builder);
@@ -829,7 +850,7 @@ fn channel_builder(model: Arc<ChannelModel>) -> AgentBuilder {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::tool_host(&mut builder, Arc::new(MockTools));
@@ -1160,7 +1181,7 @@ async fn a_steer_during_preparation_ends_the_request_before_the_model_call() {
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::tool_host(&mut builder, Arc::new(MockTools));
@@ -1215,20 +1236,32 @@ struct AppliedGate {
     entered: Notify,
     release: Notify,
 }
-struct AppliedGatePlugin(Arc<AppliedGate>);
-impl TypedPlugin for AppliedGatePlugin {
-    // InputQueue must subscribe first; independent plugins have no apply order.
-    type Deps = (Keyed<Dispatcher>, KeyedGate<InputQueue>);
+struct AppliedGatePlugin {
+    gate: Arc<AppliedGate>,
+    dispatcher: Key<Dispatcher>,
+    input_queue: Key<InputQueue>,
+}
+impl AppliedGatePlugin {
+    fn new(names: &Names<'_>, gate: Arc<AppliedGate>) -> rutis::Result<Self> {
+        Ok(Self {
+            gate,
+            dispatcher: names.key()?,
+            input_queue: names.key()?,
+        })
+    }
+}
+impl DynPlugin for AppliedGatePlugin {
     fn name(&self) -> &str {
         "test.applied-gate"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(dispatcher), _): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    // InputQueue must subscribe first; independent plugins have no apply order.
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase(), self.input_queue.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let gate = self.0.clone();
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let gate = self.gate.clone();
             dispatcher.subscribe(ctx, "test.applied-gate", &["input/message"], move |_| {
                 let gate = gate.clone();
                 Box::pin(async move {
@@ -1257,7 +1290,7 @@ async fn a_steer_consumed_after_the_first_output_waits_for_the_output_end() {
     let copy = gate.clone();
     builder.require_feature(
         Feature::new("test.applied-gate").branch("test.applied-gate", move |names| {
-            names.part(AppliedGatePlugin(copy.clone()))
+            Ok(Box::new(AppliedGatePlugin::new(names, copy.clone())?))
         }),
     );
     defaults::install(&mut builder);
@@ -1343,19 +1376,38 @@ struct TerminalHold {
     applied: AtomicU64,
     consumed: AtomicBool,
 }
-struct TerminalHoldPlugin(Arc<TerminalHold>, Arc<AppliedGate>);
-impl TypedPlugin for TerminalHoldPlugin {
-    type Deps = (Keyed<Timeline>, Keyed<Dispatcher>);
+struct TerminalHoldPlugin {
+    hold: Arc<TerminalHold>,
+    gate: Arc<AppliedGate>,
+    timeline: Key<Timeline>,
+    dispatcher: Key<Dispatcher>,
+}
+impl TerminalHoldPlugin {
+    fn new(
+        names: &Names<'_>,
+        hold: Arc<TerminalHold>,
+        gate: Arc<AppliedGate>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            hold,
+            gate,
+            timeline: names.key()?,
+            dispatcher: names.key()?,
+        })
+    }
+}
+impl DynPlugin for TerminalHoldPlugin {
     fn name(&self) -> &str {
         "test.terminal-hold"
     }
-    fn apply<'a>(
-        &'a self,
-        ctx: &'a Ctx,
-        (Keyed(timeline), Keyed(dispatcher)): Self::Deps,
-    ) -> BoxFuture<'a, std::result::Result<Effect, CordisError>> {
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase(), self.dispatcher.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let (hold, gate) = (self.0.clone(), self.1.clone());
+            let timeline = ctx.require_at(&self.timeline)?;
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let (hold, gate) = (self.hold.clone(), self.gate.clone());
             timeline.before(
                 ctx,
                 "test.terminal-hold",
@@ -1392,15 +1444,20 @@ fn hold_terminal(builder: &mut AgentBuilder) -> (Arc<AppliedGate>, Arc<TerminalH
     let copy = gate.clone();
     builder.require_feature(
         Feature::new("test.applied-gate").branch("test.applied-gate", move |names| {
-            names.part(AppliedGatePlugin(copy.clone()))
+            Ok(Box::new(AppliedGatePlugin::new(names, copy.clone())?))
         }),
     );
     let (copy, held) = (gate.clone(), hold.clone());
-    builder.require_feature(
-        Feature::new("test.terminal-hold").branch("test.terminal-hold", move |names| {
-            names.part(TerminalHoldPlugin(held.clone(), copy.clone()))
-        }),
-    );
+    builder.require_feature(Feature::new("test.terminal-hold").branch(
+        "test.terminal-hold",
+        move |names| {
+            Ok(Box::new(TerminalHoldPlugin::new(
+                names,
+                held.clone(),
+                copy.clone(),
+            )?))
+        },
+    ));
     (gate, hold)
 }
 /// Applies a steer whose dispatch the gate holds, and arms the hold of the
@@ -1510,7 +1567,7 @@ async fn a_steer_is_not_consumed_between_a_failed_preparation_and_its_terminal()
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
-                names.part(DefaultPrepareModelPlugin::new(names)?)
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
     defaults::tool_host(&mut builder, Arc::new(MockTools));

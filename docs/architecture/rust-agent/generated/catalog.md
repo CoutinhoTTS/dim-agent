@@ -29,7 +29,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `modelHost` | process | Aimux | Rust-only | — |
 | `modelSelectionHost` | process | Provider | Rust-only | — |
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | Rust-only | — |
-| `partRegistry` | process | PartRegistry | Rust-only | — |
+| `partRegistry` | process | PartRegistry | yes | `registerDefinition` async |
 | `pluginFiles` | process | PluginFiles | yes | `open` async |
 | `providerConnectionResolver` | process | Provider | Rust-only | — |
 | `providerService` | process | Provider | Rust-only | — |
@@ -48,7 +48,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `uiHost` | process | UiHost | Rust-only | — |
 | `workflowFiles` | process | Settings | yes | `createDirectory` async, `list` async, `read` async, `replace` async |
 | `agentConfig` | session | SessionScope | Rust-only | — |
-| `collaborationCapability` | session | CollaborationCapability | Rust-only | — |
+| `collaborationSession` | session | CollaborationSession | Rust-only | — |
 | `commandRulesHost` | session | CommandRules | Rust-only | — |
 | `compactionStrategyHost` | session | ProductSummaryStrategy | Rust-only | — |
 | `contextModelHost` | session | SessionScope | Rust-only | — |
