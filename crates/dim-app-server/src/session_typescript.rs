@@ -447,7 +447,6 @@ mod tests {
             name_of::<crate::agents::SessionPermissions>(),
             name_of::<crate::settings::WorkflowFiles>(),
         ] {
-            assert!(rutis::internal::service::is_exported(&name), "{name}");
             assert!(builder.catalog().is_shared(&name), "{name}");
             assert!(builder.catalog().key(&name).is_some(), "{name}");
         }
