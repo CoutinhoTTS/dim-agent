@@ -57,7 +57,7 @@ Assembly graphs and crate dependencies are computed from the actual code by `xta
 | Command (workspace root) | Purpose |
 | --- | --- |
 | `cargo run --locked -p xtask -- graph` | Regenerate `docs/architecture/rust-agent/generated/`: `services.mmd` / `services.md` (service assembly), `instances.mmd` (instance keys), `modules.mmd` (module dependencies), `crates.mmd` (crate dependencies) and their `.json` snapshots, and `catalog.md` (the service catalog and the parts that are Capabilities) |
-| `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions, that `catalog.md` matches the real assembly, and that `npm/branch-services.d.ts` matches the services marked `#[rutis::service]` |
+| `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions, that `crates.*` / `modules.*` under `generated/` match the code (read-only: a stale file fails and names it; only `graph` writes them), that `catalog.md` matches the real assembly, and that `npm/branch-services.d.ts` matches the services marked `#[rutis::service]` |
 | `cargo run --locked -p xtask -- types` | Regenerate `npm/branch-services.d.ts`, the TypeScript declarations of the services marked `#[rutis::service]`, after changing one of them or a type it uses |
 | `cargo run --release --locked -p xtask -- measure` | Resource measurement; pass `--model-config PATH` (e.g. `crates/dim-agent-aimux/examples/offline.json`) |
 
