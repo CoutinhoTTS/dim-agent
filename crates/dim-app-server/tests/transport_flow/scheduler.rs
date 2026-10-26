@@ -3433,13 +3433,25 @@ async fn node_scheduler_native_clock_preserves_anchors_collapses_gaps_and_handle
         window(&mut client, once, "2026-03-09T06:31:00.000Z").await["state"],
         "completed"
     );
-    let listed = client.rpc("schedule.list", json!({})).await;
-    let job = listed["result"]["jobs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|job| job["id"] == *once)
-        .unwrap();
+    // The timer settles one-off jobs separately from their completed runs.
+    let job = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let listed = client.rpc("schedule.list", json!({})).await;
+            assert_ok(&listed);
+            let job = listed["result"]["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|job| job["id"] == *once)
+                .unwrap();
+            if job["enabled"] == false {
+                break job.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the timer disables the one-off job");
     assert_eq!(job["enabled"], false);
     assert!(job.get("enabled_at").is_none());
 
