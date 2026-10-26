@@ -156,9 +156,13 @@ an external dependency.
 
 ### D3. A plugin is one row; each instance mounts the parts registered for it
 
-- **A plugin is one process row.** Every plugin is one rutis plugin mounted as one loader row in the
-  process, whether native or foreign, built in or optional. Its configuration, enablement and reload
-  are that row's. What the plugin owns for the process, it holds itself.
+- **A plugin's code is one process row.** The code of every plugin is one rutis plugin mounted as one
+  loader row in the process, whether native or foreign, built in or optional. Its structural
+  configuration and reload are that row's. Whether it is installed, which plugin a name uses and
+  whether it is turned off are configuration PluginManager keeps in its own record and carries out on
+  the row ([PluginManager](../design/plugins/PluginManager.md)); the loader keeps no install record.
+  Content a plugin carries (skills, MCP configuration, hooks) is not a row: it is registered with its
+  owner. What the plugin owns for the process, it holds itself.
 - **Parts are registered, not configured.** For the `session` and `branch` scopes, a plugin
   registers part generators with Dim's part registry while it runs. A registration belongs to the
   plugin's generation: it is withdrawn when the plugin unloads, and the next generation registers

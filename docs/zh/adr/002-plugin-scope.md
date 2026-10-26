@@ -66,7 +66,7 @@ ToolRegistry、Rpc，以及 Mcp、SkillsCatalog 这类内容所有者）从不�
 
 | 类别 | 示例 | 位置 | 变更时 |
 | --- | --- | --- | --- |
-| 结构性插件配置 | 启用或禁用、运行时与包路径、节点绑定 | loader 行（issue #3 可编辑层） | 可能重载该行 |
+| 结构性插件配置 | 是否安装、一个名字用哪个插件、是否关闭、包路径 | PluginManager 的 `plugins.json`，由它对 loader 行执行（[PluginManager](../design/plugins/PluginManager.md)） | 可能重载该行 |
 | 业务配置 | 搜索服务、通知渠道、Hook 规则、定时任务、工作流定义、各使用者的辅助模型选择、MCP 服务器与 Skill 文档、外部 Agent 条目与桥接、网关监听设置、OCR 组件路径、exec shell | 所属插件的业务来源（Settings 来源或插件自有存储） | 数据更新并通知；使用时读取；不重载 |
 
 ### D5. 合同语言中立

@@ -26,7 +26,7 @@
 | [AcpGateway](AcpGateway.md) | —（CLI 进程中的客户端，不是守护进程插件） | — | — | P3 |
 | [RemoteGateway](RemoteGateway.md) | 远程入口、设备 | — | — | P3 |
 | [Modality](Modality.md) | 任务、实时连接 | — | — | P3 |
-| [PluginManager](PluginManager.md) | 插件市场、插件包 | — | — | P3 |
+| [PluginManager](PluginManager.md) | 插件配置（`plugins.json`）、安装、插件代码的 loader 行、内容登记 | `PluginTools`（插件工具） | — | M1 |
 
 ## 按作用域
 

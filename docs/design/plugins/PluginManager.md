@@ -1,440 +1,351 @@
 # PluginManager
 
-Status: Draft. Overall design: [overview §4 Plugin catalog](../overview.md#4-plugin-catalog), [Settings, Mcp, SkillsCatalog changes](../overview.md#b2-app-server-process-plugins), [conventions](../overview.md#64-conventions), [multiple nodes](../overview.md#63-multiple-nodes), [ADR 002](../../adr/002-plugin-scope.md). Phase: P3 (depends on [#3](https://github.com/arcships/dim/issues/3); non-Rust capability plugins on [#4](https://github.com/arcships/dim/issues/4); peer nodes on [#5](https://github.com/arcships/dim/issues/5)). Language: Rust.
+Status: Draft, aligned with the maintainer on 2026-10-27. Requirements: [plugin management](../plugin-management.md) ([#432](https://github.com/arcships/dim/issues/432)). Issues: [#3](https://github.com/arcships/dim/issues/3), [#384](https://github.com/arcships/dim/issues/384). Scope: [ADR 002](../../adr/002-plugin-scope.md) (process: installation is per host). Language: Rust. Milestone: M1 for the parts marked in §0.
 
-> **Changes for the redesign.** (1) [#36](https://github.com/arcships/dim/issues/36): the dependency is reversed. PluginManager depends on the content owners (Mcp, SkillsCatalog and others) and hands them package content through their typed operations; owners never depend on `pluginContents`, so a failed or reloading PluginManager leaves them running with their user and project sources. (2) [#41](https://github.com/arcships/dim/issues/41): PluginManager verifies a package before it writes or re-enables its rows; code rows do not check integrity in `apply` (the loader has already run the entry by then). An enabled package is trusted (ADR 003 D4); tampering with installed files afterwards is out of scope.
+PluginManager keeps the plugin configuration of a host: which plugins are installed, where they came from, which plugin each name uses, and which names are turned off. It keeps this configuration in its own file, `plugins.json`, in Dim's own format. It keeps no runtime state. Whether a plugin is loaded, running or failed is rutis' state, read from rutis-loader. What content an owner holds (skills, MCP servers, hooks) is that owner's state. PluginManager carries out a configuration change by giving commands to the owners: rutis-loader for plugin code, and SkillsCatalog, Mcp and Hooks for content. Each owner decides and keeps its own state.
 
-> **P3: redesign with rutis' existing capabilities.** rutis is an external dependency; the requirements this document raises to rutis are withdrawn ([principles §4 rule 8](../../architecture/rust-agent/principles.md)).
+A plugin is a directory with a manifest. It may carry code (a rutis plugin in TypeScript or Python), content (skills, MCP configuration, hooks), or both. Plugins are identified by **name**. Several plugins with the same name may be installed, but only one of them is used at a time. Turning another one on replaces the one in use. This is how a built-in plugin is replaced.
 
-PluginManager is a process plugin ([ADR 002](../../adr/002-plugin-scope.md): installation is per host). It installs plugin packages from Git marketplaces, local paths or Git URLs onto a target node, records plugin intent (install, enable, node binding, package paths) through typed Settings operations into loader rows, and publishes the typed content of enabled packages as the named process service `pluginContents`. Content owners (SkillsCatalog, Mcp, Hooks, Workflow, in any language) depend on `pluginContents` by name, define their own content type keys and read the content they understand; PluginManager knows none of them. Package code runs when its package is enabled: there is no host-local approval, because installing and enabling are host configuration done through management methods, outside Approval and Permission, which govern only agent-initiated actions ([overview conventions](../overview.md#64-conventions)). Packages are never upgraded automatically. PluginManager handles only structural operations (install, enable, disable, update, remove), and it is the only writer of structural fields of any plugin row, including the `enabled` field of built-in plugins such as [RemoteGateway](RemoteGateway.md); each plugin declares the schema of its own business configuration, which is written through Settings typed operations into its named Settings sources, never through PluginManager.
+## 0. Implementation boundary
+
+| Part | M1 (2026-11-01) | Later |
+| --- | --- | --- |
+| `plugins.json`, the default configuration file, the startup layer (§2, §3.1) | yes | |
+| Install from a local path or Git, update, remove, list (§3.2–§3.6) | yes | marketplace |
+| Plugin code: create, turn on/off, replace, reload loader rows (§3) | yes, TypeScript | Python plugins installed from a directory (Appendix D) |
+| `plugin.*` management methods and `dimcode plugin` commands (§6, A.1) | yes | client notifications of changes |
+| Agent tools through a Session part (§6) | yes | |
+| The default CLI loads the default plugins (goal, web, session-title, workflow, scheduler) | yes | |
+| Settings sources registered at run time by every plugin itself (§9 R1) | yes, built-in and TypeScript plugins together | |
+| Content kinds: skills, MCP configuration, hooks (§3, §9 R2) | skills and MCP if their owners land in time | hooks (Hooks is M2) |
+
+M1's acceptance is: a user or the agent writes a TypeScript plugin, installs it from a local path, uses its tools, edits it and reloads it, and the change takes effect without a restart; the default CLI starts with the default plugins loaded.
 
 ## 1. Structure
 
 ```mermaid
 flowchart LR
-  subgraph CN["App Server process, control node"]
-    PM["PluginManagerPlugin<br/>plugin.* methods, package store,<br/>pluginContents"]:::new
-    SET["Settings<br/>typed operations on loader rows"]
-    LOADER["rutis Loader"]
-    RPC["Rpc<br/>reads managementMethods"]
-    CONS["Content owners<br/>SkillsCatalog, Mcp, Hooks, Workflow"]
+  subgraph AS["App Server process"]
+    PM["PluginManager<br/>plugins.json, plugin.* methods"]:::new
+    LOADER["rutis-loader<br/>rows: built-in, default, installed"]
+    RPC["Rpc"]
+    OWN["Content owners<br/>SkillsCatalog, Mcp, Hooks"]
+    SET["Settings"]
+    CODE["Plugin code rows"]
+    PT["PluginTools (Session part)<br/>plugin tools"]:::new
   end
-  subgraph NODE["Each configured node, local or peer"]
-    SVC["FileStorage, HostPlatform<br/>of that node"]
-    CODE["Package code rows<br/>load when enabled"]:::new
-  end
-  PM --> SET
-  PM --> LOADER
-  PM -->|"per operation on node"| SVC
-  RPC -->|"plugin.* managementMethods"| PM
-  CONS -->|"sources by own type key, changed"| PM
-  CODE -->|"verify integrity in apply"| SVC
+  RPC -->|"plugin.* (managementMethods)"| PM
+  PM -->|"create, set_disabled, remove, reload"| LOADER
+  LOADER --> CODE
+  PM -->|"register / withdraw (if present)"| OWN
+  CODE -->|"register own Settings sources"| SET
+  PT -->|"same operations"| PM
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-All dependencies are process services at the same scope ([ADR 002 D3](../../adr/002-plugin-scope.md)). Content owners depend on `pluginContents`, accepted per D3: installing, enabling or removing a package changes published sources as a data update (`changed`), never a reload, while a PluginManager reload (upgrade, crash) reloads the content owners. Rpc looks up the namespace `plugin`, which PluginManager registers with `managementMethods`, per call and does not reload with it ([methods §3.2](../contracts/session-boundary.md#32-management-method)). A PluginManager reload is a rare structural event whose propagation to content owners is documented, not prevented. Package code rows are ordinary loader rows: they offer the named services their code declares in its `provides` (for example `modalityAdapter`), which consumers collect by service name and scope, and they register their tools with `toolRegistry` and their method namespaces with `sessionMethods`; when one unloads its registrations are withdrawn and its dependents reload under the same rule. A code row on an offline peer node does not unload: its imported services stay registered and fail calls with `node_unavailable`, and its dependents neither reload nor go Pending (requirement on [#5](https://github.com/arcships/dim/issues/5), [§9](#9-requirements-raised-to-mechanism-owners)).
+- PluginManager is one process row. It is locked (§2.3): it cannot be turned off or replaced, because nothing could turn it back on.
+- It injects the loader handle and `managementMethods`. It reads the content owners only if present (`Option<Keyed<_>>`, not a gate): a missing owner skips only that kind of content.
+- It registers a Session part, `PluginTools`, with `partRegistry`. The part registers the plugin tools with the Session's `toolRegistry`; each tool call goes to PluginManager's process service.
+- Owners never look for plugins and never read `plugins.json`.
 
-| Part | Scope | Depends on | Provides |
-| --- | --- | --- | --- |
-| `PluginManagerPlugin` | Process, control node | Settings (typed operations on the loader editable layer), `pluginFiles` (extended) on the control node, the rutis Loader, `FileStorage` and `HostPlatform` of each configured node | `pluginContents` process service; registers `plugin` (`plugin.*`) with `managementMethods` |
-| Package code rows | Process, on the package's node | that node's `FileStorage`, what the code declares | named services declared in its `provides`; reads its own business configuration (its named Settings sources, its own schema) at use time |
-| Content owners | Process | `pluginContents` | — (each defines its own type key) |
+## 2. Data
 
-Contracts defined here: package manifest `dim-plugin.json` schema 2, marketplace index `dim-marketplace.json`, the `pluginContents` service and its `ContentSource` shape ([language-neutral](../../adr/002-plugin-scope.md#d5-contracts-are-language-neutral), A.3; Rust binding in Appendix G), the package directory layout, the code-row integrity check, `plugin.*` methods. Contracts depended on: typed Settings operations on the loader editable layer (#3) for plugin intent and structural fields, `pluginFiles` (extended) on the control node, the rutis-loader `Loader` (`entries`, `reload`, `restart`, `LoaderChanged`), `FileStorage` and `HostPlatform` of the package's node (peer nodes: imported over the rutis link), the [methods](../contracts/session-boundary.md) contract. These depended-on services are existing typed Rust services that PluginManager, a Rust plugin, uses directly; exposing them by name to non-Rust code rows is [#4](https://github.com/arcships/dim/issues/4)'s work. PluginManager never calls a content owner and never names a content type key in code.
+### 2.1 The plugin directory and its manifest
 
-## 2. Data and state
-
-```mermaid
-flowchart TB
-  subgraph LEL["Loader editable layer, via Settings"]
-    MK["Marketplace registrations"]
-    PR["Package intent per node and id<br/>version, source, commit, fingerprint,<br/>contents, enabled; code rows"]
-  end
-  subgraph PS["Package root on each node, via its FileStorage"]
-    PKG["Package directories<br/>content-addressed by fingerprint"]
-    STG["Staging"]
-  end
-  CACHE["Marketplace clones and indexes<br/>control node pluginFiles (extended)"]
-  MEM["pluginContents sources and revision<br/>memory"]:::new
-  PR -->|"apply and each change: verify"| PKG
-  PKG -->|"publishes"| MEM
-  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
-```
-
-Package intent in loader rows is the persisted state; `plugin.list` is projected from loader entries, never from a separate store. Published sources are rebuilt from intent on `apply` (verifying each enabled package) and updated in place after each operation, with a revision bump. Per-plugin business configuration is neither in rows nor in PluginManager: each plugin declares its schema, the configuration is written through Settings typed operations into its named Settings sources, and the plugin reads it at use time, so configuring never reloads anything ([ADR 002 D4](../../adr/002-plugin-scope.md), A16). Package bytes live under the package root of their node, marketplace caches in control-node `pluginFiles` (extended). Nothing is a Session fact.
-
-## 3. Flows
-
-### 3.1 Install and publish
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant PM as PluginManager
-  participant PS as Package store on node
-  participant S as Settings
-  participant L as Loader
-  participant O as Content owner
-  C->>PM: plugin.install source, node
-  PM->>PM: lock node and id
-  PM->>PS: stage fetch and verify digests
-  PM->>PS: commit atomic rename
-  PM->>S: plugins.install with expected revision
-  S->>L: package intent and code rows
-  PM->>PM: publish sources, revision bump
-  PM-->>C: id, fingerprint
-  PM-->>O: changed
-  O->>PM: sources of its own type key
-```
-
-Content-only packages are active once published; owners reconcile on `changed` and never receive pushes. Code rows of an enabled package load at once; they are Pending only while their runtime is unavailable.
-
-### 3.2 Enable, disable and code lifecycle
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant PM as PluginManager
-  participant S as Settings
-  participant L as Loader
-  participant K as Code row
-  C->>PM: plugin.set_enabled id, true
-  PM->>S: plugins.set_enabled with expected revision
-  S->>L: code rows enabled
-  L->>K: apply verifies package integrity
-  C->>PM: plugin.set_enabled id, false
-  PM->>S: plugins.set_enabled
-  S->>L: code rows disabled
-  L->>K: dispose
-  PM-->>C: done after disposal
-```
-
-A code row checks integrity in its own `apply`; a mismatch fails `integrity_failed` and keeps it out of service. No approval is asked: the package runs because a local administrator enabled it. Disabling code unloads that row; its dependents reload per D3, and in-flight turns that used what it offered may fail. That cost is documented, not prevented.
-
-### 3.3 Explicit update, never automatic
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant PM as PluginManager
-  participant PS as Package store
-  participant S as Settings
-  C->>PM: plugin.marketplace.update
-  PM->>PS: refetch indexes only
-  PM-->>C: commits, updateAvailable flags
-  C->>PM: plugin.update id, expectedRevision
-  PM->>PS: stage and commit new fingerprint directory
-  PM->>S: plugins.update version, fingerprint
-  Note over PM,S: code rows restart on the new fingerprint directory after verification
-```
-
-A marketplace refresh only marks `updateAvailable`; changing an installed package always takes an explicit `plugin.update` (decision E22).
-
-## 4. Timing and conflicts
-
-```mermaid
-sequenceDiagram
-  participant PM as PluginManager
-  participant PS as Package store
-  participant S as Settings
-  participant C as Client
-  PM->>PS: commit
-  alt interrupted before Settings write
-    PM-->>C: operation_interrupted, no intent, directory collected later
-  else interrupted after Settings write
-    PM-->>C: operation_interrupted, intent exists, retry gives plugin_exists
-  end
-```
-
-Install is ordered stage, commit, Settings write; the Settings revision is the commit point, so an interruption never leaves a half-registered package.
-
-| Scenario | Outcome | Owner |
-| --- | --- | --- |
-| Code row disabled while something it offers is in use | The row unloads; dependents reload (D3); affected in-flight turns may fail | Loader, code row |
-| Package updated while its code runs | Code rows restart on the new fingerprint directory; dependents reload (D3) | Loader, code row |
-| Node offline after install | Operations on that node `node_unavailable`; its sources withdrawn; its code rows' services fail calls `node_unavailable`; nothing reloads or goes Pending; other nodes unaffected | PluginManager |
-| Plugin business configuration changed (Settings typed operation) while the plugin runs | Business data update and notification; no reload; next use reads the new value | Plugin, Settings |
-| Two installs of one id | Second waits on the lock, then `plugin_exists` | PluginManager |
-| Package disabled while a branch uses its Skill | Branch keeps its adopted prompt until it re-adopts | Skills owner |
-| PluginManager reload | Content owners reload with it (D3); `plugin.*` returns `unknown_method` until it is active again, and Rpc does not reload; in-flight install/remove `operation_interrupted` | PluginManager |
-
-Full table: [Appendix B](#appendix-b-full-conflict-table).
-
-## 5. Context mapping
-
-No direct model-visible effect. PluginManager writes no input, offers no tool and registers no prompt source. Package content reaches the model only through its owner, in that owner's form: Skills through the Skill prompt source (adopted per branch, replayed after compaction as configuration, inherited by child branches from the adopted prefix), MCP and code-row tools through tool declarations and `ToolResult.content`, Hooks output through Session input. Non-interactive Sessions differ only as owners define. The model never sees package ids, fingerprints, marketplace data, configuration or diagnostics.
-
-## 6. Interfaces (summary)
-
-| Interface | Kind | Purpose |
-| --- | --- | --- |
-| `plugin.marketplace.list/add/remove/update/search/view` | Management methods | Marketplaces; `update` refreshes indexes only |
-| `plugin.install/update/list/set_enabled/reload/remove` | Management methods | Package lifecycle; `set_enabled` also switches built-in plugin rows |
-| `pluginContents` (`sources`, `changed`) | Process service, no key | Generic content publication |
-| Code-row integrity check | Loader row rule | Code rows load when enabled and their package verifies |
-| `dim-plugin.json` v2, `dim-marketplace.json` v1 | File formats | Package and marketplace descriptions |
-| Typed Settings operations `plugins.*`, `marketplaces.*` | Depended on (#3, ADR 002 D4) | Persist intent (structural only) |
-| CLI | `/plugins`, `/plugin`, `/reload-plugins`, `dimcode plugin …` | User entries |
-
-Details: [Appendix A](#appendix-a-interface-details).
-
-## 7. Security
-
-Installing, enabling and removing are management methods, provided only by this process plugin and never served to paired remote devices ([methods](../contracts/session-boundary.md)); RemoteGateway never serves them. Package code is trusted native-process code once loaded (AGENTS rule 11). It runs because a local administrator installed and enabled it, not because of an agent decision, so Approval and Permission do not govern it and there is no host-local approval: the security of that configuration is the administrator's. Git fetch runs no repository hooks or submodules; package files are never executed at install time; integrity is rechecked on every load. Content owners run executable content they interpret (Hooks, MCP, workflows) when it is enabled, with no approval step. A plugin's business configuration lives in its named Settings sources, and the plugin handles its own secrets ([settings-service §1.2](../appserver/settings-service.md#12-decision-secrets-belong-to-their-owner)); PluginManager never reads it, and secrets never enter rows, `plugin.list`, diagnostics or content sources. A package whose code contributes management methods extends the host administration surface only once a local administrator enabled it.
-
-## 8. Rule check
-
-Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [ADR 002](../../adr/002-plugin-scope.md) D1–D5.
-
-| Rule | How this document complies |
-| --- | --- |
-| §4.1 Command events for state owned by others | Loader rows are process state with no Timeline; PluginManager changes them only through the owner's typed write operations (Settings `plugins.*` over #3) and never writes other plugins' business configuration. |
-| §4.2 No withdrawal after handover | Not applicable: PluginManager hands no Timeline object to another module; a published source change reaches a branch only when its owner re-adopts. |
-| §4.3 Intervene before a write only through before callbacks | Not applicable: PluginManager registers no before callback and adds no check at a Session or RPC entry; the code-row integrity check runs in that row's own `apply`. |
-| §4.4 Core mechanisms carry no business meaning | `pluginContents` publishes opaque typed sources; the Loader and Rpc get no plugin-specific handling. |
-| §4.5 Read the whole batch before deciding | Not applicable: PluginManager reads no Timeline event. |
-| §4.6 Model context only from handed-over events | Package content reaches the model only through its owner's adopted prompt, tool or input rules. |
-| §4.7 Plugins interact only through public events and services | PluginManager never calls a content owner; owners read `pluginContents`, and each plugin's business configuration is reached only through Settings. |
-| §4.8 Generic requirements to mechanism owners | Typed loader operations (#3), services by name for non-Rust code (#4) and offline-node behaviour (#5) are raised in §9. |
-| §4.9 Only facts later decisions use enter the Timeline | PluginManager writes no Timeline event; intent stays in loader rows, packages in node storage, and clients read `plugin.list`. |
-| §1 Capability and App Server boundary | PluginManager is a process plugin in its own crate, not a Capability; the App Server only dispatches the namespace it registers with `managementMethods`. |
-| ADR 002 D1 Scope follows the owner | Installation is per host, so PluginManager is process-scoped. |
-| ADR 002 D2 No wiring modules | Content owners and code-row consumers collect services by name; no wiring module exists. |
-| ADR 002 D3 Dependencies follow scope | All dependencies are process services; PluginManager and code-row reloads propagate as documented rare structural events. |
-| ADR 002 D4 Structural and business configuration | PluginManager writes only structural intent (install, enable, disable, update, remove) to loader rows, and is the only writer of structural fields such as RemoteGateway's `enabled`; business configuration belongs to each plugin's named Settings sources. |
-| ADR 002 D5 Language-neutral contracts | `pluginContents`, the manifest and the methods are neutral; Appendix G is a binding only. |
-
-## 9. Requirements raised to mechanism owners
-
-### 9.1 Typed operations on the loader editable layer ([#3](https://github.com/arcships/dim/issues/3))
-
-Withdrawn: rutis is an external dependency, so no requirement is raised to it. PluginManager uses the existing rutis-loader operations, checks revisions itself as the only writer, and verifies package integrity before it writes rows.
-
-| Item | Content |
-| --- | --- |
-| Blocked by | ADR 002 D4 puts structural plugin intent in loader rows, and principles §4.1 and §4.7 forbid editing another module's state directly; rutis-loader 0.10 offers no typed write operation for adding, updating or removing rows. |
-| Existing mechanisms considered | `Loader` `entries`, `reload` and `restart` only read or restart rows; `VolatileUpdate` changes `x-volatile` fields of an existing row but cannot add or remove rows; a Settings business source holds business configuration, not rows; a PluginManager-owned store would be a second source of truth for rows. |
-| Generic capability | Typed operations on the editable layer: add, update and remove a row, set its `disabled` flag and set a field of an existing row (an `x-volatile` field arrives as `VolatileUpdate` without reload), each with an expected revision, atomic, with a change notification; no knowledge of packages or plugins. |
-| Effect on sequence, batch, interrupt, reload | No Timeline sequence or batch is involved; an interrupted operation either committed its revision or wrote nothing; adding or removing a row loads or unloads only that row, and its dependents reload per D3. |
-| Owner and issue | rutis-loader, [#3](https://github.com/arcships/dim/issues/3). The Settings typed operations that wrap it (A.6) are a Settings supplement, listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins). |
-
-### 9.2 Other requirements (stated elsewhere)
-
-| Requirement | Owner | Five items |
-| --- | --- | --- |
-| Services imported from a peer node stay registered while the link is down and fail calls with `node_unavailable` | rutis, [#5](https://github.com/arcships/dim/issues/5) | [ExternalAgent §9](ExternalAgent.md#9-requirements-raised-to-mechanism-owners); PluginManager needs it so an offline node never reloads PluginManager or makes a code row's dependents Pending |
-| Runtime services exposed by name to non-Rust plugins | runtime, [#4](https://github.com/arcships/dim/issues/4) | [session access §9](../contracts/session-access.md#9-requirements-raised-to-mechanism-owners); Node code rows need it to use `FileStorage` |
-
-## Appendix A. Interface details
-
-### A.1 Package manifest `dim-plugin.json` (schema 2)
-
-Version 1 was the manifest of the former `--plugin-dir` account package, which a Rust managed provider plugin replaced ([App Server contract](../../../crates/dim-app-server/README.md#managed-provider-plugins)); it is not installable here (A3).
+A plugin is a directory with `dim-plugin.json` at its root. The keys present say which kinds the plugin carries.
 
 ```json
 {
-  "schemaVersion": 2,
-  "id": "acme-review",
-  "version": "1.2.0",
-  "name": "Acme review kit",
-  "description": "Review Skills and hooks",
-  "files": {"skills/review/SKILL.md": "<sha256>", "dist/index.js": "<sha256>"},
-  "contents": [
-    {"type": "skills", "path": "skills"},
-    {"type": "hooks", "path": "hooks/hooks.json"}
-  ],
-  "code": [
-    {"runtime": "node", "entry": "dist/index.js", "hostApiVersion": 2, "rutisVersion": "0.10.0"}
-  ]
+  "name": "my-tool",
+  "description": "Adds the echo tool",
+  "code": {
+    "entry": "index.ts",
+    "inject": ["partRegistry", "settings"],
+    "provides": {},
+    "instanceNames": {},
+    "config": {}
+  },
+  "skills": "skills",
+  "mcp": "mcp.json",
+  "hooks": "hooks.json"
 }
 ```
 
-| Field | Rule (validated once at the install boundary) |
-| --- | --- |
-| `id` | `[a-z][a-z0-9-]{0,63}`; unique per node (A4) |
-| `version` | SemVer; displayed and compared for `updateAvailable` only |
-| `files` | Every file except `dim-plugin.json` and `.git/`; relative POSIX paths, no `..`, no symlinks; unlisted file or digest mismatch rejects |
-| `contents` | Opaque `type` `[a-z][a-z0-9-]*` (key defined by its consumer: `skills`, `hooks`, `mcp`, `workflows`, R14), `path` inside the package, optional `options` ≤ 64 KiB; only this shape is validated |
-| `code` | Optional; `runtime: "node"` loads `entry` as a rutis runtime row; `hostApiVersion`/`rutisVersion` checked; other runtimes rejected until #4 (A1) |
-| Fingerprint | SHA-256 of the stored manifest bytes; the manifest lists every file digest, so it binds all package bytes. It names the exact package content in `plugin.list` and `pluginContents` and addresses its directory |
-
-### A.2 Marketplace index `dim-marketplace.json` (A5)
-
-At the repository root: `{schemaVersion: 1, name, plugins: [{id, version, description, keywords?, source: {path} | {git, ref?}, fingerprint?}]}`. `source.path` is inside the marketplace repository; `fingerprint`, when present, must equal the fetched package's fingerprint.
-
-### A.3 `pluginContents`
-
-Service `pluginContents`, scope process, no key, provided by PluginManagerPlugin; content owners depend on it by name. Errors are data `{ code, message }`.
-
-| Method | Kind | Request | Reply |
-| --- | --- | --- | --- |
-| `sources` | sync | `{ type }` | `{ revision, sources: ContentSource[] }`: enabled, integrity-verified packages on available nodes |
-| `changed` | async | `{ after_revision }` | `{ revision }` once the published revision exceeds `after_revision`; the consumer cancels by dropping the call |
-
-`ContentSource`:
-
-| Field | Type | Meaning |
+| Key | Kind | Meaning |
 | --- | --- | --- |
-| `package` | string | Package id |
-| `version` | string | Package version |
-| `fingerprint` | string | Identifies the exact package bytes |
-| `node` | string or null | null = control node |
-| `root` | string | Package directory on `node` |
-| `path` | string | Declared path, relative to `root` |
-| `options` | object | From the manifest |
+| `name` | — | The plugin's name, `[A-Za-z0-9_-]`, 1–64 characters. Plugins with the same name replace each other. |
+| `code` | code | The rutis row fields ([rutis usage §2](../rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)) except `id` and `name`: `entry` is a path inside the directory; `inject`, `provides`, `instanceNames` and `config` are copied into the row. |
+| `skills` | skills | A directory inside the plugin of Skill documents, registered with SkillsCatalog. |
+| `mcp` | MCP | A file inside the plugin holding MCP server entries, registered with Mcp. |
+| `hooks` | hooks | A file inside the plugin holding a hooks document, registered with Hooks. |
 
-A consumer owns its type key and format and reads files through services valid for `node`. Node rule (A6): a source on node N is content of node N. A consumer that executes content against a Session (for example Hooks) uses only sources whose node equals that Session's resource node (`SessionConfig.resource_node`); a consumer that only reads content on the control node ignores sources it cannot reach and reports them in its own catalog.
+Every path is relative, resolved inside the directory after following symbolic links; a path that leaves the directory is refused at install and at reload (`invalid_manifest`). The manifest is parsed at this boundary; owners receive documents already read.
 
-### A.4 Package store
+A plugin's business configuration (its Settings sources) is not in the manifest: the plugin's code registers its sources with Settings when it starts (§9 R1). The `settings` member of today's TypeScript rows goes away.
 
-Internal to PluginManager, not a service: `stage` (fetch, verify), `commit` (atomic rename), `verify` (re-hash), `remove`, `fetch_marketplace`, each run against the `FileStorage` and `HostPlatform` of the target node; sources are a local path or a Git URL with optional reference. A node that is not configured or whose services are unavailable fails the operation with `node_unavailable`.
+The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.json` in place of their row files (`web.json`, `process.json`, `settings.json`, `session-title.json`).
 
-Packages live under PluginManager's package root on their node, written through that node's `FileStorage` (A13). Git runs through the node's `HostPlatform` with hooks and submodules disabled, `https://` and `ssh://` only (A7). Local paths are copied, never referenced (A8). Directories are content-addressed by fingerprint, so an update never rewrites files a running row uses.
+### 2.2 `plugins.json`
 
-### A.5 Methods (`managementMethods`, namespace `plugin`)
+`<home>/plugins.json`, read and written only by PluginManager. It holds configuration only.
 
-| Method | Params | Result | Interruption |
-| --- | --- | --- | --- |
-| `plugin.marketplace.list` | `{}` | `[{name, url, ref, commit, fetchedAt, error?}]` | Drain |
-| `plugin.marketplace.add` | `{name, url, ref?}` | `{commit}` | Report |
-| `plugin.marketplace.remove` | `{name}` | `{}` | Report |
-| `plugin.marketplace.update` | `{name?}` | `[{name, commit, error?}]`; refreshes indexes only | Report |
-| `plugin.marketplace.search` | `{query, marketplace?}` | `[{marketplace, id, version, description, installed: [{node, version}]}]` | Drain |
-| `plugin.marketplace.view` | `{marketplace, id}` | entry plus manifest summary (`contents` types, `code` presence) | Drain |
-| `plugin.install` | `{source: {marketplace, id} \| {path} \| {git, ref?}, node?, enabled?}` | `{id, version, node, fingerprint}` | Report |
-| `plugin.update` | `{id, node?, version?, expectedRevision}` | `{version, fingerprint}` | Report |
-| `plugin.list` | `{node?}` | `[{id, version, node, builtin, enabled, status, contents, source, updateAvailable, error?}]`; built-in plugin rows appear with `builtin: true` | Drain |
-| `plugin.set_enabled` | `{id, node?, enabled, expectedRevision}`; `id` may name a built-in plugin row (A17) | `{}` | Report |
-| `plugin.reload` | `{id?, node?}` | `[{id, node, status, error?}]` | Report |
-| `plugin.remove` | `{id, node?}` | `{cleanupError?}` | Report |
-
-`status`: `active`, `pending` (awaiting runtime), `unavailable` (node offline; its services fail calls), `failed` (reason), `disabled`. `install`, `update` and `marketplace.update` report phases (`fetch`, `verify`, `commit`) through the call's progress sink ([methods](../contracts/session-boundary.md), A14). Additions to the overview catalog entry: `update`, `marketplace.search/view` (A9).
-
-### A.6 Typed Settings operations used (#3, proposed Settings supplement)
-
-| Operation | Effect |
-| --- | --- |
-| `plugins.install(entry, expected_revision)` | Records package intent and creates code rows on the editable layer |
-| `plugins.update(id, node, version, fingerprint, expected_revision)` | Updates package intent; code rows follow |
-| `plugins.set_enabled(id, node, enabled, expected_revision)` | Sets the package's enabled flag and `set_disabled` on its code rows; for a built-in plugin row, sets its structural `enabled` field (`VolatileUpdate` when `x-volatile`) |
-| `plugins.remove(id, node, expected_revision)` | Removes the package intent and all its code rows |
-| `marketplaces.save/remove` | Marketplace registrations |
-
-`reload`, `restart` and status call the `Loader` directly.
-
-### A.7 Capability mechanics
-
-| Step | Path |
-| --- | --- |
-| Timeline | No writes, no Dispatcher subscription, no `StateCell`; rechecks are Settings revisions |
-| Install | Lock `(node, id)` (A10), `stage`, compare with intent, `commit`, `plugins.install`, publish sources, reply; a failed Settings write leaves an unreferenced directory collected later (A11) |
-| Publication | On `apply`, verify each enabled package and build sources; after each operation, update sources and bump the revision; a package that fails verification is withdrawn and reported `failed` |
-| Code rows | `apply` verifies integrity, else fails `integrity_failed`; `set_enabled`/`update` restart them through the `Loader`; each code row reads its own business configuration at use time |
-| PluginManager reload | Content owners reload with it (D3); `plugin.*` returns `unknown_method` until it is active again, and Rpc does not reload; in-flight install/remove return `operation_interrupted`; code rows are unaffected |
-| Process restart | Loader restores rows; packages re-verify; staging deleted; orphans collected after the loader settled |
-
-## Appendix B. Full conflict table
-
-| Scenario | Sequence order | Outcome | Owner of the decision |
-| --- | --- | --- | --- |
-| Turn or branch interrupt, branch close, concurrent inputs, `input/withdraw`/`input/deleted`, unsettled batch, compaction, child cut | — | No effect on PluginManager; owners' adoption rules apply | Content owners |
-| Package disabled while a Session uses its Skill | revision bump < next adoption | Branch keeps its adopted prompt until it re-adopts | Skills / PromptSourcesBranch |
-| Code row disabled while in use | — | Row unloads; its dependents reload (D3); affected in-flight turns may fail | Loader |
-| Two installs of one id on one node | lock, then Settings revision | Second `plugin_exists` (or `plugin_settings_conflict` across processes) | PluginManager, Settings |
-| Package updated while its code runs | new fingerprint | Code rows restart on the new directory; dependents reload (D3) | Loader, code row |
-| Disable while code runs | disable persisted < restart | Code rows disposed after settling their work; reply after disposal | Loader, code rows |
-| Install interrupted after commit, before Settings | — | `operation_interrupted`; no intent; directory collected | PluginManager |
-| Install interrupted after Settings write | — | `operation_interrupted`; intent exists; retry `plugin_exists` | Client reads state |
-| Duplicate or late `plugin.install` | — | `plugin_exists` | PluginManager |
-| Marketplace update finds a newer version | — | `updateAvailable` only; nothing changes | PluginManager |
-| Target node unavailable before install | — | `node_unavailable`; nothing written | PluginManager |
-| Node offline after install | — | Its sources withdrawn; its code rows' imported services stay registered and fail calls `node_unavailable`; no dependent reloads or goes Pending (requirement on #5); other nodes unaffected | PluginManager, rutis link |
-| Package node differs from a Session's resource node | — | Executing consumers ignore the source for that Session | Content owner |
-| Files modified on disk | next verification | `integrity_failed`; sources withdrawn; code rows fail | PluginManager, code row |
-| PluginManager reload or restart mid-operation | — | Per A.7; never re-executes a fetch | PluginManager |
-| Session unload/restore | — | No effect | — |
-| Client detach | — | Operation continues; reply and progress dropped | Rpc |
-
-## Appendix C. Errors and recovery
-
-| Code (`appError`) | Meaning |
-| --- | --- |
-| `manifest_invalid` | Missing or malformed manifest or index |
-| `integrity_failed` | Digest mismatch, unlisted file, path escape or symlink |
-| `incompatible_host` | `hostApiVersion`/`rutisVersion` or unsupported `runtime` |
-| `source_unavailable` | Git fetch or path read failed (stderr only in diagnostics) |
-| `node_unavailable` | Target node not configured or its services unavailable |
-| `plugin_exists`, `plugin_not_found`, `marketplace_not_found` | Identity errors |
-| `plugin_settings_conflict` | Stale `expectedRevision` |
-| `runtime_unavailable` | Node runtime not configured; code rows Pending |
-| `operation_interrupted` | `Report` rule of the methods contract; read `plugin.list` before retrying |
-
-Removal disposes code rows, then deletes the directory; a deletion failure returns `cleanupError` and garbage collection retries.
-
-## Appendix D. Acceptance
-
-Flow tests through `plugin.*` methods with a local test marketplace and a test consumer of a custom type key:
-
-1. Add, update, search, view a marketplace; invalid index `manifest_invalid`; update marks `updateAvailable` without changing installed packages.
-2. Install from marketplace, path and Git URL; tampered, unlisted and fingerprint-mismatched packages are rejected with nothing written.
-3. A content-only package publishes sources to the test consumer through `changed()` without reloading it; disable withdraws them; remove deletes intent then files; a PluginManager reload reloads the test consumer, which then reads the same sources.
-4. A package with Node code loads its code row as soon as it is enabled, with no approval step; `plugin.update` restarts it on the new directory; disabling disposes it; `plugin.set_enabled` on RemoteGateway's built-in row reaches it as `VolatileUpdate` without a reload.
-5. Disabling a package whose code row offers a test tool reloads its dependents; the test records the failed in-flight turn as the documented outcome.
-6. Concurrent installs; stale `expectedRevision`; interruption after commit and after the Settings write.
-7. Peer test node: install targets it; taking it offline makes only its operations and its code rows' services fail with `node_unavailable`, withdraws its sources and reloads nothing; recovery restores them.
-8. Restart: rows restored, integrity verified, staging removed, orphans collected.
-
-## Appendix E. Assumptions
-
-| # | Assumption | Basis | Effect if rejected |
-| --- | --- | --- | --- |
-| A1 | Package code is Node runtime rows (rutis-bridge) that provide and consume named services; no dynamic Rust code; access to the runtime's typed services by name waits on #4 | Overview §4, Appendix C; ADR 002 D5 | More `code.runtime` values |
-| A2 | Package code runs when its package is enabled; there is no host-local approval | Decision R6 (round 2); overview conventions | An approval step before code loads |
-| A3 | Manifest schema 2 extends the former account-package format; v1 is not accepted | App Server README; judgment | Compatibility mapping |
-| A4 | One installed version per `(node, id)` | Judgment | Side-by-side versions |
-| A5 | Marketplace index format and name | Judgment; feature list "Git plugin marketplaces" | Format replaced |
-| A6 | Sources are node content; executing consumers match the Session's resource node | Overview multiple nodes; judgment | Consumers read peer content through imported services |
-| A7 | Git via the node's `git`, hooks/submodules disabled, `https`/`ssh` only | Judgment | Library fetcher or more schemes |
-| A8 | Local paths copied, not linked | Judgment (integrity) | A development link mode |
-| A9 | Additional methods `update`, `marketplace.search/view` | Feature list; overview §4 | Folded into other methods |
-| A10 | Operations serialize per `(node, id)` | Judgment | Settings revisions alone |
-| A11 | Unreferenced directories garbage-collected after the loader settled | Judgment | Explicit cleanup command |
-| A12 | Content owners depend on `pluginContents`; a PluginManager reload reloads them | ADR 002 D3 | A separately hosted publication service |
-| A13 | Package directories are written through the node's `FileStorage` under a PluginManager package root (atomic rename available there) | Judgment | A per-node storage service is needed |
-| A14 | Install and update report progress phases | Methods contract progress sink; judgment | Result only |
-| A15 | No automatic upgrade, including content-only packages | Decision E22 | Opt-in auto-upgrade setting |
-| A16 | Each plugin declares the schema of its business configuration, which is written through Settings typed operations into its named Settings sources and read at use time; PluginManager has no configure method | ADR 002 D4 | PluginManager would write other plugins' business configuration |
-| A17 | `plugin.set_enabled` also sets the structural `enabled` field of built-in plugin rows (for example RemoteGateway); no plugin writes its own structural fields | Decision R3 (round 2); ADR 002 D4 | Each plugin writes its own structural fields |
-
-## Appendix F. Open questions
-
-| Question | Description |
-| --- | --- |
-| #3 typed operations | The Settings operations in A.6 are proposed here; their final shape belongs to the Settings supplement and #3 (structural intent only; business configuration is each plugin's, ADR 002 D4) |
-| Overview SkillsCatalog change | "Installation and removal are initiated by PluginManager" is read as: PluginManager publishes and withdraws sources, SkillsCatalog reads them; PluginManager makes no SkillsCatalog call |
-| Peer-node content | Whether control-node consumers should read content on peer nodes through imported resource services (#5) |
-
-Requirements on [#3](https://github.com/arcships/dim/issues/3), [#4](https://github.com/arcships/dim/issues/4) and [#5](https://github.com/arcships/dim/issues/5): see [§9](#9-requirements-raised-to-mechanism-owners).
-
-## Appendix G. Rust binding
-
-Rust content owners may use the generated binding; the neutral form in A.3 is normative.
-
-```rust
-/// Binding for service `pluginContents` (process, no key).
-impl PluginContents {
-    pub fn sources(&self, type_key: &str) -> Vec<Arc<ContentSource>>;
-    pub fn changed(&self) -> tokio::sync::watch::Receiver<u64>; // revision; maps `changed`
-}
-pub struct ContentSource {
-    pub package: String,
-    pub version: String,
-    pub fingerprint: String,
-    pub node: Option<String>,
-    pub root: PathBuf,
-    pub path: PathBuf,
-    pub options: serde_json::Value,
+```json
+{
+  "version": 1,
+  "installed": [
+    {
+      "id": "my-tool",
+      "name": "my-tool",
+      "source": { "path": "/Users/me/src/my-tool" },
+      "dir": "/Users/me/src/my-tool",
+      "kinds": ["code", "skills"]
+    },
+    {
+      "id": "hooks-plus",
+      "name": "Hooks",
+      "source": { "git": "https://example.com/hooks-plus.git", "ref": "main", "commit": "4f1c…" },
+      "dir": "<home>/plugins/hooks-plus/4f1c…",
+      "kinds": ["code", "hooks"]
+    }
+  ],
+  "names": {
+    "my-tool": { "use": "my-tool" },
+    "Hooks": { "use": "hooks-plus" },
+    "web": { "off": true }
+  }
 }
 ```
 
-PluginManager registers it under `TypeKey::named("pluginContents")`; its `plugin.*` methods use the `managementMethods` binding of the [methods](../contracts/session-boundary.md) contract.
+| Field | Meaning |
+| --- | --- |
+| `installed[].id` | Unique among installed plugins. Defaults to the manifest name; the caller gives another when two installed plugins share a name. |
+| `installed[].name` | The manifest name at install or last reload. |
+| `installed[].source` | `{path}` for a local directory, used in place and never copied; `{git, ref?, commit}` for Git. |
+| `installed[].dir` | The directory that is loaded: the local path itself, or the clone under `<home>/plugins/<id>/<commit>`. |
+| `installed[].kinds` | The kinds the manifest carried at install or last reload. |
+| `names.<name>.use` | Which plugin the name uses: an installed id, `"builtin"` or `"default"`. Absent: the built-in plugin of that name if there is one, else the default plugin of that name. |
+| `names.<name>.off` | `true` when the user turned the name off. |
+
+A name with no entry is in its shipped state: a built-in or default plugin on. Writing goes to a temporary file in the same directory, flushed on its own writable handle (`sync_all`, which also works on Windows), then renamed over `plugins.json`. A file that does not parse fails startup with its path; PluginManager never overwrites a file it could not read. The format is versioned; an unknown version fails startup.
+
+### 2.3 The default configuration file
+
+Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the default CLI passes the file in its release; development uses `runtime/default-plugins.json`).
+
+```json
+{
+  "plugins": {
+    "goal": "plugins/goal",
+    "web": "plugins/web",
+    "session-title": "plugins/session-title",
+    "workflow": "plugins/workflow",
+    "scheduler": "plugins/scheduler"
+  },
+  "locked": ["PluginManager", "Rpc", "Transport"]
+}
+```
+
+- `plugins` maps each default plugin's name to its directory, relative to this file. A default plugin is a plugin directory like any other (§2.1).
+- `locked` lists names that cannot be turned off and whose plugin cannot be switched. Other plugins of a locked name may still be installed. Locking is product configuration; PluginManager applies it.
+
+### 2.4 State PluginManager does not keep
+
+| State | Owner | Read through |
+| --- | --- | --- |
+| Which rows exist, their status (`Pending`, `Running`, `Failed` with error, `Stopped`) | rutis-loader | `Loader::entries()`, `Loader::get(id)`, `Loader::waiting_for` |
+| Which built-in rutis plugins exist | the App Server's assembly | rows of the `assembly` layer in `Loader::entries()`; the row id is the plugin's name |
+| Skills, MCP servers, hooks registered from a plugin | SkillsCatalog, Mcp, Hooks | the owner's own methods |
+| A plugin's business configuration | the plugin's Settings sources | Settings |
+
+## 3. Flows
+
+How PluginManager's commands map onto rutis-loader. The loader has two layers. `assembly` holds the built-in rows. `plugins` is the editable layer, which rutis does not persist (`NoPersist`); it holds the rows of default and installed plugins and the `disabled` overrides of built-in rows. Every row of a default or installed plugin has the plugin's id as its row id (for a default plugin, its name).
+
+| Configuration change | Loader commands |
+| --- | --- |
+| Turn on name N using plugin P | Turn off the plugin N uses now (below), then `create` P's row |
+| Turn off name N | Built-in: `set_disabled(N, true)`. Default or installed: `remove` its row |
+| Turn a built-in back on | `set_disabled(N, false)` |
+| Reload | `Loader::reload(id)` |
+
+rutis lets the editable layer disable a built-in row but not change or remove it, so replacing a built-in turns its row off and adds a row for the new plugin. The old plugin is turned off first, so the new one does not meet a second provider of the same services. rutis reloads the dependents of the rows that change.
+
+Content follows the same switch: when name N stops using P, PluginManager withdraws P's content from each present owner; when N starts using P, it registers P's content with each present owner (§3.7).
+
+### 3.1 Startup
+
+1. The App Server calls PluginManager's startup function with the home and the default configuration file. The function reads `plugins.json` and each used plugin's manifest and returns:
+   - the initial `plugins` layer: the rows of the default and installed plugins that are on, and `disabled: true` for each built-in name that is off or uses another plugin;
+   - the names whose `instanceNames` the catalog needs (§4);
+   - the built-in rows that are off, which the App Server drops from the rows it requires to become Active.
+2. The App Server reconciles `[assembly, plugins]` with `plugins` as the editable layer. A built-in that is off never starts.
+3. PluginManager's row applies, registers `plugin` with `managementMethods` and `PluginTools` with `partRegistry`, then, after activation, deletes leftover staging directories and Git clones no installed entry refers to.
+
+A default or installed plugin whose row fails does not fail startup; `plugin.list` shows it as failed with rutis' error. Content is not registered again at startup: owners keep their own state (§9 R2).
+
+### 3.2 Install
+
+`plugin.install {source, id?, enable?}`. `enable` defaults to `true` ([requirement 2](../plugin-management.md): installed means usable).
+
+1. Acquire (§7): a local path is checked in place; a Git source is cloned into a staging directory, checked, then renamed to `<home>/plugins/<id>/<commit>`. Any failure deletes the staging directory.
+2. Read the manifest. Refuse an `id` already installed (`plugin_exists`).
+3. Write `plugins.json` with the new entry, and, when `enable` is true and the name is not locked, `names.<name>.use = id`.
+4. If it was turned on: carry out "turn on" (§3). The reply carries the row's status and any content an owner refused.
+
+Installing a plugin whose name is locked records it without turning it on, and says so in the reply.
+
+### 3.3 Turn on, turn off, switch
+
+- `plugin.enable {name, use?}`: `use` is an installed id, `"builtin"` or `"default"`; absent, the name's current `use`. Refused for a locked name when `use` changes (`plugin_locked`). Writes `names.<name>` (clears `off`, sets `use`), then carries out the commands of §3.
+- `plugin.disable {name}`: refused for a locked name. Writes `off: true`, then turns the name off.
+
+When a content owner itself is turned on (Hooks, for example), PluginManager registers the content of every plugin in use that carries that kind (§3.7).
+
+### 3.4 Reload
+
+`plugin.reload {name}` reloads the plugin the name uses. The host watches no files; the call is the signal that something changed.
+
+1. Read the manifest again. If its name changed, refuse (`name_changed`); the user installs it again under the new name.
+2. Code: `Loader::reload(id)`. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager first removes and creates the row with the new fields.
+3. Content: register each kind again with its present owner; the new document replaces the old one. A kind the manifest no longer carries is withdrawn.
+4. Update `kinds` in `plugins.json` if they changed.
+
+A name using a built-in Rust plugin cannot be reloaded (`not_reloadable`): it needs a rebuild; it can be replaced (§3.3).
+
+### 3.5 Update
+
+`plugin.update {id, ref?}` for a Git plugin: fetch and check the new commit into a new directory as in §3.2, write the new `commit` and `dir`, then, if the plugin is in use, carry out a reload on the new directory (its row is created again, since the entry path changed). The old directory is deleted afterwards. A local-path plugin has nothing to update (`not_updatable`); reload it. Asking the user to confirm an update is the client's business.
+
+### 3.6 Remove and list
+
+- `plugin.remove {id}`: if a name uses it, turn the name off first (back to its built-in or default plugin when one exists, else nothing). Remove the entry from `plugins.json`, then delete its Git directory. A local directory is never deleted. Built-in and default plugins cannot be removed (`not_removable`); they can be turned off.
+- `plugin.list {}`: one item per name, built from `plugins.json`, the default configuration file and the `assembly` rows, with each candidate and the one in use; status comes from `Loader::get` at the time of the call.
+
+### 3.7 Content registration
+
+For each kind P carries and each owner present, PluginManager calls the owner's `register({plugin, dir, document})` and, to withdraw, `withdraw({plugin})`, where `plugin` is the plugin's name. The owner keeps what was registered as its own state, persists it, and restores it after its own reload. PluginManager does not watch owners and registers nothing again on their behalf. An owner that is absent when PluginManager would call it is skipped; the reply names the skipped kinds. When PluginManager turns that owner's name on, it registers all content of that kind.
+
+## 4. Timing and conflicts
+
+- PluginManager changes `plugins.json` in one step on its in-memory table, then writes the file, then gives the loader and owner commands. A second operation on the same id or name sees the first one's change (`plugin_exists`, or it acts on the new state). rutis-loader runs its own operations one at a time.
+- A command that rutis or an owner refuses leaves the configuration as written; the item shows the refusal in `plugin.list` (for example, the new plugin failed because another plugin of a different name provides the same service).
+- `instanceNames`: rutis needs the names a plugin's parts provide in Sessions and branches in the catalog before the runtime starts ([rutis usage §2](../rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). Installing, switching or reloading to a plugin whose `instanceNames` are not in the running catalog records the change and replies `restart_required`; the row is created at the next start. Plugins that only register tools, methods or prompt sources do not have this limit.
+- A reload or replacement in use: the old generation unloads, rutis cancels its running calls, and in-flight turns using it may fail ([ADR 002](../../adr/002-plugin-scope.md) consequences). This is documented, not prevented.
+
+## 5. Context mapping
+
+PluginManager adds nothing to model context. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). Tool results of the plugin tools say what changed, the status, and `restart_required` when it applies.
+
+## 6. Interfaces (summary)
+
+- Management methods, namespace `plugin` (A.1): `list`, `install`, `enable`, `disable`, `reload`, `update`, `remove`.
+- CLI: `dimcode plugin list | install <path|git-url> [--ref R] [--id ID] [--no-enable] | enable <name> [--use ID|builtin|default] | disable <name> | reload <name> | update <id> | remove <id>`.
+- Agent tools from `PluginTools`: `plugin_list`, `plugin_install`, `plugin_enable`, `plugin_disable`, `plugin_reload`, `plugin_update`, `plugin_remove`, with the same parameters. They are tool calls: Permission decides each one as usual ([requirement 5](../plugin-management.md), [ADR 003](../../adr/003-approval-scope.md)).
+- Owner operations PluginManager calls: `register` / `withdraw` on SkillsCatalog, Mcp and Hooks (§9 R2).
+
+## 7. Security
+
+Installing and turning on are host configuration done through management methods or tool calls; enabled plugin code runs without host-local approval ([ADR 003](../../adr/003-approval-scope.md)). PluginManager adds no scope, approval or trust step ([requirements](../plugin-management.md)). What it guards is the acquisition itself:
+
+- Git sources are `https://` or `ssh://` URLs only; other schemes (`file://`, `ext::`, scp-style paths) and arguments starting with `-` are refused before Git runs. Clones run with submodules off (`--no-recurse-submodules`), hooks off (`core.hooksPath` set to an empty directory), `protocol.file.allow=never` and no terminal prompt.
+- A clone goes to `<home>/plugins/.staging/<random>` and is renamed into place only after its manifest and paths are checked. A failure deletes the staging directory; startup deletes leftovers and clones no entry refers to.
+- No manifest path may leave the plugin directory after following symbolic links; a symbolic link inside a Git clone that points outside it is refused.
+- `plugins.json` is written atomically (§2.2).
+
+## 8. Rule check
+
+PluginManager is not a Capability: it has no Timeline state, writes no Timeline event and has no branch part.
+
+| Rule | How this document complies |
+| --- | --- |
+| Principles §4 rule 1 (commands for others' state) | Loader rows are rutis' state and content is its owners' state; PluginManager only gives them commands and reads their state when asked. |
+| Principles §4 rule 2 (handover) | Not applicable: no input or Timeline handover. |
+| Principles §4 rule 3 (before callbacks only) | No intervention before a write. |
+| Principles §4 rule 4 (no business meaning in core) | The owner `register`/`withdraw` operations and Settings registration (§9) carry no plugin-management meaning; any caller may use them. |
+| Principles §4 rule 5 (batch) | Not applicable. |
+| Principles §4 rule 6 (context from handed-over events) | Nothing enters model context except tool results (§5). |
+| Principles §4 rule 7 (public events and services only) | rutis-loader's public `Loader` API, `managementMethods`, `partRegistry`, `toolRegistry` and the owners' public services. |
+| Principles §4 rule 8 (requirements to mechanism owners) | §9: Settings, SkillsCatalog, Mcp and Hooks; none to rutis. |
+| Principles §4 rule 9 (only facts later decisions use) | Configuration lives in `plugins.json`, the only record; runtime state is read from its owners. |
+| Principles §1 (Capability and App Server boundary) | A process plugin of the App Server; no Capability. |
+| ADR 002 D1 (scope follows state) | Process: installation is per host. `PluginTools` is a Session part only because tools are registered per Session. |
+| ADR 002 D2 (no wiring modules) | No wiring: owners are called through their registration operations. |
+| ADR 002 D3 (dependencies follow scope) | Process dependencies only; owners are optional reads, so their reload does not reload PluginManager. |
+| ADR 002 D4 (structural vs business configuration) | Structural configuration (installed, used, off) is `plugins.json`; business configuration stays in each plugin's Settings sources, registered by the plugin. |
+| ADR 002 D5 (language-neutral contracts) | Methods and owner operations are JSON contracts. |
+| ADR 006 D3 (a rutis plugin is one row) | Each plugin with code is one process row, created, turned off and reloaded by PluginManager's commands; content is not a row. |
+
+## 9. Requirements raised to mechanism owners
+
+None to rutis: every loader operation used exists in rutis-loader 0.17.1.
+
+**R1. Settings: sources registered at run time (M1).**
+
+| Item | Content |
+| --- | --- |
+| Blocked by | Settings sources are fixed when the App Server builds Settings: built-in Rust owners are listed in code (`.reserve::<T>()`), TypeScript rows' `settings` members are read at startup (`.declare()`). A plugin installed, replaced or removed at run time cannot add or withdraw its sources. |
+| Existing mechanisms considered | PluginManager registering sources from the manifest (business configuration is not plugin management, ADR 002 D4); a restart per install (violates requirement 3). |
+| Generic capability | `settings.register(declaration)` on the named `settings` service, with the declaration of today's `settings` member (`source`, `userFile`, `projectFile?`, `schema`, `userOnly`). The registration belongs to the caller and is withdrawn when it unloads; a second registration of the same source name fails. Every owner, built-in Rust and TypeScript alike, registers its sources in its `apply`. The stored documents stay in the home whether or not a source is registered. The hard-coded `.reserve::<T>()` and `.declare()` paths are removed. |
+| Effect on sequence, batch, interrupt, reload | No Timeline effect. A reload registers again from the new generation. |
+| Owner and issue | Settings (App Server); to be filed with #384. |
+
+**R2. SkillsCatalog, Mcp, Hooks: register plugin content and keep it (M1 for SkillsCatalog and Mcp if they land in time; Hooks M2).**
+
+| Item | Content |
+| --- | --- |
+| Blocked by | Owners read only user and project sources; there is no way to hand them a plugin's content. |
+| Existing mechanisms considered | A `pluginContents` service owners read (owners would look for plugins; rejected); content as loader rows (Dim product state in rutis; rejected). |
+| Generic capability | A process operation `register({plugin, dir, document})` that adds or replaces the content of `plugin`, and `withdraw({plugin})`. The owner keeps registered content as its own state, persists it in its own storage, and restores it after its own reload. Mcp prefixes server ids with `plugin`; Hooks names the source `plugin:<plugin>` and gives commands `DIM_PLUGIN_ROOT = dir`; SkillsCatalog reads Skills under `dir`. |
+| Effect on sequence, batch, interrupt, reload | As each owner's existing sources: a change is a data update the owner announces its own way. |
+| Owner and issue | SkillsCatalog, Mcp, Hooks ([Hooks](Hooks.md)). |
+
+## Appendix A. Interface details
+
+### A.1 Methods (`managementMethods`, namespace `plugin`)
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `plugin.list` | `{}` | `[{name, use, off, locked, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?}]` |
+| `plugin.install` | `{source: {path} \| {git, ref?}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], restartRequired?}` |
+| `plugin.enable` | `{name, use?}` | `{status?, skipped?, restartRequired?}` |
+| `plugin.disable` | `{name}` | `{}` |
+| `plugin.reload` | `{name}` | `{status?, skipped?, restartRequired?}` |
+| `plugin.update` | `{id, ref?}` | `{commit, status?, restartRequired?}` |
+| `plugin.remove` | `{id}` | `{}` |
+
+`status` is the row's loader status (`pending`, `running`, `failed`, `stopped`) for plugins with code. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
+
+### A.2 Errors
+
+`plugin_exists`, `plugin_not_found`, `plugin_locked`, `not_removable`, `not_reloadable`, `not_updatable`, `name_changed`, `invalid_manifest` (with the field and reason), `invalid_source` (scheme or argument refused), `acquire_failed` (Git's message), `record_unreadable` (startup). A loader or owner refusal after the configuration was written is not an error of the call: it is reported in the result and in `plugin.list`.
+
+## Appendix B. Conflict table
+
+| Scenario | Outcome | Who decides |
+| --- | --- | --- |
+| Two installs of one id | The second sees the first entry: `plugin_exists` | PluginManager |
+| Plugin of a different name provides a service already provided | rutis fails the new row; `plugin.list` shows the error | rutis |
+| Replace a built-in that others depend on | The built-in row turns off, the new row starts; rutis reloads the dependents | rutis |
+| Reload while a Session uses the plugin's tools | Old generation unloads, calls cancelled, new parts mounted | rutis, the instance's mounters |
+| Content owner absent at install | That kind is skipped and reported; registered when PluginManager turns the owner on | PluginManager, owner |
+| Content owner reloads | It restores its own registered content | owner |
+| `instanceNames` not in the running catalog | Configuration recorded, `restart_required`; row created at next start | PluginManager |
+| Process stops during a Git install | Staging directory deleted at next start; `plugins.json` was not written | PluginManager |
+| Process stops after `plugins.json` was written, before the loader command | Next start builds rows from `plugins.json` | PluginManager startup |
+
+## Appendix C. Acceptance (M1)
+
+1. With an isolated home, `dimcode` starts with goal, web, session-title, workflow and scheduler loaded; `dimcode plugin list` shows them and the built-in plugins.
+2. `dimcode plugin install ./my-tool` (a TypeScript plugin registering one tool) makes the tool visible to the model in a new turn without a restart.
+3. Editing `index.ts` and running `dimcode plugin reload my-tool` changes the tool's behavior in the open Session.
+4. The agent does steps 2–3 through its tools, each call decided by Permission.
+5. `dimcode plugin disable web` removes web's tools; `enable web` brings them back; the state survives a restart.
+6. Installing a plugin named like a built-in and enabling it replaces the built-in; `enable <name> --use builtin` switches back.
+7. `disable PluginManager` is refused with `plugin_locked`.
+8. A Git install with a `file://` URL is refused; a failed clone leaves nothing under `<home>/plugins`.
+9. A default plugin's Settings source appears when it starts and disappears when it is turned off.
+
+## Appendix D. Open questions
+
+- Python plugins installed from a directory: today a Python row names a module (`py:<module>`) imported from one configured project directory. Loading a module from a plugin directory needs a decision in the Python runtime setup; after M1.
+- How the release ships the default plugins and the TypeScript runtime, and how `node` is found, is a release packaging item of M1 tracked with #384.

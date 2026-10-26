@@ -526,7 +526,7 @@ The project file is edited in the repository, not through these methods. Hooks h
 
 | Question | Description |
 | --- | --- |
-| Plugin source | Hook documents in plugin packages depend on [#3](https://github.com/arcships/dim/issues/3) and PluginManager's `pluginContents`; enabled with the plugin, only from sources on the Session's resource node |
+| Plugin source | PluginManager registers a plugin's hook document with Hooks (`register({plugin, dir, document})`, withdrawn with `withdraw({plugin})`); Hooks keeps and persists registered documents itself ([PluginManager §9 R2](PluginManager.md#9-requirements-raised-to-mechanism-owners)); only from sources on the Session's resource node |
 | Questions as a notification | Questions asks through the `ask_user` tool call ([Questions](Questions.md)); a Claude `Notification` `elicitation_dialog` analogue would observe that call. Questions is Ready; this analogue is not designed and stays unsupported |
 | pi extensions | pi hooks are TypeScript extension handlers, not commands; running them needs a TypeScript plugin runtime (#4), outside this mechanism |
 
