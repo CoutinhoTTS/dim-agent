@@ -198,8 +198,16 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
         endpoint: endpoint.clone(),
         server: server.clone(),
         profile,
-        client_kind: "cli",
-        client_name: "dimcode",
+        client_kind: if matches!(options.action, crate::args::Action::Acp { .. }) {
+            "other"
+        } else {
+            "cli"
+        },
+        client_name: if matches!(options.action, crate::args::Action::Acp { .. }) {
+            "AcpGateway"
+        } else {
+            "dimcode"
+        },
     };
     match Client::open(&connection, false).await {
         Ok(mut client) => {

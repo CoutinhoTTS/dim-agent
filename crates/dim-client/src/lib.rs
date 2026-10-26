@@ -1,6 +1,7 @@
 //! Public RPC v3 transport shared by native Dim clients.
 
 pub mod callback;
+pub mod wire;
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -352,6 +353,10 @@ impl Client {
     /// capability such as `session.fork`).
     pub fn offers(&self, feature: &str) -> bool {
         self.features.iter().any(|offered| offered == feature)
+    }
+
+    pub fn features(&self) -> &[String] {
+        &self.features
     }
     /// Reconnects without starting or replacing a daemon.
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {

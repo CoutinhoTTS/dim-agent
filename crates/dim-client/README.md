@@ -17,6 +17,10 @@ connection and waits for transport EOF and the Windows bridge's exit.
 owners validate callback state, exchange credentials and persist account state.
 The caller owns cancellation and the returned HTTP stream.
 
+`wire` is the shared public product-event and history-page parsing boundary.
+Clients consume its typed facts directly; it does not project UI state or run
+Agent code.
+
 Daemon discovery, startup, installation, home selection and command behavior
 belong to the host. This crate has no App Server, CLI, TUI or OAuth-provider
 implementation dependency. Protocol boundary tests exercise actual local

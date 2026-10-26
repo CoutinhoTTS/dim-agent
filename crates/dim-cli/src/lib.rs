@@ -397,7 +397,34 @@ fn prepare() -> Result<Option<Options>> {
     Ok(Some(options))
 }
 
+async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>) -> Result<i32> {
+    let mut signals = plugins::Signals::listen()?;
+    let client = client::connect_inner(options, true)
+        .await?
+        .ok_or("App Server did not start")?;
+    let (gateway, finished) = dim_acp::AcpGateway::new(
+        client,
+        dim_acp::Io {
+            reader: Box::new(tokio::io::stdin()),
+            writer: Box::new(tokio::io::stdout()),
+        },
+        agent_id,
+    );
+    let gateway = root.plugin(rutis::Typed::new(gateway));
+    (&gateway).await.map_err(plugin_error)?;
+    let (code, result) = tokio::select! {
+        result = finished => (0, result.map_err(|_| "ACP gateway ended without a result")?),
+        () = signals.received() => (130, Ok(())),
+    };
+    gateway.dispose().await?;
+    result?;
+    Ok(code)
+}
+
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
+    if let Action::Acp { agent_id } = &options.action {
+        return run_acp(root, &options, agent_id.clone()).await;
+    }
     if matches!(options.action, Action::Chat | Action::Tui)
         && options.prompt.is_none()
         && !options.no_tui
@@ -619,7 +646,8 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         Action::Chat | Action::Tui | Action::Exec => {
             session::chat(&mut client, &options, images).await
         }
-        Action::Help
+        Action::Acp { .. }
+        | Action::Help
         | Action::Version
         | Action::DaemonStop
         | Action::Timeline { .. }

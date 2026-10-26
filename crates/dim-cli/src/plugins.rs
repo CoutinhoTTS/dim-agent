@@ -249,7 +249,7 @@ impl WebHold {
 }
 
 /// Ctrl+C and SIGTERM, from the moment they are listened for.
-struct Signals {
+pub(crate) struct Signals {
     #[cfg(unix)]
     interrupt: tokio::signal::unix::Signal,
     #[cfg(unix)]
@@ -257,7 +257,7 @@ struct Signals {
 }
 
 impl Signals {
-    fn listen() -> std::io::Result<Self> {
+    pub(crate) fn listen() -> std::io::Result<Self> {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
@@ -270,7 +270,7 @@ impl Signals {
         Ok(Self {})
     }
 
-    async fn received(&mut self) {
+    pub(crate) async fn received(&mut self) {
         #[cfg(unix)]
         tokio::select! {
             _ = self.interrupt.recv() => {}

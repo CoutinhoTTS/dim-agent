@@ -6,6 +6,7 @@ pub const HELP: &str = "dimcode [OPTIONS]\n\n\
 Pure Rust scrollback client. With redirected stdin, run one prompt and exit.\n\n\
 Commands:\n\
   tui                              Open the interactive scrollback client\n\
+  acp [--agent ID]                  Serve ACP over stdin/stdout\n\
   exec [-p TEXT] [--image PATH ...] [--json] [--permission PRESET]\n\
                                    Run text and/or local images and exit\n\
   exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]\n\
@@ -69,6 +70,9 @@ pub enum Action {
     Chat,
     Tui,
     Exec,
+    Acp {
+        agent_id: Option<String>,
+    },
     Export {
         session_id: String,
         format: Format,
@@ -269,6 +273,17 @@ impl Options {
                         "Use --client-secret without a value; enter the secret at the hidden prompt"
                             .into(),
                     );
+                }
+                "acp" if matches!(options.action, Action::Chat) => {
+                    options.action = Action::Acp { agent_id: None };
+                }
+                "--agent" => {
+                    let Action::Acp { agent_id } = &mut options.action else {
+                        return Err("--agent requires acp".into());
+                    };
+                    if agent_id.replace(value(&mut args)?).is_some() {
+                        return Err("Supply --agent only once".into());
+                    }
                 }
                 "tui" if matches!(options.action, Action::Chat) => options.action = Action::Tui,
                 "exec" if matches!(options.action, Action::Chat) => options.action = Action::Exec,

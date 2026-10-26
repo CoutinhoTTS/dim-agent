@@ -15,6 +15,50 @@
   },
   "modules": [
     {
+      "id": "dim_acp",
+      "crate": "dim_acp",
+      "parent": null,
+      "file": "crates/dim-acp/src/lib.rs",
+      "unexpandedMacros": [
+        "agent_client_protocol::on_receive_notification",
+        "agent_client_protocol::on_receive_request",
+        "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_acp::gateway",
+      "crate": "dim_acp",
+      "parent": "dim_acp",
+      "file": "crates/dim-acp/src/gateway.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::select",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_acp::projection",
+      "crate": "dim_acp",
+      "parent": "dim_acp",
+      "file": "crates/dim-acp/src/projection.rs",
+      "unexpandedMacros": [
+        "json"
+      ]
+    },
+    {
+      "id": "dim_acp::rpc",
+      "crate": "dim_acp",
+      "parent": "dim_acp",
+      "file": "crates/dim-acp/src/rpc.rs",
+      "unexpandedMacros": [
+        "json",
+        "matches",
+        "tokio::select"
+      ]
+    },
+    {
       "id": "dim_agent_aimux",
       "crate": "dim_agent_aimux",
       "parent": null,
@@ -3549,9 +3593,164 @@
         "matches",
         "tokio::select"
       ]
+    },
+    {
+      "id": "dim_client::wire",
+      "crate": "dim_client",
+      "parent": "dim_client",
+      "file": "crates/dim-client/src/wire.rs",
+      "unexpandedMacros": []
     }
   ],
   "edges": [
+    {
+      "from": "dim_acp",
+      "to": "dim_acp::gateway",
+      "references": [
+        "mod gateway",
+        "path gateway::Gateway::new",
+        "path gateway::Incoming::Notification",
+        "path gateway::Incoming::Request"
+      ]
+    },
+    {
+      "from": "dim_acp",
+      "to": "dim_acp::projection",
+      "references": [
+        "mod projection"
+      ]
+    },
+    {
+      "from": "dim_acp",
+      "to": "dim_acp::rpc",
+      "references": [
+        "mod rpc",
+        "path rpc",
+        "path rpc::Rpc::start"
+      ]
+    },
+    {
+      "from": "dim_acp",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path dim_client::Result",
+        "use dim_client::Client"
+      ]
+    },
+    {
+      "from": "dim_acp::gateway",
+      "to": "dim_acp::projection",
+      "references": [
+        "path Projection",
+        "path Projection::default",
+        "use crate::projection::Projection"
+      ]
+    },
+    {
+      "from": "dim_acp::gateway",
+      "to": "dim_acp::rpc",
+      "references": [
+        "path Native",
+        "path Rpc",
+        "path rpc",
+        "use crate::rpc",
+        "use crate::rpc::Native",
+        "use crate::rpc::Rpc"
+      ]
+    },
+    {
+      "from": "dim_acp::gateway",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Text",
+        "use dim_agent_types::ContentBlock"
+      ]
+    },
+    {
+      "from": "dim_acp::gateway",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path TurnOutcome::Cancelled",
+        "path TurnOutcome::Completed",
+        "path TurnOutcome::Failed",
+        "use dim_agent_types::TurnOutcome",
+        "use dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_acp::gateway",
+      "to": "dim_client::wire",
+      "references": [
+        "path Event",
+        "path EventContent::Input",
+        "path EventContent::InputConsumed",
+        "path EventContent::InputDeleted",
+        "path EventContent::TurnEnd",
+        "path History",
+        "path Progress",
+        "use dim_client::wire::Event",
+        "use dim_client::wire::EventContent",
+        "use dim_client::wire::History",
+        "use dim_client::wire::Progress"
+      ]
+    },
+    {
+      "from": "dim_acp::projection",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Image",
+        "path ContentBlock::Text",
+        "path ToolContent",
+        "path ToolContent::Blocks",
+        "path ToolContent::Text",
+        "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::ToolContent"
+      ]
+    },
+    {
+      "from": "dim_acp::projection",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path UserInput",
+        "use dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_acp::projection",
+      "to": "dim_client::wire",
+      "references": [
+        "path Event",
+        "path EventContent::Input",
+        "path EventContent::InputConsumed",
+        "path EventContent::InputDeleted",
+        "path EventContent::Text",
+        "path EventContent::Thinking",
+        "path EventContent::ToolCall",
+        "path EventContent::ToolCompleted",
+        "path EventContent::ToolResult",
+        "path EventContent::ToolStart",
+        "path EventContent::ToolUse",
+        "path EventContent::ToolUseStart",
+        "path EventContent::TurnEnd",
+        "path EventContent::TurnStart",
+        "path Progress",
+        "use dim_client::wire::Event",
+        "use dim_client::wire::EventContent",
+        "use dim_client::wire::Progress"
+      ]
+    },
+    {
+      "from": "dim_acp::rpc",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path dim_client::Error",
+        "path dim_client::RpcError",
+        "use dim_client::Client",
+        "use dim_client::Message"
+      ]
+    },
     {
       "from": "dim_agent_aimux",
       "to": "dim_agent_aimux::config",
@@ -17624,10 +17823,19 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_acp",
+      "references": [
+        "path dim_acp::AcpGateway::new",
+        "path dim_acp::Io"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::args",
       "references": [
         "mod args",
         "path Action::Account",
+        "path Action::Acp",
         "path Action::Chat",
         "path Action::DaemonStop",
         "path Action::DefaultTerminalMode",
@@ -17672,6 +17880,7 @@
       "references": [
         "mod client",
         "path client",
+        "path client::connect_inner",
         "path client::shutdown",
         "path client::stop"
       ]
@@ -17797,6 +18006,7 @@
         "mod plugins",
         "path plugins::Connection",
         "path plugins::DaemonLink",
+        "path plugins::Signals::listen",
         "path plugins::Tui",
         "path plugins::WebHold"
       ]
@@ -18188,18 +18398,18 @@
     },
     {
       "from": "dim_cli::configure",
-      "to": "dim_cli::wire",
-      "references": [
-        "path Configuration",
-        "use crate::wire::Configuration"
-      ]
-    },
-    {
-      "from": "dim_cli::configure",
       "to": "dim_client",
       "references": [
         "path Client",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::configure",
+      "to": "dim_client::wire",
+      "references": [
+        "path Configuration",
+        "use crate::wire::Configuration"
       ]
     },
     {
@@ -18235,7 +18445,7 @@
     },
     {
       "from": "dim_cli::display",
-      "to": "dim_cli::wire",
+      "to": "dim_client::wire",
       "references": [
         "path Configuration",
         "path Event",
@@ -19019,7 +19229,7 @@
     },
     {
       "from": "dim_cli::projection",
-      "to": "dim_cli::wire",
+      "to": "dim_client::wire",
       "references": [
         "path Event",
         "path EventContent::BranchCreate",
@@ -19028,14 +19238,19 @@
         "path EventContent::CollaborationDelivered",
         "path EventContent::CollaborationRequest",
         "path EventContent::CollaborationResult",
+        "path EventContent::Compaction",
+        "path EventContent::CompactionStart",
         "path EventContent::Configuration",
         "path EventContent::ExecEnded",
         "path EventContent::ExecStarted",
         "path EventContent::Input",
         "path EventContent::InputApplied",
+        "path EventContent::InputConsumed",
         "path EventContent::InputDeleted",
+        "path EventContent::InputWithdraw",
         "path EventContent::ModelEnd",
         "path EventContent::ModelStart",
+        "path EventContent::ModelUsage",
         "path EventContent::Other",
         "path EventContent::PermissionChanged",
         "path EventContent::Text",
@@ -19043,8 +19258,11 @@
         "path EventContent::ToolCall",
         "path EventContent::ToolCompleted",
         "path EventContent::ToolResult",
+        "path EventContent::ToolStart",
         "path EventContent::ToolUse",
+        "path EventContent::ToolUseStart",
         "path EventContent::TurnEnd",
+        "path EventContent::TurnStart",
         "path Progress",
         "use crate::wire::Event",
         "use crate::wire::EventContent",
@@ -19061,7 +19279,7 @@
     },
     {
       "from": "dim_cli::projection::tests",
-      "to": "dim_cli::wire",
+      "to": "dim_client::wire",
       "references": [
         "path Event",
         "path Progress"
@@ -19151,14 +19369,6 @@
     },
     {
       "from": "dim_cli::question::line",
-      "to": "dim_cli::session",
-      "references": [
-        "path History",
-        "use crate::session::History"
-      ]
-    },
-    {
-      "from": "dim_cli::question::line",
       "to": "dim_client",
       "references": [
         "path Client",
@@ -19168,10 +19378,11 @@
       ]
     },
     {
-      "from": "dim_cli::session",
-      "to": "dim_agent_types",
+      "from": "dim_cli::question::line",
+      "to": "dim_client::wire",
       "references": [
-        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
+        "path History",
+        "use crate::session::History"
       ]
     },
     {
@@ -19324,16 +19535,6 @@
     },
     {
       "from": "dim_cli::session",
-      "to": "dim_cli::wire",
-      "references": [
-        "path Event",
-        "path Progress",
-        "use crate::wire::Event",
-        "use crate::wire::Progress"
-      ]
-    },
-    {
-      "from": "dim_cli::session",
       "to": "dim_client",
       "references": [
         "path Client",
@@ -19344,6 +19545,18 @@
         "use crate::client::Client",
         "use crate::client::Message",
         "use crate::client::RequestTooLarge"
+      ]
+    },
+    {
+      "from": "dim_cli::session",
+      "to": "dim_client::wire",
+      "references": [
+        "path Event",
+        "path History",
+        "path Progress",
+        "use crate::wire::Event",
+        "use crate::wire::Progress",
+        "use dim_client::wire::History"
       ]
     },
     {
@@ -19634,22 +19847,6 @@
     },
     {
       "from": "dim_cli::session_host",
-      "to": "dim_cli::wire",
-      "references": [
-        "path Configuration",
-        "path Event",
-        "path EventContent::Configuration",
-        "path EventContent::ExecEnded",
-        "path EventContent::PermissionChanged",
-        "path Progress",
-        "use crate::wire::Configuration",
-        "use crate::wire::Event",
-        "use crate::wire::EventContent",
-        "use crate::wire::Progress"
-      ]
-    },
-    {
-      "from": "dim_cli::session_host",
       "to": "dim_client",
       "references": [
         "path Client",
@@ -19667,6 +19864,22 @@
       "to": "dim_client::callback",
       "references": [
         "path mcp::Capture::bind"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_client::wire",
+      "references": [
+        "path Configuration",
+        "path Event",
+        "path EventContent::Configuration",
+        "path EventContent::ExecEnded",
+        "path EventContent::PermissionChanged",
+        "path Progress",
+        "use crate::wire::Configuration",
+        "use crate::wire::Event",
+        "use crate::wire::EventContent",
+        "use crate::wire::Progress"
       ]
     },
     {
@@ -19714,17 +19927,17 @@
     },
     {
       "from": "dim_cli::session_host::member",
-      "to": "dim_cli::wire",
+      "to": "dim_client",
       "references": [
-        "path Event",
-        "path Progress"
+        "path client::RpcError"
       ]
     },
     {
       "from": "dim_cli::session_host::member",
-      "to": "dim_client",
+      "to": "dim_client::wire",
       "references": [
-        "path client::RpcError"
+        "path Event",
+        "path Progress"
       ]
     },
     {
@@ -19777,19 +19990,19 @@
     },
     {
       "from": "dim_cli::session_host::tasks",
-      "to": "dim_cli::wire",
+      "to": "dim_client",
+      "references": [
+        "path client::RpcError"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
+      "to": "dim_client::wire",
       "references": [
         "path Event",
         "path EventContent::BranchCreate",
         "path EventContent::BranchCreateFailed",
         "path EventContent::BranchStart"
-      ]
-    },
-    {
-      "from": "dim_cli::session_host::tasks",
-      "to": "dim_client",
-      "references": [
-        "path client::RpcError"
       ]
     },
     {
@@ -24266,57 +24479,17 @@
       ]
     },
     {
-      "from": "dim_cli::wire",
-      "to": "dim_agent_types",
-      "references": [
-        "path JS_MAX_SAFE_INTEGER"
-      ]
-    },
-    {
-      "from": "dim_cli::wire",
-      "to": "dim_agent_types::content",
-      "references": [
-        "path content"
-      ]
-    },
-    {
-      "from": "dim_cli::wire",
-      "to": "dim_agent_types::events",
-      "references": [
-        "path BranchCreateData",
-        "path BranchCreateFailedData",
-        "path BranchStartData",
-        "path CollaborationDeliveredData",
-        "path CollaborationRequestData",
-        "path CollaborationResultData",
-        "path ExecEndedData",
-        "path ExecStartedData",
-        "path InputAppliedData",
-        "path InputDeletedData",
-        "path InputMessageData",
-        "path ModelOutputEndData",
-        "path ModelStartData",
-        "path TextData",
-        "path ThinkingData",
-        "path ToolCallData",
-        "path ToolCompletedData",
-        "path ToolResultData",
-        "path ToolUseData",
-        "path TurnEndData"
-      ]
-    },
-    {
-      "from": "dim_cli::wire",
-      "to": "dim_agent_types::permission",
-      "references": [
-        "path PermissionChangedData"
-      ]
-    },
-    {
       "from": "dim_client",
       "to": "dim_client::callback",
       "references": [
         "mod callback"
+      ]
+    },
+    {
+      "from": "dim_client",
+      "to": "dim_client::wire",
+      "references": [
+        "mod wire"
       ]
     },
     {
@@ -24325,6 +24498,70 @@
       "references": [
         "path Result",
         "path crate::Error",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_client::wire",
+      "to": "dim_agent_types",
+      "references": [
+        "path JS_MAX_SAFE_INTEGER",
+        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
+      ]
+    },
+    {
+      "from": "dim_client::wire",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path content"
+      ]
+    },
+    {
+      "from": "dim_client::wire",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path BranchCreateData",
+        "path BranchCreateFailedData",
+        "path BranchStartData",
+        "path CollaborationDeliveredData",
+        "path CollaborationRequestData",
+        "path CollaborationResultData",
+        "path ContextCompactionData",
+        "path ContextCompactionStartData",
+        "path ExecEndedData",
+        "path ExecStartedData",
+        "path InputAppliedData",
+        "path InputConsumedData",
+        "path InputDeletedData",
+        "path InputMessageData",
+        "path InputWithdrawData",
+        "path ModelOutputEndData",
+        "path ModelStartData",
+        "path ModelUsageData",
+        "path TextData",
+        "path ThinkingData",
+        "path ToolCallData",
+        "path ToolCompletedData",
+        "path ToolResultData",
+        "path ToolStartData",
+        "path ToolUseData",
+        "path ToolUseStartData",
+        "path TurnEndData",
+        "path TurnStartData"
+      ]
+    },
+    {
+      "from": "dim_client::wire",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionChangedData"
+      ]
+    },
+    {
+      "from": "dim_client::wire",
+      "to": "dim_client",
+      "references": [
+        "path Result",
         "use crate::Result"
       ]
     }
@@ -25087,11 +25324,11 @@
       "path": "char::is_ascii_digit"
     },
     {
-      "module": "dim_cli::wire",
+      "module": "dim_client::wire",
       "path": "D::Error"
     },
     {
-      "module": "dim_cli::wire",
+      "module": "dim_client::wire",
       "path": "Wire::deserialize"
     }
   ]
