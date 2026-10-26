@@ -44,9 +44,11 @@ Session / InputQueue / Loop / Approval / Questions / Attachments / ...
 
 每个稳定 v1 agent/client/protocol 方法、选定的 unstable 表面和 Lody 方法，分别在[计划 §4](../../../design/acp-gateway-implementation.md#4-稳定-acp-v1-方法逐项映射)、[§8](../../../design/acp-gateway-implementation.md#8-lody-方法和能力逐项决策) 判定。能力只来自已实现 handler 和真实 native availability，不复制历史能力对象。
 
-首版覆盖标准 Session create/list/load/resume、prompt/cancel、工具输出、审批、图片和文本资源。mode/model、表单提问、close/delete、fork 按现有 native 接口的可用性提供。Lody 子集为 history、compaction 和终态 turn fork 锚点。精确 turn steering、Goal 控制、token 统计、额度、完整 task/subagent 事件、标题接管、项目归属及文件回滚不支持；计划区分原生合同缺失和尚未接入。
+首版覆盖标准 Session create/list/load/resume、prompt/cancel、工具输出、审批、图片和文本资源。账户认证、mode/model、表单提问、close/delete、fork 按现有 native 接口的可用性提供。Lody 子集为 history、compaction 和终态 turn fork 锚点。精确 turn steering、Goal 控制、token 统计、额度、完整 task/subagent 事件、标题接管、项目归属及文件回滚不支持；计划区分原生合同缺失和尚未接入。
 
-网关不调用 client fs/terminal，不启动客户端 MCP，不改账户配置、不注入 raw blocks。非空 mcpServers/additionalDirectories 在创建或 attach 前报错，不静默忽略。未知非控制 metadata 按 ACP 扩展规则处理；识别到尚不支持的控制字段，在提交输入前拒绝。
+网关不调用 client fs/terminal，不启动客户端 MCP，不暴露任意账户管理、不注入 raw blocks。非空 mcpServers/additionalDirectories 在创建或 attach 前报错，不静默忽略。未知非控制 metadata 按 ACP 扩展规则处理；识别到尚不支持的控制字段，在提交输入前拒绝。
+
+socket/pipe 身份校验与模型账户认证分开。网关从现有 account.providers/status 发现 managed provider，并只发布真正可执行的 auth method。agent-type browser 方法通过 authenticate 调用现有 begin/complete/status/cancel；terminal 方法另开交互 helper，不能把其 methodId 发给 authenticate。OAuth、凭据交换和持久化仍归 provider。准确调用、callback 所有权、headless 限制和取消合同见[计划 §4.4](../../../design/acp-gateway-implementation.md#44-账户认证与现有-oauth-插件)。没有账户插件时不强制 configured/API-key 模型登录。
 
 ## 3. 状态与生命周期
 
@@ -81,7 +83,7 @@ load 固定 native 历史头，按 nextAfter/done 分页，按分支 sequence �
 
 所有分支的 native approval request 转为 ACP permission request。回答走 approval.respond；原生当前 policy 和 first-answer 顺序为准。resolved/cancelled 结束本地 waiter，不提供 always 选项。
 
-client 声明 form elicitation 后，pending ask_user 转为 elicitation/create，回答走现有 session.question.respond。pending question 来自 tool-call/result，不加 server read API。client 不支持 elicitation 时不删除 native 工具；问题可由另一个 Dim 客户端回答，Gateway 显示等待状态。MCP-server elicitation 和 URL 流程不支持。
+client 声明 form elicitation 后，pending ask_user 转为 elicitation/create，回答走现有 session.question.respond。pending question 来自 tool-call/result，不加 server read API。client 不支持 elicitation 时不删除 native 工具；问题可由另一个 Dim 客户端回答，Gateway 显示等待状态。MCP-server elicitation 和 ACP URL elicitation 不支持。
 
 ### 4.4 提交不确定性
 
@@ -89,7 +91,7 @@ submission id 是查询键，不是 native exactly-once 保证。是否保证未
 
 ## 5. 安全与上下文
 
-保留既有 socket ownership/权限、Windows authenticated pipe、协议/profile 检查及 frame limit。使用明确 native-method 白名单，ACP 方法不能变成任意 RPC proxy。Session 操作外只读取模型选项需要的安全 provider catalog；首版不开放 account/quota management。
+保留既有 socket ownership/权限、Windows authenticated pipe、协议/profile 检查及 frame limit。使用明确 native-method 白名单，ACP 方法不能变成任意 RPC proxy。Session 操作外只读取安全 provider catalog，并执行计划 §4.4 中自有的登录流程；不开放 logout、quota 或任意 account management。provider 私有 realm、client ID 和 token 流程不进入本仓库。
 
 ACP 内容经现有 session.submit.user 进入，外部边界完成解析和转换。Gateway 不写任意 Timeline 事件、raw context blocks、插件设置或 host tools。模型只看到正常 adopted input/tool result，不注入 ACP identity 或 transport diagnostics。
 

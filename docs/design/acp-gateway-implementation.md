@@ -55,10 +55,10 @@ existing Session and business owners
 
 | 路径 | 职责和输入输出 | 调用者 / 依赖 |
 | --- | --- | --- |
-| `crates/dim-client/` | 从现有 `dim-cli/src/client.rs` 提取 RPC framing、request/response、hello、socket/pipe 安全连接；输入连接配置，输出已有 Client/Message/RpcError 语义 | CLI 和 Gateway 共用；不依赖 `dim-cli` 或 `dim-app-server` |
+| `crates/dim-client/` | 从现有 `dim-cli/src/client.rs` 提取 RPC framing、request/response、hello、socket/pipe 安全连接；复用现有 loopback callback capture 的纯 I/O 部分。输入连接配置，输出已有 Client/Message/RpcError 语义 | CLI 和 Gateway 共用；不依赖 `dim-cli` 或 `dim-app-server`，不包含 OAuth provider 实现 |
 | `crates/dim-acp/` | `AcpGateway` 插件及其 ACP、Session、prompt、更新和 Lody 协议实现 | 依赖 `dim-client`、`dim-agent-types`、rutis、官方 ACP SDK；不依赖 TUI / App Server 实现 |
 | `crates/dim-cli/src/client.rs` | 保留 CLI 的 daemon 定位、启动、产品安装路径和命令策略，调用提取后的连接实现 | 保留全部既有调用者；不把 CLI Options 作为共享库合同 |
-| `crates/dim-cli/src/args.rs`、`lib.rs`、`plugins.rs` | 解析 `acp`，取得宿主输入、装载插件、等待终止、返回退出码 | 不写协议 handler；不装载 Tui、UiLeaf、WebHold 或更新提示 |
+| `crates/dim-cli/src/args.rs`、`lib.rs`、`plugins.rs` | 解析 `acp`，取得宿主输入、装载插件、等待终止、返回退出码；计划的 `acp --auth-setup METHOD_ID` 是独立交互认证入口 | 不写协议 handler；普通 ACP 入口不装载 Tui、UiLeaf、WebHold 或更新提示 |
 | `crates/dimcode/` 和既有打包验证 | 同一个 executable 分发 `acp`；保留跨平台打包和启动行为，仅发现实际打包缺口时修改脚本 | 不新增常驻进程或独立 ACP daemon |
 | Gateway 公开流程测试 | 从 stdio 驱动真实 Gateway，再连接隔离 mock-model daemon | 使用现有 transport/CLI fixture；不测私有映射 helper |
 
@@ -66,7 +66,7 @@ existing Session and business owners
 
 ### 3.2 插件输入和装配顺序
 
-宿主提供两个明确的进程级输入：独占的 ACP reader/writer；App Server endpoint、server executable 和预期 model profile 等连接配置。I/O 只交出一次。宿主提供自己的错误报告/退出入口，协议正文只写 ACP writer。上述为本地宿主输入，不是 daemon 新服务、loader 配置或跨语言 API。
+宿主提供两个明确的进程级输入：独占的 ACP reader/writer；App Server endpoint、server executable 和预期 model profile 等连接配置。可选登录输入复用现有宿主账户登录配置与 browser/terminal 能力，见 §4.4；不把实际账户 realm、client ID 或 token 流程写入 Gateway。I/O 只交出一次。宿主提供自己的错误报告/退出入口，协议正文只写 ACP writer。上述为本地宿主输入，不是 daemon 新服务、loader 配置或跨语言 API。
 
 实现时使用 rutis 现有依赖声明和 effect，不新建插件容器。客户端树没有 Dim 的 Session/branch group；不得直接照搬 `AgentBuilder` 装配或声称不存在的 `AcpHost` 服务已经可用。#434 U3 对 CLI binding 的范围仍待维护者确认：在首个实现单元中确认并记录具体 named-dependency 写法，不把 daemon migration 或 #403/#405 当成运行前置，也不扩散当前 CLI 的 raw `Arc<Connection>` 写法。
 
@@ -89,7 +89,7 @@ parse CLI options (including isolated --home / --cwd / --server / --agent)
 
 可选：`session.list` / `session.summaries`、`session.close`、`session.delete`、`session.fork`、`session.permission.get/update`、`approval.respond`；每 Session 用 `session.methods` 发现 `session.input.withdraw`、`session.question.respond`、`session.context.usage` 和 `attachment.put`。缺少撤回时取消直接走现有 `session.stop`，并披露已接收输入可能保留的限制。
 
-仅模型选择可以读取 `provider.list`、`provider.catalog`、`provider.selection` 的安全投影。Gateway 不代理 `account.*`、`settings.*`、`mcp.*`、插件管理、凭据或任意 management method；也不把 ACP 方法名直接转成原生 RPC 方法名。
+模型选择只读取 `provider.list`、`provider.catalog`、`provider.selection` 的安全投影。账户认证只允许 §4.4 列出的 `account.providers/status` 和属于当前连接的 login attempt 调用，不开放 `account.*` 代理、recover/logout/usage、settings、MCP 配置、插件管理或凭据接口。也不把 ACP 方法名直接转成原生 RPC 方法名。
 
 ## 4. 稳定 ACP v1 方法逐项映射
 
@@ -99,8 +99,8 @@ parse CLI options (including isolated --home / --cwd / --server / --agent)
 
 | ACP 方法 | 首版 | 原生调用、返回时点和限制 |
 | --- | --- | --- |
-| `initialize` | 可接 | 先 `hello {protocolVersion:3, clientKind:"other", clientName:"AcpGateway"}`。按 SDK 协商 ACP 1；记录 client capabilities；返回实际 agent capabilities、agentInfo、`authMethods:[]`。不调用账户认证。重复 initialize 拒绝 |
-| `authenticate` | 不支持 | 认证由受保护的本地 RPC transport 完成；不提供 auth method。显式调用报 unsupported，不触发登录或伪成功 |
+| `initialize` | 可接 | 先 `hello {protocolVersion:3, clientKind:"other", clientName:"AcpGateway"}`。按 SDK 协商 ACP 1；记录 client capabilities；读取现有 account discovery/status，按 §4.4 生成真实可执行的 authMethods。initialize 不自动开始登录；无 managed provider 时不强制登录。重复 initialize 拒绝 |
+| `authenticate` | 条件可接 | 仅接受本连接已发布的 agent-type methodId；`account.status` 确认已登录则返回 `{}`，否则走现有 browser begin → 宿主 callback capture → browser complete → status。OAuth 和 token 交换由原插件完成，不由本地 RPC transport 的身份校验代替 |
 | `logout` | 不支持 | 不映射到账户登出，不声明 logout capability |
 | `session/new` | 可接 | 校验绝对 `cwd`，只接受空 `mcpServers` 和空/缺失 additional directories；`session.create {cwd, agentId?}` → `session.attach {sessionId}` → 读取 main 固定历史头和 Session methods / permission / adopted model。先登记 runtime，再订阅和回放；初始化完成才返回 id、可用 modes/configOptions |
 | `session/load` | 可接 | 从 `session.summaries` 或 `session.list` 获取真实 cwd，检查一致；attach → 固定头 main history 从 0 回放 → 接上 live → 返回。重复 load 复用 runtime，不重复建立订阅；在 prompt 中拒绝重放 |
@@ -127,7 +127,7 @@ mode 和 model 的选项来自当前 Session 的公开状态，不能用用户�
 | `elicitation/complete` | 首版不发送 | 不支持 URL elicitation 或 out-of-band completion；form 请求正常响应即结算 |
 | `fs/read_text_file`、`fs/write_text_file` | 首版不调用 | 无现有客户端文件访问/未保存 buffer backend 接线；仍由 Dim 工作区工具访问资源节点 |
 | `terminal/create`、`terminal/output`、`terminal/wait_for_exit`、`terminal/kill`、`terminal/release` | 首版不调用 | 执行继续归 Dim 的 exec/BackgroundExec；不把客户端 terminal 接成第二个工具执行入口 |
-| `$/cancel_request` | 有限支持 | 可以取消 Gateway 自己尚未投递的只读准备/回放请求，按 SDK 返回 cancelled。已投递变更不回滚、不宣称未执行。`session/prompt` 的运行取消通过 `session/cancel`；首版不承诺所有原生 RPC 都可按 request id 撤销 |
+| `$/cancel_request` | 有限支持 | 可以取消本地只读准备/回放及 §4.4 的认证等待，按 SDK 返回 cancelled。已投递变更不回滚、不宣称未执行；认证只取消自己尚 pending 的 attempt。`session/prompt` 的运行取消通过 `session/cancel`；首版不承诺所有原生 RPC 都可按 request id 撤销 |
 
 提问表单沿用 [Questions](plugins/Questions.md) 的 options、multiSelect、allowCustom 及答案合同；优先复用 CLI 中与终端无关的 [question projection](../../crates/dim-cli/src/question/mod.rs)，不能复制另一套工具校验。仅存在真实 Lody question 字段时附加 elicitation metadata；answer notes、secret、preview、auto-answer 无来源，不发布。另一客户端先回答时服从 native `question_already_answered` / `question_cancelled`。
 
@@ -146,6 +146,58 @@ mode 和 model 的选项来自当前 Session 的公开状态，不能用用户�
 | ACP v2 / HTTP / WebSocket transport | 不支持 | 不用默认生产 WS endpoint 执行；首版只有 stdio 和现有本地 RPC transport |
 
 attachment 上传成功而后续 submit 失败时，文件仍归原生 Session，交给已有清理规则；Gateway 不直接删 Session 文件。跨上传和 submit 没有原子事务，不宣称有。
+
+### 4.4 账户认证与现有 OAuth 插件
+
+本地 socket/pipe 的身份校验决定谁能连接 daemon；模型账户登录决定对应 managed provider 能否取得凭据。两者不是同一认证，前者成功不能推出后者已登录。
+
+现有公开接线已经完整：[ManagedProvider](../../crates/dim-app-server/src/managed_provider.rs) → [account methods](../../crates/dim-app-server/src/managed_provider/management.rs) → 插件的 browser/device/login attempt 实现。私有账户插件通过现有 `run_with` 安装；Gateway 只使用公开 RPC，不导入私有插件代码、realm、client ID、token 或存储格式。浏览器发起/完成调用见 [CLI login](../../crates/dim-cli/src/login.rs)，自动 callback capture 和结算见 [SessionHost](../../crates/dim-cli/src/session_host.rs)；复用 [Capture](../../crates/dim-cli/src/mcp.rs) 的纯 loopback I/O 部分，不复制 HTTP parser 或 OAuth 实现。
+
+#### Discovery 和认证方法
+
+1. `account.providers {}` 返回 `providerId/displayName/loginMethods`；`account.status {providerId}` 返回 AccountSnapshot。只有方法明确不存在或 providers 为空时，才视为没有此接入；网络、存储、配置错误不能吞成“无须认证”。
+2. auth method id 从发现的 provider/method/flow 确定性编码，按本连接已发布 id 查表，不从客户端 methodId 解析任意 provider、realm 或 callback。provider id 来自原生响应，public build 不硬编码某个私有账户。独立 terminal helper 重新 discovery 并生成同一 id 表，再校验传入 id，不依赖父进程的内存映射。
+3. 当 provider 声明 browser，且宿主可打开浏览器并捕获其已配置 loopback redirect 时，发布 agent-type browser method；它才使用 `authenticate`。已登录时调用 authenticate 只核对状态并成功，不重启登录。
+4. client 声明 `clientCapabilities.auth.terminal=true` 时，可发布 terminal-type method。其计划 args 是 `["--auth-setup", METHOD_ID]`，追加到同一个配置中的 `dimcode acp ...` invocation；新交互进程复用既有 CLI login 的 browser/device 流程、相同 executable、home、profile 和宿主登录配置。`--auth-setup` 尚未实现，不是现有参数。客户端等待交互进程退出后再试请求；按照 ACP，**不能**把 terminal methodId 发给 authenticate。
+5. 无可交付 UI/终端的 headless 宿主不发布不可执行的方法。device 已有原生接口，但首版通过上述交互 helper 提供，不另造 ACP user-code/form 流程。终端 helper 是独立交互进程，其文本输出不进入 ACP 连接 stdout。
+
+认证方法可在账户已登录时继续发布，供后续重新认证；是否需要认证必须针对当前选择的 provider 判断。API-key/configured profile 不因其他 managed provider 未登录而被阻止。没有 account 插件时 authMethods 可为空；同一 Gateway 不安装插件、不切换默认 provider、不启动另一个账户构建。
+
+#### Protocol-driven authenticate
+
+```text
+authenticate(advertised agent methodId)
+  -> account.status(providerId)
+  -> already signed in? return {}
+  -> bind owned loopback callback capture for configured redirect
+  -> account.login.browser.begin(providerId, directory, redirectUri)
+  -> open returned authorizationUrl through the host
+  -> await callback / attempt terminal state / cancellation / expiry
+  -> account.login.browser.complete(providerId, attemptId, callbackUrl)
+  -> account.status(providerId), require authenticated account
+  -> authenticate response {}
+```
+
+directory/redirectUri 来自宿主现有登录配置和入口选择，不来自 ACP 任意元数据；只有插件决定授权端点、PKCE、state、token 交换、刷新和持久化。callbackUrl 仅在本地捕获后交还同一个 native attempt，不进入 form elicitation、model context、ACP 消息或日志。
+
+| 原生方法 | Gateway 使用范围 |
+| --- | --- |
+| `account.providers`、`account.status` | discovery、确认所选 provider 的账户状态；不向 ACP 暴露完整账户身份或 credentialEpoch |
+| `account.login.browser.begin {providerId,directory,redirectUri,email?}` | 发起本连接主动 authenticate；首版不从 ACP 收集 email，沿用宿主已有配置 |
+| `account.login.browser.complete {providerId,attemptId,callbackUrl}` | 只完成当前连接自己捕获的 attempt；返回 AccountSnapshot，不返回 token |
+| `account.login.status {providerId,attemptId}` | 以已有 pending/completed/failed/cancelled/expired 判断等待结果；只在本连接认证等待期间按现有 CLI 一秒节奏查询，不建立常驻账户 poller |
+| `account.login.cancel {providerId,attemptId}` | 只取消本连接尚在等待的 attempt；不能按任意客户端字段取消其他客户端登录 |
+| `account.login.begin {providerId,directory,email?}` | 已有 device flow，首版仅独立 terminal helper 复用既有 CLI login 调用；不宣称支持 ACP 内的 device UI |
+
+浏览器启动、callback capture 失败或端口被占用时，结束本次认证并尽力取消自己已创建的 attempt，返回真实错误；不自动改 redirect 端口或跳到新登录。确认所选 managed provider 缺账户时可以返回 ACP `auth_required`（-32000）；仅知道 native `provider_failed` 时不能解析文案冒充这个结论。登入成功是 native 账户状态，不保证每个后续模型请求不会发生网络或凭据拒绝。
+
+#### 认证生命周期
+
+每连接每 provider 同时最多一个认证操作，保留 methodId/native attemptId、callback listener、deadline 和 generation；不持有 token。到期使用原生 expiresAt / attempt terminal state，不另设短于原生登录流程的任意总超时。
+
+EOF、插件卸载、用户取消或 `$/cancel_request` 结束本地认证等待、关闭 callback listener，并尽力 `account.login.cancel` 当前连接自己的 pending attempt；不调用 logout，不清除已存账户。若 browser.complete 已经提交，插件仍拥有被接受的交换与持久化，即使 Gateway 不再等待；断线后只能查询 status/attempt_status，不自动重发 complete 或 begin，也不能把取消等待说成回滚登录。迟到 callback 必须同时匹配 connection generation、provider 和 attempt，不能完成下一次登录。
+
+`logout` 和 `account.usage` 仍不在首版接入范围：有原生方法不等于 Gateway 公开通用账户管理。此认证接线不增加 App Server 接口或修改 OAuth 插件。
 
 ## 5. Prompt、回放和响应关联
 
@@ -193,6 +245,7 @@ submit 的拒绝/不确定性遵循 [现有提交合同](../../crates/dim-app-se
 | ACP I/O、SDK connection、唯一 writer、RPC reader/writer | AcpGateway generation | EOF、I/O failure、signal、插件卸载进入同一个 close-once 路径 |
 | RPC ids、ACP ids、请求关联、每 Session 操作槽位 | 当前连接 generation | 响应结算或 close；不持久化，不跨连接复用 request id |
 | Session attach、回放 cursor、流式 offsets、permission/form waiter | Gateway 的 Session runtime | 显式 native close/delete、detach、RPC generation 切换或 Gateway close |
+| authentication waiter、loopback callback listener、自己的 attempt 关联 | Gateway 的连接 generation | §4.4 结算、取消、到期或 close；实际 OAuth 交换和账户持久化仍归 managed provider |
 | Session / turn / 工具进程 / 目标 / 后台工作 | App Server 的现有所有者 | 只有显式业务命令和原生生命周期决定；Gateway 退出不接管这些资源 |
 
 ### 6.2 插件和连接状态
@@ -221,7 +274,7 @@ RPC I/O 只有一个 owner，用 `send` / `next` 关联 response 和 notificatio
 
 | 情况 | 必须行为 |
 | --- | --- |
-| ACP EOF / writer failure / signal / plugin unload | 关闭本地准入，释放本地请求和 subscriptions；尽力 session.detach 后断开 RPC。不调用 session.stop/close、daemon.shutdown、Agent close；共享执行继续 |
+| ACP EOF / writer failure / signal / plugin unload | 关闭本地准入，释放本地请求和 subscriptions；按 §4.4 尽力取消自己的 pending login attempt，尽力 session.detach 后断开 RPC。不调用 session.stop/close、daemon.shutdown、Agent close 或 logout；共享执行和已被插件接受的登录交换继续 |
 | RPC 连接丢失、ACP 仍在线 | 暂停新变更请求，保留已知关联；最多恢复 30 秒，0.25/0.5/1/2 秒封顶间隔重连同一受保护 endpoint，不启动第二个 daemon。每次 hello 核验协议/profile/instance，再 attach 和按固定头补历史 |
 | 恢复后 instance id 未变 | 接回当前 runtime；read/attach/history 可重试，已送出的变更只查询结果 |
 | daemon instance id 改变 | 旧 RPC ids 和非持久 progress 失效；Session identity 仍用持久 id。按 history 重建 turn 终态；未知 permission id 不擅自重发旧答案，等待 attach 的真实 pending replay |
@@ -293,10 +346,11 @@ cancel 到达 submit reply 之前时保留 cancel 标志，等拿到 input id �
 | native `service_reloading` / `service_unavailable` | 保留 appError 原因和消息；不把永久不可用当作无限重试 |
 | `permission_conflict` / question terminal errors | 刷新真实状态、结束本次操作；不自动替用户覆盖其他客户端决定 |
 | `submission_unknown` | 保留 submissionId 和可查询的 Session id，报告不确定；不能提示客户端盲重发 |
+| `auth_required` | 仅在可确认所选 managed provider 缺账户时使用 ACP -32000；保留已发布的可执行 auth methods，不从泛化 provider_failed 文案猜认证状态 |
 | native mutation reply 丢失 | 报 operation outcome unknown；只做有合同的查询恢复，不自动重复动作 |
 | `turn_failed` / `daemon_unavailable` | 保留真实原因；不伪造 end_turn 或 cancelled |
 
-错误的 ACP `data.code` 是 Gateway 的外部错误分类，native appError 作为诊断保留，不再通过错误文本猜原因。stdout 只允许 ACP，stderr/日志不输出 auth headers、secret references、完整 prompt 或未授权的工具正文。
+错误的 ACP `data.code` 是 Gateway 的外部错误分类，native appError 作为诊断保留，不再通过错误文本猜原因。原生 RPC 的 -32000 是通用 app error，**不能原样穿透为 ACP -32000**，因为后者专指 Authentication required。ACP 的 parse/invalid-request/method-not-found/invalid-params、request-cancelled、resource-not-found 按其标准 code 输出；可确认需要认证才用 -32000，其余已知业务失败用 Gateway 的 Other code -32001，意外内部错误用 -32603。这样 turn_failed、provider_failed 或存储错误不会错误触发客户端登录。stdout 只允许 ACP，stderr/日志不输出 auth headers、secret references、完整 prompt 或未授权的工具正文。
 
 ## 10. 交付单元和验收顺序
 
@@ -304,7 +358,7 @@ cancel 到达 submit reply 之前时保留 cancel 标志，等拿到 input id �
 | --- | --- | --- |
 | A. 共享 RPC 与宿主 | dim-client、现有 CLI client 调用者 | 保留 socket/pipe/profile/frame/security 行为；确认 #434 U3 的 binding；既有 CLI flow 仍通过。无 ACP handler，无 daemon diff |
 | B. 插件与标准会话 | dim-acp、CLI acp 入口 | 真实 stdio → Gateway → 既有 daemon；initialize/new/list/load/resume/prompt，含并发准备、固定头、emoji 去重。不能只有 mock AppServer trait |
-| C. 交互与结算 | 同一 Gateway 的 permission/question/config/content | allow/deny、另一客户端先回答、form accept/decline/cancel、模式冲突、图片/文本资源、cancel 各交接点、close/delete、EOF 和 RPC recovery |
+| C. 交互与结算 | 同一 Gateway 的 auth/permission/question/config/content | managed provider discovery、agent browser authenticate、terminal helper、登录取消/到期及交换不确定性；allow/deny、另一客户端先回答、form accept/decline/cancel、模式冲突、图片/文本资源、cancel 各交接点、close/delete、EOF 和 RPC recovery |
 | D. 有依据的 Lody 子集 | history/forkAtTurn/compaction 投影 | 普通 acpx 无未知通知噪声；Lody 真实消费；不支持能力既不声明也不写入，全部负例有公开入口验证 |
 | E. 发布入口与实机 | dimcode 包、文档和验收记录 | 正确架构二进制启动 ACP；Lody/acpx 启动的是本次构建，不是历史 npx 缓存；隔离 home；至少完成 macOS，其他平台记录待验收 |
 
@@ -323,6 +377,7 @@ cancel 到达 submit reply 之前时保留 cancel 标志，等拿到 input id �
 7. EOF、signal、插件 unload 只 detach；从另一客户端观察 turn 继续。显式 close 才结算 Session；其他 Session/daemon 不受影响。可靠输出队列溢出结束连接而不无声丢消息。
 8. 标准 model/mode 选项反映真实采用状态；无 catalog/Questions/Attachments 的 profile 只失去对应功能；unsupported Lody controls 无 native side effect。
 9. history、终态 turn fork、compaction skipped/failed/cancelled；普通客户端兼容，Lody capability 和 wire 输出一致。
+10. 通过公开 ManagedProvider 测试装配模拟 browser/device：无插件/API-key profile 不被其他账户阻塞、method 只按实际能力发布、已登录 authenticate 不重复 begin、callback 匹配、端口冲突、过期、取消/EOF、complete reply 丢失不重发。terminal method 不能走 authenticate；helper 保留同一 executable/home/profile，完成后重新检查 native 账户状态。断言 native 通用 -32000 错误不会变成 ACP auth_required。复用 callback capture 时保留既有 MCP/TUI 的安全与公开流程回归。
 
 实现时才运行受影响的公开 flow；共享 RPC 提取需复用现有 CLI 回归。合并前检查遵循 AGENTS.md；本文档提交不运行 Rust 测试、构建或模型调用。
 
@@ -350,6 +405,7 @@ acpx --agent "$ACP_TEST_COMMAND" --cwd "$ACP_TEST_ROOT/workspace" \
 | acpx exec | initialize/new、stdout 纯协议、普通 prompt、工具成功/失败、deny、超时；保存 JSON 帧、工具版本和测试构建 SHA |
 | acpx sessions / set / set-mode / cancel | 依本机 help 使用命名 session：new、load/resume、历史、model/mode、第二个客户端取消、close。记录实际使用的方法，不假定 CLI 覆盖全部 SDK 方法 |
 | 官方 ACP SDK 驱动 | 覆盖 acpx 0.7.0 未暴露的方法、能力拒绝、并发、drop reply、EOF、故障恢复、elicitation 和 Lody 请求；连接真实 stdio 和 daemon |
+| 账户认证 | 在具备账户插件的隔离构建/home 上验证实际 authMethods：agent authenticate 自动捕获 callback；terminal 支持时另开交互 helper；无 terminal 的客户端不收到 terminal method。验证取消/过期、重复登录、端口冲突、RPC 断线及从同一 home 继续 Session；不保存真实授权 URL/callback/token |
 | Lody 自定义 agent | command 使用本次构建的绝对 dimcode 路径；arguments 为 `acp --home <isolated> --cwd <temporary-workspace> ...`，不使用 npx 默认 Dim。确认握手 agentInfo 和实际进程路径 |
 | Lody 基本交互 | 新建、重开、图片、工具、允许/拒绝审批、form 选项/custom/decline、取消、切模型/模式；与另一个 native 客户端观察同一 Session |
 | Lody 扩展 | history、终态 fork、自动/手动压缩活动；usage/Goal/steer/subagent 等未声明的按钮应隐藏或显示不支持，不允许 UI 发起后静默成功 |

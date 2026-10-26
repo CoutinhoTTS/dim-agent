@@ -44,9 +44,11 @@ The wire target is ACP v1, plus individually advertised Lody Core 0.2.0 features
 
 Every stable v1 agent/client/protocol method, the selected unstable surface and the Lody methods are classified in [plan §4](../acp-gateway-implementation.md#4-稳定-acp-v1-方法逐项映射) and [§8](../acp-gateway-implementation.md#8-lody-方法和能力逐项决策). Capabilities follow implemented handlers and actual native availability, never a copied historical capability object.
 
-The first delivery covers standard Session creation/list/load/resume, prompts and cancellation, tool output, approvals, images and text resources. Mode/model selection, form questions, close/delete and fork use their existing native interfaces when available. The selected Lody subset is history, compaction and terminal-turn fork anchors. Exact-turn steering, Goal control, token accounting, quotas, full task/subagent events, title ownership, worktree projects and file rollback remain unsupported; their reasons are recorded individually, distinguishing a missing native contract from an unimplemented mapping.
+The first delivery covers standard Session creation/list/load/resume, prompts and cancellation, tool output, approvals, images and text resources. Account authentication, mode/model selection, form questions, close/delete and fork use their existing native interfaces when available. The selected Lody subset is history, compaction and terminal-turn fork anchors. Exact-turn steering, Goal control, token accounting, quotas, full task/subagent events, title ownership, worktree projects and file rollback remain unsupported; their reasons are recorded individually, distinguishing a missing native contract from an unimplemented mapping.
 
-The gateway does not call client `fs/*` or `terminal/*`, start client-supplied MCP servers, alter account configuration, or inject raw blocks. Non-empty `mcpServers` and `additionalDirectories` fail before Session creation or attachment, rather than being silently ignored. Unknown non-control metadata follows ACP extensibility; recognized unsupported control metadata fails before an input is submitted.
+The gateway does not call client `fs/*` or `terminal/*`, start client-supplied MCP servers, expose arbitrary account management, or inject raw blocks. Non-empty `mcpServers` and `additionalDirectories` fail before Session creation or attachment, rather than being silently ignored. Unknown non-control metadata follows ACP extensibility; recognized unsupported control metadata fails before an input is submitted.
+
+Socket/pipe authentication is separate from model-account authentication. The gateway discovers existing `account.providers/status` and exposes executable auth methods for the managed-provider plugin. An agent-type browser method uses `authenticate` and the existing native begin/complete/status/cancel operations; a terminal method launches a separate interactive helper and must not be passed to `authenticate`. OAuth, credential exchange and persistence stay inside the provider. The exact calls, callback ownership, headless limits and cancellation contract are [plan §4.4](../acp-gateway-implementation.md#44-账户认证与现有-oauth-插件). No account plugin means no forced managed-account login for configured/API-key models.
 
 ## 3. State and lifecycle
 
@@ -81,7 +83,7 @@ The gateway's own cancel must end the prompt with ACP `cancelled` even if cancel
 
 Native approval requests from every branch become ACP permission requests. Answers use `approval.respond`; current native policy and first-answer ordering remain authoritative. Resolved/cancelled notices retire local waiters. Always options are not offered.
 
-For clients advertising form elicitation, pending `ask_user` calls become `elicitation/create`, answered through existing `session.question.respond`. Pending questions are derived from tool-call/result facts, not a new server read API. Unknown or unsupported client elicitation does not remove the native tool; the pending question remains answerable by another Dim client, and the gateway shows that state. MCP-server elicitation and URL workflows are separate, unsupported surfaces.
+For clients advertising form elicitation, pending `ask_user` calls become `elicitation/create`, answered through existing `session.question.respond`. Pending questions are derived from tool-call/result facts, not a new server read API. Unknown or unsupported client elicitation does not remove the native tool; the pending question remains answerable by another Dim client, and the gateway shows that state. MCP-server elicitation and ACP URL elicitation are separate, unsupported surfaces.
 
 ### 4.4 Submission uncertainty
 
@@ -89,7 +91,7 @@ A submission id is a lookup key, not a native exactly-once guarantee. The [nativ
 
 ## 5. Security and context
 
-The gateway retains the socket ownership/permissions, authenticated Windows pipe, protocol/profile checks and frame limits of the existing CLI client. It uses an explicit native-method allowlist; ACP methods never become arbitrary RPC proxies. Only safe provider catalog reads needed for model options are permitted outside Session operations. Account/quota management is not opened in the first delivery.
+The gateway retains the socket ownership/permissions, authenticated Windows pipe, protocol/profile checks and frame limits of the existing CLI client. It uses an explicit native-method allowlist; ACP methods never become arbitrary RPC proxies. Outside Session operations it permits only safe provider catalog reads and the narrowly owned account-login flow in plan §4.4. Logout, quota queries and arbitrary account management are not exposed. Provider-private realms, client IDs and token flows remain outside this repository.
 
 ACP content enters through existing `session.submit.user`, with parsing and content conversion at the external boundary. The gateway writes no arbitrary Timeline events, raw context blocks, plugin settings or host tool registrations. The model sees only the ordinary adopted input and tool results; ACP identities and transport diagnostics are not injected into its context.
 
