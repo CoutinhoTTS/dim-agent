@@ -12,15 +12,14 @@ A plugin is a directory with a manifest. It may carry code (a rutis plugin in Ty
 | --- | --- | --- |
 | `plugins.json`, the default configuration file, the startup layer (§2, §3.1) | yes | |
 | Install from a local path or Git, update, remove, list (§3.2–§3.6) | yes | marketplace |
-| Plugin code: create, turn on/off, replace, reload loader rows (§3) | yes, TypeScript and Python | |
-| Runtimes fetched after startup (§2.5) | yes | |
+| Plugin code: create, turn on/off, replace, reload loader rows (§3) | yes, TypeScript and Python, once their runtimes are supplied (§2.5) | |
 | `plugin.*` management methods and `dimcode plugin` commands (§6, A.1) | yes | client notifications of changes |
 | Agent tools through a Session part (§6) | yes | |
 | The default CLI loads the default plugins (goal, web, session-title, workflow, scheduler) | yes | |
 | Settings sources registered at run time by every plugin itself (§9 R1) | yes, built-in and TypeScript plugins together | |
 | Content kinds: skills, MCP configuration, hooks (§3, §9 R2) | skills and MCP if their owners land in time | hooks (Hooks is M2) |
 
-M1's acceptance is: a user or the agent writes a TypeScript plugin, installs it from a local path, uses its tools, edits it and reloads it, and the change takes effect without a restart; the default CLI starts with the default plugins loaded.
+M1's acceptance is: a user or the agent writes a TypeScript plugin, installs it from a local path, uses its tools, edits it and reloads it, and the change takes effect without a restart; the default CLI starts with the default plugins loaded. Plugin code needs its runtime, which [#476](https://github.com/arcships/dim/issues/476) supplies.
 
 ## 1. Structure
 
@@ -160,11 +159,7 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 
 ### 2.5 Runtimes
 
-The release ships Dim, the default configuration file and the default plugins' directories; it does not ship the Node or Python runtime. When a runtime that a plugin in use needs is missing, the App Server downloads it into `<home>/runtimes/` after it starts. Startup does not wait for it: a plugin row gates on its runtime's row, so it stays `Pending` until the runtime is ready and then starts by itself. `plugin.list` shows such a row as waiting for its runtime (`Loader::waiting_for`).
-
-- TypeScript: `code.entry` is a `.ts` or `.js` file; the Node runtime imports it by its absolute path.
-- Python: `code.entry` is a `.py` file; the Python runtime has the plugin directory on its import path and imports the entry module from there.
-- Reload re-imports only the entry module, in both languages ([requirement 3](../plugin-management.md)).
+Plugin code runs in the Node or Python rutis runtime. Supplying them is not PluginManager's business: how runtimes are acquired, pinned and verified, and how plugin rows start once a runtime is available, is the runtime acquisition design ([#476](https://github.com/arcships/dim/issues/476), M1). PluginManager only creates rows; a row whose runtime is not there shows rutis' status and reason in `plugin.list`. Reload re-imports only the entry module ([requirement 3](../plugin-management.md)).
 
 ## 3. Flows
 
@@ -353,9 +348,8 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 7. `disable PluginManager` is refused with `plugin_locked`.
 8. A Git install with a `file://` URL is refused; a failed clone leaves nothing under `<home>/plugins`.
 9. A default plugin's Settings source appears when it starts and disappears when it is turned off.
-10. On a home without runtimes, `dimcode` starts at once; the default plugins show as waiting for their runtime and start after the download.
-11. A Python plugin installed from a local path registers its tool, and reload picks up an edit to its entry module.
+10. A Python plugin installed from a local path registers its tool, and reload picks up an edit to its entry module (with the Python runtime supplied by [#476](https://github.com/arcships/dim/issues/476)).
 
 ## Appendix D. Open questions
 
-None.
+None in this design. Runtime acquisition, including how a Python plugin's module is imported from its directory, is [#476](https://github.com/arcships/dim/issues/476).
