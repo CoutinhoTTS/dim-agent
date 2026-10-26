@@ -89,10 +89,12 @@ pub struct QueuedInput {
 }
 
 /// Work of the session that runs apart from the turn: a command the `exec`
-/// tool moved to the background, or a member agent on a delegated task.
+/// tool moved to the background, a member agent on a delegated task, or a
+/// Workflow run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskView {
-    /// The Timeline event that started the command or delegation.
+    /// The Timeline event that started the command or delegation, or the
+    /// Workflow run ID.
     pub id: String,
     pub branch_id: String,
     pub kind: TaskKind,
@@ -140,6 +142,34 @@ pub enum TaskKind {
     Command(TaskTarget),
     /// The Session is known only after successful delivery of the request.
     Member { session_id: Option<String> },
+    /// A run of the optional Workflow package, by its run ID.
+    Workflow(Box<WorkflowView>),
+}
+
+/// The last stored run the owner returned for this Session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowView {
+    pub run: crate::wire::WorkflowRun,
+    /// The owner no longer returns the run; the record is the last observed.
+    pub unavailable: bool,
+    /// A stop request awaits its reply.
+    pub stop_pending: bool,
+}
+
+/// How far the Session's Workflow runs are known.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum WorkflowInventory {
+    /// The connection offers no `workflow.status`.
+    #[default]
+    Absent,
+    /// An explicit discovery has not replied yet.
+    Loading,
+    Ready,
+    /// Reads stopped after an error; `observed` when some read succeeded.
+    Failed {
+        error: String,
+        observed: bool,
+    },
 }
 
 /// How a turn ended.
@@ -168,6 +198,9 @@ pub struct ViewSnapshot {
     pub tasks: Vec<TaskView>,
     pub task_history_loading: usize,
     pub task_history_errors: Vec<String>,
+    pub workflow: WorkflowInventory,
+    /// The connection offers `workflow.stop`.
+    pub workflow_stop: bool,
     /// The newest turn that ended on main: its sequence and how it ended.
     pub ended: Option<(u64, TurnEnd)>,
 }

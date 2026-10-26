@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch } from "vue"
+import { computed, ref, watch } from "vue"
 import { RouterLink } from "vue-router"
 import { useI18n } from "vue-i18n"
 import { Menu } from "lucide-vue-next"
@@ -26,6 +26,7 @@ const view = computed(() => chat.views[props.sessionId])
 const summary = computed(() => sessions.byId.get(props.sessionId))
 const title = computed(() => summary.value?.preview ?? t("sidebar.untitled"))
 const approval = computed(() => view.value?.approvals[0])
+const composer = ref<InstanceType<typeof ComposerPanel>>()
 
 function send(text: string): Promise<void> {
   return chat.submit(props.sessionId, text)
@@ -72,12 +73,13 @@ function selectModel(model: ModelId): Promise<void> {
         <span v-if="view.running" class="ui-badge session-running" data-tone="primary"><span class="status-dot" data-state="running" aria-hidden="true" />{{ t(view.stopping ? "status.stopping" : "status.running") }}</span>
       </header>
     </div>
-    <TimelineView :rows="view.rows" :running="view.running" />
+    <TimelineView :rows="view.rows" :running="view.running" :quotable="!approval" @quote="composer?.quote($event)" />
     <div v-if="approval" class="composer-panel">
       <ApprovalPrompt :key="approval.requestId" :session-id="sessionId" :request="approval" />
     </div>
     <ComposerPanel
       v-else
+      ref="composer"
       :running="view.running"
       :stopping="view.stopping"
       :model="view.model"

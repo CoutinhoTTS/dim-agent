@@ -437,8 +437,8 @@ fn ask_user_definition() -> ToolDefinition {
     definition
 }
 
-/// The Questions Session part: `toolContribution` `ask_user` and
-/// `sessionMethods` `session.question`.
+/// The Questions Session part: `ask_user` registered with `toolRegistry` and
+/// `session.question` with `sessionMethods`.
 pub struct QuestionsPlugin {
     config: Key<SessionConfig>,
     tools: Key<ToolRegistry>,

@@ -172,7 +172,8 @@ claim runs a loader-wide reconcile, which also rebuilds the copies whose build w
 required row that failed in a Session's assembly can be rebuilt during that Session's creation, and
 each Session or branch creation reconciles the whole loader. The App Server shares those names in
 their groups (`register_shared_instance`), and a test checks that each is shared in the group the
-Rust binding registers it in. The build script writes only the TypeScript declarations.
+Rust binding registers it in. `xtask types` writes their TypeScript declarations to
+`npm/branch-services.d.ts`, and `xtask check` fails when that file is stale.
 
 ### 3.5 How each runtime resolves a name
 
@@ -236,7 +237,7 @@ Since rutis 0.15.1 there is one flat bus per root.
 How Dim's parts consume bus events and which public bus events Dim defines are in the
 [plugin contract §5.3](plugin-contract.md#53-bus-events).
 
-*Today:* Dim is on rutis 0.17.0, and this section holds.
+*Today:* Dim is on rutis 0.17.1, and this section holds.
 
 ## 6. Requirements raised to mechanism owners
 
@@ -279,14 +280,15 @@ These requirements concern how Dim uses rutis. They follow
 
 ### R6. Contributions register with their owner
 
-- **Blocked:** [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
-  ("Registration: declared by the plugin … not by host-side `AgentBuilder` calls"). The host
-  pre-registers contribution names (`session_tool`, `session_methods`, `session_prompt_source`,
-  `session_tool_source`, `host_tools`) and translates a foreign row's `provides` into the same calls.
-  A native tool contribution and a foreign one have different keys, so ToolRegistry reads both and
-  detects a retiring foreign generation through a sidecar token found by the same string
-  (`tool_registry.rs:486-509`); Rpc keeps the same split for method namespaces. Prompt and tool
-  sources are closed to foreign parts.
+- **Before R6:** [ADR 002 D5](../adr/002-plugin-scope.md#d5-contracts-are-language-neutral)
+  ("Registration: declared by the plugin … not by host-side `AgentBuilder` calls") was blocked: the
+  host pre-registered contribution names (`session_tool`, `session_methods`,
+  `session_prompt_source`, `session_tool_source`, `host_tools`) and translated a foreign row's
+  `provides` into the same calls. A native tool contribution and a foreign one had different keys,
+  so ToolRegistry read both and detected a retiring foreign generation through a sidecar token
+  found by the same string (`tool_registry.rs:486-509`); Rpc kept the same split for method
+  namespaces. Prompt and tool sources were closed to foreign parts. The `Needed` and `Owner`
+  bullets below describe what replaced it.
 - **Existing mechanisms considered:**
   - Finding contributions by name in the instance, from `rutis/service` events or a catalog listing.
     Rejected: the owner would learn from framework internals (which rows provide which names) what
@@ -360,7 +362,7 @@ P3 deleted the old forms ([#375](https://github.com/arcships/dim/issues/375)); t
 | `SessionService`, `BranchService` markers | The group registered in the catalog (`names::register`) |
 | `AgentBuilder::session_plugin`/`timeline_plugin` | A feature registers its parts with the part registry (`Feature`, added with `AgentBuilder::feature`, or its own plugin with `AgentBuilder::plugin`; a profile uses `require_feature`); `register_part` for an App Server process row |
 | `AgentBuilder::session_tool`, `session_methods`, `session_prompt_source`, `session_tool_source`, `host_tools` (removed) | The owner's `register`, called by the contributing part: `toolRegistry`, `promptRegistry`, `sessionMethods`, `managementMethods` (R6) |
-| `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type, Session and branch services included (§3.4); a type whose source cannot change is wrapped in a marked type of Dim's. `Exports` only writes TypeScript declarations |
+| `build.rs` `Exports::service_in(..)` | `#[rutis::service]` on the type, Session and branch services included (§3.4); a type whose source cannot change is wrapped in a marked type of Dim's. `Exports` only writes TypeScript declarations, from `xtask types` |
 | `PublicService` | Unchanged (a facade rule) |
 
 ### A.2 The binding

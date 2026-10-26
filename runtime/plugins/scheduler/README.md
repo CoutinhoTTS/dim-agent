@@ -17,7 +17,7 @@ The structural configuration is `{}`. The row declares the same
 declares the `schedule` Settings source with user file
 `schedule.json`, no project source and protected `/max_concurrent_runs`.
 
-The package uses rutis 0.17.0, the host's pinned runtime; its TypeScript code
+The package uses rutis 0.17.1, the host's pinned runtime; its TypeScript code
 is unchanged from 0.16.0 ([upgrade contract](../../../docs/design/rutis-0.16-upgrade.md)). Row-level
 dependencies stay declared. Invalid run data fails the owner and preserves the
 original bytes; calls return `service_unavailable`. The native invalid-record

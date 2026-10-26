@@ -117,6 +117,103 @@ async fn a_session_namespace_registers_unless_it_overlaps_a_builtin() {
     }
 }
 
+/// Methods contract A.1: a name a management namespace holds is management's
+/// even when its params name a Session, so `session.methods` does not list
+/// it from a Session namespace whose calls would never reach that namespace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_methods_does_not_list_a_name_management_holds() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let answer = Arc::new(std::sync::Mutex::new(None));
+    let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (server, _) = launch_with(
+        Arc::new(MockTools),
+        // A product home installs the process plugins that own the `skills`
+        // management namespace; a configured provider lets Sessions start.
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            ..Default::default()
+        },
+        {
+            let (answer, called) = (answer.clone(), called.clone());
+            move |builder| {
+                builder.require_feature(dim_agent_runtime::Feature::new("Claim").session(
+                    "Claim",
+                    move |names| {
+                        Ok(Box::new(Claim::new(
+                            names,
+                            "skills",
+                            answer.clone(),
+                            called.clone(),
+                        )?))
+                    },
+                ));
+            }
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &client
+            .rpc(
+                "provider.create",
+                json!({
+                    "providerId":"018ec73f-0000-7000-8000-000000000004",
+                    "displayName":"Fixture",
+                    "connection":{
+                        "driverKind":"openai-compatible",
+                        "baseUrl":"http://localhost/v1",
+                        "auth":{"type":"anonymous"}
+                    },
+                    "models":[{"modelId":"fixture","displayName":"fixture","status":"active",
+                        "capabilities":dim_agent_types::ModelCapabilities::default()}],
+                    "enabled":true
+                }),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({
+                    "providerId":"018ec73f-0000-7000-8000-000000000004",
+                    "modelId":"fixture"
+                }),
+            )
+            .await,
+    );
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_eq!(answer.lock().unwrap().clone().unwrap(), "");
+    let listed = client
+        .rpc("session.methods", json!({"sessionId":sid}))
+        .await;
+    assert_ok(&listed);
+    let names: Vec<&str> = listed["result"]["methods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|decl| decl["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"skills.echo"), "{listed}");
+    // The same name through the Session still routes to management, which
+    // declares no `skills.echo`.
+    let reply = client.rpc("skills.echo", json!({"sessionId":sid})).await;
+    assert_eq!(
+        reply["error"]["data"]["appError"], "unknown_method",
+        "{reply}"
+    );
+    assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// Contributes the `notes` Session methods from outside App Server, as any
 /// plugin does: a child plugin registers the namespace with the Session's
 /// method table, and a test restarts the child to reload the provider alone.

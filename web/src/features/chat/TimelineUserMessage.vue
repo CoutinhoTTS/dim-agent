@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue"
 import { useI18n } from "vue-i18n"
-import { Check, ChevronDown, Copy } from "lucide-vue-next"
+import { Check, ChevronDown, Copy, Quote } from "lucide-vue-next"
 import { copyText } from "../../clipboard"
 import { formatTimelineTimestamp } from "./timeline-time"
 
-const props = defineProps<{ text: string; at: number }>()
+const props = defineProps<{ text: string; at: number; quotable: boolean }>()
+const emit = defineEmits<{ quote: [text: string] }>()
 const { t, locale } = useI18n()
 const content = ref<HTMLElement>()
 const overflows = ref(false)
@@ -45,6 +46,9 @@ async function copy(): Promise<void> {
       <button class="ui-icon-button" data-variant="ghost" data-size="sm" type="button" v-tooltip="t('message.copy')" :aria-label="t('message.copy')" @click="copy">
         <Check v-if="copied" class="is-copied" aria-hidden="true" />
         <Copy v-else aria-hidden="true" />
+      </button>
+      <button v-if="quotable" class="ui-icon-button" data-variant="ghost" data-size="sm" type="button" v-tooltip="t('message.quote')" :aria-label="t('message.quote')" @click="emit('quote', text)">
+        <Quote aria-hidden="true" />
       </button>
     </div>
   </article>

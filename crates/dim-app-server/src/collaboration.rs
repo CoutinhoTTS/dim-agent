@@ -1,7 +1,7 @@
 //! Team collaboration, see `docs/design/appserver/collaboration.md`.
 //!
 //! `CollaborationDirectoryPlugin` (process) owns member relations and temporary
-//! Agent records across reloads. `CollaborationCapability` (Session) provides the `agent` tool and
+//! Agent records across reloads. `CollaborationSession` (Session) provides the `agent` tool and
 //! registers each branch; `CollaborationTimeline` (branch) binds the branch's
 //! Dispatcher to the business that writes its collaboration facts. Peers are
 //! only reached through their public Session interface, on their main branch.
@@ -68,7 +68,7 @@ fn member_create_failed(detail: String) -> Failure {
 pub fn install(builder: &mut AgentBuilder) {
     crate::register_names(builder.catalog_mut());
     builder
-        .require_part("CollaborationCapability")
+        .require_part("CollaborationSession")
         .require_part("CollaborationTimeline");
 }
 
@@ -625,17 +625,11 @@ impl DynPlugin for CollaborationPlugin {
             service.reconcile().await;
             ctx.provide_as::<Collaboration>(service)?;
             use dim_agent_runtime::PartScope;
-            parts.register(
-                ctx,
-                PartScope::Session,
-                "CollaborationCapability",
-                |mount| {
-                    Ok(Some(
-                        Box::new(CollaborationCapabilityPlugin::new(mount.names)?)
-                            as Box<dyn DynPlugin>,
-                    ))
-                },
-            )?;
+            parts.register(ctx, PartScope::Session, "CollaborationSession", |mount| {
+                Ok(Some(
+                    Box::new(CollaborationSessionPlugin::new(mount.names)?) as Box<dyn DynPlugin>,
+                ))
+            })?;
             parts.register(ctx, PartScope::Branch, "CollaborationTimeline", |mount| {
                 Ok(Some(
                     Box::new(CollaborationTimelinePlugin::new(mount.names)?) as Box<dyn DynPlugin>,
@@ -703,7 +697,7 @@ struct State {
 
 /// Per-Session collaboration: operations this Session starts and the
 /// collaboration facts of its Timeline.
-pub struct CollaborationCapability {
+pub struct CollaborationSession {
     collaboration: Arc<Collaboration>,
     session_id: String,
     role: CollaborationRole,
@@ -724,7 +718,7 @@ fn op_turn(kind: &EventKind) -> Option<(&str, bool)> {
     }
 }
 
-impl CollaborationCapability {
+impl CollaborationSession {
     // ------------------------------------------------------------ tool entry
 
     /// Writes the operation event and waits for its `delivered`; cancelling
@@ -2290,7 +2284,7 @@ fn agent_definition(role: CollaborationRole) -> ToolDefinition {
 }
 
 struct AgentTool {
-    capability: Arc<CollaborationCapability>,
+    session: Arc<CollaborationSession>,
     stopping: CancellationToken,
 }
 impl ToolHandler for AgentTool {
@@ -2304,21 +2298,21 @@ impl ToolHandler for AgentTool {
             if self.stopping.is_cancelled() {
                 return Err(HostError::Cancelled(RELOADING.into()));
             }
-            self.capability.run(call, context, cancel).await
+            self.session.run(call, context, cancel).await
         })
     }
 }
 
-struct CollaborationCapabilityPlugin {
+struct CollaborationSessionPlugin {
     collaboration: Key<Collaboration>,
     identity: Key<SessionIdentity>,
     config: Key<SessionConfig>,
     tree: Key<TreeCommands>,
     lifecycle: Key<SessionLifecycle>,
     tools: Key<ToolRegistry>,
-    service: Key<CollaborationCapability>,
+    service: Key<CollaborationSession>,
 }
-impl CollaborationCapabilityPlugin {
+impl CollaborationSessionPlugin {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             collaboration: names.key()?,
@@ -2331,9 +2325,9 @@ impl CollaborationCapabilityPlugin {
         })
     }
 }
-impl DynPlugin for CollaborationCapabilityPlugin {
+impl DynPlugin for CollaborationSessionPlugin {
     fn name(&self) -> &str {
-        "CollaborationCapability"
+        "CollaborationSession"
     }
     fn injects(&self) -> Vec<TypeKey> {
         vec![
@@ -2353,7 +2347,7 @@ impl DynPlugin for CollaborationCapabilityPlugin {
             let tree = ctx.require_at(&self.tree)?;
             let lifecycle = ctx.require_at(&self.lifecycle)?;
             let tools = ctx.require_at(&self.tools)?;
-            let service = Arc::new(CollaborationCapability {
+            let service = Arc::new(CollaborationSession {
                 collaboration,
                 session_id: identity.session_id.clone(),
                 role: config.collaboration_role,
@@ -2366,7 +2360,7 @@ impl DynPlugin for CollaborationCapabilityPlugin {
                 ToolContribution {
                     definition: agent_definition(config.collaboration_role),
                     handler: Arc::new(AgentTool {
-                        capability: service.clone(),
+                        session: service.clone(),
                         stopping: ctx.cancellation_token(),
                     }),
                 },
@@ -2377,9 +2371,9 @@ impl DynPlugin for CollaborationCapabilityPlugin {
     }
 }
 
-/// Binds one branch's collaboration events to the Session capability.
+/// Binds one branch's collaboration events to the Session part.
 struct CollaborationTimelinePlugin {
-    service: Key<CollaborationCapability>,
+    service: Key<CollaborationSession>,
     timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
     identity: Key<TimelineIdentity>,

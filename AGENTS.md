@@ -57,7 +57,8 @@ Assembly graphs and crate dependencies are computed from the actual code by `xta
 | Command (workspace root) | Purpose |
 | --- | --- |
 | `cargo run --locked -p xtask -- graph` | Regenerate `docs/architecture/rust-agent/generated/`: `services.mmd` / `services.md` (service assembly), `instances.mmd` (instance keys), `modules.mmd` (module dependencies), `crates.mmd` (crate dependencies) and their `.json` snapshots, and `catalog.md` (the service catalog and the parts that are Capabilities) |
-| `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions, and that `catalog.md` matches the real assembly |
+| `cargo run --locked -p xtask -- check` | Verify crate boundaries and dependency restrictions, that `catalog.md` matches the real assembly, and that `npm/branch-services.d.ts` matches the services marked `#[rutis::service]` |
+| `cargo run --locked -p xtask -- types` | Regenerate `npm/branch-services.d.ts`, the TypeScript declarations of the services marked `#[rutis::service]`, after changing one of them or a type it uses |
 | `cargo run --release --locked -p xtask -- measure` | Resource measurement; pass `--model-config PATH` (e.g. `crates/dim-agent-aimux/examples/offline.json`) |
 
 Run `check` after adding or removing a Capability or changing assembly or crate dependencies, and `graph` after changing assembly. `check` also validates the plugin pages under `docs/architecture/rust-agent/plugins/` against the code, so update a capability's page with it, and fails when the generated service catalog is stale; use the `.json` snapshot diff to confirm the change is as intended. Hand-written diagrams in documentation only describe the target structure; the generated output is authoritative for the current implementation.
@@ -69,8 +70,8 @@ Dim's architecture and the way Dim uses rutis are documented apart ([ADR 006](do
 | Layer | Document |
 | --- | --- |
 | Dim architecture: sequence, ownership, commands, handover, `before`, rebuild, side effects, placement | [time bus](docs/architecture/rust-agent/time-bus.md), [design rules](docs/architecture/rust-agent/principles.md), [ADR 002](docs/adr/002-plugin-scope.md) |
-| Dim architecture as it applies to plugins: instance tree, Dim's services and bus events, facts and their consumption, Capability, publication and closing | [plugin contract](docs/design/plugin-contract.md) (accepted, not yet implemented; each section says what holds today) |
-| Using rutis: plugins as rows and parts mounted by their instance, services by name, the catalog, crossing languages, the rutis lifecycle and bus | [How Dim uses rutis](docs/design/rutis-usage.md) (accepted, not yet implemented) |
+| Dim architecture as it applies to plugins: instance tree, Dim's services and bus events, facts and their consumption, Capability, publication and closing | [plugin contract](docs/design/plugin-contract.md) (implemented, except R5's second form; each section says what holds today) |
+| Using rutis: plugins as rows and parts mounted by their instance, services by name, the catalog, crossing languages, the rutis lifecycle and bus | [How Dim uses rutis](docs/design/rutis-usage.md) (implemented, except R5's second form) |
 | Binding: how Rust or TypeScript writes them | The appendices of How Dim uses rutis, the [TypeScript authoring guide](docs/typescript-plugin-authoring.md), and the current Rust binding below |
 
 A rule is stated once, at its layer. The Rust spelling of a rule is a binding, not the rule. See the [architecture overview](docs/architecture/README.md#design-documents) for the full document index.
