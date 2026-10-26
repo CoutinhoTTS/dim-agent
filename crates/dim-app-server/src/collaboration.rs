@@ -1892,7 +1892,7 @@ impl CollaborationSession {
             mode: Some(InputMode::Steer),
             ..Default::default()
         };
-        match branch.input(input) {
+        match branch.input(input).await {
             Ok(_) => Ok(()),
             Err(AgentError::Closed(_)) if branch.is_closing() => Ok(()),
             Err(error) => Err(error),

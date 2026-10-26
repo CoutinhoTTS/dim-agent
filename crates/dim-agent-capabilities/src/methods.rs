@@ -108,6 +108,11 @@ impl RpcError {
                 "Session initialization failed",
             ),
             "Reloading" => Self::reloading(),
+            "AmbiguousSubmission" => Self::app(
+                -32000,
+                "submission_ambiguous",
+                "Submission identity belongs to multiple inputs",
+            ),
             _ => Self::wire(-32603, "Session operation failed"),
         }
     }
@@ -120,6 +125,7 @@ impl From<AgentError> for RpcError {
             AgentError::Closed(_) => "Closed",
             AgentError::Build(_) => "Build",
             AgentError::Reloading(_) => "Reloading",
+            AgentError::AmbiguousSubmission(_) => "AmbiguousSubmission",
             _ => "",
         };
         Self::agent(variant, error.to_string())

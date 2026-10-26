@@ -1087,6 +1087,7 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/timeline_context.rs",
       "unexpandedMacros": [
+        "format",
         "tokio::pin",
         "tokio::select",
         "tracing::info_span",
@@ -1275,8 +1276,7 @@
         "format",
         "json",
         "matches",
-        "tokio::select",
-        "tracing::warn"
+        "tokio::select"
       ]
     },
     {
@@ -1287,6 +1287,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "panic",
         "tokio::join",
         "vec"
       ]
@@ -6341,6 +6342,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::AmbiguousSubmission",
         "path AgentError::Build",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
@@ -10397,6 +10399,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::AmbiguousSubmission",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
         "path AgentError::Storage",
@@ -10445,8 +10448,12 @@
       "references": [
         "path AgentEvent",
         "path EventDraft",
+        "path EventKind::InputMessage",
+        "path InputMessageData",
         "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::EventDraft"
+        "use dim_agent_types::EventDraft",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputMessageData"
       ]
     },
     {
@@ -10736,6 +10743,8 @@
       "references": [
         "path TailLock",
         "path Timeline",
+        "path crate::core::Appended::Existing",
+        "path crate::core::Appended::Written",
         "use crate::core::TailLock"
       ]
     },
@@ -10749,6 +10758,7 @@
         "path AgentError::Fault",
         "path AgentError::InvalidInput",
         "path AgentError::Reloading",
+        "path AgentError::Storage",
         "path AgentError::aggregate",
         "path AgentError::fault",
         "path Result",
@@ -10803,7 +10813,6 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
-        "path EventKind::InputMessage",
         "path EventKind::StopInterrupt",
         "path InputMessageData",
         "path InterruptScope",
@@ -11874,9 +11883,7 @@
         "path SessionPermissions",
         "path sessions",
         "path sessions::SessionsService",
-        "use sessions::Lookup",
-        "use sessions::SessionPermissions",
-        "use sessions::find_input"
+        "use sessions::SessionPermissions"
       ]
     },
     {
@@ -12035,14 +12042,6 @@
     },
     {
       "from": "dim_app_server::agents::sessions",
-      "to": "dim_agent_runtime::agent",
-      "references": [
-        "path Session",
-        "use dim_agent_runtime::Session"
-      ]
-    },
-    {
-      "from": "dim_app_server::agents::sessions",
       "to": "dim_agent_runtime::branch",
       "references": [
         "path Publication",
@@ -12054,12 +12053,11 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::AmbiguousSubmission",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
         "path AgentError::Reloading",
-        "path AgentError::Storage",
         "path AgentError::UnknownBranch",
-        "path dim_agent_runtime::Result",
         "use dim_agent_runtime::AgentError"
       ]
     },
@@ -12082,7 +12080,6 @@
         "path InputWithdrawData",
         "path UserInput",
         "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::EventKind",
         "use dim_agent_types::InputBlock",
         "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InputMode",
@@ -12188,7 +12185,8 @@
       "from": "dim_app_server::agents::sessions::tests",
       "to": "dim_agent_types::events",
       "references": [
-        "path InputMode::Append"
+        "path InputMode::Append",
+        "use dim_agent_types::EventKind"
       ]
     },
     {
@@ -12211,6 +12209,7 @@
       "to": "dim_app_server::agents::sessions",
       "references": [
         "path InputWrite",
+        "path LookupReply::Accepted",
         "path LookupRequest",
         "path call",
         "path published",
@@ -13816,17 +13815,6 @@
         "path InputMessageData::default",
         "path UserInput",
         "use dim_agent_types::BranchSource"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection::tree",
-      "to": "dim_app_server::agents::sessions",
-      "references": [
-        "path Lookup::Accepted",
-        "path Lookup::Ambiguous",
-        "path Lookup::Unknown",
-        "path crate::agents::find_input",
-        "use crate::agents::Lookup"
       ]
     },
     {

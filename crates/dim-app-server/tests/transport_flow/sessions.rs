@@ -653,14 +653,28 @@ async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs()
         sessions.ok("lookup", at("test:other")).await,
         json!({"status":"unknown"})
     );
-    for _ in 0..2 {
+    // The branch accepts each submissionId once: a resubmission writes
+    // nothing and replies the first receipt; another id is independent.
+    let first = sessions
+        .ok("input", input(&session, "test:twice", json!([])))
+        .await;
+    assert_eq!(
         sessions
             .ok("input", input(&session, "test:twice", json!([])))
-            .await;
+            .await,
+        first
+    );
+    let other = sessions
+        .ok("input", input(&session, "test:once", json!([])))
+        .await;
+    assert_ne!(other["inputId"], first["inputId"]);
+    let history = session.local("main", ..).await.unwrap();
+    for id in ["test:twice", "test:once"] {
+        assert_eq!(history.iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(id))).count(), 1);
     }
     assert_eq!(
-        sessions.error("lookup", at("test:twice")).await,
-        "ambiguous"
+        sessions.ok("lookup", at("test:twice")).await,
+        json!({"status":"accepted","inputId":first["inputId"],"sequence":first["sequence"]})
     );
     let mut missing_mode = input(&session, "test:invalid", json!([]));
     missing_mode.as_object_mut().unwrap().remove("mode");
@@ -1707,7 +1721,7 @@ async fn settlement_status(client: &mut Client) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row() {
+async fn node_input_settlement_outlives_reloads_and_a_resubmission_gets_its_receipt() {
     let (store, mut held) = DeferredInputs::new();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let Served {
@@ -1725,10 +1739,7 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
     .await;
     let target = client_session(&mut client, &agent, host_policy()).await;
     let (_, _, loader, _) = controls.recv().await.unwrap();
-    let owner = loader.get("settlement-owner").unwrap().view.unwrap();
     let before = settlement_status(&mut client).await;
-    // The owner's cleanups while no native input is in flight.
-    let idle = owner.effects().len();
     let write = |id: &str| {
         let mut write = input(&target, id, json!([]));
         write["mode"] = json!("append");
@@ -1743,11 +1754,6 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
         .unwrap();
     assert_eq!(waiting.submission_id, "settlement:index:publication");
     assert!(target.publication("main").unwrap().sequence() < waiting.sequence);
-    assert_eq!(
-        owner.effects().len(),
-        idle + 1,
-        "one drain per native input in flight"
-    );
     let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -1778,7 +1784,6 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
         settlement_status(&mut client).await["generation"],
         before["generation"]
     );
-    assert_eq!(owner.effects().len(), idle);
     assert_ok(
         &client
             .rpc("settlement.arm", write("test:late-row-call"))
@@ -1792,7 +1797,11 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
         .unwrap()
         .unwrap();
     assert_eq!(waiting.submission_id, "settlement:row:append");
-    let (restarted, ()) = tokio::join!(loader.restart("settlement-owner"), async {
+    // While the calling row reloads (its own C1 call keeps it Unloading
+    // until the input settles), a resubmission waits for the first write
+    // and replies its receipt.
+    let owner = loader.get("settlement-owner").unwrap().view.unwrap();
+    let (restarted, resubmitted) = tokio::join!(loader.restart("settlement-owner"), async {
         let mut changed = owner.watch();
         tokio::time::timeout(Duration::from_secs(5), async {
             while changed.borrow_and_update().state != rutis::host::FiberState::Unloading {
@@ -1801,26 +1810,40 @@ async fn node_input_settlement_outlives_index_reload_and_drains_the_original_row
         })
         .await
         .unwrap();
-        assert!(super::unload_held(&owner).await);
+        let caller = sessions.clone();
+        let request = write("settlement:row:append");
+        let resubmitted = tokio::spawn(async move { caller.ok("input", request).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!resubmitted.is_finished());
         waiting.release.send(()).unwrap();
+        resubmitted.await.unwrap()
     });
     restarted.unwrap();
     let reply = client.response(request).await;
     assert_ok(&reply);
     let receipt: Value = serde_json::from_str(reply["result"].as_str().unwrap()).unwrap();
     assert_eq!(receipt["ok"], true, "{receipt}");
+    assert_eq!(receipt["value"], resubmitted);
+    assert_eq!(receipt["value"]["sequence"], waiting.sequence);
     let after = settlement_status(&mut client).await;
+    // The new generation's resubmission after publication: the same receipt.
+    let reply = client
+        .rpc("settlement.input", write("settlement:row:append"))
+        .await;
+    assert_ok(&reply);
+    let again: Value = serde_json::from_str(reply["result"].as_str().unwrap()).unwrap();
+    assert_eq!(again, receipt);
+    assert!(held.try_recv().is_err(), "resubmissions write nothing");
     assert_ne!(after["generation"], before["generation"]);
     assert_eq!(
         after["cleanup"]["error"]["code"], "reloading",
-        "late cleanup cannot register native input"
+        "a stopping row's late cleanup writes no input"
     );
     assert_eq!(sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"test:late-row-call"})).await, json!({"status":"unknown"}));
     let history = target.local("main", ..).await.unwrap();
     for id in ["settlement:index:publication", "settlement:row:append"] {
         assert_eq!(history.iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(id))).count(), 1);
     }
-    assert_eq!(owner.effects().len(), idle);
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -1887,6 +1910,112 @@ async fn rust_named_input_keeps_its_outcome_across_reload_and_a_dropped_result()
     server.join().await.unwrap();
 }
 
+/// The branch's submission ids survive a host restart through its stored
+/// history; ids with several inputs, written before branches accepted each
+/// id once, stay `ambiguous` and are never written again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn submission_ids_survive_restart_and_legacy_duplicates_stay_ambiguous() {
+    use dim_agent_runtime::{Timeline, TimelineKey};
+    use dim_app_server::storage::{SqliteStorage, SqliteTimelineStore};
+    let store = Store::new();
+    let setup = || Setup {
+        database: Some(store.database()),
+        home: Some(store.0.clone()),
+        ..Default::default()
+    };
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(setup()).await;
+    super::process_typescript::select_model(&mut client).await;
+    let target = client_session(&mut client, &agent, host_policy()).await;
+    let write = |id: &str| {
+        let mut write = input(&target, id, json!([]));
+        write["mode"] = json!("append");
+        write
+    };
+    let first = sessions.ok("input", write("test:durable")).await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // A legacy history: two inputs with one id, appended outside the branch.
+    let key = TimelineKey {
+        session_id: target.id().into(),
+        branch_id: "main".into(),
+    };
+    {
+        let native = SqliteTimelineStore::new(SqliteStorage::open(store.database()).unwrap());
+        let legacy = Timeline::restore(
+            rutis::Ctx::root().unwrap(),
+            key.clone(),
+            vec![],
+            native.clone(),
+        )
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            legacy
+                .append(
+                    EventKind::InputMessage(InputMessageData {
+                        submission_id: Some("test:legacy".into()),
+                        blocks: vec![InputBlock::Raw {
+                            text: "Legacy input".into(),
+                            key: None,
+                            retire: false,
+                        }],
+                        mode: Some(dim_agent_types::InputMode::Append),
+                        ..Default::default()
+                    })
+                    .into(),
+                )
+                .unwrap();
+        }
+        let committed = legacy.committed();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            legacy
+                .watch()
+                .wait_for(|&(published, _)| published >= committed),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    // The restored branch indexes its stored inputs before it accepts input.
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(setup()).await;
+    // Another Session's consumer part injects `sessions`.
+    client_session(&mut client, &agent, host_policy()).await;
+    assert_eq!(sessions.ok("input", write("test:durable")).await, first);
+    let at = json!({"sessionId":target.id(),"branchId":"main","submissionId":"test:legacy"});
+    assert_eq!(sessions.error("lookup", at).await, "ambiguous");
+    assert_eq!(
+        sessions.error("input", write("test:legacy")).await,
+        "ambiguous"
+    );
+    let history = agent
+        .get_session(target.id())
+        .unwrap()
+        .local("main", ..)
+        .await
+        .unwrap();
+    for (id, count) in [("test:durable", 1), ("test:legacy", 2)] {
+        assert_eq!(history.iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(id))).count(), count);
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
@@ -1915,8 +2044,6 @@ async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
     let target = client_session(&mut client, &agent, host_policy()).await;
     let (_, _, loader, _) = controls.recv().await.unwrap();
     let owner = loader.get("settlement-owner").unwrap().view.unwrap();
-    // The owner's cleanups while no native input is in flight.
-    let idle = owner.effects().len();
     let before = settlement_status(&mut client).await;
     let request = input(&target, "test:retired-before-handoff", json!([]));
     assert!(target.unload_if_idle().await.unwrap());
@@ -1925,7 +2052,6 @@ async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
     tokio::time::timeout(Duration::from_secs(5), rules.held.notified())
         .await
         .unwrap();
-    assert_eq!(owner.effects().len(), idle + 1);
     let (restarted, ()) = tokio::join!(loader.restart("settlement-owner"), async {
         let mut changed = owner.watch();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -1959,7 +2085,7 @@ async fn node_input_preparation_refuses_a_retired_row_before_handoff() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
+async fn node_crash_resubmission_gets_the_original_receipt() {
     let (store, mut held) = DeferredInputs::new();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     let Served {
@@ -1977,11 +2103,10 @@ async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
     .await;
     let target = client_session(&mut client, &agent, host_policy()).await;
     let (_, _, loader, _) = controls.recv().await.unwrap();
-    let owner = loader.get("settlement-owner").unwrap().view.unwrap();
     let before = settlement_status(&mut client).await;
     let mut write = input(&target, "settlement:crash:append", json!([]));
     write["mode"] = json!("append");
-    let request = client.send("settlement.input", write).await;
+    let request = client.send("settlement.input", write.clone()).await;
     let waiting = tokio::time::timeout(Duration::from_secs(5), held.recv())
         .await
         .unwrap()
@@ -2000,26 +2125,21 @@ async fn node_crash_does_not_release_the_original_rows_native_input_drain() {
         reply.get("error").is_some(),
         "the dead Node cannot return its receipt: {reply}"
     );
-    let (restarted, ()) = tokio::join!(loader.restart("SessionNodeRuntime"), async {
-        let mut changed = owner.watch();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while changed.borrow_and_update().state != rutis::host::FiberState::Unloading {
-                changed.changed().await.unwrap();
-            }
-        })
+    tokio::time::timeout(Duration::from_secs(5), loader.restart("SessionNodeRuntime"))
         .await
+        .expect("the runtime restart does not wait for the admitted input")
         .unwrap();
-        assert!(
-            super::unload_held(&owner).await,
-            "bridge failure is not native writer settlement"
-        );
-        waiting.release.send(()).unwrap();
-    });
-    restarted.unwrap();
     let after = settlement_status(&mut client).await;
     assert_ne!(after["pid"], before["pid"]);
+    let resubmitted = client.send("settlement.input", write).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    waiting.release.send(()).unwrap();
+    let reply = client.response(resubmitted).await;
+    assert_ok(&reply);
+    let receipt: Value = serde_json::from_str(reply["result"].as_str().unwrap()).unwrap();
+    assert_eq!(receipt["value"]["sequence"], waiting.sequence, "{receipt}");
     let recovered = sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"settlement:crash:append"})).await;
-    assert_eq!(recovered["status"], "accepted");
+    assert_eq!(recovered["inputId"], receipt["value"]["inputId"]);
     assert_eq!(target.local("main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("settlement:crash:append"))).count(), 1);
     server.shutdown();
     server.join().await.unwrap();

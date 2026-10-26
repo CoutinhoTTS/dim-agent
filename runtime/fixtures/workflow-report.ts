@@ -84,23 +84,8 @@ export default definePlugin({
             let run = await store()
             if (run.report.state !== 'pending') return run
             const target = { sessionId: run.report_to.session_id, branchId: run.report_to.branch_id }
-            if (recovering) {
-              // This fixed row is callable only after the previous generation drained.
-              const lookup = await sessions.lookup({ ...target, submissionId: run.report.submission_id })
-              if (lookup.ok && lookup.value.status === 'accepted') {
-                return store(run => { run.report = { state: 'delivered' } })
-              }
-              if (!lookup.ok && lookup.error.code === 'ambiguous') {
-                const delivered = await store(run => { run.report = { state: 'delivered' } })
-                progress({ phase: 'duplicate_report_violation' })
-                return delivered
-              }
-              if (!lookup.ok) throw new Error(lookup.error.code)
-              run = await store(run => {
-                if (run.report.state === 'pending') run.report.attempt_open = false
-              })
-            }
-            if (run.report.state !== 'pending' || run.report.attempt_open) throw new Error('open_attempt')
+            // Recovery resubmits: the branch accepts the submission id once,
+            // so an input the previous generation admitted is never repeated.
             const submissionId = run.report.submission_id
             await store(run => {
               if (run.report.state === 'pending') run.report.attempt_open = true
@@ -110,6 +95,12 @@ export default definePlugin({
             const text = `<dim-workflow kind="report" run_id="${run.run_id}">completed</dim-workflow>`
             const reply = await sessions.input({ ...target, submissionId, mode: 'steer',
               rawBlocks: [{ text }], content: [{ type: 'text', text }] })
+            if (!reply.ok && reply.error.code === 'ambiguous') {
+              // Duplicates written before branches accepted each id once.
+              const delivered = await store(run => { run.report = { state: 'delivered' } })
+              progress({ phase: 'duplicate_report_violation' })
+              return delivered
+            }
             return store(run => {
               if (reply.ok) run.report = { state: 'delivered' }
               else if (['session_closed', 'branch_missing', 'rejected'].includes(reply.error.code)) {

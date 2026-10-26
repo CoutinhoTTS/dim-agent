@@ -102,6 +102,8 @@ async function fixture(t, options = {}) {
           : request.policy ?? { preset: 'read-only', allowedTools: [], disallowedTools: [] } })
       },
       async input(request) {
+        // The branch accepts each submission id once.
+        if (state.receipts.has(request.submissionId)) return ok(state.receipts.get(request.submissionId))
         state.inputs.push(structuredClone(request))
         if (request.mode === 'steer') await state.reportInput?.(request)
         const inputId = randomUUID()
@@ -721,17 +723,16 @@ test('terminal and uncertain report replies follow the persisted recovery contra
     const f = await fixture(t)
     await f.method('save', { source: 'user', document: definition('reply', [{ stage: { id: 'one', prompt: 'done' } }]) })
     const input = f.services.sessions.input
-    const lookup = f.services.sessions.lookup
     const calls = []
     let fail = true
     f.services.sessions.input = async request => {
       if (request.mode !== 'steer') return input(request)
       calls.push('input')
       if (!fail) return input(request)
-      if (code === 'publication_unknown' || code === 'reloading') await input(request)
-      return error(code === 'ambiguous' ? 'failed' : code)
+      if (code === 'publication_unknown' || code === 'reloading') { await input(request); fail = false }
+      return error(code)
     }
-    f.services.sessions.lookup = async request => { calls.push('lookup'); return lookup(request) }
+    f.services.sessions.lookup = async () => { throw new Error('reports never look up') }
     const started = await f.execute({ action: 'start', name: 'reply' })
     const id = started.structuredContent.run_id
     const status = () => f.method('status', { run_id: id }).then(reply => reply.value)
@@ -741,10 +742,14 @@ test('terminal and uncertain report replies follow the persisted recovery contra
       assert.ok(run.log.some(entry => entry.message.includes('Invalid report rejected')))
       await f.reload()
       assert.deepEqual(calls, ['input'])
+    } else if (code === 'ambiguous') {
+      const run = await until(async () => { const run = await status(); return run.report.state === 'delivered' && run })
+      assert.ok(run.log.some(entry => entry.message.includes('Duplicate report violation')))
+      assert.deepEqual(calls, ['input'])
     } else if (code === 'publication_unknown' || code === 'reloading') {
       await until(async () => (await status()).report.state === 'delivered')
-      assert.deepEqual(calls, ['input', 'lookup'], 'the actual settled reply is reconciled without repeating its accepted input')
-      assert.equal(f.state.inputs.filter(input => input.mode === 'steer').length, 1)
+      assert.deepEqual(calls, ['input', 'input'], 'the retry resubmits the same id')
+      assert.equal(f.state.inputs.filter(input => input.mode === 'steer').length, 1, 'the branch accepted it once')
     } else {
       await until(async () => {
         const run = await status()
@@ -752,13 +757,9 @@ test('terminal and uncertain report replies follow the persisted recovery contra
       })
       assert.deepEqual(calls, ['input'])
       fail = false
-      if (code === 'ambiguous') f.services.sessions.lookup = async () => { calls.push('lookup'); return error('ambiguous') }
       await f.reload()
-      const run = await until(async () => { const run = await status(); return run.report.state === 'delivered' && run })
-      if (code === 'ambiguous') {
-        assert.deepEqual(calls, ['input', 'lookup'])
-        assert.ok(run.log.some(entry => entry.message.includes('Duplicate report violation')))
-      } else assert.deepEqual(calls, ['input', 'lookup', 'input'], 'a later load starts with lookup before its single retry')
+      await until(async () => (await status()).report.state === 'delivered')
+      assert.deepEqual(calls, ['input', 'input'], 'a later load resubmits once')
     }
   })
 })

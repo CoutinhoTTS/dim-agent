@@ -60,9 +60,18 @@ impl Branch {
         Publication(self.0.timeline().clone())
     }
     /// Appends validated input. The returned event is committed; whether it
-    /// starts a turn shows in Loop's state once it is dispatched.
-    pub fn input(&self, data: InputMessageData) -> Result<Arc<AgentEvent>> {
-        self.0.input(data)
+    /// starts a turn shows in Loop's state once it is dispatched. The branch
+    /// accepts each submission id once: an input whose id it already holds
+    /// writes nothing and returns that input.
+    pub async fn input(&self, data: InputMessageData) -> Result<Arc<AgentEvent>> {
+        self.0.input(data).await
+    }
+    /// The published input with submission id `id`; `None` when the branch
+    /// holds none. Every input committed before the call is found once it is
+    /// published. Fails with [`AgentError::AmbiguousSubmission`] for an id
+    /// with several inputs, written before the branch accepted each id once.
+    pub async fn lookup(&self, id: &str) -> Result<Option<Arc<AgentEvent>>> {
+        self.0.lookup(id).await
     }
     /// Commits a turn interrupt and returns its sequence without waiting for
     /// dispatch or settlement. Safe to call while capabilities reload.

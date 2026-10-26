@@ -177,14 +177,41 @@ async fn reconnect_locates_a_published_submission_without_resubmitting() {
             )
             .await;
         assert_eq!(absent["result"], json!({"status":"unknown"}));
-        // Correlation identities do not silently deduplicate new submissions.
-        assert_ok(&reconnect.rpc("session.submit", json!({
+        // The branch accepts each submissionId once: a resubmission writes
+        // nothing and returns the first input. Inputs without one are never
+        // deduplicated.
+        let inputs = || async {
+            session
+                .history("main", None)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::InputMessage(_)))
+                .count()
+        };
+        let before = inputs().await;
+        let resubmitted = reconnect.rpc("session.submit", json!({
             "sessionId":sid,"branchId":"main","submissionId":submission,"text":"another input"
-        })).await);
-        let ambiguous = reconnect.rpc("session.input_lookup", lookup).await;
+        })).await;
+        assert_ok(&resubmitted);
         assert_eq!(
-            ambiguous["error"]["data"]["appError"],
-            "submission_ambiguous"
+            resubmitted["result"]["event"],
+            serde_json::to_value(&admitted).unwrap()
+        );
+        for _ in 0..2 {
+            assert_ok(
+                &reconnect
+                    .rpc(
+                        "session.submit",
+                        json!({"sessionId":sid,"branchId":"main","text":"same text"}),
+                    )
+                    .await,
+            );
+        }
+        assert_eq!(inputs().await, before + 2);
+        assert_eq!(
+            reconnect.rpc("session.input_lookup", lookup).await["result"]["event"],
+            serde_json::to_value(&admitted).unwrap()
         );
         for identity in [json!("invalid"), json!(null), json!(5)] {
             let rejected = reconnect.rpc("session.submit", json!({
