@@ -41,7 +41,7 @@ Dashed boxes are outside this repository (Desktop) or not implemented (ACP, remo
 | Native CLI `dimcode` | `crates/dim-cli`, `crates/dimcode` | Three interfaces in one executable: the line client (`--no-tui` or no terminal), the scrollback terminal UI (default) and the fullscreen terminal UI; `/tui` switches the two terminal UIs in-process | Implemented | [Tui](plugins/Tui.md), [CLI commands](cli-commands.md), [native CLI contract](../../crates/dim-cli/README.md) |
 | Web workspace | `web/` (Vue 3), entry in `crates/dim-app-server/src/web_entry.rs` | Browser frontend over a loopback-only web entry, opened by `dimcode web` or `/web` | Phase 1 implemented | [Web workspace](web-workspace.md) |
 | Desktop | Its own repository | Desktop application | Outside this repository | This repository owns only the App Server contract it uses (§5) |
-| ACP | — | `dimcode acp`: ACP over stdio for editors, a v3 client like the CLI | Draft, P3, not implemented | [AcpGateway](plugins/AcpGateway.md) |
+| ACP | planned `crates/dim-acp` | reusable client-host rutis plugin; `dimcode acp` is the stdio entry, public RPC v3 to the unchanged daemon | Draft, P3, not implemented (#436) | [AcpGateway](plugins/AcpGateway.md), [implementation plan](acp-gateway-implementation.md) |
 | Remote devices | — | Paired devices through RemoteGateway; absorbs the phase-1 web entry | Draft, P3, not implemented | [RemoteGateway](plugins/RemoteGateway.md) |
 
 ## 2. What clients share
@@ -115,7 +115,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | `/settings`: theme, language, startup form, mouse, notifications, approvals, model | done | later phase (needs a decision on management methods, §6) | |
 | `/settings`: subagent model, auxiliary model, default multimodal model, execution shell, sandbox, prompt language | designed elsewhere, no client UI | — | overview B.1, [Modality](plugins/Modality.md) |
 | `/settings`: VS Code focus, resource monitoring, plan usage display | none | — | |
-| `/settings`: ACP Session display | deferred with AcpGateway | — | [AcpGateway](plugins/AcpGateway.md) A15 |
+| `/settings`: ACP Session display | unsupported: no native persisted client-origin field | — | [AcpGateway](plugins/AcpGateway.md#a5-client-labels) |
 | `/usage` | context usage: done; plan quota is shown in the account view, not in `/usage` | — | |
 | `/stats` | out | — | [overview](overview.md) App. A |
 | `/debug`, debug-log configuration | none (only the daemon's `daemon.log`) | — | |

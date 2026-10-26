@@ -145,7 +145,7 @@ P3 的每一批都按功能检查同一作用域里的部件：只有一个所�
 
 不被其他插件依赖、随时可以单独做的功能：生产压缩宿主与 `/compact`、用量查询（走现有的 `ResolveContextModel` 端口，不依赖 S4）；Session 删除和 fork（S5c）；Permission 命令规则；模型参数 effort/fast 与 `/agent`；MCP OAuth；HostPlatform OS 隔离（L，先 spike）；CLI 子命令、`/export`、`exec --json`。
 
-P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后，开工前集中复核设计；按 rutis 现有能力设计，不向 rutis 提需求；`ConnectionEntry`、`EntryHost` 到时再排。
+P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后，开工前集中复核设计；按 rutis 现有能力设计，不向 rutis 提需求。AcpGateway 首版按[实施计划](acp-gateway-implementation.md) 复用现有 RPC，不等待 `ConnectionEntry`、`EntryHost`；后两者随 RemoteGateway 另排。
 
 ### 3.4 合入顺序与冲突点
 
@@ -209,7 +209,8 @@ P3（AcpGateway、RemoteGateway、Modality、PluginManager）等 P1/P2 落地后
 | Web 第二阶段（排队、附件、fork、设置页面等） | [Web 工作区](web-workspace.md) §4、Q2 | 未设计；Q2 待决定 |
 | 没有设计的 CLI 能力：`/timeline` 与消息操作、`/queue`、Skill 引用、排队消息的附件等 | [客户端 §4](clients.md#4-gaps-and-conflicts) | 待决定是否设计 |
 | 文档与代码不一致：全屏终端界面、`/web` 归属、web 入口的管理方法 | [客户端 §4](clients.md#4-gaps-and-conflicts) | 待决定后修订相关文档 |
-| ACP、远程设备 | [AcpGateway](plugins/AcpGateway.md)、[RemoteGateway](plugins/RemoteGateway.md) | 草案，P3 |
+| ACP | [#436](https://github.com/arcships/dim/issues/436)；[AcpGateway](plugins/AcpGateway.md)、[首版实施计划](acp-gateway-implementation.md) | Draft，未 Ready / 未实现；接入方 rutis 插件，首版不改 App Server，不支持项完成后再评估 |
+| 远程设备 | [RemoteGateway](plugins/RemoteGateway.md) | 草案，P3 |
 
 ## 4. 依赖图
 

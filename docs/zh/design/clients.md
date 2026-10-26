@@ -41,7 +41,7 @@ flowchart TB
 | 原生 CLI `dimcode` | `crates/dim-cli`、`crates/dimcode` | 一个可执行文件里有三种界面：行模式客户端（`--no-tui` 或没有终端）、滚动式终端界面（默认）和全屏终端界面；`/tui` 在进程内切换两种终端界面 | 已实现 | [Tui](../../design/plugins/Tui.md)、[CLI 命令](cli-commands.md)、[原生 CLI 契约](../../../crates/dim-cli/README.md) |
 | Web 工作区 | `web/`（Vue 3），入口在 `crates/dim-app-server/src/web_entry.rs` | 经仅限回环地址的 web 入口访问的浏览器前端，由 `dimcode web` 或 `/web` 打开 | 第一阶段已实现 | [Web 工作区](../../design/web-workspace.md) |
 | Desktop | 独立仓库 | 桌面应用 | 不在本仓库 | 本仓库只负责它使用的 App Server 契约（§5） |
-| ACP | — | `dimcode acp`：通过 stdio 为编辑器提供 ACP，和 CLI 一样是 v3 客户端 | 草案，P3，未实现 | [AcpGateway](plugins/AcpGateway.md) |
+| ACP | 计划 `crates/dim-acp` | 可复用接入方宿主 rutis 插件；`dimcode acp` 是 stdio 入口，经公开 RPC v3 连接不变的 daemon | Draft，P3，未实现（#436） | [AcpGateway](plugins/AcpGateway.md)、[实施计划](../../design/acp-gateway-implementation.md) |
 | 远程设备 | — | 经 RemoteGateway 配对的设备；将吸收第一阶段的 web 入口 | 草案，P3，未实现 | [RemoteGateway](plugins/RemoteGateway.md) |
 
 ## 2. 客户端共用的部分
@@ -115,7 +115,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | `/settings`：主题、语言、启动形态、鼠标、通知、审批、模型 | 已实现 | 后续阶段（需要先决定管理方法，§6） | |
 | `/settings`：子 agent 模型、辅助模型、默认多模态模型、执行 Shell、沙箱、提示词语言 | 已在别处设计，没有客户端界面 | — | 总体设计 B.1、[Modality](plugins/Modality.md) |
 | `/settings`：VS Code 聚焦、资源监控、套餐用量显示 | 无 | — | |
-| `/settings`：ACP Session 显示 | 随 AcpGateway 推迟 | — | [AcpGateway](plugins/AcpGateway.md) A15 |
+| `/settings`：ACP Session 显示 | 不支持：没有原生持久化 client-origin 字段 | — | [AcpGateway](plugins/AcpGateway.md#a5-client-label) |
 | `/usage` | 上下文用量：已实现；套餐额度显示在账号视图里，不在 `/usage` | — | |
 | `/stats` | 不做 | — | [总体设计](overview.md)附录 A |
 | `/debug`、调试日志配置 | 无（只有 daemon 的 `daemon.log`） | — | |

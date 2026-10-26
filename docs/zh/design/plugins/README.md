@@ -23,7 +23,7 @@
 | [Scheduler](Scheduler.md) | 触发、运行历史（任务在 Settings 中） | `schedule` 工具 | — | P2 |
 | [Workflow](Workflow.md) | 运行（定义在 Settings 或项目文件中） | `workflow` 工具 | — | P2 |
 | [ExternalAgent](ExternalAgent.md) | 外部会话、Collaboration 成员类型 `external-agent`；每节点一个桥接行 | —（委派与决定归 Collaboration） | — | P3 |
-| [AcpGateway](AcpGateway.md) | —（CLI 进程中的客户端，不是守护进程插件） | — | — | P3 |
+| [AcpGateway](AcpGateway.md) | 接入方宿主插件：ACP/RPC 连接、请求与清理；位于 daemon 外 | — | — | P3（Draft，#436；[实施计划](../../../design/acp-gateway-implementation.md)） |
 | [RemoteGateway](RemoteGateway.md) | 远程入口、设备 | — | — | P3 |
 | [Modality](Modality.md) | 任务、实时连接 | — | — | P3 |
 | [PluginManager](PluginManager.md) | 插件市场、插件包 | — | — | P3 |
@@ -32,6 +32,6 @@
 
 | 作用域 | 部分 |
 | --- | --- |
-| 进程部件 | Provider（管理补充提案）、Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；AcpGateway 不是进程插件，而是 CLI 进程中的客户端 |
+| 进程部件 | daemon 内的 Provider（管理补充提案）、Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RemoteGateway；接入方宿主进程内的 AcpGateway |
 | Session 部件 | Questions、ShellInput、Attachments、SessionTitle、Goal、Web、Recall、Hooks、Scheduler、Workflow |
 | 分支部件 | Goal（含 Pursuit）、Hooks |
