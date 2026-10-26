@@ -3535,9 +3535,16 @@ fn border_line(
     line
 }
 
-/// Hard wrap by display width.
-const STARTUP_LOGO: [&str; 4] = ["  ▓▓▓▓  ", "▓▓    ▓▓", "░░    ░░", "  ░░░░  "];
-const STARTUP_LOGO_WIDTH: usize = 8;
+/// "DIM" in the ANSI Shadow block style (port of `startup-logo.ts`); every
+/// glyph is one cell wide.
+const STARTUP_LOGO: [&str; 5] = [
+    "██████╗ ██╗███╗   ███╗",
+    "██╔══██╗██║████╗ ████║",
+    "██║  ██║██║██╔████╔██║",
+    "██████╔╝██║██║╚██╔╝██║",
+    "╚═════╝ ╚═╝╚═╝ ╚═╝ ╚═╝",
+];
+const STARTUP_LOGO_WIDTH: usize = 22;
 const STARTUP_LOGO_GAP: usize = 2;
 
 /// The greeting beside the logo, vertically centred against it (port of
