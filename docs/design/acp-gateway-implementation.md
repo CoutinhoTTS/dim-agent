@@ -1,6 +1,6 @@
 # AcpGateway 首版实施计划
 
-状态：合同明确支持的首版子集已实现于 [Draft PR #441](https://github.com/arcships/dim/pull/441)，未发布。需求入口：[ACP #436](https://github.com/arcships/dim/issues/436)。设计合同：[AcpGateway](plugins/AcpGateway.md)。本文定义方法映射、接线、生命周期和不支持项；实际验收及未通过项见[验收记录](acp-gateway-acceptance.md)。
+状态：合同明确支持的首版子集已实现于 [PR #441](https://github.com/arcships/dim/pull/441)，未发布。需求入口：[ACP #436](https://github.com/arcships/dim/issues/436)。设计合同：[AcpGateway](plugins/AcpGateway.md)。本文定义方法映射、接线、生命周期和不支持项；实际验收及未通过项见[验收记录](acp-gateway-acceptance.md)。
 
 ## 1. 目标和固定边界
 
@@ -522,7 +522,7 @@ acpx --agent "$ACP_TEST_COMMAND" --cwd "$ACP_TEST_ROOT/workspace" \
 | [#143](https://github.com/arcships/dim/issues/143)、[#422](https://github.com/arcships/dim/issues/422) | Hooks/Pursuit 各自交付；Gateway 不实现 prompt hooks、Goal evaluator 或 Goal 的续轮结算 |
 | [#427](https://github.com/arcships/dim/issues/427)、[#428](https://github.com/arcships/dim/issues/428)、[#429](https://github.com/arcships/dim/issues/429) | branches/compaction/prompt 的新要求由原所有者决定；本版本只投影已有 main 与压缩事实，不改变 context 输入路径 |
 | [#387](https://github.com/arcships/dim/issues/387) | daemon startup 无进展超时仍归原所有者；Gateway 不修改其策略，30 秒仅为已经断开的 RPC 恢复窗口 |
-| [#114](https://github.com/arcships/dim/issues/114) | 交付顺序与 Ready 流程；本 PR 保持 Draft，实施和验证按 §10 记录，不自动合并 |
+| [#114](https://github.com/arcships/dim/issues/114) | 交付顺序与评审流程；本 PR 进入代码评审，实施和验证按 §10 记录，不自动合并 |
 
 其余开放项涉及发布、性能预算、CI 或无关功能，不因 ACP 计划扩大范围。#386 的 UI leaf events 不是 ACP transport，不作为接线依赖；#438–#440 的发布验收不在此宣称完成。
 

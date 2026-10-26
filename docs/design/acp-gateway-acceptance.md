@@ -1,6 +1,6 @@
 # ACP Gateway acceptance
 
-验收对象是 [AcpGateway 合同](acp-gateway-implementation.md) 及 [TemporaryMcp](plugins/TemporaryMcp.md) 中明确支持的子集。Agent core、RPC 框架、内置 Session 协议和持久化格式没有改动；MCP 业务目录注册独立临时插件并复用现有服务器实现，持久 MCP 管理保持原行为。Draft PR：[arcships/dim#441](https://github.com/arcships/dim/pull/441)，主需求：[#436](https://github.com/arcships/dim/issues/436)。
+验收对象是 [AcpGateway 合同](acp-gateway-implementation.md) 及 [TemporaryMcp](plugins/TemporaryMcp.md) 中明确支持的子集。Agent core、RPC 框架、内置 Session 协议和持久化格式没有改动；MCP 业务目录注册独立临时插件并复用现有服务器实现，持久 MCP 管理保持原行为。PR：[arcships/dim#441](https://github.com/arcships/dim/pull/441)，主需求：[#436](https://github.com/arcships/dim/issues/436)。
 
 ## Build and environment
 

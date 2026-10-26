@@ -41,7 +41,7 @@ flowchart TB
 | 原生 CLI `dimcode` | `crates/dim-cli`、`crates/dimcode` | 一个可执行文件里有三种界面：行模式客户端（`--no-tui` 或没有终端）、滚动式终端界面（默认）和全屏终端界面；`/tui` 在进程内切换两种终端界面 | 已实现 | [Tui](../../design/plugins/Tui.md)、[CLI 命令](cli-commands.md)、[原生 CLI 契约](../../../crates/dim-cli/README.md) |
 | Web 工作区 | `web/`（Vue 3），入口在 `crates/dim-app-server/src/web_entry.rs` | 经仅限回环地址的 web 入口访问的浏览器前端，由 `dimcode web` 或 `/web` 打开 | 第一阶段已实现 | [Web 工作区](../../design/web-workspace.md) |
 | Desktop | 独立仓库 | 桌面应用 | 不在本仓库 | 本仓库只负责它使用的 App Server 契约（§5） |
-| ACP | `crates/dim-acp` | 可复用接入方宿主 rutis 插件；`dimcode acp` 是 stdio 入口，经公开 RPC v3 连接共享 daemon | 支持子集已实现，未发布（#436，Draft PR #441）；acpx 基本聊天已验收；Lody MCP GUI 待登录后验收 | [AcpGateway](plugins/AcpGateway.md)、[验收](../../design/acp-gateway-acceptance.md) |
+| ACP | `crates/dim-acp` | 可复用接入方宿主 rutis 插件；`dimcode acp` 是 stdio 入口，经公开 RPC v3 连接共享 daemon | 支持子集已实现，未发布（#436，PR #441）；acpx 基本聊天已验收；Lody MCP GUI 待登录后验收 | [AcpGateway](plugins/AcpGateway.md)、[验收](../../design/acp-gateway-acceptance.md) |
 | 远程设备 | — | 经 RemoteGateway 配对的设备；将吸收第一阶段的 web 入口 | 草案，P3，未实现 | [RemoteGateway](plugins/RemoteGateway.md) |
 
 ## 2. 客户端共用的部分

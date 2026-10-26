@@ -1,6 +1,6 @@
 # AcpGateway
 
-Status: the supported first-delivery subset is implemented in [Draft PR #441](https://github.com/arcships/dim/pull/441), unreleased; evidence and limits are in the [acceptance record](../acp-gateway-acceptance.md). Requirement: [#436](https://github.com/arcships/dim/issues/436). Scope: the client host process, outside the App Server daemon. Language: Rust. The [implementation contract](../acp-gateway-implementation.md) defines the method matrix, wiring, connection state machines and unsupported features. [中文](../../zh/design/plugins/AcpGateway.md)
+Status: the supported first-delivery subset is implemented in [PR #441](https://github.com/arcships/dim/pull/441), unreleased; evidence and limits are in the [acceptance record](../acp-gateway-acceptance.md). Requirement: [#436](https://github.com/arcships/dim/issues/436). Scope: the client host process, outside the App Server daemon. Language: Rust. The [implementation contract](../acp-gateway-implementation.md) defines the method matrix, wiring, connection state machines and unsupported features. [中文](../../zh/design/plugins/AcpGateway.md)
 
 `AcpGateway` is a reusable rutis plugin that serves Dim as an ACP agent. It owns the ACP connection and its independent public-RPC connection to the existing App Server. `dimcode acp` is its first host and stdio entry; another host can mount the same implementation or launch that command. The gateway has no TUI dependency. Desktop continues to use the same daemon and persisted Sessions; it needs no separate ACP protocol implementation.
 

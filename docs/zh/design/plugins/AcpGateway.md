@@ -1,6 +1,6 @@
 # AcpGateway
 
-状态：合同明确支持的首版子集已实现于 [Draft PR #441](https://github.com/arcships/dim/pull/441)，未发布；证据和限制见[验收记录](../../../design/acp-gateway-acceptance.md)。需求：[#436](https://github.com/arcships/dim/issues/436)。作用域：接入方宿主进程，位于 App Server daemon 之外。语言：Rust。[实施合同](../../../design/acp-gateway-implementation.md) 定义方法矩阵、接线、连接状态机和不支持项。[English](../../../design/plugins/AcpGateway.md)
+状态：合同明确支持的首版子集已实现于 [PR #441](https://github.com/arcships/dim/pull/441)，未发布；证据和限制见[验收记录](../../../design/acp-gateway-acceptance.md)。需求：[#436](https://github.com/arcships/dim/issues/436)。作用域：接入方宿主进程，位于 App Server daemon 之外。语言：Rust。[实施合同](../../../design/acp-gateway-implementation.md) 定义方法矩阵、接线、连接状态机和不支持项。[English](../../../design/plugins/AcpGateway.md)
 
 `AcpGateway` 是将 Dim 作为 ACP agent 提供的可复用 rutis 插件。它拥有 ACP 连接和通往现有 App Server 的独立公开 RPC 连接。`dimcode acp` 是第一个宿主和 stdio 入口；其他宿主装载同一实现，或启动该命令。网关不依赖 TUI。Desktop 继续使用同一个 daemon 和持久 Session，无须另写 ACP 协议实现。
 
