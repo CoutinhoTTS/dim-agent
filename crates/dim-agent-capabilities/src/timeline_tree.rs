@@ -843,7 +843,16 @@ impl TimelineTree {
                 });
         let sequence = match sequence {
             Ok(event) => event.sequence,
-            Err(AgentError::BranchEnded(_)) => return self.wait_ended(id).await,
+            Err(AgentError::BranchEnded(_)) => {
+                let pending = self.state.lock().unwrap().pending.remove(id);
+                return match pending {
+                    Some(pending) => {
+                        self.close_and_record(id, pending.sequence, pending.data)
+                            .await
+                    }
+                    None => self.wait_ended(id).await,
+                };
+            }
             Err(error) => return Err(error),
         };
         self.close_and_record(id, sequence, data).await

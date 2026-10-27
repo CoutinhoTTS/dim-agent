@@ -1227,6 +1227,110 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ancestors_end_closes_a_descendants_pending_tool_end() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let ancestor = soon(session.branch("main".into(), 0, options("ancestor")))
+        .await
+        .unwrap();
+    soon(session.idle(&ancestor)).await.unwrap();
+    let child = soon(session.branch(
+        ancestor.clone(),
+        0,
+        BranchOptions {
+            prompt: "tool line".into(),
+            source: BranchSource::Tool {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                call_id: "call".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    session
+        .submit(
+            r#"double:branch {"action":"end","content":"the work is done"} | wait {"millis":20000}"#
+                .into(),
+            InputMode::Queue,
+            &child,
+        )
+        .await
+        .unwrap();
+    let ended = soon(async {
+        loop {
+            if tool_results(&session, &child)
+                .await
+                .iter()
+                .any(|result| matches!(&result.content, ToolContent::Text(text) if text.contains("is ending")))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let _ = ended;
+    let source = BranchSource::Host {
+        operation_id: "op:end".into(),
+    };
+    soon(session.end_branch(&ancestor, source.clone()))
+        .await
+        .unwrap();
+    let events = local_events(&session, &child).await;
+    let end = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::BranchEnd(data) => Some((event.sequence, data.clone())),
+            _ => None,
+        })
+        .expect("the line ended itself");
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .map(|event| &event.kind),
+            Some(EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Cancelled { .. },
+                ..
+            }))
+        ),
+        "the ancestor's end interrupts the line's turn"
+    );
+
+    let results: Vec<BranchEndedData> = local_events(&session, &ancestor)
+        .await
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchEnded(data) if data.branch == child => Some(data.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [BranchEndedData {
+            branch: child.clone(),
+            end_event: end.0,
+            source: end.1.source,
+            ancestor: None,
+        }],
+        "the line's own end is the one that is closed"
+    );
+    assert_eq!(
+        session.ended_head(&child),
+        events.last().map(|event| event.sequence),
+        "the line reads up to its close"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_line_cannot_open_under_an_ending_ancestor() {
     let probe = Arc::new(Probe::default());
     let agent = setup(&probe);
