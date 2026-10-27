@@ -26,10 +26,10 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 
 ## Comments
 
-- Prefer code that needs no comment. Use a comment only for information the code cannot carry: a stable external reference (`#169`, `ADR 006 D3`), a tool or compiler directive, a `// SAFETY:` precondition, a generated-file marker, or a license header.
-- Explain behavior with code, names and types; pin constraints with tests and assertion messages; put rationale in commit messages, ADRs and design documents; keep external context in issues and specifications.
-- Do not narrate code or tests, label sections, repeat assertions, or leave a TODO without an issue. When code changes, update or remove the comments that describe it.
-- `///` and `//!` are API documentation: describe caller-visible behavior, preconditions and errors, not implementation.
+- Prefer code that needs no comment. A comment is only for what code cannot carry: a stable external reference (`#169`, `ADR 006 D3`), a tool or compiler directive, a `// SAFETY:` precondition, a generated-file marker, or a license header.
+- Pin behavior with names, types, tests and assertion messages; put design rationale in commit messages and design documents, and external context in issues and specifications.
+- Do not narrate code or tests, label sections, restate what a test asserts, or leave a TODO without an issue. Update or remove a comment when the fact it carries changes.
+- `///` and `//!` document caller-visible contracts: behavior, preconditions, errors, panics, and examples where useful, not internal implementation.
 
 ## Documentation
 
