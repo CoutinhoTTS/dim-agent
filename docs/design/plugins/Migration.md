@@ -102,7 +102,7 @@ CLI 与 Desktop 可能已经共享同一个旧 home。同一来源通过两个�
 - [Settings](../appserver/settings-service.md)已有按来源读入旧用户配置并转为原生持久化权威的行为。它处理注册来源，不是任意旧版配置的转换器；新迁移命令不得顺带改变现有自动导入策略。
 - [sessions](../appserver/sessions-service.md)提供创建、输入、查询等公开操作；稳定 `submissionId` 已支持输入重试去重，但 `launch` 没有调用方提供的创建幂等键，也没有导入历史 API。
 - [Session files](../appserver/session-files.md)已有文件所有权与删除、fork 语义。当前单文件 put 限制为 16 MiB，大附件和大型归档必须有明确分块或所有者补充合同。
-- [原生存储](../appserver/native-storage-format.md)的 v13–v19 升级属于存储所有者，不是旧 TypeScript 数据导入。Migration 不能绕过格式门禁、向原生表私写旧记录或改写原库。
+- [原生存储](../appserver/native-storage-format.md)的 v13、v15 到 v19 格式及其升级属于存储所有者，不是旧 TypeScript 数据导入。Migration 不能绕过格式门禁、向原生表私写旧记录或改写原库。
 
 ### 3.2 Provider 导入的讨论边界
 
