@@ -71,8 +71,10 @@ source validation reserves the mount list's names, host tool names and every
 registered tool's name; only a registered tool's own set may offer that name.
 Already bound requests retain their handlers. A refresh is neither a durable
 configuration save nor permission authorization; a new tool is not
-model-visible until adoption, or until the next `bind_current` request of a
-branch whose configuration has no tool part.
+model-visible until adoption, or until ToolBinding takes the next request's
+snapshot when there is no adopted configuration or its configuration has no tool
+part. The [ToolBinding contract](ToolExecution.md#toolbinding) owns request
+preparation and binding.
 
 A part depends on ToolRegistry to register with it, so a reloaded registry
 reloads the parts registered with it, and they register again. A native tool

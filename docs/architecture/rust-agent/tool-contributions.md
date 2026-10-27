@@ -16,14 +16,14 @@ Session services Active
 a part registers, or unloads and its registration is withdrawn
     -> registry task rereads -> sources_state() changes
     -> ToolBinding adopts (configuration with a tool part)
-       or the next request declares it (no tool part, bind_current)
+       or the next request snapshots it (no tool part)
 Session close starts (SessionLifecycle::closing)
     -> registry task ends; later withdrawals change nothing
 ```
 
-注册表没有框架事件监听，读取工具时也不调用其他运行时。每次读取都纳入当时已注册的内容：`snapshot()`（ToolBinding 初始化与 `bind_current`）与 `definitions()`（PrepareModelHost）。Session 发布（`SessionLifecycle::activated`）后，注册表自己的任务还在每次注册或撤回后重读；Session 开始关闭（`SessionLifecycle::closing`）时该任务结束，关闭期间撤回的注册不撤下集合、不改变来源状态；注册表卸载时中止该任务，并等已在执行的刷新结束。集合的版本只随注册变化：同一注册保持同一版本，再次注册以新版本提供。版本与 MCP 相同取新的 UUID，跨注册表实例与进程也不复用，因此分支 `tool_sources` 中持久化的版本只指一个代次，恢复后带工具部分的分支在首个请求前以新版本采用恢复后的代次。挂载列表列出但没有部件注册的工具不声明，记一次 `tool.attach` 进程日志 span，Session 创建不因此失败；有部件注册后从下一个请求起声明，不需要重载 Session。Session 创建不等待可选部件（#132、#207）：注入 `toolRegistry` 的 TypeScript 行在它 apply 时注册，其工具从之后的下一个请求起提供。
+注册表没有框架事件监听，读取工具时也不调用其他运行时。每次读取都纳入当时已注册的内容：ToolBinding 初始化、请求准备与 `bind_current` 都读取 `snapshot()`；PrepareModelHost 只从 ToolBinding 传入的声明中选择工具，不重读注册表。Session 发布（`SessionLifecycle::activated`）后，注册表自己的任务还在每次注册或撤回后重读；Session 开始关闭（`SessionLifecycle::closing`）时该任务结束，关闭期间撤回的注册不撤下集合、不改变来源状态；注册表卸载时中止该任务，并等已在执行的刷新结束。集合的版本只随注册变化：同一注册保持同一版本，再次注册以新版本提供。版本与 MCP 相同取新的 UUID，跨注册表实例与进程也不复用，因此分支 `tool_sources` 中持久化的版本只指一个代次，恢复后带工具部分的分支在首个请求前以新版本采用恢复后的代次。挂载列表列出但没有部件注册的工具不声明，记一次 `tool.attach` 进程日志 span，Session 创建不因此失败；有部件注册后从下一个请求起声明，不需要重载 Session。Session 创建不等待可选部件（#132、#207）：注入 `toolRegistry` 的 TypeScript 行在它 apply 时注册，其工具从之后的下一个请求起提供。
 
-配置不含工具部分的分支每个请求经 PrepareModelHost / `bind_current` 声明注册表当前的宿主与注册工具，注册的变化不写采用事实；只有其他来源的工具需要采用。带工具部分的配置把注册工具的集合记入 `tool_sources`，与其他来源相同。
+请求尚无已采用配置时，ToolBinding 的 `prepare` 先固定注册表快照，PrepareModelHost 从传入的声明中选择工具，ToolBinding 再按同一快照绑定处理器。已有已采用配置但不含工具部分时，每个请求经 `bind_current` 声明并绑定注册表当前的工具。这两条请求路径中，注册的变化都不写采用事实；只有其他来源的工具需要采用。带工具部分的配置把注册工具的集合记入 `tool_sources`，与其他来源相同。
 
 已安装插件的必需依赖若使装配保持 Pending，Session 仍按既有规则等待或超时。ToolRegistry 不依赖注册工具的部件，但这不跳过装配中的 Pending 插件。
 
