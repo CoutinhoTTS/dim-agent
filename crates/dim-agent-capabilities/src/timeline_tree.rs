@@ -959,16 +959,7 @@ impl TimelineTree {
                 });
         let sequence = match sequence {
             Ok(event) => event.sequence,
-            Err(AgentError::BranchEnded(_)) => {
-                let pending = self.state.lock().unwrap().pending.remove(id);
-                return match pending {
-                    Some(pending) => {
-                        self.close_and_record(id, pending.sequence, pending.data)
-                            .await
-                    }
-                    None => self.wait_ended(id).await,
-                };
-            }
+            Err(AgentError::BranchEnded(_)) => return self.wait_ended(id).await,
             Err(error) => return Err(error),
         };
         self.close_and_record(id, sequence, data).await
@@ -979,14 +970,20 @@ impl TimelineTree {
             let notified = self.end_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            {
-                let state = self.state.lock().unwrap();
+            let pending = {
+                let mut state = self.state.lock().unwrap();
                 if state.ended.contains_key(id) {
                     return Ok(());
                 }
                 if state.closing {
                     return Err(AgentError::Closed("TimelineTree".into()));
                 }
+                state.pending.remove(id)
+            };
+            if let Some(pending) = pending {
+                return self
+                    .close_and_record(id, pending.sequence, pending.data)
+                    .await;
             }
             tokio::select! {
                 _ = notified => {}

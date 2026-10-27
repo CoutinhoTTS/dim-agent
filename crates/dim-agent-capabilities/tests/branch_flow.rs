@@ -3757,3 +3757,141 @@ async fn a_stop_settles_the_branch_tool_while_the_tree_still_builds_the_child() 
     .await;
     soon(agent.close()).await.unwrap();
 }
+
+#[derive(Default)]
+struct Gate {
+    target: Mutex<Option<String>>,
+    armed: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+struct GatePlugin {
+    gate: Arc<Gate>,
+    dispatcher: Key<Dispatcher>,
+    identity: Key<TimelineIdentity>,
+}
+impl DynPlugin for GatePlugin {
+    fn name(&self) -> &str {
+        "test.gate"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase(), self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let gate = self.gate.clone();
+            let branch = identity.branch_id.clone();
+            dispatcher.subscribe(ctx, "gate", &["branch/end"], move |_event| {
+                let gate = gate.clone();
+                let branch = branch.clone();
+                Box::pin(async move {
+                    let mine = gate.target.lock().unwrap().as_deref() == Some(branch.as_str());
+                    if mine && gate.armed.swap(false, Ordering::SeqCst) {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
+                    Ok(())
+                })
+            })?;
+            Ok(Effect::Done)
+        })
+    }
+}
+fn gated(probe: &Arc<Probe>, gate: &Arc<Gate>) -> AgentBuilder {
+    let mut builder = builder(probe);
+    let gate = gate.clone();
+    builder.require_feature(Feature::new("test.gate").branch("test.gate", move |names| {
+        Ok(Box::new(GatePlugin {
+            gate: gate.clone(),
+            dispatcher: names.key()?,
+            identity: names.key()?,
+        }))
+    }));
+    builder
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_ancestors_end_closes_a_pending_end_whose_delivery_was_held() {
+    let probe = Arc::new(Probe::default());
+    let gate = Arc::new(Gate::default());
+    let agent = gated(&probe, &gate).build();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let ancestor = soon(session.branch("main".into(), 0, options("ancestor")))
+        .await
+        .unwrap();
+    soon(session.idle(&ancestor)).await.unwrap();
+    let child = soon(session.branch(
+        ancestor.clone(),
+        0,
+        BranchOptions {
+            prompt: "tool line".into(),
+            source: BranchSource::Tool {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                call_id: "call".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    *gate.target.lock().unwrap() = Some(child.clone());
+    gate.armed.store(true, Ordering::SeqCst);
+    session
+        .submit(
+            r#"double:branch {"action":"end","content":"the work is done"} | wait {"millis":20000}"#
+                .into(),
+            InputMode::Queue,
+            &child,
+        )
+        .await
+        .unwrap();
+    soon(gate.entered.notified()).await;
+    until_events(&session, &child, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BranchEnd(_)))
+    })
+    .await;
+    let ender = {
+        let session = session.clone();
+        let ancestor = ancestor.clone();
+        tokio::spawn(async move {
+            session
+                .end_branch(
+                    &ancestor,
+                    BranchSource::Host {
+                        operation_id: "op:end".into(),
+                    },
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        tool_results(&session, &child)
+            .await
+            .iter()
+            .any(|result| matches!(&result.content, ToolContent::Text(text) if text.contains("is ending"))),
+        "the line committed its own end before the ancestor's reached it"
+    );
+    gate.release.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(8), ender).await;
+    assert!(
+        outcome.is_ok(),
+        "the ancestor's end waited for the line's own turn"
+    );
+    assert!(
+        session.ended_head(&child).is_some(),
+        "the line is recorded as ended"
+    );
+    let events = local_events(&session, &child).await;
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::TurnEnd(data) if matches!(data.outcome, TurnOutcome::Cancelled { .. }))));
+    soon(agent.close()).await.unwrap();
+}
+
