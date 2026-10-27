@@ -8,9 +8,6 @@ type TreeCommands = {
 }
 type MethodCall = { method: string; params: { sessionId: string; at: number; cancel: boolean } }
 
-// Creates a child of `main` through `treeCommands.create`, passing the
-// caller's cancellation explicitly: one that never completes, or one that
-// has already completed.
 export const part = definePlugin({
   name: 'TreeCreateFixture',
   provides,

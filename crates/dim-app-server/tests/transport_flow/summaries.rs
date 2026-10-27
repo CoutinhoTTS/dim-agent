@@ -94,7 +94,6 @@ async fn summaries_are_v3_filtered_bounded_and_leave_list_strict() {
         .iter()
         .find(|row| row["sessionId"] == empty_id)
         .unwrap();
-    // No user input does not imply no events: initialization adopts configuration.
     let initial = empty_session
         .local("main", ..=empty_row["sequence"].as_u64().unwrap())
         .await

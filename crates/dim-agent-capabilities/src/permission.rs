@@ -122,7 +122,6 @@ impl Permission {
             },
             None => None,
         };
-        // Taken after the read: a policy dispatched while it waited applies.
         let policy = self.state.get().policy;
         let name = &call.name;
         if policy.disallowed_tools.contains(name) {
@@ -155,7 +154,6 @@ impl Permission {
         };
         let rules = match rules {
             Ok(rules) => rules,
-            // A deny rule may exist.
             Err(error) => {
                 return Ok(Decision::Deny {
                     reason: format!("Command rules could not be read: {error}"),
@@ -179,7 +177,6 @@ impl Permission {
                 ),
             });
         }
-        // An allow rule only answers the question; it never lifts a denial.
         Ok(match decide(&policy, name, risk) {
             Decision::Ask { .. }
                 if !command.contains(COMMAND_SEPARATORS)
@@ -221,7 +218,6 @@ impl Permission {
             },
         );
         if let Err(error) = committed {
-            // The event was registered but not committed: nothing was written.
             if let Some(id) = registered {
                 let mut inner = self.inner.lock().unwrap();
                 inner.written = expected;
@@ -400,14 +396,11 @@ impl DynPlugin for PermissionPlugin {
                 inner: Mutex::new(Inner::default()),
             });
             let closing = service.clone();
-            ctx.effect(move || {
-                async move {
-                    let mut inner = closing.inner.lock().unwrap();
-                    inner.closed = true;
-                    // Dropped waiters report `Closed`.
-                    inner.waiters.clear();
-                    Ok(())
-                }
+            ctx.effect(move || async move {
+                let mut inner = closing.inner.lock().unwrap();
+                inner.closed = true;
+                inner.waiters.clear();
+                Ok(())
             })?;
             let owner = service.clone();
             dispatcher

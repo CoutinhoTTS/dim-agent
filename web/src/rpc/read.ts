@@ -66,7 +66,6 @@ function modelId(value: unknown, at: string): ModelId {
   return { providerId: str(source, "providerId", at), modelId: str(source, "modelId", at) }
 }
 
-// ---------------------------------------------------------------- replies
 
 export function readHello(value: unknown): HelloResult {
   const source = obj(value, "hello")
@@ -172,7 +171,6 @@ export function readProviderSelection(value: unknown): ModelId | undefined {
   return { providerId: str(selection, "provider_id", "provider.selection"), modelId: str(selection, "model_id", "provider.selection") }
 }
 
-// ----------------------------------------------------------------- events
 
 function textOf(blocks: unknown, at: string): string {
   return arr(blocks, at).flatMap((item, index) => {
@@ -192,7 +190,6 @@ function toolResult(value: unknown, at: string): ToolResult {
 function content(type: string, name: string, data: Json, at: string): EventContent {
   switch (`${type}/${name}`) {
     case "input/message": {
-      // An input without `user` only carries context blocks, not a message.
       if (data.user === undefined || data.user === null) return { kind: "input" }
       return { kind: "input", text: textOf(obj(data.user, `${at}.user`).content, `${at}.user.content`) }
     }
@@ -250,7 +247,6 @@ function readEvent(value: unknown, at: string): SessionEvent {
   }
 }
 
-// ---------------------------------------------------------- notifications
 
 function readApproval(params: Json): ApprovalRequest {
   const at = "approval.request"

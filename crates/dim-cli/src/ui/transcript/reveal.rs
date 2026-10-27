@@ -100,8 +100,6 @@ mod tests {
     #[test]
     fn bursts_reveal_at_an_even_pace_near_the_stream_rate() {
         let steps = bursty();
-        // Once the rate is learnt (after ~1.5 s), every frame advances and
-        // the pace stays near 300 characters a second (~4.8 a frame).
         let settled = &steps[100..];
         assert!(settled.iter().all(|step| *step > 0), "{settled:?}");
         let mean = settled.iter().sum::<usize>() as f64 / settled.len() as f64;

@@ -33,10 +33,6 @@ impl ModelDriver for EchoModel {
                 .map(|message| message_text(message))
                 .transpose()?
                 .unwrap_or_default();
-            // Collaboration deliberately presents delegated work as an
-            // authorized agent-message block. The deterministic prototype
-            // host unwraps that test fixture so its `tool:` grammar can still
-            // drive member flows; real providers receive the rendered block.
             let text = delegated_message_body(&text).unwrap_or(text);
             let reason = if last.is_some_and(|message| message.role == Role::User)
                 && text.starts_with("tool:")

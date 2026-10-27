@@ -26,7 +26,6 @@ export class Catalog {
   async load(cwd: string) {
     const snapshot = await this.settings.read({ source: 'workflow', scope: 'user' })
     if (!snapshot.ok) throw new WorkflowError('definition_source_failed', snapshot.error.message)
-    // This source's row schema is the Settings producer's contract.
     const document = snapshot.value.document as unknown as WorkflowSettings
     const entries: DefinitionEntry[] = Object.entries(document.definitions).map(([name, definition]) => ({
       name, definition, source: 'user', enabled: true,

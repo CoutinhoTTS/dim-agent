@@ -8,7 +8,6 @@ import { useUiStore } from "./stores/ui"
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
-    // Reopens the last session, otherwise starts a new one.
     { path: "/", name: "root", component: RootRedirect },
     { path: "/chat/new", name: "chat-new", component: NewSessionPage },
     { path: "/chat/:sessionId", name: "chat-session", component: ChatPage, props: true },

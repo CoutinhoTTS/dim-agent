@@ -73,7 +73,6 @@ async fn rejected_prompt_load_does_not_publish_or_poison_the_pending_load() {
         }),
         None,
     );
-    // The second request is rebound onto the pending operation's identity.
     builder.require_feature(
         Feature::new("TamperControl").branch("TamperControl", |names| {
             Ok(Box::new(TamperControl::new(

@@ -28,7 +28,6 @@ pub(super) struct SseTransport {
     stopping: CancellationToken,
 }
 impl SseTransport {
-    // No worker is spawned here: dropping this future cancels GET/discovery.
     pub async fn connect(
         client: Client,
         config: &StreamableHttpClientTransportConfig,
@@ -37,8 +36,6 @@ impl SseTransport {
     ) -> Result<Self> {
         let base =
             Url::parse(&config.uri).map_err(|_| McpServerError::Configuration("invalid URL"))?;
-        // Reuse the SDK's bounded SSE decoder directly, without its Streamable
-        // HTTP worker or reconnect policy. It preserves endpoint events.
         let get = |token| {
             client.get_stream_with_max_sse_event_size(
                 config.uri.clone(),
@@ -92,8 +89,6 @@ impl SseTransport {
                     let endpoint = base
                         .join(&value)
                         .map_err(|_| McpServerError::InvalidResponse)?;
-                    // Never forward configured secrets to a different origin,
-                    // downgrade HTTPS, or accept URL-embedded credentials.
                     if value.trim().is_empty()
                         || endpoint.origin() != base.origin()
                         || !endpoint.username().is_empty()
@@ -176,7 +171,6 @@ impl Transport<RoleClient> for SseTransport {
             if !response.status().is_success() {
                 return Err(McpServerError::RequestFailed);
             }
-            // JSON-RPC replies arrive on GET, not in this acknowledgement body.
             Ok(())
         }
     }
@@ -190,15 +184,13 @@ impl Transport<RoleClient> for SseTransport {
             match next {
                 Some(Ok(event)) => match event.event.as_deref() {
                     Some("message" | "") | None => {
-                        // SSE defaults to message when the event field is absent
-                        // or empty. An event with no data is not dispatched.
                         let Some(data) = event.data else { continue };
                         if let Ok(message) = serde_json::from_str(&data) {
                             return Some(message);
                         }
                         break;
                     }
-                    Some("endpoint") => break, // A live route is immutable.
+                    Some("endpoint") => break,
                     _ => {}
                 },
                 _ => break,

@@ -63,7 +63,6 @@ impl PrepareContext for Prepare {
     ) -> HostFuture<'_, Arc<ModelRequest>> {
         Box::pin(async move {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 && self.stage == Stage::Preparation {
-                // A real successful preparation may finish after cancellation.
                 self.barrier.cleanup(cancel).await;
             }
             Ok(request)
@@ -279,7 +278,6 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
         let mut stop =
             tokio::spawn(async move { stopping.stop("main", "stop requested".into()).await });
         soon(native.cleaning.notified()).await;
-        // This handler is installed after all three foreground capabilities.
         soon(extension.seen.notified()).await;
         assert!(!native.cleaned.load(Ordering::SeqCst));
         assert!(
@@ -288,8 +286,6 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
                 .is_err()
         );
         native.release.notify_one();
-        // The turn closes after the native terminal; work outside the turn,
-        // like this extension's, owes the stop nothing.
         soon(stop).await.unwrap().unwrap();
         assert!(native.cleaned.load(Ordering::SeqCst));
         extension.release.notify_one();
@@ -311,8 +307,6 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
             usize::from(stage == Stage::Tools)
         );
         if stage == Stage::Model {
-            // The completed output's call is never dispatched: Loop closes it
-            // in the batch of its turn end, right before it.
             let closure = &events[events.len() - 2];
             assert!(matches!(&closure.kind,
                 EventKind::ToolResult(data) if data.call_event_id.is_none()
@@ -329,7 +323,6 @@ async fn interrupt_reaches_every_capability_before_native_cleanup_and_stop_waits
         if stage == Stage::Tools {
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ToolResult(data) if data.results[0].result.content == ToolContent::Text("native success".into()))));
         }
-        // No pause: the next input simply runs.
         soon(session.submit("resume".into(), InputMode::Queue, "main"))
             .await
             .unwrap();
@@ -439,7 +432,6 @@ async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
         .unwrap();
     soon(gate.entered.notified()).await;
     let timeline = gate.timeline.lock().unwrap().clone().unwrap();
-    // The adopted input is already written, while its turn/start is still pending.
     timeline
         .append(
             EventKind::StopInterrupt(StopInterruptData {
@@ -451,9 +443,6 @@ async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
         .unwrap();
     gate.release.notify_one();
     soon(session.idle("main")).await.unwrap();
-    // The turn this input drove was in flight when the interrupt arrived: it
-    // ends cancelled without a model call, and the unconsumed input stays
-    // pending without driving another turn by itself.
     let events = session.history("main", None).await.unwrap();
     assert!(
         !events
@@ -475,7 +464,6 @@ async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
             .queued,
         1
     );
-    // A later driving input starts a turn that also consumes it.
     let next = session
         .submit("new input".into(), InputMode::Queue, "main")
         .await
@@ -497,7 +485,6 @@ async fn input_written_before_an_interrupt_waits_for_the_next_driving_input() {
 
 fn gated() -> (Agent, Arc<Gate>) {
     let gate = Arc::new(Gate::default());
-    // These flows only need the branch Timeline, not the dispatch pause.
     gate.once.store(true, Ordering::SeqCst);
     let copy = gate.clone();
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -604,7 +591,6 @@ async fn a_tool_call_already_committed_when_the_interrupt_arrives_is_not_execute
     let gate = Arc::new(Gate::default());
     let executed = Arc::new(AtomicUsize::new(0));
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    // Hold an earlier event, before any subscriber can receive the terminal.
     let copy = gate.clone();
     builder.require_feature(
         Feature::new("test.input-gate").branch("test.input-gate", move |names| {
@@ -644,8 +630,6 @@ async fn a_tool_call_already_committed_when_the_interrupt_arrives_is_not_execute
     })
     .await;
     let timeline = gate.timeline.lock().unwrap().clone().unwrap();
-    // Loop has not seen the model output yet: once released it proposes the
-    // tool call, committed after the interrupt but before it is handled.
     let interrupt = timeline.append(interrupt()).unwrap();
     gate.release.notify_one();
     soon(session.idle("main")).await.unwrap();
@@ -676,8 +660,6 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
     let next_model = Arc::new(Barrier::default());
     let copy = gate.clone();
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    // InputQueue commits input/applied before this gate holds input/message;
-    // Loop cannot receive the later event until the gate is released.
     builder.require_feature(
         Feature::new("test.input-gate").branch("test.input-gate", move |names| {
             InputGate::part(names, copy.clone(), After::InputQueue, "input/message")
@@ -701,7 +683,6 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
         );
     defaults::install(&mut builder);
     let copy = end_gate.clone();
-    // Loop publishes Idle before this subscriber completes turn/end dispatch.
     builder.require_feature(
         Feature::new("test.turn-end-gate").branch("test.turn-end-gate", move |names| {
             InputGate::part(names, copy.clone(), After::Loop, "turn/end")
@@ -716,7 +697,6 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
         .await
         .unwrap();
     soon(gate.entered.notified()).await;
-    // Committed before Loop handles input/applied and writes turn/start.
     let stopping = session.clone();
     let mut stop = tokio::spawn(async move { stopping.stop("main", "user stop".into()).await });
     while !session
@@ -735,8 +715,6 @@ async fn stop_waits_for_an_interrupted_turn_whose_start_is_not_yet_dispatched() 
         LoopPhase::Idle
     );
     let premature = tokio::time::timeout(Duration::from_millis(25), &mut stop).await;
-    // A later turn may run before stop returns. Its model remains in flight:
-    // waiting for global idle instead of a fixed dispatch fence would hang.
     session
         .submit("later work".into(), InputMode::Queue, "main")
         .await
@@ -932,7 +910,6 @@ async fn a_stop_during_output_keeps_its_text_and_closes_every_started_call() {
     ] {
         chunks.send(chunk).unwrap();
     }
-    // Progress shows what is received and not committed.
     let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
     soon(progress.wait_for(|progress| progress.text == "tail"))
         .await
@@ -1005,7 +982,6 @@ async fn a_stop_during_output_keeps_its_text_and_closes_every_started_call() {
             ..
         })
     ));
-    // One atomic batch: the closure is never stored without its terminal.
     let key = TimelineKey {
         session_id: session.id().to_owned(),
         branch_id: "main".into(),
@@ -1054,7 +1030,8 @@ fn replaced_terminal(events: &[Arc<AgentEvent>], request_id: &str) -> bool {
 /// A steer consumed before the request received any model output replaces
 /// it: ModelProvider cancels the invocation and writes a Cancelled terminal
 /// once its host ends, with no output even when the host keeps streaming
-/// after the cancellation. The turn then goes on with the steer.
+/// after the cancellation. The turn then goes on with the steer. A usage
+/// chunk is a billing fact and is still committed for the replaced request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replaced_request_commits_no_output_its_host_still_streams() {
     let (model, chunks) = channel_model();
@@ -1069,6 +1046,20 @@ async fn a_replaced_request_commits_no_output_its_host_still_streams() {
         .await
         .unwrap();
     model.invoked().await;
+    chunks
+        .send(ModelChunk::Usage(
+            serde_json::from_value(
+                serde_json::json!({"promptTokens":4,"completionTokens":2,"totalTokens":6}),
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+    until_events(&session, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ModelUsage(_)))
+    })
+    .await;
     let steer = session
         .submit("STEER-MARKER".into(), InputMode::Steer, "main")
         .await
@@ -1096,7 +1087,6 @@ async fn a_replaced_request_commits_no_output_its_host_still_streams() {
             .is_cancelled(),
         "the invocation is cancelled"
     );
-    // The host ignores the cancellation and keeps streaming.
     for chunk in [
         ModelChunk::MessageStart {
             message_id: "late".into(),
@@ -1141,6 +1131,11 @@ async fn a_replaced_request_commits_no_output_its_host_still_streams() {
         "only the terminal of the replaced request"
     );
     assert!(replaced_terminal(&events, &replaced));
+    assert!(
+        events.iter().any(|event| matches!(&event.kind,
+            EventKind::ModelUsage(data) if data.request_id == replaced && data.usage.total_tokens == 6.)),
+        "usage for the replaced request must remain a committed billing fact"
+    );
     assert!(written[0].sequence < starts[1].0);
     assert!(echoed(&events, "STEER-MARKER"));
     assert_eq!(
@@ -1199,7 +1194,6 @@ async fn a_steer_during_preparation_ends_the_request_before_the_model_call() {
         .submit("STEER-MARKER".into(), InputMode::Steer, "main")
         .await
         .unwrap();
-    // The preparation is cancelled; it still succeeds after cleanup.
     soon(native.cleaning.notified()).await;
     native.release.notify_one();
     soon(session.idle("main")).await.unwrap();
@@ -1254,7 +1248,6 @@ impl DynPlugin for AppliedGatePlugin {
     fn name(&self) -> &str {
         "test.applied-gate"
     }
-    // InputQueue must subscribe first; independent plugins have no apply order.
     fn injects(&self) -> Vec<TypeKey> {
         vec![self.dispatcher.erase(), self.input_queue.erase()]
     }
@@ -1286,7 +1279,6 @@ async fn a_steer_consumed_after_the_first_output_waits_for_the_output_end() {
     let (model, chunks) = channel_model();
     let gate = Arc::new(AppliedGate::default());
     let mut builder = channel_builder(model.clone());
-    // InputQueue must subscribe first; independent plugins have no apply order.
     let copy = gate.clone();
     builder.require_feature(
         Feature::new("test.applied-gate").branch("test.applied-gate", move |names| {
@@ -1314,7 +1306,6 @@ async fn a_steer_consumed_after_the_first_output_waits_for_the_output_end() {
         .await
         .unwrap();
     soon(gate.entered.notified()).await;
-    // The steer is applied; its dispatch waits while the output arrives.
     chunks.send(ModelChunk::Text("answer".into())).unwrap();
     chunks.send(ModelChunk::TextEnd).unwrap();
     let committed = until_events(&session, |events| {
@@ -1414,8 +1405,6 @@ impl DynPlugin for TerminalHoldPlugin {
                 &["step/model-output-end"],
                 move |draft| {
                     if hold.armed.swap(false, Ordering::SeqCst) {
-                        // Woken from a worker thread, the dispatcher would wait
-                        // in its unstealable LIFO slot until this hook returns.
                         let release = gate.clone();
                         std::thread::spawn(move || release.release.notify_one())
                             .join()
@@ -1519,7 +1508,6 @@ async fn a_steer_is_not_consumed_between_a_failed_call_and_its_terminal() {
         .unwrap();
     model.invoked().await;
     hold_steer(&session, &gate, &hold).await;
-    // The host ends its stream without output: the call fails.
     drop(chunks);
     soon(session.idle("main")).await.unwrap();
     let events = session.history("main", None).await.unwrap();

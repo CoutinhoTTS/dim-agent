@@ -130,8 +130,6 @@ impl Connection {
     pub fn dispatch(self: &Arc<Self>, request: Request) {
         let id = request.id.clone();
         let admitted = self.hub.with_rpc(|rpc| {
-            // A connection of a previous instance is closing; its requests never
-            // reach the current generation.
             if self.closed.is_cancelled()
                 || self.instance.get().map(String::as_str) != Some(rpc.index.server_instance_id())
             {
@@ -142,11 +140,7 @@ impl Connection {
             let this = self.clone();
             let Request { id, call } = request;
             if let Call::Contributed { method, params } = call {
-                // The contract's order: built-in, management, Session. A name
-                // no management namespace holds that names a Session is a
-                // Session method candidate.
                 if self.protocol_version() >= 3 && session_candidate(rpc, &method, &params) {
-                    // An unloading load admits no new call; the next load serves it.
                     if rpc.stopping.is_cancelled() {
                         return Err(RpcError::reloading());
                     }
@@ -188,8 +182,6 @@ impl Connection {
                 return Ok(());
             }
             let rpc = rpc.clone();
-            // Shutdown must join its control requests without waiting for
-            // business commands that a forced exit deliberately abandons.
             let shutdown =
                 matches!(call, Call::Shutdown(_)).then(|| self.hub.shutdown_requests.token());
             rpc.commands.clone().spawn(async move {
@@ -262,9 +254,6 @@ impl Connection {
         }
         self.authorize(rpc, &session_id)?;
         let usage = rpc.index.acquire(&session_id).await?;
-        // A namespace withdrawn in this Session answers from the row that
-        // registered it: `service_reloading` while it starts or reloads,
-        // `service_unavailable` once it cannot run.
         let provider = crate::methods::session_provider(&rpc.loader, &usage.session, &method)?;
         if rpc.stopping.is_cancelled() {
             return Err(RpcError::reloading());
@@ -282,8 +271,6 @@ impl Connection {
             Entry::Web => {
                 let allowed = match call {
                     Call::Shutdown(_) => false,
-                    // Session methods contributed by plugins, and the
-                    // management reads the web entry is served.
                     Call::Contributed { method, .. } => {
                         !rpc.management.holds(method)
                             || WEB_READABLE_METHODS.contains(&method.as_str())
@@ -468,13 +455,10 @@ impl Connection {
                 }
                 (Some(&p.session_id), None)
             }
-            // A delete reads none of the Session's records, so a damaged
-            // Session is deleted too: only its protocol version is checked.
             Call::Delete(p) => {
                 self.authorize_version(rpc, &p.session_id)?;
                 (None, None)
             }
-            // A fork copies the native store's rows.
             Call::Fork(p) => {
                 if rpc.config.database_path.is_none() {
                     return Err(RpcError::app(
@@ -625,15 +609,12 @@ impl Connection {
             None
         };
         if call.is_execution_session() {
-            // Capability owners retain admitted work when the RPC generation ends.
             return Some(tokio::select! {
                 biased;
                 _ = rpc.unloading.cancelled() => Err(RpcError::interrupted()),
                 result = self.execution_session(rpc, &usage.as_ref().expect("execution operation pins its Session").session, call) => result,
             });
         }
-        // Capture the subscription before waiting for execution. A replacement
-        // cannot silently inherit this request's delivery guarantee.
         let delivery = match &call {
             Call::Stop(p) => Some(&p.session_id),
             Call::Idle(p) => Some(&p.session_id),
@@ -656,9 +637,6 @@ impl Connection {
             })),
             Call::Shutdown(params) => {
                 if !params.force {
-                    // The connection transfers only its final-reply writer to the
-                    // process coordinator. This RPC must leave the graph before
-                    // that coordinator can join cleanup and publish completion.
                     let mut reply = self.shutdown_reply.lock().expect("shutdown reply");
                     if reply.is_some() {
                         return Some(Err(RpcError::invalid("Shutdown already requested")));
@@ -680,8 +658,6 @@ impl Connection {
             }
             Call::Create(params) => self.create(rpc, params).await,
             Call::List(params) | Call::Summaries(params) => {
-                // v3 lists every Agent unless filtered; v1/v2 keep the
-                // single-Agent view of the default Agent.
                 let filter: Option<String> = if self.protocol_version() >= 3 {
                     params.agent_id
                 } else {
@@ -726,7 +702,6 @@ impl Connection {
                                 attached_clients: self.hub.attached_clients(s.id()),
                                 agent_id: (self.protocol_version() >= 3)
                                     .then(|| host.agent_id.clone()),
-                                // No native store, so no titles.
                                 title: (self.protocol_version() >= 3)
                                     .then(crate::storage::TitleFields::default),
                             })
@@ -751,7 +726,6 @@ impl Connection {
                         .await;
                     let (preview, updated_at) = match summary {
                         Ok(summary) => summary,
-                        // An in-memory session can close after directory capture.
                         Err(AgentError::Closed(_)) => continue,
                         Err(error) => return Some(Err(RpcError::from(error))),
                     };
@@ -809,8 +783,6 @@ impl Connection {
             },
             Call::Idle(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
-                    // Idle only observes work that may wait for client input; an
-                    // unloading service ends the wait instead of draining it.
                     let branch = params.branch_id.as_deref().unwrap_or("main");
                     let result = tokio::select! {biased;_=self.closed.cancelled()=>return None,_=rpc.unloading.cancelled()=>Err(RpcError::reloading()),result=session.idle(branch)=>result.map_err(RpcError::from)};
                     match result {
@@ -831,9 +803,6 @@ impl Connection {
                             RpcError::wire(-32000, "Session cleanup failed")
                         }),
                     None => {
-                        // The owning Agent may be closing: wait for its existing
-                        // settlement, and report a cleanup failure exactly like
-                        // the direct close path does.
                         if let Some(host) = rpc.index.host_by_session(&params.session_id)
                             && let Some(session) = host.agent.get_session(&params.session_id)
                         {
@@ -876,7 +845,6 @@ impl Connection {
             },
             Call::ApprovalRespond(params) => {
                 let branch = params.branch_id.clone().unwrap_or_else(|| "main".into());
-                // Accepted commands belong to the Session and continue after disconnect.
                 let result = match rpc.index.session(&params.session_id) {
                     Some((_, session)) => crate::approval::respond(
                         &session,
@@ -888,7 +856,6 @@ impl Connection {
                     .map(|_| Reply::empty()),
                     None => Err(RpcError::closed()),
                 };
-                // The approval capability of a live branch is reloading, not closed.
                 result.map_err(|error| {
                     let live = rpc
                         .index
@@ -924,8 +891,6 @@ impl Connection {
                     return Some(Err(RpcError::from(AgentError::Storage(reason))));
                 }
                 if params.agent_id == rpc.index.default_agent_id() {
-                    // The default Agent is the v1/v2 compatibility target;
-                    // those clients cannot create or recover Agents.
                     return Some(Err(RpcError::app(
                         -32000,
                         "agent_default",
@@ -938,8 +903,6 @@ impl Connection {
                         error @ (crate::agents::AgentOpError::Unload(_)
                         | crate::agents::AgentOpError::Settle(_)),
                     ) => {
-                        // Cleanup details stay in the server log; the client
-                        // gets a fixed outbound message.
                         tracing::error!(%error, agent_id=%params.agent_id, "Agent close failed");
                         Err(RpcError::from(error))
                     }
@@ -1048,7 +1011,6 @@ impl Connection {
                                 ),
                             ));
                         }
-                        // shortcut: concurrent clients may replace an older base; revisit with configuration patch semantics.
                         let state = session
                             .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(
                                 &p.branch_id,
@@ -1484,8 +1446,6 @@ impl RpcService {
         cwd: Option<PathBuf>,
         preferences: crate::provider::ModelPreferences,
     ) -> Result<dim_agent_types::ModelSelection, RpcError> {
-        // Product models come from Provider, read per call: while it is not
-        // active the call is retryable and every other method keeps working.
         if self.config.product_home.is_some() {
             let provider = self
                 .ctx
@@ -1517,12 +1477,9 @@ pub(crate) struct RpcPlugin {
     config: Arc<ServerConfig>,
     root: Ctx,
     index: Key<AgentIndex>,
-    // Restore observers must outlive admitted RPC commands during reload.
     collaboration: Key<crate::collaboration::Collaboration>,
     hub: Key<ConnectionHub>,
     control: Key<ServerControl>,
-    // Reads the status of the rows that registered method namespaces;
-    // the loader never reloads.
     loader: Key<rutis_loader::Loader>,
     management: Key<crate::methods::ManagementMethods>,
 }
@@ -1590,7 +1547,6 @@ impl DynPlugin for RpcPlugin {
                 service.commands.wait().await;
                 Ok(())
             })?;
-            // Registered only after its cleanup is owned by this generation.
             handler.register(registered);
             Ok(Effect::Done)
         })

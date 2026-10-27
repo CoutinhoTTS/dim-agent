@@ -73,7 +73,6 @@ impl HostDispatch for AuxiliaryModel {
             let reply = if let Some(cancelled) = cancelled {
                 tokio::select! {
                     result = &mut call => result,
-                    // The callback's result, once settled, is ignored.
                     _ = async {
                         let returned = cancelled.call_async(Value::List(vec![])).await?;
                         rutis_bridge::session::settle(returned).await
@@ -115,7 +114,6 @@ impl CompleteAuxiliary for AuxiliaryModel {
             if request.max_output_tokens == Some(0) {
                 return Err(invalid("maxOutputTokens must be positive"));
             }
-            // Dropping the call cancels the owned work instead of detaching it.
             let call = cancel.child_token();
             let _dropped = call.clone().drop_guard();
             let (owner, host) = (self.owner.clone(), self.host.clone());
@@ -229,7 +227,6 @@ async fn run(
         cancel.clone(),
     )
     .await?;
-    // The same failure policy as Session requests, settlement included.
     Ok(invoke_with_recovery(
         &host,
         &model_request,
@@ -253,7 +250,6 @@ async fn collect(mut stream: ModelStream) -> Result<AuxiliaryReply, HostError> {
     }
     let stop_reason =
         stop_reason.ok_or_else(|| HostError::failed("Model stream ended without a stop"))?;
-    // No tools are offered, so a tool stop is a provider defect.
     if stop_reason == ModelStopReason::ToolUse {
         return Err(HostError::failed(
             "Model stopped for a tool it was not offered",

@@ -16,23 +16,16 @@ try {
   console.error(`Missing dimcode-${platform}. Reinstall dimcode with npm optional dependencies enabled.`);
   process.exit(1);
 }
-// The CLI tells its SKUs apart by the package it was started from.
 const { name } = createRequire(import.meta.url)('../package.json');
 const env = { ...process.env, DIMCODE_NPM_PACKAGE: name };
-// The Web workspace is the optional dimcode-web package; an installed one is
-// named to the binary unless the user points at another frontend.
 if (env.DIMCODE_WEB_ASSETS === undefined) {
   try {
     const web = createRequire(import.meta.url).resolve('dimcode-web/package.json');
     env.DIMCODE_WEB_ASSETS = path.join(path.dirname(web), 'web');
   } catch {
-    // Not installed: `dimcode web` says how to get it.
   }
 }
-// `process.execve` came with Node 22.15 and 23.11; an older Node, which npm
-// installs under with only an engines warning, spawns like Windows does.
 if (process.platform !== 'win32' && typeof process.execve === 'function') {
-  // Replacing the launcher preserves terminal ownership and delivers each signal once.
   try {
     process.execve(binary, [binary, ...process.argv.slice(2)], env);
   } catch (error) {
@@ -41,7 +34,6 @@ if (process.platform !== 'win32' && typeof process.execve === 'function') {
   }
 }
 const child = spawn(binary, process.argv.slice(2), { stdio: 'inherit', env });
-// The Windows console sends Ctrl+C to both processes; forwarding would interrupt twice.
 const onInterrupt = () => {};
 const onTerminate = () => child.kill('SIGTERM');
 process.on('SIGINT', onInterrupt);

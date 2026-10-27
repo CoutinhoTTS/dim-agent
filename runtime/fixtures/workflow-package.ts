@@ -7,7 +7,6 @@ import type { FileError, FileLease, ManagementMethods, PluginFiles, Sessions } f
 
 const control = z.object({ phase: z.enum(['before_input', 'reply_write', 'before_launch', 'stage_input', 'stage_history', 'delete_reply']), host: z.string(), port: z.number().int(), count: z.number().int().min(1).optional() })
 
-// Gate the real package's public I/O port; its original row still owns every native call.
 export default definePlugin({
   name: 'WorkflowPackageProbe',
   inject: workflow.inject,
@@ -76,7 +75,6 @@ export default definePlugin({
         }
       },
     }
-    // The package injects `managementMethods`; the probe registers its namespace there too.
     await ctx.use<ManagementMethods>('managementMethods').register(
       'workflowprobe',
       [

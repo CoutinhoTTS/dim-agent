@@ -12,7 +12,6 @@ const output = path.resolve(destination);
 assert(!existsSync(output), 'Destination already exists');
 const repo = path.resolve(import.meta.dirname,'..');
 const all = ['darwin-arm64','darwin-x64','linux-arm64','linux-x64','windows-arm64','windows-x64'];
-// A subset is for an alpha only; publish-npm.mjs refuses one for beta and stable.
 const platforms = rest.length ? rest[1].split(',') : all;
 assert(platforms.length > 0 && platforms.every((platform) => all.includes(platform)) && new Set(platforms).size === platforms.length, 'Unknown or repeated platform');
 const manifests = platforms.map((platform) => {
@@ -37,7 +36,6 @@ const manifests = platforms.map((platform) => {
 const first = manifests[0].manifest;
 const common = ({version,sourceCommit,toolchain,account}) => ({version,sourceCommit,toolchain,account});
 for (const {manifest} of manifests) assert.deepEqual(common(manifest),common(first),'Platform provenance or account mismatch');
-// The Web workspace: one artifact for every platform, from stage-web.mjs.
 const web = (() => {
   const directory = path.resolve(source,'release-web');
   const manifest = JSON.parse(readFileSync(path.join(directory,'release-manifest.json')));
@@ -73,7 +71,6 @@ try {
   }
   cpSync(path.join(repo,'npm'),path.join(scratch,'package'),{recursive:true});
   if (platforms.length < all.length) {
-    // The wrapper references only the platform packages this release ships.
     const wrapper = path.join(scratch,'package/package.json');
     const data = JSON.parse(readFileSync(wrapper));
     data.optionalDependencies = Object.fromEntries([['dimcode-web', first.version], ...platforms.map((platform) => [`dimcode-${platform}`, first.version])]);
@@ -81,7 +78,6 @@ try {
   }
   copyFileSync(path.join(repo,'LICENSE'),path.join(scratch,'package/LICENSE'));
   const archive = `dimcode-${first.version}.tgz`;
-  // COPYFILE_DISABLE keeps macOS tar from adding AppleDouble `._*` entries.
   const packed = spawnSync('tar',['-czf',path.join(npm,archive),'-C',scratch,'package'],{encoding:'utf8',env:{...process.env,COPYFILE_DISABLE:'1'}});
   assert.ifError(packed.error);
   assert.equal(packed.status,0,'Wrapper archive creation failed');

@@ -182,7 +182,6 @@ impl ToolDriver for GateTools {
             "Wait until the test releases it.",
             serde_json::json!({"type":"object"}),
         );
-        // Only blocks inside the turn; allowed under the default read-only policy.
         gate.risk = Some("session".into());
         vec![gate]
     }
@@ -321,8 +320,6 @@ impl DynPlugin for LifecycleProbePlugin {
                 .unwrap()
                 .insert(id.clone(), lifecycle.clone());
             probe.trees.lock().unwrap().insert(id.clone(), tree);
-            // Session parts load concurrently: a flow that closes during
-            // assembly waits for this record first.
             probe.record(&id, "applied");
             let task = tokio::spawn(async move {
                 let published = lifecycle.activated().await;
@@ -338,9 +335,6 @@ impl DynPlugin for LifecycleProbePlugin {
                     probe.close_held.notify_one();
                     probe.release_close.notified().await;
                 }
-                // Like a Session part's own work, the task ends once the
-                // Session is closing or never published; aborting it
-                // could drop that record.
                 let _ = task.await;
                 Ok(())
             })?;
@@ -445,8 +439,6 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
             }),
         );
     }
-    // The Agent's own plugin: the catalog, and the Skills parts it
-    // registers. Placed now, so the catalog is there before any Session.
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
     let agent = builder.build_in(&root);
     agent.start().await.unwrap();

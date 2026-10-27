@@ -113,7 +113,6 @@ fn resolve_explicit(input: &str, bom: Option<&TextEncoding>) -> Result<TextEncod
         }
         _ => {}
     }
-    // Windows code page names the WHATWG label table lacks.
     let encoding = match canonical.as_str() {
         "cp936" => Some(encoding_rs::GBK),
         "cp932" => Some(encoding_rs::SHIFT_JIS),

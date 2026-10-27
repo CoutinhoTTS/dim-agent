@@ -85,7 +85,6 @@ mod safe_integer {
             }
 
             fn visit_f64<E: de::Error>(self, value: f64) -> Result<u64, E> {
-                // JavaScript JSON numbers do not distinguish 1, 1.0 and 1e0.
                 if value.is_finite()
                     && value.fract() == 0.0
                     && (0.0..=crate::JS_MAX_SAFE_INTEGER as f64).contains(&value)

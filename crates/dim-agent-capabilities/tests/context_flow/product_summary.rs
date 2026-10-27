@@ -123,9 +123,6 @@ async fn product_session(
 async fn every_summary_request_fits_the_window_for_cjk_history() {
     let recorder = Arc::new(Recorder::default());
     let (root, agent, session) = product_session(recorder.clone(), OUTPUT).await;
-    // One message larger than the whole window: budget recovery compacts
-    // it, and the summarizer must truncate it. Then turns that fill the
-    // window again, and a manual compaction.
     for text in [cjk(6_000), cjk(1_800), cjk(1_800), cjk(1_800)] {
         session
             .submit(text, InputMode::Queue, "main")
@@ -166,7 +163,6 @@ async fn every_summary_request_fits_the_window_for_cjk_history() {
         );
         assert_eq!(model.output_tokens(), OUTPUT as f64);
     }
-    // The oversized CJK message was truncated, not sent whole.
     assert!(events.iter().any(|event| matches!(&event.kind,
         EventKind::ContextCompaction(ContextCompactionData {
             outcome: ContextCompactionResult::Completed { diagnostics, .. }, ..
@@ -264,8 +260,6 @@ async fn a_summary_cut_off_at_max_tokens_is_retried_in_halves() {
     let (root, agent, session) = product_session(driver.clone(), OUTPUT).await;
     let events = compact_first_turn(&session).await;
     let transcripts = driver.transcripts.lock().unwrap().clone();
-    // The whole chunk is cut off, then its long first half; the halves of
-    // that and the short remainder complete.
     let [whole, first, rest @ ..] = transcripts.as_slice() else {
         panic!("{transcripts:?}")
     };
@@ -351,10 +345,6 @@ impl ModelDriver for CutOffThenLong {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retried_piece_carrying_a_long_summary_still_fits_the_input_budget() {
-    // A large output allowance leaves a 1,600-token input budget. After two
-    // cut-off replies the halves are folded in turn, and each carries a
-    // complete summary of about 1,200 tokens from the piece before it: the
-    // next piece must be checked with that summary and halved again.
     let output = 2_400;
     let driver = Arc::new(CutOffThenLong {
         cut_off: 2,
@@ -376,9 +366,6 @@ async fn a_retried_piece_carrying_a_long_summary_still_fits_the_input_budget() {
             "summary request of {tokens} tokens exceeds the input budget"
         );
     }
-    // The strategy folded every piece: no request was refused as too large
-    // and no summary was kept cut off. Whether a summary this long reduces
-    // the context enough is ContextPolicy's decision, not checked here.
     assert!(!events.iter().any(|event| matches!(&event.kind,
         EventKind::ContextCompaction(ContextCompactionData {
             outcome: ContextCompactionResult::Failed { error, .. }, ..
@@ -389,9 +376,6 @@ async fn a_retried_piece_carrying_a_long_summary_still_fits_the_input_budget() {
 
 #[tokio::test]
 async fn the_trigger_reserves_a_bounded_share_of_the_input_budget() {
-    // `threshold = B − min(max(0.10 × B, 16,000), 0.20 × B)`, `B = window −
-    // output`: the 20 % cap on small windows, the 16,000 floor in between,
-    // 10 % on large windows.
     for (window, output, threshold) in [
         (32_000, 8_000, 19_200.),
         (128_000, 8_000, 104_000.),

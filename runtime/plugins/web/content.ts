@@ -3,7 +3,6 @@ import { NodeHtmlMarkdown } from 'node-html-markdown'
 import { MIMEType } from 'node:util'
 import { WebError, type Diagnostic } from './network.ts'
 
-// Node's source-aware JSON APIs are not declared by TypeScript's standard library.
 declare global {
   interface JSON {
     parse(text: string, reviver: (key: string, value: unknown, context: { source?: string }) => unknown): unknown
@@ -44,7 +43,7 @@ export function convert(body: Buffer, contentType: string, url: URL, diagnostics
       try {
         const value = JSON.parse(decoded, (_key, item, context) => typeof item === 'number' ? JSON.rawJSON(context.source!) : item)
         return { text: JSON.stringify(value, null, 2) }
-      } catch { /* Invalid JSON remains text. */ }
+ } catch { }
     }
     return { text: decoded }
   }
@@ -57,7 +56,7 @@ export function convert(body: Buffer, contentType: string, url: URL, diagnostics
     try {
       const target = new URL(declaredBase, url)
       if (['http:', 'https:'].includes(target.protocol) && !target.username && !target.password) base = target
-    } catch { /* Invalid base URLs use the document URL. */ }
+ } catch { }
   }
   for (const anchor of document.querySelectorAll('a[href]')) {
     try {

@@ -212,8 +212,6 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         let (mut daemon, socket) = launch_product(&directory).await;
         let mut client = connect(&socket).await;
 
-        // A provider record with an inline key and a user settings document,
-        // each holding a marker the export must not contain (§6).
         let capabilities = dim_agent_types::ModelCapabilities {
             context_window: 4_000,
             max_output_tokens: 200,
@@ -231,7 +229,6 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             "expectedVersion":catalog["result"]["userRevision"],
             "configuration":{"command":"never-run-this-test-command","env":{"TOKEN":SETTING},"enabled":false}})).await);
 
-        // A tool call, a completed compaction and a child branch.
         let created = client
             .rpc("session.create", json!({"cwd":directory.join("work"),"tools":["read","branch"]}))
             .await;
@@ -258,8 +255,6 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         let child = branched["result"]["branch"]["branchId"].as_str().unwrap().to_owned();
         idle(&mut client, &sid, &child).await;
 
-        // §4: a live home exports while the daemon owns it; a backup-API
-        // copy taken at the same point exports the same lines.
         let copy = directory.join("copies/backup.sqlite");
         backup(&database, &copy);
         let live = exported(&database, &session).await;
@@ -268,7 +263,6 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         assert!(!text.contains(CREDENTIAL) && !text.contains(SETTING));
         assert!(rejected(&database, "missing-session").await.contains("Session missing-session is not in"));
 
-        // §5: header, branch directory, every event, end line.
         assert_eq!(
             live[0],
             json!({"kind":"header","export":1,"session_id":session,"store_format":19,"sensitive":true})
@@ -308,8 +302,6 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         assert_eq!(create["event"]["data"]["branch"], child);
         assert!(events.iter().any(|line| line["branch_id"] == child && kind(line) == "model/call"));
 
-        // After shutdown, which settles each branch with `stop/interrupt`,
-        // the export leaves the database file byte-identical.
         assert_ok(&client.rpc("daemon.shutdown", json!({})).await);
         assert!(daemon.wait().await.unwrap().success());
         let bytes = std::fs::read(&database).unwrap();
@@ -317,7 +309,6 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         assert_eq!(std::fs::read(&database).unwrap(), bytes);
         assert_eq!(stopped[0], live[0]);
         assert_eq!(stopped.len(), live.len() + 2);
-        // The markers were stored, outside the Timeline.
         let stored_markers: (i64, i64) = rusqlite::Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap()
             .query_row(
@@ -328,14 +319,11 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             .unwrap();
         assert_eq!(stored_markers, (1, 1));
 
-        // A file the user cannot write.
         let readonly = directory.join("copies/readonly.sqlite");
         std::fs::copy(&database, &readonly).unwrap();
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o444)).unwrap();
         assert_eq!(exported(&readonly, &session).await, stopped);
 
-        // Formats this build upgrades from are read as they are, not upgraded:
-        // v13 lacks the tables later steps add, and v17 differs only by its marker.
         for (version, dropped) in [
             (13, "DROP TABLE session_file_owners; DROP TABLE session_files; DROP TABLE session_metadata;"),
             (17, ""),
@@ -352,7 +340,6 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             assert_eq!(marker(&older), version, "v{version}");
         }
 
-        // A newer marker and a changed schema are rejected unchanged.
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 20));
@@ -367,7 +354,6 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         }
         assert!(rejected(&directory.join("copies/absent.sqlite"), &session).await.contains("No dimcode database at"));
 
-        // The lines equal the TimelineStore's reads of every branch.
         assert_eq!(stopped[1..stopped.len() - 1], stored(&database, &session).await[..]);
         http.abort();
         std::fs::remove_dir_all(directory).unwrap();

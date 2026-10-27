@@ -88,7 +88,6 @@ fn every_internal_control_is_excluded_by_the_shared_v1_boundary() {
             approval_id: "approval".into(),
             decision: ApprovalDecision::Allow,
         }),
-        // Version 1 knows only child branches; resuming is internal.
         EventKind::BranchStart(BranchStartData {
             parent: None,
             create_event: None,

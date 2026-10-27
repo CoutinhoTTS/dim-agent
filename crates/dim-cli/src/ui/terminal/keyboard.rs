@@ -177,7 +177,6 @@ mod tests {
             Some("rgb:1e1e/1e1e/1e1e")
         );
         assert!(scan.typeahead.is_empty() && scan.complete);
-        // ST-terminated, and with the kitty report ahead of it.
         let scan = scan_probe(b"\x1b[?0u\x1b]11;rgb:ffff/ffff/ffff\x1b\\\x1b[?62c");
         assert!(scan.kitty);
         assert_eq!(

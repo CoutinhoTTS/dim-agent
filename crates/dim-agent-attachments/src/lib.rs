@@ -49,7 +49,6 @@ struct PutReply {
 fn put_error(error: SessionFileError) -> RpcError {
     let code = match error.code {
         SessionFileErrorCode::NotFound => return RpcError::closed(),
-        // Nothing was stored, so the client may retry.
         SessionFileErrorCode::Cancelled => return RpcError::reloading(),
         SessionFileErrorCode::Invalid => "attachment_invalid",
         SessionFileErrorCode::TooLarge => "attachment_too_large",
@@ -90,8 +89,6 @@ impl DynPlugin for AttachmentsPlugin {
             let files = ctx.require_at(&self.files)?;
             let methods = ctx.require_at(&self.methods)?;
             let session_id = identity.session_id.clone();
-            // `drain`: an unload waits for the put either way, and the client
-            // gets the path or `service_reloading` with nothing stored.
             methods.register(
                 ctx,
                 NAMESPACE,

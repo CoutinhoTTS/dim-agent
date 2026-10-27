@@ -145,7 +145,6 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         let created = client.rpc("session.create", create(json!([]))).await;
         assert_ok(&created);
         let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
-        // Initial history folding deliberately does not repeat effects.
         loaded(&server, "BranchPartFixture", sessions.len() + 1).await;
         assert_ok(
             &client
@@ -159,7 +158,6 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
     }
     for session in &sessions {
         let marker = marked(&agent, session, "main", "<c5-marker").await;
-        // Its own branch identity, and the events in commit order.
         assert!(marker.contains(r#"branch="main""#), "{marker}");
         let seen = marker
             .split(r#"seen=""#)
@@ -170,7 +168,6 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         let start = seen.find("turn/start").expect(seen);
         let end = seen.find("turn/end").expect(seen);
         assert!(input < start && start < end, "{seen}");
-        // One marker per branch: a later turn/end does not write again.
         assert_ok(
             &client
                 .rpc(
@@ -183,8 +180,6 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
         assert_eq!(count(&agent, session, "main", "<c5-rebuilt").await, 0);
     }
 
-    // A child shares its Session services, but has its own Dispatcher,
-    // identity and local fold, despite inheriting its parent's marker.
     let parent = agent.get_session(&sessions[0]).unwrap();
     let child = parent
         .branch(
@@ -219,9 +214,6 @@ async fn node_branch_typescript_part_follows_events_and_writes_input() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // Restored Sessions: each new generation rebuilds from committed history,
-    // so it does not write the first marker again, and reports its rebuild
-    // on its first live turn end.
     let (server, agent) = launch_stored(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     for (session, branch, parts) in [
@@ -332,7 +324,6 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
     let at = session.sequence("main").unwrap();
     let probe = |cancel: bool| json!({"sessionId":id,"at":at,"cancel":cancel});
 
-    // Session publication does not wait for optional method providers.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let listed = client.rpc("session.methods", json!({"sessionId":id})).await;
@@ -358,20 +349,11 @@ async fn node_branch_typescript_create_takes_explicit_cancellation() {
         .to_owned();
     assert!(session.branches().iter().any(|branch| branch.id == child));
 
-    // Rust sees the completed cancellation only when its callback returns
-    // from Node, so an unheld child build can finish first and the call then
-    // returns the child. Holding the build until the call ends leaves the
-    // cancellation as the only way the call can end.
     hold.armed.store(true, Ordering::SeqCst);
     let cancelled = client.rpc("session.treeprobe.create", probe(true)).await;
-    // Disarm before releasing: a build that reads `armed` afterwards does
-    // not wait, and one that read it before takes the single release.
     hold.armed.store(false, Ordering::SeqCst);
     hold.release.notify_one();
     assert_eq!(cancelled["result"]["error"], "Cancelled", "{cancelled}");
-    // Cancellation stops admission; a creation whose anchor already
-    // committed is a fact the tree finishes. Either way every anchor on the
-    // parent ends as a child branch or a recorded failure.
     session.idle("main").await.unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -439,7 +421,6 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    // History folding has no effects; submit only after the fixture is Active.
     loaded(&server, "ExtensionEventsFixture", 1).await;
     assert_ok(
         &client
@@ -449,7 +430,6 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
             )
             .await,
     );
-    // The part received its own event through its `fixture/*` subscription.
     let seen = marked(&agent, &id, "main", "<ext-seen").await;
     assert!(seen.contains(r#"key="fixture/turn-seen""#), "{seen}");
     assert_ok(
@@ -465,11 +445,6 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         (written[0].domain(), written[0].name()),
         ("fixture", "turn-seen")
     );
-    // The malformed core-domain event was rejected when decoded and committed
-    // nothing: the queue applied only "first" and the part's `<ext-seen>`
-    // input, and each ran one turn.
-    // `close` is not exported: the call fails, and the branch keeps running
-    // below, through a later turn, shutdown and restore.
     let close = written[0].data()["close"].as_str().unwrap();
     assert!(close.starts_with("rejected"), "{close}");
     let malformed = written[0].data()["malformed"].as_str().unwrap();
@@ -492,7 +467,6 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
         [2, 2, 2],
         "{keys:?}"
     );
-    // v3 keeps its allowlist: the extension event never reached the client.
     assert!(
         !client
             .notices
@@ -507,8 +481,6 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // Restored: the event decodes from storage and the new generation folds
-    // it, so it does not append again.
     let (server, agent) = launch_stored(config).await;
     let mut client = Client::new_version(&server, false, 3).await;
     assert_ok(

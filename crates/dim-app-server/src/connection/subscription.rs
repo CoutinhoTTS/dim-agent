@@ -97,7 +97,6 @@ impl Progress {
         branch: String,
         receiver: Option<watch::Receiver<ModelProgress>>,
     ) -> bool {
-        // A released cell needs nothing: its replacement's activation follows.
         let Some(mut receiver) = receiver else {
             return true;
         };
@@ -160,8 +159,6 @@ impl Delivery {
     pub async fn wait(&self) -> Result<(), RpcError> {
         let mut reached = self.reached.subscribe();
         let token = {
-            // Allocation and emission share the lock: concurrent fences must
-            // arrive in token order for a single monotonic watch to suffice.
             let mut issued = self.issued.lock().expect("delivery fence");
             if *reached.borrow() == u64::MAX {
                 return Ok(());
@@ -185,8 +182,6 @@ impl Delivery {
             }
             tokio::select! {
                 _ = self.cancel.cancelled() => {
-                    // Closed can acknowledge and retire the subscription in
-                    // one scheduling turn. Retain that completed proof.
                     return if *reached.borrow() >= token {
                         Ok(())
                     } else {
@@ -227,7 +222,7 @@ impl Forward {
                 self.acknowledge(u64::MAX);
                 let _ = self.signals.send(Signal::Closed);
             }
-            // v3 only: the v1 and v2 notification sets are frozen.
+            // v3 only: the v1 and v2 notification sets are frozen (#278).
             SessionBroadcastEvent::Notice(notice) => {
                 if !self.ended.load(Ordering::Relaxed)
                     && let Some(connection) = self.connection.upgrade()
@@ -318,7 +313,7 @@ fn project(
                 reason: data.reason.clone(),
             },
         )),
-        // v3 only: the v1 and v2 notification sets are frozen.
+        // v3 only: the v1 and v2 notification sets are frozen (#278).
         EventKind::ApprovalRespond(data) if version >= 3 => {
             Some(Notification::TreeApprovalResolved(wire::ApprovalResolved {
                 session_id: session_id.to_owned(),
@@ -448,7 +443,6 @@ impl Connection {
                 async move { forward.on_event(&event).await }
             })
             .map_err(|_| RpcError::closed())?;
-        // Registered before any progress cell is read, so no activation is missed.
         let (signal, active) = watch::channel(());
         let availability = if version >= 3 {
             let availability = Arc::new(super::mcp::Availability(signal));
@@ -469,11 +463,8 @@ impl Connection {
             None
         };
         let (availability, active) = availability.unzip();
-        // Closing that started before the listener may have ended the channel.
         let ended = session.is_closing();
         {
-            // Notifications of this generation wait for the attachment, which
-            // becomes current with the reply under the same lock.
             let mut attachments = self.attachments.lock().expect("attachments");
             if self
                 .sender
@@ -498,9 +489,6 @@ impl Connection {
                 },
             );
         }
-        // After the listener: a request committed later is broadcast, one
-        // committed earlier is replayed here, before any cancellation of it.
-        // Clients deduplicate by requestId.
         crate::approval::replay(&session, |branch_id, request| {
             self.notify(
                 &session_id,
@@ -551,9 +539,6 @@ impl Connection {
         let version = self.protocol_version();
         let id = session.id().to_owned();
         let mut watches = FuturesUnordered::<StateChange>::new();
-        // What this attachment last reported per branch: a change signal
-        // reports only a status that differs from it, whoever read the
-        // status before.
         let mut reported = HashMap::<String, BranchStatus>::new();
         let mut progress = active.is_some().then(Progress::default);
         let watch_branch = |branch: String,
@@ -575,7 +560,6 @@ impl Connection {
                     reported.insert(branch.clone(), current);
                     sent
                 }
-                // A reloading Loop has no state to report; its return signals.
                 Err(dim_agent_runtime::AgentError::Reloading(_)) => true,
                 Err(_) => return true,
             };
@@ -625,11 +609,9 @@ impl Connection {
                                     watches.push(state_change(branch, receiver));
                                 }
                             }
-                            // Loop is being replaced: its return signals again.
                             Err(dim_agent_runtime::AgentError::Reloading(_)) => {
                                 watches.push(state_change(branch, receiver));
                             }
-                            // The branch is no longer published.
                             Err(_) => {}
                         }
                     }
@@ -664,7 +646,6 @@ impl Connection {
                 }
             }
         }
-        // The broadcast ended before cleanup finished.
         let cleanup = tokio::select! {
             biased;
             _ = cancel.cancelled() => return,

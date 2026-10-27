@@ -151,10 +151,6 @@ impl HistoryRenderer {
         let context = timeline
             .context_with_checkpoint(through, self.checkpoint_interpreter, self.decode_checkpoint)
             .await?;
-        // Storage validates the anchor; only the interpreter can establish that
-        // the cached state can replay its suffix. An incomplete but decodable
-        // cache must not prevent recovery from intact facts. Do not catch errors
-        // reading those facts, or suppress a later full-replay failure.
         if context.checkpoint.is_some() && (self.render)(&context).is_err() {
             return timeline.context(through).await;
         }
@@ -275,8 +271,6 @@ fn replay(
     let mut origins = Vec::new();
     let mut output = restored.output;
     let mut prompts = PromptSnapshot::from_checkpoint(&restored.prompts);
-    // Live keys in the order they were first delivered; each holds its
-    // latest block. A retired key that returns counts as new.
     let mut delivered_state: Vec<ContextBaselineEntry> = restored.delivered;
     let mut open_tools = restored.open_tools;
     let mut output_open = restored.output_open;
@@ -312,7 +306,6 @@ fn replay(
 
         match &event.kind {
             EventKind::ModelStart(data) => {
-                // A request starts after the previous one's terminal.
                 if output_open {
                     return Err(format!(
                         "Request {} starts while a previous model output is open",
@@ -347,8 +340,6 @@ fn replay(
                     end_time: None,
                 }),
             },
-            // A call takes its place in the message when it starts; its input
-            // stays empty unless the complete call follows.
             EventKind::ToolUseStart(data) => {
                 open_tools.push(data.call_id.clone());
                 output.push(MessagePart::ToolUse {
@@ -377,15 +368,11 @@ fn replay(
                 if matches!(data.outcome, ModelOutputOutcome::Completed { .. }) {
                     history.push(assistant(event.id.clone(), output, baseline.clone()));
                 } else {
-                    // Empty when its calls' closure already placed the output.
                     history.extend(interrupted(event.id.clone(), output, &baseline));
                 }
                 output_open = false;
             }
             EventKind::ToolResult(data) => {
-                // Calls of an output that did not complete are closed in the
-                // same batch, before its `step/model-output-end`: the partial
-                // message precedes their results.
                 if data.call_event_id.is_none() && output_open {
                     history.extend(interrupted(
                         event.id.clone(),

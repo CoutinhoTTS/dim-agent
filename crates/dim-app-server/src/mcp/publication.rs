@@ -245,7 +245,6 @@ impl Worker {
             application_failed: BTreeMap::new(),
         };
         let mut changes = self.settings_changed.clone();
-        // Accepted operations use an uncancelled token and settle before retirement.
         let operation = CancellationToken::new();
         loop {
             let command = tokio::select! {
@@ -295,7 +294,6 @@ impl Worker {
             }
         }
         self.commands.close();
-        // Fence queued requests: dropping their reply channels reports Closed.
         while self.commands.try_recv().is_ok() {}
         let references = projection.generations.keys().cloned().collect();
         let failed = projection.retire(references).await;
@@ -330,11 +328,6 @@ impl DynPlugin for McpPublication {
                 released: releases,
                 settings_changed: config::settings_changes(ctx)?,
             };
-            // LIFO: settle the owned worker before withdrawing Publication.
-            // Withdrawing it first unloads Mcp and its server gates, losing
-            // retirement's cleanup result (or waiting on an unloading owner).
-            // The worker retires only its instance views, never a Session or
-            // loader ancestor; Session cleanup never waits on this worker.
             ctx.provide_as::<Publication>(port)?;
             let stop = ctx.cancellation_token();
             ctx.effect(move || {
@@ -395,8 +388,6 @@ impl Projection {
     }
     async fn refresh(&mut self, settings: &SettingsService, cancel: &CancellationToken) {
         let projects = settings.project_sources();
-        // An unreadable enablement record disables every project entry (fail
-        // closed) without hiding which ids the project defines.
         let enablement = if projects.is_empty() {
             Ok(McpProjectEnablement::default())
         } else {
@@ -423,9 +414,6 @@ impl Projection {
                         degraded: None,
                     });
                     intent.error = Some("MCP source could not be read");
-                    // Keep the configurations last read, but apply the user's
-                    // current enablement to them: an explicit disable, or an
-                    // unreadable record, withdraws project entries anyway.
                     if matches!(source, SettingsScope::Project(_)) {
                         let workspace = config::workspace(settings, source).ok();
                         for (id, config) in &mut intent.current {
@@ -474,7 +462,7 @@ impl Projection {
         // so a replacement never breaks a request in flight. Disabling the
         // entry retires it in every Session, even with bindings and while its
         // source is unreadable; removing it does so once the source is read.
-        // An unused generation closes even while current.
+        // An unused generation closes even while current (ADR 004).
         let retired: Vec<_> = self
             .generations
             .iter()
@@ -528,7 +516,6 @@ impl Projection {
                 )
             })
             .collect();
-        // Notify only on change: Sessions re-read their selection then.
         if self.port.applications.get() != applications {
             self.port.applications.set(applications);
         }
@@ -606,8 +593,6 @@ impl Projection {
         }
         let reference = format!("mcp:{}", uuid::Uuid::new_v4());
         let key = Key::<McpServer>::dynamic(reference.clone()).instance(owner.scope);
-        // Validate before creation so typed errors, never secret-bearing loader diagnostics,
-        // reach the public boundary. Resource acquisition remains in plugin apply.
         McpServerPlugin::new(&id, configuration.clone(), key.clone())?;
         let created = owner
             .loader
@@ -720,8 +705,6 @@ mod tests {
     };
     use tokio::sync::Notify;
 
-    // Inject only nonportable cleanup failure / a blocked apply. All selection,
-    // cancellation, replacement and retirement go through the public directory.
     #[derive(Default)]
     struct Faults {
         fail: AtomicBool,
@@ -832,7 +815,6 @@ mod tests {
                 .await
                 .unwrap();
             let owner = McpOwner::new(root.clone(), loader.clone());
-            // Where Mcp registers its Session part; no Agent mounts it here.
             root.provide_as::<dim_agent_runtime::PartRegistry>(Arc::new(
                 dim_agent_runtime::PartRegistry::default(),
             ))
@@ -878,8 +860,6 @@ mod tests {
         async fn close(self) {
             self.faults.fail.store(false, Ordering::SeqCst);
             self.stop.cancel();
-            // Rutis root shutdown does not aggregate child disposer errors.
-            // The flows assert those on the owning view and application state.
             tokio::time::timeout(Duration::from_secs(5), self.root.shutdown())
                 .await
                 .unwrap()

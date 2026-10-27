@@ -63,8 +63,6 @@ pub struct FaultReporter(Arc<watch::Sender<Option<AgentError>>>);
 impl FaultReporter {
     pub fn report(&self, error: AgentError) {
         self.0.send_modify(|v| {
-            // Durability failures reject writes across every branch, even if a
-            // handler defect started cleanup first. Keep the first storage error.
             if v.is_none()
                 || matches!(&error, AgentError::Storage(_))
                     && !matches!(v, Some(AgentError::Storage(_)))

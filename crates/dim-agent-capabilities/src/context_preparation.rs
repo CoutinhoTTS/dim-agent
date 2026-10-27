@@ -38,7 +38,9 @@ impl ConfigurationPublisher {
     /// Commits `changes` and the configuration as one batch. `inputs` is the
     /// caller's: given the prompt state before and after `changes`, it
     /// returns blocks committed in the same batch, each as its own Append
-    /// input, in order.
+    /// input, in order. A model- or tool-only update keeps the previously
+    /// adopted system in `context/configured`; only the first configuration
+    /// renders the current system.
     pub(crate) async fn publish(
         &self,
         changes: Vec<PromptChange>,
@@ -74,8 +76,6 @@ impl ConfigurationPublisher {
             }
         }
         let previous_configuration = context_configuration(&context);
-        // The model part and the tool part update separately; each keeps
-        // the other from the last adopted configuration.
         let base = previous_configuration
             .as_ref()
             .map(|data| (*data.settings).clone());
@@ -136,7 +136,6 @@ impl ConfigurationPublisher {
             after.apply(&synthetic);
             let blocks = inputs(&before, &after);
             drafts.push(EventKind::PromptChanged(data).into());
-            // One input per item, in the caller's order.
             drafts.extend(blocks.into_iter().map(|block| {
                 EventKind::InputMessage(InputMessageData {
                     blocks: vec![block],
@@ -183,8 +182,6 @@ impl ConfigurationPublisher {
                     }),
                     prompt: before.system_revision.clone(),
                     settings: Box::new(settings),
-                    // Only the model or tool part changed: the adopted
-                    // system stays; a first configuration renders it.
                     system: previous_configuration
                         .as_ref()
                         .and_then(|data| data.system.clone())
@@ -236,7 +233,9 @@ struct PreparationState {
 }
 
 /// What a preparation at the committed head would write into
-/// `context/budget`, plus the compaction threshold.
+/// `context/budget`, plus the compaction threshold. Token counts are
+/// estimates that travel as JSON numbers and may carry a fraction, so
+/// clients decode them as `f64`.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextUsage {
@@ -280,7 +279,6 @@ impl ContextPreparation {
         events: &[Arc<AgentEvent>],
     ) -> dim_agent_runtime::Result<()> {
         let mut open: Vec<ContextPrepareData> = Vec::new();
-        // An automatic compaction start without its result was in flight.
         let mut started: Vec<(u64, ContextCompactionStartData)> = Vec::new();
         let settled = |open: &mut Vec<ContextPrepareData>, turn: &str, request: &str| {
             open.retain(|source| source.turn_id != turn || source.request_id != request)
@@ -394,10 +392,6 @@ impl ContextPreparation {
                 }
             }
         };
-        // The final recheck, the terminal and releasing the request are one
-        // step under the state lock the steer handler takes: a steer consumed
-        // before it replaces the request, one consumed after it finds no
-        // running preparation (time-bus §4).
         let (outcome, submitted) = {
             let mut state = self.state.lock().unwrap();
             let replaced = state.interrupted.is_none() && state.steer.steered(&source.request_id);
@@ -405,8 +399,6 @@ impl ContextPreparation {
                 Err(HostError::Cancelled(_)) if generation.is_cancelled() => {
                     Err(HostError::Cancelled(CAPABILITY_RELOADING.into()))
                 }
-                // Whatever the host returned after a steer, the request ends as
-                // replaced; a completed compaction stays a fact.
                 _ if replaced => Err(HostError::Cancelled(REPLACED_BY_STEER.into())),
                 result => result,
             };
@@ -532,7 +524,6 @@ impl ContextPreparation {
                 "Context preparation must preserve the timeline history prefix; additional messages may be appended.",
             ));
         }
-        // Why a compaction this preparation started was cancelled.
         let cancelled = || {
             let state = self.state.lock().unwrap();
             if generation.is_cancelled() || state.closed {
@@ -692,8 +683,6 @@ impl DynPlugin for ContextPreparationPlugin {
                             ) {
                                 let mut state = owner.state.lock().unwrap();
                                 state.steer.apply(&event);
-                                // A steer of the running request replaces it; an
-                                // interrupt already ended it.
                                 if let Some((request, cancel)) = &state.current
                                     && state.interrupted.is_none()
                                     && state.steer.steered(request)

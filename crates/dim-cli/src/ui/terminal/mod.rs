@@ -257,17 +257,19 @@ impl Terminal {
     /// Writes a program status report (`ui::status`). From then on every
     /// way out, the restore of a panic or a signal included, clears the
     /// record; a suspend clears it too, so the next status is reported again.
+    /// The mode is marked before the write, so a signal that lands during
+    /// the write still clears it.
     pub fn report_status(&mut self, report: Vec<u8>) -> io::Result<()> {
-        // Marked first: a signal before the write still clears.
         modes::mark(Mode::Status);
         self.writer.send(report)
     }
 
     /// Draws or removes the progress bar (`ui::progress`). From then on
     /// every way out, the restore of a panic or a signal included, removes
-    /// it; a suspend does too, so the next status draws it again.
+    /// it; a suspend does too, so the next status draws it again. The mode is
+    /// marked before the write, so a signal that lands during the write still
+    /// removes it.
     pub fn report_progress(&mut self, bar: &[u8]) -> io::Result<()> {
-        // Marked first: a signal before the write still removes it.
         modes::mark(Mode::Progress);
         self.writer.send(bar.to_vec())
     }
@@ -324,7 +326,6 @@ impl Terminal {
             }
         }
         self.background_report = scan.background_report;
-        // Whatever the user typed meanwhile is still theirs.
         let mut carry = scan.typeahead;
         carry.extend_from_slice(&scan.rest);
         if !carry.is_empty() {
@@ -335,14 +336,10 @@ impl Terminal {
             modes::mark(Mode::KittyKeyboard);
             self.keyboard = KeyboardProtocol::Kitty;
             if in_multiplexer() {
-                // The kitty answer may be the outer terminal's; ask for
-                // modifyOtherKeys too, which the multiplexer itself speaks.
                 sys::write_all(sys::STDOUT, Mode::ModifyOtherKeys.enable_sequence())?;
                 modes::mark(Mode::ModifyOtherKeys);
             }
         } else if scan.complete {
-            // Answered DA1 but not kitty: ask xterm-style terminals for
-            // modifyOtherKeys; terminals that ignore it stay in legacy.
             sys::write_all(sys::STDOUT, Mode::ModifyOtherKeys.enable_sequence())?;
             modes::mark(Mode::ModifyOtherKeys);
             self.keyboard = KeyboardProtocol::ModifyOtherKeys;
@@ -471,10 +468,10 @@ impl Terminal {
     }
 
     /// Hands the terminal back to the shell and stops the process (Ctrl+Z).
-    /// Returns once the job is continued, with the terminal entered again.
+    /// Output already queued reaches the screen before the modes go; the
+    /// writer is restarted because the process keeps writing. Returns once
+    /// the job is continued, with the terminal entered again.
     pub fn suspend(&mut self) -> Result<(), TerminalError> {
-        // Output already queued reaches the screen before the modes go; the
-        // writer is started again because the process keeps writing.
         self.writer.drain();
         self.writer = WriteThread::start();
         let fullscreen = modes::is_live(Mode::AltScreen);
@@ -498,16 +495,15 @@ impl Terminal {
     /// writes the rest of the restore sequence and drops raw mode.
     pub fn leave(mut self) {
         self.left = true;
-        // Everything queued reaches the screen before modes are undone.
         self.writer.drain();
         self.release_modes();
     }
 
-    /// Undoes the modes this process turned on, keyboard first.
+    /// Undoes the modes this process turned on, keyboard first. Kitty is
+    /// popped before draining to the DA1 fence, so no new reports start; the
+    /// answer proves the pop applied.
     fn release_modes(&mut self) {
         if modes::is_live(Mode::KittyKeyboard) {
-            // Pop first so no new reports start, then drain what the terminal
-            // already emitted: its DA1 answer proves the pop was applied.
             let mut out = Vec::new();
             out.extend_from_slice(b"\x1b[<u");
             out.extend_from_slice(keyboard::FENCE_QUERY);
@@ -535,7 +531,6 @@ impl Terminal {
                     if keyboard::da1_reply_len(&tail).is_some() {
                         return;
                     }
-                    // Only the end can complete a reply.
                     if tail.len() > 64 {
                         tail.drain(..tail.len() - 64);
                     }
@@ -549,8 +544,6 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         if !self.left {
-            // Unwinding or an early return: still hand the terminal back,
-            // after whatever was already queued.
             self.writer.drain();
             sys::restore_terminal_once();
             sys::remove_signal_guard();
@@ -571,7 +564,6 @@ fn stop_process() {}
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // Restore before the report so the message lands on a sane screen.
         sys::restore_terminal_once();
         previous(info);
     }));

@@ -37,7 +37,6 @@ fn main() {
         println!("cargo::rerun-if-changed={}", web.join(input).display());
     }
     let dist = out.join("web");
-    // The feature asks for the frontend: a host without npm cannot deliver it.
     npm(&web, &["--version"]).unwrap_or_else(|error| {
         panic!("the embedded-web feature needs npm to build web/: {error}")
     });
@@ -100,8 +99,6 @@ fn npm(web: &Path, args: &[&str]) -> Result<(), String> {
     let status = Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
         .args(args)
         .current_dir(web)
-        // Build output goes to cargo's log, not the protocol stdout of a
-        // build script.
         .stdout(std::process::Stdio::from(std::io::stderr()))
         .status()
         .map_err(|error| error.to_string())?;

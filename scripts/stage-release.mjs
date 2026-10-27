@@ -10,7 +10,6 @@ const [binaryDirectory, destination, version, sourceCommit, ...rest] = process.a
 const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT [--account]';
 assert(binaryDirectory && destination && version && sourceCommit, usage);
 assert(rest.length === 0 || (rest.length === 1 && rest[0] === '--account'), usage);
-// Whether the executable is the account build (compiled with the client IDs).
 const account = rest.length === 1;
 assert(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(version), 'Invalid version');
 assert(/^[a-f0-9]{40}$/.test(sourceCommit), 'Invalid source commit');
@@ -24,7 +23,6 @@ assert(!existsSync(output), 'Destination already exists');
 const digest = (data) => createHash('sha256').update(data).digest('hex');
 const suffix = osName === 'windows' ? '.exe' : '';
 const cli = path.resolve(binaryDirectory, `dimcode${suffix}`);
-// One executable: the CLI runs its App Server daemon as `dimcode app-server`.
 assert(lstatSync(cli).isFile(), 'The native executable must be a regular file');
 if (platform === host) {
   const result = spawnSync(cli, ['--version'], { encoding: 'utf8' });
@@ -32,7 +30,6 @@ if (platform === host) {
   assert.equal(result.status, 0, `dimcode --version failed: ${result.stderr}`);
   assert.equal(result.stdout.trim(), `dimcode ${version}`, 'Binary version mismatch');
 } else {
-  // shortcut: Cross-built binaries are inspected; add target-machine smoke tests when runners exist.
   checkArchitecture(cli, osName, cpu);
 }
 try {

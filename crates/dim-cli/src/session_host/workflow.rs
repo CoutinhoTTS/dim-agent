@@ -213,8 +213,6 @@ impl Worker {
         self.workflow.next_at = Some(tokio::time::Instant::now() + REFRESH_INTERVAL);
         self.changed();
         if request.stale {
-            // A settled stop is newer than this read; a discovery the panel
-            // still needs runs again.
             self.workflow.discovery |= request.run_id.is_none();
             return;
         }

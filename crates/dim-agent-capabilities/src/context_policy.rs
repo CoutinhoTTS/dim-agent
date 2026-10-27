@@ -204,7 +204,6 @@ impl ContextPolicy {
         cancelled: &(dyn Fn() -> String + Sync),
     ) -> Result<(Arc<ModelRequest>, f64), HostError> {
         let boundary = history.last().map(|entry| entry.id.clone());
-        // A retry may reuse only compactions belonging to the fixed source.
         let reusable = self
             .timeline
             .local(source.through.saturating_add(1)..)
@@ -275,7 +274,6 @@ impl ContextPolicy {
             unreachable!("a compaction step commits a compaction")
         };
         match (&data.outcome, compacted.request) {
-            // After a completed compaction the estimate is a full count.
             (_, Some(request)) => request.map(|request| {
                 let input = model.count_tokens(&request);
                 (request, input)
@@ -411,7 +409,6 @@ impl ContextPolicy {
                         }
                     })
                     .and_then(|cut| {
-                        // The in-effect state just before the cut.
                         let baseline = view.history[cut.entry - 1].baseline.clone();
                         view.compacted(model.as_ref(), cut.entry, &replacement, &baseline)
                             .map(|(_, tokens)| (cut.entry, baseline, tokens))
@@ -459,7 +456,6 @@ impl ContextPolicy {
                 .into(),
             )
             .map_err(|e| HostError::failed(e.to_string()))?;
-        // The committed fact is adopted, as middleware left it.
         let EventKind::ContextCompaction(data) = &fact.kind else {
             unreachable!("before preserves event kind")
         };
@@ -483,8 +479,6 @@ impl ContextPolicy {
                     .map_err(HostError::failed)
             });
         if request.is_ok() {
-            // Saved independently of the immutable fact; a cache failure
-            // neither discards the result nor repeats model work.
             let saved = async {
                 let snapshot = self.history.snapshot(&view.context, retain_from, &fact)?;
                 self.timeline
@@ -688,7 +682,6 @@ fn retain_limit(
 ) -> Option<usize> {
     let count = |messages: Vec<Message>| model.count_tokens(&ModelRequest::new("", "", messages));
     let empty = count(Vec::new());
-    // Kept entries, counted once each and summed from the end.
     let mut tail = vec![0.; view.history.len() + 1];
     for (index, entry) in view.history.iter().enumerate().rev() {
         tail[index] = tail[index + 1] + count(vec![entry.message.clone()]) - empty;

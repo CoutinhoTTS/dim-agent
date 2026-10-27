@@ -135,8 +135,6 @@ impl Scope {
         let scope = self.clone();
         let acquisition = self.stopping.child_token();
         let cancel_waiter = acquisition.clone().drop_guard();
-        // Both caller abandonment and RPC future cancellation leave this task
-        // owning the transaction. Transport loss settles the callback with error.
         let owner = self.files.tasks.token();
         let task = self.tasks.spawn(async move {
             let _owner = owner;
@@ -170,8 +168,6 @@ impl Scope {
                     Err(error) => return Ok(failure(error)),
                 }
             };
-            // Only acquisition uses the cancellation token. Once the callback
-            // can rotate external state, its protected I/O must settle.
             let lease = Arc::new(tokio::sync::Mutex::new(Some(lease)));
             let result = match callback
                 .call_async(Value::List(vec![lease_value(
@@ -183,8 +179,6 @@ impl Scope {
                 Ok(value) => resolve(value).await,
                 Err(error) => Err(error),
             };
-            // Revoke escaped callback references before another transaction can
-            // acquire this file. Admitted native operations finish first.
             lease.lock().await.take();
             result.map(success)
         });

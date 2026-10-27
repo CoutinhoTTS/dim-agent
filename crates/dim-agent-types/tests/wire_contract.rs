@@ -58,9 +58,6 @@ fn frozen_typescript_samples_roundtrip_without_losing_fields() {
             && value["name"] == "compaction"
             && value["data"]["status"] == "completed"
         {
-            // The native record names its cut by `retain_from` and stores a
-            // replacement: the frozen form is neither read natively nor
-            // written to v1 connections.
             assert!(serde_json::from_value::<AgentEvent>(value.clone()).is_err());
             let mut native = value.clone();
             let data = native["data"].as_object_mut().unwrap();
@@ -216,6 +213,11 @@ fn omitted_modes_and_safe_integer_limits_keep_the_contract() {
     assert_eq!(equivalent.create_at, 1000);
 }
 
+/// Version 1 carries display content only: the model-request projection strips
+/// `providerMetadata` from text, thinking and tool-use parts, while native
+/// continuation stays on the Timeline. A new continuation field or a serializer
+/// change that stops stripping exposes native-only metadata and breaks the
+/// frozen v1 request shape.
 #[test]
 fn request_events_share_the_snapshot_and_preserve_draft_encoding() {
     use std::sync::Arc;

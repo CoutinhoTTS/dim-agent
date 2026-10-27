@@ -88,7 +88,6 @@ mod linux {
     }
 
     fn isolated(mut spec: ProcessSpec, readonly: &Path) -> ProcessSpec {
-        // HostPlatform owns terminal separation; another setsid detaches its dedicated PTY.
         let mut args: Vec<OsString> = [
             "--unshare-user",
             "--unshare-pid",

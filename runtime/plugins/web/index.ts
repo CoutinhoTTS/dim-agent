@@ -68,7 +68,6 @@ function brave(value: unknown, key: string): Hit[] {
   })
 }
 
-// The Session part: each Session mounts one copy.
 export const part = definePlugin({
   name: 'Web',
   inject: ['settings', 'toolRegistry'],
@@ -216,7 +215,6 @@ export const part = definePlugin({
         ])
         controller.signal.throwIfAborted()
         if (!read.ok) throw new Error('Web settings could not be read.')
-        // Settings has already validated and defaulted the owner's declared document.
         const document = read.value.document as WebDocument
         secret = document.searchService?.apiKey
         return name === 'web_fetch' ? fetchPage(call.arguments, document, controller.signal, diagnostics) : search(call.arguments, document, controller.signal, diagnostics)

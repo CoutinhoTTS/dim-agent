@@ -29,6 +29,7 @@ function readPersisted(): Persisted {
   }
 }
 
+/** Layout persistence is best-effort: full or disabled localStorage is ignored. */
 export const useUiStore = defineStore("ui", () => {
   const persisted = readPersisted()
   const sidebarCollapsed = ref(persisted.sidebarCollapsed)
@@ -46,11 +47,9 @@ export const useUiStore = defineStore("ui", () => {
         lastSessionId: lastSessionId.value,
       }))
     } catch {
-      // Storage is full or disabled; the layout is simply not remembered.
     }
   }, { deep: true })
 
-  // The page follows the system color scheme; global.css keys dark tokens on `.dark`.
   const systemDark = matchMedia("(prefers-color-scheme: dark)")
   const applyTheme = (): void => { document.documentElement.classList.toggle("dark", systemDark.matches) }
   applyTheme()
