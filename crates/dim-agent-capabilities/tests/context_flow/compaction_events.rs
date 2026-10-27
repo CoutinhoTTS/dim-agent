@@ -43,9 +43,6 @@ async fn snapshot_codecs_preserve_completed_compaction_even_when_saving_fails() 
             .create_session(SessionConfig::default())
             .await
             .unwrap();
-        // Past the threshold from the first turn on: the first has nothing
-        // to compact but its own input; the second compacts the first even
-        // though the retained turns hold no cut (#169).
         let original = "x".repeat(1_500);
         for input in [&original, "next", "third"] {
             session
@@ -225,8 +222,6 @@ impl DynPlugin for RewriteCompaction {
                     match edit {
                         Edit::None => {}
                         Edit::Summary | Edit::FirstCursor | Edit::Completed => {
-                            // Keep from the second entry, or nothing: the
-                            // request's own model-start is the last event.
                             let retain_from = if matches!(edit, Edit::FirstCursor) {
                                 history[1].source.clone()
                             } else {
@@ -541,8 +536,6 @@ async fn a_damaged_compaction_fails_replay_without_silently_regenerating_history
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    // The rewritten compaction committed with a cursor outside the history;
-    // that turn fails while adopting its own broken result.
     let events = session.history("main", None).await.unwrap();
     assert!(events.iter().any(|event| matches!(
         &event.kind,
@@ -558,8 +551,6 @@ async fn a_damaged_compaction_fails_replay_without_silently_regenerating_history
             ..
         })
     )));
-    // Repairing the hook cannot repair a damaged durable fact. In particular,
-    // recovery must not silently generate a different summary of that history.
     *edit.lock().unwrap() = Edit::None;
     session
         .submit(

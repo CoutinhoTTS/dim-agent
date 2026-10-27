@@ -13,7 +13,6 @@ const gate = z.strictObject({
 })
 const controls = z.strictObject({ now: z.iso.datetime().optional(), gate: gate.optional(), loseReportReply: z.boolean().optional() })
 
-// Exercise the real package through its public ports, keeping every native call on its original row.
 export default definePlugin({
   name: 'SchedulerPackageProbe',
   inject: scheduler.inject, config: scheduler.config,

@@ -2,14 +2,6 @@ import { definePlugin } from '@arcships/rutis'
 import { partRow } from './part-row.ts'
 import type { BranchEvent, Services } from '../../npm/plugin.js'
 
-// A branch part that writes events of its own domain (ADR 001, issue #2).
-// After the first live turn end it appends `fixture/turn-seen` through the
-// branch `timeline`, recording that an event in a core domain which matches no
-// core contract (`input/forged`) was refused when decoded, and that the
-// exported Timeline has no `close`. It consumes its own domain like any other key, and on
-// its event writes a marked input with what it received. The replayed
-// history folds its own events, so a restored generation does not append
-// again.
 export const part = definePlugin({
   name: 'ExtensionEventsFixture',
   provides: {},
@@ -20,7 +12,6 @@ export const part = definePlugin({
     const tree = ctx.use<Services['treeCommands']>('treeCommands')
     const { branchId } = await ctx.use<Services['timelineIdentity']>('timelineIdentity').get()
     let appended = false
-    // Set when the rebuild folded this part's own event: a restored generation.
     let restored = false
     let reported = false
     const attempt = async (call: () => Promise<unknown>) => {
@@ -44,9 +35,7 @@ export const part = definePlugin({
         }
       } else if (live && key === 'turn/end' && !appended) {
         appended = true
-        // A core domain decodes only through its typed contract.
         const malformed = await attempt(() => timeline.append({ type: 'input', name: 'forged', data: {} }))
-        // Closing belongs to the branch's TimelineTree; the export has no close.
         const close = await attempt(() => (timeline as unknown as { close(): Promise<void> }).close())
         await timeline.append({ type: 'fixture', name: 'turn-seen', data: { turn: event.data, malformed, close } })
       } else if (live && key === 'turn/end' && restored && !reported) {

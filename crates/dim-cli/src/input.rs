@@ -15,8 +15,6 @@ impl Input {
             return Err("This operation requires an interactive terminal".into());
         }
         let mut name = [0; libc::PATH_MAX as usize];
-        // macOS `ttyname_r` scans `/dev` and misses this terminal while another
-        // terminal's entry is removed; the kernel names the descriptor directly.
         #[cfg(target_os = "macos")]
         if unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_GETPATH, name.as_mut_ptr()) } == -1 {
             return Err(io::Error::last_os_error().into());
@@ -29,7 +27,6 @@ impl Input {
                 return Err(io::Error::from_raw_os_error(error).into());
             }
         }
-        // A dup shares status flags with stdin and may also make stdout nonblocking.
         let fd = unsafe {
             libc::open(
                 name.as_ptr(),
@@ -357,7 +354,6 @@ impl Input {
                     resized = true;
                 } else if event.EventType == KEY_EVENT as u16 {
                     let key = unsafe { event.Event.KeyEvent };
-                    // VT Unicode input may arrive on the Alt key-up record.
                     if key.bKeyDown != 0 || key.wVirtualKeyCode == 0x12 {
                         let value = unsafe { key.uChar.UnicodeChar };
                         if value != 0 || key.wVirtualScanCode == 0 {
@@ -590,7 +586,6 @@ mod windows_flow {
             }
         });
         let (mut output, mut consumed) = (Vec::new(), 0);
-        // ConPTY inherits the terminal cursor before starting console output.
         until(&receive, &mut output, &mut consumed, "\x1b[6n");
         writer.write_all(b"\x1b[1;1R").unwrap();
         writer.flush().unwrap();

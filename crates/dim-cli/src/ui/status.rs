@@ -130,7 +130,6 @@ impl Runs {
     /// running flag: the two arrive separately and a snapshot may carry a
     /// whole short run.
     pub fn observe(&mut self, snapshot: &ViewSnapshot) {
-        // A new run puts the last one's result away.
         if snapshot.running && !self.running {
             self.settled = Status::Idle;
         }
@@ -142,7 +141,6 @@ impl Runs {
                 self.settled = match end {
                     TurnEnd::Completed => Status::Done,
                     TurnEnd::Failed => Status::Error,
-                    // An interruption is not a result to look at.
                     TurnEnd::Cancelled => Status::Idle,
                 };
             }
@@ -238,7 +236,6 @@ mod tests {
         String::from_utf8(bytes).unwrap()
     }
 
-    // The wire format: a terminal parses these bytes.
     #[test]
     fn reports_name_dims_root_record_and_end_with_st() {
         assert_eq!(report(Status::Idle), "\x1b]7501;state=idle:app=dim\x1b\\");
@@ -348,7 +345,6 @@ mod tests {
         let mut session = Session::opened(None);
         assert_eq!(session.status(), Status::Idle);
         assert_eq!(session.running(true), Status::Working);
-        // A request outranks the run it holds up, until it is answered.
         assert_eq!(
             session.approval("approval", "exec"),
             Status::Permission("exec".into())
@@ -359,30 +355,24 @@ mod tests {
         );
         session.answered.insert("approval".into());
         assert_eq!(session.status(), Status::Question);
-        // A question waits for its result, however it was answered here.
         session.answered.insert("question".into());
         assert_eq!(session.status(), Status::Question);
         session.snapshot.approvals.clear();
         session.snapshot.questions.clear();
         assert_eq!(session.publish(), Status::Working);
-        // The turn end comes before the running flag drops, or after it.
         assert_eq!(session.end(10, TurnEnd::Completed), Status::Working);
         assert_eq!(session.running(false), Status::Done);
         assert_eq!(session.running(true), Status::Working);
         assert_eq!(session.running(false), Status::Idle);
         assert_eq!(session.end(20, TurnEnd::Failed), Status::Error);
-        // An interruption settles to idle.
         session.running(true);
         session.end(30, TurnEnd::Cancelled);
         assert_eq!(session.running(false), Status::Idle);
-        // A short run can start and end within one snapshot.
         session.snapshot.ended = Some((40, TurnEnd::Completed));
         assert_eq!(session.running(true), Status::Working);
         assert_eq!(session.running(false), Status::Done);
     }
 
-    // A resumed or switched-to Session starts afresh: the turns its history
-    // ended are not results this interface watched.
     #[test]
     fn a_turn_ended_before_the_session_was_opened_is_no_result() {
         let mut session = Session::opened(Some(8));
@@ -391,7 +381,6 @@ mod tests {
         assert_eq!(session.running(true), Status::Working);
         assert_eq!(session.end(9, TurnEnd::Completed), Status::Working);
         assert_eq!(session.running(false), Status::Done);
-        // The next Session carries none of it over.
         let switched = Session::opened(Some(9));
         assert_eq!(switched.status(), Status::Idle);
     }
@@ -419,10 +408,8 @@ mod tests {
                 Status::Done.sequence(),
             ]
         );
-        // After a suspend cleared the record, it is told again.
         reporter.forget();
         assert_eq!(reporter.report(Status::Done), Some(Status::Done.sequence()));
-        // Switched off, it writes nothing, so nothing needs clearing.
         let mut off = Reporter::new(false);
         assert_eq!(off.report(Status::Idle), None);
         assert_eq!(off.report(Status::Working), None);

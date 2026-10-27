@@ -12,23 +12,19 @@ export default defineConfig({
     alias: [
       // Curated shiki bundle on the JavaScript regex engine (see src/vendor/shiki-web.ts).
       { find: /^shiki$/, replacement: new URL("./src/vendor/shiki-web.ts", import.meta.url).pathname },
-      // The Oniguruma WebAssembly blob needs 'wasm-unsafe-eval', which the entry's CSP does not grant.
       { find: /^shiki\/wasm$/, replacement: unused },
-      // markstream's optional d2 renderer is not shipped.
       { find: /^@terrastruct\/d2$/, replacement: unused },
     ],
   },
   plugins: [tailwindcss(), vue()],
   server: {
     proxy: {
-      // The entry requires Origin to equal http://<Host>, so both are rewritten to the target.
       "/api": { target, changeOrigin: true, headers: { origin: target } },
       "/ws": { target, changeOrigin: true, ws: true, headers: { origin: target } },
     },
   },
   build: {
     outDir: "dist",
-    // No data: URLs: the CSP leaves font-src at 'self', so an inlined font would be blocked.
     assetsInlineLimit: 0,
     rollupOptions: {
       output: {

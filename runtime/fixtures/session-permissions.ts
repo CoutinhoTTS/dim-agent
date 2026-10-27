@@ -17,7 +17,6 @@ export default definePlugin({
       })),
       async (call): Promise<MethodReply> => {
         try {
-          // Requests cross the generated decoder used by real process callers.
           const at = call.params as unknown as SessionRef
           if (call.method === 'permissions.legacy') return { kind: 'value', value: JSON.stringify(await sessions.idle(at)) }
           if (call.method === 'permissions.defaults') {

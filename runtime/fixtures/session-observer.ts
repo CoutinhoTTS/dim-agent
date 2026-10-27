@@ -4,9 +4,6 @@ import { partRow } from './part-row.ts'
 import type { Services, SessionMethods } from '../../npm/plugin.js'
 import provides from './session-observer.json' with { type: 'json' }
 
-// A Session row that observes its own Session: it reads the Session's
-// identity, creation configuration and lifecycle by name and listens to
-// the Session's channel from `apply` on. Its methods are `namespace`'s.
 export function observer(namespace: string, declaration: Record<string, Record<string, string>>) {
   return definePlugin({
     name: `SessionObserverFixture(${namespace})`,
@@ -34,12 +31,10 @@ export function observer(namespace: string, declaration: Record<string, Record<s
           changed.add(wake)
         })
       }
-      // Accepted work ends when the Session closes or this row unloads.
       let end!: () => void
       const ended = new Promise<void>(resolve => { end = resolve })
       const stop = () => { closed = true; release?.(); end(); notify() }
       void lifecycle.closing().then(stop)
-      // Unload waits for running listeners: a held one lets go first.
       ctx.signal.addEventListener('abort', stop)
       ctx.effect(async () => {
         stop()
@@ -52,7 +47,6 @@ export function observer(namespace: string, declaration: Record<string, Record<s
       ctx.on(`session/${binding.sessionId}`, async (broadcast: any) => {
         if (broadcast.kind !== 'event' || closed) return
         const record = { sessionId: binding.sessionId, branchId: broadcast.branchId, event: broadcast.event }
-        // Listeners start in emit order, so the record keeps it.
         work ??= ended.then(() => { settled = true })
         records.push(record); notify()
         if (hold && record.event.type === 'input' && record.event.name === 'applied') {

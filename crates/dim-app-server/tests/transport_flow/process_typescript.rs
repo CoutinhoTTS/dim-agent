@@ -246,7 +246,6 @@ async fn node_public_plugin_files_without_product_root_stays_optional() {
     })
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
-    // Pending without `pluginFiles`, the row never registers its namespace.
     assert_eq!(
         client.rpc("files.read", json!({})).await["error"]["data"]["appError"],
         "unknown_method"
@@ -270,18 +269,14 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
         row[field] = json!("Rpc");
         cases.push(vec![row]);
     }
-    // A `py:` row needs the configured Python runtime.
     cases.push(vec![
         json!({"id":"python", "name":"py:module", "provides":{}}),
     ]);
-    // A plugin row is a process row: it has no group, even a valid one.
     for group in [json!("process"), json!(true), json!("session")] {
         let mut row = process.clone();
         row["group"] = group;
         cases.push(vec![row]);
     }
-    // `instanceNames` gives each name a Session or branch group, names a
-    // service the catalog does not hold yet, and declares a name once.
     for names in [
         json!(["exampleName"]),
         json!({"exampleName": "process"}),
@@ -630,7 +625,6 @@ async fn node_process_typescript_dependency_reload_settles_calls_and_keeps_failu
     assert_ok(&settled);
     assert_eq!(settled["result"]["generation"], before["generation"]);
     assert_eq!(settled["result"]["alive"], true);
-    // Rpc publishes namespace status independently of the loader's failure.
     unavailable(&mut client).await;
     assert!(matches!(loader.get("process-example").unwrap().status,
         rutis_loader::report::EntryStatus::Running(ref state) if state.state == rutis::host::FiberState::Failed));
@@ -669,7 +663,6 @@ async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled
             "failed" => row["config"] = json!({"failAfter":1}),
             "unresolved" => row["provides"]["extra"] = json!({"read":"sync"}),
             "disabled" => row["disabled"] = json!(true),
-            // The registration is refused, which fails the row.
             "bad_methods" => row["config"] = json!({"badMethods":true}),
             _ => unreachable!(),
         }
@@ -683,9 +676,6 @@ async fn node_process_typescript_optional_pending_failed_unresolved_and_disabled
         select_model(&mut client).await;
         assert_ok(&client.rpc("session.create", create(json!([]))).await);
         let (_, _, loader, _) = controls.recv().await.unwrap();
-        // None of these owners ever registers its namespace. The pending
-        // one waits in its runtime for a name nothing provides, so it never
-        // changes; the others are waited for until they settle.
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let settled = match loader.get("process-example").unwrap().status {
@@ -767,7 +757,6 @@ async fn node_process_typescript_held_apply_does_not_hold_native_startup() {
         .unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     select_model(&mut client).await;
-    // The held owner has not registered its namespace yet.
     assert_eq!(
         client.rpc("example.status", json!({})).await["error"]["data"]["appError"],
         "unknown_method"
@@ -869,7 +858,6 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
         .unwrap();
     }
     let project_root = json!({"project":project});
-    // A host root alone does not authorize a project. Session creation does.
     let denied = workflow_file_call(
         &mut client,
         "workflow_files_test.list",
@@ -1122,7 +1110,6 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
     })
     .await
     .unwrap();
-    // A package under an authorized parent still needs its own explicit host root.
     let unlisted = home.join("unlisted");
     std::fs::create_dir_all(unlisted.join("workflows")).unwrap();
     std::fs::write(unlisted.join("workflows/secret.yaml"), b"unlisted").unwrap();

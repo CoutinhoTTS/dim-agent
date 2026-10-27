@@ -150,7 +150,6 @@ async fn native_client_authenticates_before_rpc_and_exits_without_stdin_eof() {
         stdout.read_line(&mut line).await.unwrap();
         assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["result"]["protocolVersion"], 3);
         server.restart("Transport").await.unwrap();
-        // Stdin is deliberately still open while the remote pipe closes.
         child.wait().await.unwrap();
         drop(stdin);
         let mut observer = BufReader::new(ClientOptions::new().open(&name).unwrap());
@@ -172,7 +171,6 @@ async fn named_pipe_is_private_exclusive_and_shares_session_cleanup() {
         let server = serve(builder(), config.clone()).await.unwrap();
         assert_eq!(server.pipe_name.as_deref(), Some(name.as_str()));
         assert!(serve(builder(), config).await.is_err());
-        // The losing startup cannot remove or replace the original endpoint.
         let mut client = BufReader::new(ClientOptions::new().open(&name).unwrap());
         assert_current_user_only(client.get_ref());
         let hello = request(
@@ -235,7 +233,6 @@ async fn named_pipe_is_private_exclusive_and_shares_session_cleanup() {
         client.read_to_end(&mut Vec::new()).await.unwrap();
         drop(client);
         assert!(ClientOptions::new().open(&name).is_err());
-        // All server handles were released; a later daemon can claim the name.
         let listener = ServerOptions::new()
             .first_pipe_instance(true)
             .create(&name)

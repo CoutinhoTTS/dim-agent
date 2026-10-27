@@ -226,8 +226,6 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             assert_eq!(snapshot.capabilities.context_window, 32000);
         }
 
-        // The subagent model policy: a local management source that
-        // overrides temporary and named profiles for new members only.
         const PROVIDER: &str = "018ec73f-0000-7000-8000-000000000003";
         let model = |id: &str| json!({"providerId":PROVIDER,"modelId":id});
         for method in ["collaboration.model_policy", "collaboration.set_model_policy"] {
@@ -255,7 +253,6 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             reply["result"]["revision"].as_str().unwrap().to_owned()
         };
         let fixed = set(&mut client, &initial, json!({"mode":"fixed","model":model("alpha")})).await;
-        // A second client's stale revision loses the CAS.
         let mut other = Client::new_version(&server, false, 3).await;
         let stale = other.rpc("collaboration.set_model_policy", json!({"expectedRevision":initial,"policy":{"mode":"inherit"}})).await;
         assert_eq!(stale["error"]["data"]["appError"], "collaboration_model_policy_conflict", "{stale}");
@@ -275,7 +272,6 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             last_ok(&events(&lead_session).await);
             configs.lock().unwrap().last().unwrap().model.clone()
         };
-        // Fixed overrides both a named Agent's and a temporary profile's model.
         for request in [
             json!({"action":"request","agentId":reviewer,"prompt":"hello"}),
             json!({"action":"request","profile":temporary,"prompt":"hello"}),
@@ -284,8 +280,6 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             assert_eq!(selected.model_id, "alpha");
             assert_eq!(selected.capability_snapshot.unwrap().target.model_id, "alpha");
         }
-        // Inherit copies the requesting branch's adopted selection, not its
-        // creation configuration, and no request identity.
         let inherit = set(&mut client, &fixed, json!({"mode":"inherit"})).await;
         assert_ok(&client.rpc("session.model.update", json!({"sessionId":lead,"branchId":"main","providerId":PROVIDER,"modelId":"beta"})).await);
         let adopted = poll("adopted leader model", async || {
@@ -300,18 +294,15 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             && metadata.run_id.is_none() && metadata.trace_id.is_none() && metadata.turn_id.is_none()));
         let named = json!({"action":"request","profile":{"name":"worker","description":"fixture","systemPrompt":"work","tools":["agent"],"model":model("alpha")},"prompt":"hello"});
         assert_eq!(member_model(&mut client, named).await.model_id, "beta");
-        // Agent restores each profile's own model.
         let agent_mode = set(&mut client, &inherit, json!({"mode":"agent"})).await;
         let selected = member_model(&mut client, json!({"action":"request","agentId":reviewer,"prompt":"hello"})).await;
         assert_eq!(selected.model_id, "beta");
-        // A fixed model that cannot resolve fails creation with no fallback
-        // and leaves no temporary Agent behind.
         set(&mut client, &agent_mode, json!({"mode":"fixed","model":model("missing")})).await;
         let agents = client.rpc("agent.list", json!({})).await["result"].as_array().unwrap().len();
         let members = configs.lock().unwrap().len();
         say(&mut client, &lead, tool(json!({"action":"request","profile":temporary,"prompt":"hello"})), "queue").await;
         idle(&mut client, &lead).await;
-        assert!(last_error(&events(&lead_session).await).contains("member_create_failed"));
+        assert!(last_error(&events(&lead_session).await).contains("member_create_failed"), "the failure detail is stored before collaboration/delivered so the waiting tool call observes it");
         assert_eq!(configs.lock().unwrap().len(), members);
         assert_eq!(client.rpc("agent.list", json!({})).await["result"].as_array().unwrap().len(), agents);
         server.shutdown();
@@ -441,7 +432,6 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             })
             .unwrap();
         assert!(wake.user.is_none());
-        // The input carries a bounded preview; the full result stays readable.
         assert!(serde_json::to_vec(wake).unwrap().len() < 17 * 1024);
         let projected = dim_agent_capabilities::history::project_history(&timeline).unwrap();
         let preview = projected
@@ -503,7 +493,6 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             format!("{}<exact>&tail", "界".repeat(400_000))
         );
 
-        // Retain the normal RPC/model flow independently of the direct read probe.
         say(&mut client, &lead, read.clone(), "queue").await;
         idle(&mut client, &lead).await;
         let result = last_ok(&events(&session).await);
@@ -855,7 +844,6 @@ fn result_of(events: &[Arc<AgentEvent>], member: &str) -> Vec<CollaborationOutco
 async fn leader_delegates_and_team_members_communicate() {
     let (server, agent) = launch_team().await;
     let mut client = Client::new_version(&server, false, 3).await;
-    // Without local execution there is no subagent model policy to manage.
     assert!(
         !client
             .features
@@ -891,7 +879,6 @@ async fn leader_delegates_and_team_members_communicate() {
         .unwrap()
         .to_owned();
 
-    // A new member returns immediately; its result arrives as a later input.
     say(
         &mut client,
         &lead,
@@ -907,9 +894,7 @@ async fn leader_delegates_and_team_members_communicate() {
     assert_eq!(first["agentId"], default_agent.as_str());
     let member = first["sessionId"].as_str().unwrap().to_owned();
     let member_session = agent.get_session(&member).unwrap();
-    // Operations reach a peer as its own ordinary events only.
     assert_no_collaboration_facts(&member_session).await;
-    // Tree clients see the leader's collaboration facts live.
     let mut names = vec![];
     while names.len() < 3 {
         let notice = client.notice("session.event").await;
@@ -919,14 +904,11 @@ async fn leader_delegates_and_team_members_communicate() {
         }
     }
     assert_eq!(names, ["request", "delivered", "result"]);
-    // Later assertions drive Sessions directly without draining this client.
-    // Stop the live subscription once its delivery contract is verified.
     assert_ok(
         &client
             .rpc("session.detach", json!({"sessionId": lead}))
             .await,
     );
-    // Clients of the leader's protocol see the member Session.
     let listed = client.rpc("session.list", json!({})).await;
     assert!(
         listed["result"]
@@ -954,11 +936,9 @@ async fn leader_delegates_and_team_members_communicate() {
     )));
     assert!(delivered[0].contains("Full result: agent tool, action \"result\", resultId \""));
     assert!(delivered[0].ends_with(".\n</dim-agent-report>"));
-    // The leader continues with the result input.
     assert!(timeline.iter().any(|event| matches!(&event.kind,
         EventKind::Text(data) if data.delta.starts_with("Echo: <dim-agent-report"))));
 
-    // The same member takes another request.
     say(
         &mut client,
         &lead,
@@ -976,7 +956,6 @@ async fn leader_delegates_and_team_members_communicate() {
         agent_results(&timeline)[1].contains("Status: completed.\nResult preview:\nEcho: again\n")
     );
 
-    // A working member is busy; unknown members and Agents are refused.
     say(
         &mut client,
         &lead,
@@ -1031,7 +1010,6 @@ async fn leader_delegates_and_team_members_communicate() {
         "queue",
     )
     .await;
-    // The member keeps working until the leader cancels it.
     say(
         &mut client,
         &lead,
@@ -1056,7 +1034,6 @@ async fn leader_delegates_and_team_members_communicate() {
             "invalid_input"
         ]
     );
-    // Profile tools are checked at the tool boundary: no operation event.
     let (_, profile_refusal) = results(&timeline)
         .into_iter()
         .rfind(|(error, _)| *error)
@@ -1072,7 +1049,6 @@ async fn leader_delegates_and_team_members_communicate() {
     assert!(agent_results(&timeline)[2].contains("Status: cancelled."));
 
     let read_after = lead_session.sequence("main").unwrap();
-    // Leader list shows the Team.
     say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
     idle(&mut client, &lead).await;
     let listed = last_ok(&events(&lead_session).await);
@@ -1089,8 +1065,6 @@ async fn leader_delegates_and_team_members_communicate() {
     assert_eq!(participants[1]["sessionId"], member.as_str());
     assert_eq!(participants[1]["status"], "idle");
 
-    // The member messages its leader, reads it and lists the Team; it
-    // cannot request.
     let before = events(&lead_session)
         .await
         .iter()
@@ -1135,7 +1109,6 @@ async fn leader_delegates_and_team_members_communicate() {
     };
     let before = facts(&member_session).await;
     for input in [
-        // Read recent activity from the last observed batch boundary.
         json!({"action": "read", "agentId": default_agent, "sessionId": lead, "after": read_after, "limit": 200}),
         json!({"action": "list"}),
         json!({"action": "request", "agentId": default_agent, "prompt": "x"}),
@@ -1171,13 +1144,11 @@ async fn leader_delegates_and_team_members_communicate() {
     assert_eq!(listed["role"], "member");
     assert!(listed.get("agents").is_none());
     assert_eq!(listed["participants"].as_array().unwrap().len(), 2);
-    // Members neither delegate nor inspect Agents; refusals write no event.
     for (error, text) in &member_results[member_results.len() - 2..] {
         assert!(*error && text.starts_with("invalid_input"), "{text}");
     }
     assert_eq!(facts(&member_session).await, before);
 
-    // Leader steer message reaches the member as a steer input.
     say(
         &mut client,
         &lead,
@@ -1250,8 +1221,6 @@ async fn temporary_agents_stay_private_during_concurrent_create_and_close() {
                 .unwrap();
             foreign_session.idle("main").await.unwrap();
             let listed = last_ok(&events(&foreign_session).await);
-            // Positive control: the public default remains visible; private
-            // Agents may never appear, including stale snapshots during close.
             let agents = listed["agents"].as_array().unwrap();
             assert_eq!(agents.len(), 1, "{listed}");
             assert_eq!(agents[0]["name"], "default");
@@ -1303,7 +1272,6 @@ async fn members_cancel_close_and_leave_the_team() {
         .to_owned();
     let long = "tool:wait {\"millis\":30000}";
 
-    // Temporary Agent: cancel, then close.
     say(
         &mut client,
         &lead,
@@ -1339,7 +1307,6 @@ async fn members_cancel_close_and_leave_the_team() {
         [CollaborationOutcome::Cancelled { .. }]
     ));
     assert!(agent_results(&timeline)[0].contains("Status: cancelled."));
-    // Cancellation preserves Team addressing and the temporary Agent's privacy.
     say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
     idle(&mut client, &lead).await;
     let listed = last_ok(&events(&lead_session).await);
@@ -1361,8 +1328,6 @@ async fn members_cancel_close_and_leave_the_team() {
     .await;
     idle(&mut client, &foreign).await;
     assert!(last_error(&events(&foreign_session).await).starts_with("agent_not_found"));
-    // A steer message starts a member turn outside
-    // any request; cancel still stops it and reports idle.
     say(
         &mut client,
         &lead,
@@ -1384,8 +1349,6 @@ async fn members_cancel_close_and_leave_the_team() {
     .await;
     idle(&mut client, &lead).await;
     assert_eq!(last_ok(&events(&lead_session).await)["status"], "idle");
-    // cancel is delivered once the member's stop has settled its turn, so
-    // the cancelled turn is already on the member Timeline.
     say(
         &mut client,
         &lead,
@@ -1404,7 +1367,6 @@ async fn members_cancel_close_and_leave_the_team() {
     assert_eq!(ends.len(), 2);
     assert_eq!(ends[1]["status"], "cancelled");
     idle(&mut client, &member).await;
-    // A temporary member is reused through its own address only.
     say(
         &mut client,
         &lead,
@@ -1424,7 +1386,6 @@ async fn members_cancel_close_and_leave_the_team() {
         result_of(&events(&lead_session).await, &member)[1],
         CollaborationOutcome::Completed
     ));
-    // Another leader neither sees nor uses this Team's temporary Agent.
     let other = leader(&mut client, allowed()).await;
     let other_session = agent.get_session(&other).unwrap();
     say(
@@ -1464,7 +1425,6 @@ async fn members_cancel_close_and_leave_the_team() {
             .iter()
             .all(|agent| agent["agentId"] != temporary.as_str())
     );
-    // Its creator reads the full profile on demand rather than in list.
     say(
         &mut client,
         &lead,
@@ -1502,7 +1462,6 @@ async fn members_cancel_close_and_leave_the_team() {
             .any(|agent| agent["agentId"] == temporary.as_str())
     );
     assert_eq!(result_of(&timeline, &member).len(), 2);
-    // Leaving the Team keeps the member Session and its temporary Agent.
     let agents = client.rpc("agent.list", json!({})).await;
     assert_eq!(agents["result"].as_array().unwrap().len(), 2);
     let listed = client.rpc("session.list", json!({})).await;
@@ -1518,7 +1477,6 @@ async fn members_cancel_close_and_leave_the_team() {
             .rpc("session.attach", json!({"sessionId": member}))
             .await,
     );
-    // Its last Session closing closes the temporary Agent.
     assert_ok(
         &client
             .rpc("session.close", json!({"sessionId": member}))
@@ -1537,8 +1495,6 @@ async fn members_cancel_close_and_leave_the_team() {
     .await
     .expect("temporary Agent closed with its last Session");
 
-    // Closing a working member settles its request before the relation goes;
-    // the member Session of a persistent Agent stays.
     say(
         &mut client,
         &lead,
@@ -1575,7 +1531,6 @@ async fn members_cancel_close_and_leave_the_team() {
     idle(&mut client, &lead).await;
     assert!(last_error(&events(&lead_session).await).starts_with("team_member_not_found"));
 
-    // A member closed from outside ends its request as failed.
     say(
         &mut client,
         &lead,
@@ -1601,7 +1556,6 @@ async fn members_cancel_close_and_leave_the_team() {
     );
     assert_pairing(&timeline);
 
-    // Reloading Agents settles a Team with work in flight.
     say(
         &mut client,
         &lead,
@@ -1647,7 +1601,6 @@ async fn members_cancel_close_and_leave_the_team() {
 async fn leader_stop_and_close_settle_requests() {
     let (server, agent) = launch_team().await;
     let mut client = Client::new_version(&server, false, 3).await;
-    // `agent` needs approval, which holds the leader's turn open.
     let lead = leader(
         &mut client,
         json!({"preset": "workspace-write", "allowedTools": ["echo", "wait"]}),
@@ -1681,7 +1634,6 @@ async fn leader_stop_and_close_settle_requests() {
         );
     }
 
-    // An earlier turn's request keeps working through the stop.
     say(
         &mut client,
         &lead,
@@ -1692,7 +1644,6 @@ async fn leader_stop_and_close_settle_requests() {
     .await;
     approve(&mut client, &lead, None).await;
     let earlier = next_member(&lead_session, 0).await;
-    // The steer joins the active turn after the agent tool result.
     say(
         &mut client,
         &lead,
@@ -1714,8 +1665,6 @@ async fn leader_stop_and_close_settle_requests() {
             .then_some(())
     })
     .await;
-    // Stop covers only the active turn. Delivered requests are detached work
-    // of the leader: both members keep working until stopped from outside.
     assert_ok(
         &client
             .rpc(
@@ -1742,8 +1691,6 @@ async fn leader_stop_and_close_settle_requests() {
             .await
             .unwrap();
     }
-    // Their reports arrive after the stop: like any later input, they drive
-    // a leader turn.
     returned(&mut client, &lead, &lead_session, 2).await;
     let timeline = events(&lead_session).await;
     for member in [&covered, &earlier] {
@@ -1764,7 +1711,6 @@ async fn leader_stop_and_close_settle_requests() {
     assert_eq!(reports, 2);
     lead_session.idle("main").await.unwrap();
 
-    // Closing the leader settles its in-flight request without an input.
     say(
         &mut client,
         &lead,
@@ -1782,7 +1728,6 @@ async fn leader_stop_and_close_settle_requests() {
             .rpc("session.close", json!({"sessionId": lead}))
             .await,
     );
-    // The reply follows complete cleanup: the closed Timeline is final.
     let closed = lead_session.local("main", ..).await.unwrap();
     assert_eq!(
         result_of(&closed, &earlier).last(),
@@ -1843,7 +1788,6 @@ impl ToolDriver for GateTools {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn member_work_absorbs_messages_and_spans_turns() {
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    // The default Agent's members can hold.
     let mut config = ServerConfig::default();
     config
         .session_defaults
@@ -1897,7 +1841,6 @@ async fn member_work_absorbs_messages_and_spans_turns() {
         (holds(&member_session).await == 1).then_some(())
     })
     .await;
-    // A read-only member observation shares the leader connection and owns only its attachment.
     let registered = client
         .rpc("ui.attach", json!({"sessionId":lead,"kind":"tui"}))
         .await;
@@ -1958,7 +1901,6 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     );
     assert_eq!(interfaces["result"]["instances"][0]["sessionId"], lead);
     running(&mut client, &member).await;
-    // A steer joins the running turn after the held tool returns.
     let steer = "tool:hold {\"text\":\"steered\"}";
     let steering = message(steer, "steer");
     say(&mut client, &lead, steering.clone(), "queue").await;
@@ -1983,8 +1925,6 @@ async fn member_work_absorbs_messages_and_spans_turns() {
         (holds(&member_session).await == 2).then_some(())
     })
     .await;
-    // So does an append; a host queue input waits for the turn to end and
-    // opens another turn inside the same work.
     say(
         &mut client,
         &lead,
@@ -2049,8 +1989,6 @@ async fn member_work_absorbs_messages_and_spans_turns() {
             .filter(|event| matches!(event.kind, EventKind::ToolResult(_)))
             .count()
     };
-    // Each message joins the first turn right after the tool result it
-    // arrived during.
     for (text, after_results) in [(steer, 1), ("appended note", 2)] {
         let at = consumed(text);
         assert!(
@@ -2059,13 +1997,11 @@ async fn member_work_absorbs_messages_and_spans_turns() {
         );
         assert_eq!(tool_results(starts[0].0..at), after_results, "{text}");
     }
-    // The queued input opens the second turn, which consumes it.
     let follow = consumed("follow-up");
     assert!(ends[0] < starts[1].0 && starts[1].0 < follow);
     assert!(timeline.iter().any(|event| matches!(&event.kind,
         EventKind::Text(data) if data.delta == "Echo: appended note")));
 
-    // The result is the last turn's output.
     let result = events(&lead_session)
         .await
         .iter()
@@ -2082,8 +2018,6 @@ async fn member_work_absorbs_messages_and_spans_turns() {
             .contains("Status: completed.\nResult preview:\nEcho: follow-up\n")
     );
 
-    // Paging with `after` and `limit` along `nextCursor` yields the full
-    // read: nothing repeated, nothing skipped.
     let read = |after: u64, limit: usize| {
         tool(
             json!({"action": "read", "agentId": holder, "sessionId": member,
@@ -2137,7 +2071,6 @@ async fn member_work_absorbs_messages_and_spans_turns() {
             let sequence = item["sequence"].as_u64().unwrap();
             assert!(after < sequence && sequence <= next, "{item}");
         }
-        // A result whose call sits on an earlier page still names its tool.
         split_call |= items.iter().any(|item| {
             item["type"] == "tool_result"
                 && !items
@@ -2402,8 +2335,6 @@ impl dim_agent_capabilities::host::ModelDriver for PartialCallModel {
     ) -> dim_agent_capabilities::host::HostFuture<'_, dim_agent_capabilities::host::ModelStream>
     {
         use dim_agent_capabilities::host::{HostError, ModelChunk, ModelStream};
-        // Only the prompt delegated to the member starts the partial call; the
-        // leader's command, the member's report and read results also carry it.
         let partial = request.messages.last().is_some_and(|message| {
             let text = serde_json::to_string(message).unwrap();
             message.role == dim_agent_types::Role::User
@@ -2428,8 +2359,6 @@ impl dim_agent_capabilities::host::ModelDriver for PartialCallModel {
                     name: "echo".into(),
                 }),
             ]);
-            // Usage facts put the start more than one search step before
-            // the result that closes it.
             let usage = futures_util::stream::iter((0..PARTIAL_USAGE).map(|_| {
                 Ok(ModelChunk::Usage(
                     serde_json::from_value(
@@ -2526,7 +2455,6 @@ async fn undispatched_results_name_calls_from_their_starts() {
             .flatten()
     })
     .await;
-    // A client can address the member directly without stopping its leader.
     assert_ok(
         &client
             .rpc(
@@ -2543,13 +2471,11 @@ async fn undispatched_results_name_calls_from_their_starts() {
             .then(|| events.last().unwrap().sequence)
     })
     .await;
-    // The member's report reaches the leader before the reads.
     poll("member report", async || {
         (agent_results(&events(&lead_session).await).len() == 1).then_some(())
     })
     .await;
     idle(&mut client, &lead).await;
-    // A page starting at the result, hundreds of events after the start.
     let after = start.sequence + PARTIAL_USAGE - 1;
     say(
         &mut client,
@@ -2596,7 +2522,6 @@ async fn collaboration_facts_publish_to_tree_protocols_only() {
                 .rpc("session.attach", json!({"sessionId": lead}))
                 .await,
         );
-        // v1 addresses main implicitly; v2 names the branch.
         let mut submit = json!({"sessionId": lead, "text":
             tool(json!({"action": "request", "agentId": default_agent, "prompt": "hello"}))});
         let mut wait = json!({"sessionId": lead});
@@ -2616,7 +2541,6 @@ async fn collaboration_facts_publish_to_tree_protocols_only() {
             .filter(|event| event.kind.key().starts_with("collaboration/"))
             .count();
         assert_eq!(facts, 3);
-        // Closing ends the subscription after every broadcast event.
         assert_ok(
             &client
                 .rpc("session.close", json!({"sessionId": lead}))
@@ -2741,8 +2665,6 @@ async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
         result_of(&events(&session).await, &member).last(),
         Some(CollaborationOutcome::Completed)
     ));
-    // Ordinary client restoration, without another collaboration lookup,
-    // must also restore the member's close observation.
     unload(&agent, &member).await;
     server.restart("Agents").await.unwrap();
     assert_ok(
@@ -2755,7 +2677,6 @@ async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
             .rpc("session.close", json!({"sessionId":member}))
             .await,
     );
-    // Reattach the leader's tools to the current provider generation.
     assert_ok(
         &client
             .rpc("session.detach", json!({"sessionId":lead}))
@@ -2779,7 +2700,6 @@ async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
             .then_some(())
     })
     .await;
-    // The leader's ordinary restoration must rearm its watcher too.
     say(
         &mut client,
         &lead,
@@ -3014,9 +2934,6 @@ async fn hold_until(timeline: &dim_agent_runtime::Timeline, kind: &str) {
     })
     .await
     .unwrap_or_else(|_| panic!("deadline: {kind}"));
-    // Past the writer's own bookkeeping after its append returns. Only the
-    // old behavior needs this margin to show; the fixed one is decided by
-    // the event position whatever the timing.
     tokio::time::sleep(Duration::from_millis(300)).await;
 }
 
@@ -3031,7 +2948,6 @@ async fn hold_until(timeline: &dim_agent_runtime::Timeline, kind: &str) {
 /// received the request by then and sees the stop only after `delivered`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled() {
-    // The leader's Timeline, from the first of its events the gate sees.
     let leader_timeline = Arc::new(OnceLock::new());
     let gate = DispatchGate::new({
         let leader_timeline = leader_timeline.clone();
@@ -3074,7 +2990,6 @@ async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled()
         "queue",
     )
     .await;
-    // Collaboration is delivering the request: its member is being created.
     hold.entered.notified().await;
     leader_timeline
         .get()
@@ -3129,7 +3044,6 @@ async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled()
             .sequence
     };
     assert!(position("stop/interrupt") < position("collaboration/delivered"));
-    // Covered by the stop: its result does not return to the leader.
     let reports = timeline
         .iter()
         .filter(|event| {
@@ -3284,7 +3198,6 @@ async fn an_operation_of_a_turn_interrupted_before_a_reload_is_refused() {
         .unwrap()
         .clone()
         .expect("reloaded leader");
-    // A late operation of the interrupted turn.
     let op = timeline
         .append(
             EventKind::CollaborationRequest(dim_agent_types::CollaborationRequestData {
@@ -3348,7 +3261,6 @@ async fn a_request_covered_before_its_member_input_is_refused() {
         .as_str()
         .unwrap()
         .to_owned();
-    // The delivery stops while it creates its member.
     hold.armed.store(true, Ordering::SeqCst);
     say(
         &mut client,
@@ -3358,8 +3270,6 @@ async fn a_request_covered_before_its_member_input_is_refused() {
     )
     .await;
     hold.entered.notified().await;
-    // Stop returns once Loop dispatched the interrupt: Collaboration has
-    // handled it too, before the delivery writes the member input.
     lead_session.stop("main", "stopped".into()).await.unwrap();
     hold.release.notify_one();
     let delivery = poll("delivered", async || {
@@ -3436,7 +3346,6 @@ async fn held(session: &Session) -> bool {
 async fn open_requests_hold_their_leader_until_the_last_result() {
     let (server, agent, gate, directory) = launch_holding_team().await;
     let mut client = Client::new_version(&server, false, 3).await;
-    // Driven by calls only: no client attaches to the leader.
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -3465,7 +3374,6 @@ async fn open_requests_hold_their_leader_until_the_last_result() {
     .await;
     idle(&mut client, &lead).await;
     assert!(last_error(&events(&lead_session).await).starts_with("busy"));
-    // Cancelling one request releases its hold, not the other's.
     say(
         &mut client,
         &lead,
@@ -3475,14 +3383,12 @@ async fn open_requests_hold_their_leader_until_the_last_result() {
     .await;
     returned(&mut client, &lead, &lead_session, 1).await;
     assert!(held(&lead_session).await);
-    // The last result wakes the leader; after that turn nothing holds it.
     gate.add_permits(1);
     returned(&mut client, &lead, &lead_session, 2).await;
     drop(lead_session);
     unload(&agent, &lead).await;
     unload(&agent, &cancelled).await;
     unload(&agent, &completed).await;
-    // The unload ended no work: the restored leader has both results.
     idle(&mut client, &lead).await;
     let timeline = events(&agent.get_session(&lead).unwrap()).await;
     assert_eq!(
@@ -3557,7 +3463,6 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
     unloaded(lead_session).await;
     unloaded(member_session).await;
 
-    // The relation routes the next request to the unloaded member.
     say(
         &mut client,
         &lead,
@@ -3580,8 +3485,6 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
     assert_pairing(&events(&lead_session).await);
     drop(lead_session);
 
-    // Reads of the member until one finds it unloaded: each returns its
-    // whole Timeline.
     let read = tool(json!({"action": "read", "agentId": holder, "sessionId": member}));
     let mut reads = vec![];
     tokio::time::timeout(Duration::from_secs(20), async {
@@ -3707,13 +3610,11 @@ async fn closing_a_member_keeps_a_temporary_agent_with_an_unloaded_member() {
     let (lead, lead_session, temporary, first, second) =
         unloaded_temporary_members(&mut client, &agent).await;
 
-    // The close restores the second member and closes it.
     assert_ok(
         &client
             .rpc("session.close", json!({"sessionId": second}))
             .await,
     );
-    // Collaboration has handled the close once the member leaves the Team.
     poll("the closed member leaves the Team", async || {
         (!team_of(&mut client, &lead, &lead_session)
             .await
@@ -3744,7 +3645,6 @@ async fn closing_a_member_keeps_a_temporary_agent_with_an_unloaded_member() {
         ]
     );
 
-    // Its last Session closing closes the temporary Agent.
     assert_ok(
         &client
             .rpc("session.close", json!({"sessionId": first}))
@@ -3792,7 +3692,6 @@ async fn deleting_unloaded_members_ends_their_relations_and_the_temporary_agent(
         "the temporary Agent stays with its unloaded member"
     );
 
-    // Its last Session deleted, the temporary Agent closes.
     assert_ok(
         &client
             .rpc("session.delete", json!({"sessionId": first}))
@@ -3842,8 +3741,6 @@ async fn unloaded_members_deleted_across_a_reload_end_with_their_temporary_agent
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(deleting.iter().all(|delete| !delete.is_finished()));
-    // The next index generation reads its records through the connection
-    // the deletes wait on, so they finish while the reload is under way.
     let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
         tokio::time::sleep(Duration::from_millis(100)).await;
         lock.execute_batch("COMMIT").unwrap();
@@ -3874,7 +3771,6 @@ async fn unloaded_members_deleted_across_a_reload_end_with_their_temporary_agent
 async fn every_settlement_of_a_request_releases_its_leader() {
     let (server, agent, _gate, directory) = launch_holding_team().await;
     let mut client = Client::new_version(&server, false, 3).await;
-    // Driven by calls only: no client attaches to the leader.
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -3886,7 +3782,6 @@ async fn every_settlement_of_a_request_releases_its_leader() {
         .to_owned();
     let request = tool(json!({"action": "request", "agentId": holder, "prompt": "tool:hold {}"}));
 
-    // The member closes: its request fails and wakes the leader.
     say(&mut client, &lead, request.clone(), "queue").await;
     let lead_session = agent.get_session(&lead).unwrap();
     let closed = next_member(&lead_session, 0).await;
@@ -3906,7 +3801,6 @@ async fn every_settlement_of_a_request_releases_its_leader() {
     drop(lead_session);
     unload(&agent, &lead).await;
 
-    // A reload of Collaboration fails the open request.
     say(&mut client, &lead, request.clone(), "queue").await;
     let lead_session = agent.get_session(&lead).unwrap();
     let reloaded = next_member(&lead_session, 1).await;
@@ -3926,7 +3820,6 @@ async fn every_settlement_of_a_request_releases_its_leader() {
     drop(lead_session);
     unload(&agent, &lead).await;
 
-    // Closing the leader settles its open request without waiting for it.
     say(&mut client, &lead, request, "queue").await;
     let lead_session = agent.get_session(&lead).unwrap();
     let last = next_member(&lead_session, 2).await;
@@ -3960,7 +3853,6 @@ async fn every_settlement_of_a_request_releases_its_leader() {
 /// has not handled the close when the member is ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
-    // The leader's Timeline, once its interrupt is held.
     let held_timeline = Arc::new(OnceLock::new());
     let interrupt_arrived = Arc::new(tokio::sync::Notify::new());
     let interrupt_release = Arc::new(tokio::sync::Notify::new());

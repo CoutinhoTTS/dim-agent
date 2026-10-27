@@ -112,7 +112,6 @@ async function loadGoalBranch(read, options = {}) {
     settings: { read },
     treeCommands: {
       input: async (id, input) => {
-        // A write to another branch is a fact on that branch, not on this one.
         if (id !== branchId) {
           sent.push({ branch: id, input })
           return { id: 'remote', sequence: 0, type: 'input', name: 'message', data: input }
@@ -140,7 +139,6 @@ test('Goal reads current Settings without change events and stops decisions on r
   let reply = settingsDocument(20)
   const branch = await loadGoalBranch(async () => reply)
   t.after(() => branch.unload())
-  // The document changes without this part listening to settings/goal.
   reply = settingsDocument(1)
   const set = await branch.emit('input', 'message', changes.set(B, 'ship it'))
   await branch.turn(set)
@@ -153,7 +151,6 @@ test('Goal reads current Settings without change events and stops decisions on r
   await flush()
   assert.equal(branch.writes.length, 1, 'an unreadable limit must not produce an automatic input')
 
-  // The user's interrupt does not require the unavailable continuation limit.
   await branch.emit('stop', 'interrupt', { scope: 'turn' })
   await flush()
   assert.equal(branch.writes.length, 2)
@@ -197,12 +194,10 @@ test('D2: operator input resets the count; a marked input from another source do
   const branch = started()
   branch.continueOnce(limit)
   assert.equal(branch.fold.count, 1)
-  // The operator speaks: the count restarts from that input.
   const operator = branch.user('also update the changelog')
   branch.turn([operator])
   assert.equal(branch.fold.count, 0)
   branch.continueOnce(limit)
-  // Another source's input carries a marker in its first block: not operator input.
   const marked = branch.user('scheduled check', 'queue', [{ type: 'raw', text: '<dim-scheduler run="1">\ncheck\n</dim-scheduler>' }])
   branch.turn([marked])
   branch.continueOnce(limit)
@@ -218,7 +213,6 @@ test('D3: an interrupt before turn/end pauses; turn/end decides the same, and no
   const interrupt = branch.interrupt()
   assert.deepEqual(decideInterrupt(branch.fold, interrupt.sequence), { write: 'pause', reason: 'interrupted' })
   const end = branch.commit('turn', 'end', { status: 'cancelled' })
-  // The interrupt's pause is not consumed yet: turn/end's own decision is the same pause.
   assert.deepEqual(decideTurnEnd(branch.fold, 20), { write: 'pause', reason: 'interrupted' })
   branch.write({ write: 'pause', reason: 'interrupted' }, interrupt.sequence)
   branch.write({ write: 'pause', reason: 'interrupted' }, end.sequence)
@@ -232,33 +226,28 @@ test('D3: an interrupt committed between turn/end and the continuation costs at 
   const limit = 20
   const branch = started()
   const end = branch.fold.turnEnd.sequence
-  // The decision used only events consumed through N.
   const decision = decideTurnEnd(branch.fold, limit)
   assert.equal(decision.write, 'continuation')
   const interrupt = branch.interrupt()
   const continuation = branch.write(decision, end, limit)
   assert.deepEqual(decideInterrupt(branch.fold, interrupt.sequence), { write: 'pause', reason: 'interrupted' })
   const pause = branch.write({ write: 'pause', reason: 'interrupted' }, interrupt.sequence)
-  // The extra turn consumes both; the model sees the pause last and nothing continues.
   branch.turn([continuation, pause])
   assert.equal(branch.fold.status.status, 'paused')
   assert.equal(decideTurnEnd(branch.fold, limit), undefined)
 })
 
 test('D3: interrupts after the goal starts or is applied pause it; an earlier interrupt does not', () => {
-  // After the set is committed but before it is applied.
   let branch = new Branch()
   branch.input(changes.set(B, 'ship it'))
   let interrupt = branch.interrupt()
   assert.deepEqual(decideInterrupt(branch.fold, interrupt.sequence), { write: 'pause', reason: 'interrupted' })
-  // After the set is applied by a running turn.
   branch = new Branch()
   const set = branch.input(changes.set(B, 'ship it'))
   branch.commit('turn', 'start', {})
   branch.consume(set)
   interrupt = branch.interrupt()
   assert.deepEqual(decideInterrupt(branch.fold, interrupt.sequence), { write: 'pause', reason: 'interrupted' })
-  // An interrupt before the goal became active belongs to an earlier goal state.
   branch = new Branch()
   interrupt = branch.interrupt()
   const later = branch.input(changes.set(B, 'ship it'))
@@ -268,7 +257,6 @@ test('D3: interrupts after the goal starts or is applied pause it; an earlier in
 })
 
 test('D3: an interrupt during goal_update: after its write no pause; before it the handler writes nothing and the goal pauses', () => {
-  // After the write: the fold is completed, so the interrupt finds no active goal.
   let branch = started()
   branch.commit('turn', 'start', {})
   branch.input(changes.report(B, 'completed', 'done'))
@@ -277,7 +265,6 @@ test('D3: an interrupt during goal_update: after its write no pause; before it t
   branch.commit('turn', 'end', { status: 'cancelled' })
   assert.equal(branch.fold.status.status, 'completed')
   assert.equal(decideTurnEnd(branch.fold, 20), undefined)
-  // Before the write: the cancelled handler writes nothing; the interrupt pauses.
   branch = started()
   branch.commit('turn', 'start', {})
   interrupt = branch.interrupt()
@@ -296,14 +283,12 @@ test('D4: pending Queue and Steer input suppress continuation; Append does not',
 })
 
 test('D4: a deleted input does not suppress; deleting the input that suppressed N takes N again', () => {
-  // Deleted before N.
   let branch = new Branch()
   const set = branch.input(changes.set(B, 'ship it'))
   const queued = branch.user('later')
   branch.delete(queued)
   branch.turn([set])
   assert.equal(decideTurnEnd(branch.fold, 20)?.write, 'continuation')
-  // Pending at N, deleted after N.
   branch = started()
   const pending = branch.user('later')
   assert.equal(decideTurnEnd(branch.fold, 20), undefined)
@@ -333,7 +318,6 @@ test('D5: a new generation refolds committed history and repeats no decision', (
 })
 
 test('D6: compaction steps write no turn/end, so Goal decides nothing on them', () => {
-  // Inside a goal turn: the compaction is a step; only the turn's end decides.
   const branch = started()
   const end = branch.fold.turnEnd.sequence
   const continuation = branch.write(decideTurnEnd(branch.fold, 20), end, 20)
@@ -344,7 +328,6 @@ test('D6: compaction steps write no turn/end, so Goal decides nothing on them', 
   assert.equal(decideTurnEnd(branch.fold, 20), undefined)
   branch.commit('turn', 'end', { status: 'completed' })
   assert.equal(decideTurnEnd(branch.fold, 20)?.write, 'continuation')
-  // With no turn, after a completed goal: no decision and the latest turn/end is unchanged.
   const done = started()
   done.input(changes.report(B, 'completed', 'done'))
   const latest = done.fold.turnEnd
@@ -418,12 +401,9 @@ test('Pursuit 1: set records the judge, edit keeps it, and a completion is a req
   assert.equal(branch.fold.judge, 'evaluator')
   branch.input(changes.edit(B, 'ship it twice'))
   assert.equal(branch.fold.judge, 'evaluator', 'edit keeps the judge')
-  // Goal's continuations are unchanged under the evaluator judge.
   branch.turn([set])
   assert.deepEqual(decideTurnEnd(branch.fold, 20), { write: 'continuation', count: 1 })
   const continuation = branch.write(decideTurnEnd(branch.fold, 20), branch.fold.turnEnd.sequence, 20)
-  // A turn whose worker reports completion keeps the status active, and the
-  // request moves neither `A` nor the count.
   branch.commit('turn', 'start', {})
   branch.consume(continuation)
   const request = branch.input(changes.report(B, 'completed', 'all tests pass'))
@@ -433,14 +413,11 @@ test('Pursuit 1: set records the judge, edit keeps it, and a completion is a req
   assert.deepEqual(branch.fold.requests, [{ sequence: request.sequence, summary: 'all tests pass' }])
   assert.equal(branch.fold.count, 1)
   assert.equal(decideEvaluation(branch.fold, end.sequence), true)
-  // The refold of the same history takes the same decision (Pursuit 6).
   const refold = new Fold()
   for (const event of branch.events) refold.apply(event)
   assert.equal(refold.judge, 'evaluator')
   assert.equal(decideEvaluation(refold, end.sequence), true)
-  // A later turn carries no request: its end creates no evaluator.
   assert.equal(decideEvaluation(branch.fold, branch.turn([]).sequence), false)
-  // `clear` retires the judge with the goal, and a later `set` chooses again.
   branch.input(changes.clear(B))
   assert.equal(branch.fold.judge, 'model')
   branch.input(changes.set(B, 'again', 'evaluator'))
@@ -449,7 +426,6 @@ test('Pursuit 1: set records the judge, edit keeps it, and a completion is a req
 })
 
 test('Pursuit 3: a worker blocked, an interrupt, a user pause and a limit pause create no evaluator', () => {
-  // A worker's `blocked` stands: the goal is blocked and its turn end decides nothing.
   let branch = new Branch()
   branch.input(changes.set(B, 'ship it', 'evaluator'))
   branch.commit('turn', 'start', {})
@@ -458,7 +434,6 @@ test('Pursuit 3: a worker blocked, an interrupt, a user pause and a limit pause 
   assert.equal(branch.fold.running, false)
   assert.equal(decideEvaluation(branch.fold, end.sequence), false)
   assert.equal(decideTurnEnd(branch.fold, 20), undefined)
-  // An interrupt before the turn end pauses the goal; its pause decides the turn.
   branch = new Branch()
   branch.input(changes.set(B, 'ship it', 'evaluator'))
   branch.commit('turn', 'start', {})
@@ -467,7 +442,6 @@ test('Pursuit 3: a worker blocked, an interrupt, a user pause and a limit pause 
   end = branch.commit('turn', 'end', { status: 'cancelled' })
   assert.equal(decideEvaluation(branch.fold, end.sequence), false)
   assert.deepEqual(decideInterrupt(branch.fold, interrupt.sequence), { write: 'pause', reason: 'interrupted' })
-  // A user pause before the turn end leaves nothing to evaluate.
   branch = new Branch()
   branch.input(changes.set(B, 'ship it', 'evaluator'))
   branch.commit('turn', 'start', {})
@@ -475,7 +449,6 @@ test('Pursuit 3: a worker blocked, an interrupt, a user pause and a limit pause 
   branch.input(changes.report(B, 'completed', 'done'))
   end = branch.commit('turn', 'end', { status: 'completed' })
   assert.equal(decideEvaluation(branch.fold, end.sequence), false)
-  // A limit pause is Goal's; a request in a later turn does not revive it.
   branch = new Branch()
   branch.input(changes.set(B, 'ship it', 'evaluator'))
   branch.input(writes.pause(B, 'limit', 1n))
@@ -504,7 +477,6 @@ test('Pursuit 1: a steer input before the prompt takes neither the role nor its 
   const prompt = evaluatorPrompt(B, '7', 'ship it', 'all tests pass')
   const branch = new Branch()
   branch.commit('branch', 'start', { parent: B })
-  // The role is the branch's first Queue input (§4.2); a steer is not one.
   branch.user(prompt, 'steer')
   assert.equal(branch.fold.evaluate, undefined)
   branch.user(prompt, 'queue')
@@ -512,8 +484,6 @@ test('Pursuit 1: a steer input before the prompt takes neither the role nor its 
 })
 
 test('Pursuit 1/5: an evaluation that is not a sequence names no role and no evaluator', () => {
-  // Both the role and a `branch/create` name their evaluation by a marker or
-  // an operation id, so both take the decimal form of §5 and nothing else.
   const branch = new Branch()
   branch.commit('branch', 'start', { parent: B })
   branch.user(evaluatorPrompt(B, 'abc', 'ship it', 'all tests pass'), 'queue')
@@ -558,30 +528,22 @@ function evaluated() {
 
 test('Pursuit 2/7/10: a conclusion decides once, from its own evaluator, while its evaluation is current', () => {
   const decide = (branch, event) => decideConclusion(branch.fold, event.sequence, conclusionOf(event.data.blocks[0].text))
-  // DONE completes the goal with the result the evaluator verified.
   let state = evaluated()
   assert.deepEqual(decide(state.branch, state.report('E', 'done', 'DONE: all 3 tests pass')), { write: 'completed', text: 'all 3 tests pass' })
-  // A later conclusion for the same evaluation decides nothing.
   assert.equal(decide(state.branch, state.report('E', 'done', 'DONE: again')), undefined)
-  // Another branch's conclusion decides nothing, whatever it claims.
   assert.equal(decide(state.branch, state.report('F', 'done', 'DONE: forged')), undefined)
-  // BLOCKED states what only the user can provide.
   state = evaluated()
   assert.deepEqual(decide(state.branch, state.report('E', 'blocked', 'BLOCKED: a deploy key')), { write: 'blocked', text: 'a deploy key' })
-  // CONTINUE is Goal's continuation, and Goal's limit pause at the limit.
   state = evaluated()
   assert.deepEqual(decide(state.branch, state.report('E', 'continue', 'CONTINUE:\n- two tests fail: <output>\n- the changelog')), { write: 'continue' })
   assert.deepEqual(decideEvaluatedContinuation(state.branch.fold, 20), { write: 'continuation', count: 1 })
-  // The continuation drives the next turn, as at any turn end (C5).
   const continuation = state.branch.input(writes.evaluatedContinuation(B, 1, 20, BigInt(state.evaluation), state.evaluation))
   assert.equal(decideEvaluatedContinuation(state.branch.fold, 20), undefined)
   state.branch.turn([continuation])
   assert.deepEqual(decideEvaluatedContinuation(state.branch.fold, 20), { write: 'continuation', count: 2 })
   assert.deepEqual(decideEvaluatedContinuation(state.branch.fold, 1), { write: 'pause', reason: 'limit' })
-  // A failed evaluation is Goal's own pause reason.
   state = evaluated()
   assert.deepEqual(decide(state.branch, state.report('E', 'failed', "the evaluator's turn did not complete")), { write: 'failed' })
-  // A goal change after the evaluation supersedes it: a late DONE decides nothing.
   state = evaluated()
   state.branch.input(changes.pause(B))
   assert.equal(decide(state.branch, state.report('E', 'done', 'DONE: late')), undefined)
@@ -591,11 +553,9 @@ test('Pursuit 2/7/10: a conclusion decides once, from its own evaluator, while i
 test('Pursuit 4/8: the reply ends with its last conclusion line, cut to 4000 characters', () => {
   assert.deepEqual(replyConclusion('Checked the tree.\nDONE: all 3 tests pass'), { result: 'done', text: 'DONE: all 3 tests pass' })
   assert.deepEqual(replyConclusion('x\nCONTINUE:\n- a: <out>\n- b'), { result: 'continue', text: 'CONTINUE:\n- a: <out>\n- b' })
-  // The last conclusion wins: what an earlier request said is not the reply.
   assert.deepEqual(replyConclusion('DONE: early\nnot yet\nBLOCKED: the build host is offline'), { result: 'blocked', text: 'BLOCKED: the build host is offline' })
   assert.equal(replyConclusion('no conclusion here'), undefined)
   assert.equal(replyConclusion('Done: a lowercase prefix is not a conclusion'), undefined)
-  // A whole reply written as the report, like a conclusion, keeps 4000 characters.
   assert.equal(truncate('x'.repeat(5000)).length, 4000)
   assert.equal(replyConclusion(`DONE:${'x'.repeat(5000)}`).text.length, 4000)
 })
@@ -637,8 +597,6 @@ test('Pursuit 1: a completion request creates one evaluator at the turn end and 
   assert.deepEqual(options.source, { kind: 'host', operation_id: `goal:evaluate:${end.sequence}` })
   assert.match(options.prompt, new RegExp(`^<dim-goal kind="evaluate" branch="main" evaluation="${end.sequence}">\\nYou are an evaluator\\.`))
   assert.match(options.prompt, /\nObjective:\nship it\n\nReported result:\nall tests pass\n\n/)
-  // The creation is the turn's decision: no continuation follows it, and the
-  // worker's request left the goal active.
   assert.equal(goal.writes.length, 1)
   assert.match(goal.writes[0].data.blocks[0].text, /kind="continuation" count="1"/)
   assert.equal(goal.branch.fold.status.status, 'active')
@@ -659,8 +617,6 @@ test('Pursuit 1: the evaluator DONE completes the goal by the evaluator', async 
 })
 
 test('Pursuit 4/5: a report without a valid evaluation or evaluator decides nothing', async t => {
-  // A report marker is a persisted cross-plugin format, so a producer can
-  // leave an attribute out: only the complete marker is a conclusion (§5).
   const rejections = []
   const listener = reason => rejections.push(reason)
   process.on('unhandledRejection', listener)
@@ -683,7 +639,6 @@ test('Pursuit 4/5: a report without a valid evaluation or evaluator decides noth
   }
   assert.deepEqual([...goal.branch.fold.conclusions], [], 'no malformed report is a conclusion')
   assert.equal(goal.branch.fold.status.status, 'active')
-  // A valid conclusion afterwards still decides.
   await goal.emit('input', 'message', writes.conclusion(B, evaluator, String(end.sequence), 'done', 'DONE: all 3 tests pass'))
   await flush()
   assert.equal(goal.writes.length, 2)
@@ -692,8 +647,6 @@ test('Pursuit 4/5: a report without a valid evaluation or evaluator decides noth
 })
 
 test('Pursuit 4: a report outside the first block decides nothing', async t => {
-  // The conclusion input is one block, the report (§5): a report anywhere
-  // else is not a conclusion, so the goal stays active.
   const goal = await loadGoalBranch(async () => settingsDocument(20))
   t.after(() => goal.unload())
   const end = await completionRequested(goal)
@@ -721,7 +674,6 @@ test('Pursuit 2: a CONTINUE conclusion writes one Pursuit continuation, or Goal 
   assert.match(continuation, new RegExp(`^<dim-goal kind="continuation" count="2" limit="20" after="${end.sequence}" evaluation="${end.sequence}" branch="main">`))
   assert.match(continuation, /\nAn evaluator checked your report that the goal for branch main is completed and found it is not achieved yet\./)
 
-  // At maxContinuations the same conclusion is Goal's limit pause.
   const limited = await loadGoalBranch(async () => settingsDocument(1))
   t.after(() => limited.unload())
   const limitedEnd = await completionRequested(limited)
@@ -732,7 +684,6 @@ test('Pursuit 2: a CONTINUE conclusion writes one Pursuit continuation, or Goal 
 })
 
 test('Pursuit 5: a failed conclusion, a failed creation and a throwing create give one pause', async t => {
-  // The evaluator's report says its turn did not complete.
   let goal = await loadGoalBranch(async () => settingsDocument(20))
   t.after(() => goal.unload())
   let end = await completionRequested(goal)
@@ -741,7 +692,6 @@ test('Pursuit 5: a failed conclusion, a failed creation and a throwing create gi
   assert.match(goal.writes.at(-1).data.blocks[0].text, new RegExp(`op="pause" reason="evaluation_failed" after="${end.sequence}"`))
   assert.equal(goal.branch.fold.status.reason, 'evaluation_failed')
 
-  // The tree could not build the child: its `branch/create-failed` decides.
   goal = await loadGoalBranch(async () => settingsDocument(20))
   t.after(() => goal.unload())
   end = await completionRequested(goal)
@@ -750,14 +700,12 @@ test('Pursuit 5: a failed conclusion, a failed creation and a throwing create gi
   assert.equal(goal.writes.length, 2)
   assert.match(goal.writes[1].data.blocks[0].text, /op="pause" reason="evaluation_failed"/)
 
-  // A create that throws before any `branch/create` pauses the goal.
   goal = await loadGoalBranch(async () => settingsDocument(20), { create: async () => { throw new Error('boom') } })
   t.after(() => goal.unload())
   end = await completionRequested(goal)
   assert.equal(goal.writes.length, 2)
   assert.match(goal.writes[1].data.blocks[0].text, new RegExp(`reason="evaluation_failed" after="${end.sequence}"`))
 
-  // One whose `branch/create` committed leaves the outcome to that fact.
   goal = await loadGoalBranch(async () => settingsDocument(20), {
     create: async (parent, at, options, id, create) => {
       await create(parent, at, options, id)
@@ -774,8 +722,6 @@ test('Pursuit 5: a failed conclusion, a failed creation and a throwing create gi
 })
 
 test('Pursuit 5: a create that throws after the user changed the goal writes no pause', async t => {
-  // The user pauses the goal while `create` is pending: the evaluation is no
-  // longer current, so the throw decides nothing (Pursuit §4.1).
   let change
   const goal = await loadGoalBranch(async () => settingsDocument(20), {
     create: async () => {
@@ -798,7 +744,6 @@ test('Pursuit 8: the evaluator reports the streamed conclusion of its final requ
   await evaluator.emit('step', 'model-start', { turn_id: 't1', request_id: 'r1' })
   await evaluator.emit('step', 'text', { turn_id: 't1', request_id: 'r1', delta: 'DONE: stale' })
   await evaluator.emit('step', 'model-start', { turn_id: 't1', request_id: 'r2' })
-  // A line can span records, and the earlier request's conclusion is not the reply.
   await evaluator.emit('step', 'text', { turn_id: 't1', request_id: 'r2', delta: 'checked the tree\nDONE' })
   await evaluator.emit('step', 'text', { turn_id: 't1', request_id: 'r2', delta: ': all 3 tests pass' })
   await evaluator.emit('turn', 'end', { turn_id: 't1', status: 'completed' })
@@ -814,7 +759,6 @@ test('Pursuit 8: the evaluator reports the streamed conclusion of its final requ
 test('Pursuit 4: the evaluator is asked once, then its whole reply is the report', async t => {
   const evaluator = await evaluatorBranch(async () => settingsDocument(20))
   t.after(() => evaluator.unload())
-  // The first reply has no conclusion: one follow-up on the evaluator branch.
   await evaluator.emit('turn', 'start', {})
   await evaluator.emit('step', 'model-start', { turn_id: 't1', request_id: 'r1' })
   await evaluator.emit('step', 'text', { turn_id: 't1', request_id: 'r1', delta: 'not done yet' })
@@ -824,8 +768,6 @@ test('Pursuit 4: the evaluator is asked once, then its whole reply is the report
   assert.equal(evaluator.writes[0].data.mode, 'queue')
   assert.match(evaluator.writes[0].data.blocks[0].text, /^<dim-goal kind="evaluate-again" after="\d+" branch="E">/)
   assert.equal(evaluator.sent.length, 0)
-  // The second reply has none either: the whole reply, cut to 4000 characters,
-  // is written as a continuation, and nothing asks a third time.
   const whole = `still working ${'y'.repeat(5000)}`
   await evaluator.emit('turn', 'start', {})
   await evaluator.emit('step', 'model-start', { turn_id: 't2', request_id: 'r2' })
@@ -856,8 +798,6 @@ test('Pursuit 5: a failed or cancelled evaluator turn reports failed', async t =
 })
 
 test('Pursuit 4: a restored evaluator that was already asked writes no further follow-up', async t => {
-  // Two turn ends in history: the first reply was asked for a conclusion and
-  // the second had none, so the evaluator was already asked once.
   const evaluator = await evaluatorBranch(async () => settingsDocument(20), branch => {
     for (const turn of ['t1', 't2']) {
       branch.commit('turn', 'start', { turn_id: turn })
@@ -868,7 +808,6 @@ test('Pursuit 4: a restored evaluator that was already asked writes no further f
   })
   t.after(() => evaluator.unload())
   await flush()
-  // Its next live reply without a conclusion is reported, not asked again.
   await evaluator.emit('turn', 'start', {})
   await evaluator.emit('step', 'model-start', { turn_id: 't3', request_id: 't3-r' })
   await evaluator.emit('step', 'text', { turn_id: 't3', request_id: 't3-r', delta: 'done, I think' })
@@ -885,14 +824,12 @@ test('Pursuit 6: a turn end already in the restored evaluator history reports no
     branch.commit('turn', 'start', { turn_id: 't1' })
     branch.commit('step', 'model-start', { turn_id: 't1', request_id: 'r1' })
     branch.commit('step', 'text', { turn_id: 't1', request_id: 'r1', delta: 'Hmm' })
-    // The failed end Loop records for a turn a restart cut.
     branch.commit('turn', 'end', { turn_id: 't1', status: 'failed' })
   })
   t.after(() => evaluator.unload())
   await flush()
   assert.equal(evaluator.sent.length, 0, 'a replayed turn end reports nothing')
   assert.equal(evaluator.writes.length, 0)
-  // The restored part reports its next live turn end.
   await evaluator.emit('turn', 'start', {})
   await evaluator.emit('step', 'model-start', { turn_id: 't2', request_id: 'r2' })
   await evaluator.emit('step', 'text', { turn_id: 't2', request_id: 'r2', delta: 'BLOCKED: a deploy key' })
@@ -926,11 +863,9 @@ test('Pursuit 6/7/10: a reload creates no second evaluator, and foreign or stale
   assert.equal(restored.creates.length, 0, 'the branch/create already decided the turn end')
   assert.equal(restored.writes.length, 0, 'a conclusion folded at load is not decided again')
   assert.equal(restored.branch.fold.status.status, 'active')
-  // A live conclusion from another branch decides nothing (Pursuit 8).
   await restored.emit('input', 'message', writes.conclusion(B, 'F', evaluation, 'done', 'DONE: forged'))
   await flush()
   assert.equal(restored.writes.length, 0)
-  // A goal change after the evaluation supersedes it: a late DONE decides nothing.
   await restored.emit('input', 'message', changes.pause(B))
   await restored.emit('input', 'message', writes.conclusion(B, 'E', evaluation, 'done', 'DONE: late'))
   await flush()

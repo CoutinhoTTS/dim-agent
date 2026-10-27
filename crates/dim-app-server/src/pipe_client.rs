@@ -17,7 +17,6 @@ pub fn run(name: &str) -> io::Result<()> {
                 return Err(error);
             }
         };
-        // No RPC bytes in either direction before authentication succeeds.
         writeln!(io::stderr(), "{}", serde_json::json!({"status":"ready"}))?;
         io::stderr().flush()?;
         let (mut reader, mut writer) = tokio::io::split(pipe);
@@ -30,8 +29,6 @@ pub fn run(name: &str) -> io::Result<()> {
         use tokio::io::AsyncWriteExt;
         stdout.flush().await
     });
-    // Stdin uses a blocking worker that cannot be cancelled. This dedicated
-    // process must exit even when the pipe closes while stdin remains open.
     runtime.shutdown_background();
     result
 }
@@ -50,8 +47,6 @@ async fn connect(
             ),
         ));
     }
-    // Tokio opens with SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION: a
-    // squatter cannot impersonate this client while we authenticate the pipe.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let pipe = loop {
         match ClientOptions::new().open(name) {
@@ -129,8 +124,6 @@ fn authenticate(pipe: &tokio::net::windows::named_pipe::NamedPipeClient) -> io::
     if status != 0 {
         return Err(io::Error::from_raw_os_error(status as i32));
     }
-    // This is the connected kernel object's owner, not a self-reported or
-    // re-opened PID. Ordinary users cannot assign ownership to another user.
     let same_user = !owner.is_null()
         && unsafe { EqualSid(owner, (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid) != 0 };
     unsafe { LocalFree(descriptor) };

@@ -16,7 +16,6 @@ export function windowAfter(job: Job, after: number): number | undefined {
   const iterator = CronExpressionParser.parse(schedule.cron, { currentDate: Math.max(after, anchor - 1), tz: schedule.tz })
   for (;;) {
     const next = iterator.next()
-    // cron-parser advances nonexistent wall times; Scheduler skips those windows.
     if (iterator.includesDate(next)) return next.getTime()
   }
 }

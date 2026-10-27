@@ -172,8 +172,6 @@ impl WebEntry {
         port: Option<u16>,
         holders: HashSet<String>,
     ) -> Result<Open, RpcError> {
-        // The directory is looked at on each open, so a frontend installed
-        // while the daemon runs is served without a restart.
         let assets = self
             .assets
             .as_ref()

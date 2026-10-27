@@ -149,27 +149,16 @@ fn unavailable() -> RpcError {
 /// placed.
 fn not_active(status: EntryStatus) -> Result<(), RpcError> {
     match status {
-        // The row provides nothing.
         EntryStatus::Disabled => Err(RpcError::unknown_method()),
-        // Not started yet, or between generations while the loader replaces
-        // its fiber.
         EntryStatus::Inactive => Err(RpcError::reloading()),
         EntryStatus::Running(Snapshot { state, .. }) => match state {
-            // Waiting for its dependencies, applying, or unloading between
-            // generations.
             FiberState::Pending | FiberState::Loading | FiberState::Unloading => {
                 Err(RpcError::reloading())
             }
-            // Active between the lookup and the status read.
             FiberState::Active => Ok(()),
-            // Its apply failed, or it was removed and cannot restart.
             FiberState::Failed | FiberState::Disposed => Err(unavailable()),
         },
-        // The row cannot run as configured; or a copy inside an instance
-        // disposed itself and waits for an explicit restart.
         EntryStatus::Unresolved(_) | EntryStatus::Stopped => Err(unavailable()),
-        // `EntryStatus` is non-exhaustive. A state added later stops the
-        // client instead of letting it retry without end.
         _ => Err(unavailable()),
     }
 }
@@ -191,7 +180,6 @@ pub(crate) fn management_provider(
                 .and_then(|row| loader.get(&row))
                 .ok_or_else(RpcError::unknown_method)?;
             not_active(row.status)?;
-            // Active between the lookup and the status read.
             match table.owner(method) {
                 Owner::Active(provider) => Ok(provider),
                 _ => Err(RpcError::unknown_method()),
@@ -229,8 +217,6 @@ pub(crate) fn session_provider(
         Owner::Active(provider) => Ok(provider),
         Owner::Left { row } => {
             let instance = session.instance()?;
-            // A row inside the Session group runs one copy per Session; its
-            // innermost instance is the Session's.
             let copy = row.and_then(|row| {
                 loader.entries().into_iter().find(|entry| {
                     entry.id == row

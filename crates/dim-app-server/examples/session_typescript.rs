@@ -98,10 +98,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?
     );
-    // Optional rows may still be Pending. A listed inactive method is retryable;
-    // tools omitted at the first sample wait for the next registry reload.
-    // Successful submit/idle replies acknowledge native processing; they do not
-    // certify that an omitted TypeScript tool executed. Inspect durable history.
     println!("{}", rpc(&mut stream, 4, "session.submit", json!({"sessionId":session_id,"branchId":"main","text":"tool:ts_echo {\"text\":\"hello\"}"})).await?);
     println!(
         "{}",

@@ -96,7 +96,6 @@ async fn unix_bind(
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    // Keep this inode across shutdown and crashes; ownership ends with the handle.
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -206,7 +205,6 @@ fn pipe_bind(name: &str, first: bool) -> io::Result<LocalStream> {
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // The handle and both LocalAlloc buffers remain owned until pipe creation.
     let _token = unsafe { OwnedHandle::from_raw_handle(token) };
     let mut length = 0;
     if unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut length) } == 0
@@ -239,8 +237,6 @@ fn pipe_bind(name: &str, first: bool) -> io::Result<LocalStream> {
     }
     let sid = String::from_utf16(unsafe { std::slice::from_raw_parts(sid_text, sid_length) })
         .map_err(io::Error::other)?;
-    // Clients authenticate this exact owner on the connected pipe handle.
-    // Protected DACL: exactly the current user, with no inherited grants.
     let descriptor: Vec<u16> = format!("O:{sid}D:P(A;;GA;;;{sid})")
         .encode_utf16()
         .chain(Some(0))
@@ -263,7 +259,6 @@ fn pipe_bind(name: &str, first: bool) -> io::Result<LocalStream> {
         lpSecurityDescriptor: security,
         bInheritHandle: 0,
     };
-    // Tokio copies the descriptor in CreateNamedPipeW; no pointer escapes.
     unsafe {
         ServerOptions::new()
             .first_pipe_instance(first)
@@ -380,8 +375,6 @@ impl DynPlugin for TransportPlugin {
                         let (stream, _) = match accepted {
                             Ok(accepted) => accepted,
                             Err(error) => {
-                                // Resource exhaustion and aborted handshakes are local
-                                // accept failures; do not tear down live Sessions.
                                 tracing::warn!(%error, "Unix accept failed; retrying");
                                 tokio::select! {
                                     biased;
@@ -423,8 +416,6 @@ impl DynPlugin for TransportPlugin {
                         };
                         if let Err(error) = accepted {
                             tracing::warn!(%error, "Named pipe accept failed; retrying");
-                            // Create while the old instance is still held, including
-                            // when a client disconnects during the handshake.
                             listener = pipe_bind(&name, false)?;
                             tokio::select! {
                                 biased;
@@ -433,8 +424,6 @@ impl DynPlugin for TransportPlugin {
                             }
                             continue;
                         }
-                        // Keep an instance alive throughout the handoff, so a
-                        // competing daemon cannot claim the endpoint in a gap.
                         let stream = listener;
                         listener = pipe_bind(&name, false)?;
                         let hub = hub.clone();
@@ -528,39 +517,35 @@ impl Reader {
     async fn next(&mut self) -> io::Result<Option<Vec<u8>>> {
         match self {
             #[cfg(any(unix, windows))]
-            Self::Local(reader, bytes) => {
-                // The partial frame lives in Reader, so cancelling next() does
-                // not discard already-consumed bytes.
-                loop {
-                    let part = reader.fill_buf().await?;
-                    if part.is_empty() {
-                        return if bytes.is_empty() {
-                            Ok(None)
-                        } else {
-                            Err(io::Error::other("unterminated NDJSON frame"))
-                        };
-                    }
-                    let newline = part.iter().position(|byte| *byte == b'\n');
-                    let n = newline.unwrap_or(part.len());
-                    if bytes.len() + n > MAX_FRAME_BYTES + 1 {
-                        return Err(io::Error::other("NDJSON frame exceeds 16 MiB"));
-                    }
-                    bytes.extend_from_slice(&part[..n]);
-                    reader.consume(n + usize::from(newline.is_some()));
-                    if newline.is_some() {
-                        if bytes.last() == Some(&b'\r') {
-                            bytes.pop();
-                        }
-                        if bytes.len() > MAX_FRAME_BYTES {
-                            return Err(io::Error::other("NDJSON frame exceeds 16 MiB"));
-                        }
-                        return Ok(Some(std::mem::take(bytes)));
-                    }
-                    if bytes.len() > MAX_FRAME_BYTES && bytes.last() != Some(&b'\r') {
-                        return Err(io::Error::other("NDJSON frame exceeds 16 MiB"));
-                    }
+            Self::Local(reader, bytes) => loop {
+                let part = reader.fill_buf().await?;
+                if part.is_empty() {
+                    return if bytes.is_empty() {
+                        Ok(None)
+                    } else {
+                        Err(io::Error::other("unterminated NDJSON frame"))
+                    };
                 }
-            }
+                let newline = part.iter().position(|byte| *byte == b'\n');
+                let n = newline.unwrap_or(part.len());
+                if bytes.len() + n > MAX_FRAME_BYTES + 1 {
+                    return Err(io::Error::other("NDJSON frame exceeds 16 MiB"));
+                }
+                bytes.extend_from_slice(&part[..n]);
+                reader.consume(n + usize::from(newline.is_some()));
+                if newline.is_some() {
+                    if bytes.last() == Some(&b'\r') {
+                        bytes.pop();
+                    }
+                    if bytes.len() > MAX_FRAME_BYTES {
+                        return Err(io::Error::other("NDJSON frame exceeds 16 MiB"));
+                    }
+                    return Ok(Some(std::mem::take(bytes)));
+                }
+                if bytes.len() > MAX_FRAME_BYTES && bytes.last() != Some(&b'\r') {
+                    return Err(io::Error::other("NDJSON frame exceeds 16 MiB"));
+                }
+            },
             Self::Ws(reader) => loop {
                 match reader.next().await {
                     Some(Ok(Message::Text(text))) => return Ok(Some(text.as_bytes().to_vec())),
@@ -622,8 +607,6 @@ async fn run_connection(
         loop {
             let mut frame = tokio::select! {biased;_=closed.cancelled()=>break,frame=outbound.recv()=>match frame{Some(frame)=>frame,None=>break}};
             let bytes = std::mem::take(&mut frame.bytes);
-            // Never hand off a writer with an interrupted, partially sent frame.
-            // The existing write deadline also bounds connection teardown.
             let result = tokio::time::timeout(timeout, writer.write(bytes)).await;
             if !matches!(result, Ok(Ok(()))) {
                 closed.cancel();
@@ -664,12 +647,8 @@ async fn run_connection(
                     if (1..=PROTOCOL_VERSION).contains(&params.protocol_version)
                         && (entry != Entry::Web || params.protocol_version == PROTOCOL_VERSION) =>
                 {
-                    // Recording the instance under the handler lock orders this
-                    // hello against a generation change, which closes stale ones.
                     let instance = hub
                         .with_rpc(|rpc| {
-                            // An unloading load admits no hello: the client
-                            // retries it against the next load.
                             if rpc.stopping.is_cancelled() {
                                 return Err(RpcError::reloading());
                             }
@@ -734,15 +713,10 @@ async fn run_connection(
                                     if local {
                                         features.extend(WEB_ENTRY_METHODS);
                                         features.extend(UI_HOST_METHODS);
-                                        // Distinguishes a daemon that hosts
-                                        // UI leaves from an older
-                                        // management-only UI registry.
                                         features.push("ui.leaf");
                                     }
                                     let mut features: Vec<String> =
                                         features.into_iter().map(str::to_owned).collect();
-                                    // The web entry sees only the management
-                                    // reads it is served.
                                     features.extend(
                                         methods
                                             .into_iter()
@@ -759,8 +733,6 @@ async fn run_connection(
                         ),
                         false,
                     );
-                    // Publish notification eligibility only after the hello reply
-                    // has entered this connection's ordered outbound queue.
                     connection
                         .version
                         .set(params.protocol_version)
@@ -813,8 +785,6 @@ async fn run_connection(
             .expect("shutdown reply")
             .take()
     {
-        // Captures only I/O and the request ID. No graph-owned service or task
-        // waits for the graph whose cleanup this final response certifies.
         hub.control.defer_shutdown_reply(Box::new(move |success| {
             Box::pin(async move {
                 let result = if success {

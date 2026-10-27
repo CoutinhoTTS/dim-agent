@@ -111,7 +111,6 @@ impl DynPlugin for UiLeaf {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
             let mut link = LinkConfig::dial(self.peer.clone(), LINKS, LINKS, &self.address);
-            // A leaf accepts one connection: its link ends with it.
             link.reconnect = false;
             let peer = PeerPlugin::new(link, Features::default())
                 .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
@@ -206,7 +205,6 @@ impl DynPlugin for TuiRow {
             let mut offers = peer.offers();
             let key = ctx.instance().to_string();
             let load = async {
-                // Link readiness precedes the leaf's host feature.
                 while !offers.borrow_and_update().families.contains("plugins") {
                     offers.changed().await.map_err(|_| {
                         SessionError::Transport("the leaf link ended before hosting Tui".into())

@@ -297,7 +297,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             serde_json::to_writer_pretty(std::io::stdout().lock(), &wire)?;
         }
         [flag] if flag == "--emit-extensions" => {
-            // Each sample must survive the native round trip and have no v1 view.
             let mut output = Vec::new();
             for event in extension_events() {
                 let encoded = serde_json::to_value(&event)?;

@@ -37,12 +37,9 @@ const MIB: usize = 1024 * 1024;
 struct Home(PathBuf);
 impl Home {
     fn new() -> Self {
-        // Short, for the socket path; canonical, because FileStorage refuses
-        // symlinked components such as macOS `/tmp`.
         use std::os::unix::fs::PermissionsExt;
         let directory = PathBuf::from("/tmp").join(format!("dim-att-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(directory.join("work")).unwrap();
-        // The socket directory must be private.
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
         Self(directory.canonicalize().unwrap())
     }
@@ -102,8 +99,6 @@ async fn launch(home: &Home, native: bool) -> RunningServer {
                 output_root: home.0.join("command-output"),
             },
         );
-        // A configured catalog makes the host execute locally; the scripted
-        // model answers every request, so nothing is dialed.
         let models = AimuxModels::from_config(
             serde_json::from_value::<ModelConfigFile>(json!({
                 "defaultModel": {"providerId": "local", "modelId": "scripted"},
@@ -222,7 +217,6 @@ async fn a_put_stores_a_session_file_the_model_reads_without_approval() {
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
 
-    // The user's text quotes the path; the scripted model calls `read`.
     let submitted = client
         .rpc(
             "session.submit",
@@ -307,8 +301,6 @@ async fn attachment_put_rejects_bad_requests_and_reports_store_failures() {
     let mut client = Client::connect(&server).await;
     let sid = client.create(&home.0.join("work")).await;
 
-    // An entry SessionStore cannot make its directory: `storage` fails the
-    // put, nothing is owned, and a retry succeeds once the entry is gone.
     std::fs::write(home.files(), b"not a directory").unwrap();
     let reply = client
         .rpc("attachment.put", json!({"sessionId": sid, "text": "x"}))
@@ -509,7 +501,6 @@ async fn a_session_record_gone_before_the_commit_answers_session_closed() {
     );
     assert_eq!(home.owned(&sid), 0);
     assert_eq!(home.entries(), Vec::<String>::new());
-    // Closing cannot persist a Session whose records were removed under it.
     let _ = contract.agent.close().await;
     contract.root.shutdown().await.unwrap();
 }

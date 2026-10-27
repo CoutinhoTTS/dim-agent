@@ -97,8 +97,6 @@ impl ProviderService {
             tokio::select! {
                 _ = cancel.cancelled() => Err(HostError::Cancelled("Secret lookup cancelled".into())),
                 result = host.0.resolve(provider_id, reference, cancel.clone()) => {
-                    // Host diagnostics can contain values. Do not expose them
-                    // through the model failure, trace or management protocol.
                     result.map_err(|_| failure("Provider secret lookup failed"))
                 }
             }

@@ -298,9 +298,6 @@ impl AgentBuilder {
         let provider = (!values.is_empty()).then(|| row(PROCESS_VALUES));
         let mut agent = group(AGENT_GROUP, provider.into_iter().chain(rows).collect());
         if !values.is_empty() {
-            // Instance labels repeat across loaders sharing a root, so the
-            // label is this row's own: numbered in the process, so an
-            // assembly's generated description stays the same across runs.
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
             let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let label = Value::String(format!("dim-agent-values/{number}"));
@@ -410,7 +407,6 @@ impl AgentBuilder {
                 .iter()
                 .map(|row| row["id"].as_str().unwrap().to_owned())
                 .collect();
-            // The optional mounters are not waited for.
             branch.push(row(&branch_optional));
             session.push(row(&session_optional));
             session.push(group(BRANCH_GROUP, branch));
@@ -443,7 +439,6 @@ impl AgentBuilder {
                     ))
                 })?;
                 let scope = session_scope(build)?;
-                // Recorded before any row applies, including a failed scope.
                 *owner.instance.lock().unwrap() = Some(scope.instance);
                 let required = required_session.clone();
                 Factory::new(move || {
@@ -857,9 +852,6 @@ pub(crate) async fn own_placement(
     timeout: Duration,
     cancel: &CancellationToken,
 ) -> Result<(Placement, Owned)> {
-    // A registry of this placement's own: only its own plugins register
-    // there, so Agents built from one builder do not mount each other's
-    // parts.
     let mut builder = builder.clone();
     builder.assembly.parts = Arc::default();
     let builder = &builder;
@@ -872,8 +864,6 @@ pub(crate) async fn own_placement(
             (Some(root.clone()), root)
         }
         Some(host) => {
-            // Numbered in the process, as `agent_row`'s label, so a generated
-            // description of an assembly stays the same across runs.
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
             let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let label = format!("dim-agent/{number}");
@@ -881,8 +871,6 @@ pub(crate) async fn own_placement(
                 None,
                 host.isolate(TypeKey::of::<Loader>(), &label)
                     .isolate(TypeKey::of::<crate::PartRegistry>(), &label)
-                    // The loader also provides the mounter of other languages'
-                    // plugin definitions; a host's own loader has one too.
                     .isolate(rutis_bridge::runtime::mounter_key().erase(), &label),
             )
         }
@@ -935,7 +923,6 @@ pub(crate) async fn own_placement(
             .reconcile(vec![rutis_loader::Layer::new("assembly", rows)], None)
             .await
             .map_err(loader_error)?;
-        // A skipped row (a duplicate module name) would only show later.
         if !report.failures.is_empty() || !report.issues.is_empty() {
             return Err(AgentError::Build(format!(
                 "{:?} {:?}",
@@ -1214,13 +1201,10 @@ impl DynPlugin for BranchScopePlugin {
                 owner.sequence,
                 session.faults.clone(),
             );
-            // The Timeline is closed by its handle or by build rollback.
             let dispatcher = Dispatcher::new(scope.instance, owner.sequence, timeline.clone());
             ctx.provide_at(scope.key::<Timeline>(), Arc::new(timeline.clone()))?;
             ctx.provide_at(scope.key::<Dispatcher>(), Arc::new(dispatcher.clone()))?;
             let lifecycle = BranchLifecycle::new();
-            // Its capabilities rebuild from the history it is built with,
-            // while the branch is `Loading`.
             timeline.begin_opening(&lifecycle, &session.assembly.openings);
             ctx.provide_at(scope.key::<BranchLifecycle>(), Arc::new(lifecycle.clone()))?;
             let opening = Arc::new(BranchOpening::new());
@@ -1359,10 +1343,7 @@ impl TimelineFactory {
                 }
                 let ctx = &branch.scope.ctx;
                 let scope = branch.scope.scope;
-                // Publication requires Loop; the context looks it up per call.
                 required::<dyn LoopState>(ctx, scope.key::<dyn LoopState>())?;
-                // Input deduplication covers the restored history from the
-                // first input on.
                 branch.timeline.index_submissions().await?;
                 Ok(TimelineContext::start(
                     id,
@@ -1387,15 +1368,12 @@ impl TimelineFactory {
                 Err(error) => {
                     let branch = owner.loaded.lock().unwrap().take();
                     if let Some(branch) = &branch {
-                        // Waiting background work learns the branch never started.
                         branch.lifecycle.advance(BranchPhase::Closing);
                     }
                     let created = match started {
                         Ok(created) => Some(created),
                         Err((_, created)) => created,
                     };
-                    // Unload the capabilities first so their cleanup can still
-                    // write terminals, then close the Timeline, as a close does.
                     let cleanup = match &created {
                         Some(created) => {
                             shutdown_scope(
@@ -1448,7 +1426,6 @@ async fn create_instance(
     ),
 ) -> std::result::Result<Created, (AgentError, Option<Created>)> {
     let deadline = tokio::time::Instant::now() + timeout;
-    // shortcut: loader creation still settles Loading rows; revisit if apply must wait on external work.
     let mut creation = {
         let (loader, ctx, group) = (loader.clone(), ctx.clone(), group.clone());
         tokio::spawn(async move { configure(loader.create_instance(&ctx, &group)).await })
@@ -1477,7 +1454,6 @@ async fn create_instance(
                 None => AgentError::Build(format!("initialization timed out: {group}")),
             };
             if found.is_none() {
-                // Dispose the instance once its creation ends.
                 tokio::spawn(async move {
                     if let Ok(Ok(instance)) = creation.await {
                         let _ = instance.view.shutdown().await;
@@ -1493,10 +1469,6 @@ async fn create_instance(
         .into_iter()
         .filter(|(id, _)| required.as_ref().is_none_or(|rows| rows.contains(id)))
         .filter_map(|(id, result)| match result {
-            // A mounter fails only while building the parts it mounts: a
-            // part naming a service outside its scope, or a generator that
-            // fails. That is a failure of the assembly, as it was for a
-            // part checked when the assembly was installed.
             InstanceResult::Failed(error) if crate::parts::PartMounter::is_row(&id) => {
                 Some(AgentError::Build(loader_error(error).to_string()))
             }
@@ -1517,14 +1489,10 @@ async fn create_instance(
             Some(created),
         ));
     };
-    // The required parts the mounter mounted are waited for like the rows.
     let mut waiting = rows(loader, &created.view, Some(&required));
     waiting.extend(instance().2.required);
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
     let ready = wait_active(ctx, &waiting, remaining, cancel).await;
-    // A launcher may still be Pending when the loader returns. Once it is
-    // Active its nested rows exist, but those rows may themselves be Pending.
-    // Refresh on failure too, so the rollback covers everything built.
     created.children = rows(loader, &created.view, None);
     if let Err(error) = ready {
         return Err((error, Some(created)));
@@ -1538,14 +1506,6 @@ async fn create_instance(
     {
         return Err((error, Some(created)));
     }
-    // The other rows are optional (#207). As the loader settles the rows
-    // already Loading when it creates the instance, a row that started
-    // loading because a required part provided what it waited for is
-    // settled before the instance is published; a row still Pending on a
-    // name nothing here provides returns at once. Settling the required
-    // parts first lets each finish telling its dependents it is Active. The
-    // optional parts mounted when the instance opened settle the same way,
-    // so what they register (tools, methods) exists once it is published.
     created.children = rows(loader, &created.view, None);
     let optional: Vec<FiberView> = created
         .children
@@ -1556,8 +1516,6 @@ async fn create_instance(
         .collect();
     let settled = async {
         for view in waiting.iter().chain(&optional) {
-            // An optional row's failure is its own; a required part's
-            // already counted above.
             let _ = view.await;
         }
     };
@@ -1708,7 +1666,6 @@ pub(crate) async fn build_session(
             &session.ctx,
             session.scope.key::<dyn TimelineTreeControl>(),
         )?;
-        // The tree provider must be Active before branch subtrees inject it.
         let initialize = async {
             match initialization {
                 SessionInitialization::Prepared(branches)
@@ -1725,8 +1682,6 @@ pub(crate) async fn build_session(
                 Err(AgentError::Cancelled("session initialization".into()))
             }
             _ = tokio::time::sleep_until(deadline) => {
-                // Capture pending plugin dependencies before cancellation removes
-                // their rows; the Session deadline also covers branch loading.
                 let error = timed_out(host, std::slice::from_ref(&created.view));
                 tree.begin_close();
                 let _ = initialize.await;
@@ -1747,13 +1702,11 @@ pub(crate) async fn build_session(
     match result {
         Ok((view, tree)) => Ok(BuiltSession { owner, view, tree }),
         Err(error) => {
-            // Never published: deferred background work ends without starting.
             owner.lifecycle.advance(SessionPhase::Closed);
             let rollback = match started {
                 Ok(created) => Some(created),
                 Err((_, created)) => created,
             };
-            // Unpublished from here on; released once the rollback ends.
             let _session = owner.loaded.lock().unwrap().take();
             let cleanup = match &rollback {
                 Some(created) => {
@@ -1812,8 +1765,6 @@ pub async fn wait_active(
                 FiberState::Disposed => {
                     return Err(AgentError::Build(format!("{}: Disposed", view.name())));
                 }
-                // Unloading can be initialization rollback in progress; its final
-                // state carries the cause.
                 FiberState::Pending | FiberState::Loading | FiberState::Unloading => index += 1,
             }
         }
@@ -1874,7 +1825,6 @@ fn validate(ctx: &Ctx, scope: PluginId, required: &[FiberView]) -> Result<()> {
         .flat_map(|view| subtree(&snapshot, view.id))
         .collect();
     for plugin in snapshot.plugins.iter().filter(|p| members.contains(&p.id)) {
-        // Required capabilities must await the children they register in apply.
         if required.contains(&plugin.id) && plugin.state != FiberState::Active {
             return Err(AgentError::Build(format!(
                 "{} is not Active after its scope became ready: {:?}",
@@ -1882,7 +1832,6 @@ fn validate(ctx: &Ctx, scope: PluginId, required: &[FiberView]) -> Result<()> {
             )));
         }
         for access in &plugin.accesses {
-            // Scoped reads are strict; this still catches direct `get_as` reads.
             if access.external && !access.declared {
                 return Err(AgentError::Build(format!(
                     "{} read undeclared service {}",

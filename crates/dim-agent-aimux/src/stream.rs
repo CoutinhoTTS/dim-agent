@@ -29,7 +29,6 @@ pub(crate) fn convert(
     generation: CancellationToken,
     lease: tokio_util::task::task_tracker::TaskTrackerToken,
 ) -> ModelStream {
-    // Drop the debug request body and headers without retaining a second request copy.
     let StreamResult { mut stream, .. } = result;
     Box::pin(async_stream::stream! {
         let lease = lease;
@@ -39,12 +38,9 @@ pub(crate) fn convert(
         let mut parts = Vec::new();
         let mut blocks = HashMap::new();
         let mut tool_blocks = HashMap::new();
-        // StreamPart IDs identify active segments, not response-wide identities.
-        // A balanced end permits reuse; overlapping starts remain invalid.
         let mut block_active = HashSet::new();
         let mut ended_inputs = HashSet::new();
         let mut completed_calls = HashSet::new();
-        // Thinking blocks are reported whole at their end, for every protocol.
         let mut thinking = HashMap::<String, String>::new();
         let terminal = loop {
             let next = tokio::select! {
@@ -184,8 +180,6 @@ pub(crate) fn convert(
                     yield Ok(ModelChunk::ToolArguments { id, name, delta });
                 }
                 StreamPart::ToolInputEnd { id, .. } => {
-                    // Responses can emit an input end immediately before a whole
-                    // ToolCall, without an input start. Keep that provider contract.
                     if completed_calls.contains(&id) || !ended_inputs.insert(id) {
                         break Some(Err(error(AiMuxError::InvalidResponseData("Duplicate or late tool input end".into()), &cancel)));
                     }
@@ -241,7 +235,6 @@ pub(crate) fn convert(
                         }
                     }
                     drop(raw);
-                    // Calls delivered whole still start before they complete.
                     if !started {
                         yield Ok(ModelChunk::ToolStart { id: id.clone(), name: name.clone() });
                     }
@@ -305,7 +298,6 @@ pub(crate) fn convert(
         drop(abort);
         drop(lease);
 
-        // The native call has ended. Late cancellation cannot replace this result.
         match terminal {
             Some(Ok((usage, reason))) => {
                 if preserve && reason != ModelStopReason::MaxTokens { yield Ok(ModelChunk::Content(parts)); }
@@ -341,8 +333,6 @@ pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostErro
     let mut model = None;
     let classification = match &failure {
         AiMuxError::ApiCall(detail) => {
-            // Parse native envelopes only at this external boundary. Code and type
-            // are independent facts; Responses errors can arrive with status 200.
             let view = detail.data.as_ref().map(|data| {
                 data.pointer("/response/error")
                     .or_else(|| data.get("error"))
@@ -426,8 +416,6 @@ pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostErro
                 model = Some(Box::new(ModelFailureFacts {
                     origin,
                     error_type,
-                    // The parsed message is retained separately by aimux; its
-                    // diagnostic data replaces strings longer than 4096 bytes.
                     message: field("message")
                         .filter(|value| !value.trim().is_empty())
                         .map(|_| detail.message.clone()),

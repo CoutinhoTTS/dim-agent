@@ -9,9 +9,7 @@ import { buildPlatform, checkArchitecture } from './native-binary.mjs';
 const [binaryDirectory, destination, version, sourceCommit, ...rest] = process.argv.slice(2);
 const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT [--account] [--plugins DIR]';
 assert(binaryDirectory && destination && version && sourceCommit, usage);
-// Whether the executable is the account build (compiled with the client IDs).
 let account = false;
-// The default plugins staged by stage-plugins.mjs, placed beside `bin/`.
 let plugins;
 for (let index = 0; index < rest.length; index += 1) {
   if (rest[index] === '--account' && !account) account = true;
@@ -31,7 +29,6 @@ assert(!existsSync(output), 'Destination already exists');
 const digest = (data) => createHash('sha256').update(data).digest('hex');
 const suffix = osName === 'windows' ? '.exe' : '';
 const cli = path.resolve(binaryDirectory, `dimcode${suffix}`);
-// One executable: the CLI runs its App Server daemon as `dimcode app-server`.
 assert(lstatSync(cli).isFile(), 'The native executable must be a regular file');
 if (platform === host) {
   const result = spawnSync(cli, ['--version'], { encoding: 'utf8' });
@@ -39,7 +36,6 @@ if (platform === host) {
   assert.equal(result.status, 0, `dimcode --version failed: ${result.stderr}`);
   assert.equal(result.stdout.trim(), `dimcode ${version}`, 'Binary version mismatch');
 } else {
-  // shortcut: Cross-built binaries are inspected; add target-machine smoke tests when runners exist.
   checkArchitecture(cli, osName, cpu);
 }
 try {

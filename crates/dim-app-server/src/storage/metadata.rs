@@ -238,7 +238,6 @@ pub(super) fn decode(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<
     let source: Option<TitleSource> = row.get(first + 2)?;
     Ok(SessionMetadata {
         revision: revision.unwrap_or(0),
-        // The table's CHECK keeps text and source both present or both NULL.
         title: text
             .zip(source)
             .map(|(text, source)| Title { text, source }),
@@ -265,7 +264,6 @@ fn write(
     if read(&tx, session_id)?.revision != expected_revision {
         return Err(MetadataError::Conflict);
     }
-    // The stored revision fits i64, so the next one fits u64.
     let revision = expected_revision + 1;
     tx.execute(
         "INSERT INTO session_metadata (session_id, revision, title, title_source) VALUES (?1, ?2, ?3, ?4) \
@@ -347,8 +345,6 @@ impl HostDispatch for Dispatch {
                     expected_revision,
                     title,
                 } = request(args)?;
-                // The handover: the write starts here, whatever happens to
-                // the reply.
                 let reply = self.0.set_title(&session_id, expected_revision, title);
                 Ok(RpcValue::future(async move {
                     Ok(envelope(

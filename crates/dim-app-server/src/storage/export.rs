@@ -78,7 +78,6 @@ async fn write(
         )));
     }
     let mut reader = Reader::new(CONTENT_BUDGET);
-    // The checks of a restore; the branch directory in id order.
     let branches = validate_session(db, &mut reader, session).await?;
     line(
         out,

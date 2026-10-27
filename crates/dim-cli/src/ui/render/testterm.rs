@@ -252,7 +252,6 @@ impl Emu {
             (false, 'J') => {
                 let mode = nums.first().copied().unwrap_or(0);
                 let rows: Vec<usize> = match mode {
-                    // E3: the scrollback only.
                     3 => {
                         self.scrollback.clear();
                         Vec::new()

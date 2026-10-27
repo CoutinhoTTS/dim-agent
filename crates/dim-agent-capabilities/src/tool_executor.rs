@@ -143,7 +143,6 @@ impl DynPlugin for ToolExecutorPlugin {
                         }
                         if let Some(reason) = state.interrupted.clone() {
                             drop(state);
-                            // A late request owes results, but no host work or permit.
                             timeline.append(
                                 EventKind::ToolResult(ToolResultData {
                                     turn_id: batch.turn_id.clone(),
@@ -160,7 +159,6 @@ impl DynPlugin for ToolExecutorPlugin {
                             return Ok(());
                         }
                         let cancel = lifecycle.child_token();
-                        // Cancelled only when this generation unloads, before its cleanup runs.
                         let generation = lifecycle.clone();
                         state.current = Some(cancel.clone());
                         let batch = batch.clone();
@@ -338,7 +336,6 @@ async fn execute(
     context: ToolExecutionContext,
     cancel: CancellationToken,
 ) -> Result<ToolResult, HostError> {
-    // The request's snapshot, never the registry's current table.
     let tool = match binding.handler(&context.request_id, &call.name) {
         Ok(tool) => tool,
         Err(message) => return Ok(ToolResult::error(message)),

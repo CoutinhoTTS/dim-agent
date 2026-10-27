@@ -184,7 +184,6 @@ impl Options {
             fullscreen: None,
             refresh: false,
             clear_preferences: None,
-            // The redirect address registered for Dim account sign-in.
             redirect_uri: "http://localhost:54321/auth/callback".into(),
             no_browser: false,
             client_secret: false,
@@ -500,7 +499,6 @@ impl Options {
         if !options.cwd.is_dir() {
             return Err("--cwd must name a directory".into());
         }
-        // Stopping an existing daemon does not consume model or plugin files.
         if matches!(options.action, Action::DaemonStop) {
             return Ok(options);
         }

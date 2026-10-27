@@ -35,7 +35,6 @@ pub fn copy_local(text: &str) {
         use std::process::{Command, Stdio};
         let text = text.to_owned();
         std::thread::spawn(move || {
-            // pbcopy reads its input in the locale's encoding.
             let Ok(mut child) = Command::new("pbcopy")
                 .env("LANG", "en_US.UTF-8")
                 .stdin(Stdio::piped())

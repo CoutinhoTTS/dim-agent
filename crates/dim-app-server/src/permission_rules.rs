@@ -33,7 +33,6 @@ impl BusinessDocument for PermissionSettings {
             if rule.command.split_whitespace().next().is_none() {
                 return Err(SettingsError::Invalid("empty command rule"));
             }
-            // Such a rule could never match.
             if rule.command.contains(COMMAND_SEPARATORS) {
                 return Err(SettingsError::Invalid(
                     "command rule contains a shell separator",

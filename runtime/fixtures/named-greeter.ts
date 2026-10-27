@@ -5,9 +5,6 @@ import type { SessionMethods } from '../../npm/plugin.js'
 
 type Greeter = { hello(): Promise<string> }
 
-// Reads `testGreeter`, which a Rust part provides by name in each Session,
-// and answers `session.greeter.ask` with what that Session's copy says. It
-// provides `namedGreeter` in each Session for a Rust part to read.
 export const part = definePlugin({
   name: 'NamedGreeterFixture',
   provides,

@@ -428,8 +428,6 @@ export class Fold {
         const data = event.data as { branch: string; source?: { kind?: string; operation_id?: string } }
         const evaluation = data.source?.kind === 'host' ? evaluationOfOperation(data.source.operation_id) : undefined
         if (evaluation === undefined) return
-        // The creation is `N`'s decision, so a reload creates no second
-        // evaluator, and the branch it names is the only one that may report.
         this.evaluations.set(evaluation, data.branch)
         this.decided.add(evaluation)
         return

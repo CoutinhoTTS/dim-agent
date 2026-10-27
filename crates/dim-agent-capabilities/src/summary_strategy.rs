@@ -79,8 +79,6 @@ impl CompactionStrategy for SummaryStrategy {
                     .collect::<Vec<_>>()
                     .join("\n\n")
             });
-            // Fold the transcript in chunks; each call's whole request, as
-            // the window facts count it, fits the input budget.
             let mut chunk = String::new();
             for entry in &input.history[..cut.entry] {
                 let line = render(&entry.message);
@@ -263,7 +261,6 @@ fn truncate_to_fit(
     if !fits(input, earlier, &truncate_middle(line, 0)) {
         return Err(no_fit());
     }
-    // The largest kept byte count whose request fits.
     while low < high {
         let keep = (low + high).div_ceil(2);
         if fits(input, earlier, &truncate_middle(line, keep)) {

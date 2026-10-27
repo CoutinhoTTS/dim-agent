@@ -206,6 +206,9 @@ fn revision_conflict(path: &Path, expected: &[u8; 32], display: &str) -> Option<
 /// Stages complete bytes before touching the destination. Verification is not
 /// portable CAS: uncoordinated path/parent renames or metadata changes can still
 /// race the final syscall. Windows installs the owned handle, not a temp name.
+///
+/// Cancellation is checked before the publish. After the publish the function
+/// must not return `Cancelled`: the destination may already have changed.
 pub(super) fn write_target(
     path: &Path,
     bytes: &[u8],
@@ -364,8 +367,6 @@ pub(super) fn write_target(
             json!({"code": "write_error"}),
         )));
     }
-    // No cancellation after the commit point. hard_link publishes an absent
-    // target without replacing a name created by another writer.
     let committed = if original.is_some() {
         #[cfg(unix)]
         let result = std::fs::rename(&temporary.0, path);
@@ -442,9 +443,6 @@ fn preserve_metadata(source: &std::fs::File, target: &std::fs::File) -> std::io:
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;
-        // A sibling can inherit a default ACL or security labels which the
-        // source did not have. Preserve the exact set, without trying to
-        // remove/reapply unchanged labels (e.g. security.selinux).
         let read = |file: &std::fs::File| -> std::io::Result<std::collections::BTreeMap<Vec<u8>, Vec<u8>>> {
             let fd = file.as_raw_fd();
             let size = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0) };
@@ -497,7 +495,7 @@ fn preserve_metadata(source: &std::fs::File, target: &std::fs::File) -> std::io:
         }
     }
     #[cfg(windows)]
-    let _ = (source, target); // DACL is already installed at creation.
+    let _ = (source, target);
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     return Err(std::io::ErrorKind::Unsupported.into());
     Ok(())
@@ -584,8 +582,16 @@ fn write_failure(error: &std::io::Error, display: &str, may_have_modified: bool)
     failed(message, structured)
 }
 
+/// Windows sharing violation, which Node reports as `EBUSY`.
+const ERROR_SHARING_VIOLATION: i32 = 32;
+/// Windows lock violation, which Node reports as `EBUSY`.
+const ERROR_LOCK_VIOLATION: i32 = 33;
+
 fn is_locked(error: &std::io::Error) -> bool {
-    // ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION, which Node reports as EBUSY.
     error.kind() == ErrorKind::ResourceBusy
-        || (cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)))
+        || (cfg!(windows)
+            && matches!(
+                error.raw_os_error(),
+                Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+            ))
 }

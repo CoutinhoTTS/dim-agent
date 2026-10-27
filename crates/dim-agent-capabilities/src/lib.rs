@@ -92,7 +92,6 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<workspace_tools::file_reads::FileReads>(catalog, branch);
     register::<host_platform::HostPlatform>(catalog, None);
     register::<file_storage::FileStorage>(catalog, None);
-    // The model service is the process's; a Session reaches it by name.
     register::<host::ModelHost>(catalog, None);
     register::<host::ProviderConnectionResolver>(catalog, None);
     register::<host::ModelSelectionHost>(catalog, None);
@@ -100,8 +99,6 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<skill_settings::SkillSettingsHost>(catalog, None);
     register::<skills::SkillsCatalog>(catalog, None);
 }
-// Business ports safe to obtain from a Session handle: RPC calls them by
-// request branch, tool handlers by call branch.
 impl PublicService for approval::Approval {}
 impl PublicService for input_queue::InputQueue {}
 impl PublicService for permission::Permission {}

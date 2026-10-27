@@ -7,7 +7,6 @@ use rutis_bridge::session::Bytes;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io, path::PathBuf, sync::Arc};
 
-// Leave room for base64 and the JSON envelope within the bridge's 16 MiB frame.
 const DEFINITION_BYTES: usize = 8 * 1024 * 1024;
 
 /// Package placement from one process row's structural configuration.

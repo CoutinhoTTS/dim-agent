@@ -11,7 +11,6 @@ fn parts() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     parts
 }
 fn home() -> PathBuf {
-    // Failed probes retain their disposable home for inspection.
     let home = std::env::temp_dir().join(format!("dim-report-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(home.join("workflow")).unwrap();
     home
@@ -90,7 +89,6 @@ async fn node_workflow_report_crash_recovery_resubmits_and_gets_the_first_input(
     let (_, _, loader, _) = controls.recv().await.unwrap();
     let before = ready(&mut client).await;
     let connection = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    // Release the fault before the native writer's five-second busy timeout.
     connection.execute_batch("BEGIN IMMEDIATE").unwrap();
     let request = client.send("report.send", json!({})).await;
     phase(&mut client, request, "input").await;
@@ -109,11 +107,8 @@ async fn node_workflow_report_crash_recovery_resubmits_and_gets_the_first_input(
             .success()
     );
     assert!(client.response(request).await.get("error").is_some());
-    // The runtime restarts without waiting for the write SQLite holds.
     loader.restart("SessionNodeRuntime").await.unwrap();
     assert_ne!(ready(&mut client).await["pid"], before["pid"]);
-    // Recovery resubmits while the first write is unpublished; it is
-    // answered with that input once SQLite commits.
     let recover = client.send("report.recover", json!({})).await;
     phase(&mut client, recover, "input").await;
     connection.execute_batch("COMMIT").unwrap();
@@ -134,7 +129,6 @@ async fn node_workflow_report_crash_recovery_resubmits_and_gets_the_first_input(
     ready(&mut client).await;
     assert_ok(&client.rpc("report.recover", json!({})).await);
     assert_eq!(count(&target).await, 1);
-    // A destination that already holds the report: recovery writes nothing.
     let holder = client_session(&mut client, &agent, host_policy()).await;
     seed(&home, holder.id());
     let first = sessions
@@ -264,12 +258,11 @@ async fn node_workflow_report_interrupted_send_reconciles_without_resend() {
             client.rpc("report.status", json!({})).await["error"]["data"]["appError"],
             "service_reloading"
         );
-        // The row unloads its plugin while the send still waits: the send
-        // ends with an error (the fixture's own, when its cleanup closes the
-        // gate first; otherwise `operation_interrupted`), and it may already
-        // have taken effect.
         let reply = client.response(request).await;
-        assert!(reply.get("error").is_some(), "{reply}");
+        assert!(
+            reply.get("error").is_some(),
+            "the send may end with the fixture's own error or `operation_interrupted`, and may already have taken effect: {reply}"
+        );
         let _ = release.write_all(b"replace").await;
     });
     restarted.unwrap();

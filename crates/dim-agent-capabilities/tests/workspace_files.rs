@@ -305,7 +305,6 @@ async fn edits_and_writes_preserve_bom_and_line_endings() {
     let workspace = Workspace::new();
     let reads = FileReads::default();
 
-    // CRLF: only the replaced bytes change; new line breaks follow the file.
     workspace.put("crlf.txt", b"one\r\ntwo\r\nthree\r\n");
     ok(&workspace.read(&reads, "crlf.txt").await);
     ok(&workspace.edit(&reads, "crlf.txt", "two", "2a\n2b").await);
@@ -319,7 +318,6 @@ async fn edits_and_writes_preserve_bom_and_line_endings() {
         .await);
     assert_eq!(workspace.bytes("crlf.txt"), b"x\r\ny\r\n");
 
-    // UTF-8 BOM stays exactly once across edit and write.
     workspace.put("bom.txt", b"\xef\xbb\xbfalpha\nbeta\n");
     let read = workspace.read(&reads, "bom.txt").await;
     assert_eq!(ok(&read), "1\talpha\n2\tbeta");
@@ -335,7 +333,6 @@ async fn edits_and_writes_preserve_bom_and_line_endings() {
         .await);
     assert_eq!(workspace.bytes("bom.txt"), b"\xef\xbb\xbfdelta\n");
 
-    // UTF-16LE with BOM.
     let mut utf16 = vec![0xff, 0xfe];
     utf16.extend(utf16le("héllo\r\nwörld\r\n"));
     workspace.put("utf16.txt", &utf16);
@@ -347,7 +344,6 @@ async fn edits_and_writes_preserve_bom_and_line_endings() {
     expected.extend(utf16le("héllo\r\nwörld!\r\n"));
     assert_eq!(workspace.bytes("utf16.txt"), expected);
 
-    // Mixed EOL: untouched line endings keep their bytes; new breaks follow the match.
     workspace.put("mixed.txt", b"a\r\nb\nc\r\nd\n");
     let read = workspace.read(&reads, "mixed.txt").await;
     assert_eq!(structured(&read)["eol"], "mixed");
@@ -361,7 +357,6 @@ async fn edits_and_writes_preserve_bom_and_line_endings() {
         b"a1\r\na2\r\nb\nC\r\nD1\nd2\n"
     );
 
-    // The Unicode fallback maps smart quotes and trailing blanks back to the raw text.
     workspace.put("quotes.txt", "say “hi”  \nnext\n".as_bytes());
     ok(&workspace.read(&reads, "quotes.txt").await);
     let edited = workspace
@@ -393,7 +388,6 @@ async fn writes_require_a_fresh_read_on_the_same_branch() {
     );
 
     ok(&workspace.read(&main, "a.txt").await);
-    // Another branch has not read the file, even though main has.
     let child = FileReads::default();
     let foreign = workspace
         .call(
@@ -423,7 +417,6 @@ async fn writes_require_a_fresh_read_on_the_same_branch() {
     );
     assert_eq!(workspace.bytes("a.txt"), b"changed outside\n");
 
-    // A new file needs no read; its binding lets the branch write it again.
     let created = workspace
         .call(
             &child,
@@ -436,12 +429,12 @@ async fn writes_require_a_fresh_read_on_the_same_branch() {
     assert_eq!(workspace.bytes("sub/new.txt"), b"two\n");
 }
 
+/// One blocking thread makes the order of file work observable: a gate task
+/// queued behind the path resolutions runs only after both finished, and the
+/// holder's file work then waits behind the gate.
 #[test]
 fn edits_of_one_file_run_in_fifo_order_and_waiters_can_cancel() {
     use futures_util::FutureExt;
-    // One blocking thread makes the order of file work observable: a gate
-    // task queued behind the path resolutions runs only after both finished,
-    // and the holder's file work then waits behind the gate.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .max_blocking_threads(1)
         .enable_all()
@@ -478,15 +471,12 @@ fn edits_of_one_file_run_in_fifo_order_and_waiters_can_cancel() {
             json!({ "path": "pair.txt", "oldText": "HEAD", "newText": "late" }),
             waiter.clone(),
         ));
-        // Both resolve their paths behind the first gate.
         assert!(holder.as_mut().now_or_never().is_none());
         assert!(queued.as_mut().now_or_never().is_none());
         let (open_second, second_gate) = std::sync::mpsc::channel();
         let second = gate(second_gate);
         open_first.send(()).unwrap();
         second.await.unwrap();
-        // The holder takes the lock and its file work waits behind the second
-        // gate; the other edit waits for the lock.
         assert!(holder.as_mut().now_or_never().is_none());
         assert!(queued.as_mut().now_or_never().is_none());
         waiter.cancel();
@@ -605,7 +595,6 @@ async fn read_offloads_large_results_to_the_output_directory() {
         assert_eq!(mode(Path::new(output)), 0o600);
         assert_eq!(mode(Path::new(output).parent().unwrap()), 0o700);
     }
-    // The file stays bound: an edit after an offloaded read is accepted.
     let last = format!("{line}\n");
     let edit = workspace
         .call(
@@ -617,7 +606,6 @@ async fn read_offloads_large_results_to_the_output_directory() {
     ok(&edit);
     assert_eq!(workspace.bytes("big.txt"), "y\n".repeat(400).into_bytes());
 
-    // Small results stay inline.
     workspace.put("small.txt", b"hi\n");
     let small = workspace.read(&reads, "small.txt").await;
     assert_eq!(ok(&small), "1\thi");
@@ -646,7 +634,6 @@ async fn oversized_lines_report_partial_content_without_skipping_the_tail() {
             assert!(full.ends_with("TAIL"));
             assert!(!full.contains("truncated"));
         }
-        // Even truncated reads bind the entire file revision, not its prefix.
         workspace.put("long.txt", body.replace("TAIL", "CHANGED").as_bytes());
         let edit = workspace.edit(&reads, "long.txt", "a", "b").await;
         assert_eq!(code(&edit), "file_modified_since_read");
@@ -662,7 +649,6 @@ async fn special_files_are_refused_without_blocking() {
     let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
     // SAFETY: plain syscall creating a FIFO in the test directory.
     assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
-    // No writer ever opens the pipe: a blocking open would hang here.
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         workspace.read(&reads, "pipe"),
@@ -670,7 +656,6 @@ async fn special_files_are_refused_without_blocking() {
     .await
     .expect("read of a FIFO returns");
     assert_eq!(code(&result), "not_regular_file");
-    // Keep below sockaddr_un's path limit, including macOS's long temp root.
     let socket_path = std::env::temp_dir().join(uuid::Uuid::new_v4().simple().to_string());
     let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
     let socket = workspace.read(&reads, socket_path.to_str().unwrap()).await;
@@ -701,8 +686,6 @@ async fn read_windows_far_into_a_file_and_rejects_overflowing_offsets() {
         )
         .await;
     assert_eq!(code(&beyond), "offset_out_of_range");
-    // An offset past the file size is rejected before streaming: the invalid
-    // tail byte would otherwise be decoded and reported.
     let mut broken = body.into_bytes();
     broken.push(0xFF);
     workspace.put("broken.txt", &broken);
@@ -720,7 +703,6 @@ async fn read_windows_far_into_a_file_and_rejects_overflowing_offsets() {
 async fn a_failed_offload_does_not_bind_the_file() {
     let workspace = Workspace::new();
     let reads = FileReads::default();
-    // The output directory cannot be created: its parent is a file.
     workspace.put("blocker", b"");
     let tools = FileTools::new(
         workspace.root.clone(),
@@ -865,7 +847,6 @@ async fn glob_matches_the_ripgrep_runner() {
     let all = workspace
         .call(&reads, "glob", json!({ "pattern": "*.ts" }))
         .await;
-    // The positive glob overrides the matching ignore rule.
     assert_eq!(glob_paths(&all), [".hidden.ts", "ignored.ts", "visible.ts"]);
     assert_eq!(structured(&all)["truncated"], false);
     assert!(ok(&all).starts_with("Matched 3 files. Showing 3 files. Not truncated.\n\n"));
@@ -957,7 +938,6 @@ async fn grep_survives_byte_matches_and_rejects_bad_include_globs() {
     let workspace = Workspace::new();
     let reads = FileReads::default();
     workspace.put("accent.txt", "café\n".as_bytes());
-    // Matches the second byte of `é`.
     let result = workspace
         .call(
             &reads,
@@ -1069,7 +1049,6 @@ async fn grep_matches_the_ripgrep_runner() {
             json!({ "pattern": "Target", "include": "*.{txt,md}", "outputMode": "files" }),
         )
         .await;
-    // Smart case: an uppercase literal makes the search case-sensitive.
     assert_eq!(
         ok(&files_mode),
         "Matched 0 files in 0 shown files. Not truncated."

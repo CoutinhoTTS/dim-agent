@@ -90,8 +90,6 @@ async fn collect() -> Result<String> {
         let agent = server
             .agent()
             .ok_or("the product profile has no default Agent")?;
-        // No mount list: the Session declares every tool. A list chooses
-        // among tools, not parts.
         let session = agent
             .create_session(SessionConfig {
                 cwd: dir.to_string_lossy().into_owned(),
@@ -142,7 +140,6 @@ impl Table {
         layers: &[(&'static str, RuntimeDiagnostics)],
         ctx: &Ctx,
     ) -> Result<Self> {
-        // Instance keys carry the instance of their scope plugin's group.
         let mut instances = BTreeMap::new();
         for (group, scope) in [("session", "SessionScope"), ("branch", "BranchScope")] {
             let (_, layer) = layers

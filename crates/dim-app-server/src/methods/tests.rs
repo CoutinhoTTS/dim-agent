@@ -271,7 +271,6 @@ impl DynPlugin for Fixture {
                         if method == "fixture.write" {
                             state.entered.notify_one();
                             state.release.notified().await;
-                            // The unload signal reaches it, but the unload waits.
                             assert!(cancel.is_cancelled());
                             state.committed.fetch_add(1, Ordering::SeqCst);
                         } else if method == "fixture.wait" {
@@ -300,10 +299,7 @@ async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
             }))]
         })
         .await;
-        // It registers once the table it depends on is active, which the
-        // loader's reconcile does not wait for.
         assembly.state("Fixture", FiberState::Active).await;
-        // The calling load never unloads here: only the provider reloads.
         let entry = CancellationToken::new();
         let write = assembly.dispatch("fixture.write", &entry).unwrap();
         state.entered.notified().await;
@@ -319,8 +315,6 @@ async fn provider_reload_interrupts_report_calls_and_waits_for_drain_calls() {
             !restart.is_finished(),
             "an accepted drain call holds its provider's unload"
         );
-        // Between generations the namespace is refused as reloading, never
-        // queued: the client retries once the next generation is active.
         assert_eq!(
             rejected(assembly.dispatch("fixture.read", &entry)),
             "service_reloading"
@@ -363,7 +357,6 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
             row(part(builtins, |names| {
                 Owner::new(names, "Other", "other", &["other.read"])
             })),
-            // Names a module the loader cannot resolve.
             json!({"id": "Unresolvable", "name": "unregistered"}),
         ]
     })
@@ -380,9 +373,6 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
         Some(EntryStatus::Unresolved(_))
     ));
     let entry = CancellationToken::new();
-    // A namespace nothing has registered is unknown: an owner that has not
-    // applied yet, one that failed before registering, one that cannot be
-    // resolved or is disabled, and a name no plugin serves.
     for method in [
         "pending.read",
         "broken.read",
@@ -396,7 +386,6 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
             "{method}"
         );
     }
-    // A plugin's registration is its opt-in.
     assembly
         .dispatch("other.read", &entry)
         .unwrap()
@@ -413,7 +402,6 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
             "other.read"
         ]
     );
-    // The calling load's unload interrupts a Report call; the provider stays.
     let entry = CancellationToken::new();
     let wait = assembly.dispatch("fixture.wait", &entry).unwrap();
     state.entered.notified().await;
@@ -428,13 +416,8 @@ async fn a_caller_unload_interrupts_report_calls_and_an_inactive_provider_is_iso
             .app_error,
         "operation_interrupted"
     );
-    // The interrupted operation settles after its reply; a caller that waits
-    // for the settle signal never observes it still running.
     let _ = wait.settled.await;
     assert_eq!(state.cancelled_count.load(Ordering::SeqCst), 1);
-    // A registered owner whose next generation fails answers from its row:
-    // it cannot run again until it is fixed or restarted, so clients must
-    // not retry.
     state.fail_again.store(true, Ordering::SeqCst);
     let _ = assembly.loader.restart("Fixture").await;
     assembly.state("Fixture", FiberState::Failed).await;
@@ -510,9 +493,6 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
             .unwrap()
             .unwrap();
         if child_enabled {
-            // A registered child namespace is the child's: the parent's
-            // method inside it is neither dispatched nor listed, and the
-            // parent keeps its other methods.
             assembly.state("Child", FiberState::Active).await;
             assert_eq!(
                 rejected(assembly.dispatch("fixture.nested.read", &entry)),
@@ -527,8 +507,6 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
                 .unwrap();
             assert_eq!(assembly.listed(), ["fixture.nested.other", "fixture.read"]);
         } else {
-            // A child that never registered holds nothing: the parent serves
-            // and lists the method.
             assembly
                 .dispatch("fixture.nested.read", &entry)
                 .unwrap()
@@ -542,7 +520,6 @@ async fn namespace_validation_and_nested_ownership_follow_the_longest_provided_n
                 "unknown_method"
             );
         }
-        // A name outside the declaration grammar is unknown without a lookup.
         let long = format!("fixture.{}read", "a.".repeat(1 << 17));
         let started = std::time::Instant::now();
         for method in [

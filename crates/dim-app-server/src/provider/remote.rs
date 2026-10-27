@@ -177,8 +177,6 @@ impl ProviderService {
                 if !record.enabled {
                     return Err(ProviderError::InvalidConfig("Provider is disabled".into()));
                 }
-                // Version alone can repeat after delete + recreate. Compare the
-                // admitted configuration as well before committing a late response.
                 let expected = serde_json::to_value(&record).map_err(ProviderError::from)?;
                 let models = owner.discover(&provider_id, &record, &cancel).await?;
                 let version = record.version;
@@ -301,9 +299,7 @@ fn project(
         id
     };
     descriptor.insert("id".into(), Value::String(id.into()));
-    // The full wire descriptor remains available for model-level routing.
     let mut raw = descriptor.clone();
-    // Anthropic's object discriminator is not the model's modality.
     if driver == "anthropic" && raw.get("type").and_then(Value::as_str) == Some("model") {
         raw.remove("type");
     }

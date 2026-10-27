@@ -130,7 +130,6 @@ mod tests {
         assert!(input.handle_key(key(KeyCode::Left)));
         assert!(input.handle_key(key(KeyCode::Backspace)));
         assert_eq!(input.text(), "https://api.exampe");
-        // Navigation and submission stay with the form.
         for code in [KeyCode::Enter, KeyCode::Tab, KeyCode::Up, KeyCode::Esc] {
             assert!(!input.handle_key(key(code)));
         }
@@ -154,7 +153,6 @@ mod tests {
         assert_eq!(window("abcdefgh", 8, 4), ("fgh".into(), 3));
         assert_eq!(window("abcdefgh", 2, 4), ("abcd".into(), 2));
         assert_eq!(window("abcdefgh", 5, 4), ("cdef".into(), 3));
-        // A wide character never straddles the window's edge.
         assert_eq!(window("中文字", 6, 3), ("文".into(), 2));
     }
 }

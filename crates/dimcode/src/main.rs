@@ -2,9 +2,6 @@
 //! same file as its App Server daemon with the hidden `app-server`
 //! subcommand.
 
-// With the CLI and the App Server in one debug binary, `__eh_frame` passes
-// the 16 MB that Apple's ld can reference from the compact unwind table. ld
-// then reports that only panics unwind more slowly, which does not matter here.
 #![allow(linker_messages)]
 
 /// The Dim account's OAuth client IDs, injected at build time so that they

@@ -38,8 +38,6 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-// ------------------------------------------------------------------ model
-
 /// Replies with queued tool batches, then with text. `$TASK` in an input is
 /// replaced by the last `Task ID:` the model has seen.
 #[derive(Default)]
@@ -123,8 +121,6 @@ impl ModelDriver for Script {
         })
     }
 }
-
-// ---------------------------------------------------------------- harness
 
 /// Provides the process HostPlatform the design lets tests construct.
 struct PlatformPlugin(Arc<HostPlatform>);
@@ -339,7 +335,6 @@ impl Harness {
         SessionConfig {
             cwd: self.cwd.to_string_lossy().into_owned(),
             tools: Some(vec!["exec".into(), "wait".into()]),
-            // These flows exercise execution; approval has its own tests.
             permission_policy: dim_agent_runtime::PermissionPolicy {
                 preset: dim_agent_runtime::PermissionPreset::FullAccess,
                 ..Default::default()
@@ -457,8 +452,6 @@ fn tool_results(events: &[Arc<AgentEvent>]) -> usize {
     count(events, "step/tool-result")
 }
 
-// ------------------------------------------------------------------- exec
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_cwd() {
     let home = scratch("isolation-policy");
@@ -523,7 +516,6 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     assert!(!home.join("escaped").exists());
     assert!(!policy.exists(), "defaults must not create a policy file");
 
-    // A local grant, rather than the model's cwd, widens the next process.
     std::fs::write(
         &policy,
         json!({"version":1,"writablePaths":[harness.cwd,home]}).to_string(),
@@ -546,7 +538,6 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     let result = results(&events).pop().unwrap();
     assert_ne!(result.is_error, Some(true), "{}", text(&result));
     assert!(text(&result).contains("outside-fixture-content"));
-    // Explicit writable roots replace the default TMPDIR as well.
     assert!(text(&result).contains("tmpdir=unset"), "{}", text(&result));
     assert_eq!(
         std::fs::read_to_string(home.join("escaped")).unwrap(),
@@ -736,7 +727,6 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home() {
-    // No policy file. The user's home is ungranted and has no git configuration.
     let user_home = scratch("user-home");
     std::fs::write(user_home.join("private-note"), "home-fixture-content").unwrap();
     let mut platform = platform(&[]).await;
@@ -745,9 +735,6 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
     platform
         .env
         .push(("HOME".into(), user_home.as_os_str().into()));
-    // The /usr/bin shims run DEVELOPER_DIR, which the default policy passes
-    // and grants. Naming the Command Line Tools also covers a host whose
-    // selection is an Xcode.app, which the default baseline does not.
     let command_line_tools = Path::new("/Library/Developer/CommandLineTools");
     let developer_tools = command_line_tools.is_dir();
     platform.env.retain(|(name, _)| name != "DEVELOPER_DIR");
@@ -809,13 +796,10 @@ async fn default_macos_isolation_runs_developer_tools_without_host_tmp_or_home()
             "{}",
             text(&result)
         );
-        // The shims keep their lookup cache in TMPDIR, not the ungranted /tmp.
         assert!(!text(&result).contains("xcrun_db"), "{}", text(&result));
         assert!(harness.cwd.join(".git/HEAD").is_file());
     }
 
-    // Each process tree has its own TMPDIR, held across the background
-    // handoff and removed with the tree handle.
     let mut directories = Vec::new();
     for background in [false, true] {
         let marker = harness.cwd.join(format!("temporary-{background}"));
@@ -887,8 +871,6 @@ async fn default_macos_isolation_reads_git_global_configuration_but_not_other_ho
         eprintln!("the Command Line Tools are not installed; skipping git");
         return;
     }
-    // A plain configuration, then one that a dotfile manager links from
-    // elsewhere under a moved XDG_CONFIG_HOME.
     for linked in [false, true] {
         let user_home = scratch("git-home");
         let dotfiles = scratch("dotfiles");
@@ -988,7 +970,6 @@ async fn default_macos_isolation_reads_git_global_configuration_but_not_other_ho
 /// without granting the rest of the home.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn explicit_file_roots_let_git_read_its_configuration_but_not_their_siblings() {
-    // On macOS /usr/bin/git is the shim that runs the Command Line Tools.
     let command_line_tools = Path::new("/Library/Developer/CommandLineTools");
     if !Path::new("/usr/bin/git").is_file()
         || (cfg!(target_os = "macos") && !command_line_tools.is_dir())
@@ -1021,7 +1002,6 @@ async fn explicit_file_roots_let_git_read_its_configuration_but_not_their_siblin
     );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
-    // The default directories that an explicit list repeats on each platform.
     let defaults: Vec<_> = [
         "/usr",
         "/bin",
@@ -1039,16 +1019,11 @@ async fn explicit_file_roots_let_git_read_its_configuration_but_not_their_siblin
     .chain([command_line_tools.to_path_buf()])
     .filter(|path| path.is_dir())
     .collect();
-    // Linux leaves ungranted paths out of the namespace and binds file roots
-    // read-only; Seatbelt denies both with EPERM.
     let (absent, read_only) = if cfg!(target_os = "macos") {
         ("Operation not permitted", "Operation not permitted")
     } else {
         ("No such file or directory", "Read-only file system")
     };
-    // A plain configuration, then one that a dotfile manager links from
-    // elsewhere: the root covers the link and its target, read-only, and not
-    // their siblings.
     for linked in [false, true] {
         let user_home = scratch("git-home");
         let dotfiles = scratch("dotfiles");
@@ -1073,7 +1048,6 @@ async fn explicit_file_roots_let_git_read_its_configuration_but_not_their_siblin
             json!({"version":1,"readOnlyPaths":roots}).to_string(),
         )
         .unwrap();
-        // The command selects this home and, on macOS, the Command Line Tools.
         let git = format!(
             "unset XDG_CONFIG_HOME; export HOME='{}' DEVELOPER_DIR='{}'; \
              mkdir repo-{linked} && cd repo-{linked} && /usr/bin/git init -q \
@@ -1121,8 +1095,6 @@ async fn explicit_file_roots_let_git_read_its_configuration_but_not_their_siblin
 async fn isolated_exec_failures_point_to_the_local_policy() {
     let home = scratch("isolation-note");
     let policy = home.join("host-isolation.json");
-    // The service HOME is not granted. On macOS a login bash prints an error
-    // for an existing ~/.bash_profile it cannot read; zsh skips quietly.
     let shell = if cfg!(target_os = "macos") {
         "/bin/zsh"
     } else {
@@ -1151,8 +1123,6 @@ async fn isolated_exec_failures_point_to_the_local_policy() {
     );
     let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
     let session = harness.session().await;
-    // Whether the result carries the note; it names the file and offers
-    // no approval, and the structured content does not carry it.
     let noted = |result: &ToolResult| {
         let text = text(result);
         let structured = serde_json::to_string(&result.structured_content).unwrap();
@@ -1169,9 +1139,6 @@ async fn isolated_exec_failures_point_to_the_local_policy() {
     };
     let last = async || results(&local_events(&session).await).pop().unwrap();
 
-    // Default policy: a denied write (EPERM on macOS; bubblewrap cannot
-    // enter the ungranted cwd on Linux), a resolver failure, an ordinary
-    // failure and a success that prints a denial.
     for (command, cwd, failed, note) in [
         ("printf denied > escaped", Some(&home), true, true),
         (
@@ -1195,7 +1162,6 @@ async fn isolated_exec_failures_point_to_the_local_policy() {
     }
     assert!(!home.join("escaped").exists());
 
-    // The background result carries the same note.
     harness
         .run(
             &session,
@@ -1211,7 +1177,6 @@ async fn isolated_exec_failures_point_to_the_local_policy() {
     assert!(noted(&data.result), "{}", text(&data.result));
     session.idle("main").await.unwrap();
 
-    // An explicit read-only workspace: EPERM on macOS, EROFS on Linux.
     let read_only: Vec<_> = [
         "/usr",
         "/bin",
@@ -1242,7 +1207,6 @@ async fn isolated_exec_failures_point_to_the_local_policy() {
     assert!(noted(&result), "{}", text(&result));
     assert!(!harness.cwd.join("blocked").exists());
 
-    // Disabled isolation gets no note for the same output.
     std::fs::write(&policy, r#"{"version":1,"enabled":false}"#).unwrap();
     harness
         .run(
@@ -1549,7 +1513,6 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     let platform = harness.root.get::<HostPlatform>().unwrap();
     let session = harness.session().await;
 
-    // A bad preference leaves the service active and is exposed as refusal data.
     let refusal = platform
         .build_process_spec("true", &harness.cwd)
         .await
@@ -1558,7 +1521,6 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     assert_eq!(refusal.code, EXEC_SHELL_CONFIG_INVALID);
     assert!(refusal.reason.contains("Invalid exec shell config"));
 
-    // Both callers observe each file edit without reloading the service or Session.
     for (index, executable) in ["/bin/sh", "/bin/bash"].into_iter().enumerate() {
         std::fs::write(
             &config,
@@ -1614,7 +1576,6 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
     );
     assert!(!marker.exists());
 
-    // Deleting the preference restores automatic selection on the next call.
     std::fs::remove_file(&config).unwrap();
     harness
         .run(
@@ -1650,7 +1611,6 @@ async fn foreground_output_is_canonical_and_offloaded_like_ts() {
     assert!(text(result).ends_with("\n\nCommand exited with code 3."));
     assert!(!text(result).contains('\u{FFFD}'));
 
-    // Beyond 30,000 characters the output moves to a file with a preview.
     session.idle("main").await.unwrap();
     harness
         .run(
@@ -1675,7 +1635,6 @@ async fn foreground_output_is_canonical_and_offloaded_like_ts() {
         std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path).unwrap().permissions());
     assert_eq!(mode & 0o777, 0o600);
 
-    // The file stops at 64 MiB while the pipe is still drained.
     session.idle("main").await.unwrap();
     harness
         .run(
@@ -1716,7 +1675,6 @@ fn exit_drains_output_even_when_offload_is_slow() {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             }).await.unwrap();
-            // Block filesystem offload only after the shell has started.
             let released = Arc::new((Mutex::new(false), Condvar::new()));
             let blocker = released.clone();
             let (entered, ready) = tokio::sync::oneshot::channel();
@@ -1745,13 +1703,11 @@ fn exit_drains_output_even_when_offload_is_slow() {
             assert!(bytes.iter().all(|byte| *byte == b'x'));
             sizes.push(bytes.len());
         }
-        // An inherited pipe without EOF still has a bounded exit wait.
         harness.run(&session, &[("exec", json!({"command": "/bin/sh -c 'sleep 30 & printf inherited'"}))]).await;
         let events = tokio::time::timeout(Duration::from_secs(5), until(&session, "inherited pipe", |events| tool_results(events) == 9)).await.unwrap();
         let results = results(&events);
         assert!(text(results.last().unwrap()).contains("inherited"), "{}", text(results.last().unwrap()));
         session.idle("main").await.unwrap();
-        // Continuous descendant output must not reset the exit budget.
         harness.run(&session, &[("exec", json!({"command": "/bin/sh -c 'yes x & printf inherited'"}))]).await;
         tokio::time::timeout(Duration::from_secs(5), until(&session, "writing descendant", |events| tool_results(events) == 10)).await.unwrap();
         harness.shutdown().await;
@@ -1830,7 +1786,6 @@ async fn find_scans_only_its_starting_points() {
         .run(
             &session,
             &[
-                // Expression operands name patterns, not scan targets.
                 (
                     "exec",
                     json!({"command": "find -L src -name node_modules -type d"}),
@@ -2008,13 +1963,10 @@ async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice(
         panic!("{input:?}");
     };
     assert!(notice.contains("[Preview truncated at 16 KiB.]"));
-    // The shared preview is 16 KiB; the short command/status and read hint surround it.
     assert!(notice.len() < 16 * 1024 + 1024);
-    // Lossless readback from the output file the notice points to.
     assert!(text(&end.result).contains(&format!("Output saved to: {}", data.output_path)));
     let full = std::fs::read_to_string(&data.output_path).unwrap();
     assert_eq!(full.len(), 200_000 + "tail-marker\n".len());
-    // The woken turn sees the rendered notification.
     until(&session, "woken turn", |events| {
         count(events, "turn/end") == 2
     })
@@ -2044,7 +1996,6 @@ async fn stop_and_completion_settle_once_in_dispatch_order() {
     let events = until(&session, "start", |events| count(events, "turn/end") == 1).await;
     let task = task_of(&results(&events)[0]);
     let pid = pid_in(&pid_file).await;
-    // The UI entry: the branch service reached through the Session.
     let background = session.service::<BackgroundExec>("main").unwrap();
     let (first, second) = tokio::join!(background.stop(&task), background.stop(&task));
     let (first, second) = (first.unwrap(), second.unwrap());
@@ -2057,7 +2008,6 @@ async fn stop_and_completion_settle_once_in_dispatch_order() {
         Err(workspace_tools::background::TaskError::Unknown)
     ));
 
-    // Completion first: the status stays completed and stop adopts it.
     harness
         .run(
             &session,
@@ -2077,7 +2027,6 @@ async fn stop_and_completion_settle_once_in_dispatch_order() {
     assert_eq!(adopted.status, ExecStatus::Completed);
     let events = events_after_idle(&session).await;
     assert_eq!(ended(&events).len(), 2);
-    // Only the completed task woke the branch.
     assert_eq!(
         notifications(&events)
             .into_iter()
@@ -2120,14 +2069,12 @@ async fn a_turn_stop_keeps_background_work_and_its_wake_starts_a_turn() {
     let (_, end) = &ended(&events)[0];
     assert_eq!(end.status, ExecStatus::Completed);
     assert!(text(&end.result).contains("survived"));
-    // No pause: the wake arrives after the stop and drives a turn.
     until(&session, "woken turn", |events| {
         count(events, "turn/end") == 2
     })
     .await;
     session.idle("main").await.unwrap();
     assert_eq!(count(&local_events(&session).await, "turn/start"), 2);
-    // That turn consumed the notification: it does not end a later wait.
     harness
         .run(&session, &[("wait", json!({"timeoutMs": 300}))])
         .await;
@@ -2200,7 +2147,6 @@ async fn closing_a_branch_cancels_only_its_tasks_without_a_wake() {
     assert_eq!(ends.len(), 1);
     assert_eq!(ends[0].1.status, ExecStatus::Cancelled);
     assert!(notifications(&child_events).is_empty());
-    // The sibling's task keeps running until its own Session closes.
     assert!(alive(&main));
     assert!(ended(&local_events(&session).await).is_empty());
     session.close().await.unwrap();
@@ -2303,10 +2249,8 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
             .unwrap(),
         ""
     );
-    // The branch is idle; only the running task refuses the unload.
     assert!(!session.unload_if_idle().await.unwrap());
     assert!(alive(&pid));
-    // Its child exits, so the command completes and wakes a turn.
     kill(&pid);
     let events = until(&session, "woken turn", |events| {
         count(events, "turn/end") == 2
@@ -2316,8 +2260,6 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     assert_eq!(end.status, ExecStatus::Completed);
     session.idle("main").await.unwrap();
     unload_once_released(&session).await;
-    // Left by a generation that stopped early: a start without its terminal,
-    // and a terminal whose wake was never posted.
     let id = session.id().to_owned();
     let started = |task_id: &str| {
         EventKind::ExecStarted(ExecStartedData {
@@ -2368,8 +2310,6 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     assert!(text(&orphan.result).contains(
         "Background task exec-orphan did not survive a restart of its owner; its final result is unknown. Output so far: /tmp/exec-orphan.log."
     ));
-    // The reported end is not woken again; the lost wake and the recovered
-    // terminal are each reported once.
     restored.idle("main").await.unwrap();
     let mut woken: Vec<_> = notifications(&local_events(&restored).await)
         .into_iter()
@@ -2379,7 +2319,6 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     let mut expected = vec![reported.id.clone(), lost, orphan_event.id.clone()];
     expected.sort();
     assert_eq!(woken, expected);
-    // Stopping a settled task returns its result.
     let settled = restored
         .service::<BackgroundExec>("main")
         .unwrap()
@@ -2402,7 +2341,6 @@ async fn running_tasks_hold_the_session_until_the_last_one_ends() {
         harness.cwd.join("stopped.pid"),
         harness.cwd.join("failing.pid"),
     );
-    // `wait $!` reports the child's signal, so killing the child fails it.
     let failing = json!({
         "command": format!("sh -c 'sleep 100 & echo $! > {}; wait $!'", failing_file.display()),
         "runInBackground": true,
@@ -2420,7 +2358,6 @@ async fn running_tasks_hold_the_session_until_the_last_one_ends() {
     let failing = pid_in(&failing_file).await;
     session.idle("main").await.unwrap();
     assert!(!session.unload_if_idle().await.unwrap());
-    // A stopped task ends without a wake; the other one still holds.
     let background = session.service::<BackgroundExec>("main").unwrap();
     assert_eq!(
         background.stop(&stopped).await.unwrap().status,
@@ -2428,7 +2365,6 @@ async fn running_tasks_hold_the_session_until_the_last_one_ends() {
     );
     session.idle("main").await.unwrap();
     assert!(!session.unload_if_idle().await.unwrap());
-    // The last task fails on its own and wakes a turn; then the Session goes.
     kill(&failing);
     let events = until(&session, "woken turn", |events| {
         count(events, "turn/end") == 2
@@ -2481,8 +2417,6 @@ async fn a_reload_or_a_closing_session_refuses_a_start_and_leaves_no_hold() {
     session.idle("main").await.unwrap();
     assert!(session.unload_if_idle().await.unwrap());
 
-    // Closing from the moment its close starts: the start resumes then,
-    // before or after its branch is interrupted.
     let session = harness.session().await;
     let pid_file = harness.cwd.join("closing.pid");
     let mut held = testing::hold_start(&harness.output_root.join(session.id()));
@@ -2597,8 +2531,6 @@ async fn a_long_foreground_command_moves_to_the_background_after_30_seconds() {
     harness.shutdown().await;
 }
 
-// ------------------------------------------------------------------- wait
-
 fn wait_texts(events: &[Arc<AgentEvent>]) -> Vec<String> {
     results(events)
         .iter()
@@ -2629,7 +2561,6 @@ async fn wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_
     );
     session.idle("main").await.unwrap();
 
-    // Another task's completion does not end a wait for a given task.
     harness.model.push(&[(
         "exec",
         json!({"command": "echo two", "runInBackground": true}),

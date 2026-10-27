@@ -316,7 +316,6 @@ async fn a_part_without_layer_types_mounts_in_every_group() {
     );
     agent.close().await.unwrap();
 
-    // At the process: a loader row with a process name.
     let mut catalog = names::catalog();
     names::register::<Clock>(&mut catalog, None);
     let mut builtins = Modules::new();
@@ -455,7 +454,6 @@ async fn a_misplaced_part_fails_where_it_is_mounted_naming_the_group() {
         .await
         .err()
         .expect("a Session part reading branch names fails");
-    // A failure of the assembly, which clients see as `session_build_failed`.
     assert!(
         matches!(error, dim_agent_runtime::AgentError::Build(_)),
         "{error:?}"

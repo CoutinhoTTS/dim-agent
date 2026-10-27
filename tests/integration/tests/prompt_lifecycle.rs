@@ -1104,8 +1104,6 @@ async fn initial_configuration_loads_before_start_and_failure_rolls_back() {
         .await
         .unwrap();
     let events = session.history("main", None).await.unwrap();
-    // The root starts, then Prompt delivers the initial configuration
-    // before the Session takes input.
     assert!(matches!(events[0].kind, EventKind::BranchStart(_)));
     assert!(matches!(events[1].kind, EventKind::PromptChanged(_)));
     assert!(matches!(events[2].kind, EventKind::ContextConfigured(_)));
@@ -1135,8 +1133,6 @@ async fn initial_configuration_loads_before_start_and_failure_rolls_back() {
         Ok(_) => panic!("initial load failure unexpectedly created a session"),
         Err(error) => error,
     };
-    // The opening receipt fails after the root's `branch/start` dispatches: the
-    // Session is not created, and the original cause is reported first.
     let cause = match &error {
         AgentError::Multiple(errors) => &errors[0],
         cause => cause,
@@ -1176,8 +1172,6 @@ impl DynPlugin for OpeningObserved {
                     Box::pin(async { Ok(()) })
                 },
             )?;
-            // A close must signal the host independently of dispatch drain
-            // and capability unload, even if another handler is waiting.
             let cancelled = self.1.clone();
             dispatcher.subscribe(ctx, "StartupDrain", &["stop/interrupt"], move |_| {
                 let cancelled = cancelled.clone();
@@ -1211,7 +1205,6 @@ impl DynPlugin for OpeningFailure {
             dispatcher.subscribe(ctx, "OpeningFailure", &["branch/start"], move |_| {
                 let opening = opening.clone();
                 Box::pin(async move {
-                    // A later failure must not wait behind an earlier receipt.
                     opening.register(Box::pin(std::future::pending()))?;
                     opening.register(Box::pin(async {
                         Err(AgentError::InvalidInput("opening rejected".into()))
@@ -1247,8 +1240,6 @@ async fn opening_failure_is_not_hidden_by_an_earlier_pending_receipt() {
 
 #[tokio::test]
 async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host() {
-    // A restored Session that never started starts on restore; one that did
-    // resumes, its main branch opening from stored history.
     for start in ["create", "restore", "resume"] {
         let restore = start != "create";
         for timeout in [false, true] {
@@ -1338,7 +1329,6 @@ async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host()
                 tokio::time::timeout(Duration::from_secs(1), started.notified())
                     .await
                     .unwrap();
-                // Only a branch opening from stored history shares it.
                 assert_eq!(
                     agent.live_openings(),
                     usize::from(start == "resume"),
@@ -1346,7 +1336,6 @@ async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host()
                 );
                 let dispatched =
                     tokio::time::timeout(Duration::from_millis(100), observed.notified()).await;
-                // Release even on the old implementation so a red run is bounded.
                 if dispatched.is_err() {
                     release.notify_one();
                 }
@@ -1384,7 +1373,6 @@ async fn startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host()
                     Ok(_) => panic!("cancelled startup published a session"),
                     Err(error) => error,
                 };
-                // The cancelled build released its branch opening.
                 assert_eq!(agent.live_openings(), 0, "{start}");
                 let cause = match &error {
                     AgentError::Multiple(errors) => &errors[0],
@@ -1491,7 +1479,6 @@ async fn child_opening_deadline_or_close_joins_before_recording_failure() {
         tokio::time::timeout(Duration::from_secs(1), started.notified())
             .await
             .unwrap();
-        // The child opens with its ancestry, `main` up to the cut.
         assert_eq!(agent.live_openings(), 1);
         let closing = if timeout {
             None
@@ -1516,7 +1503,6 @@ async fn child_opening_deadline_or_close_joins_before_recording_failure() {
             .unwrap()
             .unwrap();
         assert!(result.is_err());
-        // The cancelled build released the child's opening.
         assert_eq!(agent.live_openings(), 0);
         if let Some(closing) = closing {
             tokio::time::timeout(Duration::from_secs(1), closing)
@@ -1666,7 +1652,6 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
             .phase,
         LoopPhase::Idle
     );
-    // `branch/resume` compares the sources; a system source stays as adopted.
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let events = session.history("main", None).await.unwrap();
     let configured: Vec<_> = events
@@ -1676,8 +1661,6 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
             _ => None,
         })
         .collect();
-    // The stored source version is gone, so ToolBinding re-adopts the
-    // current tools once; the model and the system prompt stay adopted.
     assert_eq!(configured.len(), 2);
     assert_eq!(
         session
@@ -1695,7 +1678,6 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
             Some(SystemPrompt::Text("adopted system".into()))
         );
     }
-    // Model updates below keep this re-adopted tool part.
     let (tools, tool_sources) = (
         configured[1].settings.tools.clone(),
         configured[1].settings.tool_sources.clone(),
@@ -1882,7 +1864,6 @@ async fn context_only_initial_prompt_is_inherited_and_unchanged_in_a_child() {
         )
         .await
         .unwrap();
-    // The child compares the sources at `branch/start`; nothing changed.
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(
         !session

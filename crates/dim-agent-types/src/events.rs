@@ -1124,9 +1124,6 @@ impl EventKind {
     }
 }
 
-// A core event by domain: each domain's nested tagged enum keeps typed payload
-// validation and serde's field errors without converting payloads through
-// serde_json::Value.
 enum TaggedEvent {
     Input(InputEvent),
     Stop(StopEvent),
@@ -1329,11 +1326,6 @@ enum CollaborationEvent {
     Result(CollaborationResultData),
 }
 
-// The domain picks the decoder before the payload is read: a reserved domain
-// decodes only through its typed contract, so a malformed core event fails
-// with serde's own error; any other domain is an extension event whose data is
-// kept as given. Entries before `type` are held until then; events as written
-// put `type` before `name` and `data`, so none are.
 impl<'de> Deserialize<'de> for EventKind {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_map(EventVisitor)

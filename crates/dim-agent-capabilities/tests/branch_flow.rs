@@ -109,7 +109,6 @@ impl DynPlugin for ProbePlugin {
             if identity.branch_id == "main" {
                 *probe.main_timeline.lock().unwrap() = Some(timeline.clone());
                 if probe.read_while_opening.load(Ordering::SeqCst) {
-                    // A rebuild read fixes S and reads all of 1..=S.
                     timeline.local(..=timeline.committed()).await?;
                     let reads = batch_reads(&timeline).await;
                     probe.opening_reads.lock().unwrap().push(reads);
@@ -124,12 +123,9 @@ impl DynPlugin for ProbePlugin {
                 probe.child_entered.notify_one();
                 if probe.delay_child.load(Ordering::SeqCst) {
                     tokio::select! { _ = probe.child_release.notified() => {}, _ = ctx.cancelled() => {} }
-                    // Shutdown closes service admission before cancelling apply.
-                    // A refused late binding is a build result, not a cleanup failure.
                     ctx.provide(Arc::new("late child binding"))?;
                 }
                 if probe.fail_child.load(Ordering::SeqCst) {
-                    // Fail only once the cleanup writer is Active.
                     tokio::select! { _ = probe.writer_ready.notified() => {}, _ = ctx.cancelled() => {} }
                     return Err(rutis::Error::from(ErrorKind::ServiceNotFound(
                         "/private/agent-secret/rejected-candidate".into(),
@@ -223,7 +219,6 @@ impl DynPlugin for CleanupWriter {
         Box::pin(async move {
             let timeline = ctx.require_at(&self.timeline)?;
             let identity = ctx.require_at(&self.identity)?;
-            // Only builds the flow is about to fail; other children close normally.
             if identity.branch_id == "main" || !self.probe.fail_child.load(Ordering::SeqCst) {
                 return Ok(Effect::Done);
             }
@@ -243,7 +238,6 @@ fn setup(probe: &Arc<Probe>) -> Agent {
 }
 fn builder(probe: &Arc<Probe>) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    // Keep completed events for the cleanup assertions in this flow.
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     defaults::mock_hosts(&mut builder);
     defaults::install(&mut builder);
@@ -294,8 +288,6 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
         vec![],
         store.clone(),
     );
-    // A batch at sequences 1 and 2: a read may start inside it but must
-    // not end there.
     let input = |text: &str| {
         EventKind::InputMessage(InputMessageData::text(text, Some(InputMode::Append))).into()
     };
@@ -373,8 +365,6 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
             .into(),
         )
         .unwrap();
-    // Prompt delivered what changed while `branch/start` dispatched; the crash
-    // came before the first input, so the creation still did not finish.
     partial
         .append(
             EventKind::InputMessage(InputMessageData {
@@ -391,8 +381,6 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
     dim_agent_runtime::core::close_timeline(&partial)
         .await
         .unwrap();
-    // A capability wrote a status-only input while the child loaded; the
-    // crash came before `branch/start` and the prompt.
     let loading = main
         .append(
             EventKind::BranchCreate(BranchCreateData {
@@ -428,7 +416,6 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
     dim_agent_runtime::core::close_timeline(&loaded)
         .await
         .unwrap();
-    // Committed, then a crash before the child's directory existed.
     let orphan = main
         .append(
             EventKind::BranchCreate(BranchCreateData {
@@ -462,9 +449,6 @@ async fn restore_settles_interrupted_creates_and_keeps_failed_directories_inacti
         let agent = builder.build();
         let session = soon(agent.restore_session("saved".into())).await.unwrap();
         soon(session.idle("main")).await.unwrap();
-        // While main opened its rebuild reads shared one read of its
-        // history; reads from it end only on batch boundaries, as the
-        // store's reads after the opening do.
         let opening = probe.opening_reads.lock().unwrap().pop().unwrap();
         let main = probe.main_timeline.lock().unwrap().clone().unwrap();
         assert_eq!(opening, batch);
@@ -719,8 +703,6 @@ async fn delayed_create_uses_its_anchor_and_survives_an_abandoned_waiter() {
             .await
     });
     let create = wait_create(&session, high).await;
-    // A committed creation is a fact: the waiter stops at once, the build
-    // goes on without it.
     admission.cancel();
     assert!(matches!(
         soon(waiting).await.unwrap(),
@@ -733,7 +715,6 @@ async fn delayed_create_uses_its_anchor_and_survives_an_abandoned_waiter() {
         .unwrap();
     probe.release.notify_one();
     soon(session.idle("main")).await.unwrap();
-    // The build outlives its abandoned waiter and publishes the child itself.
     let child = soon(async {
         loop {
             if let Some(child) = session
@@ -829,8 +810,6 @@ async fn parent_close_waits_for_dispatch_before_releasing_branch_reservations() 
         }
     })
     .await;
-    // A close already in progress cannot dispose TreeTimeline while its
-    // dispatcher is held before the accepted branch/create.
     assert!(
         tokio::time::timeout(Duration::from_millis(50), &mut closing)
             .await
@@ -875,8 +854,6 @@ async fn failed_build_rolls_back_and_releases_capacity_even_without_its_waiter()
         .unwrap_err();
     assert!(internal.to_string().contains("/private/agent-secret"));
     assert_eq!(probe.child_cleanups.load(Ordering::SeqCst), 1);
-    // Capabilities unload before the Timeline closes: their cleanup can
-    // still commit terminal facts.
     assert_eq!(*probe.cleanup_write.lock().unwrap(), Some(true));
     assert_eq!(session.branches().len(), 1);
     let failures: Vec<_> = session
@@ -903,7 +880,6 @@ async fn failed_build_rolls_back_and_releases_capacity_even_without_its_waiter()
     probe.fail_child.store(false, Ordering::SeqCst);
     probe.child_builds.store(0, Ordering::SeqCst);
     probe.child_cleanups.store(0, Ordering::SeqCst);
-    // A rejected (empty) initial input fails the child build and rolls it back.
     let rejected = String::new();
     assert!(
         soon(session.branch("main".into(), 0, options(&rejected)))
@@ -916,7 +892,6 @@ async fn failed_build_rolls_back_and_releases_capacity_even_without_its_waiter()
     let caller = session.clone();
     let waiting =
         tokio::spawn(async move { caller.branch("main".into(), 0, options(&rejected)).await });
-    // Notify may retain the first failed build's signal; wait for the second build.
     soon(async {
         while probe.child_builds.load(Ordering::SeqCst) < 2 {
             probe.child_entered.notified().await;
@@ -925,7 +900,6 @@ async fn failed_build_rolls_back_and_releases_capacity_even_without_its_waiter()
     .await;
     waiting.abort();
     let _ = waiting.await;
-    // An abandoned caller does not abandon the build: it still rolls back.
     probe.child_release.notify_one();
     soon(async {
         while probe.child_cleanups.load(Ordering::SeqCst) < 2 {
@@ -988,6 +962,8 @@ async fn candidates_remain_private_until_the_initial_input_is_accepted() {
     soon(agent.close()).await.unwrap();
 }
 
+/// The loop covers both direct user input and a trusted hook selecting the
+/// same unusable cut.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invalid_batch_cut_settles_creation_without_faulting_the_session() {
     let probe = Arc::new(Probe::default());
@@ -999,7 +975,6 @@ async fn invalid_batch_cut_settles_creation_without_faulting_the_session() {
     let batch = timeline
         .append_batch_registered(vec![interrupt().into(), interrupt().into()], |_| Ok(()))
         .unwrap();
-    // Cover direct user input and a trusted hook selecting the same unusable cut.
     for rewrite in [false, true] {
         if rewrite {
             *probe.rewrite.lock().unwrap() = Rewrite::Business(
@@ -1116,8 +1091,6 @@ async fn the_initial_child_input_can_immediately_create_a_grandchild() {
     let anchor = create_event(&child_events);
     assert_eq!(grandchild.create_anchor, Some(anchor.sequence));
     soon(agent.close()).await.unwrap();
-    // Every dispatched event after the listener is broadcast once, in branch
-    // order, as the Timeline's own event; inherited prefixes are not repeated.
     let records = soon(broadcast.ended()).await;
     let (end, events) = records.split_last().unwrap();
     assert!(end.is_none());
@@ -1206,6 +1179,8 @@ impl DynPlugin for CaptureTreeDispatch {
     }
 }
 
+/// The handler is installed after readiness, and the current-thread runtime is
+/// required so the spawned build is not polled before the callback.
 #[tokio::test]
 async fn closing_after_dispatch_before_the_build_first_poll_is_a_normal_cancellation() {
     let ports = Arc::new(Mutex::new(None));
@@ -1224,8 +1199,6 @@ async fn closing_after_dispatch_before_the_build_first_poll_is_a_normal_cancella
         .await
         .unwrap();
     let (tree, dispatcher, root) = ports.lock().unwrap().take().unwrap();
-    // Installed after readiness: this handler follows TreeTimeline's registration.
-    // The single-thread runtime cannot poll the spawned build before this callback.
     dispatcher
         .subscribe(
             &root,
@@ -1263,7 +1236,6 @@ async fn a_stop_settles_the_branch_tool_while_the_tree_still_builds_the_child() 
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
-    // The probe holds the child build; once released, this build fails.
     probe.delay_child.store(true, Ordering::SeqCst);
     session
         .submit(

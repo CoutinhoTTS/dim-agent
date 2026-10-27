@@ -23,7 +23,6 @@ async fn soon<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    // Keep completed events for the cleanup assertions in this flow.
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     builder
         .process_value(Arc::new(ModelHost(model)))
@@ -276,8 +275,6 @@ async fn a_branch_failing_after_its_root_is_built_rolls_it_back_before_releasing
             "main".into(),
             0,
             BranchOptions {
-                // Passes branch admission; the initial input fails validation
-                // after the branch root is built.
                 prompt: String::new(),
                 source: BranchSource::Host {
                     operation_id: "review".into(),

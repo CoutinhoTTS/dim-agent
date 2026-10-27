@@ -305,8 +305,6 @@ async fn grow(
             let text = match mix {
                 "plain" => format!("plain turn {turns}"),
                 "tools" => format!("tool:echo {{\"text\":\"tool turn {turns}\"}}"),
-                // The product window: 1,000 bytes a turn, text and tool turns
-                // alternating.
                 _ if turns % 2 == 1 => {
                     format!(
                         "tool:echo {{\"text\":\"tool turn {turns} {}\"}}",
@@ -325,8 +323,6 @@ async fn grow(
             ms(start, Instant::now())
         );
         if std::env::var_os("RESTORE_COST_CHILD").is_some() {
-            // A child cut at main's head runs one turn of its own, so a
-            // restore also opens a branch whose ancestry is main's history.
             let at = session.sequence("main")?;
             let child = session
                 .branch(
@@ -734,7 +730,6 @@ async fn main() -> std::result::Result<(), Error> {
     let mut events = BTreeMap::new();
     let mut create = vec![];
     for rep in 0..reps {
-        // Rotate the order so no size always runs first or last.
         let mut order: Vec<_> = sessions.iter().collect();
         order.rotate_left(rep % sessions.len());
         for (target, id) in order {

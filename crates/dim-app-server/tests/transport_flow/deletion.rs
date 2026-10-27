@@ -180,7 +180,6 @@ async fn delete_closes_a_running_session_and_removes_what_it_stored() {
         store.file_rows(&file) == 0 && !exists(&store.file(&file))
     })
     .await;
-    // Nothing cascades to another Session.
     assert_eq!(store.rows(&kept), kept_rows);
     assert!(exists(&store.output(&kept)));
 
@@ -201,14 +200,12 @@ async fn delete_closes_a_running_session_and_removes_what_it_stored() {
             "{method}"
         );
     }
-    // A repeated delete, and one of an id that never existed, reply {}.
     for id in [sid.clone(), uuid::Uuid::new_v4().to_string()] {
         assert_eq!(
             other.rpc("session.delete", json!({"sessionId":id})).await["result"],
             json!({})
         );
     }
-    // Shape and protocol checks.
     assert_eq!(
         other.rpc("session.delete", json!({})).await["error"]["code"],
         -32602
@@ -219,7 +216,6 @@ async fn delete_closes_a_running_session_and_removes_what_it_stored() {
             .await["error"]["code"],
         -32602
     );
-    // An id that is not one path component names no Session's output.
     std::fs::create_dir_all(store.output(&kept).join("inner")).unwrap();
     for id in [
         format!("{kept}/inner"),
@@ -295,7 +291,6 @@ async fn unloaded_and_damaged_sessions_are_deleted_by_id() {
             "{id} does not load"
         );
     }
-    // A Session without its command output loads.
     assert_ok(
         &client
             .rpc("session.attach", json!({"sessionId":outputless}))
@@ -400,7 +395,6 @@ async fn a_failed_delete_leaves_the_session_closed_until_a_retry() {
         })
         .expect("the request was delivered");
 
-    // An entry of the leader's output the daemon cannot remove.
     let locked = store.output(&lead).join("locked");
     std::fs::create_dir_all(&locked).unwrap();
     std::fs::write(locked.join("exec.log"), b"output").unwrap();
@@ -432,7 +426,6 @@ async fn a_failed_delete_leaves_the_session_closed_until_a_retry() {
     }
     let list = client.rpc("session.list", json!({})).await;
     assert!(!listed(&list, &lead) && listed(&list, &member), "{list}");
-    // The leader's close stopped its request; the member stays a Session.
     let member_session = agent.get_session(&member).unwrap();
     assert!(!member_session.state("main").unwrap().running);
 

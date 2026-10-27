@@ -181,7 +181,6 @@ impl ShellInput {
         if cancel.is_cancelled() {
             return Err(RpcError::interrupted());
         }
-        // A reload's next generation serves a retry; a closing Session none.
         if self.generation.is_cancelled() {
             return Err(RpcError::reloading());
         }
@@ -223,8 +222,6 @@ impl ShellInput {
         check_run_id(&p.run_id)?;
         self.admit(&self.registry.lock().unwrap(), &p.run_id, &cancel)?;
         self.tree.get(&p.branch_id)?;
-        // The builder may wait for HostPlatform's shell lock and resolution;
-        // the call's token ends that wait, so no unload waits for it.
         let built = async {
             #[cfg(feature = "testing")]
             testing::pause(&self.cwd).await;
@@ -245,14 +242,6 @@ impl ShellInput {
         let (send, reply) = oneshot::channel();
         {
             let mut registry = self.registry.lock().unwrap();
-            // The admission that counts: one step with the Session hold, the
-            // spawn and the registration. A call interrupted before it starts
-            // nothing and leaves its runId unused; after it, the run belongs
-            // to this generation (A.4). The disposer closes `runs` under this
-            // lock after the generation token fired, so every admitted run is
-            // tracked. The spawn (fork and exec) runs under this std mutex,
-            // which no await holds, so `shell.list` and `shell.stop` wait for
-            // that alone.
             self.admit(&registry, &p.run_id, &cancel)?;
             if registry.stopped.remove(&p.run_id) {
                 registry.used.insert(p.run_id.clone());
@@ -264,8 +253,6 @@ impl ShellInput {
                     "durationMs": 0,
                 }));
             }
-            // None once the Session is closing or an idle release has been
-            // decided; a refused spawn drops it with the start.
             let hold = self.lifecycle.take_hold().ok_or_else(RpcError::closed)?;
             let tree = self.platform.spawn(spec).map_err(|error| {
                 refused("spawn_failed", format!("Failed to spawn process: {error}"))
@@ -335,7 +322,6 @@ impl ShellInput {
         let mut ticks = tokio::time::interval(PROGRESS_INTERVAL);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut sent = None;
-        // An exit already there wins over a stop or the end of the part.
         let end = loop {
             tokio::select! {
                 biased;
@@ -352,13 +338,9 @@ impl ShellInput {
             End::Exited(Ok(_)) => Ok(()),
             _ => tree.terminate().await,
         };
-        // Output ready at the exit is read for exec's grace, then the pipes
-        // close; descendants left in the background do not hold the run.
         stop_pumps.cancel();
         futures_util::future::join_all(pumps).await;
         drop(tree);
-        // The rest of the output, still one interval after the last item;
-        // before the Session part is checked again for the write below.
         if !self.ending()
             && let Some(item) = output.take_progress()
         {
@@ -367,13 +349,6 @@ impl ShellInput {
             }
             progress.send(item);
         }
-        // Whether to write is decided here, and nothing yields before
-        // `record` commits: an input without a submission id is written in
-        // the first poll of `Branch::input`. A run the Session part ended never writes, since
-        // `ending()` stays true. A Session that starts closing after this
-        // check gets the input like any input sent just before its close,
-        // and once its branch's close has started `Branch::input` refuses it
-        // (`recorded.error`).
         let (result, outcome) = if self.ending() {
             (Err(RpcError::interrupted()), "interrupted".to_owned())
         } else {
@@ -433,8 +408,6 @@ impl ShellInput {
             };
             (Ok(result), outcome)
         };
-        // Free the Session before replying, so the caller can start the next
-        // run; this also drops the run's hold, after its last fact above.
         self.registry.lock().unwrap().running = None;
         ended.cancel();
         span.record("outcome", outcome.as_str());
@@ -609,7 +582,6 @@ impl DynPlugin for ShellInputPlugin {
             let methods = ctx.require_at(&self.methods)?;
             let shell = Arc::new(ShellInput {
                 platform,
-                // `session.create` validated and canonicalized the cwd.
                 cwd: PathBuf::from(&config.cwd),
                 tree,
                 lifecycle,
@@ -627,8 +599,6 @@ impl DynPlugin for ShellInputPlugin {
                 owner.runs.wait().await;
                 Ok(())
             })?;
-            // After the effect above, so the provider's unload, which settles
-            // the calls, runs before the runs are awaited.
             methods.register(
                 ctx,
                 SHELL_METHODS,
@@ -643,7 +613,6 @@ impl DynPlugin for ShellInputPlugin {
                 Arc::new(move |method, value, cancel, progress| {
                     let shell = shell.clone();
                     Box::pin(async move {
-                        // The provider admits only the declared names.
                         match method.as_str() {
                             "shell.run" => shell.run(value, cancel, progress).await,
                             "shell.stop" => shell.stop(value, cancel).await,

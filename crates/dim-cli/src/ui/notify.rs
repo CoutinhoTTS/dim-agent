@@ -51,7 +51,6 @@ pub fn sequence(terminal: &Terminal, event: &Event) -> Vec<u8> {
         Event::Permission(tool) => tf("Permission needed: {tool}", &[("tool", tool)]),
         Event::Question => t("Question waiting for your answer").to_owned(),
     };
-    // `;` ends an OSC parameter and control characters end the sequence.
     let clean = |text: &str| -> String {
         text.chars()
             .filter(|c| !c.is_control())
@@ -108,6 +107,13 @@ mod tests {
                 &Event::Permission("bash;rm".into())
             ),
             "\x1b]777;notify;DIM;Permission needed: bash,rm\x07".as_bytes()
+        );
+        assert_eq!(
+            sequence(
+                &on("ghostty", "xterm-ghostty"),
+                &Event::Permission("ba\u{7}sh\u{1b}".into())
+            ),
+            "\x1b]777;notify;DIM;Permission needed: bash\x07".as_bytes()
         );
         assert_eq!(sequence(&on("Apple_Terminal", "xterm"), &done), b"\x07");
         let tmux = Terminal {

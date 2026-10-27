@@ -196,9 +196,6 @@ impl Parts {
         let mut ids = HashSet::new();
         let mut snapshots = HashMap::new();
         let mut rows = Vec::new();
-        // Before the rows register their names and the resolvers take the
-        // catalog. Parts register their tools and method namespaces with
-        // their owners, which provide their own dispatchers.
         share_names(builder.catalog_mut());
         for row in &config.rows {
             let id = row
@@ -228,9 +225,6 @@ impl Parts {
                      its Session and branch parts with partRegistry",
                 ));
             }
-            // The names the plugin's parts provide in their instances: the
-            // catalog is fixed before the runtime starts, so the row says
-            // which group each belongs to (rutis usage §2).
             let instance_names = match row.get("instanceNames") {
                 None => Map::new(),
                 Some(Value::Object(names)) => names.clone(),
@@ -287,7 +281,6 @@ impl Parts {
                         "TypeScript row provides the removed {family} name {service}; register through {owner} instead"
                     )));
                 }
-                // A process name the catalog does not hold yet.
                 if let Err(LoaderError::UnknownService(_)) =
                     builder.catalog().key_in(service, &Build::default())
                 {
@@ -295,8 +288,6 @@ impl Parts {
                 }
             }
             snapshots.insert(name.to_owned(), provides.clone());
-            // `settings` is the host's input to Settings and `instanceNames`
-            // went to the catalog: neither is a loader field.
             let mut row = row.clone();
             if let Value::Object(fields) = &mut row {
                 fields.remove("settings");
@@ -308,7 +299,6 @@ impl Parts {
             .interpreter(config.node.clone())
             .named("session-node");
         let node = ForeignRuntime::new("session-node", node, RuntimeResolver::node, builder);
-        // Named `py`, so its rows are named `py:<module>`.
         let python = config.python.as_ref().map(|python| {
             let mut runtime =
                 LocalRuntime::python(&python.project).interpreter(python.interpreter.clone());
@@ -382,7 +372,6 @@ impl Resolver for SessionResolver {
             let original = runtime.resolve(name).await?;
             match original.meta.get("provides") {
                 Some(Value::Object(actual)) if actual == snapshot => {}
-                // The pinned SDK resolves this placeholder again before releasing RuntimeRows.
                 None if original.meta["source"] == "runtime"
                     && original.meta["schema"]
                         == "unavailable: the Cordis runtime is not running" => {}

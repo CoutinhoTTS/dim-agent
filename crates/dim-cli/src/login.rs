@@ -99,7 +99,6 @@ pub async fn login(client: &mut Client, options: &Options, provider_id: &str) ->
     let mut params = params;
     params["redirectUri"] = json!(options.redirect_uri);
     let browser: Browser = client.typed("account.login.browser.begin", params).await?;
-    // Launching is best effort: the URL remains usable without desktop integration.
     println!("Open: {}", safe(&browser.authorization_url));
     open_browser(&browser.authorization_url);
     let mut input = Input::new()?;
@@ -133,7 +132,6 @@ pub async fn login(client: &mut Client, options: &Options, provider_id: &str) ->
         result = &mut complete => { result?; }
         signal = tokio::signal::ctrl_c() => {
             signal?;
-            // The plugin owns an accepted exchange even if this waiter leaves.
             eprintln!("Login is still settling; use account {provider_id} to inspect the result");
             return Ok(130);
         }

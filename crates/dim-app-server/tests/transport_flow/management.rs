@@ -87,9 +87,6 @@ async fn owner_contributions_survive_reload_and_keep_entry_boundaries() {
         client.rpc("account.codex.unknown", json!({})).await["error"]["code"],
         -32601
     );
-    // A name a management namespace holds is management's even when its
-    // params name a Session: Rpc never acquires one for it (which would
-    // answer `session_closed` for this id).
     let reply = client
         .rpc(
             "mcp.extra.echo",
@@ -100,8 +97,6 @@ async fn owner_contributions_survive_reload_and_keep_entry_boundaries() {
         reply["error"]["data"]["appError"], "unknown_method",
         "{reply}"
     );
-    // A management provider reload neither reloads Rpc nor closes the
-    // connection: the same client keeps every namespace once Mcp is active.
     server.restart("Mcp").await.unwrap();
     for method in ["mcp.catalog", "skills.catalog", "account.codex.status"] {
         assert_ok(&client.rpc(method, json!({})).await);
@@ -124,8 +119,6 @@ async fn owner_contributions_survive_reload_and_keep_entry_boundaries() {
         "provider.catalog",
         "configuration.catalog",
     ] {
-        // The entry decides first: a protected profile serves only hello and
-        // ping to non-local transports, whether or not a method exists.
         assert_eq!(
             remote.rpc(method, json!({})).await["error"]["data"]["appError"],
             "local_transport_required"

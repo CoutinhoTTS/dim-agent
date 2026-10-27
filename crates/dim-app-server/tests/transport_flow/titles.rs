@@ -208,7 +208,6 @@ async fn set_title_commits_revisions_and_announces_each_commit_once() {
             metadata.read(&sid).await,
             ok(json!({"revision": 2, "title": renamed}))
         );
-        // The same text again is a new revision; a clear keeps counting.
         assert_eq!(
             metadata.set(&sid, 2, renamed.clone()).await,
             ok(json!({"revision": 3}))
@@ -219,13 +218,11 @@ async fn set_title_commits_revisions_and_announces_each_commit_once() {
         );
         assert_eq!(code(&metadata.set(&sid, 2, auto.clone()).await), "conflict");
 
-        // Never created: `not_found`, and nothing is written.
         assert_eq!(code(&metadata.read("missing").await), "not_found");
         assert_eq!(
             code(&metadata.set("missing", 0, auto.clone()).await),
             "not_found"
         );
-        // Malformed calls are bridge errors; an omitted title is not a clear.
         for (method, request) in [
             ("setTitle", json!({"sessionId": sid, "expectedRevision": 4})),
             (
@@ -365,15 +362,11 @@ async fn failed_writes_announce_nothing_and_dropped_calls_still_settle() {
             metadata.read(&sid).await,
             ok(json!({"revision": 1, "title": before}))
         );
-        // Startup requires the exact schema, so the triggers go before any
-        // restart of this store.
         store
             .connection()
             .execute_batch("DROP TRIGGER fail_title_insert; DROP TRIGGER fail_title_update")
             .unwrap();
 
-        // The client awaits the reply future, then drops it while the
-        // write is held before its transaction.
         let mut held = hold_title_write(&sid);
         let reply = metadata
             .start("setTitle", set_request(&sid, 1, title("Dropped", "manual")))
@@ -438,10 +431,6 @@ async fn closing_settles_admitted_title_writes_and_refuses_later_ones() {
         server.shutdown();
         let stopped = tokio::spawn(server.join());
 
-        // Probes name no stored Session, so they write nothing either way.
-        // Admitted, they wait behind the held write and then fail
-        // `not_found`; once SessionStore is closing they fail at once, so the
-        // first probe to finish shows that closing has started.
         let missing = || set_request("missing", 0, title("Probe", "auto"));
         let mut probes = vec![];
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -465,8 +454,6 @@ async fn closing_settles_admitted_title_writes_and_refuses_later_ones() {
         drop(held);
         assert_eq!(running.await.unwrap(), ok(json!({"revision": 1})));
         assert_eq!(waiting.await.unwrap(), ok(json!({"revision": 2})));
-        // The probes started before closing settle; every later one was
-        // refused.
         let mut codes = vec![];
         for probe in probes {
             codes.push(code(&probe.await.unwrap()).to_owned());
@@ -481,7 +468,6 @@ async fn closing_settles_admitted_title_writes_and_refuses_later_ones() {
 
         let (server, agent, metadata) = serve_titles(&store).await;
         let mut client = Client::new_version(&server, false, 3).await;
-        // Another Session gives the test its consumer part.
         session(&mut client).await;
         assert_eq!(
             metadata.read(&sid).await,
@@ -550,7 +536,6 @@ async fn titles_survive_restart_skip_forks_and_go_with_their_session() {
         listed_everywhere(&mut client, &sid).await,
         fields(Some(("Kept", "manual")), 1)
     );
-    // Another Session gives the test its consumer part; `sid` stays unloaded.
     session(&mut client).await;
     assert_eq!(
         metadata.read(&sid).await,

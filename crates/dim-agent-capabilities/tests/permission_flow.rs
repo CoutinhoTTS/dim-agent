@@ -225,7 +225,6 @@ async fn presets_decide_by_risk_and_denied_calls_do_not_run() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
         let agent = agent(tools.clone());
-        // read, write, exec, mcp, skill, plain (unclassified)
         let expected = [
             (
                 PermissionPreset::ReadOnly,
@@ -249,7 +248,6 @@ async fn presets_decide_by_risk_and_denied_calls_do_not_run() {
             }
             session.close().await.unwrap();
         }
-        // A denied call is a tool error and never reaches its handler.
         let session = agent
             .create_session(config(PermissionPolicy::default()))
             .await
@@ -336,7 +334,6 @@ async fn updates_are_versioned_per_branch_take_effect_when_dispatched_and_surviv
                 .count()
         };
 
-        // A call admitted before the update runs; calls after it use the new policy.
         session
             .submit("tool:hold {}".into(), InputMode::Queue, "main")
             .await
@@ -362,7 +359,6 @@ async fn updates_are_versioned_per_branch_take_effect_when_dispatched_and_surviv
         );
         assert!(call(&session, "exec").await);
 
-        // A stale version writes nothing; of two updates on one version one wins.
         assert_eq!(
             permission
                 .update(0, preset(PermissionPreset::FullAccess))
@@ -383,7 +379,6 @@ async fn updates_are_versioned_per_branch_take_effect_when_dispatched_and_surviv
         let current = session.get::<PermissionState>("main").unwrap().unwrap();
         assert_eq!(current.version, won);
 
-        // A child inherits the policy at its fork with version 0 and changes alone.
         let tail = session.sequence("main").unwrap();
         let child = session
             .branch(
@@ -416,7 +411,6 @@ async fn updates_are_versioned_per_branch_take_effect_when_dispatched_and_surviv
             current
         );
 
-        // The policy is rebuilt from history.
         let id = session.id().to_owned();
         session.close().await.unwrap();
         drop(session);
@@ -533,7 +527,6 @@ impl rutis::host::DynPlugin for RespondOnStop {
                 let mut pending = Vec::new();
                 approval.replay(|request| pending.push(request.approval_id.clone()));
                 for id in pending {
-                    // Only the commit matters; the response settles later.
                     let _ = approval
                         .respond(&id, ApprovalDecision::Allow)
                         .now_or_never();
@@ -621,7 +614,6 @@ async fn allow_rules_answer_approval_only_for_simple_commands_within_the_preset(
             .unwrap();
         assert_eq!(text(&exec(&session, "cargo test -p x").await), "exec ran");
         assert_eq!(approval_requests(&session).await, 0);
-        // Not simple, or not on a word boundary: the preset asks.
         let approval = session.service::<Approval>("main").unwrap();
         for command in ["cargo test; rm x", "cargo test > out", "cargo testx"] {
             submit_exec(&session, command).await;
@@ -632,7 +624,6 @@ async fn allow_rules_answer_approval_only_for_simple_commands_within_the_preset(
         assert_eq!(approval_requests(&session).await, 3);
         session.close().await.unwrap();
 
-        // An allow rule never lifts a preset denial.
         let session = agent
             .create_session(config(preset(PermissionPreset::ReadOnly)))
             .await
@@ -662,7 +653,6 @@ async fn deny_rules_match_any_segment_under_every_preset_and_are_read_at_use_tim
             .await
             .unwrap();
         assert_eq!(text(&exec(&session, "git push origin").await), "exec ran");
-        // The next call reads the new rules; nothing reloads.
         rules.set(Some(vec![
             rule("git push", Prefix, Deny),
             rule("git push", Prefix, Allow),
@@ -779,7 +769,6 @@ async fn a_policy_tightened_during_the_rules_read_decides_the_call() {
         let rules = Arc::new(HeldRules::default());
         let agent = ruled_agent(tools.clone(), rules.clone());
 
-        // First decision: FullAccess when the read starts, ReadOnly when it ends.
         let session = agent
             .create_session(config(preset(PermissionPreset::FullAccess)))
             .await
@@ -800,7 +789,6 @@ async fn a_policy_tightened_during_the_rules_read_decides_the_call() {
         );
         session.close().await.unwrap();
 
-        // Recheck after an allow response: the tool is disallowed meanwhile.
         rules.hold.store(false, Ordering::SeqCst);
         let session = agent
             .create_session(config(preset(PermissionPreset::WorkspaceWrite)))

@@ -65,7 +65,6 @@ impl Applied {
         Self {
             id: data.input_id.clone(),
             sequence: event.sequence,
-            // Samples of the frozen contract carry no mode.
             mode: data.mode.unwrap_or_default(),
         }
     }
@@ -131,8 +130,6 @@ pub struct AgentLoop {
 impl AgentLoop {
     fn publish(&self, slot: &Option<Turn>) {
         let open = slot.as_ref().filter(|turn| turn.open);
-        // An interrupted turn is stopping until its turn/end, including one
-        // whose turn/start is written but not yet dispatched.
         let phase = match slot {
             Some(turn) if turn.interrupted.is_some() => LoopPhase::Stopping,
             Some(turn) if turn.open => LoopPhase::Running,
@@ -181,7 +178,6 @@ impl AgentLoop {
         if slot.is_some() || self.compaction.lock().unwrap().running() {
             return Ok(());
         }
-        // With no open turn every consumption was dispatched: nothing is claimed.
         if !self.driven() {
             return Ok(());
         }
@@ -289,7 +285,6 @@ impl AgentLoop {
         turn_id: Option<String>,
         through: u64,
     ) {
-        // An unloading Loop starts nothing; the next load settles the command.
         if self.lifecycle.is_cancelled() {
             return;
         }
@@ -403,9 +398,6 @@ impl AgentLoop {
     }
     /// Writes the inputs the next request consumes, then its `step/model-start`.
     fn start_request(&self, turn: &mut Turn, source: Option<ContextPrepareData>) -> Result<()> {
-        // Inputs applied during the turn join the next request built from
-        // the Timeline; a budget retry reuses its fixed request and leaves
-        // them pending for a later request or turn.
         let chosen: Vec<String> = match source {
             Some(_) => Vec::new(),
             None => {
@@ -436,9 +428,7 @@ impl AgentLoop {
             })
             .into(),
         );
-        // Consumption is dispatched later; until then the inputs are claimed.
         self.claimed.lock().unwrap().extend(chosen);
-        // Separate commits: a branch may fork right before the model-start.
         for event in events {
             self.timeline.append(event)?;
         }
@@ -476,8 +466,6 @@ impl AgentLoop {
         else {
             return;
         };
-        // Not dispatched yet, the model-start ends the request; a preparation
-        // that already handed the request over ignores the mark.
         request.replaced = true;
         if let Some(cancel) = &request.preparation {
             cancel.cancel();
@@ -497,7 +485,6 @@ impl AgentLoop {
                     starts.push((event.sequence, data.clone()))
                 }
                 EventKind::ContextCompaction(data) => {
-                    // A result answers only its own command.
                     commands.retain(|command| Some(*command) != data.command);
                     starts.retain(|(sequence, _)| Some(*sequence) != data.start);
                 }
@@ -528,9 +515,6 @@ impl AgentLoop {
                 EventKind::TurnEnd(_) => *slot = None,
                 _ => {
                     let Some(turn) = slot.as_mut() else { continue };
-                    // Every step event of a turn belongs to its current
-                    // request: a request starts after the previous one's
-                    // terminal.
                     match &event.kind {
                         EventKind::ModelStart(data) => {
                             turn.request = Some(Request {
@@ -616,13 +600,9 @@ impl AgentLoop {
         }
         self.publish(slot);
         let Some(turn) = slot.as_mut() else {
-            // Applied inputs left from before the restart start a turn now.
             return self.try_start(slot);
         };
         turn.failed = Some(CAPABILITY_RELOADING.into());
-        // A request this Loop started but had not handed to context
-        // preparation owes a terminal only this Loop can write; its output end
-        // reaches this Loop, which ends the failed turn.
         if let Some(request) = turn
             .request
             .as_ref()
@@ -642,7 +622,6 @@ impl AgentLoop {
             )?;
             return Ok(());
         }
-        // A model output or a dispatched tool batch still owes a terminal.
         let outstanding = turn.request.as_ref().is_some_and(|request| {
             request.stage == Stage::Model
                 || (request.stage == Stage::Tools && request.call_event_id.is_some())
@@ -670,7 +649,6 @@ impl AgentLoop {
         self.tasks.spawn(async move {
             let work = AssertUnwindSafe(async {
                 if let Some(mut source) = recovery {
-                    // A budget recovery keeps the tools of the request it retries.
                     owner
                         .binding
                         .transfer(&source.request_id, &request_id)
@@ -690,7 +668,6 @@ impl AgentLoop {
                         provider_id: data.settings.provider_id.clone(),
                         model_id: data.settings.model_id.clone(),
                         capability_snapshot: data.settings.capability_snapshot.clone(),
-                        // Declaration and handlers are fixed together.
                         tools: Some(match &data.settings.tools {
                             Some(tools) => {
                                 owner
@@ -776,8 +753,6 @@ impl AgentLoop {
                             .then(|| CAPABILITY_RELOADING.to_owned())
                     })
                     .or_else(|| request.replaced.then(|| REPLACED_BY_STEER.to_owned()));
-                // Decided under the turn lock: a steer consumed after this
-                // finds the request handed over.
                 request.preparation = None;
                 let kind = match reason {
                     Some(reason) => EventKind::ModelOutputEnd(ModelOutputEndData {
@@ -819,7 +794,6 @@ impl AgentLoop {
                 self.pending.lock().unwrap().push(input);
                 match slot.as_mut() {
                     None => return self.try_start(&mut slot),
-                    // An append input waits for the next request built.
                     Some(turn) if drives => self.steer(turn),
                     Some(_) => {}
                 }
@@ -833,12 +807,9 @@ impl AgentLoop {
                 self.claimed.lock().unwrap().remove(&data.input_id);
                 return Ok(());
             }
-            // A signal to the work in flight: the current turn, even one whose
-            // turn/start is still pending, and the inputs not yet consumed.
             EventKind::StopInterrupt(data) => {
                 self.interrupted_at.store(event.sequence, Ordering::Release);
                 {
-                    // The running step is cancelled; a waiting one ends now.
                     let mut compaction = self.compaction.lock().unwrap();
                     match compaction.command.as_ref() {
                         Some(Command {
@@ -892,10 +863,7 @@ impl AgentLoop {
                     })
                     .ok_or_else(|| AgentError::fault("Loop", "invalid turn/start"))?;
                 turn.open = true;
-                // next_model consumes every applied input, including those
-                // left over from before an interrupt.
                 let result = self.next_model(turn, None, event.sequence);
-                // Running is published once turn/start is dispatched.
                 self.publish(&slot);
                 return result;
             }
@@ -907,10 +875,8 @@ impl AgentLoop {
                     return Err(AgentError::fault("Loop", "unexpected turn/end"));
                 }
                 *slot = None;
-                // Whatever request the turn ended with is settled.
                 self.binding.retain_only(None);
                 self.publish(&slot);
-                // A step still waiting at the turn's end runs now, with no turn.
                 let mut compaction = self.compaction.lock().unwrap();
                 if compaction.waiting() {
                     self.start_step(&mut compaction, None, event.sequence);
@@ -922,9 +888,7 @@ impl AgentLoop {
             EventKind::ContextCompact(_) => {
                 let mut compaction = self.compaction.lock().unwrap();
                 match compaction.command.as_mut() {
-                    // The outstanding command, written by `compact`.
                     Some(command) if command.sequence == event.sequence => command.consumed = true,
-                    // Another command is outstanding: this one is not queued.
                     Some(_) => {
                         self.timeline.append(
                             EventKind::ContextCompaction(ContextCompactionData {
@@ -959,7 +923,6 @@ impl AgentLoop {
                         )?;
                         return Ok(());
                     }
-                    // Written outside `compact`, or by an earlier Loop.
                     None => {
                         compaction.command = Some(Command {
                             sequence: event.sequence,
@@ -968,8 +931,6 @@ impl AgentLoop {
                         })
                     }
                 }
-                // At once when no request is in flight; otherwise at the next
-                // step boundary.
                 if slot
                     .as_ref()
                     .is_none_or(|turn| turn.request.is_none() && !turn.ending)
@@ -980,9 +941,6 @@ impl AgentLoop {
                 return Ok(());
             }
             EventKind::ContextCompaction(data) => {
-                // The result of the outstanding command clears the slot; only
-                // a step that ran resumes the Loop. Other results (skips and
-                // settlements) change nothing.
                 let mut compaction = self.compaction.lock().unwrap();
                 let Some(command) = compaction
                     .command
@@ -1036,8 +994,6 @@ impl AgentLoop {
                     return Err(AgentError::fault("Loop", "duplicate model-start"));
                 }
                 request.stage = Stage::Model;
-                // Interrupted, or replaced by a steer consumed before its
-                // model-start was dispatched: it ends without preparing.
                 let reason = turn
                     .interrupted
                     .clone()
@@ -1093,11 +1049,9 @@ impl AgentLoop {
                             && turn.interrupted.is_none()
                             && self.driven()
                         {
-                            // Replaced by a steer: the turn goes on with it.
                             self.binding.release(&request.id);
                             self.next_model(turn, None, event.sequence)?;
                         } else {
-                            // A reload settled the request: the turn fails and stops.
                             if reason == CAPABILITY_RELOADING {
                                 turn.failed = Some(CAPABILITY_RELOADING.into());
                             }
@@ -1108,11 +1062,8 @@ impl AgentLoop {
                     ModelOutputOutcome::Completed { finish_reason } => {
                         request.stage = Stage::Tools;
                         if let Some(error) = turn.failed.clone() {
-                            // Proposed calls are not dispatched; the turn end closes them.
                             self.end(turn, TurnOutcome::Failed { error })?;
                         } else if let Some(reason) = turn.interrupted.clone() {
-                            // An interrupted turn starts no more work; its
-                            // proposed calls are closed by the turn end.
                             self.end(turn, TurnOutcome::Cancelled { reason })?;
                         } else if !request.calls.is_empty() {
                             let event = self.timeline.append(
@@ -1125,8 +1076,6 @@ impl AgentLoop {
                             )?;
                             request.call_event_id = Some(event.id.clone());
                         } else if self.driven() {
-                            // An input applied during the output: the turn
-                            // goes on with it instead of ending.
                             self.binding.release(&request.id);
                             self.next_model(turn, None, event.sequence)?;
                         } else {
@@ -1156,7 +1105,6 @@ impl AgentLoop {
                     && data.call_event_id.is_some()
                     && request.call_event_id == data.call_event_id =>
             {
-                // A reload settled the batch: the turn fails and stops.
                 if data
                     .results
                     .iter()
@@ -1164,7 +1112,6 @@ impl AgentLoop {
                 {
                     turn.failed = Some(CAPABILITY_RELOADING.into());
                 }
-                // Every call of the request settled.
                 self.binding.release(&request.id);
                 self.next_model(turn, None, event.sequence)?;
             }
@@ -1291,7 +1238,6 @@ impl DynPlugin for LoopPlugin {
                                 let mut slot = owner.turn.lock().unwrap();
                                 let rebuilt = owner.rebuild(&mut slot, &events);
                                 if rebuilt.is_ok() {
-                                    // A new Loop keeps only the bindings of the request it resumes.
                                     owner.binding.retain_only(
                                         slot.as_ref()
                                             .and_then(|turn| turn.request.as_ref())
