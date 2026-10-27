@@ -1,6 +1,6 @@
 # 007: PluginManager keeps plugin configuration; rutis and content owners keep state
 
-Decision status: Accepted by the repository owner (2026-10-27). Implementation: in progress ([#485](https://github.com/arcships/dim/pull/485)); the
+Decision status: Accepted by the repository owner (2026-10-27). Implementation: not started; the
 design is [PluginManager](../design/plugins/PluginManager.md), tracked by
 [#3](https://github.com/arcships/dim/issues/3) and [#384](https://github.com/arcships/dim/issues/384).
 [中文](../zh/adr/007-plugin-configuration.md)

@@ -2,7 +2,7 @@
 
 [English](../../adr/007-plugin-configuration.md)
 
-决策状态：已由仓库所有者接受（2026-10-27）。实现：进行中（[#485](https://github.com/arcships/dim/pull/485)）；设计见
+决策状态：已由仓库所有者接受（2026-10-27）。实现：未开始；设计见
 [PluginManager](../design/plugins/PluginManager.md)，由 [#3](https://github.com/arcships/dim/issues/3) 和
 [#384](https://github.com/arcships/dim/issues/384) 跟踪。
 
