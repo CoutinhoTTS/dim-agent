@@ -23,11 +23,29 @@ On macOS/Linux isolation is enabled by default and can be configured or disabled
 Unsupported Windows preserves ordinary execution. When enabled, missing backend support or
 failed setup refuses the payload; it never silently retries without isolation.
 
+A model command runs at one of three tiers, named by the node policy:
+
+| Tier | Boundary |
+| --- | --- |
+| `workspace` | The Session workspace is writable, system directories are read-only, no network (the default) |
+| `network` | The same files, plus host networking |
+| `host` | No process isolation: the daemon user's ordinary access |
+
+`exec` carries an optional `sandbox` argument naming a tier; the node's tier is both the default
+and the ceiling. A request at or below it applies directly. A request above it runs only where the
+node sets `escalation: "ask"`, and otherwise fails with `isolation_denied` before any payload
+starts. The argument is the model's decision, so Permission and Approval admit the call as usual;
+neither widens anything by itself, and a permission preset is not authority (ADR 003 D5). The
+approval prompt shows the call, `sandbox` argument included. Under `workspace-write` commands ask,
+so an escalated command is approved per call; under `read-only` they are denied; under
+`full-access` they run without a prompt, which makes `escalation: "ask"` the only gate there. The
+persistent shell has no argument and keeps the node tier.
+
 | Resource | Default and configuration |
 | --- | --- |
 | Files | Platform system executable/library/configuration directories are read-only; the Session workspace is writable. Persistent shells also have their host-owned current branch output directory writable by default. On macOS each isolated process tree also has its own host-owned [temporary directory](#temporary-directory) writable by default. Explicit read/write lists replace those defaults and may be empty; the read-only list may also name single files. |
 | Workspace | The immutable Session `cwd`, supplied by the consumer. A model's per-command cwd never expands the grant. |
-| Network | Disabled by default; `network: true` enables host/external networking. No per-command exception or approval matrix. |
+| Network | Off at the `workspace` tier; the `network` tier enables host/external networking. A wider tier is the `sandbox` argument plus the node's `escalation`, never a per-command exception outside that policy. |
 | Environment | An explicit name list selects values already in ProcessSpec. Defaults are PATH, HOME, LANG, LC_ALL, LC_CTYPE, TERM, NO_COLOR, PAGER, GIT_PAGER and GH_PAGER; macOS adds DEVELOPER_DIR and XDG_CONFIG_HOME, which select the developer directory and git configuration that its default grants cover. A name passes only when the service environment sets it. When the default temporary directory applies, TMPDIR names it and replaces any selected value. No credential variables are synthesized. |
 | Runtime | Backend-required devices and the caller's existing stdio/PTY; Linux has its private /proc and namespace skeleton. Host /tmp, the user's own TMPDIR and the home receive no implicit grant, apart from git's global configuration on macOS; macOS temporary files use the per-process directory above. |
 | Running processes | Policy is a startup snapshot. Edits affect the next process; running exec and persistent shells retain their original boundary. |
@@ -64,28 +82,41 @@ its declared FileStorage dependency. It is not project, client or Session config
 execution reads the remote node's file. HostPlatformConfig supplies an optional file location,
 as with exec-shell.json. The location is structural; the file's policy is business data.
 
-The file is a new, versioned format. Version 1 accepts `enabled`, `network`, `readOnlyPaths`,
+The file is a new, versioned format. Version 2 accepts `sandbox`, `escalation`, `readOnlyPaths`,
 `writablePaths` and `environment`. Each omitted policy field uses the default in the table;
 an explicitly empty list grants none of that resource. Only `version` is required when a file
-exists. Examples:
+exists. Version 1 files stay valid: they name the tier with `enabled` and `network`, and never
+permit escalation. Examples:
 
 ```json
-{"version": 1, "enabled": false}
+{"version": 2, "sandbox": "host"}
 ```
 
-An explicit Linux policy can keep isolation enabled, allow downloads, let git read the user's
-global configuration and name a writable workspace:
+```json
+{"version": 2, "sandbox": "workspace", "escalation": "ask"}
+```
+
+An explicit Linux policy can keep the default tier, allow a command to ask for the network, let
+git read the user's global configuration and name a writable workspace:
 
 ```json
 {
-  "version": 1,
-  "enabled": true,
-  "network": true,
+  "version": 2,
+  "sandbox": "workspace",
+  "escalation": "ask",
   "readOnlyPaths": ["/usr", "/bin", "/sbin", "/lib", "/etc", "/home/user/.gitconfig"],
   "writablePaths": ["/workspace/project"],
   "environment": ["PATH", "HOME", "LANG", "TERM", "NO_COLOR"]
 }
 ```
+
+`sandbox` is `workspace`, `network` or `host`. `escalation` is `deny` (default) or `ask`: `deny`
+refuses every request above the node tier, `ask` runs an approved request at the tier it names.
+Version 1 maps `enabled: false` to `host`, `network: true` to `network` and everything else to
+`workspace`, with `escalation` denied. A field that belongs to another version, an unknown field,
+an unknown version, malformed/unreadable files, non-absolute or nonexistent roots, a read-only
+root that is neither a directory nor a regular file, a writable root that is not a directory, and
+invalid environment names are errors.
 
 The path list is node-specific; it is not a portable Linux runtime promise. Each entry of
 either list is a root. A read-only root is an existing absolute directory or regular file; a
@@ -96,9 +127,6 @@ not let a client connect to a socket, and read-only binds do not permit device a
 roots stay directories, because a tool usually replaces a file by renaming a new sibling over it,
 which a single-file grant cannot allow. Preserve executable and dotfile aliases at their requested
 absolute destinations while resolving/validating their host roots once at this external boundary.
-Unknown fields, missing/unknown versions, malformed/unreadable files, non-absolute or nonexistent
-roots, a read-only root that is neither a directory nor a regular file, a writable root that is not
-a directory, and invalid environment names are errors.
 Names are nonempty and contain neither NUL nor '='. A declared or resolved read-only root cannot equal or
 be inside a writable root in the same path space: neither backend carves read-only exceptions out of a
 writable parent. A writable child inside a read-only root is supported.
@@ -107,7 +135,7 @@ filesystem access to the path it contains. No file is written merely because def
 
 Read at each model process start; no cache, watcher, Session subscription, loader reload or
 restart of an existing shell. No configured location, or a missing file at that location, uses
-the defined default. An existing invalid file fails explicitly. `enabled: false` returns the
+the defined default. An existing invalid file fails explicitly. The `host` tier returns the
 ordinary ProcessSpec without requiring a sandbox backend. Windows skips this unsupported policy
 and retains ordinary execution until it has an accepted backend contract.
 
@@ -117,12 +145,15 @@ and retains ordinary execution until it has an accepted backend contract.
    shell. Their owning Session configuration supplies the workspace separately from the model's
    requested working directory. ShellInput never enters this preparation.
 2. A crate-local HostPlatform operation prepares that spec once before spawn:
-   `prepare_isolated_process(spec, workspace: &Path, output_dir: Option<&Path>).await -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>`.
+   `prepare_isolated_process(spec, workspace: &Path, output_dir: Option<&Path>, requested: Option<Sandbox>).await -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>`.
    Only ShellSession supplies its immutable, host-owned current branch output directory.
-   It reads policy, selects the existing environment names and constructs backend argv/profile.
+   WorkspaceTools passes the resolved `sandbox` of the admitted `exec` call; ShellSession passes
+   `None`, which keeps the node tier.
+   It reads policy, resolves the tier, selects the existing environment names and constructs
+   backend argv/profile.
    The second value is the process's [temporary directory](#temporary-directory), when one applies.
    The third is the crate-local `Isolation` value of a wrapped spec, which the consumer keeps with
-   its process for [failure notes](#visibility). Explicitly disabled policy and unsupported Windows
+   its process for [failure notes](#visibility). The `host` tier and unsupported Windows
    return the original spec and neither value. No public service, protocol or ProcessSpec field is
    added.
 3. The consumer calls existing synchronous spawn or spawn_pty and attaches the temporary directory
@@ -252,7 +283,7 @@ directories, parents before children, which may lie inside read-only directories
 outside every directory root appears in otherwise empty parent directories that bubblewrap
 creates, and its siblings stay absent.
 
-`network: true` does not grant resolver files or service sockets outside the configured roots.
+The `network` tier does not grant resolver files or service sockets outside the configured roots.
 The default mounts exclude `/run`; Linux resolver setups whose `/etc/resolv.conf` points into
 `/run/systemd/resolve`, or whose NSS module requires a socket there, are not supported by the
 default policy. The exercised Debian baseline uses a plain resolver file; systemd-resolved
@@ -322,11 +353,14 @@ with path checks or Permission rules.
 
 ## Failure and persistence
 
-Policy parsing/setup failure runs no payload. Enabled isolation has no implicit fallback; explicit
-disablement is ordinary execution. Approval never widens filesystem/network policy. Existing
-consumers report their existing typed error/result; no new approval category or Timeline fact.
+Policy parsing/setup failure runs no payload. Enabled isolation has no implicit fallback; the
+`host` tier is ordinary execution. A request above the node tier without `escalation: "ask"`
+returns `isolation_denied` with its fix, naming the policy file, and runs nothing. Approval widens
+neither the filesystem nor the network: it admits a call whose `sandbox` the node policy already
+allows, and the authority stays the node's file (ADR 003 D5). Existing consumers report their
+existing typed error/result; no new approval category or Timeline fact.
 A missing Linux backend returns `isolation_unavailable` with its fix: install bubblewrap, or set
-`"enabled": false` in the policy file, which the text names.
+`"sandbox": "host"` in the policy file, which the text names.
 The policy is a startup snapshot. Concurrent path/policy edits add no atomicity guarantee, grant
 lease or filesystem virtualization. Restore/fork uses current local policy for each new process.
 
@@ -339,8 +373,9 @@ states the boundary where the model plans commands and where a command fails.
 carry one static line from HostPlatform: unless the user disabled isolation, commands are
 sandboxed, write only inside the Session workspace (on macOS also `$TMPDIR`, the
 [temporary directory](#temporary-directory)), read only there and in system directories, and have
-no network; approval does not lift these limits, and only the user changes them in
-host-isolation.json. The line describes the default policy, not the current file. ToolRegistry
+no network; `exec` accepts a `sandbox` argument to request a wider boundary, the node's
+host-isolation.json decides whether that request is allowed, and approval does not widen anything
+by itself. The line describes the default policy and the argument, not the current file. ToolRegistry
 reads declarations synchronously when it applies or attaches a generation
 ([C3](contracts/session-boundary.md#a5-tool-contribution)), while each process start reads the
 policy (ADR 002 D4). A declaration built from the file would be a second snapshot that a later
@@ -425,8 +460,8 @@ OS's ordinary cleanup; there is no startup sweep, registry or recovery.
 
 The directory is a default writable root, like the Session workspace and the shell output
 directory: an explicit `writablePaths` list replaces it. Then no directory is created, TMPDIR is not
-set, and a TMPDIR named in `environment` passes through unchanged and needs its own grant. Disabled
-policy and Windows keep ordinary execution. Failure to create the directory refuses the payload
+set, and a TMPDIR named in `environment` passes through unchanged and needs its own grant. The
+`host` tier and Windows keep ordinary execution. Failure to create the directory refuses the payload
 with `isolation_unavailable`.
 
 Linux is unchanged in this revision. Its namespace has no /tmp and receives no TMPDIR; binding the
@@ -436,8 +471,8 @@ same directory there needs a Linux acceptance run first.
 
 | Location | Necessary change |
 | --- | --- |
-| HostPlatform | Local policy parsing/defaults and backend transformation, including directory and file roots, the macOS developer-tool roots, git's global configuration, ancestor metadata and the per-process temporary directory owned by the tree handle; reuse FileStorage, ProcessSpec and error types. |
-| WorkspaceTools / ShellSession | Pass immutable Session workspace to preparation before existing spawn/PTY and attach the returned temporary directory to the spawned tree; ShellSession also supplies its owned output directory for default writes. Preserve admission and tree ownership. Declarations carry the static isolation line; exec keeps the returned `Isolation` with its process for the failure note. |
+| HostPlatform | Local policy parsing/defaults, tier resolution and backend transformation, including directory and file roots, the macOS developer-tool roots, git's global configuration, ancestor metadata and the per-process temporary directory owned by the tree handle; reuse FileStorage, ProcessSpec and error types. |
+| WorkspaceTools / ShellSession | Pass immutable Session workspace and the `exec` call's resolved `sandbox` (ShellSession passes none) to preparation before existing spawn/PTY and attach the returned temporary directory to the spawned tree; ShellSession also supplies its owned output directory for default writes. Preserve admission and tree ownership. `exec` declares the argument and keeps the returned `Isolation` with its process for the failure note. |
 | BackgroundExec | Preserve its existing live-process handoff, taskId control and terminal facts; no new process service. |
 | ShellInput | None; user commands continue ordinary spawn. |
 | Product assembly | Supply optional local file location through existing HostPlatformConfig/conditional FileStorage; default policy works without a file. |
@@ -453,12 +488,15 @@ escape, outside file/metadata denial, TCP/UDP denial with network disabled and s
 listeners when enabled, ungranted UNIX sockets, PTY input/resize/job control, tree stop/unload and
 background task survival across a turn stop. Verify later taskId stop, one terminal/wake, Session
 shutdown and no process replay. Policy edits affect only new processes; malformed existing files
-refuse payload startup; explicit disablement executes normally without requiring a backend.
+refuse payload startup; the `host` tier executes normally without requiring a backend.
 A model-supplied cwd outside the workspace must not enlarge default writes. Reuse ShellInput's
 existing ordinary `!`/`!!` flows as the exclusion control. Windows uses ordinary exec/PTY.
 Isolated foreground and background exec failures with a typical denial end with the note naming
-the policy file; success, other failures and disabled policy get none. Linux without bubblewrap
-reports the install-or-disable fix.
+the policy file; success, other failures and host-tier execution get none. Linux without bubblewrap
+reports the install-or-host fix. An `exec` call whose `sandbox` is above the node tier fails with
+`isolation_denied` before any payload, names the policy file, and leaves no file behind; the same
+call runs outside the workspace once the node sets `escalation: "ask"`, while a narrower request
+applies under any policy.
 
 Use disposable homes, roots and local listeners. Mechanism probes do not establish defaults,
 product policy loading or the real consumers. F5 closed after [#189](https://github.com/arcships/dim/pull/189) delivered the isolated model
@@ -484,6 +522,8 @@ job. CLI startup timing is a separate fix, [#158](https://github.com/arcships/di
 | ADR 002 D3 | No optional isolation-provider dependency. |
 | ADR 002 D4 | Read business policy per process; loader retains only its structural location. |
 | ADR 002 D5 | Existing data/error/process contracts; no new language-neutral service. |
+| ADR 003 D1 | The `sandbox` request is part of the model's tool call and is admitted like any other. |
+| ADR 003 D5 | A preset and an approval confer no boundary; the node's file alone decides a wider tier. |
 
 ## Requirements raised to mechanism owners
 
@@ -494,15 +534,16 @@ subscription, protocol, supervisor or rutis feature is required.
 
 One local file and its explicit defaults replace a policy service or watcher. One preparation
 operation reuses existing spawn/PTY and native errors. BackgroundExec already holds the process;
-no namespace/PID manager is needed. User ShellInput stays outside this boundary. Network is one
-local setting rather than per-command exceptions. The policy is decoded once at its local-file
-boundary; configured roots retain their canonical source and requested absolute destination.
+no namespace/PID manager is needed. User ShellInput stays outside this boundary. The tiers are the
+existing two settings named as one value, and a wider request is one extra call input resolved
+against the same file, not an approval category, per-command matrix or new result field. The
+policy is decoded once at its local-file boundary; configured roots retain their canonical source
+and requested absolute destination.
 Explicit policy fully replaces default roots; no separate runtime-directory exception is needed.
 The developer directory comes from DEVELOPER_DIR or the existing link resolution, not a probe, a
 fixed install path or a substituted selection. Git's configuration is a few named files in the
 default baseline, not a home read or a subtree. A file root reuses root resolution and the
-backend's file grant (a Seatbelt `literal`, a bubblewrap file bind); no policy field or
-version is added.
+backend's file grant (a Seatbelt `literal`, a bubblewrap file bind).
 The temporary directory lives and dies with the tree handle that already owns the process; no
 sweeper, registry or policy field is added.
 A static declaration line and a text note in existing results replace a declaration-time policy

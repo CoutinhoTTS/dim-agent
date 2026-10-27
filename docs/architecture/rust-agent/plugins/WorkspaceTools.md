@@ -63,6 +63,13 @@ Exec retains its `cwd` argument resolution, POSIX `&` refusal, heavy-search
 refusal, timeouts and background ownership. Its existing `exec_shell_unavailable`
 tool-result code is preserved, with instructions to fix the file and retry.
 
+The `exec` declaration also carries an optional `sandbox` argument
+(`workspace`, `network`, `host`). Exec passes it to HostPlatform's preparation
+unchanged; the node policy decides whether it applies, and a refused wider
+request fails the call with `isolation_denied` before the payload starts. The
+background handoff and the limit above are unchanged: the process keeps the
+tier it started with.
+
 The same module exports the existing `Decoder::{write,end}`, `sanitize`,
 `truncate_preview` and `EXIT_STDIO_GRACE`, and for ShellInput `capture_preview`,
 `tail_bytes`, `signal_name` and `pump`. Keep one incremental decoder per pipe;
