@@ -3879,7 +3879,10 @@ mod tests {
         app.run_command("plugins", "install tools/my-tool");
         assert_eq!(
             last(&sent),
-            format!("{:?}", PluginAction::Install("/work/tools/my-tool".into()))
+            format!(
+                "{:?}",
+                PluginAction::Install(std::path::Path::new("/work").join("tools/my-tool"))
+            )
         );
         let count = sent.borrow().len();
         app.prompt = None;

@@ -1590,8 +1590,7 @@ impl Worker {
         }
     }
 
-    /// The `/connect` list: every static provider the App Server knows (the
-    /// bundled catalog's and custom ones), as the panel shows them.
+    /// The `/plugins` list: every name `plugin.list` returns.
     async fn plugins(&mut self) -> Result<Vec<PluginItem>, String> {
         if !self.client.supports(&["plugin.list"]) {
             return Err("This daemon cannot manage plugins".into());
@@ -1602,6 +1601,8 @@ impl Worker {
             .map_err(|error| error.to_string())
     }
 
+    /// The `/connect` list: every static provider the App Server knows (the
+    /// bundled catalog's and custom ones), as the panel shows them.
     async fn providers(&mut self) -> Result<Vec<ProviderEntry>, String> {
         let current = self.model.as_ref().map(|model| model.provider_id.clone());
         let listed = self.provider_summaries().await.map_err(|e| e.to_string())?;
