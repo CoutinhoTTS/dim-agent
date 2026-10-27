@@ -95,6 +95,8 @@ EOF -> local cleanup and native detach
 | 原生 CLI terminal helper flow | 直接用公布的 args 启动新进程，保留独立 home、自定义 directory、redirect URI 和 server；设备登录经公开 RPC 完成。标准、旧字段、无能力及错误类型均覆盖 |
 | Gateway browser auth flows | 公开 managed-provider fixture 验证 callback 完成、取消与 EOF 清理；不访问真实账户 |
 
+Linux x64 的账户构建与同一上游认证/协议门槛已由 [CI run 40466783820](https://github.com/arcships/dim/actions/runs/40466783820/job/122064644884) 验证通过。报告记录源码 `f7cfe6b8f79d453435e3c5e5ad155482230d41dc`、上游 revision、原生版本和平台；auth 为 1 passed、0 failed、0 skipped，矩阵结果与上表一致。该构建仍使用临时归档，未覆盖正式登记 metadata 或发布包。
+
 ### 发布与 Registry 门槛
 
 - 目标分发是包含 OAuth 插件且配置真实 build-time client IDs 的账户构建；无 IDs 的 API-key 构建不作为 Registry 的认证分发。不得添加虚假 auth method。
@@ -107,7 +109,7 @@ EOF -> local cleanup and native detach
 ## Limits and unverified environments
 
 - 真实账户、浏览器授权与令牌交换未实机验收；公开 managed-provider RPC、callback 和取消路径已有测试。OAuth client IDs 和凭据不进入仓库。
-- Windows/Linux 实机、npm 发布包、其余环境依赖 ignored flows 和被过滤的恢复截止用例未在本轮验收。本次没有 release、publish 或合入 main。
+- Windows 实机、npm 发布包、其余环境依赖 ignored flows 和被过滤的恢复截止用例未验收。Linux CI 仅覆盖上述原生账户构建、认证发现和未登录矩阵；没有 release、publish 或合入 main。
 - 本次运行受影响范围的测试和 Clippy；workspace 全量 Clippy/test 及 CI 的 ignored profiles 没有在本机运行，仍须按 AGENTS.md 在合入前完成。
 - Lody GUI 的图片、审批、form、model/mode 和扩展展示未实机验收；对应 Gateway 协议流由公开 stdio 测试验证。
 - `providers/*`、Goal、steer/handoff、Lody 精确 token usage、quota、subagent 查询/输出/取消、scheduled tasks、client terminal/fs backend 和 MCP-over-ACP 等维持合同中的不支持/延期状态。临时 MCP 只承接服务器及工具，不新增 OAuth 登录或持久凭据管理。
