@@ -62,6 +62,9 @@ impl Declared {
             .map_err(|error| format!("default document is invalid: {error}"))?;
         Ok(declared)
     }
+    pub(super) fn declaration(&self) -> &SourceDeclaration {
+        &self.declaration
+    }
     pub(super) fn files(&self) -> (String, Option<String>) {
         (
             self.declaration.user_file.clone(),
