@@ -123,6 +123,9 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     assert_eq!(manager["use"], "builtin");
     assert_eq!(manager["status"], "running");
     assert_eq!(item(&list, "PermissionRules")["status"], "running");
+    // The Agents group row is the instance tree, not a plugin.
+    let listed = list["result"].as_array().unwrap();
+    assert!(listed.iter().all(|item| item["name"] != "agent"), "{list}");
 
     // Acceptance 7.
     let refused = call(

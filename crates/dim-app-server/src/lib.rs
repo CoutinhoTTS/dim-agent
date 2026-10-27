@@ -865,13 +865,21 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .flat_map(|parts| parts.runtimes())
         .map(|foreign| Key::dynamic(foreign.rows.runtime_name().to_owned()))
         .collect();
-    // The editable layer holds PluginManager's rows and the built-in rows
-    // it turns off; a built-in that is off never starts.
+    // The `plugins` layer, derived from PluginManager's record, holds its
+    // rows and the built-in rows it turns off; a built-in that is off never
+    // starts. The built-in plugins are the host rows; the Agents group row
+    // is the instance tree, not a plugin.
     let plugin_layer = match &plugins {
         Some(state) => {
+            let builtins = rows
+                .iter()
+                .filter(|row| row.get("group").is_none())
+                .map(|row| row["id"].as_str().expect("host row id").to_owned())
+                .filter(|id| required.contains(id))
+                .collect();
             let layer = state
                 .layer(
-                    required.iter().cloned().collect(),
+                    builtins,
                     builder.catalog().clone(),
                     session_parts.as_ref().map(|parts| parts.node.rows.clone()),
                 )
