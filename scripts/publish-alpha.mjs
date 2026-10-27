@@ -141,7 +141,7 @@ try {
     console.log(`\nDry run complete: packages in ${path.relative(repo, packages)}; nothing committed or published.`);
   } else {
     run('node', ['scripts/publish-npm.mjs', packages, version, sourceCommit, '--publish-local']);
-    run('npm', ['view', 'dimcode-alpha', 'dist-tags', '--registry', 'https://registry.npmjs.org']);
+    spawnSync('npm', ['view', 'dimcode-alpha', 'dist-tags', '--registry', 'https://registry.npmjs.org'], { cwd: repo, stdio: 'inherit' });
     remove(staging);
     console.log(`\nPublished dimcode-alpha@${version}. Install with: npm i -g dimcode-alpha@alpha, then run dima`);
     console.log(`Push the release commit when ready: git push`);
