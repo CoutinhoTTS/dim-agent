@@ -1,6 +1,3 @@
-// The default plugins of a release (RuntimeManager §6): the default
-// configuration file and each default plugin's sources with its production
-// dependencies, installed from its pinned lock without scripts or links.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
@@ -22,7 +19,6 @@ try {
     const source = path.join(path.dirname(defaults), relative);
     const target = path.join(output, relative);
     assert(existsSync(path.join(source, 'package-lock.json')), `${name} has no package-lock.json`);
-    // Sources only: tests, build configuration and local installs stay behind.
     cpSync(source, target, {
       recursive: true,
       filter: (file) => {

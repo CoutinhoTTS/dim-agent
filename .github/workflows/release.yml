@@ -165,7 +165,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The default plugins and the default configuration file ship beside bin/ (RuntimeManager §6).
           node scripts/stage-plugins.mjs "staging/plugins-$DIM_BUILD_PLATFORM"
           node scripts/stage-release.mjs "$DIM_BIN_DIR" "staging/$DIM_BUILD_PLATFORM" "$RELEASE_VERSION" "$SOURCE_SHA" ${DIM_ACCOUNT:-} --plugins "staging/plugins-$DIM_BUILD_PLATFORM"
           node scripts/pack-release.mjs "staging/$DIM_BUILD_PLATFORM" "release/$DIM_BUILD_PLATFORM"

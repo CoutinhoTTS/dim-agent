@@ -1,7 +1,7 @@
 //! RuntimeManager (docs/design/plugins/RuntimeManager.md): acquires the Node
-//! and Python rutis runtimes into `<home>/runtimes/`, verified against pins
-//! compiled into Dim, and mounts each one once it is installed. Plugin rows
-//! gate on the runtime's name under rutis' rules.
+//! and Python rutis runtimes into `<home>/runtimes/`, verified against their
+//! publishers' checksums, and mounts each one once it is installed. Plugin
+//! rows gate on the runtime's name under rutis' rules.
 use crate::methods::ManagementMethods;
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, RpcError, params, reply};
 use dim_agent_runtime::Names;
@@ -36,13 +36,10 @@ struct Pins {
 #[derive(Deserialize)]
 struct Pin {
     version: String,
-    /// The official checksum file the archive's SHA-256 is read from.
     checksums: String,
     sources: Vec<String>,
-    /// The archive's file name, by platform.
     files: HashMap<String, String>,
 }
-/// A runtime's archive: its file name and where its checksum is published.
 #[derive(Clone, Debug)]
 struct Archive {
     file: String,
@@ -84,7 +81,6 @@ pub struct Plan {
     pub version: String,
     /// The interpreter the runtime runs with.
     pub interpreter: PathBuf,
-    /// The archive (download) and its unpacked directory.
     archive: Option<(Archive, PathBuf)>,
     sources: Vec<String>,
     /// The packages directory: Node's `npm ci` tree, Python's `pip --target`.
@@ -92,8 +88,8 @@ pub struct Plan {
     indexes: Vec<String>,
 }
 
-/// The runtimes of a home (design §2.3): every path follows from the pins,
-/// the configuration and the home.
+/// The runtimes of a home (design §2.3): every path follows from the fixed
+/// versions, the configuration and the home.
 #[derive(Clone, Debug)]
 pub struct Runtimes {
     root: PathBuf,
@@ -197,7 +193,6 @@ impl Runtimes {
                     directory.join("bin/node")
                 }
             }
-            // Not found: the acquisition fails and says so (§3.3).
             Source::System => which("node").unwrap_or_else(|| root.join("no-system-node")),
         };
         let python_archive = archive(
@@ -278,7 +273,6 @@ impl Runtimes {
     }
 }
 
-/// The platform name of the release matrix.
 fn platform() -> String {
     let os = match std::env::consts::OS {
         "macos" => "darwin",
@@ -307,7 +301,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// An installed runtime, as `runtimes.json` records it (design §2.4).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 struct Record {
     source: Source,
@@ -317,8 +310,6 @@ struct Record {
     packages: String,
 }
 impl Record {
-    /// What installing `plan` records; `sha256` is the archive's verified
-    /// digest.
     fn of(plan: &Plan, sha256: Option<String>) -> Self {
         Self {
             source: plan.source,
@@ -367,7 +358,6 @@ pub struct RuntimeService {
     runtimes: Arc<Runtimes>,
     local: [Arc<LocalRuntime>; 2],
     states: Mutex<[State; 2]>,
-    /// Serializes writes of `runtimes.json` by the two acquisitions.
     record: tokio::sync::Mutex<()>,
     ctx: Ctx,
     stop: CancellationToken,
@@ -454,8 +444,6 @@ impl RuntimeService {
 
     async fn acquire(&self, kind: Kind) -> Result<(), String> {
         let plan = self.runtimes.plan(kind);
-        // Installed: recorded for this source, version and packages, with
-        // the directories in place (§2.4).
         let installed = read_records(&self.runtimes.record_file())
             .get(kind.name())
             .is_some_and(|record| {
@@ -504,8 +492,6 @@ impl RuntimeService {
     }
 }
 
-/// A mounted runtime: the composed rutis `LocalRuntime`, named after Dim's
-/// runtime.
 struct Mounted(Arc<LocalRuntime>, Kind);
 impl DynPlugin for Mounted {
     fn name(&self) -> &str {
@@ -529,8 +515,6 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// The archive's SHA-256, read from its official checksum file (§2.1): the
-/// address is fixed in Dim and no mirror replaces it.
 async fn checksum(client: &reqwest::Client, archive: &Archive) -> Result<String, String> {
     let text = client
         .get(&archive.checksums)
@@ -554,8 +538,6 @@ async fn checksum(client: &reqwest::Client, archive: &Archive) -> Result<String,
         })
 }
 
-/// Downloads `file` from the first source whose bytes match `sha256` and
-/// unpacks it into `directory` (design §3.2, §7).
 async fn download(
     client: &reqwest::Client,
     sources: &[String],
@@ -594,8 +576,6 @@ async fn download(
     std::fs::rename(&partial, directory).map_err(|e| format!("{}: {e}", directory.display()))
 }
 
-/// Writes `url` to `path`, hashing as it goes; the file stays only if its
-/// SHA-256 is `expected`.
 async fn fetch(
     client: &reqwest::Client,
     url: &str,
@@ -628,11 +608,8 @@ async fn fetch(
     Ok(())
 }
 
-/// The archive's single top directory, unpacked as `into`. Entries leaving
-/// it, and links pointing outside it, are refused.
 fn unpack(name: &str, archive: &Path, into: &Path) -> Result<(), String> {
     std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
-    // Every component is a plain name: no root, prefix, `.` or `..`.
     let inside = |path: &Path| -> Result<PathBuf, String> {
         if !path
             .components()
@@ -680,8 +657,6 @@ fn unpack(name: &str, archive: &Path, into: &Path) -> Result<(), String> {
                     .map_err(|e| e.to_string())?
                     .ok_or("a link without a target")?
                     .into_owned();
-                // A symbolic link resolves from its own directory, a hard
-                // link from the archive's root.
                 let resolved = if kind == tar::EntryType::Symlink {
                     relative.parent().unwrap_or(Path::new("")).join(&target)
                 } else {
@@ -714,8 +689,6 @@ fn unpack(name: &str, archive: &Path, into: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// A zip archive (the Windows Node downloads), entry by entry: links are
-/// refused, and on Unix no permission bit beyond `rwxr-xr-x` is applied.
 fn unzip(
     archive: &Path,
     into: &Path,
@@ -725,8 +698,6 @@ fn unzip(
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index).map_err(|e| e.to_string())?;
-        // The name as stored, not the sanitized one: an absolute or `..`
-        // name is refused rather than rewritten.
         let raw = String::from_utf8_lossy(entry.name_raw()).replace('\\', "/");
         let path = PathBuf::from(&raw);
         if entry.enclosed_name().is_none() {
@@ -762,7 +733,6 @@ fn unzip(
     Ok(())
 }
 
-/// Runs `command`; its failure carries the end of its output.
 async fn run(mut command: tokio::process::Command, what: &str) -> Result<String, String> {
     let output = command
         .stdin(Stdio::null())
@@ -784,13 +754,11 @@ async fn run(mut command: tokio::process::Command, what: &str) -> Result<String,
     ))
 }
 
-/// A `system` interpreter meets the runtime's requirement (design §2.2).
 async fn check_system(kind: Kind, interpreter: &Path) -> Result<(), String> {
     let mut command = tokio::process::Command::new(interpreter);
     let (minimum, accepts): (&str, fn(u32, u32) -> bool) = match kind {
         Kind::Node => {
             command.arg("--version");
-            // `^22.19.0 || >=23.11.0`, the engines of @arcships/rutis-runtime.
             ("22.19", |major, minor| {
                 major > 23 || (major == 23 && minor >= 11) || (major == 22 && minor >= 19)
             })
@@ -821,7 +789,6 @@ async fn check_system(kind: Kind, interpreter: &Path) -> Result<(), String> {
     }
 }
 
-/// `npm-cli.js` of the Node installation `node` belongs to.
 fn npm_cli(node: &Path) -> PathBuf {
     let node = node.canonicalize().unwrap_or_else(|_| node.to_owned());
     let directory = node.parent().unwrap_or(Path::new(""));
@@ -832,7 +799,6 @@ fn npm_cli(node: &Path) -> PathBuf {
     }
 }
 
-/// The pinned Node packages, installed by `npm ci` against the pinned lock.
 async fn npm_ci(plan: &Plan) -> Result<(), String> {
     let partial = plan.packages.with_extension("partial");
     let _ = std::fs::remove_dir_all(&partial);
@@ -876,7 +842,6 @@ async fn npm_ci(plan: &Plan) -> Result<(), String> {
     std::fs::rename(&partial, &plan.packages).map_err(|e| e.to_string())
 }
 
-/// The pinned `rutis` package, installed by pip with required hashes.
 async fn pip_install(plan: &Plan) -> Result<(), String> {
     let partial = plan.packages.with_extension("partial");
     let requirements = plan.packages.with_extension("requirements.txt");
@@ -972,8 +937,6 @@ impl DynPlugin for RuntimeManagerPlugin {
                 stop: CancellationToken::new(),
                 tasks: Mutex::new(Vec::new()),
             });
-            // Registered first, so the tasks are settled before the service
-            // and methods go.
             let owned = service.clone();
             ctx.effect(move || async move {
                 owned.stop.cancel();
@@ -1029,8 +992,6 @@ mod tests {
     use super::{Archive, PINS, Pins, checksum, client, download, unpack};
     use std::path::Path;
 
-    /// Every platform of the release matrix has a Node and a Python archive,
-    /// and their checksums are read from the official publishers over HTTPS.
     #[test]
     fn every_release_platform_has_an_archive_and_an_official_checksum() {
         let pins: Pins = serde_json::from_str(PINS).unwrap();
@@ -1060,10 +1021,6 @@ mod tests {
         dir
     }
 
-    /// The SHA-256 comes from the checksum file; a source whose bytes do not
-    /// match it is refused: nothing is unpacked, no download stays behind,
-    /// and the reason names it. A file the checksum file does not list is
-    /// not downloaded at all.
     #[tokio::test]
     async fn a_download_that_does_not_match_its_published_checksum_is_refused() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1134,8 +1091,6 @@ mod tests {
         std::fs::write(path, gz.finish().unwrap()).unwrap();
     }
 
-    /// Entries leaving the archive's directory, and links pointing outside
-    /// it, are refused; links inside it are kept.
     #[test]
     fn unpacking_stays_inside_its_directory() {
         let root = scratch("unpack");
@@ -1147,7 +1102,6 @@ mod tests {
             if let Some(link) = link {
                 header.set_link_name(link).unwrap();
             }
-            // `set_path` refuses `..`; the raw name is what a hostile archive carries.
             let name = &mut header.as_gnu_mut().unwrap().name;
             name[..path.len()].copy_from_slice(path.as_bytes());
             header.set_cksum();
@@ -1192,7 +1146,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// No setuid, setgid or sticky bit survives unpacking a tar archive.
     #[cfg(unix)]
     #[test]
     fn unpacking_drops_privileged_permission_bits() {
@@ -1217,8 +1170,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// A zip archive is unpacked entry by entry: `..`, absolute paths and
-    /// link entries are refused, and privileged permission bits are dropped.
     #[test]
     fn unzipping_stays_inside_and_refuses_links() {
         use std::io::Write;

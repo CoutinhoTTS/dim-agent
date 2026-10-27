@@ -668,8 +668,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .as_ref()
         .map(|parts| session_typescript::Parts::new(parts, &mut builder, &config.file_roots))
         .transpose()?;
-    // With RuntimeManager the runtimes arrive after startup: the runtimes'
-    // row parts wait for them, and startup does not.
     let acquire = config
         .session_typescript
         .as_ref()
@@ -680,8 +678,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             let python = parts.python.as_ref().ok_or_else(|| {
                 ServerError::Configuration("RuntimeManager needs the Python runtime".into())
             })?;
-            // The Python runtime imports plugins from its project directory
-            // (RuntimeManager §4), which must exist before it starts.
             if let Some(project) = config
                 .session_typescript
                 .as_ref()
