@@ -2,13 +2,13 @@
 
 Dim uses self-hosted runners for PR checks and the complete GitHub release workflow. npm publication stays disabled in `.github/workflows/npm-publish.yml.disabled`. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) walks through publishing a `-alpha.N` version end to end (Chinese).
 
-The public source uses MIT. An account-enabled distribution can contain a separately supplied private runtime plugin; `NOTICE` excludes that artifact from the public source license. This project does not select or publish a license for that private plugin.
+The source, including the Dim account plugin, uses MIT. An account-enabled distribution differs from the API-key one only by the OAuth client IDs compiled in from repository secrets.
 
 ## Upgrade compatibility
 
 Before replacing an older CLI and daemon, stop that daemon with its matching CLI. The replacement `dimcode daemon stop` refuses daemons without `daemon.shutdown.completed` and leaves them running. Forced shutdown does not certify storage or plugin cleanup.
 
-Account-enabled distributions use an executable built with the private Rust provider through `ManagedProviderRow`. The public executable supports API-key providers and does not load the former TypeScript account package. Existing launchers must remove the old `dimcode --plugin-dir`, `--node` and `--js-runtime` arguments and use the account build when managed login is required; those arguments are rejected rather than falling back to a package. Embedding applications replace `ManagedPluginConfig` with the [typed provider hook](../../crates/dim-app-server/README.md#managed-provider-plugins).
+Account-enabled distributions use an executable built with the Dim account provider (`crates/dim-oauth`) through `ManagedProviderRow`. The public executable supports API-key providers and does not load the former TypeScript account package. Existing launchers must remove the old `dimcode --plugin-dir`, `--node` and `--js-runtime` arguments and use the account build when managed login is required; those arguments are rejected rather than falling back to a package. Embedding applications replace `ManagedPluginConfig` with the [typed provider hook](../../crates/dim-app-server/README.md#managed-provider-plugins).
 
 The public host does not migrate or rewrite the account-owned `auth.json` when replacing the executable. Keep the same explicit home for the replacement account build; its provider owns reading the account format. The API-key-only executable leaves that account data in place but cannot supply its managed login or credentials. Existing Session TypeScript rows retain their separate App Server Node/runtime configuration; removing the embedded account runtime does not install a runtime for those rows.
 

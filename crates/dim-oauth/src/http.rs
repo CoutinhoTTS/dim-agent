@@ -317,34 +317,19 @@ pub(super) async fn userinfo(
     tokens: &Tokens,
     cancel: Option<&CancellationToken>,
 ) -> Result<Identity> {
-    let exchange = async {
-        let response = client
+    let (status, body) = request(
+        client
             .get(format!("{}/oauth/userinfo", trimmed(tokens.str("issuer"))))
-            .bearer_auth(tokens.str("access"))
-            .send()
-            .await
-            .map_err(|_| ManagedError::Transient)?;
-        let status = response.status();
-        if matches!(status.as_u16(), 401 | 403) {
-            return Err(ManagedError::IdentityRejected);
-        }
-        if status.is_redirection()
-            || matches!(status.as_u16(), 408 | 429)
-            || status.is_server_error()
-        {
-            return Err(ManagedError::Transient);
-        }
-        if !status.is_success() {
-            return Err(ManagedError::InvalidResponse);
-        }
-        response
-            .json::<Body>()
-            .await
-            .map_err(|_| ManagedError::InvalidResponse)
-    };
-    let body = cancellable(exchange, cancel)
-        .await
-        .ok_or(ManagedError::Transient)??;
+            .bearer_auth(tokens.str("access")),
+        cancel,
+    )
+    .await?;
+    if matches!(status.as_u16(), 401 | 403) {
+        return Err(ManagedError::IdentityRejected);
+    }
+    if !status.is_success() {
+        return Err(ManagedError::InvalidResponse);
+    }
     let label = |key: &str| {
         body.get(key)
             .and_then(Value::as_str)

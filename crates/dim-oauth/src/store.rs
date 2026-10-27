@@ -459,9 +459,11 @@ impl Store {
 
     pub async fn status(&self) -> Result<AccountSnapshot> {
         let mut file = self.open(None).await?;
-        let (mut doc, raw) = file.read().await?;
+        let (mut doc, _) = file.read().await?;
         file.normalize(&mut doc).await?;
-        if !doc.contains_key(STATE) && raw.is_none() {
+        // No Dim record at all, even beside other owners' records, is signed
+        // out; Dim tokens without their state still need recovery.
+        if !doc.contains_key(STATE) && !doc.contains_key(TOKENS) {
             doc.insert(STATE.into(), signed_out(None, false)?);
             file.write(&doc).await?;
         }

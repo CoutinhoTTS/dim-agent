@@ -2,7 +2,7 @@
 
 The Dim account (`dimcode-api-oauth`) is the rutis plugin `DimOAuth` ([`src/lib.rs`](../src/lib.rs)). It runs in the App Server process of the account build; no Node runtime or plugin package is involved. It owns the account login (browser PKCE and device flow), the `auth.json` account record, token refresh, the relay model catalog and request credential leases, and publishes them as the process's `ManagedProvider` (below).
 
-The flow is a public OAuth client: there is no client secret. The client IDs of the `dimagent.com` directory and of every other directory are in [`ClientIds::production`](../src/http.rs). A realm discovered from the login email may name its own client ID, which wins.
+The flow is a public OAuth client: there is no client secret. The `dimagent.com` directory uses `DIM_OAUTH_CLIENT_ID_GLOBAL` and every other directory `DIM_OAUTH_CLIENT_ID_CN`; `dimcode` compiles both in and passes them to `dim_oauth::row` as [`ClientIds`](../src/http.rs), and they never enter the repository. A realm discovered from the login email may name its own client ID, which wins.
 
 Login selects a directory (`--directory` or the CLI entry's default) and optional enterprise email. Discovery reads the directory's `/.well-known/openid-configuration`, falling back to `/oauth/authorize`, `/oauth/token` and `/oauth/device_authorization` under the issuer, and the relay is `{issuer}/v1`. Browser redirects permit only HTTP localhost, 127.0.0.1 or ::1 at `/auth/callback`; the host owns the callback listener and browser, the provider owns code exchange and the `/oauth/userinfo` confirmation. Device polling continues in the provider after the initiating call returns.
 

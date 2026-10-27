@@ -412,6 +412,17 @@ fn typescript_record(issuer: &str, digest: &str) -> Vec<u8> {
 async fn typescript_account_files_load_and_other_owners_fields_survive() {
     let fixture = oauth::start().await;
     let home = home();
+    // A file holding only another owner's record is signed out for Dim.
+    std::fs::write(
+        home.join("auth.json"),
+        serde_json::to_vec(&json!({"openaiCodex":{"type":"oauth","access":"codex"}})).unwrap(),
+    )
+    .unwrap();
+    let Process { root, providers } = process(&home).await;
+    let signed_out = providers.status(PROVIDER, &cancel()).await.unwrap();
+    assert!(signed_out.account.is_none());
+    assert_eq!(auth(&home)["openaiCodex"]["access"], "codex");
+
     std::fs::write(
         home.join("auth.json"),
         typescript_record(
@@ -420,7 +431,6 @@ async fn typescript_account_files_load_and_other_owners_fields_survive() {
         ),
     )
     .unwrap();
-    let Process { root, providers } = process(&home).await;
     let account = providers.status(PROVIDER, &cancel()).await.unwrap();
     assert_eq!(
         account.credential_epoch,
