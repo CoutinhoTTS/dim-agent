@@ -57,8 +57,6 @@ impl Instance {
     fn state(&self) -> &'static str {
         match &self.leaf {
             None => "online",
-            // A detach while the leaf runs (`/new`, resume) is not leaving:
-            // only its link stopping is, and that removes it.
             Some(leaf) if !(leaf.loaded && leaf.attached) => "starting",
             Some(leaf) if leaf.replacing => "replacing",
             Some(_) => "online",
@@ -169,7 +167,6 @@ impl UiHost {
                     leaf.view = Some(view);
                     None
                 }
-                // Closed while it started, or its link already stopped.
                 None => Some(view),
             }
         };
@@ -178,7 +175,6 @@ impl UiHost {
             return Err(ui_unknown());
         }
         if let Some(old) = replace {
-            // Best effort: the new leaf stands even if the old one is gone.
             let _ = self.close(hub, &old, Some("replaced".to_owned())).await;
             if let Some(leaf) = self
                 .instances
@@ -308,7 +304,6 @@ impl UiHost {
                     ));
                 }
                 leaf.attached = true;
-                // `/new` and resume keep the leaf; the registration follows.
                 instance.session_id = session_id.clone();
                 instance.connection = Some(connection.id.clone());
                 Ok(UiAttached {

@@ -52,8 +52,6 @@ async fn keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired() 
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    // Compaction keeps a short tail: the retirement of `b` is replaced from
-    // the fourth turn on.
     let inputs = [
         vec![keyed("<live>a</live>", "a"), keyed("<live>b</live>", "b")],
         vec![context_block::retire("<ended>b</ended>".into(), "b".into())],
@@ -111,7 +109,6 @@ async fn keyed_blocks_replay_verbatim_after_repeated_compaction_until_retired() 
             _ => None,
         })
         .unwrap();
-    // Summary, then the live key verbatim, then the retained history.
     assert_eq!(
         *request.messages[1],
         Message::text(Role::User, "<live>a</live>")
@@ -182,7 +179,6 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
             .into(),
         )
         .unwrap();
-    // The cut keeps nothing: the first event after the consumed input.
     let cut = timeline
         .append(
             EventKind::TurnStart(TurnStartData {
@@ -232,8 +228,6 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         )]
     );
 
-    // Matching custom interpreters own a paired codec, while
-    // Timeline.context remains independent of any cache or renderer.
     let renderer = HistoryRenderer {
         encode_checkpoint: |_, checkpoint| {
             serde_json::to_string(checkpoint)
@@ -266,7 +260,6 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
     assert_eq!(full.events, replay.events);
     assert_eq!(full.positions, replay.positions);
 
-    // Integrity binds exact payload bytes and all snapshot identity fields.
     let renderer = HistoryRenderer::default();
     let saved = renderer
         .snapshot(&timeline.context(through).await.unwrap(), &cut.id, &fact)
@@ -343,9 +336,9 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         .unwrap();
 }
 
+/// Builds a recovery snapshot from the preparation prefix, before its
+/// Completed fact, never from later input or compaction events.
 fn resume(context: &ContextHistory, cut: &str) -> ContextHistory {
-    // Production snapshots are built from the preparation prefix, before
-    // their Completed fact, never from later input/compaction events.
     let mut source = context.clone();
     if let Some(index) = context.events.iter().position(|event| {
         matches!(&event.kind, EventKind::ContextCompaction(data)
@@ -366,9 +359,6 @@ fn resume(context: &ContextHistory, cut: &str) -> ContextHistory {
         ancestry: context.ancestry.clone(),
         checkpoint: Some(checkpoint),
     };
-    // Pure projection fixtures also need an authoritative compaction fact;
-    // decoded state alone neither supplies a replacement nor makes the cut.
-    // Preserve real A/B facts rather than replacing their asymmetric summaries.
     if !resumed.events.iter().any(|event| {
         matches!(&event.kind,
         EventKind::ContextCompaction(data) if matches!(&data.outcome,
@@ -390,6 +380,9 @@ fn resume(context: &ContextHistory, cut: &str) -> ContextHistory {
     resumed
 }
 
+/// Neither a missing snapshot nor an older usable one may roll the model view
+/// back to A; expectations are literal, not derived by replaying the function
+/// under test.
 #[test]
 fn completed_compaction_survives_missing_or_older_recovery_checkpoint() {
     use dim_agent_capabilities::history::{context_messages, summary_message};
@@ -412,7 +405,6 @@ fn completed_compaction_survives_missing_or_older_recovery_checkpoint() {
             ..InputMessageData::text(text, None)
         })
     };
-    // Each compaction cuts at the turn start just before it.
     let turn = || {
         EventKind::TurnStart(TurnStartData {
             turn_id: "turn".into(),
@@ -456,8 +448,6 @@ fn completed_compaction_survives_missing_or_older_recovery_checkpoint() {
         Message::text(Role::User, "rule ended"),
         Message::text(Role::User, "tail"),
     ];
-    // Neither a missing snapshot nor an older usable one may roll the model
-    // view back to A. Expectations are literal, not derived from full replay.
     for cut in [None, Some(("event-2", 3)), Some(("event-6", 7))] {
         let candidate = match cut {
             None => context.clone(),
@@ -477,7 +467,6 @@ fn completed_compaction_survives_missing_or_older_recovery_checkpoint() {
         assert_eq!(context_messages(&candidate, &history), expected, "{cut:?}");
         assert!(history.last().unwrap().baseline.is_empty());
     }
-    // Compaction never edits raw history or erases facts used by other plugins.
     assert_eq!(project_history(&context.events).unwrap().len(), 6);
 }
 
@@ -666,7 +655,6 @@ fn checkpoint_replay_preserves_prompt_configuration_pending_input_and_internal_t
         }),
     ]);
     let whole = project_context_history(&context).unwrap();
-    // After the first input's entries, and after the tool results.
     for retain_from in ["event-12", "event-14"] {
         let resumed = resume(&context, retain_from);
         let kept = whole
@@ -686,7 +674,6 @@ fn checkpoint_replay_preserves_prompt_configuration_pending_input_and_internal_t
                 .iter()
                 .any(|(id, _)| id == "event-3")
         }));
-        // A second checkpoint inherits the first checkpoint's restored state.
         context = resumed;
     }
 }
@@ -881,7 +868,6 @@ fn an_interrupted_output_keeps_its_text_and_started_calls_and_drops_its_thinking
         tool_start("r1", "a"),
         tool_start("r1", "b"),
         tool_use("r1", "a"),
-        // Stop: the started-only and the complete call close with the output.
         closure(
             "r1",
             &[
@@ -905,8 +891,6 @@ fn an_interrupted_output_keeps_its_text_and_started_calls_and_drops_its_thinking
             .collect::<Vec<_>>(),
         ["event-1", "event-9", "event-9:0", "event-9:1", "event-12"]
     );
-    // One message with the committed text and calls in start order; the
-    // started-only call renders with an empty input; no thinking.
     assert_eq!(
         history[1].message,
         assistant(vec![
@@ -923,7 +907,6 @@ fn an_interrupted_output_keeps_its_text_and_started_calls_and_drops_its_thinking
     dim_agent_capabilities::history::validate_history_boundary(&context.events).unwrap();
     assert_checkpoints_match(&context);
 
-    // Text alone becomes a message; thinking alone leaves none.
     let failed = ModelOutputOutcome::Failed {
         error: "aborted".into(),
         budget: None,
@@ -992,7 +975,6 @@ fn an_unclosed_call_or_an_open_output_fails_the_next_request_context() {
         tool_use("r1", "a"),
         end("r1", completed()),
     ];
-    // A prefix ending mid-turn renders the call before its result exists.
     let pending = fixed(proposed.clone());
     assert_eq!(project_context_history(&pending).unwrap().len(), 1);
     assert!(dim_agent_capabilities::history::validate_context_boundary(&pending).is_err());
@@ -1003,8 +985,6 @@ fn an_unclosed_call_or_an_open_output_fails_the_next_request_context() {
         assert!(error.contains("no closing result"), "{error}");
     }
 
-    // A request replaced by a steer ends Cancelled before the next one
-    // starts and, without output, leaves no message.
     let replaced = fixed(vec![
         start("r1"),
         end("r1", cancelled()),
@@ -1012,7 +992,6 @@ fn an_unclosed_call_or_an_open_output_fails_the_next_request_context() {
         text("r2", "kept"),
     ]);
     assert!(project_context_history(&replaced).unwrap().is_empty());
-    // A request never starts while the previous output has no terminal.
     for open in [
         vec![],
         vec![text("r1", "late")],

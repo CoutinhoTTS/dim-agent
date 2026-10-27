@@ -246,7 +246,6 @@ impl ModelsPanel {
         match (self.view, event) {
             (_, Event::None | Event::Refresh) => Effect::None,
             (View::Models, Event::Close) => Effect::Close,
-            // Cancel writes nothing.
             (View::Policy, Event::Close) => {
                 self.open(View::Models, Some(SUBAGENT_MODELS));
                 Effect::None

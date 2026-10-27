@@ -278,8 +278,6 @@ impl Output {
     }
     fn thinking(&mut self, thinking: String) -> Result<(), HostError> {
         self.flush_text()?;
-        // The progress thinking is earlier blocks not published yet, then
-        // this block's deltas, which the whole block replaces.
         if thinking.is_empty() {
             self.replace_tail(true, "");
             return Ok(());
@@ -409,17 +407,11 @@ pub(crate) async fn consume_output(
     cancel: CancellationToken,
     replay_safe: &mut bool,
 ) -> Result<FinishReason, HostError> {
-    // Drained after an error, possibly after the stream already ended.
     let mut stream = stream.fuse();
     let result = parse_output(&mut stream, output, cancel.clone(), replay_safe).await;
     if result.is_err() {
         cancel.cancel();
-        // Text received before the output ended is kept; a thinking block or
-        // tool arguments in progress are not facts. A failure here also fails
-        // the terminal that follows, which reports it.
         let _ = output.flush_text();
-        // Reaching a protocol error does not release the native invocation.
-        // Hosts acknowledge cancellation by finishing their stream and cleanup.
         while stream.next().await.is_some() {}
     }
     result
@@ -433,20 +425,17 @@ async fn parse_output(
 ) -> Result<FinishReason, HostError> {
     let mut message_id = None;
     let mut finish = None;
-    // Started calls whose arguments are not complete: id to name.
     let mut partial = HashMap::<String, String>::new();
     let mut visible = false;
     let mut content_seen = false;
     let mut published = output.timeline.watch();
     loop {
-        // Output published while the stream is quiet leaves the progress now.
         let next = tokio::select! {
             chunk = stream.next() => chunk,
             changed = published.changed(), if !output.handoffs.is_empty() => {
                 if changed.is_ok() {
                     output.show(|_| {});
                 } else {
-                    // The Timeline is gone: nothing more is published.
                     output.handoffs.clear();
                 }
                 continue;
@@ -471,13 +460,10 @@ async fn parse_output(
             }
             other => other?,
         };
-        // A start marker is local parser state. Any result (including usage
-        // and partial tools) closes the replay window before publication.
         if !matches!(chunk, ModelChunk::MessageStart { .. }) {
             *replay_safe = false;
         }
         if let ModelChunk::Usage(usage) = chunk {
-            // A billing fact: written even for a request replaced by a steer.
             output
                 .timeline
                 .append(
@@ -612,7 +598,6 @@ async fn parse_output(
             ModelChunk::MessageStart { .. } | ModelChunk::Usage(_) => unreachable!(),
         }
     }
-    // A successful native stream beats cancellation arriving after its terminal chunk.
     if let Some(finish) = finish {
         return Ok(finish);
     }

@@ -17,7 +17,6 @@ export function fixture(namespace: string) {
           name: `${namespace}.${name}`, mutating: ['replace', 'create_directory', 'settings_update'].includes(name), interruption: 'drain', progress: false,
         })),
         async (call): Promise<MethodReply> => {
-          // The fixture deliberately sends caller-supplied selectors to the native decoder.
           const request = call.params as unknown as { root: WorkflowRoot; path: string; bytes: number[] }
           try {
             switch (call.method.slice(namespace.length + 1)) {

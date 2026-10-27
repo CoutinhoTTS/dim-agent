@@ -122,7 +122,6 @@ pub struct OauthView {
 impl OauthView {
     pub fn new(provider_id: &str, name: &str, attempt: u64) -> Self {
         let dim = provider_id == DIM_OAUTH_ID;
-        // Codex signs in by browser only, Grok by device code only.
         let device = !matches!(provider_id, CODEX_ID | DIM_OAUTH_ID);
         let mut view = Self {
             provider_id: provider_id.to_owned(),
@@ -144,7 +143,6 @@ impl OauthView {
         if dim {
             view.focus = Focus::Submit;
         } else {
-            // Codex and Grok start at once.
             view.focus = if view.device {
                 Focus::DeviceTab
             } else {
@@ -177,7 +175,6 @@ impl OauthView {
                 _ => Focus::Submit,
             };
         }
-        // The app asks for the usage of a signed-in account right after.
         self.usage_loading = matches!(account, Account::SignedIn(_));
         self.usage = None;
         self.account = Some(account);
@@ -233,8 +230,6 @@ impl OauthView {
         let mut rows: Vec<(Row, String)> = Vec::new();
         let dim = self.provider_id == DIM_OAUTH_ID;
         if dim && self.phase == Phase::Idle {
-            // The account lines read as status: they sit apart from the
-            // entries below them.
             match (&self.account, p) {
                 (_, None) => {}
                 (None, _) => rows.push((Row::Section, t("Checking account…").to_owned())),
@@ -266,8 +261,6 @@ impl OauthView {
             rows.push((Row::Action(Focus::Submit), t("Continue").into()));
             return rows;
         }
-        // The flow names itself; Dim's menu entry already chose the mode,
-        // so there is no switch inside the flow.
         if self.device {
             rows.push((Row::Action(Focus::DeviceTab), t("Device login").into()));
         } else {
@@ -313,7 +306,6 @@ impl OauthView {
             let mut parts: Vec<String> = Vec::new();
             parts.extend(plan.name.clone());
             if let Some(amount) = plan.price_amount {
-                // The service prices in minor units (fen, cents).
                 let major = amount / 100.0;
                 let mut price = match plan.price_currency.as_deref() {
                     Some("CNY") => format!("¥{major:.2}"),
@@ -405,8 +397,6 @@ impl OauthView {
             .map(|(label, ..)| width_of(label))
             .max()
             .unwrap_or(0);
-        // Each meter: its numbers on one row, its bar on the next, so the
-        // bars never run into each other.
         for (label, amount, unlimited, when) in meters {
             rows.push((Row::Section, String::new()));
             let label = format!("{label}{}", " ".repeat(label_width - width_of(&label)));
@@ -486,8 +476,6 @@ impl OauthView {
                             .to_owned(),
                     );
                 }
-                // The link is also printed, so it is there to copy when the
-                // browser could not open it.
                 if !opened {
                     return Effect::Print(format!(
                         "{}\n{}",
@@ -551,14 +539,12 @@ impl OauthView {
         match key.code {
             KeyCode::Esc => {
                 return match self.phase {
-                    // Back from the email prompt to the entry rows.
                     Phase::Email => {
                         self.phase = Phase::Idle;
                         self.focus = Focus::Enterprise;
                         Effect::None
                     }
                     Phase::Idle => Effect::OauthBack,
-                    // Dim goes back to its menu; Codex and Grok have none.
                     Phase::Error | Phase::Cancelled if self.provider_id == DIM_OAUTH_ID => {
                         self.phase = Phase::Idle;
                         self.error = None;
@@ -590,7 +576,6 @@ impl OauthView {
         if busy {
             return Effect::None;
         }
-        // The focused field edits first; the keys it leaves navigate.
         if self.editing().is_some_and(|field| field.handle_key(key)) {
             return Effect::None;
         }
@@ -631,7 +616,6 @@ impl OauthView {
             matches!(row, Row::Action(f) if *f == focus).then_some((i, label))
         })?;
         let column = field.view(field_room(inner, label)).1;
-        // The top border, the title and a blank row come before the rows.
         Some((
             3 + index,
             2 + width_of(SELECTED_MARKER) + width_of(label) + 2 + column,
@@ -669,7 +653,6 @@ impl OauthView {
                         Effect::OauthPaste(url)
                     }
                 }
-                // Restart after an error or a cancel.
                 _ => {
                     let device = self.device;
                     self.start(device, None)
@@ -686,7 +669,6 @@ impl OauthView {
                 Effect::None
             }
             Focus::DeviceTab if self.phase == Phase::Idle => self.start(true, None),
-            // Inside a flow the mode row only names the flow.
             Focus::DeviceTab | Focus::BrowserTab => Effect::None,
             Focus::Models => Effect::OpenModels,
             Focus::Plan => match self.plan_url() {
@@ -932,7 +914,6 @@ mod tests {
         let start = started(&mut view);
         assert!(!start.device);
         assert_eq!(start.attempt, 1);
-        // An update of another attempt is ignored.
         assert!(matches!(
             view.event(7, OauthEvent::Exchanging),
             Effect::None
@@ -993,7 +974,6 @@ mod tests {
             view.handle_key(key(KeyCode::Esc)),
             Effect::OauthBack
         ));
-        // Codex has no menu to go back to.
         let mut codex = OauthView::new("openai-codex", "OpenAI Codex", 0);
         codex.auto_start();
         codex.event(1, OauthEvent::Done(Err(Some("denied".into()))));
@@ -1040,14 +1020,12 @@ mod tests {
                 "Device login"
             ]
         );
-        // Device login.
         view.handle_key(key(KeyCode::Down));
         view.handle_key(key(KeyCode::Down));
         let start = started(&mut view);
         assert!(start.device && start.email.is_none());
         assert_eq!(labels(&view)[0], "Device login");
         assert!(!labels(&view).iter().any(|l| l.contains("mode")));
-        // Enterprise login asks for the email, then signs in by browser.
         let mut view = OauthView::new(DIM_OAUTH_ID, "DimAgent", 0);
         view.set_account(Ok(None));
         view.handle_key(key(KeyCode::Down));
@@ -1156,7 +1134,6 @@ mod tests {
             rows[1],
             "Internal · ¥0.10/month · active · expires 2026-10-28"
         );
-        // Each meter: a blank row, its numbers, its bar on a row of its own.
         assert_eq!(rows[2], "");
         assert_eq!(
             rows[3],
@@ -1171,7 +1148,6 @@ mod tests {
             view.handle_key(KeyEvent::new(KeyCode::Char('r'), Modifiers::CTRL)),
             Effect::LoginUsage(id) if id == DIM_OAUTH_ID
         ));
-        // The last numbers stay up while the host answers again.
         assert!(labels(&view)[3].starts_with("Credits"));
         assert_eq!(labels(&view)[12], "Images      unlimited");
         view.set_usage(Err("This account plugin does not report usage".into()));

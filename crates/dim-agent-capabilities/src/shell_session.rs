@@ -260,7 +260,6 @@ impl ShellSession {
         self: &Arc<Self>,
         queued: &QueuedCommand,
     ) -> Result<ToolResult, String> {
-        // While the shell is occupied the call waits instead of sending.
         if let Some(result) = self.occupied_wait(queued).await {
             return result;
         }
@@ -352,7 +351,6 @@ impl ShellSession {
             }
             inner.generation
         };
-        // The dead shell's tasks settle before a new shell takes over.
         if previous > 0 {
             self.handle_shell_exit(previous, None).await;
         }
@@ -426,8 +424,6 @@ impl ShellSession {
             inner.pty = Some(pty);
             inner.generation
         };
-        // The blocking reader runs on its own thread; the async consumer
-        // only touches the mutex between chunks.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Option<Vec<u8>>>();
         std::thread::spawn(move || {
             let mut reader = reader;
@@ -450,9 +446,6 @@ impl ShellSession {
         let lifecycle = self.lifecycle.clone();
         {
             let tasks = self.tasks.lock().await;
-            // A background job holds the PTY open past its shell, so the
-            // reader alone cannot see a shell death: the shell process is
-            // polled too.
             tasks.spawn(async move {
                 let mut poll = tokio::time::interval(SHELL_EXIT_POLL);
                 let mut reading = true;
@@ -465,8 +458,6 @@ impl ShellSession {
                                 this.handle_output(&regularize_output(&bytes)).await;
                             }
                             _ => {
-                                // EOF does not mean the exit status is ready.
-                                // Keep the process until the poll reaps it.
                                 reading = false;
                             }
                         },
@@ -503,8 +494,6 @@ impl ShellSession {
                 "Remove-Module PSReadLine -ErrorAction SilentlyContinue; $env:GIT_PAGER='cat'; $env:NO_COLOR='1'; if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }"
             }
         };
-        // Interactive shells expand `!` in command lines; the wrappers'
-        // `"$!"` must reach the shell verbatim.
         let shell_extra = match (dialect, exe_name.as_str()) {
             (ShellDialect::Posix, "zsh") => "; setopt NO_BANGHIST; unsetopt zle; stty -icanon",
             (ShellDialect::Posix, _) => "; set +H",
@@ -567,7 +556,6 @@ impl ShellSession {
             if let Some(occ) = inner.occupying.as_mut().filter(|occ| occ.started) {
                 occ.pending.push_str(text);
             }
-            // POSIX background completion through the stream.
             let matched: Vec<(String, String)> = inner
                 .background
                 .values()
@@ -642,7 +630,6 @@ impl ShellSession {
             if inner.generation != generation {
                 return;
             }
-            // A shell the session terminated already carries its note.
             if inner.pty.take().is_some() {
                 let note = match status {
                     Some(status) => match status.signal() {
@@ -671,13 +658,10 @@ impl ShellSession {
                     ended: Some(occ.ended),
                 });
             }
-            // POSIX jobs die with their shell; pwsh children survive it.
             if inner.dialect == ShellDialect::Posix {
                 orphans = inner.background.drain().map(|(_, task)| task).collect();
             }
         }
-        // A job leads its own process group, which neither the shell's
-        // termination nor its exit reaches.
         for task in orphans {
             let killed = match task.pid {
                 Ok(pid) => kill_job(pid).await,
@@ -778,7 +762,6 @@ impl ShellSession {
                         Some(start_pos) if start_pos + start_marker.len() <= pos => {
                             inner.retained[start_pos + start_marker.len()..pos].to_owned()
                         }
-                        // The retained limit discarded the prefix.
                         _ => String::new(),
                     };
                     let (output, omitted) = bound_output(&output, OUTPUT_LIMIT);
@@ -958,7 +941,6 @@ impl ShellSession {
             let inner = self.inner.lock().await;
             inner.dialect
         };
-        // Compose the wrapper per dialect.
         let (wrapped, kind) = match dialect {
             ShellDialect::Posix => (
                 posix_background(command, &output_path, &completion, &pid_marker),
@@ -989,7 +971,6 @@ impl ShellSession {
                 )
             }
         };
-        // pwsh completion arrives through the result file.
         let pwsh_paths = match &kind {
             BackgroundKind::Pwsh {
                 result_path,
@@ -997,7 +978,6 @@ impl ShellSession {
             } => Some((result_path.clone(), error_path.clone())),
             BackgroundKind::Posix => None,
         };
-        // Admit durably before either dialect can execute or report completion.
         {
             let mut inner = self.inner.lock().await;
             if self.lifecycle.is_cancelled() {
@@ -1042,7 +1022,6 @@ impl ShellSession {
             }
             return Err(error.to_string());
         }
-        // Read the job pid back through the pid marker.
         let pid_marker_full = pid_marker.full();
         let deadline = tokio::time::Instant::now() + PID_WAIT;
         while tokio::time::Instant::now() < deadline {
@@ -1129,7 +1108,6 @@ impl ShellSession {
 
     /// Stops a task by id.
     pub async fn stop(&self, task_id: &str) -> Result<ExecEndedData, TaskError> {
-        // Occupying task: Ctrl+C, bounded marker wait, cancelled settle.
         let occupying = {
             let mut inner = self.inner.lock().await;
             if inner
@@ -1186,7 +1164,6 @@ impl ShellSession {
             occ.ended.notify_waiters();
             return Ok(data);
         }
-        // Background task: signal the process group, cancelled settle.
         let task = {
             let mut inner = self.inner.lock().await;
             inner.background.remove(task_id)
@@ -1290,8 +1267,6 @@ fn advance_occupying(inner: &mut Inner) -> Option<Settlement> {
     })
 }
 
-// ------------------------------------------------------------------ plugin
-
 /// The plugin.
 pub struct ShellSessionPlugin {
     session: Key<ShellSession>,
@@ -1366,38 +1341,34 @@ impl DynPlugin for ShellSessionPlugin {
                 dispatcher,
             ));
             let service = session.clone();
-            ctx.effect(move || {
-                async move {
-                    service.lifecycle.cancel();
-                    {
-                        let mut inner = service.inner.lock().await;
-                        if let Some(mut pty) = inner.pty.take() {
-                            let _ = pty.terminate().await;
-                        }
-                        for queued in inner.queue.drain(..) {
-                            let _ = queued.done.send(Err("shell session closed".into()));
-                        }
+            ctx.effect(move || async move {
+                service.lifecycle.cancel();
+                {
+                    let mut inner = service.inner.lock().await;
+                    if let Some(mut pty) = inner.pty.take() {
+                        let _ = pty.terminate().await;
                     }
-                    let tasks = service.tasks.lock().await.clone();
-                    tasks.close();
-                    tasks.wait().await;
-                    let generation = service.inner.lock().await.generation;
-                    service.handle_shell_exit(generation, None).await;
-                    // PowerShell children survive the shell and have their
-                    // own result-file watcher, now joined above.
-                    let remaining = service
-                        .inner
-                        .lock()
-                        .await
-                        .background
-                        .keys()
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    for task in remaining {
-                        let _ = ShellSession::stop(&service, &task).await;
+                    for queued in inner.queue.drain(..) {
+                        let _ = queued.done.send(Err("shell session closed".into()));
                     }
-                    Ok(())
                 }
+                let tasks = service.tasks.lock().await.clone();
+                tasks.close();
+                tasks.wait().await;
+                let generation = service.inner.lock().await.generation;
+                service.handle_shell_exit(generation, None).await;
+                let remaining = service
+                    .inner
+                    .lock()
+                    .await
+                    .background
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for task in remaining {
+                    let _ = ShellSession::stop(&service, &task).await;
+                }
+                Ok(())
             })?;
             ctx.provide_at(self.session.clone(), session.clone())?;
             ctx.provide_at::<dyn ExecStop>(self.stop.clone(), session)?;
@@ -1405,8 +1376,6 @@ impl DynPlugin for ShellSessionPlugin {
         })
     }
 }
-
-// ------------------------------------------------------------------ helpers
 
 fn shell_args(dialect: ShellDialect) -> Vec<std::ffi::OsString> {
     match dialect {

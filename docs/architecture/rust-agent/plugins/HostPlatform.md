@@ -38,7 +38,11 @@ supported-shell fallback rules. An already running shell is not restarted when
 the exec preference changes. Spawned process lifetime belongs to each
 caller/supervisor, not this plugin. An unavailable shell does not prevent publishing HostPlatform; exec
 fails explicitly. Raw spawn/PTY and tree termination are execution mechanics;
-model consumers prepare the local isolation policy before calling them.
+model consumers prepare the local isolation policy before calling them. A
+process group id equals the root pid and stays reserved only while the group
+has members. Dropping a `ProcessTree` signals only when the tree was neither
+confirmed terminated nor reaped on its own; otherwise a recycled pid or reused
+group could receive `SIGKILL`.
 
 The [F5 isolation spike](../../../design/host-platform-isolation-spike.md) exercises
 Seatbelt, Landlock and bubblewrap wrappers through these existing process and PTY APIs. It

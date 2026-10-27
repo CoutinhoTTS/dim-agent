@@ -66,7 +66,6 @@ impl Scan<'_> {
         if self.count >= MAX_SCAN_FILES || depth > MAX_DEPTH {
             return;
         }
-        // Symlinks are followed; a directory reached twice is a cycle.
         let Ok(real) = dir.canonicalize() else {
             return;
         };
@@ -178,7 +177,6 @@ fn normalize_allowed_tools(raw: Option<&Yaml>) -> Vec<String> {
         if trimmed.is_empty() {
             continue;
         }
-        // Strip scope: Tool(scope) -> Tool
         let mut name = trimmed;
         if let Some(open) = trimmed.find('(')
             && trimmed.ends_with(')')

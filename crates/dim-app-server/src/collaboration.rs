@@ -75,8 +75,6 @@ pub fn install(builder: &mut AgentBuilder) {
         .require_part("CollaborationTimeline");
 }
 
-// ---------------------------------------------------------------- process
-
 struct Relation {
     leader: String,
     member_agent: String,
@@ -151,7 +149,6 @@ impl Collaboration {
         adopted: Option<ModelSelection>,
     ) -> Result<Peer, Failure> {
         let (leader_host, leader) = self.index.session(leader_id).ok_or(Refusal::Closed)?;
-        // One policy snapshot per creation, read before any Agent exists.
         let policy = match &self.settings {
             Some(settings) => {
                 settings
@@ -169,7 +166,6 @@ impl Collaboration {
             _ => None,
         };
         let (host, owned) = match target {
-            // A temporary Agent belongs to the Team of the leader that created it.
             NewMember::Agent(id) if !self.visible(&id, leader_id) => {
                 return Err(Refusal::AgentNotFound.into());
             }
@@ -179,7 +175,6 @@ impl Collaboration {
             ),
             NewMember::Temporary(profile) => {
                 let id = uuid::Uuid::new_v4();
-                // Establish privacy before the Agent can enter the live index.
                 self.directory
                     .temporary
                     .lock()
@@ -201,7 +196,6 @@ impl Collaboration {
         };
         let mut config =
             crate::agents::session_config(&host.profile, self.index.session_defaults());
-        // A member works in its leader's workspace under the leader's policy.
         config.cwd = leader.config().cwd.clone();
         config.permission_policy = leader.config().permission_policy.clone();
         config.collaboration_role = CollaborationRole::Member;
@@ -235,13 +229,11 @@ impl Collaboration {
                 }
             };
         }
-        // A member with a mount list reaches its team through `agent`.
         if let Some(tools) = &mut config.tools
             && !tools.iter().any(|tool| tool == AGENT_TOOL)
         {
             tools.push(AGENT_TOOL.into());
         }
-        // Clients of the leader's protocol view and address its members.
         let version = self
             .index
             .version_of(leader_id)
@@ -371,8 +363,6 @@ impl Collaboration {
             .into_iter()
             .filter(|session| Some(session.id()) != ended && !session.is_closing())
             .collect();
-        // An unloaded Session has not ended: the next request restores it,
-        // and `SessionRestored` watches it again, or its delete ends it.
         if remaining.is_empty()
             && !self
                 .index
@@ -380,7 +370,6 @@ impl Collaboration {
                 .iter()
                 .any(|session| Some(session.as_str()) != ended)
         {
-            // A temporary Agent closes with its last Session.
             let _ = self.index.close(agent_id).await;
             self.directory.temporary.lock().unwrap().remove(agent_id);
         } else {
@@ -546,7 +535,6 @@ impl Collaboration {
 
 impl Collaboration {
     fn session_restored(self: &Arc<Self>, event: &SessionRestored) {
-        // The restored Session is already in its Agent's entries.
         let Some((_, session)) = self.index.session(&event.session_id) else {
             return;
         };
@@ -645,8 +633,6 @@ impl DynPlugin for CollaborationPlugin {
                 deleted.unloaded_session_deleted(&event);
                 async { Ok(None) }
             })?;
-            // Retain handles across the reload gap: even a Session that closed
-            // while no observer ran must still clean up its relation/Agent.
             let watched: Vec<_> = service
                 .directory
                 .watched
@@ -658,8 +644,6 @@ impl DynPlugin for CollaborationPlugin {
             for watched in watched {
                 service.observe(watched);
             }
-            // Before the service is provided, so no member is being
-            // established meanwhile.
             service.reconcile().await;
             ctx.provide_as::<Collaboration>(service)?;
             use dim_agent_runtime::PartScope;
@@ -677,8 +661,6 @@ impl DynPlugin for CollaborationPlugin {
         })
     }
 }
-
-// ---------------------------------------------------------------- Session
 
 /// An operation event awaiting its `delivered`, or a delivered request
 /// awaiting its `result`.
@@ -757,8 +739,6 @@ fn op_turn(kind: &EventKind) -> Option<(&str, bool)> {
 }
 
 impl CollaborationSession {
-    // ------------------------------------------------------------ tool entry
-
     /// Writes the operation event and waits for its `delivered`; cancelling
     /// abandons only the wait.
     async fn operate(
@@ -785,7 +765,6 @@ impl CollaborationSession {
         };
         let (sender, mut receiver) = watch::channel(None);
         let committed = timeline.append_registered(kind.into(), |event| {
-            // `before` callbacks transform the data but never the kind.
             let Some((turn_id, request)) = op_turn(&event.kind) else {
                 return Err(AgentError::fault(
                     "collaboration",
@@ -811,7 +790,6 @@ impl CollaborationSession {
             );
             Ok(())
         });
-        // Not recorded: the runtime's own error is the tool result.
         if let Err(error) = committed {
             return Err(HostError::failed(error.to_string()));
         }
@@ -1016,8 +994,6 @@ impl CollaborationSession {
             .collect();
         let mut result = json!({"role": self.role, "participants": participants});
         if self.role == CollaborationRole::Leader {
-            // Keep policy stable while taking and filtering the directory
-            // snapshot; a concurrent close must not declassify a stale row.
             let temporary = self.collaboration.directory.temporary.lock().unwrap();
             result["agents"] = self
                 .collaboration
@@ -1085,7 +1061,6 @@ impl CollaborationSession {
         let mut items: Vec<Value> = vec![];
         let mut text_request = None;
         let mut next = after;
-        // Started call names by (request_id, call_id), for undispatched results.
         let mut started = HashMap::<(String, String), String>::new();
         for event in &events {
             next = event.sequence;
@@ -1128,9 +1103,6 @@ impl CollaborationSession {
                             Ok(call) => call,
                             Err(error) => return ToolResult::error(error.to_string()),
                         },
-                        // Results closing undispatched calls answer no dispatch;
-                        // their names come from the calls' starts, which may
-                        // precede this page.
                         None => {
                             for result in &data.results {
                                 let key = (data.request_id.clone(), result.call_id.clone());
@@ -1197,8 +1169,6 @@ impl CollaborationSession {
         )
     }
 
-    // ------------------------------------------------------------ dispatch
-
     fn consume(
         self: &Arc<Self>,
         branch_id: &str,
@@ -1264,8 +1234,6 @@ impl CollaborationSession {
         if let Some(turn) = &turn {
             branch.interrupted.insert(turn.clone());
         }
-        // A delivered request is detached work: a turn stop leaves it running
-        // and its result wakes the branch later. Only a branch stop ends it.
         let mut undelivered = BTreeSet::new();
         for (id, op) in branch.ops.iter_mut() {
             if covers(&op.turn_id) && (turn.is_none() || !op.delivered) {
@@ -1295,8 +1263,6 @@ impl CollaborationSession {
                 for (member, mut done) in members {
                     let _ = member.stop("main", INTERRUPTED.into()).await;
                     if scope == InterruptScope::Branch {
-                        // The branch close also owns the request's result read
-                        // and publication, not just the member's native stop.
                         tokio::select! {
                             _ = done.wait_for(|done| *done) => {}
                             _ = abort.cancelled() => break,
@@ -1316,8 +1282,6 @@ impl CollaborationSession {
         turn_id: String,
         request: bool,
     ) {
-        // Captured here, at the request's position: a later adoption on the
-        // branch cannot be applied before this handler returns.
         let adopted = match &event.kind {
             EventKind::CollaborationRequest(CollaborationRequestData {
                 target: CollaborationTarget::Agent { .. } | CollaborationTarget::Temporary { .. },
@@ -1344,8 +1308,6 @@ impl CollaborationSession {
             detail: None,
             waiter: None,
         });
-        // A cancel's outcome is decided at its own position: whether a
-        // request of this branch to the member has no handled `result` yet.
         let mut cancel = CollaborationCancelOutcome::Idle;
         match &event.kind {
             EventKind::CollaborationRequest(CollaborationRequestData {
@@ -1373,7 +1335,6 @@ impl CollaborationSession {
             | EventKind::CollaborationMessage(CollaborationMessageData { session_id, .. }) => {
                 session_id.clone()
             }
-            // A new member is a peer of its own.
             _ => event.id.clone(),
         };
         let previous = branch.chains.get(&peer).map(|(_, work)| work.clone());
@@ -1419,7 +1380,6 @@ impl CollaborationSession {
         delivery: CollaborationDelivery,
         detail: Option<String>,
     ) {
-        // The cause is recorded before the fact its handler consumes.
         let timeline = self
             .state
             .lock()
@@ -1447,16 +1407,16 @@ impl CollaborationSession {
         let Some(branch) = state.branches.get_mut(branch_id) else {
             return;
         };
-        if !written && let Some(mut op) = branch.ops.remove(op) {
-            // No fact was written: release the waiting tool call directly.
-            if let Some(waiter) = op.waiter.take() {
-                waiter.send_replace(Some((
-                    CollaborationDelivery::Error {
-                        error: Refusal::Closed,
-                    },
-                    None,
-                )));
-            }
+        if !written
+            && let Some(mut op) = branch.ops.remove(op)
+            && let Some(waiter) = op.waiter.take()
+        {
+            waiter.send_replace(Some((
+                CollaborationDelivery::Error {
+                    error: Refusal::Closed,
+                },
+                None,
+            )));
         }
     }
 
@@ -1537,7 +1497,6 @@ impl CollaborationSession {
                 let _ = peer.session.stop("main", CANCELLED.into()).await;
                 if let Some(mut done) = working {
                     let abort = self.with_abort(branch_id);
-                    // The relation outlives the request: its result comes first.
                     tokio::select! {
                         _ = done.wait_for(|done| *done) => {}
                         _ = abort.cancelled() => return Err(Refusal::Closed.into()),
@@ -1617,8 +1576,6 @@ impl CollaborationSession {
         let member = peer.session.id().to_owned();
         let covered = {
             let state = self.state.lock().unwrap();
-            // Recheck before writing to the member: a stop handled since this
-            // operation was dispatched covers it.
             state.branches.get(branch_id).and_then(|branch| {
                 let op = branch.ops.get(&event.id)?;
                 op.suppressed.then_some(if branch.closing {
@@ -1628,8 +1585,6 @@ impl CollaborationSession {
                 })
             })
         };
-        // The request holds the leader while it is open. Only a closing
-        // leader has no hold to give: refused as a closing branch is.
         let hold = covered
             .is_none()
             .then(|| self.lifecycle.take_hold())
@@ -1674,9 +1629,6 @@ impl CollaborationSession {
         {
             Ok(input) => input,
             Err(error) => {
-                // Refused before delivery: its hold drops here, and the
-                // `delivered` that answers the waiting tool call follows
-                // without an await.
                 self.state.lock().unwrap().requests.remove(&member);
                 if new {
                     self.collaboration.remove(&member);
@@ -1696,7 +1648,6 @@ impl CollaborationSession {
                 .and_then(|branch| branch.ops.get(&event.id))
                 .is_none_or(|op| op.suppressed)
         };
-        // Covered by a stop before its delivery: the result does not return.
         if suppressed {
             let _ = peer.session.stop("main", INTERRUPTED.into()).await;
         }
@@ -1748,15 +1699,12 @@ impl CollaborationSession {
         };
         let session = request.session.clone();
         let member = member.clone();
-        // Leader stop and idle do not wait for the member; unload cancels
-        // the wait and settles.
         let abort = branch.abort.clone();
         let this = self.clone();
         let branch_id = branch_id.to_owned();
         branch.tasks.spawn(async move {
             let idle = tokio::select! {
                 result = session.idle("main") => result,
-                // Unload writes the result of an aborted wait.
                 _ = abort.cancelled() => return,
             };
             this.settle(&branch_id, &member, Some(idle)).await;
@@ -1794,8 +1742,6 @@ impl CollaborationSession {
             return;
         };
         let (op, agent_id, session, input) = request;
-        // The work range ends where the member's idle point was reached;
-        // later turns of the member are not this request's work.
         let through = match &idle {
             Some(Ok(cutoff)) => Some(*cutoff),
             _ => None,
@@ -1836,7 +1782,6 @@ impl CollaborationSession {
                 .into(),
             );
         }
-        // Removed after its last fact: this drops the leader's hold.
         if let Some(request) = self.state.lock().unwrap().requests.remove(member) {
             request.done.send_replace(true);
         }
@@ -1931,8 +1876,6 @@ impl CollaborationSession {
         }
     }
 
-    // ------------------------------------------------------------ lifecycle
-
     /// Unload: pending work stops; operations without `delivered` and
     /// requests without `result` are settled on this Timeline.
     async fn unload(&self, branch_id: &str) {
@@ -2002,10 +1945,6 @@ impl CollaborationSession {
             if closing {
                 let _ = session.stop("main", INTERRUPTED.into()).await;
             } else {
-                // A reload does not wait for the member to settle: its Loop
-                // may be reloading in the same cascade and return only after
-                // this unload. Commit before releasing the request so the
-                // interrupt cannot land after a later member input.
                 let _ = session.interrupt("main", INTERRUPTED.into());
             }
             self.settle(branch_id, &member, None).await;
@@ -2029,7 +1968,6 @@ impl CollaborationSession {
     ) -> (Option<String>, BTreeSet<String>) {
         let mut current_turn = None;
         let mut interrupted = BTreeSet::new();
-        // Undelivered operations, whether each is a request.
         let mut ops = BTreeMap::new();
         let mut open: BTreeMap<String, (String, String)> = BTreeMap::new();
         for event in events {
@@ -2076,10 +2014,6 @@ impl CollaborationSession {
                 .into(),
             );
         }
-        // A request left by the previous generation ends once the branch is
-        // Active: a member this Session leads stops first, then the result
-        // is written. A branch that never starts leaves it to the next
-        // generation.
         for (op, (agent_id, session_id)) in open {
             let leads = self
                 .collaboration
@@ -2500,8 +2434,6 @@ impl DynPlugin for CollaborationTimelinePlugin {
                 owner.unload(&unloading).await;
                 Ok(())
             })?;
-            // Subscribe, then rebuild under the gate: see the capability
-            // reload protocol. Handlers skip events the rebuild covered.
             let rebuilt = Arc::new(tokio::sync::Mutex::new(0u64));
             let gate = rebuilt.clone();
             let mut rebuilding = rebuilt.lock().await;
@@ -2537,7 +2469,6 @@ impl DynPlugin for CollaborationTimelinePlugin {
             let through = timeline.committed();
             let events = timeline.local(..=through).await?;
             *rebuilding = events.last().map_or(0, |event| event.sequence);
-            // Unload waits for the rebuild's member stops with other work.
             let tasks = TaskTracker::new();
             let (current_turn, interrupted) = service.rebuild(&timeline, &phase, &events, &tasks);
             service.state.lock().unwrap().branches.insert(

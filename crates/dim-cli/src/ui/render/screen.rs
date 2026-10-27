@@ -188,7 +188,6 @@ impl Screen {
             return out;
         }
 
-        // The first frame lays the viewport out; commits need it to exist.
         if self.viewport_height == 0 {
             self.size = size;
             self.viewport_height = wanted;
@@ -201,8 +200,6 @@ impl Screen {
             let bottom = size.1.saturating_sub(1);
             match self.origin {
                 Some(origin) => {
-                    // Start where the shell stopped; scroll only as much as
-                    // the region needs below that row.
                     let origin = origin.min(bottom);
                     let top = origin.min(size.1.saturating_sub(wanted));
                     let overflow = (origin + wanted).saturating_sub(size.1);
@@ -213,7 +210,6 @@ impl Screen {
                     self.top = top;
                 }
                 None => {
-                    // Make room at the bottom: the live region owns these rows.
                     self.top = size.1.saturating_sub(wanted);
                     push_move(&mut out, 0, bottom);
                     out.extend(
@@ -290,22 +286,17 @@ impl Screen {
             viewport: Rect::new(0, self.viewport_top(), self.size.0, self.viewport_height),
             reset: false,
         };
-        // A commit's closing newline terminates its last row; the emitter
-        // would draw it as one more, blank, row.
         let text = text.strip_suffix('\n').unwrap_or(text);
         let text = &scrub_keeping_newlines(text);
-        // The writer is a Vec, so writes cannot fail.
         let written = text.split('\n').count() as u16;
         let before = self.top;
         let _ = emit_to_scrollback(&mut term, text);
-        // The emitter moved the region below what it wrote.
         let moved = term.viewport.y;
         self.top = moved;
         self.note_scroll((before + written).saturating_sub(moved));
         if term.reset {
             self.painted.fill(None);
         }
-        // The vendored routine leaves the cursor at the new viewport top.
         self.cursor_at = Some((0, self.top));
     }
 
@@ -332,11 +323,7 @@ impl Screen {
             return false;
         };
         let bottom = i64::from(self.size.1.saturating_sub(1));
-        // Where the region's first row is now. A commit taller than the
-        // screen scrolls its own first rows off the top, so this goes below
-        // zero while it is written.
         let mut top = i64::from(self.top);
-        // Screen rows written so far, from the region's first.
         let mut offset = 0;
         for (row, laid) in rows.iter().zip(laid) {
             let height = laid.rows;
@@ -351,15 +338,12 @@ impl Screen {
             }
             let last = top + (offset + height) as i64 - 1;
             if last > bottom {
-                // Past the bottom: scroll, the written rows move up.
                 let by = (last - bottom) as u16;
                 push_move(out, 0, bottom as u16);
                 out.extend(std::iter::repeat_n(b"\n", by as usize).flatten());
                 top -= i64::from(by);
                 self.note_scroll(by);
             }
-            // A wider row wraps onto the rows below as the terminal's own
-            // soft wrap, writing over them in full.
             push_move(out, 0, (top + offset as i64) as u16);
             out.extend_from_slice(laid.text.as_bytes());
             out.extend_from_slice(b"\x1b[0m");
@@ -370,10 +354,8 @@ impl Screen {
             offset += height;
         }
         let kept = (self.viewport_height as usize).saturating_sub(offset);
-        // The region now starts below the last row written.
         self.top = (top + offset as i64).clamp(0, i64::from(self.size.1)) as u16;
         self.viewport_height = kept as u16;
-        // The committed rows were the tail's first ones.
         self.tail = self.tail.saturating_sub(offset as u16);
         self.painted.drain(..self.painted.len().min(offset));
         true
@@ -424,8 +406,6 @@ impl Screen {
             out.extend(std::iter::repeat_n(b"\n", overflow as usize).flatten());
             self.note_scroll(overflow);
         }
-        // Old row `i` is new row `i - shift`; the old rows left outside the
-        // new region are erased (where the screen still shows them).
         let shift = i64::from(desired) - i64::from(self.top);
         let old_top = i64::from(self.top) - i64::from(overflow);
         for i in (0..i64::from(old)).filter(|&i| i < shift || i >= shift + i64::from(wanted)) {
@@ -435,8 +415,6 @@ impl Screen {
                 out.extend_from_slice(ERASE_LINE);
             }
         }
-        // Rows kept moved with the screen and still read the same; gap rows
-        // taken back are blank.
         self.painted = (0..i64::from(wanted))
             .map(|j| match j + shift {
                 i if i < 0 => Some(String::new()),
@@ -451,8 +429,6 @@ impl Screen {
     }
 
     fn resize_to(&mut self, size: (u16, u16), wanted: u16, out: &mut Vec<u8>) {
-        // Stage 2.8 replaces this with the reflow contract; until then keep
-        // the live region valid at the new geometry.
         self.size = size;
         self.viewport_height = wanted;
         self.top = size.1.saturating_sub(wanted);
@@ -490,8 +466,6 @@ impl Screen {
             out.extend_from_slice(scrub(row).as_bytes());
             out.extend_from_slice(b"\x1b[0m\r\n");
         }
-        // The cursor is on the row after the tail; the region starts there,
-        // scrolling the screen up for whatever does not fit below it.
         let after = tail.len().min((rows - 1) as usize) as u16;
         let overflow = (after + wanted).saturating_sub(rows);
         if overflow > 0 {
@@ -550,8 +524,6 @@ impl Screen {
             push_move(out, 0, top + i as u16);
             let text = scrub(row);
             out.extend_from_slice(text.as_bytes());
-            // Styling must not leak into the next row; the old text past the
-            // new is erased after the row is written, never before.
             out.extend_from_slice(b"\x1b[0m");
             if !lay_out(&text, self.size.0 as usize).is_some_and(|laid| laid.full) {
                 out.extend_from_slice(ERASE_LINE_END);
@@ -578,8 +550,6 @@ impl Screen {
                 }
             }
             None => {
-                // Parked on the region's first row, so the resize report has
-                // a row to be compared against.
                 let target = (0, self.viewport_top());
                 self.anchor = target.1;
                 if self.cursor_at != Some(target) {
@@ -617,7 +587,6 @@ fn lay_out(row: &str, cols: usize) -> Option<Laid<'_>> {
     let mut chars = row.char_indices().peekable();
     while let Some((at, c)) = chars.next() {
         if c == '\x1b' {
-            // The interface's own SGR and OSC 8 sequences take no cells.
             let (_, after) = escape_sequence(&row[at + 1..]);
             let end = row.len() - after.len();
             while chars.next_if(|&(i, _)| i < end).is_some() {}
@@ -726,8 +695,6 @@ fn scrub_slow(text: &str, keep_newlines: bool) -> String {
                 }
                 rest = after;
             }
-            // C1 CSI and OSC introducers: the same sequences as after ESC,
-            // never ones the interface writes.
             '\u{9b}' => rest = csi(rest).1,
             '\u{9d}' => rest = osc(rest).1,
             _ => {}
@@ -751,7 +718,6 @@ fn escape_sequence(rest: &str) -> (&str, &str) {
             } else {
                 ""
             };
-            // The kept slice must carry its ESC: it is rebuilt by the caller.
             (kept, after)
         }
         ']' => {
@@ -770,8 +736,6 @@ fn escape_sequence(rest: &str) -> (&str, &str) {
             };
             (kept, after)
         }
-        // DCS, APC, PM: ended by ST like an OSC; two-character escapes: just
-        // the one character.
         'P' | '_' | '^' => ("", osc(&rest[1..]).1),
         _ => ("", &rest[kind.len_utf8()..]),
     }
@@ -928,8 +892,6 @@ mod tests {
 
     #[test]
     fn a_commit_taller_than_the_screen_scrolls_through_without_overflow() {
-        // A long thought committed at once from a region at the top of the
-        // screen: its first rows scroll off before the last are written.
         let (mut screen, mut emu) = setup(true);
         screen.set_origin(0);
         let live = ["composer", "status"];
@@ -1044,7 +1006,6 @@ mod tests {
                 None,
             ),
         );
-        // The emulator keeps a `\0` spacer after each wide character.
         let transcript: Vec<String> = emu
             .transcript()
             .iter()
@@ -1156,8 +1117,6 @@ mod tests {
         assert!(emu.transcript().contains(&"history line".to_owned()));
         drive(&mut screen, &mut emu, &frame(&[], &["c", "s"], None));
         let rows = emu.rows_text();
-        // A shorter tail gives its rows back, blank, above the dock: the
-        // composer never moves up.
         assert_eq!(&rows[10..], ["c", "s"]);
         assert!(rows[8..10].iter().all(String::is_empty), "{rows:?}");
         assert!(
@@ -1204,8 +1163,6 @@ mod tests {
         let scrolled = open_and_close(&mut screen, &mut emu, &closed, &open, 6);
         assert_eq!(scrolled, 3, "only the first opening scrolls");
         let rows = emu.rows_text();
-        // The dock's first row stays put once closed: the rows the menu
-        // took are left blank below the status row.
         let now = rows.iter().position(|r| r == "│ /").unwrap();
         assert_eq!(now, composer - 3, "{rows:?}");
         assert_eq!(rows[now + 2], "status");
@@ -1214,8 +1171,6 @@ mod tests {
 
     #[test]
     fn a_menu_under_a_composer_with_room_below_moves_nothing() {
-        // The shell left the cursor near the top: the menu opens downwards
-        // and closes from the bottom, the composer never moves.
         let (mut screen, mut emu) = setup(true);
         screen.set_origin(2);
         let closed = ["╭─╮", "│ /", "╰─╯", "status"];
@@ -1231,8 +1186,6 @@ mod tests {
 
     #[test]
     fn a_question_changing_height_keeps_its_first_row() {
-        // A question takes the composer's place and changes height from tab
-        // to tab; answered, the composer comes back where it started.
         let (mut screen, mut emu) = setup(true);
         let composer = ["╭─╮", "│ >", "╰─╯", "status"];
         let tall = ["╭ q ╮", "a", "b", "c", "d", "╰───╯", "status"];
@@ -1267,7 +1220,6 @@ mod tests {
         assert_eq!(emu.row(10), full, "painted");
         drive(&mut screen, &mut emu, &frame(&[&full], &["s"], None));
         assert!(emu.transcript().contains(&full), "{:?}", emu.transcript());
-        // Committed where the region showed something else.
         let other = format!("{}q", "w".repeat(39));
         drive(&mut screen, &mut emu, &frame(&[&other], &["s"], None));
         assert!(emu.transcript().contains(&other), "{:?}", emu.transcript());
@@ -1301,8 +1253,6 @@ mod tests {
     #[test]
     fn a_double_width_character_at_the_edge_leaves_no_old_cell() {
         let (mut screen, mut emu) = setup(false);
-        // The old rows under the commit are full, so a cell left behind
-        // would show.
         let full = "#".repeat(40);
         let live = [full.as_str(), full.as_str(), full.as_str(), "c", "s"];
         drive(&mut screen, &mut emu, &docked(&live, 3, None));
@@ -1384,7 +1334,6 @@ mod tests {
         fn rows(&mut self, most: u64, width: u16) -> Vec<String> {
             (0..self.below(most + 1))
                 .map(|n| {
-                    // Some rows are wider than the screen, some blank.
                     let len = self.below(u64::from(width) * 2 + 2) as usize;
                     format!("{n}{}", "x".repeat(len))
                 })
@@ -1424,7 +1373,6 @@ mod tests {
                     self.tail.truncate(5);
                 }
                 2 => {
-                    // The tail's first rows are committed as they read.
                     let n = (1 + self.rng.below(3) as usize).min(self.tail.len());
                     let rows: Vec<String> = self.tail.drain(..n).collect();
                     if !rows.is_empty() {
@@ -1432,7 +1380,6 @@ mod tests {
                     }
                 }
                 3 => {
-                    // A running block folds into a shorter committed summary.
                     if !self.tail.is_empty() {
                         self.tail.clear();
                         let row = self.label("summary");
@@ -1440,8 +1387,6 @@ mod tests {
                     }
                 }
                 4 => {
-                    // A row wider than the screen, sometimes with double-width
-                    // characters that do not fit at the edge.
                     let row = self.label("w");
                     let wide = if self.rng.below(2) == 0 {
                         format!("{row}{}", "x".repeat(self.cols as usize * 3 / 2))
@@ -1502,7 +1447,6 @@ mod tests {
             let size = (20 + rng.below(60) as u16, 20 + rng.below(20) as u16);
             let sync = rng.below(2) == 0;
             let mut screen = Screen::new(size, sync);
-            // From the top of a clean screen, every row history gets is ours.
             screen.set_origin(0);
             let mut emu = Emu::new(size.0 as usize, size.1 as usize);
             let mut session = Session {
@@ -1543,8 +1487,6 @@ mod tests {
                     "a blank row reached history; {context}"
                 );
                 assert_eq!(emu.flickers, flickers, "a row flickered; {context}");
-                // The region shows the frame, the rows above it are the
-                // history and blank rows right above it (its gap).
                 let top = screen.top as usize;
                 let rows = emu.rows_text();
                 assert_eq!(
@@ -1559,7 +1501,6 @@ mod tests {
                     .iter()
                     .chain(&rows[..floor])
                     .flat_map(|row| row.chars())
-                    // The emulator marks the second cell of a wide character.
                     .filter(|&c| c != '\u{0}')
                     .collect();
                 assert_eq!(history, committed, "{context}");
@@ -1590,8 +1531,6 @@ mod tests {
             for _ in 0..rng.below(60) {
                 emu.feed(&screen.render(&session.step(), size));
             }
-            // Open and close a menu, then a question, again and again:
-            // only the first round may scroll, and it ends where it began.
             let mut round = |session: &mut Session| {
                 let start = emu.scrollback.len();
                 for (panel, replaced) in [(6, false), (0, false), (4, true), (1, true), (0, false)]
@@ -1622,7 +1561,6 @@ mod tests {
 
     #[test]
     fn random_frames_at_any_size_never_panic() {
-        // DIM_STRESS_SEEDS widens the sweep for a deeper local run.
         let seeds: u64 = std::env::var("DIM_STRESS_SEEDS")
             .ok()
             .and_then(|n| n.parse().ok())

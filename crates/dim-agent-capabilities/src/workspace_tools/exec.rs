@@ -113,8 +113,6 @@ fn object(value: Value) -> JsonObject {
     map
 }
 
-// ------------------------------------------------------------------ input
-
 struct Input {
     command: String,
     cwd: Option<String>,
@@ -269,9 +267,6 @@ fn check_heavy_search(command: &str, cwd: &str, home: &str) -> Option<ToolResult
 /// points are searched; expression operands such as `-name node_modules`
 /// are patterns, not targets. Without starting points `find` searches `.`.
 fn find_starting_points(args: &[String]) -> Vec<String> {
-    // Leading options: GNU `-H -L -P -D debugopts -Olevel`, BSD `-E -X -d -s
-    // -x -f path`; their operands are checked like starting points, which is
-    // harmless for debug options. Any other `-` token begins the expression.
     let points: Vec<String> = args
         .iter()
         .skip_while(|token| {
@@ -442,8 +437,6 @@ fn high_cost_target(raw: &str, cwd: &str, home: &str) -> bool {
         .is_some_and(|base| HIGH_COST_BASENAMES.contains(&base))
 }
 
-// ------------------------------------------------------------ environment
-
 /// TS `path.ts` resolution of the `cwd` argument.
 fn resolve_cwd(value: &str, cwd: &Path, platform: &HostPlatform) -> PathBuf {
     let expanded = if value == "~" {
@@ -494,8 +487,6 @@ fn correct_windows_path(value: &str) -> String {
     }
     value.to_owned()
 }
-
-// ------------------------------------------------------------------ output
 
 /// Incremental canonical UTF-8 decoding of one stream (ADR 018): invalid and
 /// truncated bytes become `<0xNN>`, never U+FFFD.
@@ -771,10 +762,6 @@ pub async fn pump(
             if drain_budget.is_zero() {
                 break;
             }
-            // Limit pipe reading and decoding after exit, not output writes. Slow
-            // offload must not consume the time needed to drain ready bytes.
-            // Charge ready reads too so a continuously writing descendant cannot
-            // keep this pump alive indefinitely either.
             match tokio::time::timeout(drain_budget, pipe.read(&mut buffer)).await {
                 Ok(read) => read,
                 Err(_) => break,
@@ -798,8 +785,6 @@ pub async fn pump(
     }
     output.push(&decoder.end()).await;
 }
-
-// ----------------------------------------------------------------- process
 
 /// What ended the wait for a running command.
 pub(super) enum Observed {
@@ -916,8 +901,6 @@ impl ExecProcess {
         task_id: &str,
         cancel: CancellationToken,
     ) -> (ExecStatus, ToolResult) {
-        // A completion already there wins over a stop: stop only suppresses
-        // the wake of a finished command.
         let observed = tokio::select! {
             biased;
             observed = self.next() => observed.map(Some),
@@ -936,7 +919,6 @@ impl ExecProcess {
         };
         let settled = self.close().await;
         let (status, summary, name) = match (&observed, exit) {
-            // Dropping the tree kills what is left; the result says so.
             _ if let Some(error) = &unterminated => (
                 ExecStatus::Failed,
                 format!("Command could not be terminated: {error}"),
@@ -975,7 +957,6 @@ impl ExecProcess {
                 "failed",
             ),
         };
-        // Only an unsuccessful exit, not a stop, timeout or offload failure.
         let note = match exit {
             Some(status) if !status.success() && settled.failure.is_none() => {
                 self.failure_note(summary.clone(), &settled)
@@ -1129,8 +1110,6 @@ pub(super) fn recovered_result(task_id: &str, output_path: &str) -> ToolResult {
     }
 }
 
-// ---------------------------------------------------------------- handler
-
 /// Model-visible request facts reused by every result of one call.
 struct Call<'a> {
     task_id: String,
@@ -1277,7 +1256,6 @@ pub(super) async fn execute(
             tokio::time::sleep(DEFAULT_WAIT_TIME).await
         }
     };
-    // An exit already there wins over the cancel and the handoff.
     let observed = tokio::select! {
         biased;
         observed = process.next() => Some(observed),
@@ -1290,13 +1268,11 @@ pub(super) async fn execute(
             if let Some(failure) = &settled.failure {
                 return Ok(offload_failed(failure));
             }
-            // The cancelled result keeps the TS text, output included.
             return Err(HostError::Cancelled(settled_content(&settled, Some("Command cancelled."))));
         }
         _ = handoff => None,
     };
     let wall = process.wall_time_ms();
-    // A command that exits right at the handoff completes in the foreground.
     let observed = match observed {
         Some(observed) => Some(observed),
         None => futures_util::FutureExt::now_or_never(process.next()),
@@ -1348,7 +1324,6 @@ pub(super) async fn execute(
                 return Ok(terminate_failed(&error, &settled));
             }
             process.close().await;
-            // The process started; waiting for its exit failed.
             return Ok(failed(
                 format!("Failed to wait for process: {error}"),
                 "exec_wait_failed",
@@ -1497,8 +1472,6 @@ fn start_failed(reason: &str) -> ToolResult {
     )
 }
 
-// Real process-tree termination failures cannot be induced portably.
-// Protect the partial output contract at the failure-result boundary.
 #[cfg(test)]
 #[test]
 fn termination_failure_keeps_captured_output() {

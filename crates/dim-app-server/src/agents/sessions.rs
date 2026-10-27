@@ -377,8 +377,6 @@ impl AgentIndex {
                 let cwd = session_cwd(&request.cwd)
                     .await
                     .map_err(|error| SessionsError::rejected(error.message))?;
-                // Read once under a lease; a starter that cannot be read fails
-                // the launch rather than falling back to a possibly wider bound.
                 let bound = match &request.starter {
                     Some(starter) => {
                         let lease = self.acquire(&starter.session_id).await?;
@@ -427,11 +425,6 @@ impl AgentIndex {
                 Ok((host, config, policy))
             })
             .await?;
-        // Clients see a loaded Session once its protocol version is
-        // registered: creation and registration finish together even when
-        // the caller stops waiting. Once admitted, the reply is the creation's
-        // own outcome, not the index unload: a `reloading` reply would invite
-        // a retry while this task may still create the first Session (§6.1).
         let index = self.clone();
         let session = tokio::spawn(async move {
             let session = index
@@ -506,7 +499,6 @@ impl AgentIndex {
         if row.is_some_and(CancellationToken::is_cancelled) {
             return Err(SessionsError::reloading("the calling row"));
         }
-        // No await between admission and handoff; afterwards cancellation cannot recall input.
         tokio::spawn(async move {
             let event = lease.session.input(input, &branch).await?;
             published(&publication, event.sequence).await?;
@@ -647,8 +639,6 @@ impl AgentIndex {
                     message: fault.to_string(),
                 });
             }
-            // A close settles the turn, so the facade could report the
-            // close's cutoff as an idle point.
             if session.is_closing() {
                 return Err(SessionsError::SessionClosed {
                     message: format!("{} is closed", session.id()),
@@ -673,8 +663,6 @@ impl HostDispatch for SessionsService {
         }))
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
-        // The calling runtime row, captured before returning a future: input
-        // from a row that is already stopping is refused at the handoff.
         let row = (method == "input")
             .then(caller_row)
             .flatten()
@@ -741,9 +729,6 @@ async fn call(
         }),
         "stop" => reply(json!({"sequence": index.stop(request(args)?).await?})),
         "idle" => reply(json!({"sequence": index.idle(request(args)?).await?})),
-        // S5c's delete (§6.8): admission gate, close, then the Session's rows
-        // and files. Like Rpc's `session.delete` it runs to its own outcome
-        // across an index reload, so a reload never leaves it half done.
         "delete" => {
             let SessionId { session_id } = request(args)?;
             index.delete(&session_id).await?;

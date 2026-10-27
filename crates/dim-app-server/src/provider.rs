@@ -418,8 +418,6 @@ impl ProviderRecord {
             models: entries
                 .into_iter()
                 .filter_map(|entry| {
-                    // A disappeared remote model retains its override but cannot
-                    // acquire a new account route from stale user metadata.
                     let source = self
                         .models
                         .iter()
@@ -1136,8 +1134,6 @@ impl ProviderService {
                     };
                     for (id, version, body) in rows {
                         let definition = seeds.remove(&id);
-                        // Preserve unreadable optional records. Their own operations
-                        // report the error; SQL failures still abort initialization.
                         let Ok(Some(mut previous)) = parse_static_row(&id, version, &body) else {
                             continue;
                         };
@@ -1389,7 +1385,6 @@ impl ProviderService {
                     _ = caller.cancelled() => cancel.cancel(),
                     _ = stop.cancelled() => {},
                 }
-                // Cancel lock/network waits but drain any admitted transaction.
                 operation.await
             })
         };
@@ -2073,8 +2068,6 @@ impl RecoverModelConnection for PluginRecovery {
     }
 }
 
-// These authorities retain their existing second-rejection settlement policy.
-// A generic model caller must not infer account invalidity from HTTP status.
 fn oauth_rejection(error: &HostError, phase: CredentialRecoveryPhase) -> CredentialRejection {
     if !matches!(
         error,

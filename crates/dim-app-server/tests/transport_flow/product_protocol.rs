@@ -68,8 +68,6 @@ async fn configuration_management_preserves_live_intent_and_separates_save_ackno
     );
     edit["expectedVersion"] = saved["result"]["userRevision"].clone();
     edit["configuration"]["enabled"] = json!(true);
-    // Failed persistence is not an applied-but-unsaved edit: both the source
-    // revision and its prior document remain authoritative.
     let fault = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
     fault.execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE ON settings_documents BEGIN SELECT RAISE(ABORT, 'secret-never-return'); END").unwrap();
     let failed = client.rpc("mcp.save", edit.clone()).await;
@@ -86,8 +84,6 @@ async fn configuration_management_preserves_live_intent_and_separates_save_ackno
     drop(fault);
     server.shutdown();
     server.join().await.unwrap();
-    // Restart reads committed source state, not an in-memory loader edit or a
-    // rewritten legacy file. The failed edit must not become durable later.
     let (server, _) = launch_with_agent(
         Arc::new(MockTools),
         ServerConfig {
@@ -105,7 +101,6 @@ async fn configuration_management_preserves_live_intent_and_separates_save_ackno
         saved["result"]["userRevision"]
     );
     assert_eq!(restored["result"]["servers"], saved["result"]["servers"]);
-    // The unchanged revision remains usable for a successful retry.
     assert_ok(&client.rpc("mcp.save", edit).await);
     let retried = client.rpc("mcp.catalog", json!({})).await;
     assert_ok(&retried);
@@ -138,7 +133,6 @@ async fn reconnect_locates_a_published_submission_without_resubmitting() {
                 }),
             )
             .await;
-        // Observe server admission without reading its RPC response.
         let admitted = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(event) = session
@@ -177,9 +171,6 @@ async fn reconnect_locates_a_published_submission_without_resubmitting() {
             )
             .await;
         assert_eq!(absent["result"], json!({"status":"unknown"}));
-        // The branch accepts each submissionId once: a resubmission writes
-        // nothing and returns the first input. Inputs without one are never
-        // deduplicated.
         let inputs = || async {
             session
                 .history("main", None)
@@ -683,14 +674,9 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     use dim_app_server::mcp::McpSession;
     use std::os::unix::{ffi::OsStringExt, fs::DirBuilderExt};
 
-    // The deterministic EchoModel interprets the last user message. Wait
-    // for the capability's final Append before submitting its tool grammar.
     async fn skills_posted(session: &dim_agent_runtime::Session, enabled: bool) {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                // Prompt delivered the current view's list, which names the
-                // Skill or not. The Session follows the catalog after the
-                // RPC returns, so its view may still contain the previous list.
                 let Ok(view) = session
                     .service::<dim_agent_capabilities::skills::SkillsBranch>("main")
                     .unwrap()
@@ -789,8 +775,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     )
     .await
     .unwrap();
-    // A shared daemon must authorize a workspace opened after startup. Catalog
-    // reads preserve intent and never expose connection configuration secrets.
     std::fs::write(work.join(".mcp.json"), json!({"mcpServers":{"docs":{"command":"missing-mcp-program","args":["private-secret"],"env":{"TOKEN":"private-secret"},"enabled":false}},"extension":"preserved"}).to_string()).unwrap();
     let mut client = Client::new_version(&server, false, 3).await;
     for method in [
@@ -1025,8 +1009,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             )
             .await,
     );
-    // Select the model as a user would; the no-selection fallback costs
-    // seconds in a debug build and is covered by provider_flow.
     assert_ok(
         &client
             .rpc(
@@ -1068,18 +1050,12 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             )
             .await,
     );
-    // Reload discards the MCP owner handle; the same attachment must acquire
-    // the new native state subscription and publish its initial snapshot. The
-    // registry does not depend on MCP: the new owner registers its source
-    // with the same registry.
     let old_mcp = session.session_service::<McpSession>().unwrap();
     let old_tools = session.session_service::<ToolSourcesView>().unwrap();
     client
         .notices
         .retain(|notice| notice["method"] != "session.mcp.state");
     server.restart("Mcp").await.unwrap();
-    // Restart waits for process Plugins, not Session dependents. A disabled
-    // notification still buffered in the socket cannot prove their readiness.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(mcp) = session.session_service::<McpSession>()
@@ -1101,9 +1077,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":revision,"enabled":true})).await);
     let enabled = client.rpc("mcp.catalog", json!({"cwd":work})).await;
     assert_eq!(enabled["result"]["servers"][0]["enabled"], true);
-    // Only the new owner can report this transition: the server was disabled
-    // before reload, and its configured executable does not exist. An old
-    // disabled snapshot or a successful RPC cannot prove the watch was rebound.
     loop {
         let notice = client.notice("session.mcp.state").await;
         if notice["params"]["servers"][0]["state"] == "failed" {
@@ -1112,8 +1085,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             break;
         }
     }
-    // The choice is recorded for the user; the project file and its revision
-    // do not change, so the same revision disables it again.
     assert_eq!(enabled["result"]["projectRevision"], revision);
     assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":work,"id":"docs","source":"project","expectedVersion":revision,"enabled":false})).await);
     let saved: Value =
@@ -1121,8 +1092,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     assert_eq!(saved["extension"], "preserved");
     assert_eq!(saved["mcpServers"]["docs"]["enabled"], false);
     mcp_disabled(&mut client).await;
-    // A damaged external file reports its error rather than an empty catalog;
-    // optional MCP failures leave ordinary workspace tools available.
     std::fs::write(work.join(".mcp.json"), b"{broken-private-secret").unwrap();
     let broken = client.rpc("mcp.catalog", json!({"cwd":work})).await;
     assert!(broken.get("error").is_some());
@@ -1132,7 +1101,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             .rpc("session.mcp.refresh", json!({"sessionId":sid}))
             .await,
     );
-    // After import, even corrupt legacy user files cannot replace loader intent.
     std::fs::write(home.join("skills.json"), b"{broken").unwrap();
     assert_ok(&client.rpc("session.skills", branch.clone()).await);
     assert_ok(&client.rpc("skills.refresh", json!({"cwd":work})).await);
@@ -1168,8 +1136,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     skills_posted(&session, true).await;
     assert_ok(&client.rpc("session.skills", branch.clone()).await);
 
-    // The Session created with corrupted optional Skills remains usable after
-    // refresh, and the file tools execute through the real WorkspaceTools.
     assert_ok(&client.rpc("session.submit", json!({"sessionId":sid,"branchId":"main","text":"tool:write {\"path\":\"result.txt\",\"content\":\"product output\\n\"}"})).await);
     assert_ok(&client.rpc("session.idle", branch.clone()).await);
     assert_eq!(
@@ -1201,7 +1167,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     let changed = client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":{"preset":"read-only","allowedTools":[],"disallowedTools":[]}})).await;
     assert_ok(&changed);
     assert_eq!(client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":policy["result"]["policy"]})).await["error"]["data"]["appError"], "permission_conflict");
-    // AGENTS.md arrives as a rule input; the system never carries it.
     async fn project_rule(session: &dim_agent_runtime::Session) -> (String, String) {
         let context = session
             .context("main", session.sequence("main").unwrap())
@@ -1424,8 +1389,6 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     );
     assert_eq!(adopted(), before);
 
-    // A locked database delays owner publication. Rpc reload cancels its
-    // response wait while the admitted Permission change remains owned.
     let lock = rusqlite::Connection::open(native.join("dimcode.sqlite")).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     let pending = client.send("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":changed["result"]["version"],"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}})).await;
@@ -1571,7 +1534,6 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
             arguments: "{\"text\":\"he".into(),
         }],
     };
-    // A burst of changes reaches the client coalesced, ending at the latest.
     let updates = 200;
     for count in 1..=updates {
         cell.set(progress(&"x".repeat(count)));
@@ -1592,7 +1554,6 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
             "tools":[{"callId":"call-1","name":"echo","arguments":"{\"text\":\"he"}]})
     );
 
-    // A new subscription receives the current snapshot.
     let mut other = Client::new_version(&server, true, 3).await;
     assert_ok(&other.rpc("session.attach", json!({"sessionId":sid})).await);
     assert_eq!(
@@ -1608,10 +1569,8 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
         other.notice("session.model.progress").await["params"],
         empty
     );
-    // Display state only: nothing reached the Timeline.
     assert_eq!(session.sequence("main").unwrap(), head);
 
-    // v2 subscribers observe Sessions of their own version; no progress.
     let mut legacy = Client::new_version(&server, false, 2).await;
     let created = legacy.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
@@ -1676,8 +1635,9 @@ impl Plugin for ContextHostPlugin {
     }
 }
 
-/// A ModelProvider reload replaces its progress cell; the subscription
-/// follows the new cell without re-attaching.
+/// A ModelProvider reload replaces its progress cell; the subscription follows the new cell
+/// without re-attaching. The activation listener is registered before any progress cell is read,
+/// so a reload cannot be missed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_progress_follows_a_reloaded_provider() {
     use dim_agent_capabilities::{

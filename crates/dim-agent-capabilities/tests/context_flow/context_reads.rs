@@ -88,7 +88,6 @@ impl Plugin for ContextHostsOwner {
 
     async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
         let view = ctx.plugin(TestContextHosts(self.keys.clone(), self.model.clone()));
-        // A required part awaits the children it mounts in apply.
         (&view).await.map_err(|error| {
             rutis::Error::from(ErrorKind::PluginFailed(
                 format!("context hosts failed: {error}").into(),
@@ -575,8 +574,6 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
         defaults::install(&mut builder);
         let agent = builder.build();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
-        // Keep the old watch sender alive until the replacement service exists,
-        // selecting the valid interleaving where stop misses the Reloading window.
         let old_loop = session.service::<dyn LoopState>("main").unwrap();
         let generation = || session.branch_diagnostics("main").unwrap().plugins
             .into_iter().find(|plugin| plugin.name == "Loop").unwrap();
@@ -703,7 +700,6 @@ async fn each_model_step_reads_context_twice_with_and_without_compaction_policy(
             .create_session(SessionConfig::default())
             .await
             .unwrap();
-        // The third turn compacts the first; the last two are kept.
         for input in ["x".repeat(1_500), "next".into(), "third".into()] {
             let before = store.reads.load(Ordering::SeqCst);
             session
@@ -840,7 +836,6 @@ async fn stop_is_dispatched_while_either_context_read_is_waiting() {
                 .stop("main", "stop during context read".into())
                 .await
         });
-        // Dispatch reaches the interrupt although the read still waits.
         let mut dispatch = session.dispatch_watch("main").unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -1107,13 +1102,15 @@ impl DynPlugin for InterruptGatePlugin {
     }
 }
 
+/// The gate must be registered before the default capabilities;
+/// ContextPreparation's service publication and Loop's subscription need not
+/// complete in that order. Listener order among concurrently loading
+/// capabilities is not fixed, so the gate holds Loop's interrupt only when its
+/// listener comes first and the test retries Sessions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run() {
     let store = Arc::new(CountContextReads::default());
     let gate = Arc::new(InterruptGate::default());
-    // Same hosts as builder_with_context, with the gate registered before the
-    // default capabilities. Do not depend on ContextPreparation: its service
-    // publication and Loop's subscription need not complete in that order.
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
@@ -1140,17 +1137,12 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
     );
     defaults::install(&mut builder);
     let agent = builder.build();
-    // Listener order among capabilities that load concurrently is not fixed:
-    // the gate holds the interrupt from Loop only when its listener comes
-    // first. A Session where Loop already handled the interrupt does not set
-    // up the case, and the next Session is tried.
     let mut setup = None;
     for _ in 0..50 {
         let session = agent
             .create_session(SessionConfig::default())
             .await
             .unwrap();
-        // Hold Loop's preparation task in its context read, after model-start.
         store.pause_preparation.store(true, Ordering::SeqCst);
         gate.once.store(false, Ordering::SeqCst);
         session
@@ -1170,9 +1162,6 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
             .await
             .unwrap();
         if session.state("main").unwrap().stopping {
-            // Loop handled the interrupt before the gate held it. Its
-            // cancellation drops the held read: wake it only if it still
-            // waits, so no permit lets the next Session's read pass unheld.
             store.release.notify_waiters();
             gate.release.notify_one();
             let _ = stop.await.unwrap();
@@ -1183,9 +1172,6 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
         break;
     }
     let (session, stop) = setup.expect("a Session where the gate held the interrupt from Loop");
-    // Loop has not handled the interrupt. ContextPreparation consumes it
-    // before the later preparation, regardless of its position among listeners.
-    // The task still sees its turn running and writes the request.
     store.release.notify_one();
     let prepare = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -1316,7 +1302,6 @@ async fn progress_keeps_committed_output_until_it_is_published() {
             .await
             .unwrap();
         held.notified().await;
-        // The text event is committed but not published: it is still shown.
         assert!(
             !session
                 .history("main", None)
@@ -1344,8 +1329,6 @@ async fn progress_keeps_committed_output_until_it_is_published() {
         );
         end.notify_one();
         session.idle("main").await.unwrap();
-        // Idle settles Loop, not the ModelProvider task that clears progress
-        // after publication. Observe the owning capability's state directly.
         progress
             .wait_for(|progress| *progress == ModelProgress::default())
             .await
@@ -1383,7 +1366,6 @@ async fn a_steer_during_the_context_read_ends_the_request_before_it_is_handed_ov
         .submit("STEER-MARKER".into(), InputMode::Steer, "main")
         .await
         .unwrap();
-    // The steer cancels Loop's preparation, which drops the held read.
     tokio::time::timeout(Duration::from_secs(10), session.idle("main"))
         .await
         .unwrap()

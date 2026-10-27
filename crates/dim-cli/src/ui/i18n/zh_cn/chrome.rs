@@ -1,6 +1,5 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
-        // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter 输出/中断成员 · x 停止命令 · Esc 关闭"
         }
@@ -188,14 +187,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "按 Ctrl+C 停止 Web 工作区。",
         "To resume this session:" => "恢复此会话：",
 
-        // composer/commands.rs: categories
         "session" => "会话",
         "run" => "运行",
         "view" => "视图",
         "model" => "模型",
         "app" => "应用",
         "skill" => "技能",
-        // composer/commands.rs: descriptions
         "start a new session" => "开始新会话",
         "show or set the reasoning effort" => "查看或设置推理强度",
         "show or set the priority service tier (on|off)" => "查看或设置优先服务层级（on|off）",
@@ -225,7 +222,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "suspend to the shell" => "挂起到 Shell",
         "exit" => "退出应用",
 
-        // composer/palette.rs
         "Enter select · Ctrl+X clear saved · Esc clear/close" => {
             "Enter 选择 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
         }
@@ -238,14 +234,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No matches" => "无匹配项",
         " (unavailable)" => "（不可用）",
 
-        // composer/mod.rs
         "[Text: {preview} ({count} chars)]" => "[文本：{preview}（{count} 字符）]",
         "[... {count} lines]" => "[... {count} 行]",
         "pasted text" => "粘贴的文本",
 
-        // list_panel.rs
-
-        // settings_panel.rs
         "on" => "开启",
         "off" => "关闭",
         "Interface" => "界面",
@@ -268,16 +260,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "↑↓ 移动 · Enter 选择 · ←→/Space 修改 · Esc 关闭"
         }
 
-        // language_panel.rs
         "↑↓ preview · Enter save · Esc restore" => "↑↓ 预览 · Enter 保存 · Esc 恢复",
         "System default ({locale})" => "系统默认（{locale}）",
 
-        // theme_panel.rs
         "↑↓ preview · Enter apply · Esc cancel" => "↑↓ 预览 · Enter 应用 · Esc 取消",
         "System" => "系统",
         "Could not save the theme: {error}" => "无法保存主题：{error}",
 
-        // sessions_panel.rs
         "Sessions" => "会话",
         "Enter open · Ctrl+R refresh · Esc close" => "Enter 打开 · Ctrl+R 刷新 · Esc 关闭",
         "Loading sessions..." => "正在加载会话...",
@@ -288,7 +277,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{count}h ago" => "{count}小时前",
         "{count}d ago" => "{count}天前",
 
-        // models_panel.rs
         "Select a model" => "选择模型",
         "Loading models..." => "正在加载模型...",
         "No models available. Connect a provider first." => "无可用模型。请先连接 Provider。",
@@ -313,12 +301,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Subagent model policy: {error}" => "子代理模型策略：{error}",
         "drawing diagram… {count} lines" => "正在绘制图表…已收到 {count} 行",
-        // notify.rs
         "Task complete" => "任务已完成",
         "Permission needed: {tool}" => "需要授权：{tool}",
         "Question waiting for your answer" => "有问题等你回答",
         "Notify when agent needs you" => "需要你时通知",
-        // keys.rs
         "show the key bindings" => "显示快捷键",
         "Application keys" => "应用快捷键",
         "Enter submit · Shift+Enter or Ctrl+J newline · ↑↓ history" => {

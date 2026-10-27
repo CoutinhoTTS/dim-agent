@@ -190,13 +190,7 @@ impl<P: Copy + Ord + Default + Send + Sync + 'static> Phases<P> {
 /// branch's [`crate::TimelineContext`]. Capabilities that spawn background
 /// work in `apply` wait for [`Self::activated`] before doing it.
 #[derive(Clone)]
-pub struct BranchLifecycle(
-    Phases<BranchPhase>,
-    // While `Loading`, the branch opening's shared history read; dropped
-    // when the branch leaves `Loading`, wherever that happens (activation,
-    // the start of close, or the rollback of a failed build).
-    Arc<Mutex<Option<Arc<Opening>>>>,
-);
+pub struct BranchLifecycle(Phases<BranchPhase>, Arc<Mutex<Option<Arc<Opening>>>>);
 #[service]
 impl BranchLifecycle {
     pub(crate) fn new() -> Self {
@@ -223,7 +217,6 @@ impl BranchLifecycle {
     pub(crate) fn advance(&self, next: BranchPhase) {
         self.0.advance(next);
         if next > BranchPhase::Loading {
-            // A reader still slicing the copy keeps it until it returns.
             let opening = self.1.lock().unwrap().take();
             drop(opening);
         }
@@ -335,13 +328,10 @@ impl SessionLifecycle {
     /// decided.
     pub fn hold(&self, ctx: &rutis::Ctx) -> Option<u64> {
         let hold = self.take_hold()?;
-        // Locked until the hold is recorded, so a cleanup running at once
-        // finds it.
         let mut foreign = self.foreign.lock().unwrap();
         foreign.next += 1;
         let id = foreign.next;
         let holds = Arc::downgrade(&self.foreign);
-        // An unloading row takes no hold: dropping `hold` releases it.
         let disposer = ctx
             .effect(move || async move {
                 if let Some(holds) = holds.upgrade() {

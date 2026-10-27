@@ -153,8 +153,6 @@ async fn discovery_precedence_and_list_injection() {
     let session = env.session(&layout.cwd, "").await.unwrap();
     run(&session, "first").await;
     run(&session, "second").await;
-    // The list is its own Append input ahead of the first user input; user
-    // inputs carry none, and an unchanged view is not repeated.
     let sent = inputs(&session).await;
     let user = sent.iter().position(|input| input.user.is_some()).unwrap();
     let at = sent.iter().position(|input| list(input).is_some()).unwrap();
@@ -165,7 +163,6 @@ async fn discovery_precedence_and_list_injection() {
     assert!(!first.contains("- c"));
     assert_eq!(lists(&session).await.len(), 1);
     let request = requests(&session).await.remove(0);
-    // How to use Skills is fixed system text; the state carries only the list.
     let system = system_text(request.system.as_deref().unwrap());
     assert!(system.contains("<skills_instructions>"));
     assert!(system.contains("skill({ \"skill_name\": \"<name>\" })"));
@@ -190,7 +187,6 @@ async fn load_returns_the_body_as_a_plain_tool_result() {
     assert!(content.contains(&format!("BODY-B-1 at {}", skill_root.display())));
 
     run(&session, "next").await;
-    // The body is not a rule: no rule input, no prompt change.
     let text = request_text(requests(&session).await.last().unwrap());
     assert!(text.contains("BODY-B-1") && !text.contains("skill:b"));
     assert!(
@@ -225,8 +221,6 @@ async fn a_view_change_inside_a_turn_reaches_the_next_request() {
     let session = env.session(&layout.cwd, "").await.unwrap();
     run(&session, "first").await;
 
-    // A body-only change inside a turn leaves the list text as it was, so
-    // nothing new is listed; the skill loads the current body.
     env.model.push(Step::Tool("gate", serde_json::json!({})));
     env.model.push(Step::Tool(
         "skill",
@@ -244,7 +238,6 @@ async fn a_view_change_inside_a_turn_reaches_the_next_request() {
     assert!(result_text(&last_skill_result(&session).await).contains("BODY-B-2"));
     assert_eq!(lists(&session).await.len(), 1);
 
-    // Deleted inside a turn: the next request no longer lists it.
     env.model.push(Step::Tool("gate", serde_json::json!({})));
     env.model.push(Step::Tool(
         "skill",
@@ -288,9 +281,6 @@ async fn skill_loads_the_latest_view_after_queue_and_steer_interleave() {
         .await
         .unwrap();
     entered(&env).await;
-    // Views 2..4 while the turn runs, with a queued and a steering input
-    // between them (the order of review note 58777). Each list is written
-    // before the next input is submitted.
     let (env, session, cwd) = (&env, &session, &layout.cwd);
     let change = |version: usize| {
         dirs.write(
@@ -332,9 +322,6 @@ async fn skill_loads_the_latest_view_after_queue_and_steer_interleave() {
     session.idle("main").await.unwrap();
     assert!(result_text(&last_skill_result(session).await).contains("BODY-B-4"));
     assert_eq!(lists(session).await.len(), 4);
-    // The lists reach the model in the order written: v2 and v3 with the
-    // turn's next request ahead of the steer that followed v3, v4 after it,
-    // and the queued input only in the next turn, after every list.
     let text = request_text(requests(session).await.last().unwrap());
     let lines: Vec<&str> = text.lines().collect();
     let at = |marker: &str| {
@@ -364,7 +351,6 @@ async fn enablement_changes_the_list_and_loading() {
     let layout = layout(&dirs);
     let env = env(&dirs, Options::default()).await;
     let (announced, mut seen) = tokio::sync::watch::channel(0);
-    // The latest version announced on the catalog channel.
     env.root
         .listen::<CatalogChanged>()
         .name(catalog_changes())
@@ -384,7 +370,6 @@ async fn enablement_changes_the_list_and_loading() {
         .await
         .unwrap();
     assert!(!entry.enabled);
-    // Sessions follow the catalog's announcement of the version it reports.
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         seen.wait_for(|seen| *seen == version),
@@ -415,8 +400,6 @@ async fn enablement_changes_the_list_and_loading() {
     wait_view_change(&session, &before).await;
     assert!(result_text(&load(&env, &session, "b").await).contains("BODY-B-1"));
 
-    // Another writer of the Skills source: Sessions follow the write once
-    // Settings announces it, not before.
     let before = view_version(&session);
     let current = env.settings.skills(Default::default()).await.unwrap();
     let revision = env
@@ -449,7 +432,6 @@ async fn enablement_changes_the_list_and_loading() {
         SkillsError::UnknownSkill("user:missing".into())
     );
 
-    // An empty view clears the list; `b` is already disabled.
     for id in [
         "user:a".to_owned(),
         format!("workspace:{}:nested/d", layout.project.to_string_lossy()),
@@ -560,7 +542,6 @@ async fn a_late_update_response_does_not_overwrite_a_newer_setting() {
     });
     root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(settings.clone())))
         .unwrap();
-    // Where the Skills plugin registers its parts; no Agent mounts them here.
     root.provide_as::<dim_agent_runtime::PartRegistry>(Arc::new(
         dim_agent_runtime::PartRegistry::default(),
     ))
@@ -574,7 +555,6 @@ async fn a_late_update_response_does_not_overwrite_a_newer_setting() {
     let catalog = root.get::<SkillsCatalog>().unwrap();
     let b = format!("workspace:{}:b", layout.project.to_string_lossy());
 
-    // Disable commits, but its response arrives after a later enable.
     let disabling = tokio::spawn({
         let (catalog, b, cwd) = (catalog.clone(), b.clone(), layout.cwd.clone());
         async move { catalog.set_enabled(&b, false, Some(&cwd)).await }
@@ -652,7 +632,6 @@ impl SkillSettings for FailingReads {
         std::result::Result<String, dim_agent_capabilities::skill_settings::SkillSettingsError>,
     > {
         Box::pin(async move {
-            // The write's read-back fails.
             self.failing.store(1, std::sync::atomic::Ordering::SeqCst);
             self.inner
                 .clone()
@@ -690,7 +669,6 @@ async fn unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessi
     let skills = session.service::<SkillsBranch>("main").unwrap().session();
     assert!(matches!(skills.list(), Err(SkillsError::SettingsRead(_))));
 
-    // The Session and its ordinary tool still run while Skill state is unavailable.
     env.model.push(Step::Tool("gate", serde_json::json!({})));
     env.gate.release.notify_one();
     run(&session, "ordinary programming").await;
@@ -748,7 +726,6 @@ async fn unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessi
         3
     );
 
-    // A later source failure also blocks the previously consumed Skill body.
     settings.failing.store(usize::MAX, Ordering::SeqCst);
     assert!(matches!(
         catalog.set_enabled(&b, false, Some(&layout.cwd)).await,
@@ -799,7 +776,6 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
     });
     root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(settings.clone())))
         .unwrap();
-    // Where the Skills plugin registers its parts; no Agent mounts them here.
     root.provide_as::<dim_agent_runtime::PartRegistry>(Arc::new(
         dim_agent_runtime::PartRegistry::default(),
     ))
@@ -818,7 +794,6 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
         matches!(failed, Err(SkillsError::SettingsSync(_))),
         "{failed:?}"
     );
-    // Reads work again: the next query catches up without a new change.
     let view = catalog.query(Some(&layout.cwd)).await.unwrap();
     let entry = view
         .entries
@@ -846,7 +821,6 @@ async fn content_instances_are_session_owned_and_only_changed_content_is_replace
             })
             .map(|plugin| plugin.id)
             .collect();
-        // Every actual content leaf has its own live contributed service binding.
         assert_eq!(
             snapshot
                 .bindings
@@ -858,7 +832,7 @@ async fn content_instances_are_session_owned_and_only_changed_content_is_replace
         ids
     };
     let original = content_ids();
-    assert_eq!(original.len(), 6); // a, b, d in each Session; shadowed/invalid files excluded.
+    assert_eq!(original.len(), 6);
     let second_before = view_version(&second);
     dirs.write(
         &layout.project.join("b/SKILL.md"),
@@ -871,7 +845,6 @@ async fn content_instances_are_session_owned_and_only_changed_content_is_replace
     assert_eq!(original.intersection(&refreshed).count(), 4);
     assert!(result_text(&load(&env, &second, "b").await).contains("BODY-B-2"));
 
-    // An identical rescan must not recreate any content instance.
     env.catalog()
         .refresh(RefreshTarget {
             user: true,
@@ -960,7 +933,6 @@ async fn catalog_changes_during_assembly_wait_for_session_publication() {
     tokio::time::timeout(std::time::Duration::from_secs(10), hold.entered.notified())
         .await
         .expect("assembly reached the hold");
-    // Skills applied with its initial instances while the Session is unpublished.
     let mut initial = active_content();
     for _ in 0..200 {
         if initial.len() == 3 {
@@ -982,14 +954,11 @@ async fn catalog_changes_during_assembly_wait_for_session_publication() {
         })
         .await
         .unwrap();
-    // Replacing an instance now would race the Session's readiness checks.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(active_content(), initial);
 
     hold.release.notify_one();
     let session = creating.await.unwrap().unwrap();
-    // Publication adopts the change seen during assembly: only `b` is replaced.
-    // Wait for the replacement to settle, not its first step.
     let mut adopted = active_content();
     for _ in 0..1000 {
         if adopted != initial && adopted.len() == 3 {
@@ -1000,7 +969,6 @@ async fn catalog_changes_during_assembly_wait_for_session_publication() {
     }
     assert_eq!(adopted.len(), 3);
     assert_eq!(adopted.intersection(&initial).count(), 2);
-    // The branch adopts the replacement once it is active.
     let mut body = String::new();
     for _ in 0..100 {
         body = result_text(&load(&env, &session, "b").await);
@@ -1031,8 +999,6 @@ async fn a_closing_session_creates_no_content_instances() {
     };
     let before = content();
     assert_eq!(before.len(), 3);
-    // A turn held in the gate keeps the close waiting for its branch to
-    // settle, with every Session capability still loaded.
     env.model.push(Step::Tool("gate", serde_json::json!({})));
     session
         .submit("go".into(), InputMode::Queue, "main")

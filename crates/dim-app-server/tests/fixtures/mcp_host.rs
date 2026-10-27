@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
-#[allow(dead_code)] // Session flows use their actual Session loader instead.
+#[allow(dead_code)]
 pub struct Directory {
     service: std::sync::Arc<McpService>,
     owner: McpOwner,

@@ -327,7 +327,6 @@ async fn agents_restart_records_a_creation_timeout_and_keeps_loaded_sessions() {
         call(&server.root, "lookup", lookup(&stored.session)).await,
         stored.accepted
     );
-    // The unavailable owner's Session keeps its real error.
     let reply = call(&server.root, "lookup", lookup(&peer_session)).await;
     assert_eq!(reply["error"]["code"], "failed", "{reply}");
     assert_eq!(reply["error"]["retryable"], false, "{reply}");
@@ -355,7 +354,6 @@ async fn a_dependency_reload_records_a_creation_timeout_and_continues() {
     let peer = peer(&index).await;
     index.close(&peer).await.unwrap();
     let mut held = HeldCreation::new(&peer);
-    // Agents injects Settings in the product profile.
     let (restarted, ()) = tokio::join!(server.processes.loader.restart("Settings"), async {
         let root = held.arrived().await;
         let reply = call(&root, "lookup", lookup("unknown")).await;

@@ -261,9 +261,6 @@ impl PutSessionFile for SessionFiles {
                     "a Session file holds at most 16 MiB",
                 ));
             }
-            // The put runs as SessionStore's own task, so a caller that stops
-            // waiting still leaves its file committed or abandoned, never
-            // pending under a live generation. Dropping the call cancels it.
             let call = cancel.child_token();
             let task = {
                 let _admission = self.0.admission.lock().unwrap();
@@ -291,13 +288,10 @@ impl Files {
         content: Vec<u8>,
         cancel: CancellationToken,
     ) -> Result<StoredSessionFile, SessionFileError> {
-        // The caller's cancellation, or SessionStore unloading.
         let stopped = || cancel.is_cancelled() || self.stopping.is_cancelled();
         if stopped() {
             return Err(cancelled());
         }
-        // Leftovers of crashed or reloaded generations go on the node's first
-        // put of each generation.
         if !self.swept.load(Ordering::Acquire) {
             self.sweep.notify_one();
         }
@@ -315,15 +309,11 @@ impl Files {
         let (directory, file_path, file, root) = match paths {
             Ok(paths) => paths,
             Err(FileStorageError::Closed) => return Err(node_unavailable()),
-            // The name is not one component on this node, as a Windows
-            // device name is not.
             Err(other) => return Err(file_error(SessionFileErrorCode::Invalid, other)),
         };
         let permissions = read_only(&self.db.path)
             .map_err(|failure| file_error(SessionFileErrorCode::Storage, failure))?;
 
-        // Txn 1: the row commits before its directory exists, so a sweep that
-        // lists the directory finds the row of every entry a put created.
         let (session, id, generation) =
             (session_id.clone(), file_id.clone(), self.generation.clone());
         let pending = self
@@ -369,7 +359,6 @@ impl Files {
             return Err(cancelled());
         }
 
-        // Txn 2: the Session still exists and the row is still ours.
         let (session, id, generation) = (session_id, file_id.clone(), self.generation.clone());
         let committed = self
             .db
@@ -462,9 +451,6 @@ impl Files {
             })
         };
 
-        // 1. Claim the pending rows of dead generations: their puts can no
-        // longer commit, because txn 2 needs the row still pending under
-        // their own generation.
         let generation = self.generation.clone();
         let claimed = self
             .db
@@ -482,8 +468,6 @@ impl Files {
             return false;
         }
 
-        // 2. Remove unowned files, then their rows. Unowned is terminal: no
-        // fork can share a file that has no owner.
         let unowned = match rows(
             "SELECT file_id FROM session_files f WHERE node IS NULL AND writer IS NULL AND NOT EXISTS (SELECT 1 FROM session_file_owners o WHERE o.file_id = f.file_id)",
         )
@@ -520,10 +504,6 @@ impl Files {
             }
         }
 
-        // 3. Remove entries no row records. A put commits its row before it
-        // creates its directory, so reading the rows after listing finds the
-        // row of every entry a put made; the directory belongs to this
-        // database alone.
         let directory = match storage.path(self.root, &self.directory) {
             Ok(directory) => directory,
             Err(_) => return false,

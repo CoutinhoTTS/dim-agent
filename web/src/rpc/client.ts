@@ -232,6 +232,5 @@ export async function exchangeBootstrapToken(): Promise<void> {
       body: JSON.stringify({ token }),
     })
   } catch {
-    // The entry is unreachable; connecting reports it.
   }
 }

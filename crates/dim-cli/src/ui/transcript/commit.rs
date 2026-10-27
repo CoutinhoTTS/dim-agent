@@ -22,7 +22,6 @@ impl CommitState {
     /// Plans the commit for `settled` ids and records them as written.
     pub fn plan(&mut self, settled: &[String]) -> CommitPlan {
         let committed = &self.committed;
-        // Fast path, O(1): the settled list still extends what went out.
         let extends = committed.is_empty()
             || (settled.len() >= committed.len()
                 && settled.get(committed.len() - 1) == committed.last());
@@ -74,11 +73,9 @@ mod tests {
     fn a_late_row_is_appended_not_reprinted() {
         let mut state = CommitState::default();
         state.plan(&ids(&["a", "c"]));
-        // "b" sorts in between: it goes out once, at the end; a/c do not repeat.
         let plan = state.plan(&ids(&["a", "b", "c"]));
         assert!(plan.rewritten);
         assert_eq!(plan.fresh, ids(&["b"]));
-        // And the next extension is back on the fast path.
         let plan = state.plan(&ids(&["a", "b", "c", "d"]));
         assert_eq!(
             plan,

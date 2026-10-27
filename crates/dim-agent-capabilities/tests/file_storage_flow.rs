@@ -28,7 +28,6 @@ impl Directory {
         fs::create_dir_all(&authorized).unwrap();
         #[cfg(unix)]
         {
-            // macOS inherits the parent group, which can be wheel in /tmp checkouts.
             chown(&authorized, None, Some(unsafe { libc::getegid() })).unwrap();
             let locks = authorized.join(".dim-file-storage-locks");
             let temps = locks.join(".dim-file-storage-temps");
@@ -123,8 +122,6 @@ async fn concurrent_first_locks_preserve_exclusion_and_independent_writes() {
     let (root_b, _, b) = mount(authorized.clone()).await;
     let cancel = CancellationToken::new();
     for iteration in 0..64 {
-        // Fresh parents exercise first creation of both the business key and
-        // the shared reserved keys, through independent plugin consumers.
         let same_parent = format!("same-{iteration}");
         fs::create_dir(authorized.join(&same_parent)).unwrap();
         let path_a = a.path(0, format!("{same_parent}/mcp.json")).unwrap();
@@ -179,8 +176,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
     let cancel = CancellationToken::new();
     let path = |relative: &str| storage.path(0, relative).unwrap();
 
-    // Session files: one directory per attachment, written through storage,
-    // which leaves its lock resources beside each file.
     for id in ["a1", "a2"] {
         fs::create_dir_all(root_path.join(format!("sessions/s1/attachments/{id}"))).unwrap();
         let file = path(&format!("sessions/s1/attachments/{id}/paste.txt"));
@@ -189,7 +184,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
             .await
             .unwrap();
     }
-    // A held account marker and the reserved directory are never listed.
     let account = storage
         .lock(&path("sessions/s1/auth.json"), &cancel)
         .await
@@ -222,7 +216,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
             .await,
         Err(FileStorageError::Io(_))
     ));
-    // Filesystem aliases of the marker and reserved directory stay protected.
     if root_path.join("sessions/s1/AUTH.JSON.LOCK").exists() {
         let marker = path("sessions/s1/AUTH.JSON.LOCK");
         assert!(storage.remove(&marker, &cancel).await.is_err());
@@ -239,7 +232,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
                 .is_dir()
         );
     }
-    // A reserved directory first created under an alias is hidden by identity.
     fs::create_dir_all(root_path.join("aliased/.DIM-FILE-STORAGE-LOCKS")).unwrap();
     storage
         .replace(&path("aliased/data.json"), b"{}".to_vec(), None, &cancel)
@@ -261,7 +253,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
         );
     }
 
-    // A file is removed under the lock leases use.
     let leased = path("sessions/s1/attachments/a2/paste.txt");
     let mut retained = storage.lock(&leased, &cancel).await.unwrap();
     assert!(matches!(
@@ -270,7 +261,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
     ));
     assert_eq!(retained.read(&cancel).await.unwrap(), b"pasted");
 
-    // Removing an attachment directory takes its storage resources with it.
     storage
         .remove(&path("sessions/s1/attachments/a1"), &cancel)
         .await
@@ -284,8 +274,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
         [entry("a2", EntryKind::Directory)]
     );
 
-    // A lease anywhere beneath a directory stops its removal, and a partial
-    // removal never gives up a held lock: leased files stay exclusive.
     let session = path("sessions/s1");
     let cancelled = CancellationToken::new();
     cancelled.cancel();
@@ -314,7 +302,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
         b"still leased"
     );
     drop(retained);
-    // A held lock on a missing file stops it too, after earlier entries went.
     assert!(matches!(
         storage.remove(&session, &cancel).await,
         Err(FileStorageError::Locked)
@@ -333,7 +320,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
     storage.remove(&path("aliased"), &cancel).await.unwrap();
     assert!(!root_path.join("aliased").exists());
 
-    // Removal ensures absence; listing an absent directory reports it.
     storage.remove(&path("sessions/s1"), &cancel).await.unwrap();
     storage
         .remove(&path("missing/parent/file"), &cancel)
@@ -344,9 +330,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
         Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
     ));
 
-    // Leftovers with reserved names go with their directory: a stray
-    // resource-prefixed file and directory, and an account marker that is a
-    // directory or a link, even beside `auth.json`.
     let leftovers = root_path.join("leftovers");
     fs::create_dir_all(leftovers.join(".dim-file-storage-old/nested")).unwrap();
     fs::write(leftovers.join(".dim-file-storage-old/nested/file"), b"old").unwrap();
@@ -356,12 +339,8 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
     fs::create_dir(leftovers.join("marker-link")).unwrap();
     symlink(&outside, leftovers.join("marker-link/auth.json.lock")).unwrap();
     fs::write(leftovers.join("marker-link/auth.json"), b"{}").unwrap();
-    // A marker directory stored under an alias also goes before `auth.json`.
     fs::create_dir_all(leftovers.join("marker-alias/AUTH.JSON.LOCK/nested")).unwrap();
     fs::write(leftovers.join("marker-alias/auth.json"), b"{}").unwrap();
-    // Leftovers that stop every file beside them from being locked go
-    // before those files: a file in place of the lock directory, or of the
-    // temporary directory. Until then locking fails closed.
     let wrong_types = leftovers.join("wrong-types");
     fs::create_dir(&wrong_types).unwrap();
     fs::write(wrong_types.join(".dim-file-storage-locks"), b"old").unwrap();
@@ -383,12 +362,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
             Err(FileStorageError::Io(_))
         ));
     }
-    // Stray entries inside the lock and temporary directories: trees, which
-    // may hold reserved names themselves; directories in place of a key
-    // beside its file, of the `auth.json.lock` key every lock takes, or of a
-    // temporary file; and a temporary file whose key would be the temporary
-    // directory. A file whose key a case-insensitive volume equates with the
-    // temporary directory can hold no lease either.
     fs::create_dir(leftovers.join("stray")).unwrap();
     storage
         .replace(
@@ -451,8 +424,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
             entry("wrong-types", EntryKind::Directory)
         ]
     );
-    // A case-insensitive volume lets an alias of a reserved name be leased,
-    // so a leftover file still goes under its lock.
     if leftovers.join(".DIM-FILE-STORAGE-STRAY").exists() {
         let alias = storage
             .lock(&path("leftovers/.DIM-FILE-STORAGE-STRAY"), &cancel)
@@ -472,8 +443,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
     assert!(fs::symlink_metadata(&leftovers).is_err());
     assert_eq!(fs::read(outside.join("secret")).unwrap(), b"outside");
 
-    // A marker this process failed to release is reclaimed at once, while a
-    // marker naming this process otherwise counts as live.
     #[cfg(unix)]
     if unsafe { libc::geteuid() } != 0 {
         let (failing_root, _, failing) = mount(root_path.clone()).await;
@@ -493,7 +462,6 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
         failing_root.shutdown().await.unwrap();
     }
 
-    // Links are listed and removed themselves, never followed.
     fs::create_dir_all(root_path.join("sessions/s2")).unwrap();
     symlink(&outside, root_path.join("sessions/s2/linked-directory")).unwrap();
     symlink(
@@ -547,7 +515,6 @@ async fn directory_creation_stays_inside_the_authorized_root() {
     let cancel = CancellationToken::new();
     let path = |relative: &str| storage.path(0, relative).unwrap();
 
-    // Created private; an existing directory counts as created.
     for _ in 0..2 {
         storage
             .create_directory(&path("files"), &cancel)
@@ -558,7 +525,6 @@ async fn directory_creation_stays_inside_the_authorized_root() {
         .create_directory(&path("files/one"), &cancel)
         .await
         .unwrap();
-    // The alias check leaves no key behind for a directory.
     for created in ["files", "one"] {
         let parent = if created == "files" {
             root_path.clone()
@@ -594,15 +560,12 @@ async fn directory_creation_stays_inside_the_authorized_root() {
         [entry("one", EntryKind::Directory)]
     );
 
-    // No recursive creation.
     assert!(matches!(
         storage.create_directory(&path("missing/child"), &cancel).await,
         Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
     ));
     assert!(!root_path.join("missing").exists());
 
-    // Reserved names are refused by name; filesystem aliases of the reserved
-    // directory and the account marker are refused before anything is made.
     for reserved in [
         ".dim-file-storage-locks",
         "files/.dim-file-storage-temps",
@@ -633,8 +596,6 @@ async fn directory_creation_stays_inside_the_authorized_root() {
         if case_insensitive { 1 } else { 3 }
     );
 
-    // Any other existing entry is refused and left untouched; links are never
-    // followed.
     fs::write(root_path.join("files/plain"), b"plain").unwrap();
     symlink(&outside, root_path.join("files/linked")).unwrap();
     for other in ["files/plain", "files/linked"] {
@@ -653,7 +614,6 @@ async fn directory_creation_stays_inside_the_authorized_root() {
     );
     assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
 
-    // Cancellation before the creation creates nothing.
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(matches!(
@@ -664,7 +624,6 @@ async fn directory_creation_stays_inside_the_authorized_root() {
     ));
     assert!(!root_path.join("files/cancelled").exists());
 
-    // Removal takes the lock keys the alias checks left.
     storage.remove(&path("files"), &cancel).await.unwrap();
     assert!(!root_path.join("files").exists());
     root.shutdown().await.unwrap();
@@ -674,8 +633,6 @@ async fn directory_creation_stays_inside_the_authorized_root() {
 fn removal_scales_with_directory_size() {
     #[cfg(unix)]
     if std::env::var_os(SCALE_PROBE).is_none() {
-        // The limit is lowered in a child, so the result does not depend on
-        // the host's limit and other tests keep theirs.
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -700,8 +657,6 @@ fn removal_scales_with_directory_size() {
         limit.rlim_cur = 64;
         assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &limit), 0);
     }
-    // A small stack keeps a tree too deep for recursion cheap to build: APFS
-    // spends time quadratic in depth creating and removing a chain.
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_stack_size(256 * 1024)
@@ -714,7 +669,6 @@ fn removal_scales_with_directory_size() {
             let (root, _, storage) = mount(root_path.clone()).await;
             let cancel = CancellationToken::new();
 
-            // Every distinct name leaves a lock key beside its file.
             fs::create_dir(root_path.join("names")).unwrap();
             for index in 0..300 {
                 let file = storage.path(0, format!("names/{index}.json")).unwrap();
@@ -742,7 +696,6 @@ fn removal_scales_with_directory_size() {
 
 #[cfg(unix)]
 const SCALE_PROBE: &str = "DIM_FILE_STORAGE_SCALE_PROBE";
-// Recursion on the small worker stack above overflows at a few hundred levels.
 const SCALE_DEPTH: usize = 1_000;
 
 /// Creates `base` with a chain of `depth` directories below it and returns
@@ -753,8 +706,6 @@ fn deep_tree(base: &std::path::Path, depth: usize) -> PathBuf {
         .collect();
     #[cfg(unix)]
     {
-        // The chain is longer than PATH_MAX, so it is built relative to a
-        // held descriptor.
         use std::os::fd::{AsRawFd, FromRawFd};
         fs::create_dir(base).unwrap();
         let mut current = fs::File::open(base).unwrap();
@@ -774,7 +725,6 @@ fn deep_tree(base: &std::path::Path, depth: usize) -> PathBuf {
     }
     #[cfg(windows)]
     {
-        // The root is a verbatim path, which may exceed MAX_PATH.
         let mut path = base.to_path_buf();
         path.extend(std::iter::repeat_n("d", depth));
         fs::create_dir_all(path).unwrap();
@@ -823,10 +773,10 @@ async fn late_roots_preserve_indices_and_generation_boundaries_on_reload() {
     root.shutdown().await.unwrap();
 }
 
+/// The admitted-but-unsettled drain assertion depends on a single blocking
+/// worker; a second one makes the result timing-dependent.
 #[test]
 fn file_storage_flow() {
-    // A single blocking worker allows a deterministic admitted-but-unsettled
-    // operation without timing guesses or artificial production test hooks.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .max_blocking_threads(1)
@@ -869,8 +819,6 @@ fn file_storage_flow() {
             assert_eq!(storage.read(&settings, &cancel).await.unwrap(), b"ordinary lock-named file");
             drop(unrelated);
 
-            // Let the filesystem decide whether spellings denote one file. On
-            // sensitive filesystems the different entries must stay independent.
             for (name, alias) in [("auth.json", "AUTH.JSON"), ("settings.json", "SETTINGS.JSON"), ("caf\u{e9}.json", "cafe\u{301}.json")] {
                 let original = storage.path(0, name).unwrap();
                 if name != "auth.json" { storage.replace(&original, b"alias probe".to_vec(), None, &cancel).await.unwrap(); }
@@ -921,7 +869,6 @@ fn file_storage_flow() {
                 }
             }
 
-            // Account aliases must use the marker even before the target exists.
             fs::create_dir(root_path.join("fresh")).unwrap();
             let fresh_alias = storage.path(0, "fresh/AUTH.JSON").unwrap();
             let fresh = storage.lock(&fresh_alias, &cancel).await.unwrap();
@@ -936,9 +883,6 @@ fn file_storage_flow() {
             }
             drop(fresh);
 
-            // Dynamic temps live behind the same physical directory boundary.
-            // APFS also equates long-s and Kelvin spellings, which an ASCII
-            // prefix check cannot identify; sensitive volumes keep them distinct.
             let temporary_directory = root_path.join(".dim-file-storage-locks/.dim-file-storage-temps");
             let temporary_resource = temporary_directory.join(".dim-file-storage-temp-resource");
             fs::write(&temporary_resource, b"private temporary bytes").unwrap();
@@ -963,8 +907,6 @@ fn file_storage_flow() {
             assert_eq!(fs::read(&temporary_resource).unwrap(), b"private temporary bytes");
             fs::remove_file(&temporary_resource).unwrap();
 
-            // A first lock creates the reserved directory before checking the
-            // target: its previously absent alias must not become a user lease.
             fs::create_dir(root_path.join("fresh-resource-owner")).unwrap();
             let fresh_resource = storage.path(0, "fresh-resource-owner/.dim-file-\u{17f}torage-locks").unwrap();
             let fresh_lock = storage.lock(&fresh_resource, &cancel).await;
@@ -976,8 +918,6 @@ fn file_storage_flow() {
                 drop(fresh_lock.unwrap());
             }
 
-            // The TypeScript wire contract is PID, wall-clock milliseconds,
-            // nonce and a trailing newline. An old live owner's marker stays.
             let account_lock = root_path.join("auth.json.lock");
             let old = SystemTime::now() - Duration::from_secs(60);
             fs::write(&account_lock, format!("{}\n1\nexternal-live-owner\n", std::process::id())).unwrap();
@@ -996,7 +936,6 @@ fn file_storage_flow() {
             drop(recovered);
             assert!(!account_lock.exists());
 
-            // Releasing an old lease cannot delete a newer inode or owner record.
             let displaced = storage.lock(&auth, &cancel).await.unwrap();
             let old_lock = root_path.join("retired-account-lock");
             fs::rename(&account_lock, &old_lock).unwrap();
@@ -1027,7 +966,6 @@ fn file_storage_flow() {
             assert!(matches!(storage.replace(&escape, b"overwrite".to_vec(), None, &cancel).await, Err(FileStorageError::Io(_))));
             assert_eq!(fs::read(&outside).unwrap(), b"outside");
 
-            // Authorized roots must reject links before publishing the service.
             let rejected_root = Ctx::root().unwrap();
             let rejected = rejected_root.plugin(FileStoragePlugin::new(vec![root_path.join("linked-parent")]));
             let mut status = rejected.watch();
@@ -1035,7 +973,6 @@ fn file_storage_flow() {
             assert_eq!(status.borrow().state, FiberState::Failed, "reparse or symlink root must be rejected");
             rejected_root.shutdown().await.unwrap();
 
-            // A malicious replacement of the physical lock path is rejected too.
             assert!(!account_lock.exists());
             symlink(&outside, root_path.join("auth.json.lock")).unwrap();
             assert!(matches!(storage.lock(&auth, &cancel).await, Err(FileStorageError::Io(_))));
@@ -1046,7 +983,6 @@ fn file_storage_flow() {
             let linked_temps = storage.path(0, "linked-temps/secret").unwrap();
             assert!(matches!(storage.replace(&linked_temps, b"overwrite".to_vec(), None, &cancel).await, Err(FileStorageError::Io(_))));
             assert_eq!(fs::read(&outside).unwrap(), b"outside");
-            // Removal unlinks a link in place of the temporary directory itself.
             storage.remove(&storage.path(0, "linked-temps").unwrap(), &cancel).await.unwrap();
             assert!(fs::symlink_metadata(root_path.join("linked-temps")).is_err());
             assert_eq!(fs::read(&outside).unwrap(), b"outside");
@@ -1091,7 +1027,6 @@ fn file_storage_flow() {
             let (next_root, _, next) = mount(root_path.clone()).await;
             assert!(matches!(next.read(&auth, &cancel).await, Err(FileStorageError::InvalidPath(_))));
             let next_auth = next.path(0, "auth.json").unwrap();
-            // The old externally retained lease no longer owns the lock inode.
             let new_lease = next.lock(&next_auth, &cancel).await.unwrap();
             drop(new_lease);
             next_root.shutdown().await.unwrap();
@@ -1113,8 +1048,6 @@ fn file_storage_flow() {
                         let mut writing = Box::pin(lease.replace(bytes.clone(), None, &cancel));
                         loop {
                             if let std::task::Poll::Ready(result) = futures_util::poll!(writing.as_mut()) { result.unwrap(); break; }
-                            // A visible temp proves that the real worker has begun
-                            // its action; completion is equally valid evidence.
                             if fs::read_dir(threaded_root.join(".dim-file-storage-locks/.dim-file-storage-temps")).unwrap().next().is_some() { break; }
                             tokio::task::yield_now().await;
                         }
@@ -1153,7 +1086,7 @@ fn assert_permissions(root: &std::path::Path) {
     );
 }
 #[cfg(windows)]
-#[allow(clippy::permissions_set_readonly_false)] // Windows only has the readonly attribute.
+#[allow(clippy::permissions_set_readonly_false)]
 fn assert_permissions(root: &std::path::Path) {
     let path = root.join("auth.json");
     let mut permissions = fs::metadata(&path).unwrap().permissions();
@@ -1204,8 +1137,6 @@ fn symlink(
     source: impl AsRef<std::path::Path>,
     destination: impl AsRef<std::path::Path>,
 ) -> std::io::Result<()> {
-    // Junction creation needs no Developer Mode or symlink privilege. A file
-    // fixture maps to its parent; every operation still has to reject reparse.
     let source = source.as_ref();
     let source = if source.is_dir() {
         source
@@ -1249,11 +1180,6 @@ fn acl_snapshot(path: &std::path::Path) -> String {
         path,
         r#"$a = Get-Acl -LiteralPath $env:DIM_FILE_STORAGE_ACL_PATH; $a.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)"#,
     );
-    // SE_DACL_AUTO_INHERITED (AI) is a system-managed provenance marker: the
-    // filesystem only sets it through inheritance propagation and never re-marks
-    // a DACL applied explicitly. A replacement installs the target DACL onto a
-    // freshly created file, so the marker cannot carry over. Compare protection
-    // state and ACEs instead.
     match sddl.split_once('(') {
         Some((head, aces)) => format!("{}({}", head.replace("AI", ""), aces),
         None => sddl,
@@ -1389,7 +1315,6 @@ async fn windows_checks(
             .is_none()
     );
 
-    // Junction rejection cannot alter the actual outside file.
     assert_eq!(
         fs::read(directory.0.join("outside/secret")).unwrap(),
         b"outside"

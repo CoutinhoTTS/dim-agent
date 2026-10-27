@@ -61,7 +61,6 @@ async fn command_rules_written_by_the_client_apply_to_the_next_call() {
     for method in ["permission.rules", "permission.set_rules"] {
         assert!(client.features.as_array().unwrap().contains(&json!(method)));
     }
-    // Rules are host security settings: not readable from a paired device.
     let mut remote = Client::new_version(&server, true, 3).await;
     assert_eq!(
         remote.rpc("permission.rules", json!({})).await["error"]["data"]["appError"],
@@ -76,8 +75,6 @@ async fn command_rules_written_by_the_client_apply_to_the_next_call() {
     let entry =
         json!({"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps});
     assert_ok(&client.rpc("provider.create",json!({"providerId":"018ec73f-0000-7000-8000-000000000001","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"https://model.example/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"}},"models":[entry],"enabled":true})).await);
-    // Select the model as a user would; the no-selection fallback costs
-    // seconds in a debug build and is covered by provider_flow.
     assert_ok(
         &client
             .rpc(
@@ -116,7 +113,6 @@ async fn command_rules_written_by_the_client_apply_to_the_next_call() {
             .count()
     };
 
-    // The workspace file is not a rules source: the preset still asks.
     assert_ok(&client.rpc("session.submit", exec.clone()).await);
     let approval = client.notice("approval.request").await;
     assert_ok(&client.rpc("approval.respond", json!({"sessionId":sid,"branchId":"main","requestId":approval["params"]["requestId"],"decision":"deny"})).await);
@@ -158,7 +154,6 @@ async fn command_rules_written_by_the_client_apply_to_the_next_call() {
     assert_eq!(rules["result"]["commandRules"], json!([allow]));
     assert_eq!(rules["result"]["revision"], second);
 
-    // The open Session follows the written rule without asking.
     assert_ok(&client.rpc("session.submit", exec.clone()).await);
     assert_ok(&client.rpc("session.idle", branch.clone()).await);
     assert_ne!(last_result().await.is_error, Some(true));

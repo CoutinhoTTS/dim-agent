@@ -171,7 +171,6 @@ async fn background_exec_output_is_live_bounded_and_scoped() {
     );
     assert_eq!(session.sequence("main").unwrap(), sequence);
 
-    // Hold the real terminal commit, within SQLite's existing five-second busy timeout.
     let database = rusqlite::Connection::open(shell.home.join("rust/dimcode.sqlite")).unwrap();
     database.execute_batch("BEGIN IMMEDIATE").unwrap();
     std::fs::write(shell.work.join("finish"), b"go").unwrap();
@@ -720,7 +719,6 @@ async fn shell_methods_need_the_assembly_and_check_their_requests() {
         let reply = shell.client.rpc(method, params).await;
         assert_eq!(app_error(&reply), "invalid_params", "{method}: {reply}");
     }
-    // The longest command and runId run.
     let longest = format!("true{}", " ".repeat(limit - 4));
     let reply = shell.run(&"r".repeat(64), &longest, "private").await;
     assert_eq!(reply["result"]["status"], "completed", "{reply}");
@@ -740,8 +738,6 @@ async fn shell_methods_need_the_assembly_and_check_their_requests() {
             .starts_with("EXEC_SHELL_UNAVAILABLE: "),
         "{reply}"
     );
-    // The builder reads the configuration for every run; nothing ran, so the
-    // runId is still free.
     set_shell(&shell.home.join("rust"), "/bin/sh");
     assert_eq!(
         shell.run("r3", "true", "private").await["result"]["status"],
@@ -790,8 +786,6 @@ async fn a_private_run_replies_exec_bounded_output_and_writes_nothing() {
     let lines = "i=0; while [ $i -lt 3000 ]; do echo line$i; i=$((i+1)); done";
     let reply = shell.run("lines", lines, "private").await;
     let output = reply["result"]["output"].as_str().unwrap();
-    // exec keeps the last 2000 segments split at newlines, the empty one
-    // after the final newline included.
     assert_eq!(output.lines().count(), 1999);
     assert!(output.starts_with("line1001\n") && output.ends_with("line2999\n"));
     assert_eq!(reply["result"]["truncated"], true);
@@ -997,7 +991,6 @@ async fn a_run_is_admitted_again_with_its_spawn() {
     let before = shell.through().await;
     let stopped = |run_id: &str| json!({"runId": run_id, "status": "stopped", "output": "", "truncated": false, "durationMs": 0});
 
-    // Stopped while its command is being built, and before it was sent.
     let mut held = hold_start(&shell.work);
     let call = shell.send_run("building", "echo ran > ran", "record").await;
     held.arrived().await;
@@ -1023,7 +1016,6 @@ async fn a_run_is_admitted_again_with_its_spawn() {
         stopped("ahead")
     );
 
-    // Another run started while this one was being built.
     let mut held = hold_start(&shell.work);
     let late = shell.send_run("late", "echo ran > ran", "record").await;
     held.arrived().await;
@@ -1038,7 +1030,6 @@ async fn a_run_is_admitted_again_with_its_spawn() {
     );
     gone(&[&pid]).await;
 
-    // Its runId used while it was being built.
     let mut held = hold_start(&shell.work);
     let twice = shell.send_run("twice", "echo ran > ran", "record").await;
     held.arrived().await;
@@ -1068,8 +1059,6 @@ async fn a_recorded_run_is_one_append_input_for_the_next_request() {
     let before = shell.through().await;
     let reply = shell.run("echo", "echo hi", "record").await;
     let sequence = reply["result"]["recorded"]["sequence"].as_u64().unwrap();
-    // Other capabilities may append their own inputs meanwhile; only the
-    // recorded one and its application are this run's, and no turn starts.
     let events = shell.events(before).await;
     let input = events
         .iter()
@@ -1250,7 +1239,6 @@ async fn reloading_shell_input_alone_ends_its_run() {
         .await;
     assert_eq!(app_error(&reply), "service_reloading", "{reply}");
     restart.await.unwrap().unwrap();
-    // The old generation's disposer waited for the run to end its tree.
     assert!(!alive(&pid));
     assert_eq!(shell.list().await, json!([]));
     assert!(shell.recorded(before).await.is_empty());
@@ -1273,7 +1261,6 @@ async fn a_run_outlives_its_caller_and_holds_the_session_until_recorded() {
     leaving.send("shell.run", params).await;
     let pid = written(&shell.work, "pid").await;
     drop(leaving);
-    // The branch is idle; only the run refuses the unload.
     assert!(!shell.unload().await);
     assert!(alive(&pid));
     std::fs::write(shell.work.join("go"), "").unwrap();
@@ -1287,7 +1274,6 @@ async fn a_run_outlives_its_caller_and_holds_the_session_until_recorded() {
     .expect("the run is recorded");
     assert_eq!(shell.list().await, json!([]));
     assert!(shell.unload().await);
-    // Restored, the Session keeps the input and has no run.
     assert_eq!(shell.list().await, json!([]));
     assert_eq!(shell.recorded(before).await.len(), 1);
     shell.shutdown().await;
@@ -1341,8 +1327,6 @@ async fn the_caller_receives_progress_before_the_reply() {
     assert_eq!(progress, [json!({"text": "two\n"})]);
     assert_eq!(reply["result"]["output"], "one\ntwo\n");
 
-    // At most one item per 100 ms: a command writing every 20 ms streams a
-    // few items, not one per write, and they add up to the output.
     let started = Instant::now();
     let id = shell
         .send_run(
@@ -1375,7 +1359,6 @@ async fn progress_items_are_capped_and_count_what_they_leave_out() {
     let mut shell = Shell::launch().await;
     let before = shell.through().await;
     let total = 10 * 1024 * 1024;
-    // 64-byte lines.
     let line = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-";
     let command = format!("yes {line} | head -c {total}");
     let id = shell.send_run("flood", &command, "record").await;
@@ -1429,7 +1412,6 @@ async fn the_idle_unload_pass_keeps_a_session_while_a_run_works() {
     assert!(!session.is_unloading());
     assert!(alive(&pid));
     std::fs::write(shell.work.join("go"), "").unwrap();
-    // The run's hold ends after its result is recorded.
     unloaded(session).await;
     let recorded = shell.recorded(before).await;
     assert_eq!(recorded.len(), 1);
@@ -1471,8 +1453,6 @@ async fn the_idle_unload_pass_keeps_a_session_while_a_background_exec_works() {
             )
             .await,
     );
-    // The command has started. Its `$$` is namespace-local under Linux
-    // isolation, so `exec/ended` below, not a host PID, shows it survived.
     written(&shell.work, "pid").await;
     let started = shell.events(before).await;
     let task = started

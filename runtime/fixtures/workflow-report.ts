@@ -4,7 +4,6 @@ import { definePlugin } from '@arcships/rutis'
 import { z } from 'zod'
 import type { FileResult, ManagementMethods, PluginFiles, Sessions } from '../../npm/plugin.js'
 
-// One terminal run exercises the binding, without a stage engine or source parser.
 const runSchema = z.looseObject({
   run_id: z.string(),
   state: z.literal('completed'),
@@ -33,7 +32,6 @@ export default definePlugin({
     let stopped = false
     let startup = true
     let work: Promise<Run> | undefined
-    // Native C1 admission drains these management calls before scope cleanup.
 
     const store = async (update?: (run: Run) => void, beforeReplace?: () => Promise<void>): Promise<Run> => {
       const result = await scope.withLock<FileResult<Run>>('workflow/runs.json', async file => {
@@ -84,8 +82,6 @@ export default definePlugin({
             let run = await store()
             if (run.report.state !== 'pending') return run
             const target = { sessionId: run.report_to.session_id, branchId: run.report_to.branch_id }
-            // Recovery resubmits: the branch accepts the submission id once,
-            // so an input the previous generation admitted is never repeated.
             const submissionId = run.report.submission_id
             await store(run => {
               if (run.report.state === 'pending') run.report.attempt_open = true
@@ -96,7 +92,6 @@ export default definePlugin({
             const reply = await sessions.input({ ...target, submissionId, mode: 'steer',
               rawBlocks: [{ text }], content: [{ type: 'text', text }] })
             if (!reply.ok && reply.error.code === 'ambiguous') {
-              // Duplicates written before branches accepted each id once.
               const delivered = await store(run => { run.report = { state: 'delivered' } })
               progress({ phase: 'duplicate_report_violation' })
               return delivered

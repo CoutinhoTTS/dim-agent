@@ -60,7 +60,6 @@ impl rutis::host::DynPlugin for ProbePlugin {
                 move |mut draft| {
                     match &mut draft.kind {
                         EventKind::ApprovalCancelled(_) => {
-                            // Holds the commit of the end until the test releases it.
                             let gate = probe.cancel_gate.lock().unwrap().take();
                             if let Some(release) = gate {
                                 probe.cancel_entered.notify_one();
@@ -103,7 +102,6 @@ impl rutis::host::DynPlugin for ProbePlugin {
                         _ => false,
                     };
                     if gate && matches!(event.kind, EventKind::ToolCall(_)) {
-                        // ToolExecutor has registered its task, but this single-thread test has not polled it.
                         timeline
                             .append(
                                 EventKind::StopInterrupt(StopInterruptData {
@@ -213,10 +211,8 @@ async fn v2_approval_replays_committed_fields_and_ends_a_request_stopped_before_
         wait_events(&session, "approval/request", 1).await;
         probe.release.notify_one();
         session.idle("main").await.unwrap();
-        // Closing drains every pending notification before session.closed.
         session.close().await.unwrap();
         client.notice("session.closed").await;
-        // A committed request is visible and ends with exactly one cancellation.
         let approvals: Vec<_> = client
             .notices
             .iter()
@@ -452,7 +448,6 @@ async fn decisions_are_consumed_in_order_on_both_transports_and_survive_disconne
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(result_count(&session).await, 1);
 
-        // before changes deny to allow; the disconnected sender no longer owns this accepted command.
         *probe.decision.lock().unwrap() = Some(ApprovalDecision::Allow);
         let request_id = request(&mut a, &session).await;
         assert_eq!(
@@ -534,8 +529,6 @@ async fn another_client_learns_each_committed_response_on_both_transports() {
         session.idle("main").await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        // Both answer before Approval consumes either: the first notice per
-        // request carries the accepted decision, the later one was refused.
         let request_id = request_v2(&mut a, &session).await;
         b.notice("approval.request").await;
         gate(&session, &probe).await;
@@ -567,7 +560,6 @@ async fn another_client_learns_each_committed_response_on_both_transports() {
         assert_eq!(decisions, [json!("deny"), json!("allow")]);
         session.idle("main").await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        // The response stays a control event: no client business feed carries it.
         assert!(b.notices.iter().all(|notice| {
             notice["method"] != "session.event" || notice["params"]["event"]["type"] != "approval"
         }));
@@ -601,7 +593,6 @@ async fn v2_clients_receive_no_approval_resolved_on_both_transports() {
         );
         session.idle("main").await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        // Closing drains every pending notification before session.closed.
         session.close().await.unwrap();
         for client in [&mut a, &mut b] {
             client.notice("session.closed").await;
@@ -651,7 +642,6 @@ async fn stop_before_request_and_after_allow_prevent_tool_start_on_both_transpor
             .rpc("session.attach", json!({"sessionId":session.id()}))
             .await;
         assert_eq!(attached["result"], json!({}), "attach returns no history");
-        // The committed request is pending until its stop is dispatched.
         let replayed = client.notice("approval.request").await;
         probe.release.notify_one();
         session.idle("main").await.unwrap();
@@ -802,7 +792,6 @@ async fn responses_and_interrupts_follow_the_owning_branch_on_both_transports() 
             client.notice("approval.cancelled").await["params"]["requestId"],
             main_request
         );
-        // Main does not own the child's request.
         assert_eq!(
             client
                 .rpc(
@@ -855,10 +844,7 @@ async fn rpc_reload_ends_idle_waiting_on_approval_and_keeps_the_request_answerab
     let idle = client
         .send("session.idle", json!({"sessionId":session.id()}))
         .await;
-    // Requests dispatch in read order: the ping reply means idle is accepted.
     assert_ok(&client.rpc("daemon.ping", json!({})).await);
-    // Idle waits for the tool, the tool waits for approval; the reload must
-    // not wait for either.
     tokio::time::timeout(Duration::from_secs(5), server.restart("Rpc"))
         .await
         .expect("reload does not wait on client input")
@@ -887,8 +873,6 @@ async fn rpc_reload_ends_idle_waiting_on_approval_and_keeps_the_request_answerab
 
 #[tokio::test]
 async fn tool_reload_cancels_a_pending_approval_fails_the_turn_and_the_session_continues() {
-    // SQLite publishes asynchronously: the new generation must still see the
-    // terminal its predecessor wrote while unloading, and not write a second.
     for (version, sqlite) in [(1, false), (2, false), (1, true), (2, true)] {
         let dir = std::env::temp_dir().join(format!("dim-tool-reload-{}", uuid::Uuid::new_v4()));
         let store: Arc<dyn dim_agent_runtime::TimelineStore> = if sqlite {
@@ -913,14 +897,11 @@ async fn tool_reload_cancels_a_pending_approval_fails_the_turn_and_the_session_c
         assert_ok(&client.rpc("session.submit", submit.clone()).await);
         let request = client.notice("approval.request").await;
         let stale = request["params"]["requestId"].clone();
-        // ToolRegistry and ToolExecutor reload; the batch token cancels the wait.
         tokio::time::timeout(Duration::from_secs(5), probe.tools.restart())
             .await
             .expect("reload settles in-flight work");
         let cancelled = client.notice("approval.cancelled").await;
         assert_eq!(cancelled["params"]["requestId"], stale);
-        // The reload settles the call with an error result and the turn fails,
-        // whichever Loop generation receives the result.
         wait_events(&session, "turn/end", 1).await;
         let events = session.history("main", None).await.unwrap();
         assert_eq!(
@@ -956,8 +937,6 @@ async fn tool_reload_cancels_a_pending_approval_fails_the_turn_and_the_session_c
             "a settled approval cannot be answered"
         );
 
-        // The same Session continues: approvals of the new generation reach
-        // the existing attachment and the tool runs once approved.
         assert_ok(&client.rpc("session.submit", submit).await);
         let request = client.notice("approval.request").await;
         respond["requestId"] = request["params"]["requestId"].clone();
@@ -976,7 +955,6 @@ async fn tool_reload_cancels_a_pending_approval_fails_the_turn_and_the_session_c
 }
 
 async fn settle_notices(client: &mut Client) {
-    // Drains what was already delivered; `daemon.ping` replies in order.
     assert_ok(&client.rpc("daemon.ping", json!({})).await);
 }
 
@@ -986,8 +964,6 @@ async fn attach_replay_and_cancellation_leave_no_pending_approval_on_both_transp
         let probe = Arc::new(Probe::default());
         let (server, session, mut owner, calls) = setup_version(ws, probe.clone(), 2).await;
 
-        // The request was removed and its end is held before commit: an
-        // attach in between replays nothing, and later receives the end.
         let removed = request_v2(&mut owner, &session).await;
         let (release, gate) = std::sync::mpsc::channel();
         *probe.cancel_gate.lock().unwrap() = Some(gate);
@@ -1020,7 +996,6 @@ async fn attach_replay_and_cancellation_leave_no_pending_approval_on_both_transp
             "a removed request is not replayed"
         );
 
-        // A replayed request ends after its replay.
         let replayed = request_v2(&mut owner, &session).await;
         let mut attached = Client::new_version(&server, ws, 2).await;
         assert_ok(

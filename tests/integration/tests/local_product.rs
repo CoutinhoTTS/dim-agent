@@ -68,7 +68,6 @@ async fn product(dirs: &Dirs) -> Product {
             output_root: dirs.dir("outputs"),
         },
     );
-    // The Agent's own plugin: the catalog and the Skills parts.
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
     Product {
         agent: builder.build_in(&root),
@@ -375,7 +374,6 @@ async fn a_turn_reads_writes_and_runs_an_approved_command_with_real_tools() {
         .await
         .unwrap();
 
-    // workspace-write: read and write run directly, exec asks.
     let request = approval_request(&session).await;
     assert_eq!(request.call.name, "exec");
     assert!(!cwd.join("ran.txt").exists(), "exec must wait for approval");
@@ -399,7 +397,6 @@ async fn a_turn_reads_writes_and_runs_an_approved_command_with_real_tools() {
     assert_eq!(results.len(), 3);
     assert!(results.iter().all(|result| result.is_error != Some(true)));
 
-    // The request carried the product context and the fixed tool set.
     let requests = requests(&session).await;
     let first = &requests[0];
     let system = system_text(first.system.as_ref().unwrap());
@@ -434,7 +431,6 @@ async fn a_turn_reads_writes_and_runs_an_approved_command_with_real_tools() {
             "edit", "exec", "glob", "grep", "read", "skill", "wait", "write"
         ]
     );
-    // Every request declares exec with the same static isolation line.
     let exec: Vec<_> = requests
         .iter()
         .map(|request| {

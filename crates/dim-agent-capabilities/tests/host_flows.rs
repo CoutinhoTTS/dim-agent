@@ -128,8 +128,6 @@ async fn steer_and_append_enter_the_current_turn_at_tool_result_while_queue_wait
         let queued = session.submit("next turn".into(), InputMode::Queue, "main").await.unwrap();
         let steered = session.submit("change current request".into(), InputMode::Steer, "main").await.unwrap();
         let appended = session.submit("extra current context".into(), InputMode::Append, "main").await.unwrap();
-        // Release the tool once the steer and append inputs are applied; the
-        // queue input waits for the turn to end.
         let mut dispatch = session.dispatch_watch("main").unwrap();
         loop {
             let events = session.history("main", None).await.unwrap();
@@ -742,10 +740,6 @@ async fn process_model_recovery_respects_output_cleanup_and_cancellation() {
 #[tokio::test]
 async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        // 7: repeated 503; 8: 401 then 429; 9: MessageStart then 529;
-        // 10: usage then 529; 11: partial tool arguments then 529; 13: business veto.
-        // 15: veto after recovery; 16: first rejection on the last attempt;
-        // 18: output before terminal rejection; 19: terminal rejection on attempt three.
         for (mode, expected_calls, expected_refresh, expected_rejected, completed) in [
             (7, 3, 0, 0, false),
             (8, 3, 1, 0, false),
@@ -757,9 +751,7 @@ async fn transient_retries_are_bounded_and_stop_after_irreversible_output() {
             (16, 3, 0, 0, false),
             (18, 2, 1, 1, false),
             (19, 3, 1, 1, false),
-            // Authority-specific 403 recovery, capped even if requested again.
             (20, 2, 1, 0, false),
-            // No refresh when Retry-After already exceeds the whole wait budget.
             (21, 1, 0, 0, false),
         ] {
             let probe = RecoveryProbe {
@@ -1086,7 +1078,6 @@ async fn retry_after_uses_one_real_sixty_second_budget() {
             .await
             .unwrap();
         if mode == 23 {
-            // Immediate credential recovery must leave the full wait budget available.
             let started = tokio::time::Instant::now();
             session.idle("main").await.unwrap();
             assert!(started.elapsed() >= Duration::from_secs(60));
@@ -1327,14 +1318,12 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
             .wait_for(|progress| progress.text == "Hello" && progress.thinking.is_empty())
             .await
             .unwrap();
-        // The published thinking block now precedes the progress thinking.
         let shown = session.get::<ModelProgress>("main").unwrap().unwrap();
         assert_eq!((shown.text_offset, shown.thinking_offset), (0, 12));
         assert_eq!(
             outputs(&session.history("main", None).await.unwrap()),
             ["thinking:deep thought"]
         );
-        // 3 KB pieces: the buffer passes 4 KB at the second and is written then.
         let piece = "a".repeat(3000);
         send(vec![
             ModelChunk::TextEnd,
@@ -1420,10 +1409,11 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
 
 /// Text buffered under the size threshold is committed once its oldest part
 /// is a second old, checked when the next text arrives; the progress offset
-/// then counts the published text in Unicode scalar values.
+/// then counts the published text in Unicode scalar values. Under paused time
+/// the timeout is the only liveness guard: time advances to the deadline only
+/// when the flow is stuck, so a stuck flow fails instead of hanging the suite.
 #[tokio::test(start_paused = true)]
 async fn buffered_text_is_committed_once_a_second_old() {
-    // Paused time advances to this deadline only when the flow is stuck.
     tokio::time::timeout(Duration::from_secs(30), async {
         let (chunks, receiver) = tokio::sync::mpsc::unbounded_channel();
         let agent = builder(
@@ -1521,7 +1511,6 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
             .await
             .unwrap();
         entered.notified().await;
-        // Both queue inputs wait for the running turn; the steer is applied.
         let first = session
             .submit("first queued".into(), InputMode::Queue, "main")
             .await
@@ -1545,7 +1534,6 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
             panic!("held input not deleted: {answer:?}")
         };
         assert!(replacement.is_none());
-        // A second withdrawal, an unknown id and an applied input write nothing.
         assert_eq!(
             queue.withdraw(withdraw(&first.id), None).await.unwrap().0,
             Withdrawal::NotHeld
@@ -1571,7 +1559,6 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
             queue.withdraw(withdraw(&steered.id), None).await.unwrap().0,
             Withdrawal::NotHeld
         );
-        // Withdraw and re-submit as Steer: one batch, the new input joins this turn.
         let user = UserInput {
             content: vec![ContentBlock::Text {
                 text: "second, now as steer".into(),
@@ -1590,7 +1577,6 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
             .unwrap();
         assert!(matches!(answer, Withdrawal::Deleted { .. }));
         let replacement = replacement.unwrap();
-        // A replacement that is not Steer is rejected before anything is written.
         assert!(
             queue
                 .withdraw(
@@ -1633,7 +1619,6 @@ async fn a_held_input_is_withdrawn_once_and_an_applied_one_is_not() {
         }
         assert!(events.iter().any(|event| matches!(&event.kind,
             EventKind::InputConsumed(data) if data.input_id == replacement.id)));
-        // Deleted inputs never reach the model, and no turn is left to run them.
         let requests = requests.lock().unwrap().clone();
         assert!(
             requests
@@ -1755,7 +1740,6 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        // A model that takes images gets the sendable one; the others cannot be sent.
         let unsendable = "[Image omitted: the image cannot be sent to this model.]";
         assert_eq!(
             sent_parts(requests.lock().unwrap().last().unwrap()),
@@ -1768,7 +1752,6 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
             .unwrap();
         session.submit("next".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        // The text-only model gets placeholders for every image and still answers.
         let request = requests.lock().unwrap().last().unwrap().clone();
         assert_eq!(request.model_id, "text-only");
         let omitted = "[Image omitted: the current model does not accept images.]";
@@ -1777,7 +1760,6 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
         assert!(parts.contains(&"next".to_string()));
         let history = session.history("main", None).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("next"))));
-        // The adopted input and the committed request keep their images.
         assert!(history.iter().any(|event| matches!(&event.kind,
             EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user| user.content.iter().any(|block| matches!(block, ContentBlock::Image { .. }))))));
         assert!(history.iter().any(|event| matches!(&event.kind,

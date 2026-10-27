@@ -172,7 +172,6 @@ async fn slots_stay_bounded_by_loaded_sessions_and_kept_closes() {
     assert_eq!((index.session_count(), slots(&index)), (N, (N, 0)));
     assert_eq!(client.listed("session.list").await, ids);
 
-    // Unloading a Session drops its slot; listing it again creates none.
     settle(&index, &mut marks, 0).await;
     assert_eq!(slots(&index), (0, 0));
     assert_eq!(client.listed("session.list").await, ids);
@@ -181,16 +180,11 @@ async fn slots_stay_bounded_by_loaded_sessions_and_kept_closes() {
 
     let (closed, rest) = ids.split_at(N / 3);
     let (deleted, unloaded) = rest.split_at(N / 3);
-    // A close restores its Session, and its rows remain: its slot stays,
-    // closed.
     for id in closed {
         client.ok("session.close", json!({"sessionId":id})).await;
     }
     assert_eq!((index.session_count(), slots(&index)), (0, (N / 3, N / 3)));
 
-    // A delete removes the rows and the slot. A lease taken before it keeps
-    // the deleted Session's slot, closed, until the lease ends and a pass
-    // runs.
     let lease = index.acquire(&deleted[0]).await.unwrap();
     for id in deleted {
         client.ok("session.delete", json!({"sessionId":id})).await;
@@ -204,8 +198,6 @@ async fn slots_stay_bounded_by_loaded_sessions_and_kept_closes() {
     index.unload_idle(&mut marks).await;
     assert_eq!(slots(&index), (N / 3, N / 3));
 
-    // The closes outlive the passes: closed Sessions are neither listed nor
-    // loaded again in this process.
     assert_eq!(client.listed("session.list").await, unloaded);
     for id in closed {
         assert_eq!(
@@ -215,8 +207,6 @@ async fn slots_stay_bounded_by_loaded_sessions_and_kept_closes() {
     }
     assert_eq!(index.session_count(), 0);
 
-    // An unloaded Session whose slot went is restored by its next use, on a
-    // new slot that carries its lease to the pass.
     let attach = json!({"sessionId":unloaded[0]});
     client.ok("session.attach", attach.clone()).await;
     assert_eq!(uses(&index, &unloaded[0]), Some(1));
@@ -230,7 +220,6 @@ async fn slots_stay_bounded_by_loaded_sessions_and_kept_closes() {
     settle(&index, &mut marks, 0).await;
     assert_eq!(slots(&index), (N / 3, N / 3));
 
-    // Deleting a closed Session removes its rows, and with them its slot.
     for id in closed {
         client.ok("session.delete", json!({"sessionId":id})).await;
     }
@@ -256,7 +245,6 @@ async fn a_mark_keeps_the_slot_of_a_session_released_outside_the_pass() {
     let mut client = Client::new(&server).await;
     let id = client.create(&store).await;
     let mut marks = Marks::new();
-    // One lease and none since: the pass marks the Session at count 1.
     drop(index.acquire(&id).await.unwrap());
     index.unload_idle(&mut marks).await;
     assert!(
@@ -269,10 +257,8 @@ async fn a_mark_keeps_the_slot_of_a_session_released_outside_the_pass() {
     );
     assert!(agent.get_session(&id).is_none());
 
-    // Any prune now, the next pass's included, keeps the marked slot.
     index.directory.inner.lock().unwrap().sweep();
     assert_eq!(slots(&index), (1, 0));
-    // A restore and its lease raise the marked count to 2.
     drop(index.acquire(&id).await.unwrap());
     index.unload_idle(&mut marks).await;
     assert!(

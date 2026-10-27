@@ -112,7 +112,6 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     )
     .await;
     let mut client = Client::new_version(&server, false, 3).await;
-    // A product Session needs a selected model; this one is never called.
     let models = [
         json!({"modelId":"fixture","displayName":"fixture","status":"active",
         "capabilities":dim_agent_types::ModelCapabilities::default()}),
@@ -132,8 +131,6 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     let user = json!({"source":"example","scope":"user"});
     let mut changes = log.0.subscribe();
 
-    // Item 1: the default document, a CAS write, a stale revision and
-    // invalid documents that write nothing.
     let read = owner(&mut client, &session, "read", user.clone()).await;
     assert_eq!(read["ok"], true, "{read}");
     assert_eq!(read["value"]["document"], json!({"maxResults": 5}));
@@ -164,7 +161,6 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     let read = owner(&mut client, &session, "read", user.clone()).await;
     assert_eq!(read["value"]["revision"], second);
 
-    // Item 2: a client may change the user-only field; the owner may not.
     let service = json!({"kind":"web","apiKey":"web-search"});
     let edited = client
         .rpc(
@@ -331,7 +327,6 @@ async fn node_settings_clients_and_declaration_boundaries() {
             error
         );
     }
-    // Rust sources keep their owners' methods.
     assert_eq!(
         client
             .rpc("settings.read", json!({"source":"mcp","scope":"user"}))
@@ -341,8 +336,6 @@ async fn node_settings_clients_and_declaration_boundaries() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // A declaration naming a Rust source, a second declaration of one source
-    // by another package, and a malformed entry each fail assembly.
     let mut rust = owner_row(OWNER);
     rust["settings"][0]["source"] = json!("mcp");
     let mut copy = owner_row("tool-only");

@@ -208,13 +208,10 @@ impl Isolation {
     /// so this is a heuristic; it never offers an approval.
     pub(crate) fn failure_hint(&self, output: &str) -> Option<String> {
         const DENIALS: [&str; 10] = [
-            // Seatbelt: EPERM, and dyld's report of an ungranted library.
             "operation not permitted",
             "blocked by sandbox",
-            // bubblewrap: EROFS from read-only binds, and its own diagnostics.
             "read-only file system",
             "bwrap:",
-            // Resolver and routing failures without network.
             "could not resolve host",
             "nodename nor servname",
             "temporary failure in name resolution",
@@ -655,8 +652,6 @@ impl ProcessTree {
 #[cfg(unix)]
 impl Drop for ProcessTree {
     fn drop(&mut self) {
-        // A confirmed-empty group may already reuse its id; an unconfirmed
-        // termination still has members, which keep the id reserved.
         if !self.terminated && !self.released() {
             native::signal(self.pid, libc::SIGKILL);
         }
@@ -665,14 +660,11 @@ impl Drop for ProcessTree {
 #[cfg(windows)]
 impl Drop for ProcessTree {
     fn drop(&mut self) {
-        // Closing the job kills what is left, except after a normal exit.
         if self.released() {
             self.job.keep_processes();
         }
     }
 }
-
-// ------------------------------------------------------------------ plugin
 
 #[derive(Debug, Clone, Default)]
 pub struct HostPlatformConfig {
@@ -764,8 +756,6 @@ async fn read_config(
     }
 }
 
-// ------------------------------------------------------------ shell resolve
-
 /// Resolves the exec shell from the `exec-shell.json` read result (`None`
 /// when missing, `Err` with the reason when unreadable) and `env`.
 pub async fn resolve_shell(
@@ -814,7 +804,6 @@ pub async fn resolve_shell(
             executable_path: shell.path.clone(),
             edition: shell.edition,
             source,
-            // Only PowerShell 7 and POSIX shells have a UTF-8 output contract.
             output_encoding: match shell.edition {
                 ShellEdition::GitBash | ShellEdition::WindowsPowershell | ShellEdition::Cmd => {
                     OutputEncoding::Unknown
@@ -1086,8 +1075,6 @@ mod unix {
     }
 
     pub async fn terminate(tree: &mut ProcessTree) -> io::Result<()> {
-        // The group id is the root pid, which cannot be reused while the
-        // group has members.
         let pid = tree.pid;
         signal(pid, libc::SIGTERM);
         if group_gone(tree, pid, TERMINATE_GRACE).await {
@@ -1388,8 +1375,6 @@ mod windows {
                 .iter()
                 .zip(futures_util::future::join_all(probes).await)
             {
-                // Git Bash also needs its Git root with `cygpath`, outside
-                // the product's bundled Git.
                 let accepted = passed
                     && (*edition != Edition::GitBash
                         || git_root(path).is_some_and(|root| !bundled_git_root(&root, env)));
@@ -1573,7 +1558,6 @@ mod windows {
 
     pub fn spawn(mut command: tokio::process::Command) -> io::Result<ProcessTree> {
         let job = Job::new()?;
-        // Suspended until it is in the job, so no descendant escapes it.
         command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
         let mut child = command.spawn()?;
         let attached = (|| {
@@ -1614,8 +1598,6 @@ mod windows {
         Ok(())
     }
 }
-
-// ------------------------------------------------------------------ PTY
 
 /// Terminal dimensions for PTY spawn.
 #[derive(Debug, Clone, Copy)]

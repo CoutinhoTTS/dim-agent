@@ -102,8 +102,6 @@ impl ToolBinding {
         }
         let mut state = self.state.lock().unwrap();
         register(&mut state, request_id, bound, sets)?;
-        // Every later request's prefix contains the newest pin at or before
-        // `through`, so older pins are no longer declared.
         if let Some(newest) = state
             .pins
             .iter()
@@ -204,15 +202,11 @@ impl ToolBinding {
         timeline: &Timeline,
         cancel: &CancellationToken,
     ) -> dim_agent_runtime::Result<()> {
-        // Fix optional providers during branch initialization even without a model.
         let (adoption, sets) = current(&self.registry);
         let prefix = crate::history::read_context(timeline, timeline.sequence()).await?;
         let Some(configuration) = context_configuration(&prefix) else {
             return Ok(());
         };
-        // A configuration without a tool part declares the fixed tools (Loop
-        // binds it with `bind_current`); it needs an adoption only once a
-        // dynamic source offers tools.
         let declared = match &configuration.settings.tools {
             Some(tools) => {
                 *tools == adoption.tools
@@ -224,9 +218,6 @@ impl ToolBinding {
         if declared {
             let mut state = self.state.lock().unwrap();
             if state.adopted.is_none() {
-                // Without a tool part requests bind the registry's current
-                // sets and retain them in their own snapshots; no prefix can
-                // name these versions, so they are not pinned.
                 if state.declares_tools {
                     state.pins.push((0, sets));
                 }
@@ -348,9 +339,6 @@ impl DynPlugin for ToolBindingPlugin {
             let lifecycle = ctx.cancellation_token();
             let tasks = TaskTracker::new();
             let opening_tasks = tasks.clone();
-            // Follow the registry's source state, taken before reading the
-            // registry so no change is missed. A change keeps a permit in
-            // `changed` until the background task below takes it.
             let mut sources = registry.sources_state();
             let (forward, forward_cancel) = (binding.clone(), lifecycle.clone());
             tasks.spawn(async move {
@@ -359,15 +347,11 @@ impl DynPlugin for ToolBindingPlugin {
                         _ = forward_cancel.cancelled() => return,
                         changed = sources.changed() => match changed {
                             Ok(()) => forward.changed.notify_one(),
-                            // The registry is gone with its Session.
                             Err(_) => return,
                         },
                     }
                 }
             });
-            // A new or resumed branch receives its model configuration while
-            // `branch/start` or `branch/resume` dispatches (Prompt, which this
-            // follows); adopt the tool part then, before the branch takes input.
             let (owner, opening_prompt, opening_timeline, opening_cancel) = (
                 binding.clone(),
                 prompt.clone(),
@@ -411,12 +395,9 @@ impl DynPlugin for ToolBindingPlugin {
                     Box::pin(async move { registered })
                 },
             )?;
-            // A reloaded ToolBinding finds the configuration already adopted.
             binding.reconcile(&prompt, &timeline, &lifecycle).await?;
             let (watcher, cancel) = (binding.clone(), lifecycle.clone());
             tasks.spawn(async move {
-                // Background work runs while the branch is Active; a
-                // change before that retains a permit in `changed`.
                 tokio::select! {
                     _ = cancel.cancelled() => return,
                     active = phase.activated() => if !active { return },
@@ -427,8 +408,6 @@ impl DynPlugin for ToolBindingPlugin {
                         _ = phase.closing() => return,
                         _ = watcher.changed.notified() => {},
                     }
-                    // A failed adoption keeps the pins and the prefix; the
-                    // next change retries.
                     if let Err(error) = watcher.adopt(&prompt, &cancel).await {
                         if matches!(error, AgentError::Closed(_)) {
                             return;

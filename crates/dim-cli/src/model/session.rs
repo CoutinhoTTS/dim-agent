@@ -21,7 +21,7 @@ pub enum DraftPart {
     Block(dim_agent_types::ContentBlock),
 }
 
-#[allow(dead_code)] // Fields the host reads once the App Server offers their methods.
+#[allow(dead_code)]
 pub enum Command {
     Submit(String),
     /// A draft with pastes to store or content blocks to send.
@@ -180,7 +180,7 @@ pub enum OauthEvent {
         user_code: String,
     },
     Exchanging,
-    #[allow(dead_code)] // Device polling backs off inside the account plugin.
+    #[allow(dead_code)]
     SlowDown(u64),
     /// Signed in, or why not (`None` error text = cancelled).
     Done(Result<String, Option<String>>),
@@ -236,6 +236,7 @@ pub struct Usage {
 pub struct UsagePlan {
     pub name: Option<String>,
     pub status: Option<String>,
+    /// In minor units (fen, cents); divide by 100 before showing it.
     pub price_amount: Option<f64>,
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
@@ -280,7 +281,7 @@ pub struct ProviderEntry {
     pub status: String,
     pub is_current: bool,
     pub enabled: bool,
-    #[allow(dead_code)] // Read once the App Server lists providers.
+    #[allow(dead_code)]
     pub custom: bool,
     pub base_url: Option<String>,
     pub api_key_preview: Option<String>,
@@ -344,7 +345,7 @@ pub enum SwitchKind {
     Resumed,
 }
 
-#[allow(dead_code)] // Toasts, file counts and reconnecting wait for their App Server events.
+#[allow(dead_code)]
 pub enum Update {
     /// The session exists; `provider` / `model` label the status line.
     Ready {

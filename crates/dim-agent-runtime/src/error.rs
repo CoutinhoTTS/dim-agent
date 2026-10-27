@@ -40,9 +40,10 @@ impl AgentError {
     }
     pub fn aggregate(errors: Vec<Self>) -> Result<()> {
         // A cached rutis failure can be observed through both construction and
-        // parent cleanup. Merge those observations by Arc identity, never text.
-        // collect only clones existing Arcs; it must not allocate new error
-        // Arcs that could reuse an address of an already expanded wrapper.
+        // parent cleanup. Merge those observations by Arc identity, never text
+        // (lifecycle.md §3); collect only clones existing Arcs and must not
+        // allocate new error Arcs that could reuse an address of an already
+        // expanded wrapper.
         fn collect(
             error: AgentError,
             seen: &mut HashSet<*const rutis::host::ErrorKind>,

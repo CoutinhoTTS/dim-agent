@@ -37,7 +37,6 @@ pub fn filter_commands(query: &str, context: Context) -> Vec<&'static Command> {
     let mut ranked: Vec<(u8, &'static Command)> = listed
         .filter_map(|command| rank(command, &normalized).map(|r| (r, command)))
         .collect();
-    // A stable sort keeps registry order within a rank.
     ranked.sort_by_key(|(rank, _)| *rank);
     ranked.into_iter().map(|(_, command)| command).collect()
 }
@@ -50,13 +49,10 @@ fn rank(command: &Command, query: &str) -> Option<u8> {
             .split(|c: char| !c.is_alphanumeric())
             .any(|word| word.starts_with(query))
     };
-    // Text without spaces between words (Chinese) matches anywhere.
     let translated = t(command.description).to_lowercase();
     let described = word_starts(command.description)
         || (!query.is_ascii() && translated.contains(query))
         || word_starts(&translated);
-    // Letters in order are a loose match: only for three or more that
-    // start where the name does.
     let mut letters = name.chars();
     let in_order = query.chars().count() >= 3
         && name.chars().next() == query.chars().next()
@@ -323,7 +319,6 @@ pub fn render_overlay(
         String::new(),
     ];
     content.extend(list(state, rows, inner, page, p));
-    // The box keeps its height however few commands match.
     content.resize(OVERLAY_QUERY_ROWS + page, String::new());
     let title = paint(
         t("Command Palette"),
@@ -434,9 +429,6 @@ mod tests {
 
     #[test]
     fn a_name_prefix_outranks_an_alias_and_descriptions() {
-        // `/settings` by name before `/resume` by its `sessions` alias, then
-        // description words (session, select, set, server, session's);
-        // "collapse" is not a match for "se".
         assert_eq!(
             names("/se", SCROLLBACK),
             [
@@ -454,10 +446,18 @@ mod tests {
         );
         assert_eq!(names("/stg", SCROLLBACK), ["settings"]);
         assert_eq!(&names("/re", SCROLLBACK)[..2], ["resume", "effort"]);
-        // "sessions" (an alias of resume) only contains "ss".
         assert!(names("/ss", SCROLLBACK).contains(&"resume"));
         assert!(names("/quit", SCROLLBACK).contains(&"exit"));
         assert_eq!(names("/hist", SCROLLBACK), ["history"]);
+    }
+
+    /// A non-ASCII description has no spaces between words, so a non-ASCII
+    /// query matches anywhere in it; the word-start rule cannot apply.
+    #[test]
+    fn a_non_ascii_query_matches_inside_a_description_without_spaces() {
+        crate::ui::i18n::set(crate::ui::i18n::Locale::ZhCn);
+        assert!(names("/设置", SCROLLBACK).contains(&"settings"));
+        crate::ui::i18n::set(crate::ui::i18n::Locale::En);
     }
 
     #[test]
@@ -478,7 +478,6 @@ mod tests {
         state.set_query("");
         let panel = render_overlay(&state, &rows, 72, rows.len(), &theme.palette);
         let plain: Vec<String> = panel.iter().map(|r| strip(r)).collect();
-        // Selected first row: the accent bar across the row.
         assert!(plain[4].starts_with("│   session  /new "), "{:?}", plain[4]);
         assert!(panel[4].contains("\x1b[30;43m"), "{:?}", panel[4]);
         let top = plain
@@ -491,9 +490,7 @@ mod tests {
             plain[top]
         );
         assert!(plain[top].trim_end_matches(['│', ' ']).ends_with("Home"));
-        // Keys take the keybind colour, bold.
         assert!(panel[top].contains("\x1b[1;34m  Home"), "{:?}", panel[top]);
-        // An action that cannot run now says so, faint.
         let interrupt = plain
             .iter()
             .position(|r| r.contains("interrupt the run"))
@@ -558,7 +555,6 @@ mod tests {
     #[test]
     fn skills_share_the_list_under_their_own_category() {
         let skills = sample_skills();
-        // Both kinds: commands first, told apart by category.
         let rows = rows_for("hist", SCROLLBACK, &skills);
         let categories: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
         assert_eq!(categories, ["session", "skill", "skill"]);
@@ -566,7 +562,6 @@ mod tests {
         let only = rows_for("claude", SCROLLBACK, &skills);
         assert!(only.iter().all(|r| matches!(r.kind, Kind::Skill(_))));
         assert_eq!(panel_title(&only), "Skills");
-        // A skill name prefix with no command name prefix leads.
         let lead = rows_for("codex", SCROLLBACK, &skills);
         assert_eq!(lead.len(), 1);
         let mut state = PaletteState::default();

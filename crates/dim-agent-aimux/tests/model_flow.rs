@@ -239,7 +239,6 @@ async fn process_requests_use_connection_snapshots_and_release_retained_streams_
             headers: Default::default(), bearer: Some("header-secret\n".into()), preset: None,
         }), CancellationToken::new()).await.err().unwrap();
         assert!(!failure.to_string().contains("header-secret"));
-        // Neither handle is dropped or polled again until after owner shutdown.
         let mut unpolled = host.0.invoke(request("wait"), connection(&first, "unpolled"), CancellationToken::new()).await.unwrap();
         let mut partial = host.0.invoke(request("wait"), connection(&second, "partial"), CancellationToken::new()).await.unwrap();
         assert!(matches!(partial.next().await.unwrap().unwrap(), ModelChunk::MessageStart { .. }));

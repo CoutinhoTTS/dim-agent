@@ -270,7 +270,6 @@ fn error(error: super::ManagedProviderError) -> RpcError {
     RpcError::app(-32000, error.code, error.message)
 }
 
-// Shared outbound boundary for the two built-in OAuth owners, not business logic.
 pub(crate) fn attempt_id(params: &LoginAttempt) -> Result<uuid::Uuid, RpcError> {
     uuid::Uuid::parse_str(&params.attempt_id)
         .map_err(|_| RpcError::invalid("attemptId must be a UUID"))

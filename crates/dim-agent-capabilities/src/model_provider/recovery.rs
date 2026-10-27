@@ -131,7 +131,6 @@ impl RecoveryState {
         replay_safe: bool,
         jitter: u8,
     ) -> FailureAction {
-        // Settlement is not replay: it remains necessary at every replay limit.
         if rejection == CredentialRejection::Terminal {
             return FailureAction::SettleCredentials;
         }

@@ -101,8 +101,6 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
     turn(&mut client, &sid, "first").await;
     let source = agent.get_session(&sid).unwrap();
 
-    // Children created before the cut: one finishes after it, one is in a
-    // tool batch when the fork commits, one a client steers after it.
     let head = source.sequence("main").unwrap();
     let done = branch(&mut client, &sid, head, "tool:wait {\"millis\":400}").await;
     let running = branch(&mut client, &sid, head, "tool:wait {\"millis\":60000}").await;
@@ -121,7 +119,6 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let at = source.sequence("main").unwrap();
-    // After the cut: a fourth child and a steer of the third.
     let after = branch(&mut client, &sid, at, "hello").await;
     assert_ok(&client.rpc("session.submit", json!({"sessionId":sid,"branchId":steered,"text":"steer after the cut","mode":"steer"})).await);
 
@@ -133,8 +130,6 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
         fork.sequence("main").unwrap()
     );
 
-    // main through the cut, the same events with the same ids, then the
-    // fork's own facts: branch/resume and one failed creation per child.
     let mut children = vec![done.clone(), running.clone(), steered.clone()];
     children.sort();
     let mut copied = vec![];
@@ -154,14 +149,11 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
     };
     assert_eq!(encode(&copied[..at as usize]), encode(&prefix));
     let tail = &copied[at as usize..];
-    // The fork's own fact, then the opening of the copied history.
     assert_eq!(tail[0].kind.key(), "session/forked");
     assert_eq!(tail[1].kind.key(), "branch/resume");
     assert_eq!(failed_creations(tail), children, "{:?}", keys(tail));
     assert_eq!(fork.branches().len(), 1, "only main is active in the fork");
 
-    // Rows: stored bytes through the cut, child directories without events,
-    // nothing of the later child, only referenced content, same config.
     let rows = |sql: &str| count(&store, sql, [&fid, &sid]);
     assert_eq!(
         rows(
@@ -239,7 +231,6 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
         1
     );
 
-    // The source's children go on; the fork starts nothing meanwhile.
     eventually("the finishing child ends", || {
         source.state(&done).is_ok_and(|state| !state.running)
     })
@@ -268,7 +259,6 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
         );
     }
 
-    // A restart reloads the fork without a second failed creation.
     drop((client, fork, source, agent));
     server.shutdown();
     server.join().await.unwrap();
@@ -283,7 +273,6 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
             .iter()
             .any(|key| WORK.contains(key))
     );
-    // Input from a client runs in the fork.
     turn(&mut client, &fid, "in the fork").await;
     assert!(keys(&history(&fork, "main").await).contains(&"turn/start"));
     drop((client, fork, agent));
@@ -316,8 +305,6 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
             .unwrap()
             .sequence
     };
-    // A cut inside an atomic batch is refused in
-    // `a_fork_waits_for_background_work_and_keeps_preset_and_model`.
     for (at, cause) in [
         (head + 1, "future"),
         (position("step/tool-call"), "without results"),
@@ -356,8 +343,6 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
     );
     assert_eq!(sessions(), before, "a refused fork creates nothing");
 
-    // A Queue input withdrawn while it waited behind a turn is never
-    // applied, so it does not keep the Session from resting.
     assert_ok(
         &client
             .rpc(
@@ -461,7 +446,6 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
         "the steer joins the fork's next request"
     );
 
-    // 0 inherits no event: the fork starts like a new Session.
     let fid = forked(&fork(&mut client, &sid, 0).await);
     let empty = history(&agent.get_session(&fid).unwrap(), "main").await;
     assert_eq!(empty[0].kind.key(), "branch/start");
@@ -470,7 +454,6 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // Without the native store the method is not served.
     let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let features = client.features.as_array().unwrap();
@@ -552,13 +535,11 @@ async fn a_fork_of_a_leader_does_not_stop_the_source_member() {
         result.outcome,
         dim_agent_types::CollaborationOutcome::Failed { ref reason } if reason == "capability reloading"
     ));
-    // The member was not interrupted and keeps working for the source.
     assert!(member_session.state("main").unwrap().running);
     assert!(
         !keys(&history(&member_session, "main").await).contains(&"stop/interrupt"),
         "the fork did not stop the source's member"
     );
-    // Its result reaches the source, whose report starts a turn there.
     let mut reported = false;
     for _ in 0..500 {
         let events = history(&leader, "main").await;
@@ -573,7 +554,6 @@ async fn a_fork_of_a_leader_does_not_stop_the_source_member() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(reported, "the member's result reaches the source");
-    // The fork posted no report input and ran nothing.
     let tail = history(&fork, "main").await.split_off(at as usize);
     assert!(
         !keys(&tail).iter().any(|key| WORK.contains(key)),
@@ -623,7 +603,6 @@ async fn a_fork_shares_session_files_and_outlives_its_source() {
     assert_eq!(owners(&file), both);
     assert_ok(&client.rpc("session.delete", json!({"sessionId":sid})).await);
     assert_eq!(owners(&file), std::slice::from_ref(&fid));
-    // The fork loads after a restart and its file stays readable.
     drop(agent);
     server.shutdown();
     server.join().await.unwrap();
@@ -640,7 +619,6 @@ async fn a_fork_shares_session_files_and_outlives_its_source() {
     })
     .await;
 
-    // A delete that commits first leaves nothing to fork.
     let sid = session(&mut client).await;
     let at = agent.get_session(&sid).unwrap().sequence("main").unwrap();
     assert_ok(&client.rpc("session.delete", json!({"sessionId":sid})).await);
@@ -648,7 +626,6 @@ async fn a_fork_shares_session_files_and_outlives_its_source() {
         error(&fork(&mut client, &sid, at).await).0,
         "session_closed"
     );
-    // Races of a delete and a fork of the same source.
     for _ in 0..8 {
         let sid = session(&mut client).await;
         turn(&mut client, &sid, "raced").await;
@@ -771,8 +748,6 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
         )
         .await;
     let sid = forked(&created);
-    // A graceful restart closes main with a branch-scope interrupt; the
-    // restored generation still wakes for its own tasks.
     drop(client);
     let socket = server.unix_path.clone().unwrap();
     server.shutdown();
@@ -788,7 +763,6 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
     )));
     let main = json!({"sessionId":sid,"branchId":"main"});
     assert_ok(&client.rpc("session.submit", json!({"sessionId":sid,"branchId":"main","text":"tool:exec {\"command\":\"sleep 1; printf finished\",\"runInBackground\":true,\"timeoutMs\":-1}"})).await);
-    // The task ends, its wake is posted, and the wake's turn ends.
     let mut events = vec![];
     for _ in 0..1000 {
         events = history(&source, "main").await;
@@ -834,8 +808,6 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
         assert!(message.contains(cause), "{at}: {message}");
     }
 
-    // A child running a background task when the fork commits (acceptance
-    // 4): the fork gets its directory without events.
     let head = source.sequence("main").unwrap();
     let child = branch(
         &mut client,
@@ -852,7 +824,6 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
     .await
     .expect("the child starts its background task");
 
-    // The preset and model the source holds at the cut.
     let policy = client.rpc("session.permission.get", main.clone()).await;
     assert_ok(&client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":{"preset":"read-only","allowedTools":["exec"],"disallowedTools":[]}})).await);
     let updated = client
@@ -865,8 +836,6 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
     assert_ok(&client.rpc("session.idle", main.clone()).await);
     let policy = client.rpc("session.permission.get", main.clone()).await;
     assert_eq!(policy["result"]["policy"]["preset"], "read-only");
-    // A cut inside an atomic batch, such as the Session's initial prompt
-    // adoption.
     let inside: i64 = store
         .connection()
         .query_row(
@@ -890,8 +859,6 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
             .await["result"],
         policy["result"]
     );
-    // F's first load records the child's creation as failed; then nothing
-    // runs.
     tokio::time::timeout(Duration::from_secs(10), async {
         while failed_creations(&history(&fork, "main").await[at as usize..]).is_empty() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -907,8 +874,6 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
         keys(&tail)
     );
     assert!(!store.output(&fid).exists(), "the fork ran no command");
-    // No task of the child to fail, wake or run in the fork; the source's
-    // task goes on.
     assert_eq!(failed_creations(&tail), std::slice::from_ref(&child));
     assert!(fork.state(&child).is_err());
     assert_eq!(
@@ -923,7 +888,6 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
         !keys(&source.local(&child, ..).await.unwrap()).contains(&"exec/ended"),
         "the source's task still runs"
     );
-    // Its first request uses the model the source had selected.
     turn(&mut client, &fid, "in the fork").await;
     let calls: Vec<String> = history(&fork, "main")
         .await
@@ -935,7 +899,6 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
         .collect();
     assert_eq!(calls.last().map(String::as_str), Some("beta"), "{calls:?}");
 
-    // Deleting the source removes its command output; the fork stays.
     assert_ok(&client.rpc("session.delete", json!({"sessionId":sid})).await);
     assert!(!store.output(&sid).exists());
     assert!(store.rows(&sid).is_empty());

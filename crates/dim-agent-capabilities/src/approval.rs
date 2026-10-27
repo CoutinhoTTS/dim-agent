@@ -91,13 +91,10 @@ impl Approval {
         if cancel.is_cancelled() {
             return Err(HostError::Cancelled(CANCELLED.into()));
         }
-        // The call that runs is rechecked after an allow response.
         let checked = call.call.clone();
         let (response, received) = oneshot::channel();
         let registered = cancel.clone();
         let mut registered_id = None;
-        // Registered from the final event under the commit lock: a replay after
-        // this point includes the request, a listener before it receives it.
         let committed = self.timeline.append_registered(
             EventKind::ApprovalRequest(ApprovalRequestData {
                 approval_id: uuid::Uuid::new_v4().to_string(),
@@ -126,7 +123,6 @@ impl Approval {
         let event = match committed {
             Ok(event) => event,
             Err(error) => {
-                // A request that was not committed is not pending.
                 if let Some(id) = registered_id {
                     take(&mut self.inner.lock().unwrap(), &id);
                 }
@@ -146,7 +142,6 @@ impl Approval {
             biased;
             decision = received => decision,
             _ = cancel.cancelled() => {
-                // A response consumed first has already ended the request.
                 let taken = take(&mut self.inner.lock().unwrap(), approval_id);
                 if taken.is_some() {
                     self.cancelled(approval_id, CANCELLED);
@@ -155,28 +150,22 @@ impl Approval {
             }
         };
         match decision {
-            // Branch close or reload settled the request.
             Err(_) => Err(HostError::Cancelled(CAPABILITY_RELOADING.into())),
-            // The response found the batch cancelled and ended the request.
             Ok(None) => Err(HostError::Cancelled(CANCELLED.into())),
             Ok(Some(ApprovalDecision::Deny)) => {
                 Err(HostError::failed("Tool execution denied by user"))
             }
-            // Re-check the policy that may have changed while waiting; a
-            // repeated Ask counts as approved.
             Ok(Some(ApprovalDecision::Allow)) => {
                 match self.permission.decide(&checked, risk, &cancel).await {
                     Ok(Decision::Deny { reason }) => {
                         self.cancelled(approval_id, &reason);
                         Err(HostError::failed(reason))
                     }
-                    // Allowed, then stopped before the tool started.
                     Ok(_) if cancel.is_cancelled() => {
                         self.cancelled(approval_id, CANCELLED);
                         Err(HostError::Cancelled(CANCELLED.into()))
                     }
                     Ok(_) => Ok(()),
-                    // The rules read was cancelled.
                     Err(error) => {
                         self.cancelled(approval_id, CANCELLED);
                         Err(error)
@@ -218,8 +207,6 @@ impl Approval {
                 if inner.closed {
                     return Err(AgentError::Closed("Approval".into()));
                 }
-                // Registered inside the commit lock, before the event is
-                // visible to the consuming subscription.
                 inner.responses.insert(event.id.clone(), waiter);
                 registered_id = Some(event.id.clone());
                 Ok(())
@@ -301,11 +288,9 @@ impl Approval {
         let pending: Vec<_> = {
             let mut inner = self.inner.lock().unwrap();
             inner.closed = true;
-            // Dropped waiters report `Closed`.
             inner.responses.clear();
             std::mem::take(&mut inner.pending)
         };
-        // Each waiter is released after its request is recorded as ended.
         for item in pending {
             self.cancelled(&item.request.approval_id, CAPABILITY_RELOADING);
         }
