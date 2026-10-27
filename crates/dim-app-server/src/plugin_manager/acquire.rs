@@ -1,0 +1,307 @@
+//! Acquiring a plugin directory (PluginManager §7): ids, the one path rule
+//! under `<home>/plugins`, and Git clones.
+use super::PluginError;
+use super::record::Manifest;
+use std::path::{Path, PathBuf};
+use tokio::process::Command;
+
+/// `[a-z0-9_-]{1,64}`, not `builtin` or `default`.
+pub fn check_id(id: &str) -> Result<(), PluginError> {
+    let valid = (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        && id != "builtin"
+        && id != "default";
+    if valid {
+        Ok(())
+    } else {
+        Err(PluginError::new(
+            "invalid_id",
+            format!("{id:?} must match [a-z0-9_-]{{1,64}} and not be builtin or default"),
+        ))
+    }
+}
+
+/// The directories PluginManager may create, rename or delete. Every one is
+/// checked to be exactly `<home>/plugins/.staging/<random>`,
+/// `<home>/plugins/<id>` or `<home>/plugins/<id>/<commit>` before use.
+#[derive(Clone, Debug)]
+pub struct PluginsDir {
+    root: PathBuf,
+}
+
+impl PluginsDir {
+    /// `home` is canonical.
+    pub fn new(home: &Path) -> Self {
+        Self {
+            root: home.join("plugins"),
+        }
+    }
+
+    fn staging_root(&self) -> PathBuf {
+        self.root.join(".staging")
+    }
+
+    pub fn id_dir(&self, id: &str) -> Result<PathBuf, PluginError> {
+        check_id(id)?;
+        Ok(self.root.join(id))
+    }
+
+    pub fn clone_dir(&self, id: &str, commit: &str) -> Result<PathBuf, PluginError> {
+        if commit.len() < 7 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(outside(commit));
+        }
+        Ok(self.id_dir(id)?.join(commit))
+    }
+
+    /// Whether `dir` is one of the shapes PluginManager owns, read lexically
+    /// and then after resolving what exists of it.
+    pub fn check(&self, dir: &Path) -> Result<(), PluginError> {
+        let relative = dir.strip_prefix(&self.root).map_err(|_| outside(dir))?;
+        let parts: Vec<_> = relative
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(part) => part.to_str().ok_or_else(|| outside(dir)),
+                _ => Err(outside(dir)),
+            })
+            .collect::<Result<_, _>>()?;
+        let shaped = match parts.as_slice() {
+            [".staging", random] => !random.is_empty(),
+            [id] => check_id(id).is_ok(),
+            [id, commit] => self.clone_dir(id, commit).is_ok(),
+            _ => false,
+        };
+        if !shaped {
+            return Err(outside(dir));
+        }
+        // An existing directory must resolve to itself: no symbolic link in
+        // the path leads elsewhere.
+        if let Ok(resolved) = std::fs::canonicalize(dir)
+            && resolved != dir
+        {
+            return Err(outside(dir));
+        }
+        Ok(())
+    }
+
+    /// A new, empty staging directory.
+    pub fn stage(&self) -> Result<Staging, PluginError> {
+        let dir = self
+            .staging_root()
+            .join(uuid::Uuid::new_v4().simple().to_string());
+        self.check(&dir)?;
+        std::fs::create_dir_all(&dir).map_err(acquire_failed)?;
+        Ok(Staging(Some(dir)))
+    }
+
+    /// Deletes `dir` after checking it.
+    pub fn delete(&self, dir: &Path) -> Result<(), PluginError> {
+        self.check(dir)?;
+        match std::fs::remove_dir_all(dir) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                Err(acquire_failed(error))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Startup cleanup: staging leftovers and clones no entry refers to.
+    pub fn clean(&self, keep: &[PathBuf]) {
+        let _ = std::fs::remove_dir_all(self.staging_root());
+        let Ok(ids) = std::fs::read_dir(&self.root) else {
+            return;
+        };
+        for id in ids.flatten() {
+            let id_dir = id.path();
+            if id.file_name() == ".staging" || self.check(&id_dir).is_err() {
+                continue;
+            }
+            if let Ok(commits) = std::fs::read_dir(&id_dir) {
+                for commit in commits.flatten() {
+                    let dir = commit.path();
+                    if !keep.contains(&dir) {
+                        let _ = self.delete(&dir);
+                    }
+                }
+            }
+            if !keep.iter().any(|dir| dir.starts_with(&id_dir)) {
+                let _ = self.delete(&id_dir);
+            }
+        }
+    }
+}
+
+/// A staging directory, deleted on drop.
+pub struct Staging(Option<PathBuf>);
+
+impl Staging {
+    pub fn path(&self) -> &Path {
+        self.0.as_deref().expect("staging directory")
+    }
+
+    /// Renames the clone's work tree to `target`, which `dirs` checks; the
+    /// rest of the staging directory is deleted on drop.
+    pub fn place(self, dirs: &PluginsDir, target: &Path) -> Result<PathBuf, PluginError> {
+        dirs.check(target)?;
+        let parent = target.parent().expect("a clone directory has a parent");
+        dirs.check(parent)?;
+        std::fs::create_dir_all(parent).map_err(acquire_failed)?;
+        std::fs::rename(work_dir(&self), target).map_err(acquire_failed)?;
+        Ok(target.to_owned())
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.take() {
+            let _ = std::fs::remove_dir_all(&dir);
+            // `.staging` itself goes once no other staging is in it.
+            if let Some(parent) = dir.parent() {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+    }
+}
+
+fn outside(dir: impl std::fmt::Debug) -> PluginError {
+    PluginError::new(
+        "path_outside_plugins",
+        format!("{dir:?} is not a PluginManager directory"),
+    )
+}
+
+fn acquire_failed(error: impl std::fmt::Display) -> PluginError {
+    PluginError::new("acquire_failed", error.to_string())
+}
+
+/// `https://` or `ssh://` only; nothing Git could read as an option.
+pub fn check_git_url(url: &str) -> Result<(), PluginError> {
+    let refused = || {
+        PluginError::new(
+            "invalid_source",
+            format!("{url:?}: use an https:// or ssh:// URL"),
+        )
+    };
+    let (scheme, rest) = url.split_once("://").ok_or_else(refused)?;
+    if !matches!(scheme, "https" | "ssh")
+        || rest.is_empty()
+        || url.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+pub fn check_ref(reference: &str) -> Result<(), PluginError> {
+    if reference.is_empty()
+        || reference.starts_with('-')
+        || reference
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(PluginError::new(
+            "invalid_source",
+            format!("{reference:?} is not a Git ref"),
+        ));
+    }
+    Ok(())
+}
+
+/// Git with submodules, hooks, local transports and prompts off.
+fn git(hooks: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", hooks.display()))
+        .args([
+            "-c",
+            "protocol.file.allow=never",
+            "-c",
+            "protocol.ext.allow=never",
+        ])
+        .args(["-c", "submodule.recurse=false", "-c", "core.symlinks=true"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    command
+}
+
+async fn run(mut command: Command) -> Result<String, PluginError> {
+    let output = command.output().await.map_err(acquire_failed)?;
+    if !output.status.success() {
+        return Err(acquire_failed(
+            String::from_utf8_lossy(&output.stderr).trim(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Clones `url` at `reference` into `staging` and returns the commit. The
+/// clone is checked: no symbolic link in it leads outside it.
+pub async fn clone(
+    url: &str,
+    reference: Option<&str>,
+    staging: &Staging,
+) -> Result<String, PluginError> {
+    check_git_url(url)?;
+    if let Some(reference) = reference {
+        check_ref(reference)?;
+    }
+    let dir = staging.path();
+    let hooks = dir.join("hooks");
+    let work = dir.join("work");
+    std::fs::create_dir(&hooks).map_err(acquire_failed)?;
+    let mut command = git(&hooks);
+    command.args(["clone", "--no-recurse-submodules", "--quiet"]);
+    if let Some(reference) = reference {
+        command.arg("--branch").arg(reference);
+    }
+    command.arg("--").arg(url).arg(&work);
+    run(command).await?;
+    let mut command = git(&hooks);
+    command.current_dir(&work).args(["rev-parse", "HEAD"]);
+    let commit = run(command).await?;
+    let work = std::fs::canonicalize(&work).map_err(acquire_failed)?;
+    check_links(&work, &work)?;
+    Ok(commit)
+}
+
+/// The checked-out tree of a clone in `staging`.
+pub fn work_dir(staging: &Staging) -> PathBuf {
+    staging.path().join("work")
+}
+
+fn check_links(root: &Path, dir: &Path) -> Result<(), PluginError> {
+    for entry in std::fs::read_dir(dir).map_err(acquire_failed)? {
+        let entry = entry.map_err(acquire_failed)?;
+        let path = entry.path();
+        let kind = entry.file_type().map_err(acquire_failed)?;
+        if kind.is_symlink() {
+            let leads_inside = std::fs::canonicalize(&path)
+                .map(|target| target.starts_with(root))
+                .unwrap_or(false);
+            if !leads_inside {
+                return Err(PluginError::new(
+                    "invalid_manifest",
+                    format!(
+                        "{}: a symbolic link leads outside the plugin",
+                        path.strip_prefix(root).unwrap_or(&path).display()
+                    ),
+                ));
+            }
+        } else if kind.is_dir() {
+            check_links(root, &path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reads a cloned plugin's manifest from its work tree.
+pub fn manifest_of(staging: &Staging) -> Result<Manifest, PluginError> {
+    let work = std::fs::canonicalize(work_dir(staging)).map_err(acquire_failed)?;
+    Manifest::read(&work)
+}

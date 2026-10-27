@@ -300,21 +300,22 @@ impl Resolver for SessionResolver {
         name: &'a str,
     ) -> BoxFuture<'a, std::result::Result<Arc<Resolved>, LoaderError>> {
         Box::pin(async move {
-            let snapshot = self
-                .snapshots
-                .get(name)
-                .ok_or_else(|| LoaderError::NotFound { name: name.into() })?;
+            // A Session row carries a structural snapshot; a row PluginManager
+            // creates names its entry module and has none.
+            let snapshot = self.snapshots.get(name);
             let runtime = match &self.python {
                 Some(python) if name.starts_with("py:") => python,
                 _ => &self.node,
             };
             let original = runtime.resolve(name).await?;
-            match original.meta.get("provides") {
-                Some(Value::Object(actual)) if actual == snapshot => {}
+            match (snapshot, original.meta.get("provides")) {
+                (None, _) => {}
+                (Some(snapshot), Some(Value::Object(actual))) if actual == snapshot => {}
                 // The pinned SDK resolves this placeholder again before releasing RuntimeRows.
-                None if original.meta["source"] == "runtime"
-                    && original.meta["schema"]
-                        == "unavailable: the Cordis runtime is not running" => {}
+                (Some(_), None)
+                    if original.meta["source"] == "runtime"
+                        && original.meta["schema"]
+                            == "unavailable: the Cordis runtime is not running" => {}
                 _ => {
                     return Err(LoaderError::Resolve {
                         name: name.into(),

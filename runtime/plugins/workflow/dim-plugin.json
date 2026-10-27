@@ -1,0 +1,23 @@
+{
+  "name": "workflow",
+  "description": "Workflow definitions and runs",
+  "code": {
+    "entry": "index.ts",
+    "inject": [
+      "sessions",
+      "settings",
+      "pluginFiles",
+      "workflowFiles",
+      "managementMethods",
+      "partRegistry"
+    ],
+    "provides": {
+      "workflowRuns": {
+        "call": "async"
+      }
+    },
+    "config": {
+      "packages": []
+    }
+  }
+}

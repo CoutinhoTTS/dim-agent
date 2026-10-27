@@ -61,6 +61,9 @@ not add automatic retry or recovery. See the [CLI submission contract](../../doc
 SettingsService reads and updates generic `BusinessDocument` values with per-source
 CAS. Business owners define and validate their payloads: MCP types live in
 `mcp/config.rs`, and the Skills owner supplies the existing `SkillSettingsHost`.
+Each owner registers its sources in its `apply` (`SettingsService::register`, or
+`register` on the named `settings` service); a source is served only while its
+owner is loaded, and its stored document stays when the owner unloads.
 Settings owns source persistence, not approvals or business management methods.
 There is no `configuration.*` RPC namespace.
 
@@ -484,8 +487,23 @@ dim-app-server --product-home /absolute/product-home --home /absolute/product-ho
   --session-rows /absolute/runtime/session-rows.json
 ```
 
-Rows that declare Settings sources need `--product-home` or `--home`. Without the flag, their
-namespaces answer `unknown_method` and are absent from `session.methods`.
+## Plugins
+
+With `--product-home` or `--home`, PluginManager keeps the host's plugin configuration in
+`<home>/plugins.json` and serves the `plugin.*` management methods and the agent's `plugin_*`
+tools ([design](../../docs/design/plugins/PluginManager.md)). `--defaults FILE` names the default
+configuration file: the default plugins by name and directory, and the locked names
+(development uses `runtime/default-plugins.json`). Plugin code runs in the runtimes given by
+`--node` and `--js-runtime` (and `--python`); with `--defaults` and no `--session-rows`, packages
+resolve from the default configuration file's location. A plugin whose runtime is not given shows
+its row's status in `plugin.list`.
+
+```sh
+dim-app-server --product-home /absolute/home --home /absolute/home/rust \
+  --defaults /absolute/runtime/default-plugins.json \
+  --node /absolute/node-executable \
+  --js-runtime /absolute/runtime/node_modules/@arcships/rutis-runtime
+```
 
 Process rows inject `managementMethods` and register their namespaces from their own
 `apply`, with native management admission, progress and cancellation; Rpc reads the

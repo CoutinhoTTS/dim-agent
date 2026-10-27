@@ -27,6 +27,14 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  plugin list                      List plugins by name, the one in use and its status\n\
+  plugin install PATH|GIT_URL [--ref R] [--id ID] [--no-enable]\n\
+                                   Install a plugin and turn it on\n\
+  plugin enable NAME [--use ID|builtin|default]\n\
+  plugin disable NAME\n\
+  plugin reload NAME               Reload a plugin after editing it\n\
+  plugin update ID                 Load the latest commit of a Git plugin\n\
+  plugin remove ID\n\
   daemon stop                      Gracefully stop an existing daemon\n\
   web [--port N] [--no-open]       Hold the Web workspace until Ctrl+C
 web --off                        Turn off the daemon-owned Web switch
@@ -96,6 +104,11 @@ pub enum Action {
     McpEnable {
         id: String,
         enabled: bool,
+    },
+    /// `plugin ...`: one of PluginManager's methods and its params.
+    Plugin {
+        method: String,
+        params: serde_json::Value,
     },
     DaemonStop,
     /// `web`: hold the daemon's local web entry open in the foreground.
@@ -330,6 +343,10 @@ impl Options {
                         output: None,
                         database: None,
                     };
+                }
+                "plugin" if matches!(options.action, Action::Chat) => {
+                    let (method, params) = crate::plugin_command::parse(&mut args)?;
+                    options.action = Action::Plugin { method, params };
                 }
                 "mcp" if matches!(options.action, Action::Chat) => {
                     options.action = match value(&mut args)?.as_str() {
