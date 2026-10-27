@@ -500,7 +500,8 @@ Session 地址及 `(branchId,requestId,callId)`。
 
 复用既有选择、确认和窄屏窗口：数字键选择，Space 多选切换，Tab/Shift+Tab 或左右键切题，
 Confirm 上 Enter 提交。只有 allowCustom 为 true 时显示自定义输入，并与所选标签分开提交。
-Esc 拒答整次调用。显示脱敏不改变提交给 owner 的原始标签，composer 草稿保持。
+自定义行输入非空文字即勾选（单选时替换已选标签），清空则取消；编辑中 Esc 保留文字退出编辑，
+Enter 保留并进入下一题。编辑之外 Esc 拒答整次调用。显示脱敏不改变提交给 owner 的原始标签，composer 草稿保持。
 
 发送期间禁止重复提交；成功回复或已提交的批次 result 关闭提示。invalid/not-pending/其他
 失败保留回答和诊断，由 Confirm 显式重试；Esc 可重试拒答。result 先于迟到回复时以 result 为准；后续复用
