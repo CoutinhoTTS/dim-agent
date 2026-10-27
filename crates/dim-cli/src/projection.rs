@@ -199,9 +199,10 @@ impl Projection {
                 self.held.retain(|(id, _)| *id != data.input_id);
             }
             EventContent::BranchEnd(data) => {
-                let issuer = match data.source {
-                    BranchSource::Tool { .. } => "itself",
-                    BranchSource::Host { .. } => "an operation",
+                let issuer = match (&data.source, &data.ancestor) {
+                    (_, Some(ancestor)) => format!("with {ancestor}"),
+                    (BranchSource::Tool { .. }, None) => "itself".into(),
+                    (BranchSource::Host { .. }, None) => "an operation".into(),
                 };
                 self.push(
                     format!("end-{sequence}"),
@@ -1310,6 +1311,24 @@ mod tests {
             main.line_views().last().map(|line| &line.state),
             Some(&LineState::EndedWith("b-7c".into())),
             "a tool source does not make a cascade an end of its own"
+        );
+        let mut done = Projection::for_branch("b-90");
+        let end: Event = serde_json::from_value(line_event(
+            16,
+            "end",
+            serde_json::json!({
+                "source": {"kind": "tool", "turn_id": "t1", "request_id": "r1", "call_id": "c1"},
+                "ancestor": "b-7c",
+            }),
+        ))
+        .unwrap();
+        done.apply("b-90", &end);
+        assert!(
+            done.snapshot()
+                .rows
+                .iter()
+                .any(|row| row.text == "This line ended (with b-7c)"),
+            "a cascaded line's own transcript names its ancestor"
         );
     }
 
