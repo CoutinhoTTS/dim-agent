@@ -429,10 +429,10 @@ Unchanged artifacts; the plugins are compiled into the client and ship with it, 
 | Artifact | Content | Change |
 | --- | --- | --- |
 | Six native archives (`dimcode-<platform>`) | One `dimcode` executable: CLI with the client tree (which is also the UI leaf node), App Server as the `app-server` subcommand; the Web workspace is the separate `dimcode-web` artifact ([web-workspace §2.4](../web-workspace.md#24-assets)) | `dim-cli` gains `rutis-bridge` for the leaf node and keeps its existing `rutis` dependency. No loader row and no Node runtime are added |
-| Account build | The private repository's `dimcode`: the same CLI and daemon with the Dim account plugin installed through `cli::run_with` | None. Neither tree loads Node |
+| Account build | `dimcode` built with the Dim account's client IDs: the same CLI and daemon with the Dim account plugin installed through `cli::run_with` | None. Neither tree loads Node |
 | Seven npm tarballs (`dimcode` wrapper + six platform packages) | Wrapper picks the platform package and runs the executable | None |
 | `release-manifest.json`, `SHA256SUMS` | Provenance | None |
-| Development: `./dev`, `scripts/dev.sh` in the private repository | Build the executable, stage the local plugin archive, start the daemon through the CLI | None; the CLI still spawns the daemon the same way |
+| Development: `./dev` | Build the executable, stage the local plugin archive, start the daemon through the CLI | None; the CLI still spawns the daemon the same way |
 
 No loader row is added, so there is nothing to enable, disable or persist ([D4](../../adr/002-plugin-scope.md#d4-structural-configuration-and-business-configuration-are-separate)). Normal `dimcode` startup uses the daemon's internal `ui.open` management RPC; there is no `dimcode ui open` command. Whether the TUI or ACP front end runs is decided by the subcommand, as today. A client loader with `Builtins` rows (so that front ends could be toggled by configuration) is possible later without changing this document's plugins; it is out of scope.
 

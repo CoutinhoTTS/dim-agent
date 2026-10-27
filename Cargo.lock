@@ -1308,6 +1308,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dim-oauth"
+version = "0.1.0-alpha.6"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "dim-agent-capabilities",
+ "dim-agent-runtime",
+ "dim-app-server",
+ "getrandom 0.3.4",
+ "regex",
+ "reqwest 0.12.28",
+ "rutis",
+ "rutis-loader",
+ "serde_jcs",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "dimcode"
 version = "0.1.0-alpha.6"
 dependencies = [
@@ -1316,6 +1339,7 @@ dependencies = [
  "dim-agent-types",
  "dim-app-server",
  "dim-cli",
+ "dim-oauth",
  "image",
  "libc",
  "serde_json",

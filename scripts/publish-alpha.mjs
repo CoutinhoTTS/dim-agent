@@ -82,8 +82,9 @@ mkdirSync(path.join(repo, 'staging'), { recursive: true });
 for (const entry of readdirSync(path.join(repo, 'staging'), { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
   if (entry.name.startsWith('alpha-') && entry.name !== `alpha-${version}`) remove(path.join(repo, 'staging', entry.name));
 }
-const account = process.env.DIM_OAUTH_SOURCE_DIR ? path.resolve(process.env.DIM_OAUTH_SOURCE_DIR) : null;
-if (account) run(path.join(account, 'scripts/sync-lock.sh'), [], { env: { ...process.env, DIM_PUBLIC_REPO: repo } });
+const ids = [process.env.DIM_OAUTH_CLIENT_ID_CN, process.env.DIM_OAUTH_CLIENT_ID_GLOBAL].filter(Boolean).length;
+assert(ids !== 1, 'Set DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL together');
+const account = ids === 2;
 console.log(`\ndimcode ${current} → ${version} (npm tag alpha${dryRun ? ', dry run' : ''}, ${account ? 'with' : 'without'} Dim account, ${platforms.join(' ')})\n`);
 
 const bumped = version !== current;
@@ -117,15 +118,14 @@ try {
     const { triple, zig } = targets[platform];
     console.log(`\n▸ ${platform}`);
     run('rustup', ['target', 'add', triple], { stdio: ['ignore', 'ignore', 'inherit'] });
-    const build = account ?? repo;
-    run('cargo', [zig === undefined ? 'build' : 'zigbuild', '--release', ...(account ? [] : ['--locked']),
-      '--target', `${triple}${zig ?? ''}`, '-p', account ? 'dim-oauth' : 'dimcode'], { cwd: build });
-    run('node', ['scripts/stage-release.mjs', path.join(build, 'target', triple, 'release'),
+    run('cargo', [zig === undefined ? 'build' : 'zigbuild', '--release', '--locked',
+      '--target', `${triple}${zig ?? ''}`, '-p', 'dimcode'], { cwd: repo });
+    run('node', ['scripts/stage-release.mjs', path.join(repo, 'target', triple, 'release'),
       path.join(staging, 'stage', platform), version, sourceCommit, ...(account ? ['--account'] : [])],
     { env: { ...process.env, DIM_BUILD_PLATFORM: platform } });
     run('node', ['scripts/pack-release.mjs', path.join(staging, 'stage', platform),
       path.join(staging, 'platforms', `release-${platform}`)]);
-    remove(path.join(build, 'target', triple));
+    remove(path.join(repo, 'target', triple));
     remove(path.join(staging, 'stage', platform));
   }
   if (!reused) {

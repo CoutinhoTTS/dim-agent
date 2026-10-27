@@ -137,7 +137,7 @@ node scripts/publish-alpha.mjs --platform darwin-arm64  # 只发指定平台（�
   <p>每次运行结束（不论成功还是失败），只要本机装了 mbx，就会自动执行一次 <code>mbx gc</code>。<code>target/</code> 由 mbx 管理时，它会按 mbx 自己的预算回收共享编译缓存和长期不用的 target，清理失败也不影响发布结果。脚本本身不会去删开发用的 <code>target/debug</code>、<code>target/release</code>。</p>
 
   <div class="note">
-    <strong>账号插件：</strong>默认打出来的 alpha 不带私有账号插件，只支持 API key。要带插件，运行前设置 <code>DIM_OAUTH_PACKAGE_ARCHIVE</code>（或 <code>DIM_OAUTH_PACKAGE_URL</code>）和 <code>DIM_OAUTH_PACKAGE_SHA256</code>。
+    <strong>账号插件：</strong>默认打出来的 alpha 不带 Dim 账号，只支持 API key。要带账号，运行前设置 <code>DIM_OAUTH_CLIENT_ID_CN</code> 和 <code>DIM_OAUTH_CLIENT_ID_GLOBAL</code>（不要提交到仓库）。
   </div>
 
   <h2>验证</h2>
