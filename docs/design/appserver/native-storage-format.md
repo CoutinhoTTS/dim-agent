@@ -14,7 +14,9 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as v13, v15, v16, v17, v18 or v19. No
 migration API or startup option is provided. S5c (Session deletion and fork) kept
 v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain valid in
-v19, and v16 request rows stay readable as written.
+v19, and v16 request rows stay readable as written. #427 decided v20 for its two
+new core events; that step takes effect with #427's implementation, and until
+then the current format stays v19 ([#427 v20 decision](#427-v20-格式决定)).
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
@@ -222,7 +224,7 @@ ProjectionCheckpoint = {
 
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
-首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件与 #364 的挂载列表各自为下一版本作出的决定见下文。
+首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件、#364 的挂载列表与 #427 的分支结束事件各自为下一版本作出的决定见下文。
 
 ### S5a v15 格式决定
 
@@ -343,6 +345,38 @@ ProjectionCheckpoint = {
 - 不扩展既有严格嵌套类型。`ModelPreferences` 拒绝未知字段，`NewApiEndpoint` 是闭合枚举；已支持新映射的旧二进制会拒绝后续新增的内部字段/枚举值，增加前须另作显式格式决定。
 - 新版本 reseed 若因用户模型与新默认项重名，保留该记录已准入定义、fingerprint 和 version，继续处理其他记录，管理面沿既有逐项错误提示。用户删除冲突模型后，下次启动采用新定义；不以 Provider 激活失败阻断修复入口。其他非法记录和未知数据库格式沿原规则拒绝并保留。
 - 验证在一次性 v19 库中运行 Provider 管理实现之前的实际 App Server 二进制：只读不改变自定义记录字节；旧 `provider.save` 重写丢失三个新增字段，旧启动 reseed 丢失内置记录的用户模型和偏好，库标记始终为 19。新增字段的缺失值、重启保留、用户模型冲突、删除和重新装载由 Provider 流程测试保护。
+
+### #427 v20 格式决定
+
+[Timeline 分支](../timeline-branches.md#16-format)（#427）的格式决定：升级到 **v20**，从 v19 原地升级。
+
+- **状态**：由 #427 决定，随其实现生效。在那之前当前格式仍是 v19，本文其余部分描述的都是 v19。
+- **只增两种核心事件**：两者都以 `encoding: "event"` 写入普通 `event` 行，不进输出行、不带请求引用。行结构、内容寻址和其他记录的字节不变。
+  - `branch/end` 写在要结束的分支上，`data` 为 `{source, ancestor?}`。`source` 是 `branch/create` 已在用的 `BranchSource`：`{kind: "tool", turn_id, request_id, call_id}` 或 `{kind: "host", operation_id}`。`ancestor` 是分支 ID，只在因祖先结束而结束时出现。
+  - `branch/ended` 写在其父分支上，`data` 为 `{branch, endEvent, source, ancestor?}`。`endEvent` 是 `branch/end` 在结束分支上的序号（安全整数），`source` 与 `ancestor` 取自 `branch/end`（[Timeline 分支 §10](../timeline-branches.md#10-ending-a-line)）。
+- **目录行不变**：`timeline_branches.info` 照旧是不含 `source` 的 `TimelineInfo` JSON。运行时的 `TimelineInfo` 新增 `source`，但存储写目录行时不写它；恢复时由 TimelineTree 从父分支的 `branch/create` 补齐（[Timeline 分支 §5](../timeline-branches.md#5-parts)）。
+- **不能留在 v19**：
+  - v19 读取器对核心保留领域只按类型解码（见上文 [#2 v18 决定](#2-v18-格式决定)），解码不了 `branch/end` 与 `branch/ended` 行。
+  - #193 的 v17 起，能打开某版本库的守护进程都能解码其中每一行；留在 v19 就打破这一点，为不兼容的已提交格式沿用了版本号。
+  - #2 的 v18 决定写明，新增核心事件需要各自的格式决定。
+- **SQL 不变**：表、列与索引不变，`agent_store_format` 的约束改为 `CHECK (version = 20)`。
+- **读取或转换路径**：在现有的启动准入事务内处理：
+  - 空库直接建 v20。
+  - 结构恰为 v19 且标记为 19 的库，在同一事务内只重建 `agent_store_format` 并写入 20，不读取、不改写任何业务行；失败则回滚，原 v19 库保持不变。
+  - 结构恰为 v18、v17、v16、v15 或 v13 且标记相符的库，在同一事务内先走已有各步，再走本步，直接成为 v20。
+  - 恰为 v20 的库直接打开。
+  - 其他库（标记不符的 v19 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
+- **旧版本的失败方式**：v19 守护进程以现有的"unsupported SQLite schema … preserved"错误在启动时拒绝整个 v20 库，因为其启动门禁比较精确的 SQL 结构，而 `agent_store_format` 的 `CHECK (version = 20)` 已不同。它不会等到恢复含这两种事件的 Session 时才失败。
+- **单向**：不做备份，与之前各步相同。升级日志沿用 S5a 的那一行：`Upgraded native store <path> from format v19 to v20; earlier dimcode versions cannot open it.`
+- **验证**：
+  - 用 v19 结构和完整记录示例构建一次性 v19 库，升级后核对结构恰为 v20、标记为 20、业务行逐行不变。
+  - v18、v17、v16、v15、v13 库一次升级到 v20。
+  - 标记不符的 v19、v20 结构和升级到一半的库被拒绝并保留。
+  - `branch/end` 与 `branch/ended` 各占一行，经 Session 恢复原样读出；已结束的分支恢复后不再打开。
+  - 新子分支的目录行不含 `source`，与 v19 的写法逐字节相同。
+  - 从不打开用户已有的库。
+
+  对应 `storage_flow.rs` 的 `a_v19_store_upgrades_in_place_once` 及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与 `branch_end_events_restore_unchanged_and_the_line_stays_ended`。
 
 
 ## 索引与实际查询
