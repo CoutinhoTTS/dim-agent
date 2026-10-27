@@ -2264,15 +2264,24 @@ async fn node_session_rows_flag_installs_session_methods() {
         let created = client.rpc("session.create", create(json!(["echo"]))).await;
         assert_ok(&created);
         let sid = created["result"]["sessionId"].clone();
+        let status = if installed {
+            when_served(
+                &mut client,
+                "session.typescript.status",
+                json!({"sessionId":sid}),
+            )
+            .await
+        } else {
+            client
+                .rpc("session.typescript.status", json!({"sessionId":sid}))
+                .await
+        };
         let methods = client
             .rpc("session.methods", json!({"sessionId":sid}))
             .await;
         assert_ok(&methods);
         let listed = methods.to_string().contains("session.typescript.status");
         assert_eq!(listed, installed, "{methods}");
-        let status = client
-            .rpc("session.typescript.status", json!({"sessionId":sid}))
-            .await;
         if installed {
             assert_eq!(status["result"]["calls"], 0, "{status}");
         } else {

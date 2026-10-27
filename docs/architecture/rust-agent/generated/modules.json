@@ -2320,7 +2320,8 @@
         "println",
         "serde_json::json",
         "tokio::select",
-        "unreachable"
+        "unreachable",
+        "vec"
       ]
     },
     {

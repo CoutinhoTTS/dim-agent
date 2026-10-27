@@ -113,7 +113,7 @@ async fn browser_flow(cancel: bool, eof: bool) {
         directory: "https://fixture.invalid".into(),
         redirect_uri: redirect,
         open_browser: Some(|_| true),
-        terminal: false,
+        terminal_args: None,
     });
     let root = rutis::Ctx::root().unwrap();
     let mounted = root.plugin(gateway);
