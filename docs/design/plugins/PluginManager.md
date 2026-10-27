@@ -118,7 +118,7 @@ The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.
 
 | Field | Meaning |
 | --- | --- |
-| `installed[].id` | Unique among installed plugins; the key of the record and the name of the clone directory. Defaults to the manifest name; the caller gives another when two installed plugins share a name. |
+| `installed[].id` | Unique among installed plugins; the key of the record and the name of the clone directory. Matches `[A-Za-z0-9_-]{1,64}` and is not `builtin` or `default` (§7). Defaults to the manifest name; the caller gives another when two installed plugins share a name. |
 | `installed[].name` | The manifest name at install or last reload. |
 | `installed[].source` | `{path}` for a local directory, used in place and never copied; `{git, ref?, commit}` for Git. |
 | `installed[].dir` | The directory that is loaded: the local path itself, or the clone under `<home>/plugins/<id>/<commit>`. |
@@ -252,6 +252,7 @@ PluginManager adds nothing to model context. A plugin's tools and prompt sources
 Installing and turning on are host configuration done through management methods or tool calls; enabled plugin code runs without host-local approval ([ADR 003](../../adr/003-approval-scope.md)). PluginManager adds no scope, approval or trust step ([requirements](../plugin-management.md)). What it guards is the acquisition itself:
 
 - Git sources are `https://` or `ssh://` URLs only; other schemes (`file://`, `ext::`, scp-style paths) and arguments starting with `-` are refused before Git runs. Clones run with submodules off (`--no-recurse-submodules`), hooks off (`core.hooksPath` set to an empty directory), `protocol.file.allow=never` and no terminal prompt.
+- **Paths.** One rule covers every operation that touches the file system for a plugin: install (staging, clone, rename), update, remove and the startup cleanup. Before any file system change, PluginManager checks that the id, whether the caller gave it or it came from the manifest name, matches `[A-Za-z0-9_-]{1,64}` and is not `builtin` or `default`, and that every directory it is about to create, rename or delete resolves to a direct child of `<home>/plugins` or of `<home>/plugins/<id>`. A failed check refuses the operation with `invalid_id` or `path_outside_plugins` and changes nothing: no directory, no `plugins.json` write, no loader command. A local-path plugin's own directory is never created, renamed or deleted, so the rule does not apply to it.
 - A clone goes to `<home>/plugins/.staging/<random>` and is renamed into place only after its manifest and paths are checked. A failure deletes the staging directory; startup deletes leftovers and clones no entry refers to.
 - No manifest path may leave the plugin directory after following symbolic links; a symbolic link inside a Git clone that points outside it is refused.
 - `plugins.json` is written atomically (§2.2).
@@ -321,7 +322,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 
 ### A.2 Errors
 
-`plugin_exists`, `plugin_not_found`, `plugin_locked`, `not_removable`, `not_reloadable`, `not_updatable`, `name_changed`, `invalid_manifest` (with the field and reason), `invalid_source` (scheme or argument refused), `acquire_failed` (Git's message), `record_unreadable` (startup). A loader or owner refusal after the configuration was written is not an error of the call: it is reported in the result and in `plugin.list`.
+`plugin_exists`, `plugin_not_found`, `invalid_id`, `path_outside_plugins` (both before any file system change, §7), `plugin_locked`, `not_removable`, `not_reloadable`, `not_updatable`, `name_changed`, `invalid_manifest` (with the field and reason), `invalid_source` (scheme or argument refused), `acquire_failed` (Git's message), `record_unreadable` (startup). A loader or owner refusal after the configuration was written is not an error of the call: it is reported in the result and in `plugin.list`.
 
 ## Appendix B. Conflict table
 
@@ -346,7 +347,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 5. `dimcode plugin disable web` removes web's tools; `enable web` brings them back; the state survives a restart.
 6. Installing a plugin named like a built-in and enabling it replaces the built-in; `enable <name> --use builtin` switches back.
 7. `disable PluginManager` is refused with `plugin_locked`.
-8. A Git install with a `file://` URL is refused; a failed clone leaves nothing under `<home>/plugins`.
+8. A Git install with a `file://` URL is refused; a failed clone leaves nothing under `<home>/plugins`; an install with the id `../x` is refused with `invalid_id` and creates nothing.
 9. A default plugin's Settings source appears when it starts and disappears when it is turned off.
 10. A Python plugin installed from a local path registers its tool, and reload picks up an edit to its entry module (with the Python runtime supplied by [#476](https://github.com/arcships/dim/issues/476)).
 
