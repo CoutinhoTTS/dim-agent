@@ -1,6 +1,6 @@
 # 插件管理：需求
 
-状态：需求已定，不是设计。本文写插件管理要达到什么目的、已经定下的方向和需求；设计按这些需求修订或重写 [PluginManager](plugins/PluginManager.md) 等文档（[#3](https://github.com/arcships/dim/issues/3)、[#384](https://github.com/arcships/dim/issues/384)）。现有机制只给出入口链接。
+状态：需求已定，不是设计。本文写插件管理要达到什么目的、已经定下的方向和需求；设计见 [PluginManager](plugins/PluginManager.md)（[#3](https://github.com/arcships/dim/issues/3)、[#384](https://github.com/arcships/dim/issues/384)）。现有机制只给出入口链接。
 
 ## 目的
 
@@ -19,6 +19,7 @@
 | 方面 | 方向 |
 | --- | --- |
 | 插件概念 | 只有一个插件概念，共用一套安装、启用、列表、更新、移除。hooks、skills、MCP 配置等是内容类别；内容向负责方登记，负责方不去发现或读取插件 |
+| 插件记录 | 见 [ADR 007](../adr/007-plugin-configuration.md)。PluginManager 用自己的文件 `plugins.json` 保存插件配置：装了哪些、从哪里装的、每个名字用哪个插件、哪些名字关了。它不保存运行状态：插件代码的状态在 rutis，内容的状态在各负责方。loader 不是安装记录 |
 | 格式 | 使用 Dim 自己的格式。与 Claude Code、Codex 等外部格式的兼容由外部去做，Dim 不读取对方的文件 |
 | 安装 | 支持本地（文件）和远程（Git）；市场以后再建。插件管理不增加作用域、审批、信任等额外约束 |
 | 约束 | 插件管理对插件不做限制。需要约束时，由已经在运行的插件自己施加（例如 Permission 对工具调用的决定） |
@@ -31,10 +32,10 @@
 1. **插件是一个目录。** 来自本地路径或 Git，里面可以有代码（TypeScript、Python 等），也可以有 skills、hooks、MCP 配置等内容。
 2. **装上就能用。** 安装后立即启用；可以停用、移除。插件装在本机，不分项目；仓库自带的 skills、MCP 配置等仍由各负责方的项目来源处理（[ADR 003](../adr/003-approval-scope.md)）。
 3. **改完 reload 就生效，不用重启。** 宿主不监视文件，reload 操作本身就是“改了”的信号。reload 是插件换一代（[rutis usage §4](rutis-usage.md#4-lifecycle-rutis-provides)）：旧的一代卸载，它正在跑的调用由 rutis 取消；新的一代重新登记，Session 和分支里挂的部件随之更换；依赖它的插件由 rutis 重新加载；Capability 从 Timeline 恢复（[插件契约 §7.2](plugin-contract.md#72-generations-reload-and-rebuild)）。
-   - 内容：插件这一行换一代，把新内容交给负责方。
+   - 内容：重新读插件目录，把新内容再登记给负责方，替换旧内容。
    - TypeScript、Python 代码：reload 重新导入这个插件的入口模块，插件带着新代码换一代；同一运行时里的其他插件不受影响。入口模块导入的其他模块不会重新导入，它们的改动要重启运行时才生效（或者把插件代码放在入口模块里）。
    - 编进 Dim 本体的 Rust 代码不能 reload，要重新编译、重启；要换它，用第 4 条。
-4. **Dim 自带的插件也能换。** 在配置里把它指向另一个插件；不允许换的，写在默认配置文件里。
+4. **Dim 自带的插件也能换。** 插件按名字认：装一个同名插件并开启它，就替换了原来的；同一个名字同时只开一个。不允许换的，写在默认配置文件里。
 5. **agent 也能装插件、reload 插件**，和用户用同一套操作；agent 的调用是工具调用，由 Permission 照常决定。
 
 以后再做：市场（M1 之后）。
@@ -43,10 +44,10 @@
 
 ## 现有基础
 
-- [PluginManager](plugins/PluginManager.md)：草案、P3，写于插件契约迁移之前。安全与信任部分已经符合 ADR 003；过时的是把内容发布为 `pluginContents` 服务、由负责方读取的做法，要按上面的方向重写。其中的市场部分推迟到 M1 之后。
-- [#3](https://github.com/arcships/dim/issues/3)：loader 的可编辑层，作为启用状态的唯一来源；安装、启用、reload、移除写到这一层。
+- [PluginManager](plugins/PluginManager.md)：按上面的方向于 2026-10-27 重写的设计。旧草案把内容发布为 `pluginContents` 服务、由负责方读取，已废弃；市场推迟到 M1 之后。
+- [#3](https://github.com/arcships/dim/issues/3)：插件记录和 loader 行的管理。早先“loader 的可编辑层作为启用状态的唯一来源”的方向已被取代：记录是 PluginManager 的 `plugins.json`，loader 只负责插件代码的生命周期。
 - [#384](https://github.com/arcships/dim/issues/384)：安装和启用插件，在 #3 之上。
-- [Hooks](plugins/Hooks.md)：草案、Ready 候选；包来源的 hooks 留到 #3 之后。
+- [Hooks](plugins/Hooks.md)：草案；插件来源的 hooks 由 PluginManager 调用 Hooks 的登记操作（[PluginManager §9 R2](plugins/PluginManager.md#9-requirements-raised-to-mechanism-owners)）。
 - [ADR 004](../adr/004-loader-plugin-management.md)、[插件契约](plugin-contract.md)、[How Dim uses rutis](rutis-usage.md)。
 
 需求跟踪：[#432](https://github.com/arcships/dim/issues/432)。

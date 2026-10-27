@@ -428,7 +428,7 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 4. 在 RemoteGateway 测试入口上，`session.permission.update` 与 `session.exec.stop` 成功。
 5. 非 Rust 插件经 `toolRegistry` 注册的工具，会像 Rust 工具一样被声明给模型，并经 ToolExecutor 执行；没有挂载列表的 Session 不需要修改配置即声明它。Session 挂载列表列出但没有部件注册的工具被省略并在诊断中报告，Session 照常启动；有部件注册后从下一个请求起声明。
 6. 进度先于响应；连接收不下的进度被丢弃，不关闭连接，也不丢失响应；断开后 `notify` 报告 `gone`。
-7. 某个已启用的管理方法提供方处于 Pending 时，`hello` 成功，其他命名空间都正常。它首次注册之前，其名称返回 `unknown_method`；其命名空间撤回后，它的行正在启动或重载时返回 `service_reloading`，该行处于 Failed 或 Unresolved 时返回 `service_unavailable`；行已禁用时返回 `unknown_method`。PluginManager 提供 `plugin.set_enabled`（未实现）之后，除非该提供方就是 PluginManager 本身，否则可以用它禁用该提供方。管理方法提供方重载既不会让 Rpc 重载，也不会关闭连接。
+7. 某个已启用的管理方法提供方处于 Pending 时，`hello` 成功，其他命名空间都正常。它首次注册之前，其名称返回 `unknown_method`；其命名空间撤回后，它的行正在启动或重载时返回 `service_reloading`，该行处于 Failed 或 Unresolved 时返回 `service_unavailable`；行已禁用时返回 `unknown_method`。PluginManager 提供 `plugin.disable`（未实现）之后，可以用它关闭该提供方，除非它的名字是锁定的（PluginManager 自己的名字就是锁定的）。管理方法提供方重载既不会让 Rpc 重载，也不会关闭连接。
 
 ## 附录 E. 假设
 

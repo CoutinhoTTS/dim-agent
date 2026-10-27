@@ -9,6 +9,8 @@ amended on 2026-10-26 to name the tool mechanism as built: a part registers a to
 `toolRegistry` (ADR 006 D4), and `toolContribution`, `SessionToolSource` and `Contributions<T>` are
 gone.
 
+D4's location of structural configuration is corrected by [ADR 007](007-plugin-configuration.md).
+
 ## Context
 
 Dim assembles plugins at three scopes: the process, a Session, and a branch

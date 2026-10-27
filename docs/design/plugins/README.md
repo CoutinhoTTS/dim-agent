@@ -27,7 +27,7 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | [Tui](Tui.md) | — (client tree in the CLI process: `DaemonLink`, `Tui`, `WebHold`; not daemon plugins) | — | — | P1 (implemented) |
 | [RemoteGateway](RemoteGateway.md) | remote entry, devices | — | — | P3 |
 | [Modality](Modality.md) | tasks, realtime connections | — | — | P3 |
-| [PluginManager](PluginManager.md) | marketplaces, packages | — | — | P3 |
+| [PluginManager](PluginManager.md) | plugin configuration (`plugins.json`), install, loader rows of plugin code, content registration | `PluginTools` (plugin tools) | — | M1 |
 
 ## By scope
 
