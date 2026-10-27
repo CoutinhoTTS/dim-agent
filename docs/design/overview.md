@@ -81,7 +81,7 @@ Green parts are new and orange-bordered parts are changed. Each new plugin part 
 | Modality | Tasks, realtime connections | — | — | Tasks and provider connections are shared |
 | PluginManager | Plugin configuration (`plugins.json`) | `PluginTools` (plugin tools) | — | Installation is per host |
 | RemoteGateway | Remote entry, devices | — | — | An external entry |
-| AcpGateway | CLI process | — | — | A client |
+| AcpGateway | client host process | — | — | A reusable client-process plugin, outside the daemon |
 
 Management is not a plugin. Management methods are client RPC methods about the host rather than a Session ([definition](contracts/session-boundary.md)); only process plugins provide them, by registering their namespaces with `managementMethods`, the process's method table. Session methods have no level. Rpc serves a local connection Session and management methods, never serves management methods to a connection with a `deviceId` (a paired device), and serves an exported rutis link management methods only when exported.
 
@@ -167,7 +167,7 @@ Index of plugin design documents: [plugins/README.md](plugins/README.md).
 | Workflow | Process + Session | Multi-stage runs across Sessions; `workflow` tool | P2 | TypeScript first | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | Delivery to channels; `notify` tool | P2 | TypeScript first | [Notifications](plugins/Notifications.md) (withdrawn) |
 | ExternalAgent | Process | External agents as Collaboration sub-agents (a member kind) | P3 | TypeScript first | [ExternalAgent](plugins/ExternalAgent.md) |
-| AcpGateway | CLI process | ACP server over local RPC | P3 | TypeScript first | [AcpGateway](plugins/AcpGateway.md) |
+| AcpGateway | client host process | ACP over existing local RPC; disposable native MCP bindings | Supported subset implemented, unreleased (PR #441) | Rust | [AcpGateway](plugins/AcpGateway.md), [acceptance](acp-gateway-acceptance.md) |
 | RemoteGateway | Process | Remote entry, pairing, devices | P3 | Rust | [RemoteGateway](plugins/RemoteGateway.md) |
 | Modality | Process | Multimodal tasks and realtime connections | P3 | TypeScript first | [Modality](plugins/Modality.md) |
 | PluginManager | Process | Plugin configuration, install from a path or Git, loader rows of plugin code, content registration with owners | M1 | Rust | [PluginManager](plugins/PluginManager.md) |

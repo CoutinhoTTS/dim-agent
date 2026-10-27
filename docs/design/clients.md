@@ -6,7 +6,7 @@ Client work has so far been designed per feature. This document collects those d
 
 ## 1. Clients
 
-Every client is a protocol v3 client of the App Server daemon. The daemon is headless and shared: one per product home, one executor with many viewers ([Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves)). A client owns presentation and local interaction only; the App Server owns host configuration, external protocols and persisted Sessions ([feature list](../feature-list.md)).
+Every client is a protocol v3 client of the App Server daemon. The daemon is headless and shared: one per product home, one executor with many viewers ([Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves)). A client owns presentation, protocol adaptation and local interaction; the App Server owns execution, host configuration and persisted Sessions ([feature list](../feature-list.md)).
 
 ```mermaid
 flowchart TB
@@ -14,7 +14,7 @@ flowchart TB
     CLI["Native CLI dimcode<br/>line, scrollback, fullscreen"]
     WEB["Web workspace<br/>phase 1, loopback entry"]
     DESK["Desktop<br/>own repository"]:::outside
-    ACP["ACP<br/>P3 draft"]:::planned
+    ACP["ACP<br/>implemented subset"]
     REM["Remote devices<br/>P3 draft"]:::planned
   end
   P["Protocol v3: the contract every client shares (§2)"]
@@ -27,21 +27,21 @@ flowchart TB
   CLI --> P
   WEB --> P
   DESK --> P
-  ACP -.-> P
+  ACP --> P
   REM -.-> P
   P --> D
   classDef outside stroke-dasharray:4 3
   classDef planned stroke-dasharray:4 3,color:#888
 ```
 
-Dashed boxes are outside this repository (Desktop) or not implemented (ACP, remote devices); dashed arrows are connections that do not exist yet.
+Dashed boxes are outside this repository (Desktop) or not implemented (remote devices); dashed arrows are connections that do not exist yet.
 
 | Client | Where | Form | Status | Design |
 | --- | --- | --- | --- | --- |
 | Native CLI `dimcode` | `crates/dim-cli`, `crates/dimcode` | Three interfaces in one executable: the line client (`--no-tui` or no terminal), the scrollback terminal UI (default) and the fullscreen terminal UI; `/tui` switches the two terminal UIs in-process | Implemented | [Tui](plugins/Tui.md), [CLI commands](cli-commands.md), [native CLI contract](../../crates/dim-cli/README.md) |
 | Web workspace | `web/` (Vue 3), entry in `crates/dim-app-server/src/web_entry.rs` | Browser frontend over a loopback-only web entry, opened by `dimcode web` or `/web` | Phase 1 implemented | [Web workspace](web-workspace.md) |
 | Desktop | Its own repository | Desktop application | Outside this repository | This repository owns only the App Server contract it uses (§5) |
-| ACP | — | `dimcode acp`: ACP over stdio for editors, a v3 client like the CLI | Draft, P3, not implemented | [AcpGateway](plugins/AcpGateway.md) |
+| ACP | `crates/dim-acp` | reusable client-host rutis plugin; `dimcode acp` is the stdio entry, public RPC v3 to the shared daemon | Supported subset implemented, unreleased (#436, PR #441); acpx basic chat verified; Lody MCP GUI verification awaits login | [AcpGateway](plugins/AcpGateway.md), [acceptance](acp-gateway-acceptance.md) |
 | Remote devices | — | Paired devices through RemoteGateway; absorbs the phase-1 web entry | Draft, P3, not implemented | [RemoteGateway](plugins/RemoteGateway.md) |
 
 ## 2. What clients share
@@ -115,7 +115,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | `/settings`: theme, language, startup form, mouse, notifications, approvals, model | done | later phase (needs a decision on management methods, §6) | |
 | `/settings`: subagent model, auxiliary model, default multimodal model, execution shell, sandbox, prompt language | designed elsewhere, no client UI | — | overview B.1, [Modality](plugins/Modality.md) |
 | `/settings`: VS Code focus, resource monitoring, plan usage display | none | — | |
-| `/settings`: ACP Session display | deferred with AcpGateway | — | [AcpGateway](plugins/AcpGateway.md) A15 |
+| `/settings`: ACP Session display | unsupported: no native persisted client-origin field | — | [AcpGateway](plugins/AcpGateway.md#a5-client-labels) |
 | `/usage` | context usage: done; plan quota is shown in the account view, not in `/usage` | — | |
 | `/stats` | out | — | [overview](overview.md) App. A |
 | `/debug`, debug-log configuration | none (only the daemon's `daemon.log`) | — | |

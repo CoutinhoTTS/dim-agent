@@ -42,10 +42,22 @@ type Result<T> = std::result::Result<T, Error>;
 pub fn run_cli() -> i32 {
     let result = prepare().and_then(|options| {
         let Some(options) = options else { return Ok(0) };
+        let acp = matches!(
+            options.action,
+            Action::Acp {
+                auth_setup: None,
+                ..
+            }
+        );
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        runtime.block_on(run(options))
+        let result = runtime.block_on(run(options));
+        // Owned plugin work has drained; blocked OS stdio must not hold CLI exit.
+        if acp {
+            runtime.shutdown_background();
+        }
+        result
     });
     match result {
         Ok(code) => code,
@@ -399,7 +411,59 @@ fn prepare() -> Result<Option<Options>> {
     Ok(Some(options))
 }
 
+async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>) -> Result<i32> {
+    let mut signals = plugins::Signals::listen()?;
+    let client = client::connect_inner(options, true)
+        .await?
+        .ok_or("App Server did not start")?;
+    let (gateway, finished) = dim_acp::AcpGateway::new(
+        client,
+        dim_acp::Io {
+            reader: Box::new(tokio::io::stdin()),
+            writer: Box::new(tokio::io::stdout()),
+        },
+        agent_id,
+    );
+    let gateway = gateway.login(dim_acp::auth::Login {
+        directory: options
+            .directory
+            .clone()
+            .unwrap_or_else(|| login::account_directory().into()),
+        redirect_uri: options.redirect_uri.clone(),
+        open_browser: if std::env::var("DIMCODE_OAUTH_MANUAL").is_ok_and(|value| value == "1") {
+            None
+        } else {
+            Some(browser::open)
+        },
+        terminal: true,
+    });
+    let gateway = root.plugin(gateway);
+    (&gateway).await.map_err(plugin_error)?;
+    let (code, result) = tokio::select! {
+        result = finished => (0, result.map_err(|_| "ACP gateway ended without a result")?),
+        () = signals.received() => (130, Ok(())),
+    };
+    gateway.dispose().await?;
+    result?;
+    Ok(code)
+}
+
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
+    if let Action::Acp {
+        auth_setup: Some(method),
+        ..
+    } = &options.action
+    {
+        let mut client = client::connect_inner(&options, true)
+            .await?
+            .ok_or("App Server did not start")?;
+        let (provider, device) = dim_acp::auth::terminal_method(&mut client, method).await?;
+        options.device = device;
+        return login::login(&mut client, &options, &provider).await;
+    }
+    if let Action::Acp { agent_id, .. } = &options.action {
+        return run_acp(root, &options, agent_id.clone()).await;
+    }
     if matches!(options.action, Action::Chat | Action::Tui)
         && options.prompt.is_none()
         && !options.no_tui
@@ -624,7 +688,8 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         Action::Chat | Action::Tui | Action::Exec => {
             session::chat(&mut client, &options, images).await
         }
-        Action::Help
+        Action::Acp { .. }
+        | Action::Help
         | Action::Version
         | Action::DaemonStop
         | Action::Timeline { .. }

@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "cli_flow/acp.rs"]
+mod acp;
+
 #[path = "cli_flow/permission.rs"]
 mod permission;
 #[path = "cli_flow/question.rs"]

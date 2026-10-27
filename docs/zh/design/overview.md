@@ -81,7 +81,7 @@ flowchart TB
 | Modality | 任务、实时连接 | — | — | 任务与 provider 连接是共享的 |
 | PluginManager | 插件配置（`plugins.json`） | `PluginTools`（插件工具） | — | 安装以宿主为单位 |
 | RemoteGateway | 远程入口、设备 | — | — | 一个外部入口 |
-| AcpGateway | CLI 进程 | — | — | 一个客户端 |
+| AcpGateway | 接入方宿主进程 | — | — | 可复用客户端进程插件，位于 daemon 外 |
 
 管理不是插件。管理方法是关于宿主而不是某个 Session 的客户端 RPC 方法（[定义](contracts/session-boundary.md)）；只有进程插件提供，方式是把命名空间注册到进程的方法表 `managementMethods`。Session 方法没有级别。Rpc 为本地连接提供 Session 方法和管理方法，从不向带 `deviceId` 的连接（已配对设备）提供管理方法，只在导出时向导出的 rutis 链接提供管理方法。
 
@@ -167,7 +167,7 @@ flowchart LR
 | Workflow | 进程 + Session | 跨 Session 的多阶段运行；`workflow` 工具 | P2 | TypeScript 优先 | [Workflow](plugins/Workflow.md) |
 | Notifications | Session | 投递到渠道；`notify` 工具 | P2 | TypeScript 优先 | [Notifications](plugins/Notifications.md)（已撤回） |
 | ExternalAgent | 进程 | 外部 Agent 作为 Collaboration 子 agent（一种成员类型） | P3 | TypeScript 优先 | [ExternalAgent](plugins/ExternalAgent.md) |
-| AcpGateway | CLI 进程 | 基于本地 RPC 的 ACP 服务器 | P3 | TypeScript 优先 | [AcpGateway](plugins/AcpGateway.md) |
+| AcpGateway | 接入方宿主进程 | 复用现有本地 RPC 的 ACP 服务；独立临时 MCP 绑定 | 支持子集已实现，未发布（PR #441） | Rust | [AcpGateway](plugins/AcpGateway.md)、[验收](../../design/acp-gateway-acceptance.md) |
 | RemoteGateway | 进程 | 远程入口、配对、设备 | P3 | Rust | [RemoteGateway](plugins/RemoteGateway.md) |
 | Modality | 进程 | 多模态任务与实时连接 | P3 | TypeScript 优先 | [Modality](plugins/Modality.md) |
 | PluginManager | 进程 | 插件配置、从路径或 Git 安装、插件代码的 loader 行、向负责方登记内容 | M1 | Rust | [PluginManager](plugins/PluginManager.md) |

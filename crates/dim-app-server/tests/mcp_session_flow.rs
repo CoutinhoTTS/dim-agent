@@ -494,6 +494,264 @@ async fn results(session: &Session) -> Vec<String> {
         .collect()
 }
 
+async fn temporary(
+    session: &Session,
+    method: &str,
+    mut params: Value,
+) -> std::result::Result<Value, dim_agent_capabilities::methods::RpcError> {
+    params["sessionId"] = json!(session.id());
+    session
+        .session_service::<dim_agent_capabilities::methods::SessionMethods>()
+        .unwrap()
+        .provider(method)
+        .unwrap()
+        .accept(method.into(), params, CancellationToken::new(), |_| {})
+        .unwrap()
+        .reply
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn temporary_mcp_binds_calls_isolates_and_disposes_without_settings_writes() {
+    let env = Env::new().await;
+    let first = env.session(false, PermissionPreset::FullAccess).await;
+    let second = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&first).await;
+    ready(&second).await;
+    let settings = std::fs::read(env.home.join("mcp.json")).unwrap();
+    let binding = uuid::Uuid::new_v4().to_string();
+    let input =
+        json!({"bindingId":binding,"servers":{"client":configuration(&env.url,"temporary")}});
+    temporary(&first, "session.mcp_temporary.attach", input.clone())
+        .await
+        .unwrap();
+    let initialized = env.remote.initializes.load(Ordering::SeqCst);
+    temporary(&first, "session.mcp_temporary.attach", input)
+        .await
+        .unwrap();
+    assert_eq!(env.remote.initializes.load(Ordering::SeqCst), initialized);
+    env.turn(&first, Action::Text).await;
+    let request = env.model.requests.lock().unwrap().last().unwrap().clone();
+    let native_id = format!("temporary:{binding}:client");
+    let tool = request
+        .tools
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|tool| {
+            tool.metadata.as_ref().is_some_and(|metadata| {
+                metadata.mcp_server_id.as_deref() == Some(&native_id)
+                    && metadata.mcp_original_tool_name.as_deref() == Some("lookup/item")
+            })
+        })
+        .expect("the very first request must include the bound MCP tool")
+        .name
+        .clone();
+    env.turn(
+        &first,
+        Action::Call {
+            pause: false,
+            name: Some(tool),
+        },
+    )
+    .await;
+    assert!(
+        results(&first)
+            .await
+            .last()
+            .unwrap()
+            .contains("temporary:8")
+    );
+    let sources = first.session_service::<ToolSourcesView>().unwrap();
+    let (key, version) = sources
+        .get()
+        .0
+        .into_iter()
+        .find(|(key, _)| key.starts_with("temporary_mcp_"))
+        .unwrap();
+    let mut changes = sources.subscribe();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while env.remote.events.receiver_count() < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    env.remote.revision.store(1, Ordering::SeqCst);
+    env.remote
+        .events
+        .send(json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"}).to_string())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while changes
+            .borrow_and_update()
+            .0
+            .get(&key)
+            .is_none_or(|state| state.adopted == version.adopted)
+        {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("temporary tools must adopt list changes");
+    env.turn(&first, Action::Text).await;
+    assert!(
+        env.model
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|tool| {
+                tool.metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.mcp_server_id.as_deref() == Some(&native_id))
+                    && tool.description.contains("revision 1")
+            })
+    );
+    env.turn(&second, Action::Text).await;
+    assert!(
+        env.model
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|tool| !tool
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.mcp_server_id.as_deref() == Some(&native_id)))
+    );
+    let mut conflict =
+        json!({"bindingId":binding,"servers":{"client":configuration(&env.url,"other")}});
+    assert_eq!(
+        temporary(&first, "session.mcp_temporary.attach", conflict.take())
+            .await
+            .unwrap_err()
+            .data
+            .unwrap()
+            .app_error,
+        "mcp_binding_conflict"
+    );
+    temporary(
+        &first,
+        "session.mcp_temporary.renew",
+        json!({"bindingId":binding}),
+    )
+    .await
+    .unwrap();
+    let deleted = env.remote.deletes.load(Ordering::SeqCst);
+    temporary(
+        &first,
+        "session.mcp_temporary.detach",
+        json!({"bindingId":binding}),
+    )
+    .await
+    .unwrap();
+    temporary(
+        &first,
+        "session.mcp_temporary.detach",
+        json!({"bindingId":binding}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        env.remote.deletes.load(Ordering::SeqCst),
+        deleted + 1,
+        "binding disposal closes its HTTP connection despite retained model requests"
+    );
+    env.turn(&first, Action::Text).await;
+    assert!(
+        env.model
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|tool| !tool
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.mcp_server_id.as_deref() == Some(&native_id)))
+    );
+    assert_eq!(std::fs::read(env.home.join("mcp.json")).unwrap(), settings);
+    assert!(!env.home.join("project/.mcp.json").exists());
+    env.close().await;
+}
+
+#[tokio::test]
+async fn temporary_mcp_failed_setup_cleans_up_and_an_abandoned_binding_expires() {
+    let env = Env::new().await;
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    let failed_id = uuid::Uuid::new_v4().to_string();
+    let refused = temporary(&session,"session.mcp_temporary.attach",json!({"bindingId":failed_id,"servers":{"client":configuration("http://127.0.0.1:1/mcp","unused")}})).await.unwrap_err();
+    assert_eq!(refused.data.unwrap().app_error, "mcp_binding_failed");
+    assert_eq!(
+        temporary(
+            &session,
+            "session.mcp_temporary.renew",
+            json!({"bindingId":failed_id})
+        )
+        .await
+        .unwrap_err()
+        .data
+        .unwrap()
+        .app_error,
+        "mcp_binding_missing"
+    );
+    let binding = uuid::Uuid::new_v4().to_string();
+    let input =
+        json!({"bindingId":binding,"servers":{"client":configuration(&env.url,"temporary")}});
+    temporary(&session, "session.mcp_temporary.attach", input.clone())
+        .await
+        .unwrap();
+    let deleted = env.remote.deletes.load(Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(35), async {
+        while env.remote.deletes.load(Ordering::SeqCst) == deleted {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("abandoned MCP resources must expire");
+    assert_eq!(
+        temporary(
+            &session,
+            "session.mcp_temporary.renew",
+            json!({"bindingId":binding})
+        )
+        .await
+        .unwrap_err()
+        .data
+        .unwrap()
+        .app_error,
+        "mcp_binding_missing"
+    );
+    temporary(&session, "session.mcp_temporary.attach", input)
+        .await
+        .unwrap();
+    let deleted = env.remote.deletes.load(Ordering::SeqCst);
+    session.close().await.unwrap();
+    assert_eq!(
+        env.remote.deletes.load(Ordering::SeqCst),
+        deleted + 2,
+        "closing the Session disposes both configured and temporary connections"
+    );
+    env.close().await;
+}
+
 async fn state(session: &Session, expected: McpSourceState) {
     let mut state = session.session_service::<McpSession>().unwrap().subscribe();
     tokio::time::timeout(Duration::from_secs(5), async {
