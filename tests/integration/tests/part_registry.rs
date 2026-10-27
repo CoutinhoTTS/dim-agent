@@ -219,13 +219,14 @@ impl Plugin for Gated {
     }
 }
 
+/// Whether `session` holds a copy of `name` that has not been disposed.
 fn mounted(session: &Session, name: &str) -> bool {
     session
         .diagnostics()
         .unwrap()
         .plugins
         .iter()
-        .any(|plugin| plugin.name == name)
+        .any(|plugin| plugin.name == name && plugin.state != rutis::host::FiberState::Disposed)
 }
 async fn eventually(mut done: impl FnMut() -> bool) {
     for _ in 0..500 {
