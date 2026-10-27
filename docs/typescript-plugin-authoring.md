@@ -300,7 +300,7 @@ home. Rows carry no `settings` member.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
-import type { PartRegistry, Settings, SourceDeclaration } from '../npm/plugin.js'
+import type { PartRegistry, Settings, SourceDeclaration } from 'dimcode/plugin'
 
 const settings: SourceDeclaration = {
   source: 'web',
@@ -311,6 +311,12 @@ const settings: SourceDeclaration = {
     additionalProperties: false,
   },
 }
+
+const part = definePlugin({
+  name: 'WebSession',
+  inject: ['settings'],
+  async apply() {},
+})
 
 export default definePlugin({
   name: 'Web',
