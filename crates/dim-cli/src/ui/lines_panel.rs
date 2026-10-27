@@ -10,24 +10,41 @@ use crate::ui::theme::ansi::fg;
 
 const HINT: &str = "Enter show the line · x end it · Esc close";
 
-/// How far below `main` the line sits, so the panel reads as a tree (§14).
-fn depth(lines: &[LineView], id: &str) -> usize {
-    let mut depth = 0;
-    let mut parent = lines
-        .iter()
-        .find(|line| line.id == id)
-        .and_then(|line| line.parent.clone());
-    while let Some(id) = parent.filter(|parent| parent != "main") {
-        depth += 1;
-        if depth > lines.len() {
-            break;
+/// The rows in tree order: the session itself, then each line under the line
+/// that opened it, children in the order the snapshot lists them (design §14).
+fn tree_order(lines: &[LineView]) -> Vec<(usize, usize)> {
+    fn walk(
+        lines: &[LineView],
+        parent: usize,
+        depth: usize,
+        seen: &mut [bool],
+        out: &mut Vec<(usize, usize)>,
+    ) {
+        for (index, line) in lines.iter().enumerate() {
+            if seen[index] || line.parent.as_deref() != Some(lines[parent].id.as_str()) {
+                continue;
+            }
+            seen[index] = true;
+            out.push((index, depth));
+            walk(lines, index, depth + 1, seen, out);
         }
-        parent = lines
-            .iter()
-            .find(|line| line.id == id)
-            .and_then(|line| line.parent.clone());
     }
-    depth
+    let mut seen = vec![false; lines.len()];
+    let mut out = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        if line.parent.is_some() || seen[index] {
+            continue;
+        }
+        seen[index] = true;
+        out.push((index, 0));
+        walk(lines, index, 1, &mut seen, &mut out);
+    }
+    for index in 0..lines.len() {
+        if !seen[index] {
+            out.push((index, 0));
+        }
+    }
+    out
 }
 
 pub struct LinesPanel {
@@ -70,10 +87,10 @@ impl LinesPanel {
         let selected = self.list.selected_id();
         self.focus = snapshot.focus.clone();
         self.lines = snapshot.lines.clone();
-        let items = snapshot
-            .lines
-            .iter()
-            .map(|line| {
+        let items = tree_order(&snapshot.lines)
+            .into_iter()
+            .map(|(index, depth)| {
+                let line = &snapshot.lines[index];
                 let state = match &line.state {
                     LineState::Main => t("the session itself").to_owned(),
                     LineState::Working => t("working").to_owned(),
@@ -95,11 +112,7 @@ impl LinesPanel {
                 };
                 Item::new(
                     line.id.clone(),
-                    format!(
-                        "{}{}",
-                        "  ".repeat(depth(&snapshot.lines, &line.id)),
-                        safe(&line.id)
-                    ),
+                    format!("{}{}", "  ".repeat(depth), safe(&line.id)),
                     detail,
                 )
             })
@@ -280,6 +293,7 @@ mod tests {
         ));
         panel.handle_key(key(KeyCode::Char('n')));
         panel.handle_key(key(KeyCode::Down));
+        panel.handle_key(key(KeyCode::Down));
         assert!(matches!(
             panel.handle_key(key(KeyCode::Char('x'))),
             Effect::Notice(_)
@@ -303,17 +317,24 @@ mod tests {
     #[test]
     fn a_line_below_a_line_is_listed_under_its_parent_and_can_be_ended() {
         let snapshot = snapshot("main");
-        assert_eq!(depth(&snapshot.lines, "main"), 0);
-        assert_eq!(depth(&snapshot.lines, "b-7c"), 0);
-        assert_eq!(depth(&snapshot.lines, "b-91"), 1);
         let mut panel = LinesPanel::new(&snapshot);
         let rows = panel
             .render(100, 20, &palette(), &markdown())
             .into_iter()
             .map(|row| crate::ui::render::panel::strip_escapes(&row))
             .collect::<Vec<_>>();
-        assert!(rows.iter().any(|row| row.contains("  b-91")), "{rows:#?}");
-        for _ in 0..3 {
+        let position = |id: &str| {
+            rows.iter()
+                .position(|row| row.contains(id))
+                .unwrap_or_else(|| panic!("{id} is listed: {rows:#?}"))
+        };
+        assert!(rows.iter().any(|row| row.contains("    b-91")), "{rows:#?}");
+        assert!(position("b-7c") < position("b-91"), "{rows:#?}");
+        assert!(
+            position("b-91") < position("b-02"),
+            "a line follows the line that opened it, not arrival order: {rows:#?}"
+        );
+        for _ in 0..2 {
             panel.handle_key(key(KeyCode::Down));
         }
         panel.handle_key(key(KeyCode::Char('x')));
