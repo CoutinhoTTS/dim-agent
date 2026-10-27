@@ -134,11 +134,10 @@ jobs:
           }
       - name: Build native payload for target architecture
         env:
-          # A pinned commit of the private dim-oauth-plugin-rust repository makes
-          # every target an account build; without one the build is API-key only.
-          DIM_OAUTH_REPOSITORY: ${{ vars.DIM_OAUTH_REPOSITORY }}
-          DIM_OAUTH_REVISION: ${{ vars.DIM_OAUTH_REVISION }}
-          DIM_OAUTH_GIT_CREDENTIAL: ${{ secrets.DIM_OAUTH_GIT_CREDENTIAL }}
+          # The Dim account's OAuth client IDs stay in secrets and are compiled
+          # into dimcode; without them the build is API-key only.
+          DIM_OAUTH_CLIENT_ID_CN: ${{ secrets.DIM_OAUTH_CLIENT_ID_CN }}
+          DIM_OAUTH_CLIENT_ID_GLOBAL: ${{ secrets.DIM_OAUTH_CLIENT_ID_GLOBAL }}
         shell: bash
         run: |
           set -euo pipefail
@@ -152,28 +151,13 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           fi
           rustup target add "$DIM_BUILD_TARGET"
-          if [[ -z "$DIM_OAUTH_REPOSITORY$DIM_OAUTH_REVISION" ]]; then
-            cargo build --release --locked --target "$DIM_BUILD_TARGET" -p dimcode
-            echo "DIM_BIN_DIR=$PWD/target/$DIM_BUILD_TARGET/release" >> "$GITHUB_ENV"
-            exit 0
+          if [[ -n "$DIM_OAUTH_CLIENT_ID_CN" && -n "$DIM_OAUTH_CLIENT_ID_GLOBAL" ]]; then
+            echo "DIM_ACCOUNT=--account" >> "$GITHUB_ENV"
+          elif [[ -n "$DIM_OAUTH_CLIENT_ID_CN$DIM_OAUTH_CLIENT_ID_GLOBAL" ]]; then
+            echo 'Set DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL together.' >&2; exit 1
           fi
-          [[ -n "$DIM_OAUTH_REPOSITORY" && "$DIM_OAUTH_REVISION" =~ ^[0-9a-f]{40}$ ]] \
-            || { echo 'Set DIM_OAUTH_REPOSITORY and a full DIM_OAUTH_REVISION together.' >&2; exit 1; }
-          # The private crate reaches this checkout as its sibling `../dim`.
-          [[ "$(basename "$PWD")" == dim ]] || { echo 'The public checkout must be named dim.' >&2; exit 1; }
-          source="$(dirname "$PWD")/dim-oauth-plugin-rust"
-          rm -rf "$source"
-          set +x
-          header="Authorization: Basic $(printf '%s' "$DIM_OAUTH_GIT_CREDENTIAL" | base64 | tr -d '\n')"
-          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="$header" \
-            git clone --quiet --no-checkout "$DIM_OAUTH_REPOSITORY" "$source"
-          unset header DIM_OAUTH_GIT_CREDENTIAL
-          git -C "$source" checkout --quiet --detach "$DIM_OAUTH_REVISION"
-          # Its build starts from this checkout's Cargo.lock: one dependency graph.
-          (cd "$source" && DIM_PUBLIC_REPO="$PWD/../dim" scripts/sync-lock.sh \
-            && cargo build --release --target "$DIM_BUILD_TARGET" -p dim-oauth)
-          echo "DIM_BIN_DIR=$source/target/$DIM_BUILD_TARGET/release" >> "$GITHUB_ENV"
-          echo "DIM_ACCOUNT=--account" >> "$GITHUB_ENV"
+          cargo build --release --locked --target "$DIM_BUILD_TARGET" -p dimcode
+          echo "DIM_BIN_DIR=$PWD/target/$DIM_BUILD_TARGET/release" >> "$GITHUB_ENV"
       - name: Stage and pack release payload
         env:
           RELEASE_VERSION: ${{ needs.preflight.outputs.version }}

@@ -1,5 +1,4 @@
-//! Colour roles of the terminal interface: the default theme (Amp's,
-//! following the terminal's own colours), the named themes with contrast
+//! Colour roles of the terminal interface: the default theme (following the terminal's own colours), the named themes with contrast
 //! floors against the real background, detection.
 
 pub mod ansi;
@@ -28,7 +27,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// The `system` theme: Amp's default, in the terminal's own colours.
+    /// The `system` theme: the default, in the terminal's own colours.
     /// A dark terminal needs no contrast floors: its scheme already pairs
     /// its palette with its background. A light terminal's hex ramp is held
     /// to the floors against the reported background (an off-white when the
@@ -71,7 +70,7 @@ impl Theme {
         }
         let background = background.unwrap_or(entry.background);
         let own = |h: &str| h.to_owned();
-        // The roles Amp's structure adds come from the theme's own: users
+        // The roles the default structure adds come from the theme's own: users
         // speak in its accent, keys take its function colour, and the
         // accent bar carries its background.
         let mut palette = Palette {

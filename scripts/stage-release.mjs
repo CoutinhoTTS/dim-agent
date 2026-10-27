@@ -9,7 +9,7 @@ import { buildPlatform, checkArchitecture } from './native-binary.mjs';
 const [binaryDirectory, destination, version, sourceCommit, ...rest] = process.argv.slice(2);
 const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT [--account] [--plugins DIR]';
 assert(binaryDirectory && destination && version && sourceCommit, usage);
-// Whether the executable is the account build (dim-oauth-plugin-rust).
+// Whether the executable is the account build (compiled with the client IDs).
 let account = false;
 // The default plugins staged by stage-plugins.mjs, placed beside `bin/`.
 let plugins;

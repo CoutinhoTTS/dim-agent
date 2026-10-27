@@ -1,7 +1,7 @@
 //! The tool calls of one model response drawn as one group (port of
 //! `blocks/tool-group.ts` and `tool-group-render.ts`).
 //!
-//! Collapsed, the default, is Amp's summary row alone
+//! Collapsed, the default, is the summary row alone
 //! (`✓ Ran 1 command, ran 1 search, read 1 file · 1 failed`). Expanded (the
 //! `/tools` toggle) adds a row per call with the bodies that matter: command
 //! output, edit diffs. The live region and the committed block both draw
@@ -19,11 +19,11 @@ use crate::ui::theme::ansi::{Paint, fg, paint};
 
 /// Source lines of one edit's diff before the rest is counted, not shown.
 const DIFF_MAX_LINES: usize = 40;
-/// Line numbers take at least this many columns, as Amp pads them.
+/// Line numbers take at least this many columns.
 const LINE_NUMBER_MIN_WIDTH: usize = 3;
 /// Rows one wrapped line may take before the rest is cut.
 const WRAP_MAX_ROWS: usize = 4;
-/// Screen rows of a command's output: its end, unmarked, as Amp shows it.
+/// Screen rows of a command's output: its end, unmarked.
 const TAIL_MAX_ROWS: usize = 15;
 
 /// How much of a group is drawn.
@@ -87,7 +87,7 @@ enum Mark {
 
 /// `Truncate` keeps one row. `Wrap` continues under the text column and keeps
 /// the text's own line breaks, up to [`WRAP_MAX_ROWS`] (`Rows` up to its
-/// own count), ending the last in `…`; `Whole` keeps every row, as Amp prints a command however long.
+/// own count), ending the last in `…`; `Whole` keeps every row, however long the command.
 /// `Tail` keeps the last [`TAIL_MAX_ROWS`] rows, as a command's output is
 /// shown, with a scrollbar beside them when there are more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,8 +393,8 @@ fn classify(call: Call<'_>) -> Item<'_> {
         }
         "exec" | "bash" => {
             let command = call.string("command").unwrap_or("").to_owned();
-            // A read-only command that exited non-zero still explored, as
-            // Amp shows it: done, with its output and without the exit note.
+            // A read-only command that exited non-zero still explored,
+            // shown done, with its output and without the exit note.
             let output = call.exit_code.filter(|code| *code != 0).and_then(|code| {
                 let note = format!("Command exited with code {code}.");
                 call.result
@@ -445,7 +445,7 @@ fn classify(call: Call<'_>) -> Item<'_> {
     }
 }
 
-/// A plain read-only command reads as the exploring it is, the way Amp counts
+/// A plain read-only command reads as the exploring it is, counting
 /// `ls`, `wc` and `git log` among the files and searches. Anything with shell
 /// operators, redirection, substitution or a second line stays a command:
 /// what it does is no longer one program's.
@@ -461,7 +461,7 @@ fn explore_command(
     let args: Vec<&str> = words.filter(|word| !word.starts_with('-')).collect();
     match program {
         "ls" | "tree" | "find" | "fd" => {
-            // Amp lists the paths after the listing's own output.
+            // The paths are listed after the listing's own output.
             let listed = output_lines(result);
             let detail = args
                 .iter()
@@ -496,7 +496,7 @@ fn header_spans(items: &[Item<'_>], sections: &[Section]) -> Vec<Span> {
         return match section {
             Section::Explore => explore_header(&members),
             Section::Edit => edit_header(&members),
-            // Only Explored mutes its counts; Amp prints these headers whole.
+            // Only Explored mutes its counts; these headers print whole.
             _ => vec![span(
                 capitalize(&phrase(phrase_key(&items[0]), &members)),
                 Tone::Text,
@@ -580,7 +580,7 @@ fn phrase(key: PhraseKey, members: &[&Item<'_>]) -> String {
                     ],
                 ),
             };
-            // Amp reads files, and explores only once web pages are among them.
+            // Files are read, and explored only once web pages are among them.
             let verb = if pages == 0 {
                 verb("read", "reading")
             } else {
@@ -938,7 +938,7 @@ fn append_command(lines: &mut Vec<Line>, call: &Call<'_>, command: &str) {
         action: None,
     });
     // A detached command's result only says it started; its output arrives
-    // through a later check, as in Amp.
+    // through a later check.
     if call.state == State::Running || (call.background() && call.state == State::Done) {
         return;
     }
@@ -960,7 +960,7 @@ fn append_edit(lines: &mut Vec<Line>, call: &Call<'_>, write: bool, single: bool
         edit_lines(call, write)
     };
     let (added, removed) = diff_counts(&diff);
-    // Amp names a written file by what happened to it.
+    // A written file is named by what happened to it.
     let label = match (write, removed) {
         (true, 0) => "Create",
         (true, _) => "Write",
@@ -1037,7 +1037,7 @@ enum DiffLine {
     },
 }
 
-/// The diff as Amp prints it: `...` for each skipped stretch, then every hunk
+/// The diff as printed: `...` for each skipped stretch, then every hunk
 /// line behind its file line number, changes coloured whole, context plain.
 fn append_diff(lines: &mut Vec<Line>, diff: &[DiffLine]) {
     let shown = if diff.len() <= DIFF_MAX_LINES + 1 {
@@ -1471,7 +1471,7 @@ fn capitalize(text: &str) -> String {
 
 /// The group's rows at `width`. `spinner` is the glyph of running marks.
 ///
-/// As in Amp, the header ends in `▸` (collapsed) or `▾` (expanded), and so
+/// The header ends in `▸` (collapsed) or `▾` (expanded), and so
 /// does every expanded row with rows of its own under it (a section, a
 /// command with output, an edit with its diff). The marker survives the
 /// header's truncation.
@@ -1558,7 +1558,7 @@ fn lay_out_group(
         let mark = line.mark.map(|mark| mark_text(mark, spinner, p));
         let lead = line.indent + if mark.is_some() { 2 } else { 0 };
         // Output with more rows than the tail shows gets a scrollbar in the
-        // last column, its thumb at the end, as Amp draws it.
+        // last column, its thumb at the end.
         let content = (line.overflow == Overflow::Tail)
             .then(|| wrapped_rows(&line.spans, width.saturating_sub(lead + 2).max(1)))
             .filter(|rows| *rows > TAIL_MAX_ROWS);

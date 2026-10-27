@@ -360,8 +360,7 @@ fn run_terminal(
                 dirty = true;
             }
         }
-        // A frame waits while the last one is still being written, as
-        // grok-build's presenter does: a slow terminal gets fewer, current
+        // A frame waits while the last one is still being written: a slow terminal gets fewer, current
         // frames instead of a queue of stale ones.
         let due = last_frame.is_none_or(|at| now.duration_since(at) >= FRAME_INTERVAL)
             && !terminal.writing();
@@ -461,7 +460,7 @@ fn run_terminal(
                     }
                 }
             }
-            // Amp's message navigation: Tab (or Up while a message is
+            // Message navigation: Tab (or Up while a message is
             // picked) goes to older user messages, Shift+Tab or Down to newer
             // ones and back to the composer past the newest; Esc ends it,
             // `e` takes the message into the composer and `q` quotes it
@@ -789,7 +788,7 @@ struct App {
     upgrade: Option<UpgradeDialog>,
 }
 
-/// Widest the fullscreen command palette is drawn (Amp's).
+/// Widest the fullscreen command palette is drawn.
 const OVERLAY_PALETTE_WIDTH: usize = 80;
 /// Widest a fullscreen picker is drawn.
 const OVERLAY_LIST_WIDTH: usize = 100;
@@ -1438,8 +1437,8 @@ impl App {
             return outcome;
         }
         match key.code {
-            // The command palette, also over a draft (Amp's Ctrl+O; the
-            // banner's Ctrl+P).
+            // The command palette, also over a draft (Ctrl+O, or
+            // the banner's Ctrl+P).
             KeyCode::Char('o' | 'p') if ctrl && !self.composer.palette_open() => {
                 if !self.composer.is_empty() {
                     self.palette_stash = Some(self.composer.text().to_owned());
@@ -2125,7 +2124,7 @@ impl App {
     fn toggle_tool_details(&mut self) {
         let detail = self.tool_detail.flipped();
         self.tool_detail = detail;
-        // Every group follows, as Amp's toggle redraws the transcript.
+        // Every group follows, and the toggle redraws the transcript.
         self.group_details.clear();
         for block in &mut self.history {
             match block {
@@ -2518,7 +2517,7 @@ impl App {
         });
         let inner = cols.saturating_sub(2 * MARGIN + 4).max(1);
         let shell = self.composer.shell();
-        // Fullscreen's input is Amp's: no prompt mark, no placeholder.
+        // Fullscreen's input has no prompt mark and no placeholder.
         let prompt = match shell {
             Some(shell) => format!("{} ", shell.prefix()),
             None if self.fullscreen => String::new(),
@@ -2542,7 +2541,7 @@ impl App {
         } else {
             &p.accent
         };
-        // Fullscreen draws the palette as Amp does: a box of its own over
+        // Fullscreen draws the palette as a box of its own over
         // the transcript, with the query in it and the composer empty below.
         let palette_overlay =
             self.fullscreen && self.prompt.is_none() && self.composer.palette_open();
@@ -2570,7 +2569,7 @@ impl App {
             }
             (cursor.1 as usize, prompt_width + cursor.0 as usize)
         };
-        // Fullscreen keeps room for a second line, as Amp's input does.
+        // Fullscreen keeps room for a second line.
         if self.fullscreen && rows.len() < FULLSCREEN_COMPOSER_ROWS {
             rows.resize(FULLSCREEN_COMPOSER_ROWS, String::new());
         }
@@ -2583,8 +2582,8 @@ impl App {
             Shell::Private => t("!! shell mode · not sent to the model"),
         });
         let tinted = |label: &str| fg(label, shell_color);
-        // Fullscreen keeps the run status in the bottom border, as Amp
-        // does; scrollback shows it in the top one.
+        // Fullscreen keeps the run status in the bottom border;
+        // scrollback shows it in the top one.
         let top_status = status.as_deref().filter(|_| !self.fullscreen);
         let title = match (top_status, shell_title) {
             (Some(text), _) => Some((text, &muted as &dyn Fn(&str) -> String)),
@@ -2599,7 +2598,7 @@ impl App {
         let edge = |edge: &str| fg(edge, border);
         let mut composer_box = boxed(&rows, cols, &edge, &|_, body| body.to_owned(), title);
         if self.fullscreen {
-            // Amp's prompt box: the model at the top right, the status at
+            // The prompt box: the model at the top right, the status at
             // the bottom left and the workspace at the bottom right; there
             // is no status row under it.
             let outer = cols.saturating_sub(2 + MARGIN).max(4);
@@ -2624,7 +2623,7 @@ impl App {
             );
         }
         // A prompt that must be answered first (an approval, a question, the
-        // exit confirmation) takes the composer's place, as Amp's do: there
+        // exit confirmation) takes the composer's place: there
         // is nothing to type into meanwhile.
         let replaced = matches!(
             self.prompt,
@@ -2846,7 +2845,7 @@ impl App {
         }
 
         let markdown = &self.markdown;
-        // Answers start at the margin, unmarked, as Amp prints them.
+        // Answers start at the margin, unmarked.
         let render = |source: &str, width: usize| markdown.render(source, width, 0);
         let fresh = self.commits.plan(&settled_ids).fresh;
         // A parked stream pairs only with an answer that has not gone out:
@@ -3272,7 +3271,7 @@ impl App {
         }
     }
 
-    /// Fullscreen's bottom border label, Amp's status corner: the run
+    /// Fullscreen's bottom border label, the status corner: the run
     /// status, the slot (a notice in the highlight colour) and the approvals
     /// mode when it is not the default one.
     fn dock_status(&self, run: Option<&str>) -> Option<String> {
@@ -3603,8 +3602,8 @@ fn labeled_rows(pairs: &[(&str, &str)], body_width: usize) -> Vec<String> {
     rows
 }
 
-/// The working directory, `~` for the home, and the git branch: what Amp
-/// writes in its prompt box's bottom border.
+/// The working directory, `~` for the home, and the git branch: what the
+/// prompt box writes in its bottom border.
 fn workspace_label(branch: &str) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -3671,7 +3670,7 @@ type Painter<'a> = &'a dyn Fn(&str) -> String;
 /// Rounded box drawing around `rows`, sized to `cols` with the common
 /// margin. Rows that are too long are cut to the inner width. `edge` paints
 /// the border characters. `status`, plain text painted by `label`, is set
-/// into the top border (`╭─ status ───╮`), Amp-style.
+/// into the top border (`╭─ status ───╮`).
 fn boxed(
     rows: &[String],
     cols: usize,
@@ -3707,7 +3706,7 @@ fn boxed(
 }
 
 /// One border row `outer` columns wide between `corners`: a styled label
-/// after `─ ` on the left, another before ` ─` on the right, as Amp's prompt
+/// after `─ ` on the left, another before ` ─` on the right, as the prompt
 /// box carries them. A label that does not fit is left out, the right one
 /// first.
 fn border_line(

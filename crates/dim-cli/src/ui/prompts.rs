@@ -443,7 +443,7 @@ impl PermissionPrompt {
             );
         }
         let inner = width.saturating_sub(4).max(1);
-        // Amp's panel frame: the title in the top border, the keys in the
+        // The panel frame: the title in the top border, the keys in the
         // bottom one.
         let title = paint(
             &truncate_cells(t("Permission required"), inner),
@@ -1396,7 +1396,7 @@ mod tests {
             .iter()
             .map(|r| strip(r))
             .collect();
-        // Amp's frame: the title in the top border, the keys in the bottom.
+        // The panel frame: the title in the top border, the keys in the bottom.
         assert!(rows[0].starts_with("╭─ Permission required ─"));
         assert!(rows[2].contains("# source: tool_rule"));
         assert!(rows[3].contains("$ edit {\"path\":\"src/index.ts\"}"));

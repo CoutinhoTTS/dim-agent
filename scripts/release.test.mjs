@@ -19,46 +19,6 @@ function fixture(t) {
   return temporary;
 }
 
-test('account checkout keeps credentials out of arguments and traced logs', {skip:process.platform==='win32'}, (t)=>{
-  const temporary=fixture(t);
-  const bin=path.join(temporary,'tools');
-  mkdirSync(bin);
-  const capture=path.join(temporary,'git-call.json');
-  const credential='fixture-user:fixture-release-secret';
-  const workflow=readFileSync(path.join(root,'.github/workflows/release.yml'),'utf8');
-  const start=workflow.indexOf('          set +x\n');
-  const end=workflow.indexOf('          git -C "$source" checkout',start);
-  assert(start>=0&&end>start);
-  const authenticate=workflow.slice(start,end).replace(/^          /gm,'');
-  writeFileSync(path.join(bin,'git'),`#!${process.execPath}
-const assert=require('node:assert/strict');
-const {writeFileSync}=require('node:fs');
-const {spawnSync}=require('node:child_process');
-const secret=process.env.DIM_OAUTH_GIT_CREDENTIAL;
-const header='Authorization: Basic '+Buffer.from(secret).toString('base64');
-const args=process.argv.slice(2);
-assert(args.every(arg=>!arg.includes(secret)&&!arg.includes(header)));
-const config=spawnSync('/usr/bin/git',['config','--get','http.extraHeader'],{encoding:'utf8'});
-assert.equal(config.status,0);
-assert.equal(config.stdout.trim()===header,true);
-writeFileSync(process.env.TEST_CAPTURE,JSON.stringify(args));
-process.exit(Number(process.env.TEST_GIT_EXIT));
-`,{mode:0o755});
-  const repository='https://example.invalid/account.git';
-  const source=path.join(temporary,'account source');
-  for(const status of [0,17]) {
-    const result=spawnSync('bash',['-c',`set -euxo pipefail\n${authenticate}\ntest -z "\${header+x}"\ntest -z "\${DIM_OAUTH_GIT_CREDENTIAL+x}"`],{
-      encoding:'utf8',env:{...process.env,PATH:`${bin}:${process.env.PATH}`,source,
-        DIM_OAUTH_REPOSITORY:repository,DIM_OAUTH_GIT_CREDENTIAL:credential,
-        TEST_CAPTURE:capture,TEST_GIT_EXIT:String(status)},
-    });
-    assert.equal(result.status,status,result.stderr);
-    assert.deepEqual(JSON.parse(readFileSync(capture)),['clone','--quiet','--no-checkout',repository,source]);
-    for(const secret of [credential,Buffer.from(credential).toString('base64')]) {
-      assert.equal((result.stdout+result.stderr).includes(secret),false);
-    }
-  }
-});
 // Entry names read straight from the gzip'd ustar stream: macOS bsdtar would
 // fold AppleDouble `._*` entries back into extended attributes and hide them.
 function entries(archive) {
