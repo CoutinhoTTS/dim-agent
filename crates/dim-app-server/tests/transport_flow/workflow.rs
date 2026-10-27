@@ -5,12 +5,7 @@ use std::path::{Path, PathBuf};
 
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut config = session_typescript::fixture();
-    config.rows = vec![
-        serde_json::from_str(include_str!(
-            "../../../../runtime/plugins/workflow/process.json"
-        ))
-        .unwrap(),
-    ];
+    config.rows = vec![session_typescript::manifest_row("workflow")];
     config
 }
 

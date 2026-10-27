@@ -969,11 +969,13 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
             .into_iter()
             .find(|p| p.provider_id == id)
             .unwrap();
-        let mut network_input = json!({"providerId":id,"displayName":summary.display_name,"driverKind":summary.driver_kind,"baseUrl":summary.base_url,"auth":summary.auth,"enabled":true,"network":{"timeoutMs":6000 + index}});
+        let mut network_input =
+            json!({"network":{"timeoutMs":{"action":"set","value":6000 + index}}});
         provider
-            .save_static(
+            .update(
+                id.into(),
+                summary.version,
                 serde_json::from_value(network_input.clone()).unwrap(),
-                Some(summary.version),
                 &cancel,
             )
             .await
@@ -1057,11 +1059,12 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
             rejected.rejection(&error, CredentialRecoveryPhase::Initial),
             CredentialRejection::Recoverable
         );
-        network_input["network"] = json!({"timeoutMs":9000 + index});
+        network_input["network"] = json!({"timeoutMs":{"action":"set","value":9000 + index}});
         provider
-            .save_static(
+            .update(
+                id.into(),
+                edited.version,
                 serde_json::from_value(network_input).unwrap(),
-                Some(edited.version),
                 &cancel,
             )
             .await
@@ -1188,13 +1191,14 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
             .into_iter()
             .find(|p| p.provider_id == id)
             .unwrap();
-        let mut input = json!({"providerId":id,"displayName":summary.display_name,"driverKind":summary.driver_kind,"baseUrl":summary.base_url,"auth":summary.auth,"enabled":true});
+        let mut input = json!({});
         input["credential"] = json!({"action":"set","value":"must-not-be-stored"});
         assert!(
             provider
-                .save_static(
+                .update(
+                    id.into(),
+                    summary.version,
                     serde_json::from_value(input.clone()).unwrap(),
-                    Some(summary.version),
                     &cancel
                 )
                 .await
@@ -1204,9 +1208,10 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         input["baseUrl"] = json!("https://outside.test");
         assert!(
             provider
-                .save_static(
+                .update(
+                    id.into(),
+                    summary.version,
                     serde_json::from_value(input).unwrap(),
-                    Some(summary.version),
                     &cancel
                 )
                 .await
@@ -1269,8 +1274,16 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
             .await
             .is_err()
     );
-    let updated = provider.save_static(serde_json::from_value(json!({"providerId":"openai-codex","displayName":summary.display_name,"driverKind":summary.driver_kind,"baseUrl":summary.base_url,"auth":summary.auth,"enabled":true})).unwrap(), Some(summary.version + 1), &cancel).await.unwrap();
-    assert!(updated.credential_configured);
+    let updated = provider
+        .update(
+            "openai-codex".into(),
+            summary.version + 1,
+            serde_json::from_value(json!({"enabled":true})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(updated.connection.unwrap().credential_configured);
     let old_request = {
         let selection = provider
             .configuration(

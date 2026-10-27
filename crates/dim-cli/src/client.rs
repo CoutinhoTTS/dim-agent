@@ -52,6 +52,22 @@ fn web_assets_in(configured: Option<OsString>, executable: &Path, home: &Path) -
         .find(|directory| directory.join("index.html").is_file())
 }
 
+/// The default plugin configuration file (PluginManager §2.3):
+/// `DIMCODE_DEFAULT_PLUGINS`, else `default-plugins.json` beside the
+/// executable's `bin/`, next to the `plugins/` directory it lists.
+fn default_plugins(executable: &Path) -> Option<PathBuf> {
+    [
+        std::env::var_os("DIMCODE_DEFAULT_PLUGINS").map(PathBuf::from),
+        executable
+            .parent()
+            .and_then(Path::parent)
+            .map(|root| root.join("default-plugins.json")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|file| file.is_file())
+}
+
 /// What to tell the user when the daemon cannot serve the Web workspace, as
 /// two sentences without their full stops; `None` for any other failure. A
 /// daemon started with no frontend while the CLI now finds one beside the
@@ -287,6 +303,9 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     // directory (web-workspace.md §2.4).
     if let Some(path) = web_assets(binary, &options.home) {
         command.arg("--web-assets").arg(path);
+    }
+    if let Some(path) = default_plugins(binary) {
+        command.arg("--defaults").arg(path);
     }
     #[cfg(unix)]
     {

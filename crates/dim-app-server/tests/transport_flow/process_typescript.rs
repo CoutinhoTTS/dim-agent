@@ -7,7 +7,6 @@ fn parts() -> SessionTypeScriptConfig {
     parts.rows.push(json!({
         "id":"process-example", "name":parts.anchor.parent().unwrap().join("fixtures/process-part.ts"),
         "provides":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/process-part.json")).unwrap(),
-        "settings":serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.settings.json")).unwrap(),
         "config":{},
     }));
     parts
@@ -307,6 +306,7 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
                     js_runtime: "/unstarted/runtime".into(),
                     anchor: "/unstarted/package.json".into(),
                     python: None,
+                    acquire: None,
                     rows: rows.clone(),
                 }),
                 ..Default::default()
@@ -818,7 +818,7 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
         })
     };
     let mut first = row("workflow-reader", "workflow-files", "installed", &package);
-    first["settings"] = json!([{
+    first["config"]["settings"] = json!([{
         "source":"workflow", "userFile":"workflow.json", "projectFile":null,
         "schema":{"type":"object","properties":{
             "definitions":{"type":"object","default":{}},

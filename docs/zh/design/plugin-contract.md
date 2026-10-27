@@ -2,7 +2,7 @@
 
 [English](../../design/plugin-contract.md)
 
-状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)。已实现；P4 中 R5 的第二种形式随 [#403](https://github.com/arcships/dim/issues/403) 完成。各节说明今天已成立的部分。
+状态：已接受，见 [ADR 006](../adr/006-plugin-contract.md)。各节说明契约。
 它所依据的理论，即[时间总线](../../architecture/rust-agent/time-bus.md)与[设计规则](../../architecture/rust-agent/principles.md)，
 不变，现在即适用。
 

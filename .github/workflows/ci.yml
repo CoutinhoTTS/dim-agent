@@ -40,6 +40,11 @@ jobs:
       - name: Select check groups
         id: groups
         run: node scripts/ci-changes.mjs
+      - name: Check accepted ADRs
+        if: github.event_name == 'pull_request'
+        env:
+          DIM_DOCS_ADR_ERRATUM: ${{ contains(github.event.pull_request.labels.*.name, 'adr-erratum') && '1' || '0' }}
+        run: node scripts/adr-check.mjs --base HEAD^1
   dependencies:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.dependencies == 'true'
@@ -151,6 +156,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/python.tar.gz" -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/python/bin/python3" -m venv runtime/.venv
           runtime/.venv/bin/python -m pip install --require-hashes --no-deps -r runtime/python-requirements.txt
+          export PATH="$RUNNER_TEMP/python/bin:$PATH"
           export DIM_TEST_NODE="$(command -v node)"
           export DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime"
           export DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs"

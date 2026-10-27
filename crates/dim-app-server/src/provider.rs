@@ -298,51 +298,12 @@ pub enum StaticAuth {
     AwsBedrock,
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProviderInput {
-    pub provider_id: String,
-    pub display_name: String,
-    pub driver_kind: String,
-    pub base_url: String,
-    pub auth: StaticAuth,
-    #[serde(default, deserialize_with = "optional_non_null")]
-    pub network: Option<ModelNetwork>,
-    #[serde(default)]
-    pub headers: Option<HashMap<String, String>>,
-    #[serde(default, deserialize_with = "optional_non_null")]
-    pub credential: Option<CredentialUpdate>,
-    pub models: Option<Vec<ModelEntry>>,
-    pub enabled: bool,
-}
-
 fn optional_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
 {
     T::deserialize(deserializer).map(Some)
-}
-impl std::fmt::Debug for ProviderInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderInput")
-            .field("provider_id", &self.provider_id)
-            .field("display_name", &self.display_name)
-            .field("driver_kind", &self.driver_kind)
-            .field("base_url", &"<redacted until validated>")
-            .field("auth", &"<redacted until validated>")
-            .field(
-                "headers",
-                &self.headers.as_ref().map(|h| h.keys().collect::<Vec<_>>()),
-            )
-            .field(
-                "credential",
-                &self.credential.as_ref().map(|_| "<redacted>"),
-            )
-            .field("model_count", &self.models.as_ref().map(Vec::len))
-            .field("enabled", &self.enabled)
-            .finish()
-    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -1224,79 +1185,6 @@ impl ProviderService {
         }
         self.check(cancel)?;
         Ok(list)
-    }
-
-    pub async fn save_static(
-        self: &Arc<Self>,
-        input: ProviderInput,
-        expected_version: Option<u32>,
-        cancel: &CancellationToken,
-    ) -> Result<ProviderSummary, HostError> {
-        let authority = managed_authority(&input.provider_id);
-        if self
-            .oauth
-            .contains(&input.provider_id, cancel)
-            .await
-            .map_err(failure)?
-            || (authority == CredentialAuthority::Static
-                && self
-                    .bundled
-                    .provider(&input.provider_id)
-                    .is_some_and(|provider| {
-                        !matches!(provider.auth.kind.as_str(), "api_key" | "aws_bedrock")
-                    }))
-        {
-            return Err(failure("Managed provider cannot be replaced"));
-        }
-        let available = self.account_available(&input.provider_id, cancel).await?;
-        if authority != CredentialAuthority::Static
-            && !matches!(input.credential, None | Some(CredentialUpdate::Keep))
-        {
-            return Err(failure("Managed credentials belong to the OAuth service"));
-        }
-        let db = self.db.clone();
-        self.owned(cancel, move |_| Box::pin(async move { db.run(move |connection| {
-            let tx = connection.transaction().map_err(storage)?;
-            let previous = read_static(&tx, &input.provider_id)?;
-            if previous.as_ref().map(|r| r.version) != expected_version { return Err(storage("Provider version conflict")); }
-            let credential = match input.credential {
-                None | Some(CredentialUpdate::Keep) => previous.as_ref().and_then(|r| r.credential.clone()),
-                Some(CredentialUpdate::Clear) => None,
-                Some(CredentialUpdate::Set { value }) if !value.is_empty() => Some(StaticCredential::Inline(ProviderSecret::Token(value))),
-                Some(CredentialUpdate::Set { .. }) => return Err(storage("Credential must not be empty")),
-                Some(CredentialUpdate::SetAws { value }) => Some(StaticCredential::Inline(ProviderSecret::Aws(value))),
-                Some(CredentialUpdate::SetRef { reference }) => Some(StaticCredential::Reference { reference }),
-            };
-            let version = expected_version.unwrap_or(0).checked_add(1).ok_or_else(|| storage("Provider version overflow"))?;
-            let kind = previous.as_ref().map_or(StaticRecordKind::Custom, |r| r.kind);
-            let overrides = previous.as_ref().map_or_else(Vec::new, |r| r.model_config_overrides.clone());
-            let user_models = previous.as_ref().map_or_else(Vec::new, |r| r.user_models.clone());
-            let model_preferences = previous.as_ref().map_or_else(BTreeMap::new, |r| r.model_preferences.clone());
-            let endpoint_overrides = previous.as_ref().map_or_else(BTreeMap::new, |r| r.endpoint_overrides.clone());
-            let disabled = previous.as_ref().map_or_else(Vec::new, |r| r.disabled_model_ids.clone());
-            if let Some(previous) = previous.as_ref().filter(|record| record.kind == StaticRecordKind::Builtin)
-                && (input.display_name != previous.display_name
-                    || input.driver_kind != previous.driver_kind
-                    || input.auth != previous.auth
-                    || input.models.is_some())
-                {
-                    return Err(storage("Builtin provider definition is read-only"));
-                }
-            let definition_fingerprint = previous.as_ref().and_then(|r| r.definition_fingerprint.clone());
-            let remote_models = input.models.is_none() && previous.as_ref().is_some_and(|r| r.remote_models);
-            let models = input.models.or_else(|| previous.as_ref().map(|r| r.models.clone())).ok_or_else(|| storage("New provider requires model descriptors"))?;
-            let headers = input.headers.unwrap_or_else(|| previous.as_ref().map(|r| r.headers.clone()).unwrap_or_default());
-            let network = input.network.unwrap_or_else(|| previous.as_ref().map(|r| r.network.clone()).unwrap_or_default());
-            let endpoint_types = previous.map(|r| r.endpoint_types).unwrap_or_default();
-            let mut record = StaticProviderRecord { kind, display_name: input.display_name, driver_kind: input.driver_kind, auth: input.auth, credential_authority: authority, base_url: input.base_url, network, headers, credential, models, remote_models, endpoint_types, routes: HashMap::new(), bedrock_region: None, model_config_overrides: overrides, user_models, model_preferences, endpoint_overrides, disabled_model_ids: disabled, enabled: input.enabled, definition_fingerprint, version };
-            let id = input.provider_id;
-            validate_static_record(&id, &mut record).map_err(storage)?;
-            tx.execute("INSERT INTO providers(provider_id,version,record) VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![id, version, serde_json::to_string(&record).map_err(storage)?]).map_err(storage)?;
-            tx.commit().map_err(storage)?;
-            let mut summary = static_summary(id, record);
-            if authority != CredentialAuthority::Static { summary.credential_configured = available; }
-            Ok(summary)
-        }).await.map_err(failure) })).await
     }
 
     pub async fn delete_static(

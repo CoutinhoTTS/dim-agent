@@ -3,11 +3,7 @@
 //! definitions, and the row lists the names those parts provide in their
 //! instances (`instanceNames`), which the catalog needs before the runtime
 //! starts (rutis usage §2).
-use crate::{
-    Result, ServerError,
-    methods::ManagementMethods,
-    settings::{SourceDeclaration, WorkflowPackages},
-};
+use crate::{Result, ServerError, methods::ManagementMethods, settings::WorkflowPackages};
 use dim_agent_capabilities::{methods::SessionMethods, tool_registry::ToolRegistry};
 use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, PartRegistry, SESSION_GROUP, names::name_of};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, PluginFactory, TypeKey};
@@ -82,10 +78,39 @@ pub struct SessionTypeScriptConfig {
     pub anchor: PathBuf,
     /// The Python runtime of rows named `py:<module>`, if any.
     pub python: Option<PythonConfig>,
+    /// Set when RuntimeManager acquires the runtimes at these paths: the
+    /// runtime processes start only once it has installed them.
+    pub acquire: Option<Arc<crate::runtime_manager::Runtimes>>,
     /// Loader rows, each a process row. A row may list `instanceNames`, the
     /// names its plugin's parts provide in each Session or branch, as
     /// `{"name": "session" | "branch"}`.
     pub rows: Vec<Value>,
+}
+
+impl SessionTypeScriptConfig {
+    /// The runtimes RuntimeManager acquires into `home` (RuntimeManager
+    /// §2.3), with `rows`. The Python runtime imports plugins from
+    /// `<home>/plugins/.python/` (§4).
+    pub fn acquired(
+        home: &std::path::Path,
+        runtimes: Arc<crate::runtime_manager::Runtimes>,
+        rows: Vec<Value>,
+    ) -> Self {
+        use crate::runtime_manager::Kind;
+        let python = runtimes.plan(Kind::Python);
+        Self {
+            node: runtimes.plan(Kind::Node).interpreter.clone(),
+            js_runtime: runtimes.js_runtime(),
+            anchor: runtimes.anchor(),
+            python: Some(PythonConfig {
+                interpreter: python.interpreter.clone(),
+                project: home.join("plugins").join(".python"),
+                packages: Some(python.packages.clone()),
+            }),
+            acquire: Some(runtimes),
+            rows,
+        }
+    }
 }
 
 /// Python 3.10 or later with the `rutis` package, running the modules of
@@ -94,36 +119,9 @@ pub struct SessionTypeScriptConfig {
 pub struct PythonConfig {
     pub interpreter: PathBuf,
     pub project: PathBuf,
-}
-
-/// The rows' `settings` entries (settings-service §3.1, §5.4): a row's
-/// package declares its sources next to `provides`, and the row id is their
-/// owner. Settings checks and compiles each declaration when it applies.
-pub(crate) fn settings_sources(config: &SessionTypeScriptConfig) -> Result<Vec<SourceDeclaration>> {
-    let mut sources = Vec::new();
-    for row in &config.rows {
-        let Some(entries) = row.get("settings") else {
-            continue;
-        };
-        let owner = row
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                ServerError::Configuration("Session TypeScript row requires id".into())
-            })?;
-        let entries: Vec<SourceDeclaration> =
-            serde_json::from_value(entries.clone()).map_err(|error| {
-                ServerError::Configuration(format!(
-                    "settings of Session TypeScript row {owner}: {error}"
-                ))
-            })?;
-        sources.extend(entries.into_iter().map(|mut entry| {
-            entry.owner = owner.to_owned();
-            entry
-        }));
-    }
-    Ok(sources)
+    /// A directory put ahead on the runtime's `PYTHONPATH`: the installed
+    /// `rutis` package.
+    pub packages: Option<PathBuf>,
 }
 
 /// A runtime of other languages and the resolver of its rows.
@@ -258,7 +256,6 @@ impl Parts {
             snapshots.insert(name.to_owned(), provides.clone());
             let mut row = row.clone();
             if let Value::Object(fields) = &mut row {
-                fields.remove("settings");
                 fields.remove("instanceNames");
             }
             rows.push(row);
@@ -268,8 +265,11 @@ impl Parts {
             .named("session-node");
         let node = ForeignRuntime::new("session-node", node, RuntimeResolver::node, builder);
         let python = config.python.as_ref().map(|python| {
-            let runtime =
+            let mut runtime =
                 LocalRuntime::python(&python.project).interpreter(python.interpreter.clone());
+            if let Some(packages) = &python.packages {
+                runtime = runtime.python_path(packages);
+            }
             ForeignRuntime::new("py", runtime, RuntimeResolver::modules, builder)
         });
         let resolver = Arc::new(SessionResolver {
@@ -326,20 +326,19 @@ impl Resolver for SessionResolver {
         name: &'a str,
     ) -> BoxFuture<'a, std::result::Result<Arc<Resolved>, LoaderError>> {
         Box::pin(async move {
-            let snapshot = self
-                .snapshots
-                .get(name)
-                .ok_or_else(|| LoaderError::NotFound { name: name.into() })?;
+            let snapshot = self.snapshots.get(name);
             let runtime = match &self.python {
                 Some(python) if name.starts_with("py:") => python,
                 _ => &self.node,
             };
             let original = runtime.resolve(name).await?;
-            match original.meta.get("provides") {
-                Some(Value::Object(actual)) if actual == snapshot => {}
-                None if original.meta["source"] == "runtime"
-                    && original.meta["schema"]
-                        == "unavailable: the Cordis runtime is not running" => {}
+            match (snapshot, original.meta.get("provides")) {
+                (None, _) => {}
+                (Some(snapshot), Some(Value::Object(actual))) if actual == snapshot => {}
+                (Some(_), None)
+                    if original.meta["source"] == "runtime"
+                        && original.meta["schema"]
+                            == "unavailable: the Cordis runtime is not running" => {}
                 _ => {
                     return Err(LoaderError::Resolve {
                         name: name.into(),
@@ -467,6 +466,7 @@ mod tests {
             js_runtime: "/nonexistent/runtime.js".into(),
             anchor: "/nonexistent/package.json".into(),
             python: None,
+            acquire: None,
             rows: vec![serde_json::json!({
                 "id": "legacy",
                 "name": "/nonexistent/legacy.js",

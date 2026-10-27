@@ -18,8 +18,8 @@ use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
     model_catalog::ModelEntry,
     provider::{
-        CredentialUpdate, ModelPreferences, ProviderError, ProviderInput, ProviderPlugin,
-        ProviderService, StaticAuth,
+        ConnectionInput, CreateProvider, CredentialUpdate, ModelPreferences, ProviderError,
+        ProviderPlugin, ProviderService, StaticAuth,
     },
     storage::SqliteStoragePlugin,
 };
@@ -177,6 +177,25 @@ fn model(id: &str, max: u64) -> ModelEntry {
         "capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":true,"vision":false,"audio":false,"reasoning":false,"contextWindow":32000,"maxOutputTokens":max}
     })).unwrap()
 }
+const PROXY: &str = "00000000-0000-4000-8000-000000000001";
+const DIRECT: &str = "00000000-0000-4000-8000-000000000002";
+const EXTERNAL: &str = "00000000-0000-4000-8000-000000000003";
+const ANONYMOUS: &str = "00000000-0000-4000-8000-000000000004";
+const REMOTE: &str = "00000000-0000-4000-8000-000000000005";
+const RECREATED: &str = "00000000-0000-4000-8000-000000000006";
+const INVALID_AZURE: &str = "00000000-0000-4000-8000-000000000007";
+const INVALID_ROUTE: &str = "00000000-0000-4000-8000-000000000008";
+const WRONG_AWS: &str = "00000000-0000-4000-8000-000000000009";
+const PROVIDER_A: &str = "00000000-0000-4000-8000-000000000010";
+const PROVIDER_B: &str = "00000000-0000-4000-8000-000000000011";
+const MISSING: &str = "00000000-0000-4000-8000-000000000012";
+const MEDIA: &str = "00000000-0000-4000-8000-000000000013";
+const AUX: &str = "00000000-0000-4000-8000-000000000014";
+const HANG: &str = "00000000-0000-4000-8000-000000000015";
+const PAGED_ANTHROPIC: &str = "00000000-0000-4000-8000-000000000017";
+const PAGED_ANTHROPIC_UNVERSIONED: &str = "00000000-0000-4000-8000-000000000018";
+const PAGED_GOOGLE: &str = "00000000-0000-4000-b000-000000000000";
+
 fn input(
     id: &str,
     base: &str,
@@ -184,19 +203,21 @@ fn input(
     credential: Option<&str>,
     marker: &str,
     max: u64,
-) -> ProviderInput {
-    ProviderInput {
+) -> CreateProvider {
+    CreateProvider {
         provider_id: id.into(),
         display_name: id.into(),
-        driver_kind: "openai-compatible".into(),
-        base_url: base.into(),
-        auth,
-        network: None,
-        headers: Some(HashMap::from([("x-marker".into(), marker.into())])),
-        credential: credential.map(|value| CredentialUpdate::Set {
-            value: value.into(),
-        }),
-        models: Some(vec![model("same", max)]),
+        connection: ConnectionInput {
+            driver_kind: "openai-compatible".into(),
+            base_url: base.into(),
+            auth,
+            network: None,
+            headers: Some(HashMap::from([("x-marker".into(), marker.into())])),
+            credential: credential.map(|value| CredentialUpdate::Set {
+                value: value.into(),
+            }),
+        },
+        models: vec![model("same", max)],
         enabled: true,
     }
 }
@@ -286,7 +307,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
         let resolver = root.get::<ProviderConnectionResolver>().unwrap();
         let host = root.get::<ModelHost>().unwrap();
         let mut config = input(
-            "proxy",
+            PROXY,
             &base,
             StaticAuth::Bearer,
             Some("model-secret"),
@@ -294,48 +315,49 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             47,
         );
         if !restart {
-            config.network = Some(ModelNetwork {
+            config.connection.network = Some(ModelNetwork {
                 proxy: Some(proxy.clone()),
                 timeout_ms: Some(3000),
             });
-            let saved = provider
-                .save_static(config.clone(), None, &cancel)
-                .await
-                .unwrap();
-            assert!(saved.proxy_configured);
-            assert_eq!(saved.timeout_ms, Some(3000));
+            let saved = provider.create(config.clone(), &cancel).await.unwrap();
+            assert!(saved.connection.as_ref().unwrap().proxy_url.is_some());
+            assert_eq!(saved.connection.as_ref().unwrap().timeout_ms, Some(3000));
             let mut other = config.clone();
-            other.provider_id = "direct".into();
-            other.network = None;
-            provider.save_static(other, None, &cancel).await.unwrap();
-            config.network = None;
+            other.provider_id = DIRECT.into();
+            other.connection.network = None;
+            provider.create(other, &cancel).await.unwrap();
             let kept = provider
-                .save_static(config.clone(), Some(saved.version), &cancel)
+                .update(
+                    config.provider_id.clone(),
+                    saved.version.unwrap(),
+                    serde_json::from_value(json!({"displayName":config.display_name})).unwrap(),
+                    &cancel,
+                )
                 .await
                 .unwrap();
-            assert!(kept.proxy_configured);
+            assert!(kept.connection.as_ref().unwrap().proxy_url.is_some());
             for network in [
-                json!({"proxy":"socks5://localhost:1080"}),
-                json!({"proxy":"https://host/path"}),
-                json!({"proxy":"https://host?secret=value"}),
-                json!({"timeoutMs":0}),
-                json!({"timeoutMs":9_007_199_254_740_992u64}),
+                json!({"proxy":{"action":"set","value":"socks5://localhost:1080"}}),
+                json!({"proxy":{"action":"set","value":"https://host/path"}}),
+                json!({"proxy":{"action":"set","value":"https://host?secret=value"}}),
+                json!({"timeoutMs":{"action":"set","value":0}}),
+                json!({"timeoutMs":{"action":"set","value":9_007_199_254_740_992u64}}),
             ] {
-                let mut invalid = config.clone();
-                invalid.network = Some(serde_json::from_value(network).unwrap());
-                assert!(
-                    provider
-                        .save_static(invalid, Some(kept.version), &cancel)
-                        .await
-                        .is_err()
-                );
+                if let Ok(patch) = serde_json::from_value(json!({"network":network})) {
+                    assert!(
+                        provider
+                            .update(PROXY.into(), kept.version.unwrap(), patch, &cancel)
+                            .await
+                            .is_err()
+                    );
+                }
             }
         }
         let listing = provider.list(&cancel).await.unwrap();
         let summary = listing
             .providers
             .iter()
-            .find(|p| p.provider_id == "proxy")
+            .find(|p| p.provider_id == PROXY)
             .unwrap();
         assert!(summary.proxy_configured);
         assert!(
@@ -344,7 +366,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 .contains("proxy-secret")
         );
         let mut version = summary.version;
-        for id in ["proxy", "direct"] {
+        for id in [PROXY, DIRECT] {
             let selection = provider
                 .configuration(Some(target(id)), None, ModelPreferences::default(), &cancel)
                 .await
@@ -374,7 +396,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
         }
         assert_eq!(direct.lock().unwrap().len(), if restart { 2 } else { 1 });
         assert_eq!(proxied.lock().unwrap().len(), if restart { 3 } else { 1 });
-        let refreshed = provider.refresh_for("proxy".into(), &cancel).await.unwrap();
+        let refreshed = provider.refresh_for(PROXY.into(), &cancel).await.unwrap();
         assert_eq!(refreshed.version, version + 1);
         version = refreshed.version;
         {
@@ -392,47 +414,37 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             let unused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let dead = format!("http://user:private-proxy@{}", unused.local_addr().unwrap());
             drop(unused);
-            config.network = Some(ModelNetwork {
-                proxy: Some(dead),
-                timeout_ms: Some(500),
-            });
             version = provider
-                .save_static(config.clone(), Some(version), &cancel)
+                .update(PROXY.into(), version, serde_json::from_value(json!({"network":{"proxy":{"action":"set","value":dead},"timeoutMs":{"action":"set","value":500}}})).unwrap(), &cancel)
                 .await
                 .unwrap()
-                .version;
+                .version.unwrap();
             let error = provider
-                .refresh_for("proxy".into(), &cancel)
+                .refresh_for(PROXY.into(), &cancel)
                 .await
                 .err()
                 .unwrap();
             assert!(!error.to_string().contains("private-proxy"));
             assert_eq!(direct.lock().unwrap().len(), 2);
-            config.network = Some(ModelNetwork::default());
             provider
-                .save_static(config.clone(), Some(version), &cancel)
+                .update(PROXY.into(), version, serde_json::from_value(json!({"network":{"proxy":{"action":"clear"},"timeoutMs":{"action":"clear"}}})).unwrap(), &cancel)
                 .await
                 .unwrap();
             version = provider
-                .refresh_for("proxy".into(), &cancel)
+                .refresh_for(PROXY.into(), &cancel)
                 .await
                 .unwrap()
                 .version;
             assert_eq!(direct.lock().unwrap().len(), 3);
-            config.base_url = format!("http://{}/slow/v1", addresses[0]);
-            config.network = Some(ModelNetwork {
-                proxy: None,
-                timeout_ms: Some(500),
-            });
             version = provider
-                .save_static(config.clone(), Some(version), &cancel)
+                .update(PROXY.into(), version, serde_json::from_value(json!({"baseUrl":format!("http://{}/slow/v1", addresses[0]),"network":{"timeoutMs":{"action":"set","value":500}}})).unwrap(), &cancel)
                 .await
                 .unwrap()
-                .version;
+                .version.unwrap();
             assert!(
                 tokio::time::timeout(
                     std::time::Duration::from_secs(3),
-                    provider.refresh_for("proxy".into(), &cancel)
+                    provider.refresh_for(PROXY.into(), &cancel)
                 )
                 .await
                 .unwrap()
@@ -440,7 +452,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             );
             assert_eq!(
                 provider
-                    .catalog_for("proxy".into(), &cancel)
+                    .catalog_for(PROXY.into(), &cancel)
                     .await
                     .unwrap()
                     .unwrap()
@@ -449,7 +461,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             );
             let selection = provider
                 .configuration(
-                    Some(target("proxy")),
+                    Some(target(PROXY)),
                     None,
                     ModelPreferences::default(),
                     &cancel,
@@ -458,7 +470,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 .unwrap();
             let request = Arc::new(ModelRequest {
                 capability_snapshot: selection.capability_snapshot,
-                ..ModelRequest::new("proxy", "same", vec![Message::text(Role::User, "hello")])
+                ..ModelRequest::new(PROXY, "same", vec![Message::text(Role::User, "hello")])
             });
             let connection = resolver
                 .0
@@ -485,9 +497,16 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             .unwrap();
             assert_eq!(text, "network reply");
             assert!(failed && !stopped);
-            config.base_url = format!("http://{}/redirect/v1", addresses[0]);
             provider
-                .save_static(config, Some(version), &cancel)
+                .update(
+                    PROXY.into(),
+                    version,
+                    serde_json::from_value(
+                        json!({"baseUrl":format!("http://{}/redirect/v1", addresses[0])}),
+                    )
+                    .unwrap(),
+                    &cancel,
+                )
                 .await
                 .unwrap();
             let before = direct.lock().unwrap().len();
@@ -583,40 +602,34 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     active(&plain).await;
     let provider = root.get::<ProviderService>().unwrap();
     let cancel = CancellationToken::new();
-    let mut config = input("external", &base, StaticAuth::Bearer, None, "secrets", 43);
-    config.credential = Some(CredentialUpdate::SetRef {
+    let mut config = input(EXTERNAL, &base, StaticAuth::Bearer, None, "secrets", 43);
+    config.connection.credential = Some(CredentialUpdate::SetRef {
         reference: "opaque-account-key".into(),
     });
     let mut invalid = config.clone();
-    invalid.auth = StaticAuth::ApiKey {
+    invalid.connection.auth = StaticAuth::ApiKey {
         header_name: "x-key".into(),
         prefix: "bad\r\nprefix".into(),
     };
-    assert!(provider.save_static(invalid, None, &cancel).await.is_err());
-    let summary = provider
-        .save_static(config.clone(), None, &cancel)
-        .await
-        .unwrap();
-    assert!(summary.credential_configured);
+    assert!(provider.create(invalid, &cancel).await.is_err());
+    let summary = provider.create(config.clone(), &cancel).await.unwrap();
+    assert!(summary.connection.as_ref().unwrap().credential_configured);
     assert!(
         !serde_json::to_string(&summary)
             .unwrap()
             .contains("opaque-account-key")
     );
     assert!(matches!(
-        provider.refresh_for("external".into(), &cancel).await,
+        provider.refresh_for(EXTERNAL.into(), &cancel).await,
         Err(ProviderError::Unsupported(_))
     ));
     let mut anonymous = config.clone();
-    anonymous.provider_id = "anonymous".into();
-    anonymous.auth = StaticAuth::Anonymous;
-    provider
-        .save_static(anonymous, None, &cancel)
-        .await
-        .unwrap();
+    anonymous.provider_id = ANONYMOUS.into();
+    anonymous.connection.auth = StaticAuth::Anonymous;
+    provider.create(anonymous, &cancel).await.unwrap();
     let anonymous = provider
         .configuration(
-            Some(target("anonymous")),
+            Some(target(ANONYMOUS)),
             None,
             ModelPreferences::default(),
             &cancel,
@@ -625,7 +638,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
         .unwrap();
     let anonymous = Arc::new(ModelRequest {
         capability_snapshot: anonymous.capability_snapshot,
-        ..ModelRequest::new("anonymous", "same", vec![])
+        ..ModelRequest::new(ANONYMOUS, "same", vec![])
     });
     let anonymous = root
         .get::<ProviderConnectionResolver>()
@@ -639,7 +652,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     );
     let selection = provider
         .configuration(
-            Some(target("external")),
+            Some(target(EXTERNAL)),
             None,
             ModelPreferences::default(),
             &cancel,
@@ -649,7 +662,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     let request = Arc::new(ModelRequest {
         capability_snapshot: selection.capability_snapshot,
         config: selection.config,
-        ..ModelRequest::new("external", "same", vec![Message::text(Role::User, "hello")])
+        ..ModelRequest::new(EXTERNAL, "same", vec![Message::text(Role::User, "hello")])
     });
     assert!(matches!(
         root.get::<ProviderConnectionResolver>()
@@ -723,7 +736,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     for token in ["resolved-first", "resolved-rotated"] {
         let task = spawn(cancel.clone());
         let (id, reference, reply) = lookups.recv().await.unwrap();
-        assert_eq!(id, "external");
+        assert_eq!(id, EXTERNAL);
         assert_eq!(reference, "opaque-account-key");
         assert!(reply.send(Ok(ProviderSecret::Token(token.into()))).is_ok());
         let resolved = task.await.unwrap().unwrap();
@@ -753,7 +766,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     let owner = provider.clone();
     let refresh = tokio::spawn(async move {
         owner
-            .refresh_for("external".into(), &CancellationToken::new())
+            .refresh_for(EXTERNAL.into(), &CancellationToken::new())
             .await
     });
     let (_, _, reply) = lookups.recv().await.unwrap();
@@ -770,8 +783,8 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
     let record: String = db
         .query_row(
-            "SELECT record FROM providers WHERE provider_id='external'",
-            [],
+            "SELECT record FROM providers WHERE provider_id=?1",
+            [EXTERNAL],
             |r| r.get(0),
         )
         .unwrap();
@@ -937,21 +950,18 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         before_probe
     );
     let mut config = input(
-        "remote",
+        REMOTE,
         &format!("{base}/tenant/v1beta"),
         StaticAuth::Bearer,
         Some("catalog-key"),
         "refresh",
         37,
     );
-    config.driver_kind = "new-api-router".into();
-    provider
-        .save_static(config.clone(), None, &cancel)
-        .await
-        .unwrap();
+    config.connection.driver_kind = "new-api-router".into();
+    provider.create(config.clone(), &cancel).await.unwrap();
     let admitted = serde_json::to_value(
         provider
-            .management(Some("remote".into()), &cancel)
+            .management(Some(REMOTE.into()), &cancel)
             .await
             .unwrap(),
     )
@@ -959,7 +969,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     let probe = {
         let provider = provider.clone();
         let cancel = cancel.clone();
-        let input = serde_json::from_value(json!({"providerId":"remote","connection":{"baseUrl":format!("{base}/changed/v1"),"headers":[{"name":"x-draft","action":"set","value":"unsaved-header"}]}})).unwrap();
+        let input = serde_json::from_value(json!({"providerId":REMOTE,"connection":{"baseUrl":format!("{base}/changed/v1"),"headers":[{"name":"x-draft","action":"set","value":"unsaved-header"}]}})).unwrap();
         tokio::spawn(async move { provider.probe(input, &cancel).await })
     };
     let (uri, headers, reply) = requests.recv().await.unwrap();
@@ -973,7 +983,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     assert_eq!(
         serde_json::to_value(
             provider
-                .management(Some("remote".into()), &cancel)
+                .management(Some(REMOTE.into()), &cancel)
                 .await
                 .unwrap()
         )
@@ -982,7 +992,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     );
     let edited = provider
         .update_model_config(
-            "remote".into(),
+            REMOTE.into(),
             1,
             "same".into(),
             serde_json::from_value(json!({"displayName":"My model","maxOutputTokens":91})).unwrap(),
@@ -991,7 +1001,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         .await
         .unwrap();
     let disabled = provider
-        .set_enabled_models("remote".into(), edited.version, vec![], &cancel)
+        .set_enabled_models(REMOTE.into(), edited.version, vec![], &cancel)
         .await
         .unwrap();
     let spawn = |id: &str, cancel: CancellationToken| {
@@ -999,7 +1009,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         let id = id.to_owned();
         tokio::spawn(async move { provider.refresh_for(id, &cancel).await })
     };
-    let refresh = spawn("remote", cancel.clone());
+    let refresh = spawn(REMOTE, cancel.clone());
     let (uri, headers, reply) = requests.recv().await.unwrap();
     assert_eq!(uri.path(), "/tenant/v1/models");
     assert_eq!(headers["authorization"], "Bearer catalog-key");
@@ -1015,10 +1025,33 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     assert_eq!(result.models[0].config.max_tokens, Some(91.0));
     assert_eq!(result.models[1].capabilities.context_window, 83003);
     assert_eq!(result.models[1].config.max_tokens, Some(509.0));
+    let refresh = spawn(REMOTE, cancel.clone());
+    requests.recv().await.unwrap().2.send((StatusCode::OK,
+        Json(json!({"data":[{"id":"other","context_window":83003,"max_output_tokens":509,"endpoint_type":"openai-response"}]})))).unwrap();
+    let missing = refresh.await.unwrap().unwrap();
+    let chosen = provider
+        .set_enabled_models(
+            REMOTE.into(),
+            missing.version,
+            vec!["other".into()],
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(chosen.disabled_model_ids.contains(&"same".into()));
+    let refresh = spawn(REMOTE, cancel.clone());
+    requests.recv().await.unwrap().2.send((StatusCode::OK, Json(json!({"data":[
+        {"id":"same","context_window":65001,"max_output_tokens":407,"endpoint_type":"anthropic"},
+        {"id":"other","context_window":83003,"max_output_tokens":509,"endpoint_type":"openai-response"}
+    ]})))).unwrap();
+    let result = refresh.await.unwrap().unwrap();
+    assert!(result.disabled_model_ids.contains(&"same".into()));
+    assert_eq!(result.models[0].name, "My model");
+    assert_eq!(result.models[0].config.max_tokens, Some(91.0));
     let selection = provider
         .configuration(
             Some(ModelId {
-                provider_id: "remote".into(),
+                provider_id: REMOTE.into(),
                 model_id: "other".into(),
             }),
             None,
@@ -1033,7 +1066,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         .resolve(
             Arc::new(ModelRequest {
                 capability_snapshot: selection.capability_snapshot,
-                ..ModelRequest::new("remote", "other", vec![])
+                ..ModelRequest::new(REMOTE, "other", vec![])
             }),
             cancel.clone(),
         )
@@ -1067,7 +1100,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             json!({"data":[{"id":"bad","limit":{"output":1.5}}]}),
         ),
     ] {
-        let refresh = spawn("remote", cancel.clone());
+        let refresh = spawn(REMOTE, cancel.clone());
         requests
             .recv()
             .await
@@ -1078,7 +1111,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         assert!(refresh.await.unwrap().is_err());
         assert_eq!(
             provider
-                .catalog_for("remote".into(), &cancel)
+                .catalog_for(REMOTE.into(), &cancel)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1086,13 +1119,15 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             result.version
         );
     }
-    let refresh = spawn("remote", cancel.clone());
+    let refresh = spawn(REMOTE, cancel.clone());
     let (_, _, reply) = requests.recv().await.unwrap();
-    config.models = None;
-    config.credential = None;
-    config.display_name = "Changed while refreshing".into();
     let saved = provider
-        .save_static(config, Some(result.version), &cancel)
+        .update(
+            REMOTE.into(),
+            result.version,
+            serde_json::from_value(json!({"displayName":"Changed while refreshing"})).unwrap(),
+            &cancel,
+        )
         .await
         .unwrap();
     reply
@@ -1103,7 +1138,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         Err(ProviderError::Conflict(_))
     ));
     let cancelled = CancellationToken::new();
-    let refresh = spawn("remote", cancelled.clone());
+    let refresh = spawn(REMOTE, cancelled.clone());
     let (_, _, reply) = requests.recv().await.unwrap();
     cancelled.cancel();
     assert!(
@@ -1116,15 +1151,15 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     drop(reply);
     assert_eq!(
         provider
-            .catalog_for("remote".into(), &cancel)
+            .catalog_for(REMOTE.into(), &cancel)
             .await
             .unwrap()
             .unwrap()
             .version,
-        saved.version
+        saved.version.unwrap()
     );
 
-    let refresh = spawn("remote", cancel.clone());
+    let refresh = spawn(REMOTE, cancel.clone());
     requests
         .recv()
         .await
@@ -1142,14 +1177,14 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             .unwrap()
             .providers
             .iter()
-            .find(|p| p.provider_id == "remote")
+            .find(|p| p.provider_id == REMOTE)
             .unwrap()
             .enabled
     );
 
     for (id, driver, header, prefix, path, first, next, second) in [
         (
-            "paged-google",
+            PAGED_GOOGLE,
             "gemini",
             "x-goog-api-key",
             "/tenant/v1beta/",
@@ -1159,7 +1194,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             json!({"models":[{"name":"models/last","inputTokenLimit":19009,"outputTokenLimit":109,"supportedGenerationMethods":["embedContent"]}]}),
         ),
         (
-            "paged-anthropic",
+            PAGED_ANTHROPIC,
             "anthropic",
             "x-api-key",
             "/tenant/v1/",
@@ -1169,7 +1204,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             json!({"data":[{"id":"last"}],"has_more":false}),
         ),
         (
-            "paged-anthropic-unversioned",
+            PAGED_ANTHROPIC_UNVERSIONED,
             "anthropic",
             "x-api-key",
             "/tenant",
@@ -1190,9 +1225,9 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             "pages",
             41,
         );
-        config.driver_kind = driver.into();
-        config.models = Some(Vec::new());
-        provider.save_static(config, None, &cancel).await.unwrap();
+        config.connection.driver_kind = driver.into();
+        config.models = Vec::new();
+        provider.create(config, &cancel).await.unwrap();
         assert!(
             provider
                 .configuration(
@@ -1264,32 +1299,26 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         );
     }
     let aba = input(
-        "recreated",
+        RECREATED,
         &base,
         StaticAuth::Bearer,
         Some("old-key"),
         "old",
         23,
     );
-    provider
-        .save_static(aba.clone(), None, &cancel)
-        .await
-        .unwrap();
-    let refresh = spawn("recreated", cancel.clone());
+    provider.create(aba.clone(), &cancel).await.unwrap();
+    let refresh = spawn(RECREATED, cancel.clone());
     let (_, _, reply) = requests.recv().await.unwrap();
     provider
-        .delete_static("recreated".into(), 1, &cancel)
+        .delete_static(RECREATED.into(), 1, &cancel)
         .await
         .unwrap();
     let mut replacement = aba;
-    replacement.credential = Some(CredentialUpdate::Set {
+    replacement.connection.credential = Some(CredentialUpdate::Set {
         value: "new-key".into(),
     });
-    replacement.models = Some(vec![model("replacement", 71)]);
-    provider
-        .save_static(replacement, None, &cancel)
-        .await
-        .unwrap();
+    replacement.models = vec![model("replacement", 71)];
+    provider.create(replacement, &cancel).await.unwrap();
     reply
         .send((StatusCode::OK, Json(json!({"data":[]}))))
         .unwrap();
@@ -1299,7 +1328,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     );
     assert_eq!(
         provider
-            .catalog_for("recreated".into(), &cancel)
+            .catalog_for(RECREATED.into(), &cancel)
             .await
             .unwrap()
             .unwrap()
@@ -1316,24 +1345,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         .find(|p| p.provider_id == "openai")
         .unwrap();
     provider
-        .save_static(
-            ProviderInput {
-                provider_id: builtin.provider_id,
-                display_name: builtin.display_name,
-                driver_kind: builtin.driver_kind,
-                auth: builtin.auth,
-                base_url: format!("{base}/v1"),
-                network: None,
-                headers: None,
-                credential: Some(CredentialUpdate::Set {
-                    value: "builtin-key".into(),
-                }),
-                models: None,
-                enabled: true,
-            },
-            Some(builtin.version),
-            &cancel,
-        )
+        .update(builtin.provider_id, builtin.version, serde_json::from_value(json!({"baseUrl":format!("{base}/v1"),"credential":{"action":"set","value":"builtin-key"},"enabled":true})).unwrap(), &cancel)
         .await
         .unwrap();
     let refresh = spawn("openai", cancel.clone());
@@ -1355,32 +1367,27 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             .contains("does not support")
     );
     let current = provider
-        .catalog_for("remote".into(), &cancel)
+        .catalog_for(REMOTE.into(), &cancel)
         .await
         .unwrap()
         .unwrap();
     let manual = provider
-        .create_model(
-            "remote".into(),
-            current.version,
-            model("manual", 77),
-            &cancel,
-        )
+        .create_model(REMOTE.into(), current.version, model("manual", 77), &cancel)
         .await
         .unwrap();
     assert!(manual.models.iter().any(|model| model.id == "manual"));
-    let refresh = spawn("remote", cancel.clone());
+    let refresh = spawn(REMOTE, cancel.clone());
     requests.recv().await.unwrap().2.send((StatusCode::OK, Json(json!({"data":[
         {"id":"gone","context_window":3000,"max_output_tokens":90,"endpoint_type":"openai-response"},
         {"id":"stable","context_window":4000,"max_output_tokens":100,"endpoint_type":"gemini"}
     ]})))).unwrap();
     let fresh = refresh.await.unwrap().unwrap();
     assert!(fresh.models.iter().any(|model| model.id == "manual"));
-    let edited_default = provider.update_model_config("remote".into(), fresh.version, "gone".into(),
+    let edited_default = provider.update_model_config(REMOTE.into(), fresh.version, "gone".into(),
         Some(serde_json::from_value(json!({"displayName":"Former default","endpoint":{"action":"set","value":"anthropic"}})).unwrap()), &cancel).await.unwrap();
     let disabled_user = provider
         .set_enabled_models(
-            "remote".into(),
+            REMOTE.into(),
             edited_default.version,
             vec!["stable".into()],
             &cancel,
@@ -1393,7 +1400,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             .iter()
             .any(|id| id == "manual")
     );
-    let refresh = spawn("remote", cancel.clone());
+    let refresh = spawn(REMOTE, cancel.clone());
     requests.recv().await.unwrap().2.send((StatusCode::OK, Json(json!({"data":[
         {"id":"stable","context_window":4000,"max_output_tokens":100,"endpoint_type":"gemini"}
     ]})))).unwrap();
@@ -1402,7 +1409,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     user.metadata =
         Some(serde_json::from_value(json!({"raw":{"endpointType":"openai-response"}})).unwrap());
     let created = provider
-        .create_model("remote".into(), disappeared.version, user.clone(), &cancel)
+        .create_model(REMOTE.into(), disappeared.version, user.clone(), &cancel)
         .await
         .unwrap();
     let gone = created
@@ -1423,7 +1430,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         assert!(matches!(
             provider
                 .create_model(
-                    "remote".into(),
+                    REMOTE.into(),
                     created.version,
                     model(duplicate, 333),
                     &cancel
@@ -1435,7 +1442,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     assert!(matches!(
         provider
             .create_model(
-                "remote".into(),
+                REMOTE.into(),
                 created.version - 1,
                 model("stale", 333),
                 &cancel
@@ -1445,7 +1452,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     ));
     let edited_user = provider
         .update_model_config(
-            "remote".into(),
+            REMOTE.into(),
             created.version,
             "gone".into(),
             Some(
@@ -1477,7 +1484,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         .select(
             Some(&home),
             ModelId {
-                provider_id: "remote".into(),
+                provider_id: REMOTE.into(),
                 model_id: "gone".into(),
             },
             selected,
@@ -1486,7 +1493,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         .await
         .unwrap();
     let deleted = provider
-        .delete_model("remote".into(), edited_user.version, "gone".into(), &cancel)
+        .delete_model(REMOTE.into(), edited_user.version, "gone".into(), &cancel)
         .await
         .unwrap();
     assert!(
@@ -1499,12 +1506,12 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     assert!(!deleted.models.iter().any(|model| model.id == "gone"));
     assert!(matches!(
         provider
-            .delete_model("remote".into(), deleted.version, "stable".into(), &cancel)
+            .delete_model(REMOTE.into(), deleted.version, "stable".into(), &cancel)
             .await,
         Err(dim_app_server::provider::ProviderError::Unsupported(_))
     ));
     let recreated = provider
-        .create_model("remote".into(), deleted.version, user, &cancel)
+        .create_model(REMOTE.into(), deleted.version, user, &cancel)
         .await
         .unwrap();
     let gone = recreated
@@ -1520,7 +1527,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     assert!(!recreated.disabled_model_ids.iter().any(|id| id == "gone"));
     let route_only = provider
         .update_model_config(
-            "remote".into(),
+            REMOTE.into(),
             recreated.version,
             "stable".into(),
             Some(
@@ -1533,7 +1540,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         )
         .await
         .unwrap();
-    let refresh = spawn("remote", cancel.clone());
+    let refresh = spawn(REMOTE, cancel.clone());
     requests.recv().await.unwrap().2.send((StatusCode::OK, Json(json!({"data":[
         {"id":"stable","context_window":9002,"max_output_tokens":902,"endpoint_type":"anthropic"}
     ]})))).unwrap();
@@ -1555,7 +1562,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     );
     let cleared = provider
         .update_model_config(
-            "remote".into(),
+            REMOTE.into(),
             followed.version,
             "stable".into(),
             Some(serde_json::from_value(json!({"endpoint":{"action":"clear"}})).unwrap()),
@@ -1573,7 +1580,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         Some(dim_agent_capabilities::host::ModelProtocol::Anthropic)
     );
     let before_collision = serde_json::to_value(&cleared).unwrap();
-    let refresh = spawn("remote", cancel.clone());
+    let refresh = spawn(REMOTE, cancel.clone());
     requests
         .recv()
         .await
@@ -1593,7 +1600,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     assert_eq!(
         serde_json::to_value(
             provider
-                .catalog_for("remote".into(), &cancel)
+                .catalog_for(REMOTE.into(), &cancel)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1602,7 +1609,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         before_collision
     );
     let retained = provider
-        .catalog_for("remote".into(), &cancel)
+        .catalog_for(REMOTE.into(), &cancel)
         .await
         .unwrap()
         .unwrap();
@@ -1612,8 +1619,8 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         db.execute("UPDATE providers SET record=json_set(record,'$.definitionFingerprint','previous-bundle') WHERE provider_id='openai'", []).unwrap();
         db.execute("UPDATE providers SET record=json_set(record,'$.modelPreferences',json(?1)) WHERE provider_id='openai'",
             [json!({"gpt-5-nano":{"reasoningEffort":"high"}}).to_string()]).unwrap();
-        db.execute("UPDATE providers SET record=json_set(record,'$.modelPreferences',json(?1)) WHERE provider_id='remote'",
-            [json!({"gone":{"reasoningEffort":"high"}}).to_string()]).unwrap();
+        db.execute("UPDATE providers SET record=json_set(record,'$.modelPreferences',json(?1)) WHERE provider_id=?2",
+            [json!({"gone":{"reasoningEffort":"high"}}).to_string(), REMOTE.into()]).unwrap();
     }
     let root = Ctx::root().unwrap();
     root.plugin(
@@ -1654,7 +1661,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     assert_eq!(
         serde_json::to_value(
             reopened
-                .catalog_for("remote".into(), &cancel)
+                .catalog_for(REMOTE.into(), &cancel)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1666,7 +1673,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     let selected = reopened
         .configuration(
             Some(ModelId {
-                provider_id: "remote".into(),
+                provider_id: REMOTE.into(),
                 model_id: "gone".into(),
             }),
             None,
@@ -1694,12 +1701,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         "reseed preserves optional preference fields without introducing nulls"
     );
     drop(db);
-    assert!(
-        provider
-            .refresh_for("remote".into(), &cancel)
-            .await
-            .is_err()
-    );
+    assert!(provider.refresh_for(REMOTE.into(), &cancel).await.is_err());
     root.shutdown().await.unwrap();
     server.abort();
     let _ = server.await;
@@ -1824,7 +1826,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
     .into_iter()
     .enumerate()
     {
-        let id = format!("route-{index}");
+        let id = format!("00000000-0000-4000-9000-{index:012}");
         let base = format!("http://{address}/{id}/v1/");
         let mut input = input(
             &id,
@@ -1834,11 +1836,11 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
             "kept",
             1357,
         );
-        input.driver_kind = driver.into();
+        input.connection.driver_kind = driver.into();
         let azure = driver == "azure-openai";
         if azure {
-            input.base_url = "https://fixture.services.ai.azure.com/openai/".into();
-            input.auth = StaticAuth::ApiKey {
+            input.connection.base_url = "https://fixture.services.ai.azure.com/openai/".into();
+            input.connection.auth = StaticAuth::ApiKey {
                 header_name: "api-key".into(),
                 prefix: String::new(),
             };
@@ -1852,25 +1854,27 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
             }))
             .unwrap(),
         );
-        input.models = Some(vec![entry]);
+        input.models = vec![entry];
         if app_code == Some("custom-code") {
             input
+                .connection
                 .headers
                 .as_mut()
                 .unwrap()
                 .insert("app-code".into(), "custom-code".into());
         }
         if model_id == "custom-header" {
-            input.auth = StaticAuth::CustomHeader {
+            input.connection.auth = StaticAuth::CustomHeader {
                 header_name: "app-code".into(),
             };
             input
+                .connection
                 .headers
                 .as_mut()
                 .unwrap()
                 .insert("Authorization".into(), "Bearer fixture-secret".into());
         }
-        provider.save_static(input, None, &cancel).await.unwrap();
+        provider.create(input, &cancel).await.unwrap();
         let target = ModelId {
             provider_id: id.clone(),
             model_id: model_id.into(),
@@ -2034,18 +2038,15 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
         "https://fixture.openai.azure.com/openai?api-version=v1",
     ] {
         let mut invalid = input(
-            "invalid-azure",
+            INVALID_AZURE,
             base,
             StaticAuth::Bearer,
             Some("key"),
             "",
             1357,
         );
-        invalid.driver_kind = "azure-openai".into();
-        assert!(
-            provider.save_static(invalid, None, &cancel).await.is_err(),
-            "{base}"
-        );
+        invalid.connection.driver_kind = "azure-openai".into();
+        assert!(provider.create(invalid, &cancel).await.is_err(), "{base}");
     }
     let azure = provider
         .list(&cancel)
@@ -2099,7 +2100,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
         let resolver = root.get::<ProviderConnectionResolver>().unwrap();
         let host = root.get::<ModelHost>().unwrap();
         let cancel = CancellationToken::new();
-        for (model_id, raw, suffix) in [
+        for (index, (model_id, raw, suffix)) in [
             (
                 "claude-explicit",
                 json!({"endpointType":"openai-response"}),
@@ -2158,8 +2159,8 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 json!({"endpointType":"openai-response-compact"}),
                 None,
             ),
-        ] {
-            let id = format!("router-{model_id}");
+        ].into_iter().enumerate() {
+            let id = format!("00000000-0000-4000-a000-{index:012}");
             if !restart {
                 let mut entry = model(model_id, 765);
                 entry.metadata = Some(serde_json::from_value(json!({"raw":raw})).unwrap());
@@ -2171,9 +2172,9 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                     "router",
                     765,
                 );
-                input.driver_kind = "new-api-router".into();
-                input.models = Some(vec![entry]);
-                provider.save_static(input, None, &cancel).await.unwrap();
+                input.connection.driver_kind = "new-api-router".into();
+                input.models = vec![entry];
+                provider.create(input, &cancel).await.unwrap();
             }
             let target = ModelId {
                 provider_id: id.clone(),
@@ -2405,19 +2406,19 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
             let mut entry = model("invalid", 1000);
             entry.metadata = Some(serde_json::from_value(json!({"raw":raw})).unwrap());
             let mut input = input(
-                "invalid-route",
+                INVALID_ROUTE,
                 &format!("http://{address}"),
                 StaticAuth::Anonymous,
                 None,
                 "bad",
                 1000,
             );
-            input.driver_kind = "new-api-router".into();
-            input.models = Some(vec![entry]);
-            assert!(provider.save_static(input, None, &cancel).await.is_err());
+            input.connection.driver_kind = "new-api-router".into();
+            input.models = vec![entry];
+            assert!(provider.create(input, &cancel).await.is_err());
             assert!(
                 provider
-                    .catalog_for("invalid-route".into(), &cancel)
+                    .catalog_for(INVALID_ROUTE.into(), &cancel)
                     .await
                     .unwrap()
                     .is_none()
@@ -2433,30 +2434,10 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
             .unwrap();
         if !restart {
             saved_version = provider
-                .save_static(
-                    ProviderInput {
-                        provider_id: builtin.provider_id,
-                        display_name: builtin.display_name,
-                        driver_kind: builtin.driver_kind,
-                        auth: builtin.auth,
-                        base_url: format!("http://{address}/go/v1"),
-                        network: None,
-                        headers: Some(HashMap::from([(
-                            "X-OpenCode-Session".into(),
-                            "stale".into(),
-                        )])),
-                        credential: Some(CredentialUpdate::Set {
-                            value: "builtin-key".into(),
-                        }),
-                        models: None,
-                        enabled: true,
-                    },
-                    Some(builtin.version),
-                    &cancel,
-                )
+                .update(builtin.provider_id, builtin.version, serde_json::from_value(json!({"baseUrl":format!("http://{address}/go/v1"),"headers":[{"name":"X-OpenCode-Session","action":"set","value":"stale"}],"credential":{"action":"set","value":"builtin-key"},"enabled":true})).unwrap(), &cancel)
                 .await
                 .unwrap()
-                .version;
+                .version.unwrap();
         } else {
             assert_eq!(
                 builtin.version, saved_version,
@@ -2876,31 +2857,10 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .unwrap();
     assert_eq!(bedrock.auth, StaticAuth::AwsBedrock);
     let bedrock = provider
-        .save_static(
-            ProviderInput {
-                provider_id: bedrock.provider_id.clone(),
-                display_name: bedrock.display_name,
-                driver_kind: bedrock.driver_kind,
-                base_url: "https://bedrock-runtime.us-west-2.amazonaws.com".into(),
-                auth: bedrock.auth,
-                network: None,
-                headers: Some(HashMap::from([("x-marker".into(), "safe".into())])),
-                credential: Some(CredentialUpdate::SetAws {
-                    value: AwsCredentials {
-                        access_key_id: "fixture-access".into(),
-                        secret_access_key: "fixture-secret".into(),
-                        session_token: Some("fixture-session".into()),
-                    },
-                }),
-                models: None,
-                enabled: true,
-            },
-            Some(bedrock.version),
-            &cancel,
-        )
+        .update(bedrock.provider_id.clone(), bedrock.version, serde_json::from_value(json!({"baseUrl":"https://bedrock-runtime.us-west-2.amazonaws.com","headers":[{"name":"x-marker","action":"set","value":"safe"}],"credential":{"action":"set_aws","value":{"accessKeyId":"fixture-access","secretAccessKey":"fixture-secret","sessionToken":"fixture-session"}},"enabled":true})).unwrap(), &cancel)
         .await
         .unwrap();
-    assert!(bedrock.credential_configured);
+    assert!(bedrock.connection.as_ref().unwrap().credential_configured);
     let catalog = provider
         .catalog_for("aws-bedrock".into(), &cancel)
         .await
@@ -2945,18 +2905,6 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     assert_eq!(connection.headers["x-marker"], "safe");
     let public = serde_json::to_string(&provider.list(&cancel).await.unwrap()).unwrap();
     assert!(!public.contains("fixture-access") && !public.contains("fixture-secret"));
-    let bedrock_input = ProviderInput {
-        provider_id: bedrock.provider_id.clone(),
-        display_name: bedrock.display_name.clone(),
-        driver_kind: bedrock.driver_kind.clone(),
-        base_url: bedrock.base_url.clone(),
-        auth: bedrock.auth.clone(),
-        network: None,
-        headers: None,
-        credential: Some(CredentialUpdate::Keep),
-        models: None,
-        enabled: true,
-    };
     for base_url in [
         "http://bedrock-runtime.us-west-2.amazonaws.com",
         "https://bedrock-runtime.us-west-2.amazonaws.com:444",
@@ -2964,11 +2912,15 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         "https://bedrock-runtime.us-west-2.amazonaws.com?secret=value",
         "https://bedrock-runtime.us-west-2.amazonaws.com.attacker.invalid",
     ] {
-        let mut invalid = bedrock_input.clone();
-        invalid.base_url = base_url.into();
+        let patch = serde_json::from_value(json!({"baseUrl":base_url})).unwrap();
         assert!(
             provider
-                .save_static(invalid, Some(bedrock.version), &cancel)
+                .update(
+                    bedrock.provider_id.clone(),
+                    bedrock.version.unwrap(),
+                    patch,
+                    &cancel
+                )
                 .await
                 .is_err()
         );
@@ -2981,11 +2933,18 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         "X-Amz-Security-Token",
         "Content-Type",
     ] {
-        let mut invalid = bedrock_input.clone();
-        invalid.headers = Some(HashMap::from([(header.into(), "reserved".into())]));
+        let patch = serde_json::from_value(
+            json!({"headers":[{"name":header,"action":"set","value":"reserved"}]}),
+        )
+        .unwrap();
         assert!(
             provider
-                .save_static(invalid, Some(bedrock.version), &cancel)
+                .update(
+                    bedrock.provider_id.clone(),
+                    bedrock.version.unwrap(),
+                    patch,
+                    &cancel
+                )
                 .await
                 .is_err()
         );
@@ -2996,23 +2955,27 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         ("access\n", "secret", None),
         ("access", "secret", Some("bad\r\ntoken")),
     ] {
-        let mut invalid = bedrock_input.clone();
-        invalid.credential = Some(CredentialUpdate::SetAws {
-            value: AwsCredentials {
-                access_key_id: access.into(),
-                secret_access_key: secret.into(),
-                session_token: session.map(str::to_owned),
-            },
-        });
+        let mut value = json!({"accessKeyId":access,"secretAccessKey":secret});
+        if let Some(session) = session {
+            value["sessionToken"] = json!(session);
+        }
+        let patch =
+            serde_json::from_value(json!({"credential":{"action":"set_aws","value":value}}))
+                .unwrap();
         assert!(
             provider
-                .save_static(invalid, Some(bedrock.version), &cancel)
+                .update(
+                    bedrock.provider_id.clone(),
+                    bedrock.version.unwrap(),
+                    patch,
+                    &cancel
+                )
                 .await
                 .is_err()
         );
     }
-    let mut wrong_driver = input("wrong-aws", &base, StaticAuth::Bearer, None, "", 4096);
-    wrong_driver.credential = Some(CredentialUpdate::SetAws {
+    let mut wrong_driver = input(WRONG_AWS, &base, StaticAuth::Bearer, None, "", 4096);
+    wrong_driver.connection.credential = Some(CredentialUpdate::SetAws {
         value: AwsCredentials {
             access_key_id: "access".into(),
             secret_access_key: "secret".into(),
@@ -3021,76 +2984,81 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     });
     assert!(
         provider
-            .save_static(wrong_driver.clone(), None, &cancel)
+            .create(wrong_driver.clone(), &cancel)
             .await
             .is_err()
     );
-    wrong_driver.auth = StaticAuth::AwsBedrock;
-    assert!(
-        provider
-            .save_static(wrong_driver, None, &cancel)
-            .await
-            .is_err()
-    );
+    wrong_driver.connection.auth = StaticAuth::AwsBedrock;
+    assert!(provider.create(wrong_driver, &cancel).await.is_err());
     assert_eq!(
         serde_json::to_string(&provider.list(&cancel).await.unwrap()).unwrap(),
         public
     );
     assert!(
         provider
-            .save_static(bedrock_input.clone(), Some(bedrock.version - 1), &cancel)
+            .update(
+                bedrock.provider_id.clone(),
+                bedrock.version.unwrap() - 1,
+                serde_json::from_value(json!({"enabled":true})).unwrap(),
+                &cancel
+            )
             .await
             .is_err()
     );
     assert_eq!(
         provider
-            .save_static(bedrock_input, Some(bedrock.version), &cancel)
+            .update(
+                bedrock.provider_id.clone(),
+                bedrock.version.unwrap(),
+                serde_json::from_value(json!({"enabled":true})).unwrap(),
+                &cancel
+            )
             .await
             .unwrap()
             .version,
-        bedrock.version + 1
+        Some(bedrock.version.unwrap() + 1)
     );
 
     let a = provider
-        .save_static(
+        .create(
             input(
-                "a",
+                PROVIDER_A,
                 &format!("{base}/a"),
                 StaticAuth::Bearer,
                 Some("key-a"),
                 "secret-a",
                 1234,
             ),
-            None,
             &cancel,
         )
         .await
         .unwrap();
     let b = provider
-        .save_static(
+        .create(
             input(
-                "b",
+                PROVIDER_B,
                 &format!("{base}/b"),
                 StaticAuth::Anonymous,
                 None,
                 "public-b",
                 5678,
             ),
-            None,
             &cancel,
         )
         .await
         .unwrap();
-    assert!(a.credential_configured && !b.credential_configured);
+    assert!(
+        a.connection.as_ref().unwrap().credential_configured
+            && !b.connection.as_ref().unwrap().credential_configured
+    );
     let public = serde_json::to_string(&provider.list(&cancel).await.unwrap()).unwrap();
     assert!(
         !public.contains("key-a") && !public.contains("secret-a") && !public.contains("public-b")
     );
     assert!(
         provider
-            .save_static(
-                input("missing", &base, StaticAuth::Bearer, None, "x", 100),
-                None,
+            .create(
+                input(MISSING, &base, StaticAuth::Bearer, None, "x", 100),
                 &cancel
             )
             .await
@@ -3098,18 +3066,18 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     );
 
     let global = provider
-        .select(None, target("b"), None, &cancel)
+        .select(None, target(PROVIDER_B), None, &cancel)
         .await
         .unwrap();
     assert!(
         provider
-            .select(None, target("a"), None, &cancel)
+            .select(None, target(PROVIDER_A), None, &cancel)
             .await
             .is_err()
     );
     let workspace = std::path::Path::new("/workspace/provider-flow");
     provider
-        .select(Some(workspace), target("a"), None, &cancel)
+        .select(Some(workspace), target(PROVIDER_A), None, &cancel)
         .await
         .unwrap();
     let chosen = provider
@@ -3121,17 +3089,17 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             chosen.provider_id.as_str(),
             chosen.config.as_ref().unwrap().max_tokens
         ),
-        ("a", Some(1234.0))
+        (PROVIDER_A, Some(1234.0))
     );
     let catalog = provider
-        .set_enabled_models("a".into(), a.version, vec![], &cancel)
+        .set_enabled_models(PROVIDER_A.into(), a.version.unwrap(), vec![], &cancel)
         .await
         .unwrap();
     let fallback = provider
         .configuration(None, Some(workspace), ModelPreferences::default(), &cancel)
         .await
         .unwrap();
-    assert_eq!(fallback.provider_id, "b");
+    assert_eq!(fallback.provider_id, PROVIDER_B);
     assert_eq!(
         provider
             .selection(Some(workspace), &cancel)
@@ -3139,15 +3107,20 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .unwrap()
             .unwrap()
             .provider_id,
-        "a"
+        PROVIDER_A
     );
     assert_eq!(global.version, 1);
     provider
-        .set_enabled_models("a".into(), catalog.version, vec!["same".into()], &cancel)
+        .set_enabled_models(
+            PROVIDER_A.into(),
+            catalog.version,
+            vec!["same".into()],
+            &cancel,
+        )
         .await
         .unwrap();
 
-    for id in ["a", "b"] {
+    for (id, suffix) in [(PROVIDER_A, "a"), (PROVIDER_B, "b")] {
         let selection = provider
             .configuration(Some(target(id)), None, ModelPreferences::default(), &cancel)
             .await
@@ -3164,7 +3137,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         let ModelConnection::Http(connection) = &resolved.connection else {
             panic!("HTTP expected")
         };
-        assert!(connection.base_url.ends_with(&format!("/{id}")));
+        assert!(connection.base_url.ends_with(&format!("/{suffix}")));
         let mut output = root
             .get::<ModelHost>()
             .unwrap()
@@ -3196,12 +3169,12 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .unwrap();
     let builtin = provider.update("deepseek".into(), builtin.providers[0].version.unwrap(), serde_json::from_value(json!({"baseUrl":format!("{base}/builtin"),"credential":{"action":"set","value":"user-model-key"},"enabled":true})).unwrap(), &cancel).await.unwrap();
     let custom = provider
-        .catalog_for("a".into(), &cancel)
+        .catalog_for(PROVIDER_A.into(), &cancel)
         .await
         .unwrap()
         .unwrap();
     for (id, version) in [
-        ("a", custom.version),
+        (PROVIDER_A, custom.version),
         ("deepseek", builtin.version.unwrap()),
     ] {
         let catalog = provider
@@ -3268,20 +3241,20 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         );
     }
 
-    let mut media = input("media", &base, StaticAuth::Anonymous, None, "media", 99);
-    media.models.as_mut().unwrap()[0].metadata =
+    let mut media = input(MEDIA, &base, StaticAuth::Anonymous, None, "media", 99);
+    media.models[0].metadata =
         Some(serde_json::from_value(json!({"raw":{"type":"embedding"}})).unwrap());
-    provider.save_static(media, None, &cancel).await.unwrap();
+    provider.create(media, &cancel).await.unwrap();
     assert!(
         provider
-            .select(None, target("media"), Some(global.version), &cancel)
+            .select(None, target(MEDIA), Some(global.version), &cancel)
             .await
             .is_err()
     );
     assert!(
         provider
             .configuration(
-                Some(target("media")),
+                Some(target(MEDIA)),
                 None,
                 ModelPreferences::default(),
                 &cancel
@@ -3291,13 +3264,13 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     );
 
     let before = provider
-        .catalog_for("b".into(), &cancel)
+        .catalog_for(PROVIDER_B.into(), &cancel)
         .await
         .unwrap()
         .unwrap();
     let edited = provider
         .update_model_config(
-            "b".into(),
+            PROVIDER_B.into(),
             before.version,
             "same".into(),
             Some(
@@ -3310,65 +3283,47 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .unwrap();
     assert_eq!(edited.models[0].config.max_tokens, Some(3333.));
     let reset = provider
-        .update_model_config("b".into(), edited.version, "same".into(), None, &cancel)
+        .update_model_config(
+            PROVIDER_B.into(),
+            edited.version,
+            "same".into(),
+            None,
+            &cancel,
+        )
         .await
         .unwrap();
     assert_eq!(reset.models[0].config.max_tokens, Some(5678.));
     assert!(
         provider
-            .update_model_config("b".into(), edited.version, "same".into(), None, &cancel)
+            .update_model_config(
+                PROVIDER_B.into(),
+                edited.version,
+                "same".into(),
+                None,
+                &cancel
+            )
             .await
             .is_err()
     );
 
     let disabled = provider
-        .set_enabled_models("b".into(), reset.version, vec![], &cancel)
+        .set_enabled_models(PROVIDER_B.into(), reset.version, vec![], &cancel)
         .await
         .unwrap();
-    let mut changed = input(
-        "b",
-        &format!("{base}/b"),
-        StaticAuth::Anonymous,
-        None,
-        "public-b",
-        5678,
-    );
-    changed.models = Some(vec![model("other", 765)]);
-    let changed = provider
-        .save_static(changed, Some(disabled.version), &cancel)
-        .await
-        .unwrap();
-    let enabled = provider
-        .set_enabled_models("b".into(), changed.version, vec!["other".into()], &cancel)
-        .await
-        .unwrap();
-    assert!(enabled.disabled_model_ids.contains(&"same".into()));
-    let mut returned = input(
-        "b",
-        &format!("{base}/b"),
-        StaticAuth::Anonymous,
-        None,
-        "public-b",
-        5678,
-    );
-    returned.models.as_mut().unwrap().push(model("other", 765));
     let returned = provider
-        .save_static(returned, Some(enabled.version), &cancel)
+        .create_model(
+            PROVIDER_B.into(),
+            disabled.version,
+            model("other", 765),
+            &cancel,
+        )
         .await
         .unwrap();
-    assert!(
-        provider
-            .catalog_for("b".into(), &cancel)
-            .await
-            .unwrap()
-            .unwrap()
-            .disabled_model_ids
-            .contains(&"same".into())
-    );
+    assert!(returned.disabled_model_ids.contains(&"same".into()));
     assert!(
         provider
             .configuration(
-                Some(target("b")),
+                Some(target(PROVIDER_B)),
                 None,
                 ModelPreferences::default(),
                 &cancel
@@ -3383,7 +3338,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     }
     provider
         .set_enabled_models(
-            "b".into(),
+            PROVIDER_B.into(),
             returned.version,
             vec!["same".into(), "other".into()],
             &cancel,
@@ -3396,7 +3351,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .await
             .unwrap()
             .provider_id,
-        "b"
+        PROVIDER_B
     );
     assert_eq!(
         provider
@@ -3417,24 +3372,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .find(|p| p.provider_id == "anthropic")
         .unwrap();
     let builtin = provider
-        .save_static(
-            ProviderInput {
-                provider_id: builtin.provider_id.clone(),
-                display_name: builtin.display_name,
-                driver_kind: builtin.driver_kind,
-                base_url: format!("{base}/builtin"),
-                auth: builtin.auth,
-                network: None,
-                headers: None,
-                credential: Some(CredentialUpdate::Set {
-                    value: "builtin-key".into(),
-                }),
-                models: None,
-                enabled: true,
-            },
-            Some(builtin.version),
-            &cancel,
-        )
+.update(builtin.provider_id.clone(), builtin.version, serde_json::from_value(json!({"baseUrl":format!("{base}/builtin"),"credential":{"action":"set","value":"builtin-key"},"enabled":true})).unwrap(), &cancel)
         .await
         .unwrap();
     let builtin_models = provider
@@ -3457,7 +3395,11 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .await
         .unwrap();
     provider
-        .delete_static(builtin.provider_id.clone(), builtin.version, &cancel)
+        .delete_static(
+            builtin.provider_id.clone(),
+            builtin.version.unwrap(),
+            &cancel,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -3489,7 +3431,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     let persisted = serde_json::to_value(provider.list(&cancel).await.unwrap()).unwrap();
     let last_selection = provider
         .configuration(
-            Some(target("a")),
+            Some(target(PROVIDER_A)),
             None,
             ModelPreferences::default(),
             &cancel,
@@ -3507,7 +3449,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     ));
     let request = Arc::new(ModelRequest {
         capability_snapshot: last_selection.capability_snapshot,
-        ..ModelRequest::new("a", "same", vec![])
+        ..ModelRequest::new(PROVIDER_A, "same", vec![])
     });
     assert!(matches!(
         resolver.0.resolve(request, cancel.clone()).await,
@@ -3569,7 +3511,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     assert_eq!(
         reloaded
             .configuration(
-                Some(target("a")),
+                Some(target(PROVIDER_A)),
                 None,
                 ModelPreferences::default(),
                 &cancel
@@ -3613,8 +3555,8 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .unwrap();
         let custom: String = database
             .query_row(
-                "SELECT record FROM providers WHERE provider_id='a'",
-                [],
+                "SELECT record FROM providers WHERE provider_id=?1",
+                [PROVIDER_A],
                 |r| r.get(0),
             )
             .unwrap();
@@ -3679,7 +3621,12 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         assert!(usable.catalog_for(id.into(), &cancel).await.is_err());
     }
     let listing = usable.list(&cancel).await.unwrap();
-    assert!(listing.providers.iter().any(|p| p.provider_id == "a"));
+    assert!(
+        listing
+            .providers
+            .iter()
+            .any(|p| p.provider_id == PROVIDER_A)
+    );
     let upgraded = listing
         .providers
         .iter()
@@ -3719,7 +3666,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .await
             .unwrap()
             .provider_id,
-        "a"
+        PROVIDER_A
     );
     assert!(
         usable
@@ -3981,8 +3928,37 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
             .count(),
         3
     );
+    let edited = provider
+        .update(
+            "legacy-defaults".into(),
+            entry.version.unwrap(),
+            serde_json::from_value(json!({"displayName":"Edited legacy Provider"})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited.display_name, "Edited legacy Provider");
+    assert!(edited.connection.as_ref().unwrap().credential_configured);
+    assert_eq!(
+        edited.models.as_ref().unwrap()[0]
+            .model
+            .capabilities
+            .max_output_tokens,
+        202
+    );
+    assert!(matches!(
+        provider
+            .update(
+                "legacy-defaults".into(),
+                entry.version.unwrap(),
+                serde_json::from_value(json!({"enabled":false})).unwrap(),
+                &cancel
+            )
+            .await,
+        Err(ProviderError::Conflict(_))
+    ));
     provider
-        .delete_static("legacy-defaults".into(), entry.version.unwrap(), &cancel)
+        .delete_static("legacy-defaults".into(), edited.version.unwrap(), &cancel)
         .await
         .unwrap();
     provider
@@ -4039,31 +4015,29 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     let auxiliary = root.get::<AuxiliaryModelHost>().unwrap();
     let cancel = CancellationToken::new();
     let saved = provider
-        .save_static(
+        .create(
             input(
-                "aux",
+                AUX,
                 &base,
                 StaticAuth::Bearer,
                 Some("aux-secret"),
-                "aux",
+                AUX,
                 4096,
             ),
-            None,
             &cancel,
         )
         .await
         .unwrap();
     provider
-        .save_static(
+        .create(
             input(
-                "hang",
+                HANG,
                 &format!("{base}/hang"),
                 StaticAuth::Bearer,
                 Some("hang-secret"),
-                "hang",
+                HANG,
                 4096,
             ),
-            None,
             &cancel,
         )
         .await
@@ -4081,13 +4055,13 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
 
     let reply = auxiliary
         .0
-        .complete(target("aux"), request(Some(32)), cancel.clone())
+        .complete(target(AUX), request(Some(32)), cancel.clone())
         .await
         .unwrap();
     assert_eq!(reply.text, "ok");
     assert_eq!(reply.stop_reason, ModelStopReason::EndTurn);
     let sent = seen.lock().unwrap().pop().unwrap();
-    assert_eq!(sent.marker.as_deref(), Some("aux"));
+    assert_eq!(sent.marker.as_deref(), Some(AUX));
     assert_eq!(sent.authorization.as_deref(), Some("Bearer aux-secret"));
     assert_eq!(sent.body["model"], "same");
     assert!(sent.body.to_string().contains("Title this conversation"));
@@ -4096,7 +4070,7 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     assert_eq!(max_tokens(&sent.body), Some(32));
     auxiliary
         .0
-        .complete(target("aux"), request(Some(1_000_000)), cancel.clone())
+        .complete(target(AUX), request(Some(1_000_000)), cancel.clone())
         .await
         .unwrap();
     assert_eq!(
@@ -4109,7 +4083,7 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     for invalid in [empty, request(Some(0))] {
         let error = auxiliary
             .0
-            .complete(target("aux"), invalid, cancel.clone())
+            .complete(target(AUX), invalid, cancel.clone())
             .await
             .unwrap_err();
         assert_eq!(error.code, AuxiliaryErrorCode::InvalidRequest);
@@ -4119,7 +4093,7 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     let call_cancel = CancellationToken::new();
     let call = auxiliary
         .0
-        .complete(target("hang"), request(None), call_cancel.clone());
+        .complete(target(HANG), request(None), call_cancel.clone());
     tokio::pin!(call);
     tokio::select! {
         result = &mut call => panic!("unexpected {result:?}"),
@@ -4137,30 +4111,30 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
             std::time::Duration::from_millis(100),
             auxiliary
                 .0
-                .complete(target("hang"), request(None), cancel.clone()),
+                .complete(target(HANG), request(None), cancel.clone()),
         )
         .await
         .is_err()
     );
 
     let disabled = provider
-        .set_enabled_models("aux".into(), saved.version, vec![], &cancel)
+        .set_enabled_models(AUX.into(), saved.version.unwrap(), vec![], &cancel)
         .await
         .unwrap();
     let error = auxiliary
         .0
-        .complete(target("aux"), request(None), cancel.clone())
+        .complete(target(AUX), request(None), cancel.clone())
         .await
         .unwrap_err();
     assert_eq!(error.code, AuxiliaryErrorCode::ModelUnavailable);
     assert!(seen.lock().unwrap().is_empty());
     provider
-        .delete_static("aux".into(), disabled.version, &cancel)
+        .delete_static(AUX.into(), disabled.version, &cancel)
         .await
         .unwrap();
     let error = auxiliary
         .0
-        .complete(target("aux"), request(None), cancel.clone())
+        .complete(target(AUX), request(None), cancel.clone())
         .await
         .unwrap_err();
     assert_eq!(error.code, AuxiliaryErrorCode::ModelUnavailable);
@@ -4171,7 +4145,7 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
         async move {
             auxiliary
                 .0
-                .complete(target("hang"), request(None), CancellationToken::new())
+                .complete(target(HANG), request(None), CancellationToken::new())
                 .await
         }
     });

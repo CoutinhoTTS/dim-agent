@@ -1,0 +1,42 @@
+{
+  "node": {
+    "version": "24.21.0",
+    "checksums": "https://nodejs.org/dist/v{version}/SHASUMS256.txt",
+    "sources": [
+      "https://nodejs.org/dist/v{version}/{file}",
+      "https://npmmirror.com/mirrors/node/v{version}/{file}"
+    ],
+    "files": {
+      "darwin-arm64": "node-v24.21.0-darwin-arm64.tar.gz",
+      "darwin-x64": "node-v24.21.0-darwin-x64.tar.gz",
+      "linux-arm64": "node-v24.21.0-linux-arm64.tar.gz",
+      "linux-x64": "node-v24.21.0-linux-x64.tar.gz",
+      "windows-arm64": "node-v24.21.0-win-arm64.zip",
+      "windows-x64": "node-v24.21.0-win-x64.zip"
+    }
+  },
+  "python": {
+    "version": "3.12.15+20261003",
+    "checksums": "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/SHA256SUMS",
+    "sources": [
+      "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/{file}",
+      "https://registry.npmmirror.com/-/binary/python-build-standalone/20261003/{file}"
+    ],
+    "files": {
+      "darwin-arm64": "cpython-3.12.15+20261003-aarch64-apple-darwin-install_only.tar.gz",
+      "darwin-x64": "cpython-3.12.15+20261003-x86_64-apple-darwin-install_only.tar.gz",
+      "linux-arm64": "cpython-3.12.15+20261003-aarch64-unknown-linux-gnu-install_only.tar.gz",
+      "linux-x64": "cpython-3.12.15+20261003-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "windows-arm64": "cpython-3.12.15+20261003-aarch64-pc-windows-msvc-install_only.tar.gz",
+      "windows-x64": "cpython-3.12.15+20261003-x86_64-pc-windows-msvc-install_only.tar.gz"
+    }
+  },
+  "npmRegistries": [
+    "https://registry.npmjs.org",
+    "https://registry.npmmirror.com"
+  ],
+  "pythonIndexes": [
+    "https://pypi.org/simple",
+    "https://pypi.tuna.tsinghua.edu.cn/simple"
+  ]
+}

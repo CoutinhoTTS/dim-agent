@@ -1,7 +1,9 @@
 //! The App Server command line, shared by `dim-app-server` and `dimcode app-server`.
 
 use crate::{
-    ServerConfig, ShutdownReason, collaboration, permission_rules, serve,
+    ServerConfig, ShutdownReason, collaboration, permission_rules,
+    runtime_manager::Runtimes,
+    serve,
     session_typescript::{PythonConfig, SessionTypeScriptConfig},
 };
 use dim_agent_aimux::{AimuxModels, config::ModelConfigFile};
@@ -133,6 +135,11 @@ pub fn run_with(
                     args.next().ok_or("--session-rows requires a path")?,
                 ))
             }
+            "--defaults" => {
+                config.plugin_defaults = Some(std::fs::canonicalize(
+                    args.next().ok_or("--defaults requires a path")?,
+                )?)
+            }
             "--python" => {
                 python = Some(PathBuf::from(
                     args.next().ok_or("--python requires a path")?,
@@ -140,7 +147,7 @@ pub fn run_with(
             }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
+                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--defaults FILE] [--session-rows FILE] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
                      dim-app-server --export-timeline SESSION_ID --database PATH"
                 );
                 return Ok(());
@@ -148,11 +155,11 @@ pub fn run_with(
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
     }
-    if (node.is_some() || js_runtime.is_some()) && session_rows.is_none() {
-        return Err("--node and --js-runtime need --session-rows".into());
-    }
-    if python.is_some() && session_rows.is_none() {
-        return Err("--python needs --session-rows".into());
+    let anchor = session_rows
+        .clone()
+        .or_else(|| config.plugin_defaults.clone());
+    if (node.is_some() || js_runtime.is_some() || python.is_some()) && anchor.is_none() {
+        return Err("--node, --js-runtime and --python need --session-rows or --defaults".into());
     }
     if config.product_home.is_some() {
         config.managed_provider = managed_provider;
@@ -160,33 +167,53 @@ pub fn run_with(
     if config.web_assets.is_none() {
         config.web_assets = config.product_home.as_ref().map(|home| home.join("web"));
     }
-    if let Some(path) = session_rows {
-        let (Some(node), Some(js_runtime)) = (node, js_runtime) else {
-            return Err("--session-rows requires --node and --js-runtime".into());
-        };
+    if node.is_some() != js_runtime.is_some() || (python.is_some() && node.is_none()) {
+        return Err("--node and --js-runtime go together, and --python needs them".into());
+    }
+    if session_rows.is_some() && (node.is_none() || js_runtime.is_none()) {
+        return Err("--session-rows requires --node and --js-runtime".into());
+    }
+    if let (Some(path), Some(node), Some(js_runtime)) = (anchor, node, js_runtime) {
         let unreadable =
             |error: std::io::Error| format!("Cannot read Session rows {}: {error}", path.display());
         let anchor = std::fs::canonicalize(&path).map_err(unreadable)?;
         let bytes = std::fs::read(&anchor).map_err(unreadable)?;
-        let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|error| {
-            format!(
-                "Invalid Session rows {} at line {}, column {}",
-                path.display(),
-                error.line(),
-                error.column()
-            )
-        })?;
+        let rows: Vec<serde_json::Value> = if session_rows.is_some() {
+            serde_json::from_slice(&bytes).map_err(|error| {
+                format!(
+                    "Invalid Session rows {} at line {}, column {}",
+                    path.display(),
+                    error.line(),
+                    error.column()
+                )
+            })?
+        } else {
+            vec![]
+        };
         let python = python.map(|interpreter| PythonConfig {
             interpreter,
             project: anchor.parent().expect("a file has a directory").to_owned(),
+            packages: None,
         });
         config.session_typescript = Some(SessionTypeScriptConfig {
             node,
             js_runtime,
             anchor,
             python,
+            acquire: None,
             rows,
         });
+    } else if let Some(defaults) = &config.plugin_defaults {
+        let home = config
+            .product_home
+            .as_ref()
+            .or(config.target_home.as_ref())
+            .ok_or("--defaults needs --product-home or --home")?;
+        let home = std::path::absolute(home)?;
+        let preset = crate::plugin_manager::Defaults::read(defaults)?.runtimes;
+        let runtimes = Arc::new(Runtimes::load(&home, &preset)?);
+        config.session_typescript =
+            Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![]));
     }
     if threads == 0 {
         return Err("--threads must be positive".into());

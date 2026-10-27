@@ -34,8 +34,12 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 ## Documentation
 
 - Cross-module flows live in higher-level documents; lower-level documents only describe their own inputs, outputs and error contracts.
-- Read the [foundation ADR](docs/adr/001-harness-foundation.md) for branch implementation status and proposals requiring maintainer alignment. Keep accepted decisions, implemented contracts and proposals distinct. A branch implementation does not supersede an issue's agreed design, and contributors must not be required to use APIs that do not exist yet.
-- A rule is stated once, at its layer ([ADR 006](docs/adr/006-plugin-contract.md) D1, D9): theory and contract rules do not restate a binding's spelling, and rule documents carry no delivery status or history. Status and history live in ADR delivery tables and design documents.
+- Read the [foundation ADR](docs/adr/001-harness-foundation.md) for its decision and proposals requiring maintainer alignment. Do not use it as the source of implementation status; that lives in issues. Keep accepted decisions, current contracts and proposals distinct. A branch implementation does not supersede an issue's agreed design, and contributors must not be required to use APIs that do not exist yet.
+- A rule is stated once, at its layer ([ADR 006](docs/adr/006-plugin-contract.md) D1, D9): theory and contract rules do not restate a binding's spelling, and rule documents and ADRs carry no delivery status or history. Status and history live in issues.
+- An accepted ADR is a snapshot ([ADR 008](docs/adr/008-documentation-ownership.md)). Do not modify or delete an accepted ADR; a proposed ADR may change until accepted. A direction change is a new ADR; a link or typo fix to an accepted ADR uses the `adr-erratum` label. Existing ADRs are not retroactively cleaned.
+- A document owns only its own scope. A feature or plugin design states its own inputs, outputs, events, state, errors and declared dependencies, and links to another module's contract instead of restating or changing it. Put a cross-module requirement in the design that raises it; the owner changes its own document.
+- Technical detail stays at its layer: public contract terms in the contract or design, language spelling in a binding appendix, current implementation in architecture pages. Do not describe another module's internals.
+- Document type comes from the existing path; there is no manifest. Templates live in `docs/templates/`, whose README links the examples. Run `node scripts/adr-check.mjs --base <ref>` in a PR checkout; CI uses `HEAD^1`.
 
 ## Testing
 
@@ -77,8 +81,8 @@ Dim's architecture and the way Dim uses rutis are documented apart ([ADR 006](do
 | Layer | Document |
 | --- | --- |
 | Dim architecture: sequence, ownership, commands, handover, `before`, rebuild, side effects, placement | [time bus](docs/architecture/rust-agent/time-bus.md), [design rules](docs/architecture/rust-agent/principles.md), [ADR 002](docs/adr/002-plugin-scope.md) |
-| Dim architecture as it applies to plugins: instance tree, Dim's services and bus events, facts and their consumption, Capability, publication and closing | [plugin contract](docs/design/plugin-contract.md) (implemented, except R5's second form; each section says what holds today) |
-| Using rutis: plugins as rows and parts mounted by their instance, services by name, the catalog, crossing languages, the rutis lifecycle and bus | [How Dim uses rutis](docs/design/rutis-usage.md) (implemented, except R5's second form) |
+| Dim architecture as it applies to plugins: instance tree, Dim's services and bus events, facts and their consumption, Capability, publication and closing | [plugin contract](docs/design/plugin-contract.md) |
+| Using rutis: plugins as rows and parts mounted by their instance, services by name, the catalog, crossing languages, the rutis lifecycle and bus | [How Dim uses rutis](docs/design/rutis-usage.md) |
 | Binding: how Rust or TypeScript writes them | The appendices of How Dim uses rutis, the [TypeScript authoring guide](docs/typescript-plugin-authoring.md), and the current Rust binding below |
 
 A rule is stated once, at its layer. The Rust spelling of a rule is a binding, not the rule. See the [architecture overview](docs/architecture/README.md#design-documents) for the full document index.

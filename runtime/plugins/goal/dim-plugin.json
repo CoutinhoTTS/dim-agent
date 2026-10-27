@@ -1,0 +1,11 @@
+{
+  "name": "goal",
+  "description": "Goal: a branch keeps working toward a goal it was given",
+  "code": {
+    "entry": "index.ts",
+    "inject": [
+      "partRegistry",
+      "settings"
+    ]
+  }
+}

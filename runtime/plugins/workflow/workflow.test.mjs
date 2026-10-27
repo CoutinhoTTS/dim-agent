@@ -37,6 +37,7 @@ async function fixture(t, options = {}) {
   let activeScopes = 0
   const services = {
     settings: {
+      register: async declaration => { assert.equal(declaration.source, 'workflow') },
       read: async () => ok({ revision: state.revision, document: structuredClone(state.document) }),
       update: async request => {
         if (request.expectedRevision !== state.revision) return error('conflict')

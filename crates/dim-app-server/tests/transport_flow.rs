@@ -74,10 +74,15 @@ mod session_methods;
 
 #[path = "transport_flow/branch_typescript.rs"]
 mod branch_typescript;
+#[path = "transport_flow/runtime_manager.rs"]
+mod runtime_manager;
+
 #[path = "transport_flow/foreign_rows.rs"]
 mod foreign_rows;
 #[path = "transport_flow/goal.rs"]
 mod goal;
+#[path = "transport_flow/plugin_manager.rs"]
+mod plugin_manager;
 #[path = "transport_flow/process_typescript.rs"]
 mod process_typescript;
 #[path = "transport_flow/session_typescript.rs"]

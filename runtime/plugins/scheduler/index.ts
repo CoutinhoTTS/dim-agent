@@ -6,6 +6,7 @@ import { Scheduler } from './engine.ts'
 import { Jobs } from './jobs.ts'
 import { bounded, management, unloadingBeforeCall, type ScheduleJobs } from './requests.ts'
 import session from './session.ts'
+import { settings } from './settings.ts'
 import { RunStore, type Run } from './store.ts'
 import { windowAfter } from './windows.ts'
 
@@ -21,6 +22,7 @@ export default definePlugin({
   inject: ['sessions', 'sessionPermissions', 'settings', 'pluginFiles', 'managementMethods', 'partRegistry'],
   provides: { scheduleJobs: { call: 'async' } },
   async apply(ctx) {
+    await ctx.use<Settings>('settings').register(settings)
     const jobs = new Jobs(ctx.use<Settings>('settings'), ctx.use<SessionPermissions>('sessionPermissions'))
     const scope = await ctx.use<PluginFiles>('pluginFiles').open()
     const scheduler = new Scheduler(jobs, ctx.use<Sessions>('sessions'), new RunStore(scope))

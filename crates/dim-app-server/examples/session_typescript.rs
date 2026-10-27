@@ -63,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 js_runtime,
                 anchor: workspace.join("runtime/package.json"),
                 python: None,
+                acquire: None,
                 rows: vec![json!({
                     "id":"typescript", "name":workspace.join("runtime/fixtures/session-part.ts"),
                     "provides":{},

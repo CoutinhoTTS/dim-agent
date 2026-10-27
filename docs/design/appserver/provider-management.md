@@ -289,9 +289,9 @@ All accepted calls remain owner-tracked and drain on unload. Disconnect only los
 the reply; it never rolls back committed writes. Reread uncertain writes rather
 than replaying them. Provider updates do not reload the loader row.
 
-The legacy native `ProviderInput`/`save_static` upsert remains public for existing
-integration fixtures. Its removal is tracked in [#360](https://github.com/arcships/dim/issues/360);
-it is not exposed by RPC or used as a client fallback.
+The native service and RPC share the same create, partial update and model operations.
+New custom Providers use canonical UUIDs. Existing bundled and explicitly imported
+non-UUID identities remain editable through their accepted partial-write paths.
 
 ## 4. Client integration
 

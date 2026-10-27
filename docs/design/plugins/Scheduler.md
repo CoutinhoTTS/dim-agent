@@ -86,10 +86,10 @@ No runtime, facade, loader, event format or rutis change is proposed. All new bu
 The optional package lives at `runtime/plugins/scheduler`, with package name
 `@dimcode/scheduler`. Its root module is the process plugin; from its apply it
 registers `session.ts` with `partRegistry` as the Session definition
-`SchedulerSession`, the Session tool. The installed package supplies one complete
-`process.json` row, which the embedding host puts in `SessionTypeScriptConfig.rows`.
-This is the package's explicit installation row. No default CLI installation or
-PluginManager implementation is included.
+`SchedulerSession`, the Session tool. The plugin directory carries `dim-plugin.json`
+and is a default plugin listed in `runtime/default-plugins.json`, which PluginManager
+loads (`--defaults`). An embedding host may still build the row below from the
+manifest's `code` fields.
 
 | Row field | Process row |
 | --- | --- |
@@ -401,8 +401,8 @@ Writing the user's full document is an operator action that can change all jobs 
 
 ### 7.1 Settings source
 
-The Scheduler process row declares one source through the ordinary row `settings` member
-([Settings §3.1](../appserver/settings-service.md#31-source-declaration)); the Session definition does not declare it.
+The Scheduler process row registers one source in its `apply`
+([Settings §3.1](../appserver/settings-service.md#31-source-registration)); the Session definition does not register it.
 
 | Declaration | Value |
 | --- | --- |
