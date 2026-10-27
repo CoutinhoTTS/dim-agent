@@ -25521,6 +25521,10 @@
     },
     {
       "module": "dim_cli::ui::transcript::stream::tests",
+      "path": "CommitState::default"
+    },
+    {
+      "module": "dim_cli::ui::transcript::stream::tests",
       "path": "Emu::new"
     },
     {

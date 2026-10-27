@@ -2848,6 +2848,10 @@ impl App {
         let markdown = &self.markdown;
         // Answers start at the margin, unmarked, as Amp prints them.
         let render = |source: &str, width: usize| markdown.render(source, width, 0);
+        let fresh = self.commits.plan(&settled_ids).fresh;
+        // A parked stream pairs only with an answer that has not gone out:
+        // an earlier answer with identical text is already in scrollback.
+        settled_assistant.retain(|b| fresh.iter().any(|id| id == b.id));
         let mut plan = self.planner.plan(
             SESSION_REVISION,
             &live_text,
@@ -2928,7 +2932,6 @@ impl App {
                 }
             }
         }
-        let fresh = self.commits.plan(&settled_ids).fresh;
         for id in fresh {
             let Some(index) = snapshot.rows.iter().position(|r| r.row_id == id) else {
                 continue;
