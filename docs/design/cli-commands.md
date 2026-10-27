@@ -597,7 +597,10 @@ addressed by its original Session and `(branchId, requestId, callId)`.
 Reuse the current prompt's selection, review and narrow-screen window: number keys
 choose, Space toggles, Tab/Shift+Tab or Left/Right moves between questions, and Enter
 on Confirm submits. Custom text is available only with `allowCustom`; it is sent
-separately from offered labels. Esc declines the whole call. Display sanitization
+separately from offered labels. Non-empty text on the custom row checks it as it
+is typed (replacing the chosen label in a single choice) and clearing it unchecks it;
+while editing, Esc leaves the editor keeping the text and Enter keeps it and moves to
+the next question. Outside the editor, Esc declines the whole call. Display sanitization
 never changes the labels sent to the owner. The composer's draft is preserved.
 
 While submitting, disable duplicate responses. The successful reply or a committed

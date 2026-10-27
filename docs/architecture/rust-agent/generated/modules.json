@@ -23469,9 +23469,11 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode",
+        "path KeyCode::Backspace",
         "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::Enter",
+        "path KeyCode::Esc",
         "path KeyCode::Left",
         "path KeyCode::Right",
         "path KeyEvent",

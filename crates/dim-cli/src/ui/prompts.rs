@@ -611,27 +611,31 @@ impl AskUserPrompt {
         self.draft = LineInput::new(&draft);
     }
 
-    fn commit_typing(&mut self) {
-        if !self.typing {
-            return;
-        }
+    fn sync_draft(&mut self) {
         let Some(question) = self.question() else {
-            self.typing = false;
-            self.draft.clear();
             return;
         };
         let id = question.id.clone();
         let multi = question.multi_select;
         let text = self.draft.text().trim().to_owned();
-        self.typing = false;
-        self.draft.clear();
         if text.is_empty() {
+            self.custom_answers.remove(&id);
             return;
         }
         self.custom_answers.insert(id.clone(), text);
         self.missing_tab = None;
         if !multi {
             self.selections.remove(&id);
+        }
+    }
+
+    fn stop_typing(&mut self, advance: bool) {
+        self.typing = false;
+        self.draft.clear();
+        if advance
+            && let Some(question) = self.question()
+            && self.custom_answers.contains_key(&question.id)
+        {
             self.move_tab(1);
         }
     }
@@ -782,13 +786,11 @@ impl AskUserPrompt {
 
     fn handle_typing_key(&mut self, key: KeyEvent) -> Effect {
         match key.code {
-            KeyCode::Esc => {
-                self.typing = false;
-                self.draft.clear();
-            }
-            KeyCode::Enter => self.commit_typing(),
+            KeyCode::Esc => self.stop_typing(false),
+            KeyCode::Enter => self.stop_typing(true),
             _ => {
                 self.draft.handle_key(key);
+                self.sync_draft();
             }
         }
         Effect::None
@@ -804,6 +806,7 @@ impl AskUserPrompt {
         }
         if self.typing {
             self.draft.paste(text);
+            self.sync_draft();
         }
     }
 
@@ -1518,6 +1521,24 @@ mod tests {
         ask.handle_key(key(KeyCode::Enter));
         assert!(ask.cursor(100, 20).is_none());
         assert_eq!(ask.custom_answers["dinner"], "面牛肉 条");
+
+        let mut ask = dinner(true);
+        ask.handle_key(key(KeyCode::Char(' ')));
+        for _ in 0..3 {
+            ask.handle_key(key(KeyCode::Down));
+        }
+        ask.handle_key(key(KeyCode::Char('饺')));
+        let text = strip(&ask.render(100, 20, &theme.palette).concat());
+        assert!(text.contains("[x] Hotpot") && text.contains("[x] Type your own answer"));
+        ask.handle_key(key(KeyCode::Esc));
+        assert!(!ask.typing);
+        assert_eq!(ask.collect().unwrap()[0].custom.as_deref(), Some("饺"));
+        ask.handle_key(key(KeyCode::Enter));
+        ask.handle_key(key(KeyCode::Backspace));
+        assert!(!ask.custom_answers.contains_key("dinner"));
+        ask.handle_key(key(KeyCode::Char('面')));
+        ask.handle_key(key(KeyCode::Enter));
+        assert!(!ask.typing && ask.on_confirm_tab());
 
         let mut ask = dinner(false);
         ask.call.questions[0].allow_custom = false;
