@@ -126,7 +126,7 @@ The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.
 | `names.<name>.use` | Which plugin the name uses: an installed id, `"builtin"` or `"default"`. Absent: the built-in plugin of that name if there is one, else the default plugin of that name. |
 | `names.<name>.off` | `true` when the user turned the name off. |
 
-A name with no entry is in its shipped state: a built-in or default plugin on. Writing goes to a temporary file in the same directory, flushed on its own writable handle (`sync_all`, which also works on Windows), then renamed over `plugins.json`. A file that does not parse fails startup with its path; PluginManager never overwrites a file it could not read. The format is versioned; an unknown version fails startup.
+A name with no entry is in its shipped state: a built-in or default plugin on, unless the default configuration file lists it under `off`. Writing goes to a temporary file in the same directory, flushed on its own writable handle (`sync_all`, which also works on Windows), then renamed over `plugins.json`. A file that does not parse fails startup with its path; PluginManager never overwrites a file it could not read. The format is versioned; an unknown version fails startup.
 
 ### 2.3 The default configuration file
 
@@ -141,11 +141,13 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
     "workflow": "plugins/workflow",
     "scheduler": "plugins/scheduler"
   },
+  "off": ["RemoteGateway"],
   "locked": ["PluginManager", "Rpc", "Transport"]
 }
 ```
 
 - `plugins` maps each default plugin's name to its directory, relative to this file. A default plugin is a plugin directory like any other (§2.1).
+- `off` lists built-in or default names that are off until the user turns them on, such as [RemoteGateway](RemoteGateway.md).
 - `locked` lists names that cannot be turned off and whose plugin cannot be switched. Other plugins of a locked name may still be installed. Locking is product configuration; PluginManager applies it.
 
 ### 2.4 State PluginManager does not keep

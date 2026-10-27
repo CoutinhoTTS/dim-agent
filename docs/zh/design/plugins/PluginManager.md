@@ -126,7 +126,7 @@ flowchart LR
 | `names.<name>.use` | 这个名字使用哪个插件：一个已安装的 id、`"builtin"` 或 `"default"`。不存在时：如果有该名字的内置插件，就用它，否则用该名字的默认插件。 |
 | `names.<name>.off` | 用户关闭了这个名字时为 `true`。 |
 
-没有条目的名字处于出厂状态：内置插件或默认插件处于打开状态。写入时先写到同一目录下的临时文件，在它自己的可写句柄上刷盘（`sync_all`，在 Windows 上也可用），然后改名覆盖 `plugins.json`。文件无法解析时，启动失败，并给出文件路径；PluginManager 从不覆盖一个它读不了的文件。格式带有版本号；未知版本使启动失败。
+没有条目的名字处于出厂状态：内置插件或默认插件处于打开状态，除非默认配置文件把它列在 `off` 里。写入时先写到同一目录下的临时文件，在它自己的可写句柄上刷盘（`sync_all`，在 Windows 上也可用），然后改名覆盖 `plugins.json`。文件无法解析时，启动失败，并给出文件路径；PluginManager 从不覆盖一个它读不了的文件。格式带有版本号；未知版本使启动失败。
 
 ### 2.3 默认配置文件
 
@@ -141,11 +141,13 @@ flowchart LR
     "workflow": "plugins/workflow",
     "scheduler": "plugins/scheduler"
   },
+  "off": ["RemoteGateway"],
   "locked": ["PluginManager", "Rpc", "Transport"]
 }
 ```
 
 - `plugins` 把每个默认插件的名字映射到它的目录，路径相对于这个文件。默认插件和其他插件一样是一个插件目录（§2.1）。
+- `off` 列出在用户打开之前保持关闭的内置或默认名字，例如 [RemoteGateway](RemoteGateway.md)。
 - `locked` 列出不能关闭、也不能切换所用插件的名字。锁定名字的其他插件仍然可以安装。锁定是产品配置；PluginManager 执行它。
 
 ### 2.4 PluginManager 不保存的状态
