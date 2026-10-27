@@ -16,7 +16,7 @@ pub struct ConnectionInput {
     pub credential: Option<CredentialUpdate>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateProvider {
     pub provider_id: String,

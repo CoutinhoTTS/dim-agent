@@ -225,9 +225,8 @@ create/update 替代 provider.save 并与 CLI 调用者一起移除旧方法，�
 Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追踪、卸载时 drain。
 断线只丢回复，不撤销已提交写入；先重读不确定结果，不盲重放。业务更新不 reload。
 
-既有集成 fixture 使用的原生 `ProviderInput`/`save_static` upsert 仍然公开，
-移除工作由 [#360](https://github.com/arcships/dim/issues/360) 跟踪；RPC 不暴露它，
-客户端也不将它用作回退。
+原生 service 与 RPC 使用相同的 create、部分更新与模型操作。新自定义 Provider 使用规范 UUID；
+现有内置及显式导入的非 UUID 身份继续通过既定的部分写入接口编辑。
 
 ## 4. 客户端集成
 
