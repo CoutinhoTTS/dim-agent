@@ -3902,3 +3902,117 @@ async fn an_ancestors_end_closes_a_pending_end_whose_delivery_was_held() {
     soon(agent.close()).await.unwrap();
 }
 
+async fn copy_session(
+    from: &MemoryTimelineStore,
+    to: &MemoryTimelineStore,
+    session: &str,
+    keep: impl Fn(&str, &[StoredEvent]) -> usize,
+) {
+    to.create_session(session, &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut branches = from.branches(session).await.unwrap();
+    let depth = |id: &str, all: &[StoredBranch]| {
+        let mut depth = 0;
+        let mut at = all.iter().find(|branch| branch.info.id == id).unwrap();
+        while let Some(parent) = &at.info.parent {
+            depth += 1;
+            at = all.iter().find(|branch| &branch.info.id == parent).unwrap();
+        }
+        depth
+    };
+    let snapshot = branches.clone();
+    branches.sort_by_key(|branch| depth(&branch.info.id, &snapshot));
+    for branch in branches {
+        if branch.sequence == 0 {
+            continue;
+        }
+        let key = TimelineKey {
+            session_id: session.into(),
+            branch_id: branch.info.id.clone(),
+        };
+        let mut records = from.read(&key, 1..=branch.sequence).await.unwrap();
+        let kept = keep(&branch.info.id, &records);
+        records.truncate(kept);
+        if records.is_empty() {
+            continue;
+        }
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        to.append(
+            key,
+            records,
+            Box::new(move |result| {
+                let _ = sender.send(result);
+            }),
+        )
+        .unwrap();
+        receiver.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_spanning_a_restart_after_a_steer_writes_no_idle_notice() {
+    let first = Arc::new(MemoryTimelineStore::default());
+    let probe = Arc::new(Probe::default());
+    let mut builder1 = builder(&probe);
+    builder1.timeline_store(first.clone());
+    let agent = builder1.build();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let id = session.id().to_owned();
+    let child = open_line(&session, "watch the tests").await;
+    until_events(&session, "main", |events| {
+        !blocks_with(events, "<dim-branch-idle").is_empty()
+    })
+    .await;
+    soon(session.idle("main")).await.unwrap();
+    let call =
+        r#"{"action":"message","to":"main","content":"the leak is in cache.rs","mode":"steer"}"#;
+    let result = tool_call(&session, &child, call).await;
+    assert_eq!(result.is_error, None, "{:?}", result.content);
+    soon(session.idle("main")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before = blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len();
+    soon(agent.close()).await.unwrap();
+
+    let second = Arc::new(MemoryTimelineStore::default());
+    let line = child.clone();
+    copy_session(&first, &second, &id, |branch, records| {
+        if branch != line {
+            return records.len();
+        }
+        let at = records
+            .iter()
+            .rposition(|record| matches!(&record.event.kind, EventKind::ToolResult(_)))
+            .expect("the steer's result");
+        records[at].batch_end as usize
+    })
+    .await;
+    let probe = Arc::new(Probe::default());
+    let mut builder2 = builder(&probe);
+    builder2.timeline_store(second);
+    let agent = builder2.build();
+    let session = soon(agent.restore_session(id)).await.unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    soon(session.idle("main")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let child_events = local_events(&session, &child).await;
+    let restart_end = child_events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::TurnEnd(data) => Some(format!("{:?}", data.outcome)),
+            _ => None,
+        });
+    let after = blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len();
+    assert!(
+        restart_end.is_some(),
+        "the restart ends the turn that was open"
+    );
+    assert_eq!(
+        after, before,
+        "a turn that steered main before the restart writes no idle notice"
+    );
+    soon(agent.close()).await.unwrap();
+}
