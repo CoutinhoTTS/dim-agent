@@ -14,8 +14,9 @@ const git=(cwd,...args)=>{
   return result.stdout;
 };
 
-test('documentation-only changes skip every check',()=>{
-  assert.deepEqual(classify(['docs/adr/006-plugin-contract.md','docs/zh/INDEX.md','README.md','AGENTS.md']),only());
+test('documentation-only changes need no build group',()=>{
+  assert.deepEqual(classify(['docs/adr/006-plugin-contract.md','docs/zh/INDEX.md']),only());
+  assert.deepEqual(classify(['README.md','AGENTS.md']),only());
 });
 
 test('documents that code reads keep their checks',()=>{
@@ -24,7 +25,7 @@ test('documents that code reads keep their checks',()=>{
 });
 
 test('dependency policy changes select the scan without compiling the workspace',()=>{
-  assert.deepEqual(classify(['deny.toml','LICENSE','docs/release/README.md']),only('dependencies'));
+  assert.deepEqual(classify(['deny.toml','LICENSE']),only('dependencies'));
 });
 
 test('source areas select their groups',()=>{

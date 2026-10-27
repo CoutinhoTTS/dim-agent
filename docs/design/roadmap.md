@@ -1,52 +1,14 @@
 # 开发计划与优先级
 
-Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[插件设计索引](plugins/README.md)、[ADR 001](../adr/001-harness-foundation.md) 实现状态，以及 [#21–#30](https://github.com/arcships/dim/issues/31) 的讨论结论。交付基线：`main` @ `0c0b8ba`（2026-10-25）；PR 的实时状态见 [#114](https://github.com/arcships/dim/issues/114)。
+Status: Draft. 依据：[总体设计](overview.md) §8 阶段与附录 B/F、[插件设计索引](plugins/README.md) 和 [#21–#30](https://github.com/arcships/dim/issues/31) 的讨论结论。
 
 跟踪 issue：[#114](https://github.com/arcships/dim/issues/114)，每个工作项一个 issue 和一个 draft PR，各有唯一的负责人。
 
-本文只排顺序、依赖和优先级，不重复设计内容。设计文档仍是权威；本文与设计冲突时以设计为准，并回来更新本文。
+本文只排顺序、依赖和优先级，不重复设计内容，也不新增交付状态。ADR 008 之前的文字是历史，不再更新。设计文档仍是权威；本文与设计冲突时以设计为准，并回来更新本文。交付状态看 issue。
 
-## 1. 现状
+## 1. 状态
 
-本轮大部分 Rust 前置机制已合入，包括 C1/C2/C3、S1/S2、S4、S5a/S5c、S6/S7、S8a、S10/S11、R1 和 E1/E2；C7、S3 已确认无需新增机制。C4 工具/方法绑定、原生 Session 广播、rutis 0.11 升级，以及 S8b Rust 服务、C4 行来源声明、TypeScript owner 读写和 Settings 事件已合入；C6 广播通知与 S5b 标题元数据也已合入。C5 通用导出实现 #196 及 rutis 0.12.1 升级 #195 已合入；S8b 通过 #185 撤销共享 `credentials` 服务，密钥由各插件自己处理（settings-service §1.2）。插件按自己需要的接口推进，设计、spike、研究合入不表示产品实现完成。已有、可直接扩展的基础：
-
-| 已有 | 位置 | 对应工作项 |
-| --- | --- | --- |
-| 同步 `Timeline::before`（一个草稿进、一个草稿出，失败提交原草稿） | `dim-agent-runtime/src/core/timeline.rs` | 不变（[原则 §4 第 3 条](../architecture/rust-agent/principles.md)） |
-| `ToolContribution` 与工具来源由部件注册到 ToolRegistry，部件卸载时撤回 | `dim-agent-capabilities/src/tool_registry.rs` | C3（#82 已合入）、#382 |
-| Session 门面的 `history(branch, through)`：上限是已发布的头部，只读已发布的事件（内部 `Timeline::history` 才以已分配的头部为上限） | `dim-agent-runtime/src/agent.rs` | 不需要新接口：先取已发布的 head（`sequence`），再 `history(Some(head))`（#50） |
-| `PluginFilesPlugin`（UTF-8、锁、显式 v1 格式） | `dim-app-server/src/plugin_files.rs` | S10（#91、#135 已合入） |
-| Settings Rust 业务来源、C4 行声明的 JSON 来源、TypeScript owner 读写和 owner/client 写入边界；变更经既有 rutis 事件及 TypeScript leaf 事件通知 | `dim-app-server/src/settings.rs`、`settings_methods.rs`、`session_typescript.rs`；事件合同在 `dim-agent-capabilities/src/settings.rs` | S8a、S8b 来源、读写与事件（#90、#166、#175、#177 已合入） |
-| 自动压缩事实、生产压缩宿主、`/compact` 和用量查询；显式 `--models` 配置无能力快照时不启用压缩 | `context_preparation.rs`、App Server `main.rs` | F1（#108 已合入） |
-
-当前交付范围：
-
-| 工作项 | 已合入 | 剩余范围 |
-| --- | --- | --- |
-| P1 ShellInput | 服务端 #101、CLI `!` / `!!` #155 | 本轮交付完成 |
-| P2 Attachments | 服务端 #102、CLI 设计 #154、headless 图片 #160、多行/大段粘贴与提交时上传 #163、原生文件/剪贴板输入 #164 | 本轮输入链路已合入；平台支持和原生交互验收范围见各 PR |
-| F6 CLI | 设计 #113、实现 #149、编码请求上限 #153 | 本轮交付完成 |
-| F3 模型参数 | 设计 #110、`/effort`、`/fast`、`/agent` 实现 #148 | 本轮交付完成 |
-| Provider 客户端完整管理 [#329](https://github.com/arcships/dim/issues/329) | 已有 Provider 基础管理、账号入口与会话级模型参数 | [完整方案](appserver/provider-management.md) 与实现由 PR #349 交付；创建/局部更新替代 save，管理视图重读及 CAS，模型/路由与客户端显式采用的持久偏好，v19 可选字段；用量复用已交付的 account.usage，不扩 core 或公开宿主 API |
-| F4 MCP OAuth | 服务端 #111、CLI 登录与状态 #151 | 本轮交付完成 |
-| F5 OS 隔离 | spike #112、设计 #152 | 产品实现 #189 已合入；用户 `!` / `!!` 不在隔离范围内 |
-| C4 Session 级 TS | spike #99、装配前置 #137、工具/方法设计 #141、实现 #150、rutis 0.11 升级 #173、广播设计 #174 与实现 #180 | C4/#63 已完成，#63/#168 已关闭。原生 Windows Node 验收保留已记录的限制；#156 已关闭且不采用 |
-| C5 分支级 TS | 设计 #100、rutis 0.12.1 升级 #195、通用导出 #196、显式创建取消 #205、作者指南和生成 SDK 类型 #198 | 已交付；#64/#140 已关闭。Goal #199 使用 Session 写输入、分支所有者决定的合同，客户端读取 Timeline 事实。手写绑定 #186/#187 已撤回 |
-| S8b Settings | 设计 #119、Rust 实现 #166；#175 的 C4 行 `settings` 声明、TypeScript owner 读写及真实 Node 验收（§11 第 1–3 项）；TypeScript 事件 #177 | 已完成；不新增 manifest；#185 撤销共享 `credentials` 服务及其验收，密钥由各插件自行管理（§1.2） |
-| F1 跟进 | 研究 #165、死区与截断修复 #172、#128 运行时调参 #183 | #128 已关闭；摘要提示词、思考与目标长度评估 #170 属于 M2 |
-| P5 Goal | 设计 #105、TypeScript 实现 #199 | 已使用 C4/C5 交付输入、分支折叠与继续流程；验收已完成，#69 已关闭；产品安装归 PluginManager，可选工具的启动时序见 #241 |
-| 插件作者指南 #140 | 进程服务、C4 工具/方法、Settings 指南与类型 #167；C4 Session 观察 #190；C5 分支服务指南与生成 SDK 类型 #198 | 已交付，#140 已关闭；分支创建的显式取消合同见 #205 |
-
-S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程测试修正 #157、CLI 私有 socket 启动修复 #158、共享中断监听修复 #162 和 CI fixture 修正 #161 已合入。CLI 修复不属于 F5 隔离或 P1 ShellInput 策略。以上记录交付范围；CI 和评审是否允许合并，以各 PR 当前提交的实时状态为准。
-
-相关 PR：
-
-| PR | 状态 | 内容 | 对计划的影响 |
-| --- | --- | --- | --- |
-| [#14](https://github.com/arcships/dim/pull/14) | 已合入 | Session 持有 MCP；`ManagementMethods` 由业务 owner 提供；`SessionLifecycle`；移除 `mcp.approve`/`mcp.revoke`，项目源条目默认禁用（ADR 003 D3、ADR 004） | C1、S8a、F4 的前置已满足 |
-| [#16](https://github.com/arcships/dim/pull/16) | 已关闭 | 移除 `mcp.approve`/`mcp.revoke` | 已由 #14 完成 |
-| [#17](https://github.com/arcships/dim/pull/17) | 已合入 | 实验性 Pursuit 设计 | 决策 D3 |
-| [#20](https://github.com/arcships/dim/pull/20) | 已合入 | `managementMethods` 按调用查找，不依赖其所有者 | 已反映在总体设计 B.2 |
+交付状态和合并状态以 issue 为准，主要是 [#114](https://github.com/arcships/dim/issues/114)。本文不新增交付状态；ADR 008 之前的文字是历史，不再更新。
 
 ## 2. 排期原则
 
@@ -60,7 +22,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 
 ## 3. 工作清单
 
-规模：S（几天）、M（1–2 周）、L（数周或需要 spike）。
+规模：S（几天）、M（1–2 周）、L（数周或需要 spike）。以下清单是计划；条目里的历史状态文字写于 ADR 008 之前，不再更新，状态看 issue。
 
 ### 3.1 立即做（文档与对齐）
 
@@ -72,7 +34,7 @@ S10 后续 #135、S2 删除及评审后续 #159、App Server 真实配置流程�
 6. 为确定要做的运行时需求开 issue（总体设计附录 F）。rutis 是外部依赖，不向它提需求。
 7. Provider 的 Desktop/CLI 完整管理由 [#329](https://github.com/arcships/dim/issues/329) 跟踪，负责人 zerob13；[方案](appserver/provider-management.md) 的实现与验收由 PR #349 交付。复用现有调用、重读和 CAS，无机制前置；Provider JSON 以可选字段保持 v19，接受旧 v19 二进制重写时丢失未知字段；v18 二进制拒绝 v19 数据库。客户端读取持久模型偏好后显式采用，服务端不自动应用；用量复用已交付的 account.usage 及原有包查询合同。S4 与 F3 已有 Session 采用流程保持，持久偏好取代 F3 原有的无持久偏好范围。
 8. 插件契约迁移（[ADR 006](../adr/006-plugin-contract.md)）归 M1。M1 对外开放插件开发，按第 2 节第 5 条，插件作者直接使用的公开契约须在开放前就位；Dim 尚未发布，所以迁移不保留兼容路径。工作项见 §3.2 的“插件契约迁移”表，阶段与验收见[插件契约 §10](../zh/design/plugin-contract.md#10-迁移)。迁移已完成：P4 中 R5 的第二种形式随 #403 完成，TypeScript 与 Python 插件都是一行，以插件定义登记部件。P6 Scheduler（#70）的 loader 门槛所等的 rutis 0.16 升级（#379）已完成。对外开放前须满足 [#364](https://github.com/arcships/dim/issues/364)：第三方插件的部件注册工具后，模型就能看到这些工具，不需要写进配置。R6（#382）以可选的挂载列表 `SessionConfig.tools` 实现它：没有挂载列表的 Session（产品默认）声明全部宿主工具与部件注册的全部工具；有挂载列表的 Session 只声明其中列出的。工具调用是否执行仍由 Permission 决定，它不改变声明。
-9. 对外发布前处理：[#294](https://github.com/arcships/dim/issues/294) 的权限语义已确定，`workspace-write` 对工作区外写入和修改逐次询问，读取策略不变；实现由 [#419](https://github.com/arcships/dim/pull/419) 交付，待合入。其余事项：[#296](https://github.com/arcships/dim/issues/296)（依赖漏洞与许可证扫描）、[#297](https://github.com/arcships/dim/issues/297)（发布流水线的 action 固定到提交 SHA）、[#368](https://github.com/arcships/dim/issues/368)（发布包大小门槛）。
+9. 对外发布前处理：[#294](https://github.com/arcships/dim/issues/294) 的权限语义已确定，`workspace-write` 对工作区外写入和修改逐次询问，读取策略不变；实现见 [#419](https://github.com/arcships/dim/pull/419)。其余事项：[#296](https://github.com/arcships/dim/issues/296)（依赖漏洞与许可证扫描）、[#297](https://github.com/arcships/dim/issues/297)（发布流水线的 action 固定到提交 SHA）、[#368](https://github.com/arcships/dim/issues/368)（发布包大小门槛）。
 
 归下一个里程碑 [M2](https://github.com/arcships/dim/milestone/1)：Questions（#144/#178/#251）已由 #262 实现（#269、#336、#351）；Hooks（#143/#181）、ExternalAgent（#145/#182；[#254](https://github.com/arcships/dim/pull/254) 改为子 agent 形态，取代按模型的框架）的设计已合入，仍待各自 Ready 确认与实现；Pursuit（#146/#179/#252）的设计已于 2026-10-26 Ready，已由 [#422](https://github.com/arcships/dim/issues/422) 实现；回忆工具 `recall`（#129，设计见 [Recall](plugins/Recall.md)，2026-10-21 已 Ready，实现由 #310 跟踪）、摘要提示词/思考与目标长度评估（#170）也归该里程碑。#2 动态事件不归 M2，已于 2026-10-20 移入 M1（C8）：M1 对外开放插件开发，插件写自己的事件属于公开契约。其设计已于同日收敛（[ADR 001](../adr/001-harness-foundation.md#events-and-ownership-issue-2)）：Timeline 只检查信封与核心保留领域，并以不透明数据承载核心未定义的事件类型，Dispatcher 订阅只做过滤，能力事件声明只是描述契约；现有 `EventKind` 事件（含 F1、S1 加入的 4 个）不迁移。F1 的研究 #165、#169 的修复 #172 和 #128 的运行时调参 #183 已合入；#170 保留独立评估范围。插件契约的 #380（R1：Dispatcher 先回放历史、再接实时事件的注册）与 #381（R4：xtask 生成服务目录并标出 Capability）也归 M2：它们只新增能力或工具，不改变插件作者的写法，已于 2026-10-25 合入（#409、#408）。用户安装与启用第三方插件（[#384](https://github.com/arcships/dim/issues/384)）、效率测量与预算门槛（#363、#365、#366、#367）也归 M2。启动改为没有进展才失败、不再用固定总时限（[#387](https://github.com/arcships/dim/issues/387)），以及 Workflow 的用户定义与 `runs.json` 可能超过 16 MiB 桥接帧（[#343](https://github.com/arcships/dim/issues/343)，由 Workflow 在自己的数据布局内解决）也归 M2。
 
