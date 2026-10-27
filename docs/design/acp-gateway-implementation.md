@@ -19,7 +19,6 @@
 | Rust SDK | [`agent-client-protocol` 3.5.0，`5ef0fa3a`](https://github.com/agentclientprotocol/rust-sdk/tree/5ef0fa3aa9e1f268ce16b58b1219b91f2fc24399/src/agent-client-protocol) | typed protocol、JSON-RPC、stdio；只选择需要的功能，不打开总 `unstable` |
 | Lody Core | [0.2.0，`11e0708d`](https://github.com/LodyAI/acp-extension-core/tree/11e0708df0669568f44e287f17626a3944921dc5/src) | 每项独立 version 1；方法、元数据和计数语义 |
 | Lody Codex adapter | [`df464ab9`](https://github.com/LodyAI/acp-extension-codex/tree/df464ab94e3028ce49a95ae0a9377957c54d8b93/src) | Core 列出的参考实现；用于理解临时 Provider routing 和 startup config，不取代 Core/RFD 合同，也不复制其进程重启策略 |
-| 历史 Dim | `8bb52a93a` 的 `packages/cli/src/acp/` | `server.ts`、`lody.ts`、session/prompt/event bridge、elicitation 及公开 ACP 流程用例的语义参考；不复制旧 SDK、Agent wrapper 或连接终止行为 |
 
 ACP 协议版本固定为 1，不能把 SDK 包版本当成协议版本。[v2](https://agentclientprotocol.com/protocol/v2/overview) 是另一个生命周期合同，首版不启用。Cargo.lock 固定 SDK 3.5.0 / schema 1.12.0，二者许可证均为 Apache-2.0；只启用所需的 unstable session fork。
 
@@ -85,7 +84,7 @@ parse CLI options (including isolated --home / --cwd / --server / --agent)
 
 `--agent` 只选择 `session.create.agentId`；不创建 Agent、不改变默认 Agent 配置。插件不得拿走 Desktop/TUI 正在使用的 RPC connection。一个 ACP connection 拥有一个独立 RPC connection，多 Session 在该连接上按 Session id 分发。
 
-Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一原生 CLI，`command:"dim"`、`args:["acp"]` 无需调整。`ACP_STICKY_SESSION` 可作为旧环境配置保留，不改变协议行为：同一 Session id 的连续 prompt 保留上下文；`session/new` 始终创建独立 Session；继续已有 Session 使用 load/resume。它不自动选择最近会话，也不把同目录的新会话合并。已核对的历史源码 `8bb52a93a` 的 newSession 同样直接创建 Session；可追溯记录中的这个环境变量仅出现在文档，没有可移植的开关实现。兼容通过原有会话能力与公开流程验证完成，不增加无效的环境变量分支。
+Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一原生 CLI，`command:"dim"`、`args:["acp"]` 无需调整。`ACP_STICKY_SESSION` 可作为旧环境配置保留，不改变协议行为：同一 Session id 的连续 prompt 保留上下文；`session/new` 始终创建独立 Session；继续已有 Session 使用 load/resume。它不自动选择最近会话，也不把同目录的新会话合并。此移植未添加环境变量分支；上述行为来自现有 Session 语义与公开流程测试。
 
 ```json
 {
