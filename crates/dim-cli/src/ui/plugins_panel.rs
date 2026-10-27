@@ -338,7 +338,7 @@ fn row(item: &PluginItem) -> Row {
         label: item.name.clone(),
         detail,
         key: None,
-        unavailable: item.off,
+        unavailable: false,
     }
 }
 
@@ -376,7 +376,8 @@ fn about(item: &PluginItem) -> Vec<(String, bool)> {
     lines
 }
 
-/// The notice a successful change leaves.
+/// The notice a successful change leaves. A failed row or refused content
+/// shows on the selected plugin, which the change selects.
 fn outcome(action: &PluginAction, reply: &PluginReply) -> String {
     let mut parts = vec![match action {
         PluginAction::Enable(name) => tf("Turned on {name}.", &[("name", name)]),
@@ -399,20 +400,11 @@ fn outcome(action: &PluginAction, reply: &PluginReply) -> String {
                 .to_owned(),
         );
     }
-    if let Some(error) = &reply.error {
-        parts.push(tf("Error: {error}", &[("error", error)]));
-    }
     if !reply.skipped.is_empty() {
         let kinds = reply.skipped.join(", ");
         parts.push(tf(
             "Skipped {kinds}: their owner is not running.",
             &[("kinds", &kinds)],
-        ));
-    }
-    for refused in &reply.refused {
-        parts.push(tf(
-            "Refused {kind}: {error}",
-            &[("kind", &refused.kind), ("error", &refused.error)],
         ));
     }
     parts.join(" ")

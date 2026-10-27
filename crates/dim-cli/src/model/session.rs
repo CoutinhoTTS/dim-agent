@@ -204,18 +204,16 @@ pub struct PluginRefusal {
     pub error: String,
 }
 
-/// What a `plugin.*` change replied (A.1); `install` also names the plugin.
+/// What a `plugin.*` change replied (A.1) that `plugin.list` does not show;
+/// `install` also names the plugin.
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginReply {
     pub id: Option<String>,
     pub name: Option<String>,
     pub enabled: Option<bool>,
-    pub error: Option<String>,
     #[serde(default)]
     pub skipped: Vec<String>,
-    #[serde(default)]
-    pub refused: Vec<PluginRefusal>,
     #[serde(default)]
     pub restart_required: bool,
 }

@@ -2949,6 +2949,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::de::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::de",
+      "file": "crates/dim-cli/src/ui/i18n/de/plugins.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::de::prompts",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::de",
@@ -2974,6 +2981,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::es",
       "file": "crates/dim-cli/src/ui/i18n/es/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::es::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::es",
+      "file": "crates/dim-cli/src/ui/i18n/es/plugins.rs",
       "unexpandedMacros": []
     },
     {
@@ -3005,6 +3019,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::fr::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::fr",
+      "file": "crates/dim-cli/src/ui/i18n/fr/plugins.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::fr::prompts",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::fr",
@@ -3030,6 +3051,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::id",
       "file": "crates/dim-cli/src/ui/i18n/id/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::id::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::id",
+      "file": "crates/dim-cli/src/ui/i18n/id/plugins.rs",
       "unexpandedMacros": []
     },
     {
@@ -3061,6 +3089,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::ja::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ja",
+      "file": "crates/dim-cli/src/ui/i18n/ja/plugins.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::ja::prompts",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::ja",
@@ -3086,6 +3121,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::ko",
       "file": "crates/dim-cli/src/ui/i18n/ko/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ko::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ko",
+      "file": "crates/dim-cli/src/ui/i18n/ko/plugins.rs",
       "unexpandedMacros": []
     },
     {
@@ -3117,6 +3159,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::pt_br::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_br",
+      "file": "crates/dim-cli/src/ui/i18n/pt_br/plugins.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::pt_br::prompts",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::pt_br",
@@ -3145,6 +3194,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_cli::ui::i18n::pt_pt::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_pt",
+      "file": "crates/dim-cli/src/ui/i18n/pt_pt/plugins.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::pt_pt::prompts",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::pt_pt",
@@ -3164,6 +3220,7 @@
       "parent": "dim_cli::ui::i18n",
       "file": "crates/dim-cli/src/ui/i18n/mod.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
@@ -3179,6 +3236,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::zh_cn",
       "file": "crates/dim-cli/src/ui/i18n/zh_cn/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::zh_cn::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::zh_cn",
+      "file": "crates/dim-cli/src/ui/i18n/zh_cn/plugins.rs",
       "unexpandedMacros": []
     },
     {
@@ -3207,6 +3271,13 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::zh_hant",
       "file": "crates/dim-cli/src/ui/i18n/zh_hant/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::zh_hant::plugins",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::zh_hant",
+      "file": "crates/dim-cli/src/ui/i18n/zh_hant/plugins.rs",
       "unexpandedMacros": []
     },
     {
@@ -3337,6 +3408,28 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::oauth_view",
       "file": "crates/dim-cli/src/ui/oauth_view.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "panic",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::plugins_panel",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/plugins_panel.rs",
+      "unexpandedMacros": [
+        "format",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::plugins_panel::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::plugins_panel",
+      "file": "crates/dim-cli/src/ui/plugins_panel.rs",
       "unexpandedMacros": [
         "assert",
         "assert_eq",
@@ -20634,6 +20727,18 @@
     },
     {
       "from": "dim_cli::plugin_command",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path PluginAction",
+        "path PluginAction::Disable",
+        "path PluginAction::Enable",
+        "path PluginAction::Install",
+        "path PluginAction::Reload",
+        "use crate::model::session::PluginAction"
+      ]
+    },
+    {
+      "from": "dim_cli::plugin_command",
       "to": "dim_cli::plugin_command::tests",
       "references": [
         "mod tests"
@@ -21308,6 +21413,7 @@
         "path Command::Configure",
         "path Command::InputControl",
         "path Command::ListModels",
+        "path Command::ListPlugins",
         "path Command::ListProviders",
         "path Command::ListSessions",
         "path Command::LoginStatus",
@@ -21318,6 +21424,7 @@
         "path Command::OauthCancel",
         "path Command::OauthPaste",
         "path Command::OauthStart",
+        "path Command::Plugin",
         "path Command::Provider",
         "path Command::ReadModelPolicy",
         "path Command::Resume",
@@ -21355,6 +21462,8 @@
         "path OauthEvent::Exchanging",
         "path OauthEvent::Url",
         "path OauthStart",
+        "path PluginItem",
+        "path PluginReply",
         "path ProviderAction",
         "path ProviderAction::Configure",
         "path ProviderAction::Create",
@@ -21375,6 +21484,8 @@
         "path Update::Models",
         "path Update::Notice",
         "path Update::Oauth",
+        "path Update::PluginResult",
+        "path Update::Plugins",
         "path Update::ProviderResult",
         "path Update::Providers",
         "path Update::QuestionReply",
@@ -21399,6 +21510,8 @@
         "use crate::model::session::ModelPolicyUpdate",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::OauthStart",
+        "use crate::model::session::PluginItem",
+        "use crate::model::session::PluginReply",
         "use crate::model::session::ProviderAction",
         "use crate::model::session::ProviderEntry",
         "use crate::model::session::SessionItem",
@@ -21438,6 +21551,13 @@
         "path permission::read",
         "path permission::select",
         "use crate::permission"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::plugin_command",
+      "references": [
+        "path crate::plugin_command::call"
       ]
     },
     {
@@ -21844,6 +21964,13 @@
       "to": "dim_cli::ui::oauth_view",
       "references": [
         "mod oauth_view"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
+      "to": "dim_cli::ui::plugins_panel",
+      "references": [
+        "mod plugins_panel"
       ]
     },
     {
@@ -22623,6 +22750,14 @@
     },
     {
       "from": "dim_cli::ui::i18n::de",
+      "to": "dim_cli::ui::i18n::de::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::de",
       "to": "dim_cli::ui::i18n::de::prompts",
       "references": [
         "mod prompts",
@@ -22643,6 +22778,14 @@
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::es",
+      "to": "dim_cli::ui::i18n::es::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::lookup"
       ]
     },
     {
@@ -22671,6 +22814,14 @@
     },
     {
       "from": "dim_cli::ui::i18n::fr",
+      "to": "dim_cli::ui::i18n::fr::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::fr",
       "to": "dim_cli::ui::i18n::fr::prompts",
       "references": [
         "mod prompts",
@@ -22691,6 +22842,14 @@
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::id",
+      "to": "dim_cli::ui::i18n::id::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::lookup"
       ]
     },
     {
@@ -22719,6 +22878,14 @@
     },
     {
       "from": "dim_cli::ui::i18n::ja",
+      "to": "dim_cli::ui::i18n::ja::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ja",
       "to": "dim_cli::ui::i18n::ja::prompts",
       "references": [
         "mod prompts",
@@ -22739,6 +22906,14 @@
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ko",
+      "to": "dim_cli::ui::i18n::ko::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::lookup"
       ]
     },
     {
@@ -22767,6 +22942,14 @@
     },
     {
       "from": "dim_cli::ui::i18n::pt_br",
+      "to": "dim_cli::ui::i18n::pt_br::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::pt_br",
       "to": "dim_cli::ui::i18n::pt_br::prompts",
       "references": [
         "mod prompts",
@@ -22787,6 +22970,14 @@
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::pt_pt",
+      "to": "dim_cli::ui::i18n::pt_pt::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::lookup"
       ]
     },
     {
@@ -22813,11 +23004,96 @@
       ]
     },
     {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::de",
+      "references": [
+        "path de::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::es",
+      "references": [
+        "path es::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::fr",
+      "references": [
+        "path fr::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::id",
+      "references": [
+        "path id::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::ja",
+      "references": [
+        "path ja::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::ko",
+      "references": [
+        "path ko::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::pt_br",
+      "references": [
+        "path pt_br::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::pt_pt",
+      "references": [
+        "path pt_pt::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::zh_cn",
+      "references": [
+        "path zh_cn::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::i18n::zh_hant",
+      "references": [
+        "path zh_hant::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::tests",
+      "to": "dim_cli::ui::plugins_panel",
+      "references": [
+        "path crate::ui::plugins_panel::STRINGS"
+      ]
+    },
+    {
       "from": "dim_cli::ui::i18n::zh_cn",
       "to": "dim_cli::ui::i18n::zh_cn::chrome",
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::zh_cn",
+      "to": "dim_cli::ui::i18n::zh_cn::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::lookup"
       ]
     },
     {
@@ -22842,6 +23118,14 @@
       "references": [
         "mod chrome",
         "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::zh_hant",
+      "to": "dim_cli::ui::i18n::zh_hant::plugins",
+      "references": [
+        "mod plugins",
+        "path plugins::lookup"
       ]
     },
     {
@@ -23436,6 +23720,197 @@
       ]
     },
     {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path PluginAction",
+        "path PluginAction::Disable",
+        "path PluginAction::Enable",
+        "path PluginAction::Install",
+        "path PluginAction::Reload",
+        "path PluginItem",
+        "path PluginReply",
+        "use crate::model::session::PluginAction",
+        "use crate::model::session::PluginItem",
+        "use crate::model::session::PluginReply"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::ui::plugins_panel::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect",
+        "path Effect::Close",
+        "path Effect::None",
+        "path Effect::Plugin",
+        "path Effect::Refresh",
+        "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path bordered",
+        "path confirm_panel",
+        "path follow_window",
+        "path key_hints",
+        "path wrap_words",
+        "use crate::ui::render::panel::bordered",
+        "use crate::ui::render::panel::confirm_panel",
+        "use crate::ui::render::panel::follow_window",
+        "use crate::ui::render::panel::key_hints",
+        "use crate::ui::render::panel::wrap_words"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::ui::rows",
+      "references": [
+        "path Columns::of",
+        "path Kind::Item",
+        "path Row",
+        "path panel_row",
+        "path title_plain",
+        "use crate::ui::rows::Columns",
+        "use crate::ui::rows::Kind",
+        "use crate::ui::rows::Row",
+        "use crate::ui::rows::panel_row",
+        "use crate::ui::rows::title_plain"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode::BackTab",
+        "path KeyCode::Char",
+        "path KeyCode::Down",
+        "path KeyCode::End",
+        "path KeyCode::Enter",
+        "path KeyCode::Esc",
+        "path KeyCode::Home",
+        "path KeyCode::Left",
+        "path KeyCode::Right",
+        "path KeyCode::Tab",
+        "path KeyCode::Up",
+        "path KeyEvent",
+        "path Modifiers::CTRL",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::ui::text",
+      "references": [
+        "path truncate_cells",
+        "use crate::ui::text::truncate_cells"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path fg",
+        "use crate::ui::theme::ansi::fg"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette",
+        "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path PluginAction::Disable",
+        "path PluginAction::Enable",
+        "path PluginAction::Install",
+        "path PluginAction::Reload",
+        "path PluginItem",
+        "path PluginReply",
+        "path PluginReply::default",
+        "use crate::model::session::PluginCandidate",
+        "use crate::model::session::PluginRefusal"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel::tests",
+      "to": "dim_cli::ui::plugins_panel",
+      "references": [
+        "path PluginsPanel",
+        "path PluginsPanel::installing",
+        "path PluginsPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel::tests",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect::Plugin"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel::tests",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path strip_escapes",
+        "use crate::ui::render::panel::strip_escapes",
+        "use crate::ui::render::panel::visible_width"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode",
+        "path KeyCode::Char",
+        "path KeyCode::Down",
+        "path KeyCode::End",
+        "path KeyCode::Enter",
+        "path KeyCode::Left",
+        "path KeyEvent",
+        "path KeyEvent::new",
+        "path Modifiers::NONE"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::plugins_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Appearance::Dark",
+        "path ColorMode::TrueColor",
+        "path Palette",
+        "path terminal_palette",
+        "use crate::ui::theme::Appearance",
+        "use crate::ui::theme::ColorMode",
+        "use crate::ui::theme::palette::terminal_palette"
+      ]
+    },
+    {
       "from": "dim_cli::ui::progress",
       "to": "dim_cli::ui::progress::tests",
       "references": [
@@ -23513,6 +23988,7 @@
       "to": "dim_cli::model::session",
       "references": [
         "path crate::model::session::OauthStart",
+        "path crate::model::session::PluginAction",
         "path crate::model::session::ProviderAction",
         "path crate::model::session::SubagentModelPolicy"
       ]
@@ -25856,6 +26332,7 @@
         "path Command::Configure",
         "path Command::InputControl",
         "path Command::ListModels",
+        "path Command::ListPlugins",
         "path Command::ListProviders",
         "path Command::ListSessions",
         "path Command::LoginStatus",
@@ -25866,6 +26343,7 @@
         "path Command::OauthCancel",
         "path Command::OauthPaste",
         "path Command::OauthStart",
+        "path Command::Plugin",
         "path Command::Provider",
         "path Command::ReadModelPolicy",
         "path Command::Resume",
@@ -25901,6 +26379,8 @@
         "path Update::Models",
         "path Update::Notice",
         "path Update::Oauth",
+        "path Update::PluginResult",
+        "path Update::Plugins",
         "path Update::ProviderResult",
         "path Update::Providers",
         "path Update::QuestionReply",
@@ -25918,6 +26398,7 @@
         "path Update::UpgradeInstalled",
         "path Update::Usage",
         "path Update::Web",
+        "path crate::model::session::PluginAction::Install",
         "use crate::model::session::Command",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",
@@ -26093,6 +26574,16 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::plugins_panel",
+      "references": [
+        "path PluginsPanel",
+        "path PluginsPanel::installing",
+        "path PluginsPanel::new",
+        "use crate::ui::plugins_panel::PluginsPanel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::progress",
       "references": [
         "path ProgressBar::from_env",
@@ -26127,6 +26618,7 @@
         "path Effect::OauthStart",
         "path Effect::OpenModels",
         "path Effect::OpenUrl",
+        "path Effect::Plugin",
         "path Effect::Print",
         "path Effect::Provider",
         "path Effect::ReadModelPolicy",
@@ -26544,8 +27036,12 @@
       "to": "dim_cli::model::session",
       "references": [
         "path Command",
+        "path Command::ListPlugins",
+        "path Command::Plugin",
         "path SessionPort",
-        "path Update"
+        "path Update",
+        "path Update::PluginResult",
+        "path Update::Plugins"
       ]
     },
     {
@@ -26602,8 +27098,10 @@
         "path KeyCode::BackTab",
         "path KeyCode::Char",
         "path KeyCode::Down",
+        "path KeyCode::Enter",
         "path KeyCode::Esc",
         "path KeyCode::Tab",
+        "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "path crate::ui::terminal::KeyEvent::new"
       ]
@@ -27496,6 +27994,22 @@
       "path": "char::is_whitespace"
     },
     {
+      "module": "dim_cli::plugin_command::tests",
+      "path": "PluginAction::Disable"
+    },
+    {
+      "module": "dim_cli::plugin_command::tests",
+      "path": "PluginAction::Enable"
+    },
+    {
+      "module": "dim_cli::plugin_command::tests",
+      "path": "PluginAction::Install"
+    },
+    {
+      "module": "dim_cli::plugin_command::tests",
+      "path": "PluginAction::Reload"
+    },
+    {
       "module": "dim_cli::plugins",
       "path": "SignalKind::interrupt"
     },
@@ -27656,12 +28170,20 @@
       "path": "Source::Text"
     },
     {
+      "module": "dim_cli::ui::tui",
+      "path": "char::is_whitespace"
+    },
+    {
       "module": "dim_cli::ui::tui::tests",
       "path": "Appearance::Dark"
     },
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "PluginAction::Enable"
     },
     {
       "module": "dim_cli::usage",
