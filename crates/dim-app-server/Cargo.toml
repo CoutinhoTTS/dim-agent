@@ -30,6 +30,8 @@ foldhash = "0.2"
 getrandom = "0.3"
 flate2 = "1.1"
 tar = { version = "0.4", default-features = false }
+# The Windows Node archives are zip files (runtime manager).
+zip = { version = "9.1", default-features = false, features = ["deflate"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2"
 base64 = "0.22"
@@ -42,8 +44,6 @@ http = "1"
 reqwest-mcp = { package = "reqwest", version = "0.13.2", default-features = false, features = ["json", "stream", "rustls"] }
 
 [target.'cfg(windows)'.dependencies]
-# The Windows Node archives are zip files (runtime manager).
-zip = { version = "2", default-features = false, features = ["deflate"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [features]

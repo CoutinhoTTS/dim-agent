@@ -1,6 +1,6 @@
 # RuntimeManager
 
-RuntimeManager supplies the Node and Python rutis runtimes that plugin code runs in ([#476](https://github.com/arcships/dim/issues/476)). It is a process plugin of the App Server, one loader row. It acquires each runtime that is on (a pinned, verified download into the home, or one already installed on the machine), keeps what it installed in its own file, and starts the runtime process. Plugin rows gate on their runtime's name under rutis' rules and start by themselves once RuntimeManager provides it.
+RuntimeManager supplies the Node and Python rutis runtimes that plugin code runs in ([#476](https://github.com/arcships/dim/issues/476)). It is a process plugin of the App Server, one loader row. It acquires each runtime that is on (a download of a fixed version into the home, verified against its official checksum, or one already installed on the machine), keeps what it installed in its own file, and starts the runtime process. Plugin rows gate on their runtime's name under rutis' rules and start by themselves once RuntimeManager provides it.
 
 The release ships the executable, the default configuration file and the default plugins, not the runtimes ([release packaging](../../release/README.md#local-packaging)).
 
@@ -8,14 +8,14 @@ The release ships the executable, the default configuration file and the default
 
 | Part | M1 (2026-11-01) | Later |
 | --- | --- | --- |
-| Node: pinned download, verification, `@arcships/rutis-runtime` from the pinned lock, start (§3) | yes | |
-| Python: pinned download, verification, the `rutis` package from pinned hashes, start (§3) | yes | |
+| Node: download of the fixed version, verification against the official checksum, `@arcships/rutis-runtime` from the pinned lock, start (§3) | yes | |
+| Python: download of the fixed version, verification against the official checksum, the `rutis` package from pinned hashes, start (§3) | yes | |
 | `source: system` for both runtimes (§2.2) | yes | |
 | Source lists with official sources first and mirrors after (§2.1) | yes | |
 | `runtime.list`, `runtime.install`; `dimcode runtime list/install` (§5) | yes | client notifications of changes |
 | Default plugins and the default configuration file in the release (§6) | yes | |
 | Python import through PluginManager's link directory (§4) | the runtime side here; links are PluginManager's ([#3](https://github.com/arcships/dim/issues/3)) | |
-| Removing runtime versions no pin uses | | yes |
+| Removing runtime versions this Dim no longer uses | | yes |
 
 ## 1. Structure
 
@@ -26,7 +26,7 @@ App Server startup
         │
         ▼
 RuntimeManager apply: registers `runtime` methods and RuntimeService, then a task per runtime that is on
-        │  acquire (§3): installed and matching the pins? else download → verify → unpack → rename
+        │  acquire (§3): installed and matching the fixed versions? else download → verify → unpack → rename
         ▼
 ctx.plugin(LocalRuntime)  ──provides──▶  Runtime#session-node / Runtime#py
                                               │ rutis gating
@@ -40,29 +40,31 @@ ctx.plugin(LocalRuntime)  ──provides──▶  Runtime#session-node / Runtim
 
 ## 2. Data
 
-### 2.1 Pins: `runtime/runtimes.json`, compiled into Dim
+### 2.1 Versions and sources: `runtime/runtimes.json`, compiled into Dim
 
 ```json
 {
   "node": {
     "version": "24.21.0",
+    "checksums": "https://nodejs.org/dist/v{version}/SHASUMS256.txt",
     "sources": ["https://nodejs.org/dist/v{version}/{file}", "https://npmmirror.com/mirrors/node/v{version}/{file}"],
-    "files": { "darwin-arm64": { "file": "node-v24.21.0-darwin-arm64.tar.gz", "sha256": "…" } }
+    "files": { "darwin-arm64": "node-v24.21.0-darwin-arm64.tar.gz" }
   },
   "python": {
     "version": "3.12.15+20261003",
+    "checksums": "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/SHA256SUMS",
     "sources": ["https://github.com/astral-sh/python-build-standalone/releases/download/20261003/{file}",
                 "https://registry.npmmirror.com/-/binary/python-build-standalone/20261003/{file}"],
-    "files": { "darwin-arm64": { "file": "cpython-3.12.15+20261003-aarch64-apple-darwin-install_only.tar.gz", "sha256": "…" } }
+    "files": { "darwin-arm64": "cpython-3.12.15+20261003-aarch64-apple-darwin-install_only.tar.gz" }
   },
   "npmRegistries": ["https://registry.npmjs.org", "https://registry.npmmirror.com"],
   "pythonIndexes": ["https://pypi.org/simple", "https://pypi.tuna.tsinghua.edu.cn/simple"]
 }
 ```
 
-- One file per platform (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`), with its SHA-256.
+- Dim fixes the version and one archive per platform (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `windows-x64`, `windows-arm64`). The archive's SHA-256 is read at acquisition from `checksums`, the publisher's own checksum file (nodejs.org's `SHASUMS256.txt`, the python-build-standalone release's `SHA256SUMS`), fetched over HTTPS from that fixed address. Dim trusts the official publisher; no environment variable or mirror replaces that address. A network that intercepts it is the user's network.
 - The runtime packages are pinned where they already are: `runtime/package.json` and `runtime/package-lock.json` (`@arcships/rutis-runtime`, matching the host's rutis, with npm `integrity` for every package), and `runtime/python-requirements.txt` (`rutis`, with `--hash`). Both are compiled into Dim; changing the host's rutis version changes them in the same commit.
-- Sources are tried in order; the first whose file passes verification is used. A file is accepted only by its pinned hash, so a source's location adds no trust. The environment puts the user's own source first: `DIMCODE_NODE_MIRROR` and `DIMCODE_PYTHON_MIRROR` (a base URL the file name is appended to), `DIMCODE_NPM_REGISTRY` (already used by the CLI) and `DIMCODE_PYTHON_INDEX`.
+- Sources are tried in order; the first whose file matches the official SHA-256 is used. A mirror only serves bytes, so it adds no trust. The environment puts the user's own source first: `DIMCODE_NODE_MIRROR` and `DIMCODE_PYTHON_MIRROR` (a base URL the file name is appended to), `DIMCODE_NPM_REGISTRY` (already used by the CLI) and `DIMCODE_PYTHON_INDEX`.
 
 ### 2.2 Configuration: the `runtimes` section of the default configuration file
 
@@ -75,7 +77,7 @@ The default configuration file ([PluginManager §2.3](PluginManager.md#23-the-de
 }
 ```
 
-- `source`: `download` uses the pinned file above; `system` uses the interpreter on `PATH` (`node`; `python3`, or `python` on Windows), checked when it is acquired: Node 22.19 or later (the `engines` of `@arcships/rutis-runtime`) with its bundled npm, Python 3.10 or later with pip. A check that fails is that runtime's failure (§3.3).
+- `source`: `download` uses the archive above; `system` uses the interpreter on `PATH` (`node`; `python3`, or `python` on Windows), checked when it is acquired: Node 22.19 or later (the `engines` of `@arcships/rutis-runtime`) with its bundled npm, Python 3.10 or later with pip. A check that fails is that runtime's failure (§3.3).
 - `auto`: `true` acquires the runtime at every start. `false` leaves it off until `runtime.install` (§5); once installed, it is recorded (§2.4) and acquired at every start like an `auto` one.
 - The user overrides the preset in `<home>/runtimes/config.json`, the same shape, merged per runtime and field over the preset. It is in the home, so only the user's local configuration changes it; no project source does.
 
@@ -91,7 +93,7 @@ The default configuration file ([PluginManager §2.3](PluginManager.md#23-the-de
 | `config.json` | the user's override (§2.2), optional |
 | `*.partial/`, `*.download` | work in progress; removed before each attempt |
 
-Every path is a function of the pins, the configuration and the home, so the App Server builds the `LocalRuntime` objects and the row resolvers from them before reconciliation, as it does today with configured paths; the runtime process starts only when RuntimeManager mounts the runtime. With `source: system`, the interpreter path is looked up on `PATH` when the App Server builds the objects.
+Every path is a function of the fixed versions, the configuration and the home, so the App Server builds the `LocalRuntime` objects and the row resolvers from them before reconciliation, as it does today with configured paths; the runtime process starts only when RuntimeManager mounts the runtime. With `source: system`, the interpreter path is looked up on `PATH` when the App Server builds the objects.
 
 The Python runtime's project directory is `<home>/plugins/.python/`, PluginManager's (§4). The Node runtime's anchor is the `package.json` of its packages directory.
 
@@ -102,13 +104,13 @@ The Python runtime's project directory is `<home>/plugins/.python/`, PluginManag
   "python": { "source": "download", "version": "3.12.15+20261003", "sha256": "…", "packages": "python-packages-…" } }
 ```
 
-Written by RuntimeManager only, after a runtime and its packages are installed. An entry whose fields equal what the pins and configuration give, with its directories present, is installed: the next start uses it without downloading. An entry for an `auto: false` runtime means the user installed it. Nothing else is stored; whether a runtime is running is rutis' state (`RuntimeHandle::state`).
+Written by RuntimeManager only, after a runtime and its packages are installed. `sha256` is the official digest the archive was verified against. An entry whose source, version and packages equal what the fixed versions and configuration give, with its directories present, is installed: the next start uses it without downloading. An entry for an `auto: false` runtime means the user installed it. Nothing else is stored; whether a runtime is running is rutis' state (`RuntimeHandle::state`).
 
 ## 3. Flows
 
 ### 3.1 Startup
 
-1. The App Server reads the pins and the configuration, builds the `LocalRuntime` objects from the fixed paths (§2.3), and adds the rows: `RuntimeManager` (required), `SessionNodeRows` and `SessionPythonRows` (not required), and the plugin rows.
+1. The App Server reads the fixed versions and the configuration, builds the `LocalRuntime` objects from the fixed paths (§2.3), and adds the rows: `RuntimeManager` (required), `SessionNodeRows` and `SessionPythonRows` (not required), and the plugin rows.
 2. RuntimeManager's `apply` registers `runtime` with `managementMethods` and provides `RuntimeService`, then starts one task per runtime that is on (`auto`, or recorded in `runtimes.json`).
 3. Each task acquires its runtime (§3.2) and mounts it. The runtime rows and then the plugin rows waiting for it start by themselves. The two runtimes are independent: one failing does not affect the other.
 
@@ -119,7 +121,7 @@ Startup does not wait for any runtime: a first start without a network reaches t
 For each runtime, in its task:
 
 1. If `runtimes.json` records it as installed (§2.4), go to step 5.
-2. `download`: fetch the platform's file from each source in order into `<home>/runtimes/<directory>.download`, compute SHA-256 while writing, and keep the first that matches the pin. Unpack it only after it matches, into `<directory>.partial/`, refusing entries that leave the directory and links that point outside it. Rename the unpacked directory to its final path, replacing nothing that verified before. `system`: look up and check the interpreter (§2.2).
+2. `download`: read the archive's SHA-256 from the official checksum file (a file it does not list is not downloaded), then fetch the archive from each source in order into `<home>/runtimes/<directory>.download`, compute SHA-256 while writing, and keep the first that matches. Unpack it only after it matches, into `<directory>.partial/`, refusing entries that leave the directory and links that point outside it. Rename the unpacked directory to its final path, replacing nothing that verified before. `system`: look up and check the interpreter (§2.2).
 3. Packages, into `<dir>.partial/` then renamed: Node runs `npm ci --ignore-scripts --omit=dev --no-audit --no-fund --registry <r>` with the verified (or system) Node's own npm over the pinned `package.json` and lock, trying each registry in order; npm verifies every package against the lock's `integrity`. Python runs `python -m pip install --require-hashes --no-deps --only-binary :all: --target <dir> --index-url <i> -r requirements`, trying each index in order.
 4. Write `runtimes.json`.
 5. Mount the `LocalRuntime` as RuntimeManager's child.
@@ -134,7 +136,7 @@ When the runtime process ends on its own, rutis withdraws the runtime's name and
 
 ### 3.4 Upgrade and rollback
 
-A Dim version with new pins acquires into new directories (their names carry the version and digests) and rewrites `runtimes.json` only when the new version is installed. Until then, and if it fails, the previous directories are untouched; an older Dim started on the same home finds its own directories and uses them. Versions no pin uses are not removed in M1.
+A Dim version with new fixed versions acquires into new directories (their names carry the version and digests) and rewrites `runtimes.json` only when the new version is installed. Until then, and if it fails, the previous directories are untouched; an older Dim started on the same home finds its own directories and uses them. Versions this Dim no longer uses are not removed in M1.
 
 ## 4. Python import of a plugin installed from a directory
 
@@ -170,8 +172,8 @@ LICENSE  NOTICE  release-manifest.json
 
 ## 7. Security
 
-- Every downloaded file is verified against a hash compiled into Dim before it is unpacked or run; npm and pip packages are verified by the pinned lock and requirements. Sources and mirrors add no trust.
-- Archive entries are unpacked only inside their directory: absolute paths and `..` are refused, and so are links whose target leaves it (on Windows a link inside is unpacked as a copy).
+- Every downloaded archive is verified against the SHA-256 its official publisher lists, read from a fixed HTTPS address, before it is unpacked or run; npm and pip packages are verified by the pinned lock and requirements in the repository. Sources and mirrors add no trust.
+- Archive entries are unpacked only inside their directory: absolute paths and `..` are refused, and so are links whose target leaves it (on Windows a link inside is unpacked as a copy); link entries of a zip archive are always refused. No setuid, setgid or sticky bit is kept (on Unix permissions are at most `rwxr-xr-x`).
 - npm runs with `--ignore-scripts`; pip installs only wheels (`--only-binary :all:`), so no package code runs during installation.
 - RuntimeManager writes only under `<home>/runtimes/`. No credentials are used or stored.
 

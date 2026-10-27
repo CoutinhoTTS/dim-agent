@@ -17303,14 +17303,18 @@
       "from": "dim_app_server::runtime_manager::tests",
       "to": "dim_app_server::runtime_manager",
       "references": [
+        "path Archive",
         "path PINS",
-        "path PinFile",
         "path Pins",
+        "path checksum",
+        "path client",
         "path download",
         "path unpack",
+        "use super::Archive",
         "use super::PINS",
-        "use super::PinFile",
         "use super::Pins",
+        "use super::checksum",
+        "use super::client",
         "use super::download",
         "use super::unpack"
       ]
@@ -26307,6 +26311,14 @@
     {
       "module": "dim_app_server::provider::preferences",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::runtime_manager",
+      "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_app_server::runtime_manager::tests",
+      "path": "SimpleFileOptions::default"
     },
     {
       "module": "dim_app_server::session_typescript",

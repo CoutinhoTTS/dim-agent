@@ -1,34 +1,42 @@
 {
   "node": {
     "version": "24.21.0",
+    "checksums": "https://nodejs.org/dist/v{version}/SHASUMS256.txt",
     "sources": [
       "https://nodejs.org/dist/v{version}/{file}",
       "https://npmmirror.com/mirrors/node/v{version}/{file}"
     ],
     "files": {
-      "darwin-arm64": { "file": "node-v24.21.0-darwin-arm64.tar.gz", "sha256": "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057" },
-      "darwin-x64": { "file": "node-v24.21.0-darwin-x64.tar.gz", "sha256": "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097" },
-      "linux-arm64": { "file": "node-v24.21.0-linux-arm64.tar.gz", "sha256": "724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5" },
-      "linux-x64": { "file": "node-v24.21.0-linux-x64.tar.gz", "sha256": "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff" },
-      "windows-arm64": { "file": "node-v24.21.0-win-arm64.zip", "sha256": "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921" },
-      "windows-x64": { "file": "node-v24.21.0-win-x64.zip", "sha256": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541" }
+      "darwin-arm64": "node-v24.21.0-darwin-arm64.tar.gz",
+      "darwin-x64": "node-v24.21.0-darwin-x64.tar.gz",
+      "linux-arm64": "node-v24.21.0-linux-arm64.tar.gz",
+      "linux-x64": "node-v24.21.0-linux-x64.tar.gz",
+      "windows-arm64": "node-v24.21.0-win-arm64.zip",
+      "windows-x64": "node-v24.21.0-win-x64.zip"
     }
   },
   "python": {
     "version": "3.12.15+20261003",
+    "checksums": "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/SHA256SUMS",
     "sources": [
       "https://github.com/astral-sh/python-build-standalone/releases/download/20261003/{file}",
       "https://registry.npmmirror.com/-/binary/python-build-standalone/20261003/{file}"
     ],
     "files": {
-      "darwin-arm64": { "file": "cpython-3.12.15+20261003-aarch64-apple-darwin-install_only.tar.gz", "sha256": "316a463172740e71d8dca1f2730784e325f3f720941137b5d674d5801a632213" },
-      "darwin-x64": { "file": "cpython-3.12.15+20261003-x86_64-apple-darwin-install_only.tar.gz", "sha256": "a8fd7a91852f19b6d959793ef41fad048631ccb2a334a9ecdf573255298f7978" },
-      "linux-arm64": { "file": "cpython-3.12.15+20261003-aarch64-unknown-linux-gnu-install_only.tar.gz", "sha256": "95c01982c9fcb9d95b0acfdb5eb8a6e0099dd11edf062314a474228d93f2b765" },
-      "linux-x64": { "file": "cpython-3.12.15+20261003-x86_64-unknown-linux-gnu-install_only.tar.gz", "sha256": "f937814031eab4698ca6d07ec606ede1825768f3f3e99af76d9db3900bee03c5" },
-      "windows-arm64": { "file": "cpython-3.12.15+20261003-aarch64-pc-windows-msvc-install_only.tar.gz", "sha256": "2de96a340fecdabe215094345ed3aea1b473e858bd098360f2253299e18f24d2" },
-      "windows-x64": { "file": "cpython-3.12.15+20261003-x86_64-pc-windows-msvc-install_only.tar.gz", "sha256": "4b6f0beebbb695a0f3ea237b8c3eaa5bd424f47a7bc25b2fbe3a43390c770f08" }
+      "darwin-arm64": "cpython-3.12.15+20261003-aarch64-apple-darwin-install_only.tar.gz",
+      "darwin-x64": "cpython-3.12.15+20261003-x86_64-apple-darwin-install_only.tar.gz",
+      "linux-arm64": "cpython-3.12.15+20261003-aarch64-unknown-linux-gnu-install_only.tar.gz",
+      "linux-x64": "cpython-3.12.15+20261003-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "windows-arm64": "cpython-3.12.15+20261003-aarch64-pc-windows-msvc-install_only.tar.gz",
+      "windows-x64": "cpython-3.12.15+20261003-x86_64-pc-windows-msvc-install_only.tar.gz"
     }
   },
-  "npmRegistries": ["https://registry.npmjs.org", "https://registry.npmmirror.com"],
-  "pythonIndexes": ["https://pypi.org/simple", "https://pypi.tuna.tsinghua.edu.cn/simple"]
+  "npmRegistries": [
+    "https://registry.npmjs.org",
+    "https://registry.npmmirror.com"
+  ],
+  "pythonIndexes": [
+    "https://pypi.org/simple",
+    "https://pypi.tuna.tsinghua.edu.cn/simple"
+  ]
 }

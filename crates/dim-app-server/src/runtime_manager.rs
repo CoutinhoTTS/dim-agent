@@ -36,13 +36,17 @@ struct Pins {
 #[derive(Deserialize)]
 struct Pin {
     version: String,
+    /// The official checksum file the archive's SHA-256 is read from.
+    checksums: String,
     sources: Vec<String>,
-    files: HashMap<String, PinFile>,
+    /// The archive's file name, by platform.
+    files: HashMap<String, String>,
 }
-#[derive(Deserialize, Clone, Debug)]
-struct PinFile {
+/// A runtime's archive: its file name and where its checksum is published.
+#[derive(Clone, Debug)]
+struct Archive {
     file: String,
-    sha256: String,
+    checksums: String,
 }
 
 /// Where a runtime's interpreter comes from (design §2.2).
@@ -80,8 +84,8 @@ pub struct Plan {
     pub version: String,
     /// The interpreter the runtime runs with.
     pub interpreter: PathBuf,
-    /// The pinned archive (download) and its unpacked directory.
-    archive: Option<(PinFile, PathBuf)>,
+    /// The archive (download) and its unpacked directory.
+    archive: Option<(Archive, PathBuf)>,
     sources: Vec<String>,
     /// The packages directory: Node's `npm ci` tree, Python's `pip --target`.
     pub packages: PathBuf,
@@ -170,10 +174,13 @@ impl Runtimes {
             hex(&hash.finalize())[..16].to_owned()
         };
         let archive = |pin: &Pin, directory: String| {
-            pin.files
-                .get(&platform)
-                .cloned()
-                .map(|file| (file, root.join(directory)))
+            pin.files.get(&platform).map(|file| {
+                let archive = Archive {
+                    file: file.clone(),
+                    checksums: pin.checksums.replace("{version}", &pin.version),
+                };
+                (archive, root.join(directory))
+            })
         };
         let node_archive = archive(
             &pins.node,
@@ -310,11 +317,13 @@ struct Record {
     packages: String,
 }
 impl Record {
-    fn of(plan: &Plan) -> Self {
+    /// What installing `plan` records; `sha256` is the archive's verified
+    /// digest.
+    fn of(plan: &Plan, sha256: Option<String>) -> Self {
         Self {
             source: plan.source,
             version: plan.version.clone(),
-            sha256: plan.archive.as_ref().map(|(file, _)| file.sha256.clone()),
+            sha256,
             packages: plan
                 .packages
                 .file_name()
@@ -445,26 +454,38 @@ impl RuntimeService {
 
     async fn acquire(&self, kind: Kind) -> Result<(), String> {
         let plan = self.runtimes.plan(kind);
-        let record = Record::of(plan);
-        let installed = |plan: &Plan| {
-            plan.archive
+        // Installed: recorded for this source, version and packages, with
+        // the directories in place (§2.4).
+        let installed = read_records(&self.runtimes.record_file())
+            .get(kind.name())
+            .is_some_and(|record| {
+                let expected = Record::of(plan, record.sha256.clone());
+                *record == expected
+            })
+            && plan
+                .archive
                 .as_ref()
                 .is_none_or(|(_, directory)| directory.is_dir())
-                && plan.packages.is_dir()
-        };
-        if read_records(&self.runtimes.record_file()).get(kind.name()) == Some(&record)
-            && installed(plan)
-        {
+            && plan.packages.is_dir();
+        if installed {
             return Ok(());
         }
         std::fs::create_dir_all(&self.runtimes.root).map_err(|e| e.to_string())?;
-        if let Some((file, directory)) = &plan.archive {
-            if !directory.is_dir() {
-                download(&plan.sources, file, directory).await?;
+        let sha256 = match &plan.archive {
+            Some((archive, directory)) => {
+                let client = client()?;
+                let sha256 = checksum(&client, archive).await?;
+                if !directory.is_dir() {
+                    download(&client, &plan.sources, &archive.file, &sha256, directory).await?;
+                }
+                Some(sha256)
             }
-        } else {
-            check_system(kind, &plan.interpreter).await?;
-        }
+            None => {
+                check_system(kind, &plan.interpreter).await?;
+                None
+            }
+        };
+        let record = Record::of(plan, sha256);
         if !plan.packages.is_dir() {
             match kind {
                 Kind::Node => npm_ci(plan).await?,
@@ -500,20 +521,54 @@ impl DynPlugin for Mounted {
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Downloads `file` from the first source whose bytes match its pin and
-/// unpacks it into `directory` (design §3.2, §7).
-async fn download(sources: &[String], file: &PinFile, directory: &Path) -> Result<(), String> {
-    let client = reqwest::Client::builder()
+fn client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         .connect_timeout(TIMEOUT)
         .read_timeout(TIMEOUT)
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+}
+
+/// The archive's SHA-256, read from its official checksum file (§2.1): the
+/// address is fixed in Dim and no mirror replaces it.
+async fn checksum(client: &reqwest::Client, archive: &Archive) -> Result<String, String> {
+    let text = client
+        .get(&archive.checksums)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| format!("{}: {e}", archive.checksums))?
+        .text()
+        .await
+        .map_err(|e| format!("{}: {e}", archive.checksums))?;
+    text.lines()
+        .filter_map(|line| line.split_once(char::is_whitespace))
+        .find(|(_, name)| name.trim().trim_start_matches('*') == archive.file)
+        .map(|(digest, _)| digest.to_ascii_lowercase())
+        .filter(|digest| digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| {
+            format!(
+                "{} lists no SHA-256 for {}",
+                archive.checksums, archive.file
+            )
+        })
+}
+
+/// Downloads `file` from the first source whose bytes match `sha256` and
+/// unpacks it into `directory` (design §3.2, §7).
+async fn download(
+    client: &reqwest::Client,
+    sources: &[String],
+    file: &str,
+    sha256: &str,
+    directory: &Path,
+) -> Result<(), String> {
     let partial = directory.with_extension("partial");
     let archive = directory.with_extension("download");
     let mut errors = Vec::new();
     for source in sources {
-        let url = source.replace("{file}", &file.file.replace('+', "%2B"));
-        match fetch(&client, &url, &archive, &file.sha256).await {
+        let url = source.replace("{file}", &file.replace('+', "%2B"));
+        match fetch(client, &url, &archive, sha256).await {
             Ok(()) => {
                 errors.clear();
                 break;
@@ -523,10 +578,10 @@ async fn download(sources: &[String], file: &PinFile, directory: &Path) -> Resul
     }
     if !errors.is_empty() || sources.is_empty() {
         let _ = std::fs::remove_file(&archive);
-        return Err(format!("{} not acquired: {}", file.file, errors.join("; ")));
+        return Err(format!("{file} not acquired: {}", errors.join("; ")));
     }
     let _ = std::fs::remove_dir_all(&partial);
-    let name = file.file.clone();
+    let name = file.to_owned();
     let (from, to) = (archive.clone(), partial.clone());
     let unpacked = tokio::task::spawn_blocking(move || unpack(&name, &from, &to))
         .await
@@ -534,7 +589,7 @@ async fn download(sources: &[String], file: &PinFile, directory: &Path) -> Resul
     let _ = std::fs::remove_file(&archive);
     if let Err(error) = unpacked {
         let _ = std::fs::remove_dir_all(&partial);
-        return Err(format!("{}: {error}", file.file));
+        return Err(format!("{file}: {error}"));
     }
     std::fs::rename(&partial, directory).map_err(|e| format!("{}: {e}", directory.display()))
 }
@@ -566,7 +621,9 @@ async fn fetch(
     let actual = hex(&hash.finalize());
     if actual != expected {
         let _ = std::fs::remove_file(path);
-        return Err(format!("SHA-256 {actual} does not match the pin"));
+        return Err(format!(
+            "SHA-256 {actual} does not match the published {expected}"
+        ));
     }
     Ok(())
 }
@@ -575,15 +632,15 @@ async fn fetch(
 /// it, and links pointing outside it, are refused.
 fn unpack(name: &str, archive: &Path, into: &Path) -> Result<(), String> {
     std::fs::create_dir_all(into).map_err(|e| e.to_string())?;
+    // Every component is a plain name: no root, prefix, `.` or `..`.
     let inside = |path: &Path| -> Result<PathBuf, String> {
-        let relative: PathBuf = path.components().skip(1).collect();
-        if !relative
+        if !path
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
         {
             return Err(format!("refusing archive path {}", path.display()));
         }
-        Ok(relative)
+        Ok(path.components().skip(1).collect())
     };
     if name.ends_with(".zip") {
         return unzip(archive, into, &inside);
@@ -657,7 +714,8 @@ fn unpack(name: &str, archive: &Path, into: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(windows)]
+/// A zip archive (the Windows Node downloads), entry by entry: links are
+/// refused, and on Unix no permission bit beyond `rwxr-xr-x` is applied.
 fn unzip(
     archive: &Path,
     into: &Path,
@@ -667,9 +725,16 @@ fn unzip(
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index).map_err(|e| e.to_string())?;
-        let path = entry
-            .enclosed_name()
-            .ok_or_else(|| format!("refusing archive path {}", entry.name()))?;
+        // The name as stored, not the sanitized one: an absolute or `..`
+        // name is refused rather than rewritten.
+        let raw = String::from_utf8_lossy(entry.name_raw()).replace('\\', "/");
+        let path = PathBuf::from(&raw);
+        if entry.enclosed_name().is_none() {
+            return Err(format!("refusing archive path {raw}"));
+        }
+        if entry.is_symlink() {
+            return Err(format!("refusing link {}", path.display()));
+        }
         let relative = inside(&path)?;
         if relative.as_os_str().is_empty() {
             continue;
@@ -683,13 +748,18 @@ fn unzip(
             }
             let mut out = std::fs::File::create(&destination).map_err(|e| e.to_string())?;
             std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            if let Some(mode) = entry.unix_mode() {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    &destination,
+                    std::fs::Permissions::from_mode(mode & 0o755),
+                )
+                .map_err(|e| e.to_string())?;
+            }
         }
     }
     Ok(())
-}
-#[cfg(not(windows))]
-fn unzip(_: &Path, _: &Path, _: &dyn Fn(&Path) -> Result<PathBuf, String>) -> Result<(), String> {
-    Err("zip archives are Windows downloads".into())
 }
 
 /// Runs `command`; its failure carries the end of its output.
@@ -956,14 +1026,20 @@ impl DynPlugin for RuntimeManagerPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{PINS, PinFile, Pins, download, unpack};
+    use super::{Archive, PINS, Pins, checksum, client, download, unpack};
     use std::path::Path;
 
-    /// Every platform of the release matrix has a pinned Node and Python
-    /// file with a lowercase hex SHA-256.
+    /// Every platform of the release matrix has a Node and a Python archive,
+    /// and their checksums are read from the official publishers over HTTPS.
     #[test]
-    fn every_release_platform_is_pinned() {
+    fn every_release_platform_has_an_archive_and_an_official_checksum() {
         let pins: Pins = serde_json::from_str(PINS).unwrap();
+        assert!(pins.node.checksums.starts_with("https://nodejs.org/"));
+        assert!(
+            pins.python
+                .checksums
+                .starts_with("https://github.com/astral-sh/python-build-standalone/")
+        );
         for platform in [
             "darwin-arm64",
             "darwin-x64",
@@ -973,9 +1049,7 @@ mod tests {
             "windows-x64",
         ] {
             for pin in [&pins.node, &pins.python] {
-                let sha = &pin.files[platform].sha256;
-                assert_eq!(sha.len(), 64, "{platform}");
-                assert!(sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+                assert!(pin.files.contains_key(platform), "{platform}");
             }
         }
     }
@@ -986,33 +1060,67 @@ mod tests {
         dir
     }
 
-    /// A source whose bytes do not match the pin is refused: nothing is
-    /// unpacked and no download stays behind, and the reason names it.
+    /// The SHA-256 comes from the checksum file; a source whose bytes do not
+    /// match it is refused: nothing is unpacked, no download stays behind,
+    /// and the reason names it. A file the checksum file does not list is
+    /// not downloaded at all.
     #[tokio::test]
-    async fn a_download_that_does_not_match_its_pin_is_refused() {
+    async fn a_download_that_does_not_match_its_published_checksum_is_refused() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let published = "ab".repeat(32);
+        let sums = format!(
+            "{published}  node.tar.gz\n{}  other.tar.gz\n",
+            "cd".repeat(32)
+        );
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             loop {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = [0u8; 1024];
-                let _ = stream.read(&mut request).await;
+                let read = stream.read(&mut request).await.unwrap_or(0);
+                let body = if String::from_utf8_lossy(&request[..read]).contains("SUMS") {
+                    sums.clone()
+                } else {
+                    "tampered".to_owned()
+                };
                 let _ = stream
-                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\ntampered")
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
                     .await;
             }
         });
+        let client = client().unwrap();
+        let archive = |file: &str| Archive {
+            file: file.into(),
+            checksums: format!("http://{address}/SUMS"),
+        };
+        assert_eq!(
+            checksum(&client, &archive("node.tar.gz")).await.unwrap(),
+            published
+        );
+        let unlisted = checksum(&client, &archive("node.zip")).await.unwrap_err();
+        assert!(
+            unlisted.contains("lists no SHA-256 for node.zip"),
+            "{unlisted}"
+        );
         let root = scratch("pin");
         let directory = root.join("node-v0-test");
-        let file = PinFile {
-            file: "node.tar.gz".into(),
-            sha256: "0".repeat(64),
-        };
-        let error = download(&[format!("http://{address}/{{file}}")], &file, &directory)
-            .await
-            .unwrap_err();
-        assert!(error.contains("does not match the pin"), "{error}");
+        let error = download(
+            &client,
+            &[format!("http://{address}/{{file}}")],
+            "node.tar.gz",
+            &published,
+            &directory,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("does not match the published"), "{error}");
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1061,6 +1169,7 @@ mod tests {
         assert!(root.join("good/bin/npm").is_symlink());
         for (name, kind, path, link) in [
             ("parent", tar::EntryType::Regular, "top/../../escape", None),
+            ("rooted", tar::EntryType::Regular, "/top/escape", None),
             (
                 "link",
                 tar::EntryType::Symlink,
@@ -1077,6 +1186,90 @@ mod tests {
             let file = root.join(format!("{name}.tar.gz"));
             archive(&file, |b| entry(b, kind, path, link));
             let error = unpack("x.tar.gz", &file, &root.join(name)).unwrap_err();
+            assert!(error.contains("refusing"), "{name}: {error}");
+        }
+        assert!(!root.parent().unwrap().join("escape").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// No setuid, setgid or sticky bit survives unpacking a tar archive.
+    #[cfg(unix)]
+    #[test]
+    fn unpacking_drops_privileged_permission_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("mode");
+        let file = root.join("mode.tar.gz");
+        archive(&file, |builder| {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_path("top/bin/node").unwrap();
+            header.set_mode(0o7777);
+            header.set_size(2);
+            header.set_cksum();
+            builder.append(&header, &b"ok"[..]).unwrap();
+        });
+        unpack("mode.tar.gz", &file, &root.join("out")).unwrap();
+        let mode = std::fs::metadata(root.join("out/bin/node"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o755);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A zip archive is unpacked entry by entry: `..`, absolute paths and
+    /// link entries are refused, and privileged permission bits are dropped.
+    #[test]
+    fn unzipping_stays_inside_and_refuses_links() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let root = scratch("unzip");
+        let build = |name: &str, add: &dyn Fn(&mut zip::ZipWriter<std::fs::File>)| {
+            let path = root.join(name);
+            let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            add(&mut writer);
+            writer.finish().unwrap();
+            path
+        };
+        let good = build("good.zip", &|w| {
+            w.start_file(
+                "top/node.exe",
+                SimpleFileOptions::default().unix_permissions(0o4755),
+            )
+            .unwrap();
+            w.write_all(b"ok").unwrap();
+        });
+        unpack("good.zip", &good, &root.join("good")).unwrap();
+        assert_eq!(std::fs::read(root.join("good/node.exe")).unwrap(), b"ok");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(root.join("good/node.exe"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o7000, 0);
+        }
+        type Add<'a> = &'a dyn Fn(&mut zip::ZipWriter<std::fs::File>);
+        let cases: [(&str, Add); 3] = [
+            ("parent", &|w| {
+                w.start_file("top/../../escape", SimpleFileOptions::default())
+                    .unwrap();
+                w.write_all(b"x").unwrap();
+            }),
+            ("absolute", &|w| {
+                w.start_file("/tmp/escape", SimpleFileOptions::default())
+                    .unwrap();
+                w.write_all(b"x").unwrap();
+            }),
+            ("link", &|w| {
+                w.add_symlink("top/link", "../../../etc", SimpleFileOptions::default())
+                    .unwrap();
+            }),
+        ];
+        for (name, add) in cases {
+            let file = build(&format!("{name}.zip"), add);
+            let error = unpack("x.zip", &file, &root.join(name)).unwrap_err();
             assert!(error.contains("refusing"), "{name}: {error}");
         }
         assert!(!root.parent().unwrap().join("escape").exists());
