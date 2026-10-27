@@ -106,6 +106,9 @@ pub(crate) struct State {
     catalog: OnceLock<ServiceCatalog>,
     /// The Node rows' resolver, told to forget a module before a reload.
     node: OnceLock<Option<Arc<rutis_loader::runtime::RuntimeResolver>>>,
+    /// Held while the layer is derived from the record and reconciled, so
+    /// the layer reconciled last is derived from the latest record.
+    applying: tokio::sync::Mutex<()>,
 }
 
 /// The `plugins` layer startup reconciles with (§3.1).
@@ -156,6 +159,7 @@ impl State {
             builtins: OnceLock::new(),
             catalog: OnceLock::new(),
             node: OnceLock::new(),
+            applying: tokio::sync::Mutex::new(()),
         }))
     }
 
@@ -177,12 +181,30 @@ impl State {
                 return Err(format!("locked plugin {name} is not part of this build"));
             }
         }
+        let _ = self.builtins.set(builtins);
+        let _ = self.catalog.set(catalog);
+        let _ = self.node.set(node);
         let record = self.record.lock().unwrap().clone();
+        let (patches, off) = self.derive(&record);
+        Ok(StartupLayer {
+            patches,
+            off,
+            locked: locked_rows,
+        })
+    }
+
+    /// The `plugins` layer `record` implies (§3): a row for each name that
+    /// uses a default or installed plugin with code, and each built-in row
+    /// whose name is off or uses another plugin turned off; with those
+    /// built-in names.
+    fn derive(&self, record: &Record) -> (Vec<Patch>, Vec<String>) {
+        let builtins = self.builtins.get().expect("set at startup");
+        let catalog = self.catalog.get().expect("set at startup");
         let mut rows = Vec::new();
         let mut patches = Vec::new();
         let mut off = Vec::new();
-        for name in names(&record, &self.defaults, &builtins) {
-            let used = using(&record, &self.defaults, &builtins, &name);
+        for name in names(record, &self.defaults, builtins) {
+            let used = using(record, &self.defaults, builtins, &name);
             if builtins.contains(&name) && used != Some(Use::Builtin) {
                 patches.push(Patch {
                     id: Some(name.clone()),
@@ -195,15 +217,15 @@ impl State {
             }
             let Some(dir) = used
                 .as_ref()
-                .and_then(|used| dir_of(&record, &self.defaults, &name, used))
+                .and_then(|used| dir_of(record, &self.defaults, &name, used))
             else {
                 continue;
             };
-            // A plugin whose manifest no longer reads does not fail startup.
+            // A plugin whose manifest no longer reads has no row.
             match Manifest::read(&dir) {
                 Ok(Manifest {
                     code: Some(code), ..
-                }) if missing_instance_names(&catalog, &code).is_empty() => {
+                }) if missing_instance_names(catalog, &code).is_empty() => {
                     rows.push(row_value(&name, &code));
                 }
                 Ok(_) => {}
@@ -217,17 +239,9 @@ impl State {
                 ..Default::default()
             },
         );
-        let _ = self.builtins.set(builtins);
-        let _ = self.catalog.set(catalog);
-        let _ = self.node.set(node);
-        Ok(StartupLayer {
-            patches,
-            off,
-            locked: locked_rows,
-        })
+        (patches, off)
     }
 }
-
 fn register_names(catalog: &mut ServiceCatalog, code: &record::Code) {
     for (service, group) in &code.instance_names {
         if matches!(
@@ -431,24 +445,23 @@ impl Manager {
     }
 
     /// Changes the in-memory record with `change`, writes it, and returns
-    /// what the name used before and after along with `change`'s value. A
-    /// failed write leaves the table as it was.
+    /// `change`'s value and what the name uses afterwards. A failed write
+    /// leaves the table as it was.
     fn commit<T>(
         &self,
         name: impl Fn(&Record, &T) -> String,
         change: impl FnOnce(&mut Record) -> Result<T, PluginError>,
-    ) -> Result<(T, Option<Use>, Option<Use>), PluginError> {
+    ) -> Result<(T, Option<Use>), PluginError> {
         let mut record = self.state.record.lock().unwrap();
         let mut next = record.clone();
         let value = change(&mut next)?;
         let name = name(&next, &value);
-        let before = self.using(&record, &name);
         let after = self.using(&next, &name);
         next.write(&self.state.record_path).map_err(|error| {
             PluginError::new("acquire_failed", format!("plugins.json: {error}"))
         })?;
         *record = next;
-        Ok((value, before, after))
+        Ok((value, after))
     }
 
     pub async fn call(
@@ -551,7 +564,7 @@ impl Manager {
             };
             let locked = self.locked(&manifest.name);
             let turn_on = enable && !locked;
-            let ((), before, after) = self.commit(
+            let ((), after) = self.commit(
                 |_, ()| manifest.name.clone(),
                 |record| {
                     if record.installed(&id).is_some() {
@@ -573,10 +586,10 @@ impl Manager {
                     Ok(())
                 },
             )?;
-            Ok::<_, PluginError>((id, manifest.name, locked, before, after))
+            Ok::<_, PluginError>((id, manifest.name, locked, after))
         }
         .await;
-        let (id, name, locked, before, after) = match result {
+        let (id, name, locked, after) = match result {
             Ok(done) => done,
             Err(error) => {
                 if let Some(dir) = placed {
@@ -592,7 +605,7 @@ impl Manager {
         };
         phase("load");
         let enabled = after == Some(Use::Installed(id.clone()));
-        let outcome = self.switch(&name, before, after).await;
+        let outcome = self.switch(&name, after.as_ref()).await;
         let mut reply = outcome.into_map();
         reply.insert("id".into(), json!(id));
         reply.insert("name".into(), json!(name));
@@ -646,7 +659,7 @@ impl Manager {
                     .into_map(),
             ));
         }
-        let ((), before, after) = self.commit(
+        let ((), after) = self.commit(
             |_, ()| name.clone(),
             |record| {
                 if !self.known(record, &name) {
@@ -680,7 +693,7 @@ impl Manager {
             },
         )?;
         Ok(Value::Object(
-            self.switch(&name, before, after).await.into_map(),
+            self.switch(&name, after.as_ref()).await.into_map(),
         ))
     }
 
@@ -692,7 +705,7 @@ impl Manager {
                 format!("{name} is locked"),
             ));
         }
-        let ((), before, after) = self.commit(
+        let ((), after) = self.commit(
             |_, ()| name.to_owned(),
             |record| {
                 if !self.known(record, name) {
@@ -702,7 +715,7 @@ impl Manager {
                 Ok(())
             },
         )?;
-        self.switch(name, before, after).await;
+        self.switch(name, after.as_ref()).await;
         Ok(json!({}))
     }
 
@@ -714,7 +727,7 @@ impl Manager {
                 "built-in and default plugins can be turned off, not removed",
             ));
         }
-        let (entry, before, after) = self.commit(
+        let (entry, after) = self.commit(
             |_, entry: &Installed| entry.name.clone(),
             |record| {
                 let index = record
@@ -734,7 +747,7 @@ impl Manager {
                 Ok(entry)
             },
         )?;
-        self.switch(&entry.name, before, after).await;
+        self.switch(&entry.name, after.as_ref()).await;
         if let Source::Git { .. } = entry.source {
             self.state
                 .dirs
@@ -800,7 +813,7 @@ impl Manager {
         };
         let row = row_id(name);
         match &manifest.code {
-            None => self.drop_row(&row).await,
+            None => self.apply().await,
             Some(code)
                 if !missing_instance_names(
                     self.state.catalog.get().expect("set at startup"),
@@ -826,8 +839,8 @@ impl Manager {
                         tracing::warn!(%row, %error, "plugin reload refused");
                     }
                 } else {
-                    self.drop_row(&row).await;
-                    self.create(name, code).await;
+                    // Other row fields: the derived layer replaces the row.
+                    self.apply().await;
                 }
             }
         }
@@ -903,7 +916,7 @@ impl Manager {
                 Ok(())
             },
         );
-        let ((), _, after) = match committed {
+        let ((), after) = match committed {
             Ok(done) => done,
             Err(error) => {
                 let _ = self.state.dirs.delete(&dir);
@@ -913,46 +926,38 @@ impl Manager {
         phase("load");
         let mut reply = Map::new();
         if after == Some(Use::Installed(id.clone())) {
-            // The entry path changed: the row is created again.
-            let row = row_id(&entry.name);
-            self.drop_row(&row).await;
-            let mut outcome = self.turn_on(&entry.name, after.as_ref().unwrap()).await;
-            outcome.status = Some(self.status(&row));
-            reply = outcome.into_map();
+            // The entry path changed: the derived layer replaces the row.
+            reply = self.switch(&entry.name, after.as_ref()).await.into_map();
         }
         let _ = self.state.dirs.delete(&entry.dir);
         reply.insert("commit".into(), json!(commit));
         Ok(Value::Object(reply))
     }
 
-    /// Carries out a name's switch from `before` to `after` (§3): the plugin
-    /// in use is turned off first, then the new one turned on.
-    async fn switch(&self, name: &str, before: Option<Use>, after: Option<Use>) -> Outcome {
-        if before != after {
-            match &before {
-                Some(Use::Builtin) => {
-                    if let Err(error) = self.loader.set_disabled(name, true).await {
-                        tracing::warn!(%name, %error, "turning off a built-in refused");
-                    }
-                }
-                Some(_) => self.drop_row(&row_id(name)).await,
-                None => {}
-            }
+    /// Brings the loader to the record (§3): derives the `plugins` layer
+    /// from `plugins.json` and reconciles it. A row rutis refuses stays in
+    /// the loader with its reason, as after a restart.
+    async fn apply(&self) {
+        let _applying = self.state.applying.lock().await;
+        let record = self.state.record.lock().unwrap().clone();
+        let (patches, _) = self.state.derive(&record);
+        let mut layers = self.loader.layers();
+        match layers.iter_mut().find(|layer| layer.name == LAYER) {
+            Some(layer) => layer.patches = patches,
+            None => layers.push(rutis_loader::Layer::new(LAYER, patches)),
         }
-        match &after {
-            Some(used) if before != after => self.turn_on(name, used).await,
-            Some(used) => self.status_of(name, Some(used)),
-            None => Outcome::default(),
+        if let Err(error) = self.loader.reconcile(layers, None).await {
+            tracing::warn!(%error, "plugin layer reconcile refused");
         }
     }
 
-    async fn turn_on(&self, name: &str, used: &Use) -> Outcome {
-        if let Use::Builtin = used {
-            if let Err(error) = self.loader.set_disabled(name, false).await {
-                tracing::warn!(%name, %error, "turning on a built-in refused");
-            }
-            return self.status_of(name, Some(used));
-        }
+    /// Applies the record and says what the name now using `used` came to:
+    /// its row's status, the content kinds skipped, `restartRequired`.
+    async fn switch(&self, name: &str, used: Option<&Use>) -> Outcome {
+        self.apply().await;
+        let Some(used @ (Use::Default | Use::Installed(_))) = used else {
+            return self.status_of(name, used);
+        };
         let dir = {
             let record = self.state.record.lock().unwrap();
             dir_of(&record, &self.state.defaults, name, used)
@@ -975,33 +980,12 @@ impl Manager {
             if missing_instance_names(self.state.catalog.get().expect("set at startup"), code)
                 .is_empty()
             {
-                self.create(name, code).await;
                 outcome.status = Some(self.status(&row_id(name)));
             } else {
                 outcome.restart_required = true;
             }
         }
         outcome
-    }
-
-    async fn create(&self, name: &str, code: &record::Code) {
-        let entry = rutis_loader::edit::NewEntry {
-            id: Some(row_id(name)),
-            name: module(code),
-            config: code.config.clone(),
-            inject: code.inject.clone(),
-            ..Default::default()
-        };
-        if let Err(error) = self.loader.create(entry, None, None).await {
-            tracing::warn!(%name, %error, "plugin row refused");
-        }
-    }
-
-    async fn drop_row(&self, row: &str) {
-        match self.loader.remove(row).await {
-            Ok(()) | Err(LoaderError::UnknownEntry(_)) => {}
-            Err(error) => tracing::warn!(%row, %error, "removing a plugin row refused"),
-        }
     }
 
     fn status_of(&self, name: &str, used: Option<&Use>) -> Outcome {

@@ -35,7 +35,7 @@ flowchart LR
     PT["PluginTools (Session part)<br/>plugin tools"]:::new
   end
   RPC -->|"plugin.* (managementMethods)"| PM
-  PM -->|"create, set_disabled, remove, reload"| LOADER
+  PM -->|"reconcile derived layer, reload"| LOADER
   LOADER --> CODE
   PM -->|"register / withdraw (if present)"| OWN
   CODE -->|"register own Settings sources"| SET
@@ -163,16 +163,15 @@ Plugin code runs in the Node or Python rutis runtime. Supplying them is not Plug
 
 ## 3. Flows
 
-How PluginManager's commands map onto rutis-loader. The loader has two layers. `assembly` holds the built-in rows. `plugins` is the editable layer, which rutis does not persist (`NoPersist`); it holds the rows of default and installed plugins and the `disabled` overrides of built-in rows. PluginManager's rows have the row id `plugin:<name>`: one row per name, which cannot collide with a built-in row id, since the built-in row of that name stays in the composed tree when it is disabled.
+How PluginManager's configuration maps onto rutis-loader. The loader has two layers. `assembly` holds the built-in rows. `plugins` is derived from `plugins.json` and the default configuration file; rutis keeps no copy of it beyond the running tree. It holds the rows of default and installed plugins in use and the `disabled` overrides of built-in rows. PluginManager's rows have the row id `plugin:<name>`: one row per name, which cannot collide with a built-in row id, since the built-in row of that name stays in the composed tree when it is disabled.
 
-| Configuration change | Loader commands |
+| Name N in `plugins.json` | In the derived `plugins` layer |
 | --- | --- |
-| Turn on name N using a default or installed plugin P | Turn off the plugin N uses now (below), then `create` the row `plugin:N` from P's manifest |
-| Turn on name N using its built-in | Turn off the plugin N uses now (below), then `set_disabled(N, false)` |
-| Turn off name N | Built-in: `set_disabled(N, true)`. Default or installed: `remove` the row `plugin:N` |
-| Reload | `Loader::reload("plugin:N")` |
+| Uses a default or installed plugin P with code | The row `plugin:N` from P's manifest |
+| Uses its built-in | Nothing: the built-in row runs |
+| Off, or uses a plugin other than its built-in | `disabled: true` on the built-in row N, if there is one |
 
-rutis lets the editable layer disable a built-in row and override its fields, but not rename or remove it, so replacing a built-in turns its row off and adds a row for the new plugin. The old plugin is turned off first, so the new one does not meet a second provider of the same services. rutis reloads the dependents of the rows that change.
+A configuration change writes `plugins.json`, derives the `plugins` layer again and gives the loader `reconcile([assembly, plugins])`. A row rutis refuses stays in the loader and `plugin.list` shows rutis' status and reason, as after a restart. A reload is `Loader::reload("plugin:N")` when the row's fields are unchanged. rutis lets a layer disable a built-in row and override its fields, but not rename or remove it, so replacing a built-in disables its row and adds a row for the new plugin. rutis reloads the dependents of the rows that change.
 
 Content follows the same switch: when name N stops using P, PluginManager withdraws P's content from each present owner; when N starts using P, it registers P's content with each present owner (§3.7).
 
@@ -182,7 +181,7 @@ Content follows the same switch: when name N stops using P, PluginManager withdr
    - the initial `plugins` layer: the rows of the default and installed plugins that are on, and `disabled: true` for each built-in name that is off or uses another plugin;
    - the names whose `instanceNames` the catalog needs (§4);
    - the built-in rows that are off, which the App Server drops from the rows it requires to become Active.
-2. The App Server reconciles `[assembly, plugins]` with `plugins` as the editable layer. A built-in that is off never starts.
+2. The App Server reconciles `[assembly, plugins]`. A built-in that is off never starts.
 3. PluginManager's row applies, registers `plugin` with `managementMethods` and `PluginTools` with `partRegistry`, then, after activation, deletes leftover staging directories and Git clones no installed entry refers to.
 
 A default or installed plugin whose row fails does not fail startup; `plugin.list` shows it as failed with rutis' error. Content is not registered again at startup: owners keep their own state (§9 R2).
@@ -194,14 +193,14 @@ A default or installed plugin whose row fails does not fail startup; `plugin.lis
 1. When the caller gives `id`, check it (§7) and refuse an `id` already installed (`plugin_exists`) before acquiring anything.
 2. Acquire (§7): a local path is checked in place; a Git source is cloned into a staging directory and its manifest read; without a given `id`, the id is the manifest name lowercased, checked and refused if installed in the same way, before the staging directory is renamed to `<home>/plugins/<id>/<commit>`. Any failure deletes the staging directory.
 3. Write `plugins.json` with the new entry, and, when `enable` is true and the name is not locked, `names.<name>.use = id`.
-4. If it was turned on: carry out "turn on" (§3). The reply carries the row's status and any content an owner refused.
+4. If it was turned on: reconcile the derived layer (§3). The reply carries the row's status and any content an owner refused.
 
 Installing a plugin whose name is locked records it without turning it on, and says so in the reply.
 
 ### 3.3 Turn on, turn off, switch
 
-- `plugin.enable {name, use?}`: `use` is an installed id, `"builtin"` or `"default"`; absent, the name's current `use`. Refused for a locked name when `use` changes (`plugin_locked`). Writes `names.<name>` (clears `off`, sets `use`), then carries out the commands of §3: the built-in row for `"builtin"`, the `plugin:N` row otherwise.
-- `plugin.disable {name}`: refused for a locked name. Writes `off: true`, then turns the name off.
+- `plugin.enable {name, use?}`: `use` is an installed id, `"builtin"` or `"default"`; absent, the name's current `use`. Refused for a locked name when `use` changes (`plugin_locked`). Writes `names.<name>` (clears `off`, sets `use`), then reconciles the derived layer (§3).
+- `plugin.disable {name}`: refused for a locked name. Writes `off: true`, then reconciles the derived layer.
 
 When a content owner itself is turned on (Hooks, for example), PluginManager registers the content of every plugin in use that carries that kind (§3.7).
 
@@ -210,7 +209,7 @@ When a content owner itself is turned on (Hooks, for example), PluginManager reg
 `plugin.reload {name}` reloads the plugin the name uses. The host watches no files; the call is the signal that something changed.
 
 1. Read the manifest again. If its name changed, refuse (`name_changed`); the user installs it again under the new name.
-2. Code: `Loader::reload("plugin:<name>")`. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager first removes and creates the row with the new fields.
+2. Code: `Loader::reload("plugin:<name>")`. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager reconciles the derived layer, which carries the row with the new fields.
 3. Content: register each kind again with its present owner; the new document replaces the old one. A kind the manifest no longer carries is withdrawn.
 4. Update `kinds` in `plugins.json` if they changed.
 
@@ -218,7 +217,7 @@ A name using a built-in Rust plugin cannot be reloaded (`not_reloadable`): it ne
 
 ### 3.5 Update
 
-`plugin.update {id, ref?}` for a Git plugin: fetch and check the new commit into a new directory as in §3.2, write the new `commit` and `dir`, then, if the plugin is in use, carry out a reload on the new directory (its row is created again, since the entry path changed). The old directory is deleted afterwards. A local-path plugin has nothing to update (`not_updatable`); reload it. Asking the user to confirm an update is the client's business.
+`plugin.update {id, ref?}` for a Git plugin: fetch and check the new commit into a new directory as in §3.2, write the new `commit` and `dir`, then, if the plugin is in use, reconcile the derived layer (its row carries the new entry path). The old directory is deleted afterwards. A local-path plugin has nothing to update (`not_updatable`); reload it. Asking the user to confirm an update is the client's business.
 
 ### 3.6 Remove and list
 
@@ -231,8 +230,8 @@ For each kind P carries and each owner present, PluginManager calls the owner's 
 
 ## 4. Timing and conflicts
 
-- PluginManager changes `plugins.json` in one step on its in-memory table, then writes the file, then gives the loader and owner commands. A second operation on the same id or name sees the first one's change (`plugin_exists`, or it acts on the new state). rutis-loader runs its own operations one at a time.
-- A command that rutis or an owner refuses leaves the configuration as written; the item shows the refusal in `plugin.list` (for example, the new plugin failed because another plugin of a different name provides the same service).
+- PluginManager changes `plugins.json` in one step on its in-memory table, then writes the file, then reconciles the layer derived from it and gives owners their commands. A second operation on the same id or name sees the first one's change (`plugin_exists`, or it acts on the new state). Deriving the layer and reconciling it run one at a time, each from the record as it is then, so the layer reconciled last is the latest record's. rutis-loader runs its own operations one at a time.
+- A row that rutis or a command that an owner refuses leaves the configuration as written; the item shows the refusal in `plugin.list` (for example, the new plugin failed because another plugin of a different name provides the same service).
 - `instanceNames`: rutis needs the names a plugin's parts provide in Sessions and branches in the catalog before the runtime starts ([rutis usage §2](../rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)). Installing, switching or reloading to a plugin whose `instanceNames` are not in the running catalog records the change and replies `restart_required`; the row is created at the next start. Plugins that only register tools, methods or prompt sources do not have this limit.
 - A reload or replacement in use: the old generation unloads, rutis cancels its running calls, and in-flight turns using it may fail ([ADR 002](../../adr/002-plugin-scope.md) consequences). This is documented, not prevented.
 

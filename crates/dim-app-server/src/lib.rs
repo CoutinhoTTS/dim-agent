@@ -921,17 +921,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             &CancellationToken::new(),
         )
         .await?;
-        let (layers, editable) = match &plugin_layer {
-            Some(layer) => (
-                vec![assembly.clone(), layer.clone()],
-                Some(rutis_loader::edit::Editable::new(
-                    plugin_manager::LAYER,
-                    rutis_loader::edit::Version(String::new()),
-                )),
-            ),
-            None => (vec![assembly.clone()], None),
-        };
-        let reconcile = processes.loader.reconcile(layers, editable);
+        let layers = std::iter::once(assembly.clone())
+            .chain(plugin_layer.clone())
+            .collect();
+        let reconcile = processes.loader.reconcile(layers, None);
         let report = match tokio::time::timeout_at(deadline, reconcile).await {
             Ok(report) => report.map_err(|error| AgentError::Build(error.to_string()))?,
             // The deadline has passed: this names the rows not yet Active.
