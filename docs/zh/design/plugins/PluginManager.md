@@ -73,7 +73,7 @@ flowchart LR
 
 | 键 | 种类 | 含义 |
 | --- | --- | --- |
-| `name` | — | 插件的名字，`[A-Za-z0-9_-]`，1–64 个字符。同名插件互相替换。 |
+| `name` | — | 插件的名字。同名插件互相替换。 |
 | `code` | 代码 | rutis 行的字段（[rutis 用法 §2](../rutis-usage.md#2-插件是一行实例挂载它的部件)），`id` 和 `name` 除外：`entry` 是目录内的路径；`inject`、`provides`、`instanceNames` 和 `config` 原样复制到行中。 |
 | `skills` | skill | 插件内的一个目录，里面是 Skill 文档，登记到 SkillsCatalog。 |
 | `mcp` | MCP | 插件内的一个文件，里面是 MCP 服务器条目，登记到 Mcp。 |
@@ -118,7 +118,7 @@ flowchart LR
 
 | 字段 | 含义 |
 | --- | --- |
-| `installed[].id` | 在已安装插件中唯一；它是记录的键，也是克隆目录的名字。只能用 `[A-Za-z0-9_-]`，1–64 个字符，不能是 `builtin` 或 `default`；无论是调用方给的还是取自清单名字，都在第一次用到文件系统之前检查。默认是清单中的名字；两个已安装插件同名时，由调用方给出另一个。 |
+| `installed[].id` | 在已安装插件中唯一；它是记录的键，也是克隆目录的名字。默认是清单中的名字；两个已安装插件同名时，由调用方给出另一个。 |
 | `installed[].name` | 安装时或上一次重新加载时清单中的名字。 |
 | `installed[].source` | 本地目录用 `{path}`，原地使用，从不复制；Git 用 `{git, ref?, commit}`。 |
 | `installed[].dir` | 被加载的目录：本地路径本身，或 `<home>/plugins/<id>/<commit>` 下的克隆。 |
@@ -252,7 +252,6 @@ PluginManager 不向模型上下文加入任何东西。插件的工具和提示
 安装和打开是通过管理方法或工具调用完成的宿主配置；已启用的插件代码运行时不需要宿主本地审批（[ADR 003](../../adr/003-approval-scope.md)）。PluginManager 不增加作用域、审批或信任步骤（[需求](../../../design/plugin-management.md)）。它守护的是获取过程本身：
 
 - Git 来源只接受 `https://` 或 `ssh://` URL；其他协议（`file://`、`ext::`、scp 风格的路径）以及以 `-` 开头的参数，在 Git 运行之前就被拒绝。克隆时关闭子模块（`--no-recurse-submodules`），关闭 hook（`core.hooksPath` 设为一个空目录），设置 `protocol.file.allow=never`，并且不弹出终端提示。
-- id 在第一次用到文件系统之前按规则检查（§2.2）。PluginManager 创建、改名或删除的每个目录都直接位于 `<home>/plugins` 下（`<id>/<commit>` 或 `.staging/<random>`）；安装、更新、移除和启动时的清理在动手前都检查这一点。
 - 克隆先放到 `<home>/plugins/.staging/<random>`，只有在清单和路径检查通过后才改名放到正式位置。失败时删除暂存目录；启动时删除残留目录以及没有条目引用的克隆。
 - 清单中的任何路径在跟随符号链接之后都不能离开插件目录；Git 克隆内指向克隆外部的符号链接被拒绝。
 - `plugins.json` 以原子方式写入（§2.2）。

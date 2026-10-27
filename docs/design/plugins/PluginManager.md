@@ -73,7 +73,7 @@ A plugin is a directory with `dim-plugin.json` at its root. The keys present say
 
 | Key | Kind | Meaning |
 | --- | --- | --- |
-| `name` | — | The plugin's name, `[A-Za-z0-9_-]`, 1–64 characters. Plugins with the same name replace each other. |
+| `name` | — | The plugin's name. Plugins with the same name replace each other. |
 | `code` | code | The rutis row fields ([rutis usage §2](../rutis-usage.md#2-plugins-are-rows-instances-mount-their-parts)) except `id` and `name`: `entry` is a path inside the directory; `inject`, `provides`, `instanceNames` and `config` are copied into the row. |
 | `skills` | skills | A directory inside the plugin of Skill documents, registered with SkillsCatalog. |
 | `mcp` | MCP | A file inside the plugin holding MCP server entries, registered with Mcp. |
@@ -118,7 +118,7 @@ The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.
 
 | Field | Meaning |
 | --- | --- |
-| `installed[].id` | Unique among installed plugins; the key of the record and the name of the clone directory. `[A-Za-z0-9_-]`, 1–64 characters, not `builtin` or `default`; checked before any filesystem use, whether given by the caller or taken from the manifest name. Defaults to the manifest name; the caller gives another when two installed plugins share a name. |
+| `installed[].id` | Unique among installed plugins; the key of the record and the name of the clone directory. Defaults to the manifest name; the caller gives another when two installed plugins share a name. |
 | `installed[].name` | The manifest name at install or last reload. |
 | `installed[].source` | `{path}` for a local directory, used in place and never copied; `{git, ref?, commit}` for Git. |
 | `installed[].dir` | The directory that is loaded: the local path itself, or the clone under `<home>/plugins/<id>/<commit>`. |
@@ -252,7 +252,6 @@ PluginManager adds nothing to model context. A plugin's tools and prompt sources
 Installing and turning on are host configuration done through management methods or tool calls; enabled plugin code runs without host-local approval ([ADR 003](../../adr/003-approval-scope.md)). PluginManager adds no scope, approval or trust step ([requirements](../plugin-management.md)). What it guards is the acquisition itself:
 
 - Git sources are `https://` or `ssh://` URLs only; other schemes (`file://`, `ext::`, scp-style paths) and arguments starting with `-` are refused before Git runs. Clones run with submodules off (`--no-recurse-submodules`), hooks off (`core.hooksPath` set to an empty directory), `protocol.file.allow=never` and no terminal prompt.
-- An id is checked against its rule (§2.2) before any filesystem use. Every directory PluginManager creates, renames or deletes is directly under `<home>/plugins` (`<id>/<commit>` or `.staging/<random>`); install, update, remove and the startup cleanup check that before acting.
 - A clone goes to `<home>/plugins/.staging/<random>` and is renamed into place only after its manifest and paths are checked. A failure deletes the staging directory; startup deletes leftovers and clones no entry refers to.
 - No manifest path may leave the plugin directory after following symbolic links; a symbolic link inside a Git clone that points outside it is refused.
 - `plugins.json` is written atomically (§2.2).
