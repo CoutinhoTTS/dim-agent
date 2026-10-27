@@ -760,7 +760,8 @@ impl TimelineTree {
             });
         }
     }
-    fn descendants(&self, id: &str) -> Vec<(String, String)> {
+    /// The lines below `id`, deepest first.
+    fn descendants(&self, id: &str) -> Vec<String> {
         let state = self.state.lock().unwrap();
         let mut found = Vec::new();
         let mut pending = vec![(id.to_owned(), 0usize)];
@@ -770,20 +771,17 @@ impl TimelineTree {
                 .values()
                 .filter(|node| node.info.parent.as_deref() == Some(parent.as_str()))
             {
-                found.push((node.info.id.clone(), parent.clone(), depth + 1));
+                found.push((node.info.id.clone(), depth + 1));
                 pending.push((node.info.id.clone(), depth + 1));
             }
         }
-        found.sort_by_key(|found| std::cmp::Reverse(found.2));
-        found
-            .into_iter()
-            .map(|(id, parent, _)| (id, parent))
-            .collect()
+        found.sort_by_key(|found| std::cmp::Reverse(found.1));
+        found.into_iter().map(|(id, _)| id).collect()
     }
     async fn finish_end(&self, id: &str, end_event: u64, data: BranchEndData) -> Result<()> {
         let mut errors = Vec::new();
-        for (child, ancestor) in self.descendants(id) {
-            if let Err(error) = self.end_descendant(&child, &ancestor, &data.source).await {
+        for child in self.descendants(id) {
+            if let Err(error) = self.end_descendant(&child, id, &data.source).await {
                 errors.push(error);
             }
         }
