@@ -3,11 +3,7 @@
 //! definitions, and the row lists the names those parts provide in their
 //! instances (`instanceNames`), which the catalog needs before the runtime
 //! starts (rutis usage §2).
-use crate::{
-    Result, ServerError,
-    methods::ManagementMethods,
-    settings::{SourceDeclaration, WorkflowPackages},
-};
+use crate::{Result, ServerError, methods::ManagementMethods, settings::WorkflowPackages};
 use dim_agent_capabilities::{methods::SessionMethods, tool_registry::ToolRegistry};
 use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, PartRegistry, SESSION_GROUP, names::name_of};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, PluginFactory, TypeKey};
@@ -126,36 +122,6 @@ pub struct PythonConfig {
     /// A directory put ahead on the runtime's `PYTHONPATH`: the installed
     /// `rutis` package.
     pub packages: Option<PathBuf>,
-}
-
-/// The rows' `settings` entries (settings-service §3.1, §5.4): a row's
-/// package declares its sources next to `provides`, and the row id is their
-/// owner. Settings checks and compiles each declaration when it applies.
-pub(crate) fn settings_sources(config: &SessionTypeScriptConfig) -> Result<Vec<SourceDeclaration>> {
-    let mut sources = Vec::new();
-    for row in &config.rows {
-        let Some(entries) = row.get("settings") else {
-            continue;
-        };
-        let owner = row
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                ServerError::Configuration("Session TypeScript row requires id".into())
-            })?;
-        let entries: Vec<SourceDeclaration> =
-            serde_json::from_value(entries.clone()).map_err(|error| {
-                ServerError::Configuration(format!(
-                    "settings of Session TypeScript row {owner}: {error}"
-                ))
-            })?;
-        sources.extend(entries.into_iter().map(|mut entry| {
-            entry.owner = owner.to_owned();
-            entry
-        }));
-    }
-    Ok(sources)
 }
 
 /// A runtime of other languages and the resolver of its rows.
@@ -290,7 +256,6 @@ impl Parts {
             snapshots.insert(name.to_owned(), provides.clone());
             let mut row = row.clone();
             if let Value::Object(fields) = &mut row {
-                fields.remove("settings");
                 fields.remove("instanceNames");
             }
             rows.push(row);
@@ -361,20 +326,19 @@ impl Resolver for SessionResolver {
         name: &'a str,
     ) -> BoxFuture<'a, std::result::Result<Arc<Resolved>, LoaderError>> {
         Box::pin(async move {
-            let snapshot = self
-                .snapshots
-                .get(name)
-                .ok_or_else(|| LoaderError::NotFound { name: name.into() })?;
+            let snapshot = self.snapshots.get(name);
             let runtime = match &self.python {
                 Some(python) if name.starts_with("py:") => python,
                 _ => &self.node,
             };
             let original = runtime.resolve(name).await?;
-            match original.meta.get("provides") {
-                Some(Value::Object(actual)) if actual == snapshot => {}
-                None if original.meta["source"] == "runtime"
-                    && original.meta["schema"]
-                        == "unavailable: the Cordis runtime is not running" => {}
+            match (snapshot, original.meta.get("provides")) {
+                (None, _) => {}
+                (Some(snapshot), Some(Value::Object(actual))) if actual == snapshot => {}
+                (Some(_), None)
+                    if original.meta["source"] == "runtime"
+                        && original.meta["schema"]
+                            == "unavailable: the Cordis runtime is not running" => {}
                 _ => {
                     return Err(LoaderError::Resolve {
                         name: name.into(),

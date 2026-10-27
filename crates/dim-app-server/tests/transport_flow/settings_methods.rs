@@ -1,6 +1,6 @@
 //! Declared Settings sources through a TypeScript row loaded on C4's path
-//! (settings-service §11): the row's package declares source `example` next
-//! to its `provides`, its owner code uses `settings`, and local clients use
+//! (settings-service §11): the row registers source `example` when it
+//! starts, its owner code uses `settings`, and local clients use
 //! `settings.*`.
 use super::*;
 use dim_app_server::{
@@ -18,15 +18,22 @@ fn repository() -> PathBuf {
         .canonicalize()
         .unwrap()
 }
-/// The owner row: `provides` and `settings` come from the package's own
-/// declaration files, as a package would hand them to the host.
+/// The owner row; its code registers source `example` (or the sources of
+/// `config.settings`) when it starts.
 fn owner_row(id: &str) -> Value {
     json!({
         "id": id,
         "name": repository().join("runtime/fixtures/settings-owner.ts"),
         "provides": {},
-        "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/fixtures/settings-owner.settings.json")).unwrap(),
+        "config": {},
     })
+}
+fn declaration() -> Value {
+    serde_json::from_str::<Value>(include_str!(
+        "../../../../runtime/fixtures/settings-owner.settings.json"
+    ))
+    .unwrap()[0]
+        .clone()
 }
 fn rows(rows: Vec<Value>) -> SessionTypeScriptConfig {
     SessionTypeScriptConfig {
@@ -80,6 +87,24 @@ impl Plugin for Probe {
             })?;
         Ok(())
     }
+}
+
+/// Reads `source` once its owner row has started and registered it: the
+/// row applies after native startup, and the source appears only then.
+async fn registered(client: &mut Client, source: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let read = client
+                .rpc("settings.read", json!({"source":source,"scope":"user"}))
+                .await;
+            if read["error"]["data"]["appError"] != "settings_unknown_source" {
+                break read;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap()
 }
 
 /// A call to the owner's Session method; the `settings` envelope it returned.
@@ -257,10 +282,10 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// The client path (§4.3) and the declaration boundary (§3.1, §11 item 5):
-/// local connections read and write declared sources, Rust sources and
-/// paired devices are not served, and invalid or conflicting declarations
-/// fail assembly.
+/// The client path (§4.3) and the registration boundary (§3.1, §11 item 5):
+/// local connections read and write registered sources, Rust sources and
+/// paired devices are not served, and invalid or conflicting registrations
+/// fail the registering row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_settings_clients_and_declaration_boundaries() {
@@ -281,9 +306,7 @@ async fn node_settings_clients_and_declaration_boundaries() {
             .await["error"]["data"]["appError"],
         "local_transport_required"
     );
-    let read = client
-        .rpc("settings.read", json!({"source":"example","scope":"user"}))
-        .await;
+    let read = registered(&mut client, "example").await;
     assert_ok(&read);
     assert_eq!(read["result"]["document"], json!({"maxResults": 5}));
     let first = read["result"]["revision"].clone();
@@ -337,33 +360,47 @@ async fn node_settings_clients_and_declaration_boundaries() {
     server.shutdown();
     server.join().await.unwrap();
 
-    let mut rust = owner_row(OWNER);
-    rust["settings"][0]["source"] = json!("mcp");
-    let mut copy = owner_row("tool-only");
-    copy["name"] = json!(repository().join("runtime/fixtures/session-tool-only.ts"));
-    copy["provides"] = serde_json::from_str::<Value>(include_str!(
-        "../../../../runtime/fixtures/session-tool-only.json"
-    ))
-    .unwrap();
-    let mut malformed = owner_row(OWNER);
-    malformed["settings"][0]["userfile"] = json!("example.json");
-    for (failing, reason) in [
-        (vec![rust], "settings source mcp of example-owner"),
+    let failing = |declarations: Vec<Value>| {
+        let mut row = owner_row(OWNER);
+        row["config"]["settings"] = json!(declarations);
+        row
+    };
+    let mut rust = declaration();
+    rust["source"] = json!("mcp");
+    let mut malformed = declaration();
+    malformed["userfile"] = json!("example.json");
+    for (row, reason) in [
+        (failing(vec![rust]), "settings source mcp"),
         (
-            vec![owner_row(OWNER), copy],
-            "settings source example of tool-only",
+            failing(vec![declaration(), declaration()]),
+            "settings source example",
         ),
-        (
-            vec![malformed],
-            "settings of Session TypeScript row example-owner",
-        ),
+        (failing(vec![malformed]), "settings request"),
     ] {
-        let Err(error) =
-            try_launch_with(Arc::new(MockTools), config(&home, rows(failing)), |_| {}).await
-        else {
-            panic!("{reason}: assembly succeeded");
-        };
-        assert!(error.to_string().contains(reason), "{error}");
+        let (server, _) =
+            launch_with_agent(Arc::new(MockTools), config(&home, rows(vec![row]))).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !server.diagnostics().plugins.iter().any(|plugin| {
+                plugin.state == rutis::host::FiberState::Failed
+                    && plugin
+                        .error
+                        .as_ref()
+                        .is_some_and(|error| error.to_string().contains(reason))
+            }) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{reason}: the owner row did not fail"));
+        let mut client = Client::new_version(&server, false, 3).await;
+        assert_eq!(
+            client
+                .rpc("settings.read", json!({"source":"example","scope":"user"}))
+                .await["error"]["data"]["appError"],
+            "settings_unknown_source"
+        );
+        server.shutdown();
+        server.join().await.unwrap();
     }
     let _ = std::fs::remove_dir_all(&home);
 }

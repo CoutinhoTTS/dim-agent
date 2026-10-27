@@ -1,8 +1,9 @@
 # Settings service
 
-Status: Design approved; implemented. Rust side (S8b part 1, §12), declarations on C4 rows and
-the TypeScript owner path (part 2), event delivery to TypeScript parts (part 3). The shared
-`credentials` service is withdrawn (§1.2). Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
+Status: Design approved; implemented. Rust side (S8b part 1, §12), the TypeScript owner path
+(part 2), event delivery to TypeScript parts (part 3), sources registered at run time by their
+owners (part 4, [PluginManager §9 R1](../plugins/PluginManager.md#9-requirements-raised-to-mechanism-owners)).
+The shared `credentials` service is withdrawn (§1.2). Roadmap item S8b ([#118](https://github.com/arcships/dim/issues/118)).
 Builds on S8a ([#54](https://github.com/arcships/dim/issues/54), PR [#90](https://github.com/arcships/dim/pull/90));
 implementation depends on C4 ([#63](https://github.com/arcships/dim/issues/63)).
 Overview: [§6.4 Configuration](../overview.md#64-conventions). Scope:
@@ -11,12 +12,13 @@ Overview: [§6.4 Configuration](../overview.md#64-conventions). Scope:
 
 ## 1. Summary
 
-Settings serves sources owned by plugins that are not written in Rust. Such a plugin declares each
-source next to its `provides`, in the `settings` member of its C4 row: the source name, its files,
-a JSON Schema (with `default` values) and its user-only fields. Settings then offers three things over JSON documents:
+Settings serves sources owned by plugins that are not written in Rust. Such a plugin registers
+each source with Settings when it starts ([ADR 007](../../adr/007-plugin-configuration.md) D5):
+the source name, its files, a JSON Schema (with `default` values) and its user-only fields
+(§3.1). Settings then offers three things over JSON documents:
 
-- the process service `settings`, which the owner uses: `read`, `update` (CAS on the revision)
-  and `projects`;
+- the process service `settings`, which the owner uses: `register`, `read`, `update` (CAS on
+  the revision) and `projects`;
 - the client management methods `settings.read` and `settings.update`;
 - the same rutis events as S8a, `settings.changed` and `settings.project_authorized`. Their
   payloads become serializable. There is no `subscribe(source)`.
@@ -28,8 +30,8 @@ its tool is an owner write, so it is rejected when it changes a user-only field.
 Settings gives no field a meaning. A secret is an ordinary field of its owner's document, and
 the owner decides whether and how to store, encrypt or look it up (§1.2).
 
-`BusinessDocument` stays the Rust binding and is unchanged. Rust sources keep their owners'
-management methods. F2's `permission.rules`/`permission.set_rules` stay (§8.1).
+`BusinessDocument` stays the Rust binding; a Rust owner registers its document types the same
+way (§4.5). Rust sources keep their owners' management methods. F2's `permission.rules`/`permission.set_rules` stay (§8.1).
 
 No new plugin, no Timeline event, no change to Timeline, Dispatcher, rutis or assembly.
 
@@ -82,15 +84,15 @@ depended on a store nobody owned. That service and the `*Ref` rule are withdrawn
  +-------------------------------------------------------------------------+
  |  Settings (existing plugin)                                             |
  |   SettingsService                                                       |
- |     BusinessDocument sources (Rust owners, unchanged)                   |
- |     declared sources (from C4 rows' `settings`): schema, defaults,      |
- |       files, user-only pointers                                         |
+ |     registered sources, each until its registering plugin unloads:      |
+ |       BusinessDocument types (Rust owners)                              |
+ |       declared sources: schema, defaults, files, user-only pointers     |
  |   named service `settings` (HostDispatch)  <-- owner writes             |
  |   managementMethods `settings`             <-- client writes            |
  |   emits settings.changed on settings/<source>,                          |
  |         settings.project_authorized on settings/projects                |
  +------^-------------------------------^----------------------------------+
-        | read/update/projects          | settings.read / settings.update
+        | register/read/update/projects | settings.read / settings.update
         |                               |
   TypeScript owner (rutis runtime row)  Rpc  <--  local client
 ```
@@ -100,18 +102,21 @@ owner depends on `settings`.
 
 ## 3. Data and state
 
-### 3.1 Source declaration
+### 3.1 Source registration
 
-Each TypeScript package that owns sources lists them in the `settings` member of its row in
-C4's structural input (`ServerConfig.session_typescript.rows`,
-[Session TypeScript parts](../session-typescript.md#host-input-and-declaration-discovery)),
-next to `provides`. As with `provides`, the package keeps one JSON declaration and hands that
-same file to the host; it is not maintained twice. C4 adds no package manifest, so there is no
-other place for it.
+Every owner, built-in Rust and TypeScript alike, registers its sources from its own process row's
+`apply`, a TypeScript owner with `settings.register(declaration)` (§4.2) and a Rust owner with
+`SettingsService::register::<D>` (§4.5). Neither the App Server's assembly nor PluginManager
+declares sources. A registration belongs to the plugin that made it and is withdrawn when that
+plugin unloads (turned off, removed or reloaded); a reload registers again from the new
+generation. The stored documents stay in the home whether or not their source is registered: an
+unregistered source is `unknown_source` on every path, and its document is served again when an
+owner registers it.
+
+A declaration, as the owner's code holds it:
 
 ```json
-"settings": [
-  {
+{
     "source": "web",
     "userFile": "web.json",
     "projectFile": null,
@@ -134,21 +139,20 @@ other place for it.
       "additionalProperties": false
     },
     "userOnly": ["/searchService", "/allowPrivateHosts"]
-  }
-]
+}
 ```
 
-| Field | Rule (checked once, where the host assembles the rows) |
+| Field | Rule (checked once, at registration) |
 | --- | --- |
-| `source` | `[a-z0-9_-]`, as for Rust sources. Unique among all sources of the process: a second declaration, or a declaration naming a Rust source, fails assembly |
-| `userFile` | Same rule as `BusinessDocument::USER_FILE` (a plain filename in the home root) |
-| `projectFile` | Optional, same rule as `PROJECT_FILE`. Present means the source also has project scope. This is the "allowed scopes" declaration |
+| `source` | `[a-z0-9_-]`, as for Rust sources. Unique among the registered sources of the process, Rust sources included |
+| `userFile` | Same rule as `BusinessDocument::USER_FILE` (a plain filename in the home root). No two registered sources share a user file |
+| `projectFile` | Optional, same rule as `PROJECT_FILE`. Present means the source also has project scope. This is the "allowed scopes" declaration. No two registered sources share a project file |
 | `schema` | JSON Schema (draft 2020-12). It must compile, and its root must be `type: object` |
 | `userOnly` | JSON Pointers (RFC 6901) to object members. Each must name a member reachable through `properties` |
-| owner | The `id` of the row that declares it. Not written in the entry |
 
 The default document is `{}` with defaults applied (§3.2). It must be valid against the schema,
-or assembly fails. So a missing file always reads as a valid document.
+or the registration fails. So a missing file always reads as a valid document. A refused
+registration fails the registering call, and so the caller's `apply`.
 
 ### 3.2 Documents, validation and defaults
 
@@ -173,8 +177,8 @@ strings (`missing`, a SHA-256 of the file, or `native:user/<source>:<version>`).
 
 ### 3.4 Runtime state
 
-Settings keeps the compiled declarations in memory, built from its factory configuration. Nothing
-else is new. Nothing enters the Timeline.
+Settings keeps the registered sources in memory, declarations compiled, each until its registering
+plugin unloads. Nothing else is new. Nothing enters the Timeline.
 
 ## 4. Interfaces
 
@@ -192,10 +196,14 @@ Process scope, no instance key, provided by Settings.
 
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
+| `register` | async | a declaration (§3.1) | nothing; rejects when refused |
 | `read` | async | `{source, scope: Scope}` | `Snapshot` |
 | `update` | async | `{source, scope: Scope, expectedRevision, document}` | `Snapshot` (the stored document) |
 | `projects` | sync | `{}` | `{projects: [{root, cwd}]}`: the authorized project roots now |
 
+- `register` is a registration of the calling row, withdrawn when that row unloads. It is called
+  from the row's own `apply`; a refusal (§3.1) rejects the call rather than returning an
+  envelope, so it fails that `apply` as every owner's `register` does.
 - `update` is CAS: it fails with `conflict` unless `expectedRevision` is the current revision.
 - `update` is an owner write. It fails with `user_only_field` when the stored document and the new
   one differ at any `userOnly` pointer (a value changed, added or removed). The comparison uses
@@ -203,11 +211,12 @@ Process scope, no instance key, provided by Settings.
 - `projects` is what an owner reads first. Afterwards it follows `settings/projects` (§4.4).
 - Cancellation: the caller drops the call. A write that has already committed stays committed,
   as in S8a.
-- Errors (§6): `unknown_source`, `invalid_scope`, `invalid_document`, `user_only_field`,
-  `conflict`, `unsynced`, `failed`, `closed`, `cancelled`.
+- Errors of `read`, `update` and `projects` (§6): `unknown_source`, `invalid_scope`,
+  `invalid_document`, `user_only_field`, `conflict`, `unsynced`, `failed`, `closed`, `cancelled`.
 
-The service has no caller identity. Ownership comes from the declaring row: each source has one owner,
-and only that package is written against it. This is the trust model of in-process plugins
+Only `register` uses the caller's identity, to withdraw the registration with the calling row.
+Ownership comes from the registering row: each source has one owner, and only that package is
+written against it. This is the trust model of in-process plugins
 (AGENTS.md rule 11): dependency declarations are not a sandbox.
 
 ### 4.3 Management methods `settings.*` (client path)
@@ -220,7 +229,8 @@ with `managementMethods` (§4.5). They are never served to paired devices (overv
 | `settings.read` | `{source, scope}` | `{revision, document}` | invalid params (bad scope), `settings_unknown_source`, `settings_failed` |
 | `settings.update` | `{source, scope, expectedRevision, document}` | `{revision, document}` | invalid params (bad scope, schema violation), `settings_unknown_source`, `settings_conflict`, `settings_unsynced`, `settings_failed` |
 
-- Only declared sources are served. A Rust source (for example `mcp`) is `settings_unknown_source`.
+- Only registered declared sources are served. A Rust source (for example `mcp`) is
+  `settings_unknown_source`.
   Its owner's methods stay the way to change it.
 - A client write may change user-only fields. There is no other difference from the owner path.
 - `closed` maps to the existing retryable reloading error.
@@ -271,14 +281,17 @@ pub struct SettingsChanged { pub source: String,           // was &'static str
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectAuthorized { pub root: usize, pub cwd: PathBuf }   // + Serialize/Deserialize
 
-/// One `settings` entry of a C4 row, parsed where the host assembles the rows.
-pub struct SourceDeclaration { pub owner: String, pub source: String, pub user_file: String,
+/// A declaration (§3.1), as `register` receives it.
+pub struct SourceDeclaration { pub source: String, pub user_file: String,
                                pub project_file: Option<String>, pub schema: serde_json::Value,
                                pub user_only: Vec<String> }
 
 pub enum Writer { Owner, Client }
 
 impl SettingsService {
+    /// Registers `D` (or a declaration) until the plugin owning `ctx` unloads.
+    pub fn register<D: BusinessDocument>(&self, ctx: &Ctx) -> rutis::Result<()>;
+    pub fn register_declared(&self, ctx: &Ctx, declaration: SourceDeclaration) -> rutis::Result<()>;
     pub async fn read_declared(&self, source: &str, scope: SettingsScope,
                                cancel: &CancellationToken) -> Result<SettingsSnapshot<Value>>;
     pub async fn update_declared(self: &Arc<Self>, source: &str, scope: SettingsScope,
@@ -287,16 +300,13 @@ impl SettingsService {
 }
 ```
 
-- `SettingsPlugin::new`/`native` take the declarations as factory configuration
-  (`.declare(Vec<SourceDeclaration>)`), next to `project_roots`; App Server assembly passes the
-  entries of the Session TypeScript rows, each with its row id as owner, and does not hand
-  `settings` to the loader. `apply` checks each declaration (§3.1), compiles its schema with
-  `jsonschema` (already in `Cargo.lock` through the vendored aimux) and records each declared name
-  in the existing `claims` map. A Rust type that later names a declared source fails with the
-  existing "belongs to another document type". Assembly also reserves the names of the Rust sources
-  it registers (`.reserve::<D>()`: `mcp`, `mcp-projects`, `skills`, `permission`), so a declaration
-  naming one, or two declarations of one source, fail assembly with the owner and source in the
-  message.
+- Both registrations are effects of the plugin owning `ctx`, withdrawn when it unloads, and are
+  checked under one registry state (§3.1). `register_declared` compiles the schema with
+  `jsonschema`. The process owners register in their `apply`: Mcp (`mcp`, `mcp-projects`),
+  SkillsCatalog (`skills`), PermissionRules (`permission`) and CollaborationModelPolicy
+  (`collaboration`). Readers in other plugins only read; `read::<D>`/`update::<D>` of a type that
+  is not the registered one for its name is `UnknownSource`. The `settings` service's
+  `register` calls `register_declared` with the calling row's context.
 - The file and native paths are shared with `BusinessDocument`, keyed by source name instead of
   `D::NAMESPACE`. CAS, the gate, leases, the unsynced case and `publish` stay as they are.
 - `SettingsError` gains `UnknownSource`, `UserOnlyField(pointer)`, `InvalidScope` and
@@ -345,26 +355,28 @@ document it replaces.
    | update {web, "user", r3, doc with another searchService} -> user_only_field, nothing written
 ```
 
-### 5.3 Declaration boundary
+### 5.3 Registration
 
 ```
- assembly reads each Session TypeScript row's `settings` (owner = row id)
-   -> parse entries (unknown fields rejected), drop `settings` from the loader row
-   -> check names, files, pointers
-   -> compile schema; check that {} with defaults is valid
-   -> SettingsPlugin factory configuration (declarations)
- Settings apply: claims each declared name; provides `settings`, `settings.*`
+ owner row apply                  settings (HostDispatch)      SettingsService
+   | register(declaration) ------->| caller = calling row       |
+   |                               | register_declared -------->| parse (unknown fields rejected)
+   |                               |                            | check name, files, pointers
+   |                               |                            | compile schema; {} with defaults valid
+   |                               |                            | name or file registered? refuse
+   |                               |                            | record; withdrawal = caller's unload
+   |<-- resolved (or rejected: the row's apply fails) ----------|
+ owner row unloads -> its sources are withdrawn; their documents stay in the home
 ```
 
-An invalid declaration fails assembly with the row id and source in the message, like an invalid
-row today. Declared sources need a product or target home; without one, assembly fails rather
-than drop them.
+Settings is built whenever there is a product or target home, as before; a plugin that registers
+a source needs it.
 
 ## 6. Errors
 
 | Code (service / wire) | When | Retry |
 | --- | --- | --- |
-| `unknown_source` / `settings_unknown_source` | Not a declared source (including Rust sources) | No |
+| `unknown_source` / `settings_unknown_source` | No source of that name is registered, or (on these paths) it is a Rust source | After its owner registers it |
 | `invalid_scope` / invalid params | Project scope for a source without `projectFile`, or a root not authorized | After authorizing the project |
 | `invalid_document` / invalid params | Schema violation or a non-object document | No; nothing written |
 | `invalid_document` / `settings_failed` | The persisted file or row is invalid (on read) | After the user repairs it |
@@ -399,13 +411,13 @@ than drop them.
 | Permission rules (F2) | Unchanged; see §8.1 |
 | Provider | Unchanged. Its inline credentials and its own optional `ProviderSecretHost` stay (§1.2) |
 | ADR 004 D4 | It says Settings publishes no management methods until S8b. S8b adds the `settings` namespace, limited to declared sources. ADR 004 is updated with the implementation |
-| C4 (TypeScript bridge) | Its rows are the structural input; S8b adds their `settings` member next to `provides` (§3.1). Its rows listen to the Settings channels themselves (§4.4) |
-| PluginManager (P3) | When it produces C4 rows from its package boundary, it produces their `settings` member too |
+| C4 (TypeScript bridge) | Its rows register their sources from their code (§3.1) and listen to the Settings channels themselves (§4.4) |
+| PluginManager | Declares no sources: a plugin's business configuration is its own ([ADR 007](../../adr/007-plugin-configuration.md) D5). Turning a plugin off withdraws its sources with its row |
 | Rpc | Unchanged; it dispatches the new namespace like any owner's |
 | Timeline, Dispatcher, rutis, loader | Unchanged |
 
-Public additions: the `settings` service, the `settings` management namespace (two methods), the
-`settings` member of a C4 row, and the JSON shapes of the two existing events. Each one is needed
+Public additions: the `settings` service (with `register`), the `settings` management namespace
+(two methods), and the JSON shapes of the two existing events. Each one is needed
 for a non-Rust owner to read, write and be told about its source, and for a client to edit it.
 
 ### 8.1 Decision: keep `permission.rules`/`permission.set_rules`
@@ -446,15 +458,12 @@ question 2); that is no new requirement on dim runtime or rutis.
 
 ## 10. Open questions
 
-1. ~~**Which manifest carries the `settings` entry.**~~ Settled with C4's loading path: C4 adds no
-   package manifest, and its rows carry the package's structural declarations. The entry is the
-   row's `settings` member, next to `provides` (§3.1).
+1. ~~**Which manifest carries the `settings` entry.**~~ Settled by ADR 007 D5: no manifest
+   carries it; the plugin's code registers its sources (§3.1).
 2. ~~**How a TypeScript part listens to rutis events.**~~ Settled: a part listens to the Settings
    channels on rutis's one bus (§4.4). The Session broadcast does not carry them.
-3. **Packages installed while running.** Declarations are Settings factory configuration, so a
-   runtime install (PluginManager, P3) would reload Settings and its dependents (MCP, Skills).
-   ADR 002 D3 accepts reloads after structural operations, but whether this one is acceptable is
-   decided with PluginManager. Today TypeScript packages are loaded only at startup.
+3. ~~**Packages installed while running.**~~ Settled: sources are registered at run time by the
+   plugin itself (§3.1), so installing, replacing or removing a plugin does not reload Settings.
 4. ~~**Which plugin provides `credentials` in the product.**~~ Withdrawn with the service: each
    owner handles its own secrets (§1.2).
 5. **Source discovery for a settings UI.** A generic `/settings` page would need the declared
@@ -469,7 +478,7 @@ question 2); that is no new requirement on dim runtime or rutis.
 App Server flow tests (`crates/dim-app-server/tests/settings_flow.rs` and a TypeScript row loaded
 through C4's path):
 
-1. A TypeScript test package declares source `example` (user file, project file, schema with a
+1. A TypeScript test package registers source `example` (user file, project file, schema with a
    `default`, one user-only pointer). Its first `read` returns the default document with revision
    `missing`. An `update` with that revision stores the document and returns a new revision. A
    stale revision fails with `conflict`. A schema violation fails and writes nothing.
@@ -480,8 +489,10 @@ through C4's path):
    the §4.4 JSON shape.
 4. Native profile: the user scope persists in row `user/example`; existing v13 rows are unchanged.
    Project scope on an unauthorized root fails with `invalid_scope`.
-5. `settings.read` of `mcp` returns `settings_unknown_source`. A row declaring `mcp`, two
-   packages declaring the same source, or a malformed entry fails assembly.
+5. `settings.read` of `mcp` returns `settings_unknown_source`. A row registering `mcp`, a second
+   registration of one source, or a malformed declaration fails the registering row. A source
+   appears when its owner registers it and is `unknown_source` once the owner unloads, while its
+   document stays in the home.
 6. ~~Credential references through a shared `credentials` store.~~ Withdrawn (§1.2).
 7. A paired-device connection is not served `settings.read`.
 
@@ -499,8 +510,6 @@ Corrections made against the code (reflected in §4.3 and §4.5):
   (methods contract §3.2; ADR 004 D4 boundary). This is the only new plugin row; the §2 diagram's
   `managementMethods settings` sits in that part, and §9's ADR 002 D2 answer holds for it as for
   PermissionRules: it is the client path of the Settings data, not a wiring module.
-- Rust sources are reserved at assembly so that a declaration naming one fails assembly (§11
-  item 5); Settings alone only learns Rust names on first use.
 - `SettingsError` has `InvalidScope` and `Document(message)` besides the two named variants, so
   the client path can tell invalid params from a persisted failure.
 - The service reply envelope is the one of `sessions`.
@@ -510,20 +519,26 @@ owner calling the `settings` service through its `HostDispatch`: items 1–5 and
 
 **Part 2 (S8b-2).** Implemented on C4's path:
 
-- Declarations are the `settings` member of a Session TypeScript row (§3.1, §5.3, §10 question 1),
-  parsed into `SourceDeclaration` with the row id as owner. `ServerConfig::settings_sources` is
-  removed: the plugin declares its own settings, and the embedder no longer lists them separately.
+- The TypeScript owner path through C4's rows. (Declarations were first the rows' `settings`
+  member; part 4 replaced it with registration.)
 - `transport_flow/settings_methods.rs` runs a TypeScript owner (`runtime/fixtures/settings-owner.*`)
   in the Node runtime. Item 1 (default document, CAS, stale revision, invalid documents), item 2
   (user-only field: client may, owner may not) and item 3 (a Rust listener sees one §4.4 change per
   successful write on either path, none for a rejected one) pass through its Session methods, which
-  call `settings` from TypeScript. The client path (§4.3, item 7) and the declaration boundary
-  (item 5: a Rust source name, a second declaration by another package, a malformed entry) run in
-  the same file. These are `node_` flows, run by CI's Node step.
+  call `settings` from TypeScript. The client path (§4.3, item 7) and the registration boundary
+  (item 5: a Rust source name, a second registration of one source, a malformed declaration)
+  run in the same file. These are `node_` flows, run by CI's Node step.
 
 **Part 3 (S8b-3).** TypeScript parts listen to `settings/<source>` and `settings/projects`
 (§4.4, §10 question 2). `transport_flow/settings_methods.rs` checks that the owner fixture's
 `ctx.on` listeners receive the three `example` changes of item 3 in commit order, and the
 authorization of a project created after the part loaded.
+
+**Part 4 (PluginManager M1, R1).** Sources are registered at run time (§3.1, §4.2, §4.5): the
+rows' `settings` member, `SettingsPlugin::reserve`/`declare` and Rust names claimed on first use
+are removed. The Rust owners and the TypeScript plugins under `runtime/plugins` register their
+sources in their process rows. `settings_flow.rs` checks that a source appears on registration
+and is `unknown_source` after its owner unloads while its document stays, and that invalid or
+conflicting registrations fail the registering plugin.
 
 Nothing remains open for S8b.

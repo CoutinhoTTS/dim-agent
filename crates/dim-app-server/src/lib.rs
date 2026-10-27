@@ -18,6 +18,7 @@ pub mod permission_rules;
 #[cfg(windows)]
 mod pipe_client;
 pub mod plugin_files;
+pub mod plugin_manager;
 pub mod protocol;
 pub mod provider;
 pub mod runtime_manager;
@@ -79,6 +80,8 @@ pub struct ServerConfig {
     pub idle_unload_after: Duration,
     /// Built Web workspace assets served by the local web entry.
     pub web_assets: Option<PathBuf>,
+    /// The default plugin configuration file (PluginManager §2.3).
+    pub plugin_defaults: Option<PathBuf>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -101,6 +104,7 @@ impl Default for ServerConfig {
             startup_timeout: Duration::from_secs(10),
             idle_unload_after: Duration::from_secs(60),
             web_assets: None,
+            plugin_defaults: None,
         }
     }
 }
@@ -576,19 +580,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             Ok(Box::new(provider::ProviderPlugin::new(names)?))
         })?);
     }
-    let settings_sources = config
-        .session_typescript
-        .as_ref()
-        .map(session_typescript::settings_sources)
-        .transpose()?
-        .unwrap_or_default();
-    let settings_root = execution_root.or(product_root);
-    if settings_root.is_none() && !settings_sources.is_empty() {
-        return Err(ServerError::Configuration(
-            "settings sources need a product or target home".into(),
-        ));
-    }
-    if let Some(home_root) = settings_root {
+    if let Some(home_root) = execution_root.or(product_root) {
         let build = rutis_loader::resolve::Build::default();
         let names = dim_agent_runtime::Names::copy(builder.catalog(), &build);
         let settings = if native_home.is_some() {
@@ -596,17 +588,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         } else {
             settings::SettingsPlugin::new(&names, home_root, vec![])
         }
-        .map_err(|error| ServerError::Configuration(error.to_string()))?
-        .reserve::<mcp::config::McpSettings>()
-        .reserve::<mcp::config::McpProjectEnablement>()
-        .reserve::<skills_management::SkillDocument>()
-        .reserve::<permission_rules::PermissionSettings>();
-        let settings = if config.local_execution() {
-            settings.reserve::<collaboration_model_policy::ModelPolicy>()
-        } else {
-            settings
-        }
-        .declare(settings_sources);
+        .map_err(|error| ServerError::Configuration(error.to_string()))?;
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
@@ -663,11 +645,45 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             ))
         })?);
     }
+    let plugin_home = config
+        .product_home
+        .clone()
+        .or_else(|| config.target_home.clone());
+    let plugins = match &plugin_home {
+        Some(home) => Some(
+            plugin_manager::State::read(
+                home,
+                product_root.and(config.product_home.as_deref()),
+                config.plugin_defaults.as_deref(),
+                builder.catalog_mut(),
+            )
+            .map_err(ServerError::Configuration)?,
+        ),
+        None if config.plugin_defaults.is_some() => {
+            return Err(ServerError::Configuration(
+                "default plugins need a product or target home".into(),
+            ));
+        }
+        None => None,
+    };
     let session_parts = config
         .session_typescript
         .as_ref()
         .map(|parts| session_typescript::Parts::new(parts, &mut builder, &config.file_roots))
         .transpose()?;
+    if let Some(state) = &plugins {
+        let state = state.clone();
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                Ok(Box::new(plugin_manager::PluginManagerPlugin::new(
+                    names,
+                    state.clone(),
+                )?))
+            },
+        )?);
+    }
     let acquire = config
         .session_typescript
         .as_ref()
@@ -836,7 +852,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .map(|name| serde_json::json!({ "id": name, "name": name }))
         .collect();
     rows.push(agents::group_row(&builder, session_row));
-    let required = rows
+    let mut required: Vec<String> = rows
         .iter()
         .map(|row| row["id"].as_str().expect("host row id").to_owned())
         .filter(|id| !optional.contains(&id.as_str()))
@@ -860,6 +876,30 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .flat_map(|parts| parts.runtimes())
         .map(|foreign| Key::dynamic(foreign.rows.runtime_name().to_owned()))
         .collect();
+    let plugin_layer = match &plugins {
+        Some(state) => {
+            let builtins = rows
+                .iter()
+                .filter(|row| row.get("group").is_none())
+                .map(|row| row["id"].as_str().expect("host row id").to_owned())
+                .filter(|id| required.contains(id))
+                .collect();
+            let layer = state
+                .layer(
+                    builtins,
+                    builder.catalog().clone(),
+                    session_parts.as_ref().map(|parts| parts.node.rows.clone()),
+                )
+                .map_err(ServerError::Configuration)?;
+            required.retain(|row| !layer.off.contains(row));
+            required.extend(layer.locked);
+            Some(rutis_loader::Layer::new(
+                plugin_manager::LAYER,
+                layer.patches,
+            ))
+        }
+        None => None,
+    };
     let mut resolver = rutis_loader::Chain::new().with(builtins);
     if let Some(parts) = session_parts {
         resolver = resolver.with_shared(parts.resolver);
@@ -896,7 +936,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             &CancellationToken::new(),
         )
         .await?;
-        let reconcile = processes.loader.reconcile(vec![assembly.clone()], None);
+        let layers = std::iter::once(assembly.clone())
+            .chain(plugin_layer.clone())
+            .collect();
+        let reconcile = processes.loader.reconcile(layers, None);
         let report = match tokio::time::timeout_at(deadline, reconcile).await {
             Ok(report) => report.map_err(|error| AgentError::Build(error.to_string()))?,
             Err(_) => {

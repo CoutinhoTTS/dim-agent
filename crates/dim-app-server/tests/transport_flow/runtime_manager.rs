@@ -61,7 +61,15 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
         json!({"id": "probe", "name": plugins.join("probe.mjs"), "provides": {}}),
         json!({"id": "probe-py", "name": "py:probe_py.entry", "provides": {}}),
     ];
-    let runtimes = Arc::new(Runtimes::load(&home, &defaults).unwrap());
+    let runtimes = Arc::new(
+        Runtimes::load(
+            &home,
+            &dim_app_server::plugin_manager::Defaults::read(&defaults)
+                .unwrap()
+                .runtimes,
+        )
+        .unwrap(),
+    );
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -105,7 +113,15 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
     server.join().await.unwrap();
 
     std::fs::remove_file(&python_marker).unwrap();
-    let runtimes = Arc::new(Runtimes::load(&home, &defaults).unwrap());
+    let runtimes = Arc::new(
+        Runtimes::load(
+            &home,
+            &dim_app_server::plugin_manager::Defaults::read(&defaults)
+                .unwrap()
+                .runtimes,
+        )
+        .unwrap(),
+    );
     let rows = vec![json!({"id": "probe-py", "name": "py:probe_py.entry", "provides": {}})];
     let server = launch(
         Arc::new(MockTools),

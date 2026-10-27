@@ -1,28 +1,12 @@
 //! Web through actual C4, Settings, Permission and ToolExecutor boundaries.
 use super::*;
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
-use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 
 fn rows() -> SessionTypeScriptConfig {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    let row: Value =
-        serde_json::from_str(include_str!("../../../../runtime/plugins/web/web.json")).unwrap();
-    SessionTypeScriptConfig {
-        python: None,
-        acquire: None,
-        node: std::env::var_os("DIM_TEST_NODE")
-            .expect("DIM_TEST_NODE")
-            .into(),
-        js_runtime: std::env::var_os("DIM_TEST_JS_RUNTIME")
-            .expect("DIM_TEST_JS_RUNTIME")
-            .into(),
-        anchor: root.join("runtime/package.json"),
-        rows: vec![row],
-    }
+    let mut config = session_typescript::fixture();
+    config.rows = vec![session_typescript::manifest_row("web")];
+    config
 }
 
 async fn configure(client: &mut Client, document: Value) {

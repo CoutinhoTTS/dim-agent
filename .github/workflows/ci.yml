@@ -40,6 +40,11 @@ jobs:
       - name: Select check groups
         id: groups
         run: node scripts/ci-changes.mjs
+      - name: Check accepted ADRs
+        if: github.event_name == 'pull_request'
+        env:
+          DIM_DOCS_ADR_ERRATUM: ${{ contains(github.event.pull_request.labels.*.name, 'adr-erratum') && '1' || '0' }}
+        run: node scripts/adr-check.mjs --base HEAD^1
   dependencies:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.dependencies == 'true'

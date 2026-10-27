@@ -16,32 +16,10 @@ use dim_agent_types::{BranchCreateData, BranchSource, MessageContent, ModelReque
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use std::path::{Path, PathBuf};
 
-fn repository() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap()
-}
 fn goal_rows() -> SessionTypeScriptConfig {
-    let goal = repository().join("runtime/plugins/goal");
-    SessionTypeScriptConfig {
-        python: None,
-        acquire: None,
-        node: std::env::var_os("DIM_TEST_NODE")
-            .expect("DIM_TEST_NODE")
-            .into(),
-        js_runtime: std::env::var_os("DIM_TEST_JS_RUNTIME")
-            .expect("DIM_TEST_JS_RUNTIME")
-            .into(),
-        anchor: repository().join("runtime/package.json"),
-        rows: vec![json!({
-            "id": "goal",
-            "name": goal.join("index.ts"),
-            "provides": {},
-            "settings": serde_json::from_str::<Value>(include_str!("../../../../runtime/plugins/goal/settings.json")).unwrap(),
-            "config": {},
-        })],
-    }
+    let mut config = session_typescript::fixture();
+    config.rows = vec![session_typescript::manifest_row("goal")];
+    config
 }
 fn product_home() -> PathBuf {
     use std::os::unix::fs::PermissionsExt;

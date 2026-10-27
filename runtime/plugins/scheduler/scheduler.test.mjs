@@ -61,6 +61,7 @@ async function host(t, initial = {}) {
     managementMethods: { async register(namespace, declarations, call) { h.methods = call } },
     partRegistry: { async registerDefinition(scope, name, definition) { h.part = { scope, name, definition } } },
     settings: {
+      async register(declaration) { assert.equal(declaration.source, 'schedule') },
       async read() {
         h.settingsReads++
         const snapshot = { revision: String(h.revision), document: copy(h.document) }

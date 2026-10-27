@@ -97,35 +97,27 @@ pub struct Runtimes {
     python: Plan,
 }
 
-#[derive(Deserialize, Default, Clone, Copy)]
+/// One runtime's entry in the `runtimes` section (RuntimeManager §2.2).
+#[derive(Deserialize, Default, Clone, Copy, Debug)]
 #[serde(deny_unknown_fields)]
-struct ChoiceFile {
-    source: Option<Source>,
-    auto: Option<bool>,
+pub struct Choice {
+    pub source: Option<Source>,
+    pub auto: Option<bool>,
 }
 
+/// The `runtimes` section of the default configuration file, by runtime name.
+pub type Choices = BTreeMap<String, Choice>;
+
 impl Runtimes {
-    /// The runtimes of `home`: the `runtimes` section of the default
-    /// configuration file `defaults`, overridden by `<home>/runtimes/config.json`.
-    pub fn load(home: &Path, defaults: &Path) -> Result<Self, String> {
-        #[derive(Deserialize)]
-        struct Defaults {
-            #[serde(default)]
-            runtimes: BTreeMap<String, ChoiceFile>,
-        }
-        let read = |path: &Path| -> Result<BTreeMap<String, ChoiceFile>, String> {
-            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            serde_json::from_slice::<Defaults>(&bytes)
-                .map(|file| file.runtimes)
-                .map_err(|e| format!("{}: {e}", path.display()))
-        };
-        let preset = read(defaults)?;
+    /// The runtimes of `home`: the default configuration file's `preset`,
+    /// overridden by `<home>/runtimes/config.json`.
+    pub fn load(home: &Path, preset: &Choices) -> Result<Self, String> {
         let root = home.join("runtimes");
         let user_file = root.join("config.json");
         let user = match std::fs::read(&user_file) {
-            Ok(bytes) => serde_json::from_slice::<BTreeMap<String, ChoiceFile>>(&bytes)
+            Ok(bytes) => serde_json::from_slice::<Choices>(&bytes)
                 .map_err(|e| format!("{}: {e}", user_file.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Choices::new(),
             Err(error) => return Err(format!("{}: {error}", user_file.display())),
         };
         for name in preset.keys().chain(user.keys()) {

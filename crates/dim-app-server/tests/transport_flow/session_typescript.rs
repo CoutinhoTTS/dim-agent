@@ -226,6 +226,27 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// The row of a repository plugin built from its `dim-plugin.json` `code`
+/// fields, named by the absolute path of its entry.
+pub(super) fn manifest_row(plugin: &str) -> Value {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/plugins")
+        .join(plugin)
+        .canonicalize()
+        .unwrap();
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("dim-plugin.json")).unwrap())
+            .unwrap();
+    let code = &manifest["code"];
+    json!({
+        "id": plugin,
+        "name": dir.join(code["entry"].as_str().unwrap()),
+        "inject": code["inject"],
+        "provides": code.get("provides").cloned().unwrap_or_else(|| json!({})),
+        "config": code.get("config").cloned().unwrap_or_else(|| json!({})),
+    })
+}
+
 pub(super) fn fixture() -> SessionTypeScriptConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

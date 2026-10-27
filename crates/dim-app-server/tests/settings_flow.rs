@@ -33,6 +33,42 @@ fn native_settings_part(home_root: usize, project_roots: Vec<usize>) -> Settings
     SettingsPlugin::native(&Names::copy(&catalog, &build), home_root, project_roots).unwrap()
 }
 
+type Register = Arc<dyn Fn(&SettingsService, &Ctx) -> rutis::Result<()> + Send + Sync>;
+/// A plugin that owns sources: it registers them with Settings in its
+/// `apply`, so they are withdrawn when it unloads.
+struct Owner {
+    name: &'static str,
+    settings: Key<SettingsService>,
+    register: Register,
+}
+fn owner(
+    name: &'static str,
+    register: impl Fn(&SettingsService, &Ctx) -> rutis::Result<()> + Send + Sync + 'static,
+) -> Owner {
+    let catalog = dim_app_server::catalog();
+    let build = Build::default();
+    Owner {
+        name,
+        settings: Names::copy(&catalog, &build).key().unwrap(),
+        register: Arc::new(register),
+    }
+}
+impl DynPlugin for Owner {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.settings.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let settings = ctx.require_at(&self.settings)?;
+            (self.register)(&settings, ctx)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
 type Captured = tokio::sync::watch::Sender<
     Option<(
         std::sync::Arc<SettingsService>,
@@ -233,6 +269,9 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     let views = vec![
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(settings_part(0, vec![])),
+        root.plugin(owner("test.mcp", |settings, ctx| {
+            settings.register::<McpSettings>(ctx)
+        })),
     ];
     let cancel = CancellationToken::new();
     wait_active(&root, &views, Duration::from_secs(5), &cancel)
@@ -350,6 +389,11 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
             root.plugin(FileStoragePlugin::new(vec![home.clone()])),
             root.plugin(SqliteStoragePlugin::new(database.clone())),
             root.plugin(native_settings_part(0, vec![])),
+            root.plugin(owner("test.documents", |settings, ctx| {
+                settings.register::<Document>(ctx)?;
+                settings.register::<Other>(ctx)?;
+                settings.register::<dim_app_server::mcp::config::McpSettings>(ctx)
+            })),
         ];
         wait_active(&root, &views, Duration::from_secs(5), &cancel)
             .await
@@ -489,6 +533,9 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
             second.clone(),
         ])),
         root.plugin(settings_part(0, vec![1, 2])),
+        root.plugin(owner("test.document", |settings, ctx| {
+            settings.register::<Document>(ctx)
+        })),
     ];
     let cancel = CancellationToken::new();
     wait_active(&root, &views, Duration::from_secs(5), &cancel)
@@ -703,9 +750,14 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         Err(SettingsError::Closed)
     ));
     let view = root.plugin(settings_part(0, vec![1, 2]));
-    wait_active(&root, &[view], Duration::from_secs(5), &cancel)
-        .await
-        .unwrap();
+    wait_active(
+        &root,
+        &[view, views[2].clone()],
+        Duration::from_secs(5),
+        &cancel,
+    )
+    .await
+    .unwrap();
     let fresh = root.get::<SettingsService>().unwrap();
     assert_eq!(
         fresh
@@ -719,7 +771,7 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
 }
 
 #[tokio::test]
-async fn business_documents_reject_escaping_filenames() {
+async fn sources_appear_while_registered_and_names_are_exclusive() {
     let home = home();
     let root = Ctx::root().unwrap();
     let views = vec![
@@ -731,6 +783,51 @@ async fn business_documents_reject_escaping_filenames() {
         .await
         .unwrap();
     let settings = root.get::<SettingsService>().unwrap();
+    let dispatch = root
+        .get_at::<dyn HostDispatch>(&host_key("settings"))
+        .unwrap();
+    assert!(matches!(
+        settings
+            .read::<Document>(SettingsScope::User, &cancel)
+            .await,
+        Err(SettingsError::UnknownSource)
+    ));
+    let read = json!({"source": "declared", "scope": "user"});
+    assert_eq!(
+        owner_call(&dispatch, "read", read.clone()).await["error"]["code"],
+        "unknown_source"
+    );
+    let source = root.plugin(owner("test.owner", |settings, ctx| {
+        settings.register::<Document>(ctx)?;
+        settings.register_declared(ctx, declaration("declared"))
+    }));
+    wait_active(
+        &root,
+        std::slice::from_ref(&source),
+        Duration::from_secs(5),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let empty = settings
+        .read::<Document>(SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    let saved = settings
+        .update(
+            SettingsScope::User,
+            &empty.revision,
+            Document {
+                value: "kept".into(),
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        owner_call(&dispatch, "read", read.clone()).await["ok"],
+        true
+    );
     #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
     struct BadPath;
     impl BusinessDocument for BadPath {
@@ -740,10 +837,6 @@ async fn business_documents_reject_escaping_filenames() {
             Ok(())
         }
     }
-    assert!(matches!(
-        settings.read::<BadPath>(SettingsScope::User, &cancel).await,
-        Err(SettingsError::Invalid(_))
-    ));
     #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
     struct SameNamespace;
     impl BusinessDocument for SameNamespace {
@@ -762,26 +855,41 @@ async fn business_documents_reject_escaping_filenames() {
             Ok(())
         }
     }
-    settings
-        .read::<Document>(SettingsScope::User, &cancel)
-        .await
-        .unwrap();
-    for result in [
+    assert!(settings.register::<BadPath>(&root).is_err());
+    assert!(settings.register::<SameNamespace>(&root).is_err());
+    assert!(settings.register::<SameFile>(&root).is_err());
+    assert!(settings.register::<Document>(&root).is_err());
+    assert!(
+        settings
+            .register_declared(&root, declaration("example"))
+            .is_err()
+    );
+    assert!(
         settings
             .read::<SameNamespace>(SettingsScope::User, &cancel)
             .await
-            .map(drop),
+            .is_err()
+    );
+    source.dispose().await.unwrap();
+    assert!(matches!(
         settings
-            .read::<SameFile>(SettingsScope::User, &cancel)
+            .read::<Document>(SettingsScope::User, &cancel)
+            .await,
+        Err(SettingsError::UnknownSource)
+    ));
+    assert_eq!(
+        owner_call(&dispatch, "read", read).await["error"]["code"],
+        "unknown_source"
+    );
+    assert!(home.join("example.json").exists());
+    settings.register::<Document>(&root).unwrap();
+    assert_eq!(
+        settings
+            .read::<Document>(SettingsScope::User, &cancel)
             .await
-            .map(drop),
-    ] {
-        assert!(matches!(result, Err(SettingsError::Invalid(_))));
-    }
-    settings
-        .read::<Document>(SettingsScope::User, &cancel)
-        .await
-        .unwrap();
+            .unwrap(),
+        saved
+    );
     root.shutdown().await.unwrap();
     fs::remove_dir_all(home).unwrap();
 }
@@ -790,7 +898,6 @@ async fn business_documents_reject_escaping_filenames() {
 /// project files, a schema with a `default`, one user-only member.
 fn declaration(source: &str) -> SourceDeclaration {
     SourceDeclaration {
-        owner: "example-package".into(),
         source: source.into(),
         user_file: format!("{source}.json"),
         project_file: Some(format!(".{source}.json")),
@@ -841,7 +948,10 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         if native {
             views.push(root.plugin(SqliteStoragePlugin::new(home.join("settings.sqlite"))));
         }
-        views.push(root.plugin(settings_plugin.declare(vec![declaration("example")])));
+        views.push(root.plugin(settings_plugin));
+        views.push(root.plugin(owner("test.declared", |settings, ctx| {
+            settings.register_declared(ctx, declaration("example"))
+        })));
         let cancel = CancellationToken::new();
         wait_active(&root, &views, Duration::from_secs(5), &cancel)
             .await
@@ -978,14 +1088,6 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
 
         let mcp = owner_call(&owner, "read", json!({"source": "mcp", "scope": "user"})).await;
         assert_eq!(mcp["error"]["code"], "unknown_source");
-        assert!(matches!(
-            settings
-                .read::<Document>(SettingsScope::User, &cancel)
-                .await,
-            Err(SettingsError::Invalid(
-                "settings source belongs to another document type"
-            ))
-        ));
         root.shutdown().await.unwrap();
         assert_eq!(
             owner_call(&owner, "read", user).await["error"]["code"],
@@ -996,28 +1098,35 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
 }
 
 #[tokio::test]
-async fn invalid_or_conflicting_declarations_fail_assembly() {
+async fn invalid_or_conflicting_registrations_fail_the_owner() {
     let mut unreachable = declaration("example");
     unreachable.user_only = vec!["/searchService/missing".into()];
     let mut invalid_default = declaration("example");
     invalid_default.schema["properties"]["maxResults"]["default"] = json!(0);
     let mut escaping = declaration("example");
     escaping.user_file = "../example.json".into();
-    let cases = [
-        settings_part(0, vec![])
-            .reserve::<dim_app_server::mcp::config::McpSettings>()
-            .declare(vec![declaration("mcp")]),
-        settings_part(0, vec![]).declare(vec![declaration("example"), declaration("example")]),
-        settings_part(0, vec![]).declare(vec![unreachable]),
-        settings_part(0, vec![]).declare(vec![invalid_default]),
-        settings_part(0, vec![]).declare(vec![escaping]),
+    let cases: Vec<Vec<SourceDeclaration>> = vec![
+        vec![declaration("mcp")],
+        vec![declaration("example"), declaration("example")],
+        vec![unreachable],
+        vec![invalid_default],
+        vec![escaping],
     ];
     let home = home();
-    for plugin in cases {
+    for (index, declarations) in cases.into_iter().enumerate() {
         let root = Ctx::root().unwrap();
         let views = vec![
             root.plugin(FileStoragePlugin::new(vec![home.clone()])),
-            root.plugin(plugin),
+            root.plugin(settings_part(0, vec![])),
+            root.plugin(owner("test.declared", move |settings, ctx| {
+                if index == 0 {
+                    settings.register::<dim_app_server::mcp::config::McpSettings>(ctx)?;
+                }
+                for declaration in &declarations {
+                    settings.register_declared(ctx, declaration.clone())?;
+                }
+                Ok(())
+            })),
         ];
         let error = wait_active(
             &root,
@@ -1028,7 +1137,7 @@ async fn invalid_or_conflicting_declarations_fail_assembly() {
         .await
         .unwrap_err()
         .to_string();
-        assert!(error.contains("example-package"), "{error}");
+        assert!(error.contains("settings source"), "{error}");
         root.shutdown().await.unwrap();
     }
     fs::remove_dir_all(home).unwrap();

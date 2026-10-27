@@ -16,6 +16,7 @@ mod mcp_command;
 mod model;
 mod permission;
 mod permission_command;
+mod plugin_command;
 mod plugins;
 mod projection;
 mod question;
@@ -587,6 +588,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 eprintln!("No cached catalog. Sign in and run models PROVIDER --refresh.");
             }
             Ok(0)
+        }
+        Action::Plugin { method, params } => {
+            plugin_command::run(&mut client, method, params.clone()).await
         }
         Action::RuntimeList => {
             runtime_list(&mut client).await?;

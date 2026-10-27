@@ -28,27 +28,9 @@ pub(super) async fn complete(
 }
 
 pub(super) fn rows() -> SessionTypeScriptConfig {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    SessionTypeScriptConfig {
-        python: None,
-        acquire: None,
-        node: std::env::var_os("DIM_TEST_NODE")
-            .expect("DIM_TEST_NODE")
-            .into(),
-        js_runtime: std::env::var_os("DIM_TEST_JS_RUNTIME")
-            .expect("DIM_TEST_JS_RUNTIME")
-            .into(),
-        anchor: root.join("runtime/package.json"),
-        rows: vec![
-            serde_json::from_str(include_str!(
-                "../../../../runtime/plugins/session-title/session-title.json"
-            ))
-            .unwrap(),
-        ],
-    }
+    let mut config = session_typescript::fixture();
+    config.rows = vec![session_typescript::manifest_row("session-title")];
+    config
 }
 
 pub(super) async fn entry(client: &mut Client, id: &str) -> Value {

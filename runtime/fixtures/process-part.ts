@@ -1,8 +1,9 @@
 import { createConnection } from 'node:net'
 import { once } from 'node:events'
 import { definePlugin, type Plugin } from '@arcships/rutis'
-import type { ManagementMethods, MethodDeclaration, Settings } from '../../npm/plugin.js'
+import type { ManagementMethods, MethodDeclaration, Settings, SourceDeclaration } from '../../npm/plugin.js'
 import provides from './process-part.json' with { type: 'json' }
+import sources from './settings-owner.settings.json' with { type: 'json' }
 
 let applied = 0
 export default definePlugin({
@@ -16,6 +17,7 @@ export default definePlugin({
     const generation = ++applied
     if (config.failAfter && generation >= config.failAfter) throw new Error('fixture apply failure')
     const settings = ctx.use<Settings>('settings')
+    for (const declaration of sources as SourceDeclaration[]) await settings.register(declaration)
     let stopped = false
     let calls = 0
     const pending = new Set<Promise<void>>()

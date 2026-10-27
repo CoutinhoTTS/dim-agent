@@ -35,7 +35,7 @@ flowchart LR
     PT["PluginTools (Session part)<br/>plugin tools"]:::new
   end
   RPC -->|"plugin.* (managementMethods)"| PM
-  PM -->|"create, set_disabled, remove, reload"| LOADER
+  PM -->|"reconcile derived layer, reload"| LOADER
   LOADER --> CODE
   PM -->|"register / withdraw (if present)"| OWN
   CODE -->|"register own Settings sources"| SET
@@ -80,6 +80,8 @@ flowchart LR
 | `hooks` | hook | 插件内的一个文件，里面是一份 hooks 文档，登记到 Hooks。 |
 
 每个路径都是相对路径，在跟随符号链接之后在目录内解析；离开目录的路径在安装时和重新加载时被拒绝（`invalid_manifest`）。清单在这个边界上解析；所有者收到的是已经读好的文档。
+
+**数据目录。** 打开一个带代码的插件时，如果 `<pluginFiles 根目录>/<id>/` 不存在，PluginManager 就创建它：`<id>` 是已安装插件的 id，或默认插件的名字，两者都按 id 规则检查（§7）。关闭或删除插件时，PluginManager 从不删除这个目录，和 Settings 文档留在 home 中一样。已存在的条目只有在它是目录、不是符号链接、并且解析后就是根目录下的它自己时才使用；否则不创建任何东西，插件的文件操作会像没有这个目录时一样失败。插件通过 `pluginFiles` 只在自己的 id 目录下写入（[进程 TypeScript §5.2](../../../design/process-typescript.md#52-public-pluginfiles-binding)）。
 
 插件的业务配置（它的 Settings 来源）不在清单中：插件的代码在启动时向 Settings 登记自己的来源（§9 R1）。现在 TypeScript 行中的 `settings` 成员将被去掉。
 
@@ -161,18 +163,19 @@ flowchart LR
 
 插件代码在 Node 或 Python 的 rutis 运行时里运行。提供运行时不归 PluginManager 管：运行时怎么获取、固定哪个版本、怎么校验，运行时就绪后插件的行怎么启动，都由 [RuntimeManager](RuntimeManager.md) 决定（[#476](https://github.com/arcships/dim/issues/476)，M1）。PluginManager 只负责建行；运行时还没有时，`plugin.list` 显示 rutis 给出的状态和原因。reload 只重新导入入口模块（[需求第 3 条](../../../design/plugin-management.md)）。
 
+TypeScript 的行以入口文件的绝对路径命名。Python 插件通过 PluginManager 维护的链接导入：`<home>/plugins/.python/<package>` 指向插件目录，`<package>` 是插件的 id（默认插件用名字），其中 `-` 换成 `_`；它的行名是 `py:<package>.<入口模块>`，插件在自己的包内使用相对导入。PluginManager 在打开插件时创建链接，更新后把它指向新目录，移除插件时删除它。Python 运行时从 `<home>/plugins/.python/` 导入（#476）。
+
 ## 3. 流程
 
-下面说明 PluginManager 的命令如何对应到 rutis-loader。loader 有两层。`assembly` 存放内置行。`plugins` 是可编辑层，rutis 不持久化它（`NoPersist`）；它存放默认插件和已安装插件的行，以及对内置行的 `disabled` 覆盖。PluginManager 建的行，行 id 是 `plugin:<name>`：每个名字一行，不会和内置行的 id 冲突，因为内置行被禁用后仍留在组合结果里。
+下面说明 PluginManager 的配置如何对应到 rutis-loader。loader 有两层。`assembly` 存放内置行。`plugins` 由 `plugins.json` 和默认配置文件推导出来；除了运行中的树，rutis 不保存它的副本。它存放正在使用的默认插件和已安装插件的行，以及对内置行的 `disabled` 覆盖。PluginManager 建的行，行 id 是 `plugin:<name>`：每个名字一行，不会和内置行的 id 冲突，因为内置行被禁用后仍留在组合结果里。
 
-| 配置变更 | Loader 命令 |
+| `plugins.json` 中的名字 N | 推导出的 `plugins` 层中 |
 | --- | --- |
-| 打开名字 N，使用默认或已安装的插件 P | 先关闭 N 当前使用的插件（见下），然后按 P 的清单 `create` 行 `plugin:N` |
-| 打开名字 N，使用它的内置插件 | 先关闭 N 当前使用的插件（见下），然后 `set_disabled(N, false)` |
-| 关闭名字 N | 内置：`set_disabled(N, true)`。默认或已安装：`remove` 行 `plugin:N` |
-| 重新加载 | `Loader::reload("plugin:N")` |
+| 使用带代码的默认或已安装插件 P | 按 P 的清单生成的行 `plugin:N` |
+| 使用它的内置插件 | 无：内置行运行 |
+| 关闭，或使用内置插件以外的插件 | 若有内置行 N，则给它 `disabled: true` |
 
-rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允许改名或移除它，所以替换内置插件时，要关闭它的行，并为新插件加一行。先关闭旧插件，这样新插件不会遇到同一服务的第二个提供者。rutis 会重新加载发生变化的行的依赖方。
+配置变更写入 `plugins.json`，重新推导 `plugins` 层，并让 loader 执行 `reconcile([assembly, plugins])`。rutis 拒绝的行留在 loader 里，`plugin.list` 显示 rutis 的状态和原因，与重启后相同。行的字段不变时，重新加载是 `Loader::reload("plugin:N")`。rutis 允许一层禁用一个内置行、覆盖它的字段，但不允许改名或移除它，所以替换内置插件时，禁用它的行，并为新插件加一行。rutis 会重新加载发生变化的行的依赖方。
 
 内容跟随同样的切换：当名字 N 不再使用 P 时，PluginManager 从每个存在的所有者那里撤回 P 的内容；当 N 开始使用 P 时，它向每个存在的所有者登记 P 的内容（§3.7）。
 
@@ -182,7 +185,7 @@ rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允�
    - 初始的 `plugins` 层：处于打开状态的默认插件和已安装插件的行，以及每个被关闭或使用其他插件的内置名字的 `disabled: true`；
    - catalog 需要其 `instanceNames` 的名字（§4）；
    - 被关闭的内置行，App Server 把它们从变为 Active 所需的行中去掉。
-2. App Server 以 `plugins` 作为可编辑层，对 `[assembly, plugins]` 进行 reconcile。被关闭的内置插件从不启动。
+2. App Server 对 `[assembly, plugins]` 进行 reconcile。被关闭的内置插件从不启动。
 3. PluginManager 的行 apply，向 `managementMethods` 登记 `plugin`，向 `partRegistry` 登记 `PluginTools`，然后在激活之后，删除残留的暂存目录，以及没有任何已安装条目引用的 Git 克隆。
 
 默认插件或已安装插件的行失败时，启动不失败；`plugin.list` 把它显示为失败，并带上 rutis 的错误。启动时不会再次登记内容：所有者保存自己的状态（§9 R2）。
@@ -194,14 +197,14 @@ rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允�
 1. 调用方给了 `id` 时，先检查它（§7），已经安装的 `id` 直接拒绝（`plugin_exists`），不做任何获取。
 2. 获取（§7）：本地路径在原地检查；Git 来源先克隆到暂存目录并读取清单；没有给 `id` 时，id 取清单名字转成小写，同样检查并拒绝已安装的 id，然后才把暂存目录改名为 `<home>/plugins/<id>/<commit>`。任何失败都会删除暂存目录。
 3. 写入 `plugins.json`，加入新条目；当 `enable` 为 true 且名字未锁定时，同时写入 `names.<name>.use = id`。
-4. 如果已打开：执行"打开"（§3）。回复带上行的状态，以及被所有者拒绝的内容。
+4. 如果已打开：reconcile 推导出的层（§3）。回复带上行的状态，以及被所有者拒绝的内容。
 
 安装名字已锁定的插件时，只记录它，不打开它，并在回复中说明这一点。
 
 ### 3.3 打开、关闭、切换
 
-- `plugin.enable {name, use?}`：`use` 是一个已安装的 id、`"builtin"` 或 `"default"`；不给时，使用该名字当前的 `use`。对锁定的名字，当 `use` 改变时拒绝（`plugin_locked`）。写入 `names.<name>`（清除 `off`，设置 `use`），然后执行 §3 中的命令：`"builtin"` 对应内置行，其他对应 `plugin:N` 行。
-- `plugin.disable {name}`：对锁定的名字拒绝。写入 `off: true`，然后关闭该名字。
+- `plugin.enable {name, use?}`：`use` 是一个已安装的 id、`"builtin"` 或 `"default"`；不给时，使用该名字当前的 `use`。对锁定的名字，当 `use` 改变时拒绝（`plugin_locked`）。写入 `names.<name>`（清除 `off`，设置 `use`），然后 reconcile 推导出的层（§3）。
+- `plugin.disable {name}`：对锁定的名字拒绝。写入 `off: true`，然后 reconcile 推导出的层。
 
 当一个内容所有者本身被打开时（例如 Hooks），PluginManager 登记每个正在使用、并带有该种类的插件的内容（§3.7）。
 
@@ -210,7 +213,7 @@ rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允�
 `plugin.reload {name}` 重新加载该名字使用的插件。宿主不监视任何文件；这个调用就是表示有东西变了的信号。
 
 1. 再次读取清单。如果名字变了，拒绝（`name_changed`）；用户用新名字重新安装它。
-2. 代码：`Loader::reload("plugin:<name>")`。rutis 重新导入插件的入口模块（它导入的模块不会被重新导入；[需求 3](../../../design/plugin-management.md)），并开始一个新的世代；它在 Session 和分支中的部件被替换，它的依赖方被重新加载。如果清单的 `code` 字段变了，PluginManager 先移除这一行，再用新字段创建它。
+2. 代码：`Loader::reload("plugin:<name>")`。rutis 重新导入插件的入口模块（它导入的模块不会被重新导入；[需求 3](../../../design/plugin-management.md)），并开始一个新的世代；它在 Session 和分支中的部件被替换，它的依赖方被重新加载。如果清单的 `code` 字段变了，PluginManager reconcile 推导出的层，层里的这一行带着新字段。
 3. 内容：把每种内容重新登记到存在的所有者；新文档替换旧文档。清单不再带有的种类被撤回。
 4. 如果 `kinds` 变了，更新 `plugins.json` 中的 `kinds`。
 
@@ -218,7 +221,7 @@ rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允�
 
 ### 3.5 更新
 
-Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit，检查后放入一个新目录，写入新的 `commit` 和 `dir`，然后，如果插件正在使用，就在新目录上执行一次重新加载（它的行会被重新创建，因为入口路径变了）。旧目录在之后删除。本地路径插件没有可更新的东西（`not_updatable`）；重新加载它即可。是否要求用户确认更新，是客户端的事。
+Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit，检查后放入一个新目录，写入新的 `commit` 和 `dir`，然后，如果插件正在使用，就 reconcile 推导出的层（入口路径变了，层里的行带着新路径）。旧目录在之后删除。本地路径插件没有可更新的东西（`not_updatable`）；重新加载它即可。是否要求用户确认更新，是客户端的事。
 
 ### 3.6 移除和列出
 
@@ -231,8 +234,8 @@ Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit�
 
 ## 4. 时序与冲突
 
-- PluginManager 在内存表上一步完成对 `plugins.json` 的修改，然后写文件，然后向 loader 和所有者下达命令。针对同一个 id 或名字的第二个操作能看到第一个操作的变更（`plugin_exists`，或者它在新状态上执行）。rutis-loader 一次执行一个自己的操作。
-- rutis 或某个所有者拒绝的命令，不改变已写入的配置；该项在 `plugin.list` 中显示这次拒绝（例如，新插件失败，因为另一个不同名的插件提供了同一服务）。
+- PluginManager 在内存表上一步完成对 `plugins.json` 的修改，然后写文件，然后 reconcile 由它推导出的层，并向所有者下达命令。针对同一个 id 或名字的第二个操作能看到第一个操作的变更（`plugin_exists`，或者它在新状态上执行）。推导层和 reconcile 一次执行一个，每次都按当时的记录推导，所以最后 reconcile 的层来自最新的记录。rutis-loader 一次执行一个自己的操作。
+- rutis 拒绝的行或某个所有者拒绝的命令，不改变已写入的配置；该项在 `plugin.list` 中显示这次拒绝（例如，新插件失败，因为另一个不同名的插件提供了同一服务）。
 - `instanceNames`：rutis 需要在运行时启动之前，在 catalog 中拿到插件的部件在 Session 和分支中提供的名字（[rutis 用法 §2](../rutis-usage.md#2-插件是一行实例挂载它的部件)）。安装、切换或重新加载到一个 `instanceNames` 不在运行中 catalog 内的插件时，记录变更并回复 `restart_required`；该行在下次启动时创建。只登记工具、方法或提示来源的插件没有这个限制。
 - 正在使用时的重新加载或替换：旧世代卸载，rutis 取消它正在运行的调用，使用它的进行中轮次可能失败（[ADR 002](../../adr/002-plugin-scope.md) 的后果）。这一点写入文档，不加以阻止。
 
@@ -252,7 +255,7 @@ PluginManager 不向模型上下文加入任何东西。插件的工具和提示
 安装和打开是通过管理方法或工具调用完成的宿主配置；已启用的插件代码运行时不需要宿主本地审批（[ADR 003](../../adr/003-approval-scope.md)）。PluginManager 不增加作用域、审批或信任步骤（[需求](../../../design/plugin-management.md)）。它守护的是获取过程本身：
 
 - Git 来源只接受 `https://` 或 `ssh://` URL；其他协议（`file://`、`ext::`、scp 风格的路径）以及以 `-` 开头的参数，在 Git 运行之前就被拒绝。克隆时关闭子模块（`--no-recurse-submodules`），关闭 hook（`core.hooksPath` 设为一个空目录），设置 `protocol.file.allow=never`，并且不弹出终端提示。
-- **路径。** 所有为插件动文件系统的操作都用同一条规则：安装（暂存、克隆、改名）、更新、移除和启动时的清理。在任何文件系统改动之前，PluginManager 检查两件事：id（无论是调用方给的，还是取自清单名字）符合 `[a-z0-9_-]{1,64}`，且不是 `builtin` 或 `default`；它将要创建、改名或删除的每个目录，解析后恰好是 `<home>/plugins/.staging/<random>`、`<home>/plugins/<id>` 或 `<home>/plugins/<id>/<commit>` 之一（`.staging` 不可能是 id，因为 id 里没有点）。检查不通过时，操作以 `invalid_id` 或 `path_outside_plugins` 被拒绝，什么都不改：不建目录、不写 `plugins.json`、不发 loader 命令。本地路径插件自己的目录从不被创建、改名或删除，所以这条规则不适用于它。
+- **路径。** 所有为插件动文件系统的操作都用同一条规则：安装（暂存、克隆、改名）、更新、移除和启动时的清理。在任何文件系统改动之前，PluginManager 检查两件事：id（无论是调用方给的，还是取自清单名字）符合 `[a-z0-9_-]{1,64}`，且不是 `builtin` 或 `default`；它将要创建、改名或删除的每个目录，解析后恰好是 `<home>/plugins/.staging/<random>`、`<home>/plugins/.python`、`<home>/plugins/<id>` 或 `<home>/plugins/<id>/<commit>` 之一（`.staging` 和 `.python` 不可能是 id，因为 id 里没有点）。`.python` 中的 Python 链接只作为链接被替换或删除，从不改动它们指向的内容。检查不通过时，操作以 `invalid_id` 或 `path_outside_plugins` 被拒绝，什么都不改：不建目录、不写 `plugins.json`、不发 loader 命令。本地路径插件自己的目录从不被创建、改名或删除，所以这条规则不适用于它。
 - 克隆先放到 `<home>/plugins/.staging/<random>`，只有在清单和路径检查通过后才改名放到正式位置。失败时删除暂存目录；启动时删除残留目录以及没有条目引用的克隆。
 - 清单中的任何路径在跟随符号链接之后都不能离开插件目录；Git 克隆内指向克隆外部的符号链接被拒绝。
 - `plugins.json` 以原子方式写入（§2.2）。

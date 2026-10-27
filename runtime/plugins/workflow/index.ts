@@ -6,6 +6,7 @@ import { WorkflowError } from './definition.ts'
 import { Workflow } from './engine.ts'
 import { management, unloadingAfterCall, type RunReply, type RunRequest, type WorkflowRuns } from './requests.ts'
 import session from './session.ts'
+import { settings } from './settings.ts'
 import { bounded, RunStore, type Run } from './store.ts'
 
 const options = z.strictObject({ packages: z.array(z.strictObject({ id: z.string().min(1), root: z.string().min(1) })) })
@@ -25,6 +26,7 @@ export default definePlugin({
   inject: ['sessions', 'settings', 'pluginFiles', 'workflowFiles', 'managementMethods', 'partRegistry'],
   provides,
   async apply(ctx, config: z.infer<typeof options>) {
+    await ctx.use<Settings>('settings').register(settings)
     const catalog = new Catalog(ctx.use<Settings>('settings'), ctx.use<WorkflowFiles>('workflowFiles'), config.packages)
     const scope = await ctx.use<PluginFiles>('pluginFiles').open()
     const workflow = new Workflow(catalog, ctx.use<Sessions>('sessions'), new RunStore(scope))

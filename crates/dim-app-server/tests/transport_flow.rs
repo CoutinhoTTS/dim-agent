@@ -81,6 +81,8 @@ mod runtime_manager;
 mod foreign_rows;
 #[path = "transport_flow/goal.rs"]
 mod goal;
+#[path = "transport_flow/plugin_manager.rs"]
+mod plugin_manager;
 #[path = "transport_flow/process_typescript.rs"]
 mod process_typescript;
 #[path = "transport_flow/session_typescript.rs"]
