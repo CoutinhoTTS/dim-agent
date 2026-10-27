@@ -1,14 +1,23 @@
 //! The interface language (port of the TS `i18n` locale model). Strings are
 //! keyed by their English text: [`t`] looks a string up in the active
-//! locale's table and falls back to the English. As in the TS scrollback,
-//! English and Simplified Chinese carry the interface; the other locales are
-//! offered and read as English until their tables exist.
+//! locale's table and falls back to the English. Every locale's table holds
+//! the keys of the Simplified Chinese one, which follows the TS build's
+//! `zh-CN` catalogue.
 //!
 //! The active locale belongs to the interface thread: every panel, hint and
 //! notice reads it while drawing, so a switch shows on the next frame. Rows
 //! already committed to the transcript keep their language.
 
+mod de;
+mod es;
+mod fr;
+mod id;
+mod ja;
+mod ko;
+mod pt_br;
+mod pt_pt;
 mod zh_cn;
+mod zh_hant;
 
 use std::cell::Cell;
 
@@ -123,10 +132,20 @@ pub fn active() -> Locale {
 
 /// `english` in the active locale.
 pub fn t(english: &'static str) -> &'static str {
-    match active() {
-        Locale::ZhCn => zh_cn::lookup(english).unwrap_or(english),
-        _ => english,
-    }
+    let lookup = match active() {
+        Locale::En => return english,
+        Locale::ZhCn => zh_cn::lookup,
+        Locale::Ja => ja::lookup,
+        Locale::Ko => ko::lookup,
+        Locale::ZhHant => zh_hant::lookup,
+        Locale::Id => id::lookup,
+        Locale::De => de::lookup,
+        Locale::Fr => fr::lookup,
+        Locale::Es => es::lookup,
+        Locale::PtBr => pt_br::lookup,
+        Locale::PtPt => pt_pt::lookup,
+    };
+    lookup(english).unwrap_or(english)
 }
 
 /// `english` in the active locale with each `{name}` replaced by its value.
