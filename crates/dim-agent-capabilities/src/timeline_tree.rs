@@ -4,8 +4,8 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, Branch, BranchLifecycle, BranchOptions, Delivery, Dispatcher, Names, Result,
-    SessionIdentity, StoredBranch, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
-    TimelineInfo, TimelineKey, TimelineStore, TimelineTreeControl,
+    SessionIdentity, StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory,
+    TimelineIdentity, TimelineInfo, TimelineKey, TimelineStore, TimelineTreeControl,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -260,9 +260,9 @@ impl TimelineTree {
         let Some(parent) = info.parent.as_deref() else {
             return Ok(());
         };
-        let Some(parent) = self.owned_context(parent) else {
-            return Ok(());
-        };
+        let parent = self
+            .owned_context(parent)
+            .ok_or_else(|| AgentError::UnknownBranch(parent.into()))?;
         parent
             .timeline()
             .append(
@@ -275,6 +275,131 @@ impl TimelineTree {
                 .into(),
             )
             .map(|_| ())
+    }
+    /// The lines whose end `branch` recorded, from its stored history.
+    async fn stored_ends(&self, branch: &str, head: u64) -> Result<BTreeSet<String>> {
+        if head == 0 {
+            return Ok(BTreeSet::new());
+        }
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: branch.into(),
+        };
+        Ok(self
+            .store
+            .read(&key, 1..=head)
+            .await?
+            .into_iter()
+            .filter_map(|record| match &record.event.kind {
+                EventKind::BranchEnded(data) => Some(data.branch.clone()),
+                _ => None,
+            })
+            .collect())
+    }
+    /// The stored lines below `id`, deepest first.
+    fn stored_descendants(id: &str, stored: &BTreeMap<String, StoredBranch>) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut pending = vec![(id.to_owned(), 0usize)];
+        while let Some((parent, depth)) = pending.pop() {
+            for branch in stored
+                .values()
+                .filter(|branch| branch.info.parent.as_deref() == Some(parent.as_str()))
+            {
+                found.push((branch.info.id.clone(), depth + 1));
+                pending.push((branch.info.id.clone(), depth + 1));
+            }
+        }
+        found.sort_by_key(|found| std::cmp::Reverse(found.1));
+        found.into_iter().map(|(id, _)| id).collect()
+    }
+    /// Completes the ends below a line whose own end was interrupted,
+    /// deepest first, each result on the line's stored parent: that line is
+    /// not opened, so the record goes to its stored history and its fixed
+    /// head follows (design §10, §17 R1).
+    async fn complete_stored_ends(
+        &self,
+        line: &TimelineInfo,
+        stored: &mut BTreeMap<String, StoredBranch>,
+    ) -> Result<()> {
+        let mut recorded: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut complete = BTreeSet::new();
+        for id in Self::stored_descendants(&line.id, stored) {
+            let parent = stored[&id]
+                .info
+                .parent
+                .clone()
+                .expect("a stored descendant has a parent");
+            if complete.contains(&parent) {
+                complete.insert(id);
+                continue;
+            }
+            if !recorded.contains_key(&parent) {
+                let head = stored[&parent].sequence;
+                recorded.insert(parent.clone(), self.stored_ends(&parent, head).await?);
+            }
+            if recorded[&parent].contains(&id) {
+                complete.insert(id);
+                continue;
+            }
+            let head = stored[&id].sequence;
+            let Some((end_event, data)) = self.own_end(&id, head).await? else {
+                continue;
+            };
+            let parent_head = stored[&parent].sequence;
+            let head = self
+                .append_stored_result(
+                    &parent,
+                    parent_head,
+                    BranchEndedData {
+                        branch: id.clone(),
+                        end_event,
+                        source: data.source,
+                        ancestor: data.ancestor,
+                    },
+                )
+                .await?;
+            stored
+                .get_mut(&parent)
+                .expect("the parent is stored")
+                .sequence = head;
+            complete.insert(id);
+        }
+        Ok(())
+    }
+    /// Appends one result on a line that restore keeps closed, and returns
+    /// the line's new head.
+    async fn append_stored_result(
+        &self,
+        branch: &str,
+        head: u64,
+        data: BranchEndedData,
+    ) -> Result<u64> {
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: branch.into(),
+        };
+        let sequence = head + 1;
+        let event = Arc::new(AgentEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            sequence,
+            create_at: dim_agent_runtime::core::unix_millis(),
+            tags: None,
+            kind: EventKind::BranchEnded(data).into(),
+        });
+        let (published, wait) = oneshot::channel();
+        self.store.append(
+            key,
+            vec![StoredEvent {
+                event,
+                trace: None,
+                batch_end: sequence,
+            }],
+            Box::new(move |result| {
+                let _ = published.send(result);
+            }),
+        )?;
+        wait.await.expect("the store publishes each append once")?;
+        Ok(sequence)
     }
     fn settle_failed(&self, info: &TimelineInfo, error: AgentError) -> AgentError {
         match self.record_create_failed(info, &error) {
@@ -1163,11 +1288,13 @@ impl TimelineTreeControl for TimelineTree {
                     None
                 };
                 if let Some((end_event, data)) = own_end {
+                    self.complete_stored_ends(&next, &mut remaining).await?;
+                    let head = remaining[&next.id].sequence;
                     self.complete_end(&next, end_event, data)?;
                     self.state.lock().unwrap().ended.insert(
                         next.id.clone(),
                         EndedLine {
-                            head: stored.sequence,
+                            head,
                             info: next.clone(),
                         },
                     );

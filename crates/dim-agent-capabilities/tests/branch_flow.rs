@@ -771,6 +771,175 @@ async fn a_restart_completes_an_end_without_its_result() {
     soon(agent.close()).await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_completes_an_interrupted_descendants_end_first() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("saved", &SessionConfig::default())
+        .await
+        .unwrap();
+    let root = || rutis::Ctx::root().unwrap();
+    let key = |branch: &str| TimelineKey {
+        session_id: "saved".into(),
+        branch_id: branch.into(),
+    };
+    let main = Timeline::new(root(), key("main"), vec![], store.clone());
+    let create = main
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: options("host line").source,
+                branch: "X".into(),
+                prompt: "host line".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let line = Timeline::new(
+        root(),
+        key("X"),
+        vec![("main".into(), create.sequence)],
+        store.clone(),
+    );
+    line.append(
+        EventKind::BranchStart(BranchStartData {
+            parent: Some("main".into()),
+            create_event: Some(create.sequence),
+        })
+        .into(),
+    )
+    .unwrap();
+    line.append(
+        EventKind::InputMessage(InputMessageData::text(
+            "work on the line",
+            Some(InputMode::Queue),
+        ))
+        .into(),
+    )
+    .unwrap();
+    let child_create = line
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: options("child").source,
+                branch: "C".into(),
+                prompt: "child".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let child = Timeline::new(
+        root(),
+        key("C"),
+        vec![
+            ("X".into(), child_create.sequence),
+            ("main".into(), create.sequence),
+        ],
+        store.clone(),
+    );
+    child
+        .append(
+            EventKind::BranchStart(BranchStartData {
+                parent: Some("X".into()),
+                create_event: Some(child_create.sequence),
+            })
+            .into(),
+        )
+        .unwrap();
+    child
+        .append(
+            EventKind::InputMessage(InputMessageData::text(
+                "work on the child",
+                Some(InputMode::Queue),
+            ))
+            .into(),
+        )
+        .unwrap();
+    let source = BranchSource::Host {
+        operation_id: "op:end".into(),
+    };
+    let end = line
+        .append(
+            EventKind::BranchEnd(BranchEndData {
+                source: source.clone(),
+                ancestor: None,
+            })
+            .into(),
+        )
+        .unwrap();
+    let child_end = child
+        .append(
+            EventKind::BranchEnd(BranchEndData {
+                source: source.clone(),
+                ancestor: Some("X".into()),
+            })
+            .into(),
+        )
+        .unwrap();
+    for timeline in [&child, &line, &main] {
+        dim_agent_runtime::core::close_timeline(timeline)
+            .await
+            .unwrap();
+    }
+    let mut builder = builder(&Arc::new(Probe::default()));
+    builder.timeline_store(store);
+    let agent = builder.build();
+    let session = soon(agent.restore_session("saved".into())).await.unwrap();
+    soon(session.idle("main")).await.unwrap();
+    assert_eq!(
+        session
+            .branches()
+            .iter()
+            .map(|info| info.id.as_str())
+            .collect::<Vec<_>>(),
+        ["main"]
+    );
+    assert_eq!(session.ended_head("C"), Some(child_end.sequence));
+    assert_eq!(
+        session.ended_head("X"),
+        Some(end.sequence + 1),
+        "the child's result extends the line"
+    );
+    let events = session
+        .local_page("X", 0, 64, session.ended_head("X").unwrap())
+        .await
+        .unwrap();
+    let result = events
+        .iter()
+        .find(|event| matches!(&event.kind, EventKind::BranchEnded(data) if data.branch == "C"))
+        .expect("the child's result is completed on its parent");
+    assert_eq!(result.sequence, end.sequence + 1);
+    assert_eq!(
+        result.kind,
+        EventKind::BranchEnded(BranchEndedData {
+            branch: "C".into(),
+            end_event: child_end.sequence,
+            source: source.clone(),
+            ancestor: Some("X".into()),
+        })
+    );
+    let results: Vec<BranchEndedData> = session
+        .history("main", None)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchEnded(data) if data.branch == "X" => Some(data.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [BranchEndedData {
+            branch: "X".into(),
+            end_event: end.sequence,
+            source: source.clone(),
+            ancestor: None,
+        }]
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 struct SettleOnActivation {
     child: String,
     source: BranchSource,

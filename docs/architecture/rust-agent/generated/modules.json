@@ -9293,6 +9293,7 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path Timeline",
+        "path dim_agent_runtime::core::unix_millis",
         "use dim_agent_runtime::Timeline"
       ]
     },
@@ -9340,6 +9341,7 @@
         "path TimelineKey",
         "path TimelineStore",
         "use dim_agent_runtime::StoredBranch",
+        "use dim_agent_runtime::StoredEvent",
         "use dim_agent_runtime::TimelineKey",
         "use dim_agent_runtime::TimelineStore"
       ]

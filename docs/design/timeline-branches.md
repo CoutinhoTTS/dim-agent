@@ -302,7 +302,7 @@ Clients show "ended itself" for a `tool` source, and otherwise the operation tha
 
 **Restore.** A child is inactive when its parent has a `branch/ended` for it. The resumed parent's history read reports these (§5). This joins the existing rules: the parent is inactive, the parent has a `branch/create-failed` for the child, or the child's creation never completed.
 
-A line that has `branch/end` but whose parent has no `branch/ended` for it is not opened. Restore completes such ends, writing each missing `branch/ended` on the parent with `source` and `ancestor` taken from `branch/end`. A line whose parent ended too gets no `branch/ended`: the parent is closed and never replays, so nothing would read it. Restore records the line as ended at the head it stopped at, with the `source` its parent's `branch/create` gave it, and its history stays readable (§1, "After the end").
+A line that has `branch/end` but whose parent has no `branch/ended` for it is not opened. Restore completes such ends deepest line first, writing each missing `branch/ended` on the parent with `source` and `ancestor` taken from `branch/end`, and a line's own result last. That parent is not opened either, so the record joins its stored history and its fixed head follows. A line below one of them whose own end never started gets no `branch/ended`: the parent is closed and never replays, so nothing would read it. Restore records each such line as ended at the head it stopped at, with the `source` its parent's `branch/create` gave it, and its history stays readable (§1, "After the end").
 
 **After the end:**
 
