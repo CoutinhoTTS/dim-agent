@@ -2836,6 +2836,230 @@
       ]
     },
     {
+      "id": "dim_cli::ui::i18n::de",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n",
+      "file": "crates/dim-cli/src/ui/i18n/de/mod.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::de::chrome",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::de",
+      "file": "crates/dim-cli/src/ui/i18n/de/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::de::prompts",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::de",
+      "file": "crates/dim-cli/src/ui/i18n/de/prompts.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::de::providers",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::de",
+      "file": "crates/dim-cli/src/ui/i18n/de/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::es",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n",
+      "file": "crates/dim-cli/src/ui/i18n/es/mod.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::es::chrome",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::es",
+      "file": "crates/dim-cli/src/ui/i18n/es/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::es::prompts",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::es",
+      "file": "crates/dim-cli/src/ui/i18n/es/prompts.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::es::providers",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::es",
+      "file": "crates/dim-cli/src/ui/i18n/es/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::fr",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n",
+      "file": "crates/dim-cli/src/ui/i18n/fr/mod.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::fr::chrome",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::fr",
+      "file": "crates/dim-cli/src/ui/i18n/fr/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::fr::prompts",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::fr",
+      "file": "crates/dim-cli/src/ui/i18n/fr/prompts.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::fr::providers",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::fr",
+      "file": "crates/dim-cli/src/ui/i18n/fr/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::id",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n",
+      "file": "crates/dim-cli/src/ui/i18n/id/mod.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::id::chrome",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::id",
+      "file": "crates/dim-cli/src/ui/i18n/id/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::id::prompts",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::id",
+      "file": "crates/dim-cli/src/ui/i18n/id/prompts.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::id::providers",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::id",
+      "file": "crates/dim-cli/src/ui/i18n/id/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ja",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n",
+      "file": "crates/dim-cli/src/ui/i18n/ja/mod.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ja::chrome",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ja",
+      "file": "crates/dim-cli/src/ui/i18n/ja/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ja::prompts",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ja",
+      "file": "crates/dim-cli/src/ui/i18n/ja/prompts.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ja::providers",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ja",
+      "file": "crates/dim-cli/src/ui/i18n/ja/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ko",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n",
+      "file": "crates/dim-cli/src/ui/i18n/ko/mod.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ko::chrome",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ko",
+      "file": "crates/dim-cli/src/ui/i18n/ko/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ko::prompts",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ko",
+      "file": "crates/dim-cli/src/ui/i18n/ko/prompts.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::ko::providers",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::ko",
+      "file": "crates/dim-cli/src/ui/i18n/ko/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::pt_br",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n",
+      "file": "crates/dim-cli/src/ui/i18n/pt_br/mod.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::pt_br::chrome",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_br",
+      "file": "crates/dim-cli/src/ui/i18n/pt_br/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::pt_br::prompts",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_br",
+      "file": "crates/dim-cli/src/ui/i18n/pt_br/prompts.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::pt_br::providers",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_br",
+      "file": "crates/dim-cli/src/ui/i18n/pt_br/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::pt_pt",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n",
+      "file": "crates/dim-cli/src/ui/i18n/pt_pt/mod.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::pt_pt::chrome",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_pt",
+      "file": "crates/dim-cli/src/ui/i18n/pt_pt/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::pt_pt::prompts",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_pt",
+      "file": "crates/dim-cli/src/ui/i18n/pt_pt/prompts.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::pt_pt::providers",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::pt_pt",
+      "file": "crates/dim-cli/src/ui/i18n/pt_pt/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_cli::ui::i18n::tests",
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n",
@@ -2870,6 +3094,34 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::i18n::zh_cn",
       "file": "crates/dim-cli/src/ui/i18n/zh_cn/providers.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::zh_hant",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n",
+      "file": "crates/dim-cli/src/ui/i18n/zh_hant/mod.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::zh_hant::chrome",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::zh_hant",
+      "file": "crates/dim-cli/src/ui/i18n/zh_hant/chrome.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::zh_hant::prompts",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::zh_hant",
+      "file": "crates/dim-cli/src/ui/i18n/zh_hant/prompts.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_cli::ui::i18n::zh_hant::providers",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::i18n::zh_hant",
+      "file": "crates/dim-cli/src/ui/i18n/zh_hant/providers.rs",
       "unexpandedMacros": []
     },
     {
@@ -21758,6 +22010,70 @@
     },
     {
       "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::ui::i18n::de",
+      "references": [
+        "mod de",
+        "path de::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::ui::i18n::es",
+      "references": [
+        "mod es",
+        "path es::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::ui::i18n::fr",
+      "references": [
+        "mod fr",
+        "path fr::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::ui::i18n::id",
+      "references": [
+        "mod id",
+        "path id::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::ui::i18n::ja",
+      "references": [
+        "mod ja",
+        "path ja::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::ui::i18n::ko",
+      "references": [
+        "mod ko",
+        "path ko::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::ui::i18n::pt_br",
+      "references": [
+        "mod pt_br",
+        "path pt_br::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::ui::i18n::pt_pt",
+      "references": [
+        "mod pt_pt",
+        "path pt_pt::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
       "to": "dim_cli::ui::i18n::tests",
       "references": [
         "mod tests"
@@ -21769,6 +22085,206 @@
       "references": [
         "mod zh_cn",
         "path zh_cn::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n",
+      "to": "dim_cli::ui::i18n::zh_hant",
+      "references": [
+        "mod zh_hant",
+        "path zh_hant::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::de",
+      "to": "dim_cli::ui::i18n::de::chrome",
+      "references": [
+        "mod chrome",
+        "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::de",
+      "to": "dim_cli::ui::i18n::de::prompts",
+      "references": [
+        "mod prompts",
+        "path prompts::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::de",
+      "to": "dim_cli::ui::i18n::de::providers",
+      "references": [
+        "mod providers",
+        "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::es",
+      "to": "dim_cli::ui::i18n::es::chrome",
+      "references": [
+        "mod chrome",
+        "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::es",
+      "to": "dim_cli::ui::i18n::es::prompts",
+      "references": [
+        "mod prompts",
+        "path prompts::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::es",
+      "to": "dim_cli::ui::i18n::es::providers",
+      "references": [
+        "mod providers",
+        "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::fr",
+      "to": "dim_cli::ui::i18n::fr::chrome",
+      "references": [
+        "mod chrome",
+        "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::fr",
+      "to": "dim_cli::ui::i18n::fr::prompts",
+      "references": [
+        "mod prompts",
+        "path prompts::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::fr",
+      "to": "dim_cli::ui::i18n::fr::providers",
+      "references": [
+        "mod providers",
+        "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::id",
+      "to": "dim_cli::ui::i18n::id::chrome",
+      "references": [
+        "mod chrome",
+        "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::id",
+      "to": "dim_cli::ui::i18n::id::prompts",
+      "references": [
+        "mod prompts",
+        "path prompts::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::id",
+      "to": "dim_cli::ui::i18n::id::providers",
+      "references": [
+        "mod providers",
+        "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ja",
+      "to": "dim_cli::ui::i18n::ja::chrome",
+      "references": [
+        "mod chrome",
+        "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ja",
+      "to": "dim_cli::ui::i18n::ja::prompts",
+      "references": [
+        "mod prompts",
+        "path prompts::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ja",
+      "to": "dim_cli::ui::i18n::ja::providers",
+      "references": [
+        "mod providers",
+        "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ko",
+      "to": "dim_cli::ui::i18n::ko::chrome",
+      "references": [
+        "mod chrome",
+        "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ko",
+      "to": "dim_cli::ui::i18n::ko::prompts",
+      "references": [
+        "mod prompts",
+        "path prompts::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::ko",
+      "to": "dim_cli::ui::i18n::ko::providers",
+      "references": [
+        "mod providers",
+        "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::pt_br",
+      "to": "dim_cli::ui::i18n::pt_br::chrome",
+      "references": [
+        "mod chrome",
+        "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::pt_br",
+      "to": "dim_cli::ui::i18n::pt_br::prompts",
+      "references": [
+        "mod prompts",
+        "path prompts::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::pt_br",
+      "to": "dim_cli::ui::i18n::pt_br::providers",
+      "references": [
+        "mod providers",
+        "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::pt_pt",
+      "to": "dim_cli::ui::i18n::pt_pt::chrome",
+      "references": [
+        "mod chrome",
+        "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::pt_pt",
+      "to": "dim_cli::ui::i18n::pt_pt::prompts",
+      "references": [
+        "mod prompts",
+        "path prompts::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::pt_pt",
+      "to": "dim_cli::ui::i18n::pt_pt::providers",
+      "references": [
+        "mod providers",
+        "path providers::lookup"
       ]
     },
     {
@@ -21797,6 +22313,30 @@
     {
       "from": "dim_cli::ui::i18n::zh_cn",
       "to": "dim_cli::ui::i18n::zh_cn::providers",
+      "references": [
+        "mod providers",
+        "path providers::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::zh_hant",
+      "to": "dim_cli::ui::i18n::zh_hant::chrome",
+      "references": [
+        "mod chrome",
+        "path chrome::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::zh_hant",
+      "to": "dim_cli::ui::i18n::zh_hant::prompts",
+      "references": [
+        "mod prompts",
+        "path prompts::lookup"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::i18n::zh_hant",
+      "to": "dim_cli::ui::i18n::zh_hant::providers",
       "references": [
         "mod providers",
         "path providers::lookup"
