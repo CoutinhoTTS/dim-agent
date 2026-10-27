@@ -478,8 +478,9 @@ impl Options {
         {
             return Err("--no-browser and --client-secret require mcp login ID".into());
         }
-        if !matches!(options.action, Action::Login(_))
-            && (options.directory.is_some() || options.device)
+        if (!matches!(options.action, Action::Login(_) | Action::Acp { .. })
+            && options.directory.is_some())
+            || (!matches!(options.action, Action::Login(_)) && options.device)
         {
             return Err("Login options require the login command".into());
         }

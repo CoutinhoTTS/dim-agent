@@ -404,7 +404,13 @@ impl Gateway {
                     result: crate::auth::discover(
                         &rpc,
                         login.as_ref(),
-                        initialize.client_capabilities.auth.terminal,
+                        initialize.client_capabilities.auth.terminal
+                            || initialize
+                                .client_capabilities
+                                .meta
+                                .as_ref()
+                                .and_then(|meta| meta.get("terminal-auth"))
+                                == Some(&json!(true)),
                     )
                     .await,
                 }
@@ -428,7 +434,9 @@ impl Gateway {
                 let Some(method) = self
                     .auth_methods
                     .iter()
-                    .find(|method| method.id == args.method_id.to_string() && !method.terminal)
+                    .find(|method| {
+                        method.id == args.method_id.to_string() && method.terminal.is_none()
+                    })
                     .cloned()
                 else {
                     return reply.respond_with_error(Error::invalid_params());

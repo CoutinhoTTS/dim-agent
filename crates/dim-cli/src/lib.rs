@@ -424,6 +424,29 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
         },
         agent_id,
     );
+    let mut terminal_args = vec![
+        "acp".into(),
+        "--redirect-uri".into(),
+        options.redirect_uri.clone(),
+    ];
+    for (flag, path) in [
+        ("--home", Some(&options.home)),
+        ("--server", options.server.as_ref()),
+        ("--model-config", options.model_config.as_ref()),
+    ] {
+        if let Some(path) = path {
+            terminal_args.extend([
+                flag.into(),
+                std::path::absolute(path)?
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| "ACP terminal authentication requires UTF-8 paths")?,
+            ]);
+        }
+    }
+    if let Some(directory) = &options.directory {
+        terminal_args.extend(["--directory".into(), directory.clone()]);
+    }
     let gateway = gateway.login(dim_acp::auth::Login {
         directory: options
             .directory
@@ -435,7 +458,7 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
         } else {
             Some(browser::open)
         },
-        terminal: true,
+        terminal_args: Some(terminal_args),
     });
     let gateway = root.plugin(gateway);
     (&gateway).await.map_err(plugin_error)?;

@@ -82,31 +82,29 @@ EOF -> local cleanup and native detach
 
 ## Registry compatibility
 
-2026-10-27，macOS arm64，使用上游 [ACP Registry `49f768659a8089f07874f56a0d474312695ad861`](https://github.com/agentclientprotocol/registry/tree/49f768659a8089f07874f56a0d474312695ad861) 的原始脚本，Python 3.14，由 uv 启动。所有子进程使用隔离 home，无真实账户或 API key。本地源码为 `7205184e362b4b1b215593aa005ba623d36a55fd`；其后的文档提交不改变被测实现。
+认证入口遵循 [ACP Registry 认证合同](https://github.com/agentclientprotocol/registry/blob/49f768659a8089f07874f56a0d474312695ad861/AUTHENTICATION.md)。Gateway 接受标准的 `clientCapabilities.auth.terminal` 与 Registry 的 `clientCapabilities._meta["terminal-auth"]` 布尔能力；没有能力声明或字符串值 `"true"` 均不授予 terminal 支持。Terminal setup 的 args 替换默认启动参数，包含 `acp`、原来的绝对 home、显式 server/model profile、登录 directory/redirect URI 和 method ID。helper 从原生公开接口重新发现方法，不接收客户端指定的任意 provider。
 
-| 检查 | 已登记的 `dimcode@0.5.21` | 本地公共版 `dimcode 0.1.0-alpha.6` |
-| --- | --- | --- |
-| `verify_agents.py --auth-check --agent dimcode` | 通过，`dimcode.terminal(terminal)` | 失败，`No authMethods in response` |
-| `protocol_matrix.py --agent dimcode --table-mode capabilities` | initialize、session/list 成功；session/new 为 `-32000`，要求认证 | initialize、session/list 成功；session/new 为 `-32001 No available model` |
-| fork/resume 探测 | 要求认证 | 对不存在的测试 Session 返回 `-32002 Resource not found` |
-| stop / set_model 探测 | stop 未实现；set_model 对不存在的 Session 返回 `-32002` | 均返回 `-32601 Method not found`，与未声明这些能力一致 |
+### 已验证范围
 
-发布包使用上游未修改的 `dimcode/agent.json`，通过 npx 启动。本地检查仅在临时 registry checkout 中把 distribution 替换为指向本机 executable 的 binary entry，并传入 `acp --home <isolated-home>`；验证脚本没有修改。这验证原生程序的协议行为，不等于 Linux runner 或最终 npm 发布产物验收。矩阵只记录未登录状态下的能力和方法结果；脚本退出成功不代表表中每项通过，也不执行模型对话。
+2026-10-27，macOS arm64，Rust `dimcode 0.1.0-alpha.6`，账户构建使用 `crates/dim-oauth` 与本地 build-time client IDs。测试使用独立空 home，没有真实账号、token 或 API key；产品 home 未使用。上游固定为 [Registry `49f768659a8089f07874f56a0d474312695ad861`](https://github.com/agentclientprotocol/registry/tree/49f768659a8089f07874f56a0d474312695ad861)，Python 3.14，由 uv 启动。原始脚本没有修改；临时 manifest 的 binary distribution 指向本机编译归档，不能等同于最终 npm 发布包。
 
-认证门槛要求至少一种 Agent Auth 或 Terminal Auth，不能用 API key 配置代替。本地公共版 App Server 未注册 `account.providers`，Gateway 按现有合同返回空 `authMethods`，因此本次构建不满足该门槛。空白模型配置也解释了 `No available model`。带 Rust OAuth 插件的实际发布组合尚未核验，不能由公共版结果推断其通过或失败；私有插件实现和凭据不进入本仓库。
+| 检查 | 结果 |
+| --- | --- |
+| `verify_agents.py --auth-check --agent dimcode` | 通过；从真实账户插件发现 browser/device terminal 方法。使用 `DIMCODE_OAUTH_MANUAL=1` 禁用 browser Agent Auth，保证检查覆盖 Registry 的旧 terminal capability |
+| `protocol_matrix.py --agent dimcode --table-mode capabilities` | initialize 和 Session 列表通过；空模型配置的 session/new 返回 `-32001 No available model`；fork/resume 对不存在的测试 Session 返回资源不存在；未声明的 stop/set_model 返回方法不存在。矩阵不是登录或聊天验收 |
+| 原生 CLI terminal helper flow | 直接用公布的 args 启动新进程，保留独立 home、自定义 directory、redirect URI 和 server；设备登录经公开 RPC 完成。标准、旧字段、无能力及错误类型均覆盖 |
+| Gateway browser auth flows | 公开 managed-provider fixture 验证 callback 完成、取消与 EOF 清理；不访问真实账户 |
 
-另有两项 Terminal Auth 兼容缺口，保持待处理状态：
+### 发布与 Registry 门槛
 
-- registry 的 validator 发送 `clientCapabilities._meta["terminal-auth"]: true`；当前 Gateway 只读取 `clientCapabilities.auth.terminal`。仅发送旧字段时，不会公布 terminal 方法；浏览器 Agent Auth 是否可用仍取决于公开账户能力发现。此项来自协议与代码核对，未用账户版二进制复现。
-- [registry 认证合同](https://github.com/agentclientprotocol/registry/blob/49f768659a8089f07874f56a0d474312695ad861/AUTHENTICATION.md)规定 Terminal Auth 的 args 替换默认启动参数。当前返回 `["--auth-setup", methodId]`，缺少 `acp`；实际按该规则调用原生 CLI 得到 `--auth-setup requires acp`。既有 helper 流程使用 `acp --auth-setup ...`，不能作为此启动方式已兼容的证据。registry 的 auth checker 只检查握手声明，不执行 setup，因此单独通过它也不能证明交互登录可用。
-
-上游 `build_registry.py --agents dimcode` 对已登记元数据的检查停在 distribution URL 校验：本机 DNS 将 `registry.npmjs.org` 解析为 `198.18.0.35`，被脚本的非公网地址检查拒绝，显示 `npm package not found: dimcode`；同机 HTTPS 请求返回 200。这是本机网络环境限制，不能认定 npm 包不存在，也没有绕过上游 URL 安全检查。完整 registry build 尚未通过。注册版本还需满足其 schema：stable 为 `X.Y.Z`，preview 为 `X.Y.Z-preview.N` 或 `X.Y.Z`；当前 alpha 版本不能直接填入这些字段。
-
-**Registry 检查未接入或启用 CI。** 认证构建组合、Terminal Auth 兼容缺口及网络验证条件明确后，再决定检查范围；当前不修改认证或 Session 运行逻辑。
+- 目标分发是包含 OAuth 插件且配置真实 build-time client IDs 的账户构建；无 IDs 的 API-key 构建不作为 Registry 的认证分发。不得添加虚假 auth method。
+- Registry 稳定字段仅接受 `X.Y.Z`，preview 接受 `X.Y.Z-preview.N` 或 `X.Y.Z`。原生 `0.1.0-alpha.6` 不直接登记，也不伪装成另一个版本。登记的稳定版本仍为 `0.5.21`；preview 低于稳定版本会被上游稳定通道覆盖。须随实际发布确定可用的版本及通道，再填写与该产物一致的分发坐标。
+- 最终发布包尚未构建或发布；Linux runner 上对该包的原始 auth checker、metadata/build validator 和未登录矩阵仍待执行。本机 Docker 拉取构建镜像被现有代理 `127.0.0.1:7890` 拒绝，未修改全局代理。此前本机 npm DNS 解析到非公网地址的结果也不能当作 metadata build 通过。
+- `#480` 保持开放。Registry 检查未接入或启用 CI；具备真实可分发产物后，最小检查只覆盖该产物的原始上游认证门槛与 metadata 校验，是否启用仍单独决定。原生协议与 helper 回归复用已有 CLI/Gateway flow，不复制上游 checker。
 
 ## Limits and unverified environments
 
-- 私有 OAuth 插件的真实账户、浏览器授权与令牌交换未实机验收；公开 managed-provider RPC、callback 和取消路径已有测试。私有 realm/token 实现不进入本仓库。
+- 真实账户、浏览器授权与令牌交换未实机验收；公开 managed-provider RPC、callback 和取消路径已有测试。OAuth client IDs 和凭据不进入仓库。
 - Windows/Linux 实机、npm 发布包、其余环境依赖 ignored flows 和被过滤的恢复截止用例未在本轮验收。本次没有 release、publish 或合入 main。
 - 本次运行受影响范围的测试和 Clippy；workspace 全量 Clippy/test 及 CI 的 ignored profiles 没有在本机运行，仍须按 AGENTS.md 在合入前完成。
 - Lody GUI 的图片、审批、form、model/mode 和扩展展示未实机验收；对应 Gateway 协议流由公开 stdio 测试验证。
