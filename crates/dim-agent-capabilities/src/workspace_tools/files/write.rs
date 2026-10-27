@@ -206,6 +206,9 @@ fn revision_conflict(path: &Path, expected: &[u8; 32], display: &str) -> Option<
 /// Stages complete bytes before touching the destination. Verification is not
 /// portable CAS: uncoordinated path/parent renames or metadata changes can still
 /// race the final syscall. Windows installs the owned handle, not a temp name.
+///
+/// Cancellation is checked before the publish. After the publish the function
+/// must not return `Cancelled`: the destination may already have changed.
 pub(super) fn write_target(
     path: &Path,
     bytes: &[u8],

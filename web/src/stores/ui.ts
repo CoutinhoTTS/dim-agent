@@ -29,6 +29,7 @@ function readPersisted(): Persisted {
   }
 }
 
+/** Layout persistence is best-effort: full or disabled localStorage is ignored. */
 export const useUiStore = defineStore("ui", () => {
   const persisted = readPersisted()
   const sidebarCollapsed = ref(persisted.sidebarCollapsed)
