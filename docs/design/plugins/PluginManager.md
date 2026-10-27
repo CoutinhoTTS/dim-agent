@@ -118,7 +118,7 @@ The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.
 
 | Field | Meaning |
 | --- | --- |
-| `installed[].id` | Unique among installed plugins; the key of the record and the name of the clone directory. Matches `[a-z0-9_-]{1,64}` (lowercase, so two ids never name one directory on a case-insensitive file system) and is not `builtin` or `default` (§7). Defaults to the manifest name; the caller gives another when two installed plugins share a name. |
+| `installed[].id` | Unique among installed plugins; the key of the record and the name of the clone directory. Matches `[a-z0-9_-]{1,64}` (lowercase, so two ids never name one directory on a case-insensitive file system) and is not `builtin` or `default` (§7). When the caller gives none, the id is the manifest name lowercased (`Hooks` → `hooks`); a collision after lowercasing is `plugin_exists`, and the caller then gives another id. The example's `hooks-plus` was given by the caller (`--id hooks-plus`). |
 | `installed[].name` | The manifest name at install or last reload. |
 | `installed[].source` | `{path}` for a local directory, used in place and never copied; `{git, ref?, commit}` for Git. |
 | `installed[].dir` | The directory that is loaded: the local path itself, or the clone under `<home>/plugins/<id>/<commit>`. |
@@ -126,7 +126,7 @@ The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.
 | `names.<name>.use` | Which plugin the name uses: an installed id, `"builtin"` or `"default"`. Absent: the built-in plugin of that name if there is one, else the default plugin of that name. |
 | `names.<name>.off` | `true` when the user turned the name off. |
 
-A name with no entry is in its shipped state: a built-in or default plugin on, unless the default configuration file lists it under `off`. Writing goes to a temporary file in the same directory, flushed on its own writable handle (`sync_all`, which also works on Windows), then renamed over `plugins.json`. A file that does not parse fails startup with its path; PluginManager never overwrites a file it could not read. The format is versioned; an unknown version fails startup.
+A name with no entry is in its shipped state: a built-in or default plugin on. Writing goes to a temporary file in the same directory, flushed on its own writable handle (`sync_all`, which also works on Windows), then renamed over `plugins.json`. A file that does not parse fails startup with its path; PluginManager never overwrites a file it could not read. The format is versioned; an unknown version fails startup.
 
 ### 2.3 The default configuration file
 
@@ -141,13 +141,11 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
     "workflow": "plugins/workflow",
     "scheduler": "plugins/scheduler"
   },
-  "off": ["RemoteGateway"],
   "locked": ["PluginManager", "Rpc", "Transport"]
 }
 ```
 
 - `plugins` maps each default plugin's name to its directory, relative to this file. A default plugin is a plugin directory like any other (§2.1).
-- `off` lists built-in or default names that are off until the user turns them on, such as [RemoteGateway](RemoteGateway.md).
 - `locked` lists names that cannot be turned off and whose plugin cannot be switched. Other plugins of a locked name may still be installed. Locking is product configuration; PluginManager applies it.
 
 ### 2.4 State PluginManager does not keep
@@ -169,9 +167,9 @@ How PluginManager's commands map onto rutis-loader. The loader has two layers. `
 
 | Configuration change | Loader commands |
 | --- | --- |
-| Turn on name N using plugin P | Turn off the plugin N uses now (below), then `create` the row `plugin:N` from P's manifest |
+| Turn on name N using a default or installed plugin P | Turn off the plugin N uses now (below), then `create` the row `plugin:N` from P's manifest |
+| Turn on name N using its built-in | Turn off the plugin N uses now (below), then `set_disabled(N, false)` |
 | Turn off name N | Built-in: `set_disabled(N, true)`. Default or installed: `remove` the row `plugin:N` |
-| Turn a built-in back on | `set_disabled(N, false)` |
 | Reload | `Loader::reload("plugin:N")` |
 
 rutis lets the editable layer disable a built-in row and override its fields, but not rename or remove it, so replacing a built-in turns its row off and adds a row for the new plugin. The old plugin is turned off first, so the new one does not meet a second provider of the same services. rutis reloads the dependents of the rows that change.
@@ -194,7 +192,7 @@ A default or installed plugin whose row fails does not fail startup; `plugin.lis
 `plugin.install {source, id?, enable?}`. `enable` defaults to `true` ([requirement 2](../plugin-management.md): installed means usable).
 
 1. When the caller gives `id`, check it (§7) and refuse an `id` already installed (`plugin_exists`) before acquiring anything.
-2. Acquire (§7): a local path is checked in place; a Git source is cloned into a staging directory and its manifest read; without a given `id`, the id is the manifest name, checked and refused if installed in the same way, before the staging directory is renamed to `<home>/plugins/<id>/<commit>`. Any failure deletes the staging directory.
+2. Acquire (§7): a local path is checked in place; a Git source is cloned into a staging directory and its manifest read; without a given `id`, the id is the manifest name lowercased, checked and refused if installed in the same way, before the staging directory is renamed to `<home>/plugins/<id>/<commit>`. Any failure deletes the staging directory.
 3. Write `plugins.json` with the new entry, and, when `enable` is true and the name is not locked, `names.<name>.use = id`.
 4. If it was turned on: carry out "turn on" (§3). The reply carries the row's status and any content an owner refused.
 
@@ -202,7 +200,7 @@ Installing a plugin whose name is locked records it without turning it on, and s
 
 ### 3.3 Turn on, turn off, switch
 
-- `plugin.enable {name, use?}`: `use` is an installed id, `"builtin"` or `"default"`; absent, the name's current `use`. Refused for a locked name when `use` changes (`plugin_locked`). Writes `names.<name>` (clears `off`, sets `use`), then carries out the commands of §3.
+- `plugin.enable {name, use?}`: `use` is an installed id, `"builtin"` or `"default"`; absent, the name's current `use`. Refused for a locked name when `use` changes (`plugin_locked`). Writes `names.<name>` (clears `off`, sets `use`), then carries out the commands of §3: the built-in row for `"builtin"`, the `plugin:N` row otherwise.
 - `plugin.disable {name}`: refused for a locked name. Writes `off: true`, then turns the name off.
 
 When a content owner itself is turned on (Hooks, for example), PluginManager registers the content of every plugin in use that carries that kind (§3.7).

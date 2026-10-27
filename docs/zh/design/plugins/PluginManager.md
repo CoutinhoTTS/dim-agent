@@ -118,7 +118,7 @@ flowchart LR
 
 | 字段 | 含义 |
 | --- | --- |
-| `installed[].id` | 在已安装插件中唯一；它是记录的键，也是克隆目录的名字。必须符合 `[a-z0-9_-]{1,64}`（只用小写，所以在不区分大小写的文件系统上，两个 id 不会指向同一个目录），不能是 `builtin` 或 `default`（§7）。默认是清单中的名字；两个已安装插件同名时，由调用方给出另一个。 |
+| `installed[].id` | 在已安装插件中唯一；它是记录的键，也是克隆目录的名字。必须符合 `[a-z0-9_-]{1,64}`（只用小写，所以在不区分大小写的文件系统上，两个 id 不会指向同一个目录），不能是 `builtin` 或 `default`（§7）。调用方没给时，id 是清单名字转成小写（`Hooks` → `hooks`）；转小写后和已装的重复，报 `plugin_exists`，调用方再给一个别的 id。示例中的 `hooks-plus` 是调用方给的（`--id hooks-plus`）。 |
 | `installed[].name` | 安装时或上一次重新加载时清单中的名字。 |
 | `installed[].source` | 本地目录用 `{path}`，原地使用，从不复制；Git 用 `{git, ref?, commit}`。 |
 | `installed[].dir` | 被加载的目录：本地路径本身，或 `<home>/plugins/<id>/<commit>` 下的克隆。 |
@@ -126,7 +126,7 @@ flowchart LR
 | `names.<name>.use` | 这个名字使用哪个插件：一个已安装的 id、`"builtin"` 或 `"default"`。不存在时：如果有该名字的内置插件，就用它，否则用该名字的默认插件。 |
 | `names.<name>.off` | 用户关闭了这个名字时为 `true`。 |
 
-没有条目的名字处于出厂状态：内置插件或默认插件处于打开状态，除非默认配置文件把它列在 `off` 里。写入时先写到同一目录下的临时文件，在它自己的可写句柄上刷盘（`sync_all`，在 Windows 上也可用），然后改名覆盖 `plugins.json`。文件无法解析时，启动失败，并给出文件路径；PluginManager 从不覆盖一个它读不了的文件。格式带有版本号；未知版本使启动失败。
+没有条目的名字处于出厂状态：内置插件或默认插件处于打开状态。写入时先写到同一目录下的临时文件，在它自己的可写句柄上刷盘（`sync_all`，在 Windows 上也可用），然后改名覆盖 `plugins.json`。文件无法解析时，启动失败，并给出文件路径；PluginManager 从不覆盖一个它读不了的文件。格式带有版本号；未知版本使启动失败。
 
 ### 2.3 默认配置文件
 
@@ -141,13 +141,11 @@ flowchart LR
     "workflow": "plugins/workflow",
     "scheduler": "plugins/scheduler"
   },
-  "off": ["RemoteGateway"],
   "locked": ["PluginManager", "Rpc", "Transport"]
 }
 ```
 
 - `plugins` 把每个默认插件的名字映射到它的目录，路径相对于这个文件。默认插件和其他插件一样是一个插件目录（§2.1）。
-- `off` 列出在用户打开之前保持关闭的内置或默认名字，例如 [RemoteGateway](RemoteGateway.md)。
 - `locked` 列出不能关闭、也不能切换所用插件的名字。锁定名字的其他插件仍然可以安装。锁定是产品配置；PluginManager 执行它。
 
 ### 2.4 PluginManager 不保存的状态
@@ -169,9 +167,9 @@ flowchart LR
 
 | 配置变更 | Loader 命令 |
 | --- | --- |
-| 打开名字 N，使用插件 P | 先关闭 N 当前使用的插件（见下），然后按 P 的清单 `create` 行 `plugin:N` |
+| 打开名字 N，使用默认或已安装的插件 P | 先关闭 N 当前使用的插件（见下），然后按 P 的清单 `create` 行 `plugin:N` |
+| 打开名字 N，使用它的内置插件 | 先关闭 N 当前使用的插件（见下），然后 `set_disabled(N, false)` |
 | 关闭名字 N | 内置：`set_disabled(N, true)`。默认或已安装：`remove` 行 `plugin:N` |
-| 重新打开一个内置插件 | `set_disabled(N, false)` |
 | 重新加载 | `Loader::reload("plugin:N")` |
 
 rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允许改名或移除它，所以替换内置插件时，要关闭它的行，并为新插件加一行。先关闭旧插件，这样新插件不会遇到同一服务的第二个提供者。rutis 会重新加载发生变化的行的依赖方。
@@ -194,7 +192,7 @@ rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允�
 `plugin.install {source, id?, enable?}`。`enable` 默认为 `true`（[需求 2](../../../design/plugin-management.md)：已安装就意味着可用）。
 
 1. 调用方给了 `id` 时，先检查它（§7），已经安装的 `id` 直接拒绝（`plugin_exists`），不做任何获取。
-2. 获取（§7）：本地路径在原地检查；Git 来源先克隆到暂存目录并读取清单；没有给 `id` 时，id 取清单名字，同样检查并拒绝已安装的 id，然后才把暂存目录改名为 `<home>/plugins/<id>/<commit>`。任何失败都会删除暂存目录。
+2. 获取（§7）：本地路径在原地检查；Git 来源先克隆到暂存目录并读取清单；没有给 `id` 时，id 取清单名字转成小写，同样检查并拒绝已安装的 id，然后才把暂存目录改名为 `<home>/plugins/<id>/<commit>`。任何失败都会删除暂存目录。
 3. 写入 `plugins.json`，加入新条目；当 `enable` 为 true 且名字未锁定时，同时写入 `names.<name>.use = id`。
 4. 如果已打开：执行"打开"（§3）。回复带上行的状态，以及被所有者拒绝的内容。
 
@@ -202,7 +200,7 @@ rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允�
 
 ### 3.3 打开、关闭、切换
 
-- `plugin.enable {name, use?}`：`use` 是一个已安装的 id、`"builtin"` 或 `"default"`；不给时，使用该名字当前的 `use`。对锁定的名字，当 `use` 改变时拒绝（`plugin_locked`）。写入 `names.<name>`（清除 `off`，设置 `use`），然后执行 §3 中的命令。
+- `plugin.enable {name, use?}`：`use` 是一个已安装的 id、`"builtin"` 或 `"default"`；不给时，使用该名字当前的 `use`。对锁定的名字，当 `use` 改变时拒绝（`plugin_locked`）。写入 `names.<name>`（清除 `off`，设置 `use`），然后执行 §3 中的命令：`"builtin"` 对应内置行，其他对应 `plugin:N` 行。
 - `plugin.disable {name}`：对锁定的名字拒绝。写入 `off: true`，然后关闭该名字。
 
 当一个内容所有者本身被打开时（例如 Hooks），PluginManager 登记每个正在使用、并带有该种类的插件的内容（§3.7）。
