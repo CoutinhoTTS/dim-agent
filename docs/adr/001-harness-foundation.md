@@ -4,6 +4,9 @@ Superseded in part by [ADR 004](004-loader-plugin-management.md): MCP now uses
 Session-owned instanced groups. Business documents retain source-local authority;
 [ADR 002](002-plugin-scope.md) D4 reserves loader configuration for structural settings.
 
+Corrected in part by [ADR 007](007-plugin-configuration.md): structural plugin configuration is
+PluginManager's own record, not the persisted editable layer this ADR assumes for issue #3.
+
 Decision status: Recovery design adopted for this branch. ADR 004 records the approved
 configuration scope and its remaining integration work for issue #3. Dynamic events are decided
 (issue #2, revised 2026-10-20): the model-context boundary, a structural write check (envelope and

@@ -1,6 +1,6 @@
 # Hooks
 
-Status: Draft, Ready candidate ([#143](https://github.com/arcships/dim/issues/143)); maintainer decisions of 2026-10-22 are applied (§10), and what remains for Ready is §10.2. Overall design: [overview](../overview.md) (Hooks). Phase: M2 (user and project sources); plugin source after #3. Language: Rust. Scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session + branch).
+Status: Draft, Ready candidate ([#143](https://github.com/arcships/dim/issues/143)); maintainer decisions of 2026-10-22 are applied (§10), and what remains for Ready is §10.2. Overall design: [overview](../overview.md) (Hooks). Phase: M2 (user and project sources); plugin source registered by PluginManager (#3). Language: Rust. Scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session + branch).
 
 Hooks runs user-configured commands at fixed points of a Session's **business operations** and hands each command's decision to the owner of that operation. Dim reads only its own hooks configuration; it does not load Claude Code or Codex hook files. For easy migration, the document shape (event names, matcher groups, command handlers, `timeout`, `onFailure`) and the script protocol (stdin JSON, exit codes, decision and output fields) follow Claude Code and Codex, so existing scripts and pasted configuration work (Appendix G).
 
@@ -307,7 +307,7 @@ AcpGateway already maps `input_blocked` from `session.submit` to the stop reason
 | --- | --- |
 | Accept A.6.1 (advisors registered with Permission, `allow` included) and file its issue | Permission, Approval |
 | Accept A.6.2 (the `submitChecks` table, `input_blocked`, the did-not-commit set) and file its issue | Rpc (App Server), InputQueue, CLI |
-| Plugin source (packages' hook documents) | After #3, Appendix F |
+| Plugin source (packages' hook documents) | Registered by PluginManager ([PluginManager §9 R2](PluginManager.md#9-requirements-raised-to-mechanism-owners)) |
 
 No question in this document is waiting for a maintainer answer.
 
@@ -351,7 +351,7 @@ Project enablement is the user-local source `hooks-projects`: `{ "enabled": ["<w
 | --- | --- | --- |
 | `user` | Settings source `hooks`, user scope | As written |
 | `project` | `<workspace>/.dimcode/hooks.json`, read through FileStorage | When `hooks-projects` lists the workspace |
-| `plugin:<id>` | A plugin package's hook document | After #3 (Appendix F) |
+| `plugin:<id>` | A plugin package's hook document | Registered by PluginManager ([PluginManager §9 R2](PluginManager.md#9-requirements-raised-to-mechanism-owners)) |
 
 `HookSources.read(cwd, cancel)` returns, per source, its id, path, enabled state and document or error. The workspace is the project root Settings authorizes for `cwd`, as `mcp.catalog` resolves it; a `cwd` with no project has no project source. Catalog order is the table order, then document order. Handlers with identical `command` strings at one hook point run once. Documents are read at each hook point; a missing project file is empty, an unreadable or invalid one is listed `invalid` with a diagnostic and none of its hooks run.
 
@@ -526,7 +526,6 @@ The project file is edited in the repository, not through these methods. Hooks h
 
 | Question | Description |
 | --- | --- |
-| Plugin source | Hook documents in plugin packages depend on [#3](https://github.com/arcships/dim/issues/3) and PluginManager's `pluginContents`; enabled with the plugin, only from sources on the Session's resource node |
 | Questions as a notification | Questions asks through the `ask_user` tool call ([Questions](Questions.md)); a Claude `Notification` `elicitation_dialog` analogue would observe that call. Questions is Ready; this analogue is not designed and stays unsupported |
 | pi extensions | pi hooks are TypeScript extension handlers, not commands; running them needs a TypeScript plugin runtime (#4), outside this mechanism |
 

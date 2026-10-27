@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+dim-client.workspace = true
+dim-acp.workspace = true
 dim-agent-types.workspace = true
 rutis.workspace = true
 rutis-bridge.workspace = true

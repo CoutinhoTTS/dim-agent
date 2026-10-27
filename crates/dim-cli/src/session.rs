@@ -32,43 +32,7 @@ enum Submission {
     Shell(String),
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct History {
-    pub events: Vec<Value>,
-    pub through: u64,
-    next_after: u64,
-    done: bool,
-}
-impl History {
-    /// Checks a page read from `after` against the read's fixed watermark
-    /// and returns the next cursor, or `None` when the read is complete.
-    pub fn next(&self, after: u64, through: Option<u64>) -> Result<Option<u64>> {
-        if through.is_some_and(|through| through != self.through)
-            || self.through > dim_agent_types::JS_MAX_SAFE_INTEGER
-            || self.next_after < after
-            || self.next_after > self.through
-            || !self.done && self.next_after == after
-        {
-            return Err("Invalid history page cursor".into());
-        }
-        for event in &self.events {
-            let sequence = event["sequence"]
-                .as_u64()
-                .ok_or("Invalid history event sequence")?;
-            if sequence <= after || sequence > self.next_after {
-                return Err("History event is outside its page".into());
-            }
-        }
-        if !self.done {
-            return Ok(Some(self.next_after));
-        }
-        if self.next_after != self.through {
-            return Err("History ended before its fixed watermark".into());
-        }
-        Ok(None)
-    }
-}
+pub use dim_client::wire::History;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

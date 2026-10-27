@@ -16,7 +16,10 @@ with #403. The phases are in the
 
 Relation to other decisions:
 
-- Extends [ADR 002](002-plugin-scope.md). Its D1–D4 stand unchanged. This ADR finishes D5:
+- D3's first point is corrected by [ADR 007](007-plugin-configuration.md): plugin configuration is
+  PluginManager's, and content a plugin carries is not a row.
+- Extends [ADR 002](002-plugin-scope.md). Its D1–D4 stand unchanged (D4's location of structural
+  configuration is later corrected by ADR 007). This ADR finishes D5:
   Dim's own runtime services become named contract entries, and Rust becomes one binding of
   the contract instead of its definition.
 - Keeps [ADR 001](001-harness-foundation.md#events-and-ownership-issue-2) (envelope, reserved

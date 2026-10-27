@@ -7,6 +7,8 @@ Dim 的运行时服务进入命名目录，部件的位置就是它所在 loader
 2026-10-26 修订 D2 与 D5，按实现后的机制描述工具：部件向 Session 的 `toolRegistry` 注册工具
 （ADR 006 D4）；`toolContribution`、`SessionToolSource` 与 `Contributions<T>` 已移除。
 
+D4 中结构性配置的存放位置由 [ADR 007](007-plugin-configuration.md) 纠正。
+
 ## 背景
 
 Dim 在三个作用域装配插件：进程、Session 和分支

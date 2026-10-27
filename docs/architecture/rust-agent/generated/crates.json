@@ -112,8 +112,32 @@
     "to": "dim-app-server"
   },
   {
+    "from": "dim-client",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-acp",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-acp",
+    "to": "dim-client"
+  },
+  {
+    "from": "dim-acp",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-cli",
+    "to": "dim-acp"
+  },
+  {
     "from": "dim-cli",
     "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-cli",
+    "to": "dim-client"
   },
   {
     "from": "dim-cli",

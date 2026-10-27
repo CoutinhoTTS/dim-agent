@@ -264,6 +264,14 @@ The requesting connection hands only its final-response writer to the existing p
 
 The server writes `tracing` output to stderr, filtered by `RUST_LOG` (errors only by default); a daemon started by the CLI writes it to the private `daemon.log` in its native home. The runtime operations `prompt.load`, `context.prepare`, `model.invoke`, `tool.attach`, `tool.execute`, `shell.run`, `timeline.close` and `session.close` are spans carrying the Session and branch ids and the operation's own ids. Closing one logs its duration as `time.busy` plus `time.idle`, so `RUST_LOG=info` shows operation timing. Span names and fields are log output, not a compatibility contract. Committed facts are read from the Timeline, not from logs ([ADR 005](../../docs/adr/005-observability.md)).
 
+## Temporary MCP bindings
+
+The MCP feature also registers the independent `TemporaryMcp` Session part for
+client-supplied servers. It reuses ordinary `McpServer` children and the tool
+registry; configured MCP sources and RPC dispatch are unchanged. Its public
+methods, volatile configuration, lease and disposal contract are in
+[Temporary MCP](../../docs/design/plugins/TemporaryMcp.md).
+
 ## Managed provider plugins
 
 The public server runs without a managed provider. API-key and supported native subscription providers need none, and no Node process is started for one. A managed provider is a Rust rutis plugin built outside this repository that provides `Arc<dyn ManagedProvider>` (the [contract](#managed-provider-contract) below). Its own executable installs it, mirroring the public [`dimcode` entry](../dimcode/src/main.rs):

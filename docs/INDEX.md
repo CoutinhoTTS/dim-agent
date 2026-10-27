@@ -4,6 +4,9 @@
 - [Model preferences and Agent configuration](design/model-configuration.md)
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
+- [AcpGateway implementation contract](design/acp-gateway-implementation.md)（中文，#436）：protocol mapping, client-host plugin wiring, lifecycle and unsupported features
+- [AcpGateway acceptance](design/acp-gateway-acceptance.md)（中文）：automated public flows, acpx/Lody runtime verification and client MCP behavior
+- [Temporary MCP](design/plugins/TemporaryMcp.md): disposable Session bindings, server plugins, tool registration and cleanup
 - [Development plan and priorities](design/roadmap.md)（中文）
 - [Agent context: goals and requirements to define](design/agent-context.md)（中文；branches, compaction, model prompts; requirements, not design）
 - [Plugin management: requirements](design/plugin-management.md)（中文；one plugin concept, install, reload, replacement; requirements, not design）
