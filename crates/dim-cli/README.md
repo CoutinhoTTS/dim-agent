@@ -969,7 +969,7 @@ When the daemon keeps a UI registry (`ui.attach` in `hello`), the interface regi
 
 ## Home, transport and output
 
-The default product home is `~/.dimcode`; `DIMCODE_HOME` or `--home PATH` overrides it. Native state and the daemon endpoint/log live in `<home>/rust`. No existing home, auth file or database is automatically migrated. Use an isolated home for development and acceptance.
+The default product home is `~/.dimcode`, or `~/.dimcode-alpha` for an alpha build so it never shares state with a release; `DIMCODE_HOME` or `--home PATH` overrides it. Native state and the daemon endpoint/log live in `<home>/rust`. No existing home, auth file or database is automatically migrated. Use an isolated home for development and acceptance.
 
 On Unix, the native directory must be private (`0700`), and the socket must be private and owned by the current user. The CLI validates peer credentials before sending RPC data. On Windows, it uses the existing authenticated `dimcode app-server --connect-pipe` bridge (or `--server PATH --connect-pipe`), which verifies the connected pipe's owner before forwarding any RPC bytes. The client uses v3 protocol capabilities to reject incompatible daemons; it does not remove unknown endpoints or kill another daemon.
 

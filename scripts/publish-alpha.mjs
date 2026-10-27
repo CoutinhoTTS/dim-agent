@@ -48,25 +48,27 @@ const compare = (left, right) => {
   return 0;
 };
 
-const listed = output('npm', ['view', 'dimcode', 'versions', '--json', '--registry', 'https://registry.npmjs.org']);
-let published = JSON.parse(listed.stdout || '[]');
-if (listed.status !== 0) {
-  assert.equal(published.error?.code, 'E404', 'Cannot read dimcode versions from npm');
-  published = [];
-}
-published = [published].flat();
+const versions = (name) => {
+  const listed = output('npm', ['view', name, 'versions', '--json', '--registry', 'https://registry.npmjs.org']);
+  const parsed = JSON.parse(listed.stdout || '[]');
+  if (listed.status === 0) return [parsed].flat();
+  assert.equal(parsed.error?.code, 'E404', `Cannot read ${name} versions from npm`);
+  return [];
+};
+const published = versions('dimcode');
+const released = [...published, ...versions('dimcode-alpha')];
 const current = readFileSync(path.join(repo, 'Cargo.toml'), 'utf8')
   .match(/\[workspace\.package\]\s+version = "([^"]+)"/)[1];
-const alphas = published.filter((value) => /^\d+\.\d+\.\d+-alpha\.\d+$/.test(value)).sort(compare);
+const alphas = released.filter((value) => /^\d+\.\d+\.\d+-alpha\.\d+$/.test(value)).sort(compare);
 let version = requested[0];
 if (!version) {
-  if (/-alpha\.\d+$/.test(current) && !published.includes(current)) version = current;
+  if (/-alpha\.\d+$/.test(current) && !released.includes(current)) version = current;
   else if (alphas.length === 0) version = `${current.split('-')[0]}-alpha.0`;
   else version = alphas.at(-1).replace(/\d+$/, (number) => String(Number(number) + 1));
 }
 assert(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-alpha\.(0|[1-9]\d*)$/.test(version),
   `Expected X.Y.Z-alpha.N, got ${version}`);
-assert(!published.includes(version), `dimcode@${version} is already on npm`);
+assert(!released.includes(version), `${version} is already on npm`);
 const betas = published.filter((value) => /^\d+\.\d+\.\d+-beta\.\d+$/.test(value)).sort(compare);
 assert(betas.length === 0 || compare(version.split('-')[0], betas.at(-1).split('-')[0]) <= 0,
   `Alpha ${version} must stay below the newest dimcode beta ${betas.at(-1)}`);
@@ -85,7 +87,7 @@ for (const entry of readdirSync(path.join(repo, 'staging'), { withFileTypes: tru
 const ids = [process.env.DIM_OAUTH_CLIENT_ID_CN, process.env.DIM_OAUTH_CLIENT_ID_GLOBAL].filter(Boolean).length;
 assert(ids !== 1, 'Set DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL together');
 const account = ids === 2;
-console.log(`\ndimcode ${current} → ${version} (npm tag alpha${dryRun ? ', dry run' : ''}, ${account ? 'with' : 'without'} Dim account, ${platforms.join(' ')})\n`);
+console.log(`\ndimcode ${current} → ${version} (dimcode-alpha on npm tag alpha${dryRun ? ', dry run' : ''}, ${account ? 'with' : 'without'} Dim account, ${platforms.join(' ')})\n`);
 
 const bumped = version !== current;
 try {
@@ -139,9 +141,9 @@ try {
     console.log(`\nDry run complete: packages in ${path.relative(repo, packages)}; nothing committed or published.`);
   } else {
     run('node', ['scripts/publish-npm.mjs', packages, version, sourceCommit, '--publish-local']);
-    run('npm', ['view', 'dimcode', 'dist-tags', '--registry', 'https://registry.npmjs.org']);
+    run('npm', ['view', 'dimcode-alpha', 'dist-tags', '--registry', 'https://registry.npmjs.org']);
     remove(staging);
-    console.log(`\nPublished dimcode@${version}. Install with: npm i -g dimcode@alpha`);
+    console.log(`\nPublished dimcode-alpha@${version}. Install with: npm i -g dimcode-alpha@alpha, then run dima`);
     console.log(`Push the release commit when ready: git push`);
   }
 } finally {

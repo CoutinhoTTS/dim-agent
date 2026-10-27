@@ -59,6 +59,8 @@ const metadata = JSON.parse(readFileSync(path.join(repo,'npm/package.json')));
 assert.equal(metadata.version,first.version,'Wrapper version mismatch');
 assert(Object.values(metadata.optionalDependencies).every((version) => version === first.version),'Wrapper dependency version mismatch');
 assert.equal(metadata.optionalDependencies['dimcode-web'],first.version,'Wrapper must list dimcode-web');
+const alpha = /-alpha\.\d+$/.test(first.version);
+const wrapperName = alpha ? 'dimcode-alpha' : 'dimcode';
 const scratch = mkdtempSync(path.join(os.tmpdir(),'dimcode-collect-'));
 try {
   const npm = path.join(output,'npm');
@@ -70,20 +72,24 @@ try {
     copyFileSync(path.join(directory,manifest.nativeArchives[0].file),path.join(native,manifest.nativeArchives[0].file));
   }
   cpSync(path.join(repo,'npm'),path.join(scratch,'package'),{recursive:true});
-  if (platforms.length < all.length) {
+  if (alpha || platforms.length < all.length) {
     const wrapper = path.join(scratch,'package/package.json');
     const data = JSON.parse(readFileSync(wrapper));
+    if (alpha) {
+      data.name = wrapperName;
+      data.bin = {dima: data.bin.dim};
+    }
     data.optionalDependencies = Object.fromEntries([['dimcode-web', first.version], ...platforms.map((platform) => [`dimcode-${platform}`, first.version])]);
     writeFileSync(wrapper,`${JSON.stringify(data,null,2)}\n`);
   }
   copyFileSync(path.join(repo,'LICENSE'),path.join(scratch,'package/LICENSE'));
-  const archive = `dimcode-${first.version}.tgz`;
+  const archive = `${wrapperName}-${first.version}.tgz`;
   const packed = spawnSync('tar',['-czf',path.join(npm,archive),'-C',scratch,'package'],{encoding:'utf8',env:{...process.env,COPYFILE_DISABLE:'1'}});
   assert.ifError(packed.error);
   assert.equal(packed.status,0,'Wrapper archive creation failed');
   const result = {schemaVersion:1,...common(first),
     npmPackages:[...manifests.flatMap(({manifest}) => manifest.npmPackages), ...web.manifest.npmPackages,
-      {name:'dimcode',file:archive,sha256:createHash('sha256').update(readFileSync(path.join(npm,archive))).digest('hex')}],
+      {name:wrapperName,file:archive,sha256:createHash('sha256').update(readFileSync(path.join(npm,archive))).digest('hex')}],
     nativeArchives:[...manifests.flatMap(({manifest}) => manifest.nativeArchives), ...web.manifest.nativeArchives],
   };
   writeFileSync(path.join(npm,'release-manifest.json'),`${JSON.stringify(result,null,2)}\n`);
