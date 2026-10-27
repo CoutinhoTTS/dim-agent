@@ -964,6 +964,25 @@ impl Manager {
         let staging = self.state.dirs.stage()?;
         let commit = acquire::clone(git, reference.as_deref(), &staging).await?;
         if &commit == old {
+            // Nothing to load; a newly given ref is still recorded.
+            if &reference != recorded {
+                self.commit(
+                    |_, ()| entry.name.clone(),
+                    |record| {
+                        if let Some(Installed {
+                            source:
+                                Source::Git {
+                                    reference: stored, ..
+                                },
+                            ..
+                        }) = record.installed.iter_mut().find(|current| current.id == id)
+                        {
+                            stored.clone_from(&reference);
+                        }
+                        Ok(())
+                    },
+                )?;
+            }
             return Ok(json!({"commit": commit}));
         }
         phase("check");
@@ -1129,11 +1148,18 @@ impl Manager {
                     None => {}
                     Some(Use::Builtin) => fields.extend(object(self.status(&name))),
                     Some(used) => {
-                        let carries_code = dir_of(&record, &self.state.defaults, &name, used)
-                            .and_then(|dir| Manifest::read(&dir).ok())
-                            .is_some_and(|m| m.code.is_some());
-                        if carries_code {
-                            fields.extend(object(self.status(&row_id(&name))));
+                        match dir_of(&record, &self.state.defaults, &name, used)
+                            .map(|dir| Manifest::read(&dir))
+                        {
+                            Some(Ok(Manifest { code: Some(_), .. })) => {
+                                fields.extend(object(self.status(&row_id(&name))));
+                            }
+                            // Its row was not derived: say why.
+                            Some(Err(error)) => {
+                                fields.insert("status".into(), json!("failed"));
+                                fields.insert("error".into(), json!(error.to_string()));
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1226,7 +1252,6 @@ impl DynPlugin for PluginManagerPlugin {
                 .unwrap()
                 .installed
                 .iter()
-                .filter(|entry| matches!(entry.source, Source::Git { .. }))
                 .map(|entry| entry.dir.clone())
                 .collect();
             manager.state.dirs.clean(&keep);

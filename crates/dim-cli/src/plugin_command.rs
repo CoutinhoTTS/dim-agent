@@ -149,3 +149,60 @@ fn summary(method: &str, result: &Value) -> String {
     }
     parts.join(" ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+    use serde_json::{Value, json};
+
+    fn parsed(args: &[&str]) -> Result<(String, Value), String> {
+        parse(&mut args.iter().map(|arg| arg.to_string()))
+    }
+
+    /// Each form in the usage string maps to its `plugin.*` method and params.
+    #[test]
+    fn usage_forms_map_to_plugin_methods() {
+        let cwd = std::env::current_dir().unwrap();
+        let cases = [
+            (vec!["list"], "plugin.list", json!({})),
+            (
+                vec!["install", "x", "--no-enable", "--id", "y"],
+                "plugin.install",
+                json!({"source": {"path": cwd.join("x")}, "enable": false, "id": "y"}),
+            ),
+            (
+                vec!["install", "https://h/r.git", "--ref", "v1"],
+                "plugin.install",
+                json!({"source": {"git": "https://h/r.git", "ref": "v1"}, "enable": true}),
+            ),
+            (
+                vec!["install", "file:///r.git"],
+                "plugin.install",
+                json!({"source": {"git": "file:///r.git"}, "enable": true}),
+            ),
+            (vec!["enable", "n"], "plugin.enable", json!({"name": "n"})),
+            (
+                vec!["enable", "n", "--use", "builtin"],
+                "plugin.enable",
+                json!({"name": "n", "use": "builtin"}),
+            ),
+            (vec!["disable", "n"], "plugin.disable", json!({"name": "n"})),
+            (vec!["reload", "n"], "plugin.reload", json!({"name": "n"})),
+            (vec!["update", "i"], "plugin.update", json!({"id": "i"})),
+            (vec!["remove", "i"], "plugin.remove", json!({"id": "i"})),
+        ];
+        for (args, method, params) in cases {
+            assert_eq!(parsed(&args), Ok((method.to_owned(), params)), "{args:?}");
+        }
+        for args in [
+            vec!["list", "x"],
+            vec!["install"],
+            vec!["install", "x", "--ref", "v1"],
+            vec!["enable", "n", "--use"],
+            vec!["remove"],
+            vec!["frobnicate"],
+        ] {
+            assert!(parsed(&args).is_err(), "{args:?}");
+        }
+    }
+}

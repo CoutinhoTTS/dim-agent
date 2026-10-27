@@ -76,12 +76,51 @@ impl PluginsDir {
         if !shaped {
             return Err(outside(dir));
         }
-        // An existing directory must resolve to itself: no symbolic link in
-        // the path leads elsewhere.
-        if let Ok(resolved) = std::fs::canonicalize(dir)
-            && resolved != dir
-        {
-            return Err(outside(dir));
+        self.real_dirs(dir)
+    }
+
+    /// Every component from the root down to `dir` that exists is a
+    /// directory and not a symbolic link, so nothing created or deleted at
+    /// `dir` lands outside the root. The root's parent, the home, is
+    /// canonical.
+    fn real_dirs(&self, dir: &Path) -> Result<(), PluginError> {
+        let relative = dir.strip_prefix(&self.root).map_err(|_| outside(dir))?;
+        let mut path = self.root.clone();
+        for part in std::iter::once(None).chain(relative.components().map(Some)) {
+            if let Some(part) = part {
+                path.push(part);
+            }
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+                Ok(_) => return Err(outside(&path)),
+                // Nothing below a missing component exists.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(acquire_failed(error)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Creates `dir` one component at a time from the root, each a new or an
+    /// existing real directory; `dir` is checked first.
+    fn create(&self, dir: &Path) -> Result<(), PluginError> {
+        self.check(dir)?;
+        let relative = dir.strip_prefix(&self.root).map_err(|_| outside(dir))?;
+        let mut path = self.root.clone();
+        for part in std::iter::once(None).chain(relative.components().map(Some)) {
+            if let Some(part) = part {
+                path.push(part);
+            }
+            match std::fs::create_dir(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    match std::fs::symlink_metadata(&path) {
+                        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+                        _ => return Err(outside(&path)),
+                    }
+                }
+                Err(error) => return Err(acquire_failed(error)),
+            }
         }
         Ok(())
     }
@@ -92,12 +131,7 @@ impl PluginsDir {
     pub fn python_link(&self, package: &str, target: &Path) -> Result<(), PluginError> {
         let python = self.python_dir(package)?;
         let link = python.join(package);
-        std::fs::create_dir_all(&self.root).map_err(acquire_failed)?;
-        match std::fs::symlink_metadata(&python) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
-            Ok(_) => return Err(outside(&python)),
-            Err(_) => std::fs::create_dir(&python).map_err(acquire_failed)?,
-        }
+        self.create(&python)?;
         match std::fs::symlink_metadata(&link) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 if std::fs::read_link(&link).is_ok_and(|current| current == target) {
@@ -142,8 +176,7 @@ impl PluginsDir {
         let dir = self
             .staging_root()
             .join(uuid::Uuid::new_v4().simple().to_string());
-        self.check(&dir)?;
-        std::fs::create_dir_all(&dir).map_err(acquire_failed)?;
+        self.create(&dir)?;
         Ok(Staging(Some(dir)))
     }
 
@@ -158,8 +191,15 @@ impl PluginsDir {
         }
     }
 
-    /// Startup cleanup: staging leftovers and clones no entry refers to.
-    pub fn clean(&self, keep: &[PathBuf]) {
+    /// Startup cleanup: staging leftovers and Git clones no entry refers
+    /// to. `installed` are the directories of every installed entry: an id
+    /// directory holding one that is not a clone (a local plugin kept under
+    /// `<home>/plugins`) is left whole, and only clone-shaped directories
+    /// are ever deleted, the id directory only once it is empty.
+    pub fn clean(&self, installed: &[PathBuf]) {
+        if self.real_dirs(&self.staging_root()).is_err() {
+            return;
+        }
         let _ = std::fs::remove_dir_all(self.staging_root());
         let Ok(ids) = std::fs::read_dir(&self.root) else {
             return;
@@ -170,17 +210,21 @@ impl PluginsDir {
             if id.file_name().to_string_lossy().starts_with('.') || self.check(&id_dir).is_err() {
                 continue;
             }
+            let local = installed.iter().any(|dir| {
+                dir.starts_with(&id_dir) && dir.parent() != Some(id_dir.as_path()) || dir == &id_dir
+            });
+            if local {
+                continue;
+            }
             if let Ok(commits) = std::fs::read_dir(&id_dir) {
                 for commit in commits.flatten() {
                     let dir = commit.path();
-                    if !keep.contains(&dir) {
+                    if !installed.contains(&dir) && self.check(&dir).is_ok() {
                         let _ = self.delete(&dir);
                     }
                 }
             }
-            if !keep.iter().any(|dir| dir.starts_with(&id_dir)) {
-                let _ = self.delete(&id_dir);
-            }
+            let _ = std::fs::remove_dir(&id_dir);
         }
     }
 }
@@ -198,8 +242,7 @@ impl Staging {
     pub fn place(self, dirs: &PluginsDir, target: &Path) -> Result<PathBuf, PluginError> {
         dirs.check(target)?;
         let parent = target.parent().expect("a clone directory has a parent");
-        dirs.check(parent)?;
-        std::fs::create_dir_all(parent).map_err(acquire_failed)?;
+        dirs.create(parent)?;
         std::fs::rename(work_dir(&self), target).map_err(acquire_failed)?;
         Ok(target.to_owned())
     }

@@ -25,8 +25,9 @@ dependencies stay declared. Invalid run data fails the owner and preserves the
 original bytes; calls return `service_unavailable`. The native invalid-record
 acceptance checks this behavior without a package-level loader workaround.
 
-Provision `scheduler/` under the host's authorized plugin storage root before
-enabling the row. The native file transaction does not create parent directories.
+PluginManager creates `scheduler/` under the plugin storage root when it turns
+the plugin on. A host that builds the row itself provisions that directory before
+enabling the row: the native file transaction does not create parent directories.
 Agents idle unloading
 [#126](https://github.com/arcships/dim/issues/126) is delivered in main by
 [#331](https://github.com/arcships/dim/pull/331); Scheduler uses its existing

@@ -244,6 +244,35 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     assert!(!first_dir.exists());
     let local = call(&mut client, "plugin.update", json!({"id":"notes"})).await;
     assert_eq!(app_error(&local), "not_updatable", "{local}");
+    // A ref given for the commit already in place is still recorded.
+    let pinned = call(
+        &mut client,
+        "plugin.update",
+        json!({"id":"git-notes","ref":"main"}),
+    )
+    .await;
+    assert_eq!(pinned["result"]["commit"], second.as_str(), "{pinned}");
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(home.join("plugins.json")).unwrap()).unwrap();
+    let entry = record["installed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == "git-notes");
+    assert_eq!(entry.unwrap()["source"]["ref"], "main", "{record}");
+
+    // A local plugin kept under `<home>/plugins` is the user's: startup
+    // cleanup leaves it, including a clone-shaped directory inside it.
+    let kept = plugin_dir(&home.join("plugins"), "kept");
+    std::fs::create_dir_all(kept.join("abcdef1234")).unwrap();
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source":{"path":kept}}),
+        )
+        .await,
+    );
 
     // Acceptance 5: the state survives a restart.
     assert_ok(
@@ -273,6 +302,9 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     assert_eq!(rules["status"], "off");
     let reply = client.rpc("permission.rules", json!({})).await;
     assert!(reply.get("error").is_some(), "{reply}");
+    assert!(kept.join("dim-plugin.json").is_file());
+    assert!(kept.join("abcdef1234").is_dir());
+    assert!(home.join("plugins/git-notes").join(&second).is_dir());
     assert_ok(
         &call(
             &mut client,
@@ -281,6 +313,19 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
         )
         .await,
     );
+
+    // A used plugin whose manifest no longer reads is listed as failed.
+    std::fs::write(source.join("dim-plugin.json"), "{").unwrap();
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    let notes = item(&list, "notes");
+    assert_eq!(notes["status"], "failed", "{notes}");
+    assert!(
+        notes["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid_manifest"),
+        "{notes}"
+    );
     assert_ok(&call(&mut client, "permission.rules", json!({})).await);
 
     // Removing a Git plugin deletes its clones; a local one stays.
@@ -288,11 +333,65 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     assert!(!home.join("plugins/git-notes").exists());
     assert_ok(&call(&mut client, "plugin.remove", json!({"id":"notes"})).await);
     assert!(source.join("dim-plugin.json").is_file());
+    assert_ok(&call(&mut client, "plugin.remove", json!({"id":"kept"})).await);
+    assert!(kept.join("dim-plugin.json").is_file());
     let builtin = call(&mut client, "plugin.remove", json!({"id":"builtin"})).await;
     assert_eq!(app_error(&builtin), "not_removable", "{builtin}");
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The path rule holds when a directory PluginManager would create under
+/// lies below a symbolic link: a Git install is refused and nothing is
+/// created outside `<home>/plugins`, with the link at `.staging` or at
+/// `plugins` itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_storage_refuses_directories_below_symbolic_links() {
+    ssh_stand_in();
+    let home = home();
+    let config = config(&home);
+    let outside = PathBuf::from("/tmp").join(format!(
+        "dm-out-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    std::fs::create_dir_all(&outside).unwrap();
+    let repo = home.join("repo");
+    std::fs::create_dir_all(repo.join("skills")).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        repo.join("dim-plugin.json"),
+        r#"{"name":"linked","skills":"skills"}"#,
+    )
+    .unwrap();
+    std::fs::write(repo.join("skills/one.md"), "one").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "one"]);
+    let url = format!("ssh://fixture{}", repo.display());
+
+    std::fs::create_dir_all(home.join("plugins")).unwrap();
+    std::os::unix::fs::symlink(&outside, home.join("plugins/.staging")).unwrap();
+    for round in 0..2 {
+        if round == 1 {
+            std::fs::remove_dir_all(home.join("plugins")).unwrap();
+            std::os::unix::fs::symlink(&outside, home.join("plugins")).unwrap();
+        }
+        let (server, _, _) = start(config.clone()).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let refused = call(&mut client, "plugin.install", json!({"source":{"git":url}})).await;
+        assert_eq!(app_error(&refused), "path_outside_plugins", "{refused}");
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "round {round}"
+        );
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+    std::fs::remove_dir_all(&outside).unwrap();
+    std::fs::remove_file(home.join("plugins")).unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
 
