@@ -13,7 +13,7 @@ pub struct Login {
     pub directory: String,
     pub redirect_uri: String,
     pub open_browser: Option<fn(&str) -> bool>,
-    pub terminal: bool,
+    pub terminal_args: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -28,19 +28,23 @@ pub(crate) struct Method {
     pub id: String,
     pub provider: String,
     pub flow: String,
-    pub terminal: bool,
+    pub terminal: Option<Vec<String>>,
     name: String,
 }
 impl Method {
     pub(crate) fn value(&self) -> Value {
-        if self.terminal {
-            json!({"type":"terminal","id":self.id,"name":self.name,"args":["--auth-setup",self.id]})
+        if let Some(args) = &self.terminal {
+            json!({"type":"terminal","id":self.id,"name":self.name,"args":args})
         } else {
             json!({"id":self.id,"name":self.name})
         }
     }
 }
-fn methods(providers: Vec<Provider>, browser: bool, terminal_available: bool) -> Vec<Method> {
+fn methods(
+    providers: Vec<Provider>,
+    browser: bool,
+    terminal_args: Option<&[String]>,
+) -> Vec<Method> {
     let mut methods = Vec::new();
     for provider in providers {
         for flow in provider
@@ -49,22 +53,27 @@ fn methods(providers: Vec<Provider>, browser: bool, terminal_available: bool) ->
             .filter(|flow| matches!(flow.as_str(), "browser" | "device"))
         {
             for terminal in [false, true] {
-                if (terminal && !terminal_available)
+                if (terminal && terminal_args.is_none())
                     || (!terminal && (flow != "browser" || !browser))
                 {
                     continue;
                 }
+                let id = json!([
+                    "dim",
+                    provider.provider_id,
+                    flow,
+                    if terminal { "terminal" } else { "agent" }
+                ])
+                .to_string();
                 methods.push(Method {
-                    id: json!([
-                        "dim",
-                        provider.provider_id,
-                        flow,
-                        if terminal { "terminal" } else { "agent" }
-                    ])
-                    .to_string(),
+                    terminal: terminal.then(|| {
+                        let mut args = terminal_args.unwrap().to_vec();
+                        args.extend(["--auth-setup".into(), id.clone()]);
+                        args
+                    }),
+                    id,
                     provider: provider.provider_id.clone(),
                     flow: flow.clone(),
-                    terminal,
                     name: format!("{} ({flow})", provider.display_name),
                 });
             }
@@ -89,16 +98,18 @@ pub(crate) async fn discover(
     Ok(methods(
         providers,
         login.is_some_and(|login| login.open_browser.is_some()),
-        terminal && login.is_some_and(|login| login.terminal),
+        login
+            .filter(|_| terminal)
+            .and_then(|login| login.terminal_args.as_deref()),
     ))
 }
 
 /// Resolve an advertised terminal ID again against the current native discovery.
 pub async fn terminal_method(client: &mut Client, id: &str) -> dim_client::Result<(String, bool)> {
     let providers: Vec<Provider> = client.typed("account.providers", json!({})).await?;
-    let method = methods(providers, false, true)
+    let method = methods(providers, false, Some(&[]))
         .into_iter()
-        .find(|method| method.id == id && method.terminal)
+        .find(|method| method.id == id && method.terminal.is_some())
         .ok_or("Unknown terminal authentication method")?;
     Ok((method.provider, method.flow == "device"))
 }
