@@ -11,8 +11,8 @@ const rules=[
   [/^docs\/architecture\/rust-agent\/(plugins|generated)\//,['xtask']],
   // storage_flow reads this document.
   [/^docs\/design\/appserver\/native-storage-format\.md$/,['rust']],
-  // Documentation boundaries are checked by scripts/docs-check.mjs.
-  [/^docs\//,['scripts']],
+  // Documentation boundaries run in the changes job; docs alone need no build group.
+  [/^docs\//,[]],
   [/^deny\.toml$|^LICENSE$/,['dependencies']],
   [/^[^/]+\.md$/,[]],
   // dim-cli's composer test reads the quote cases the Web composer checks.

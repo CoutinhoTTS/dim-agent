@@ -1,6 +1,6 @@
 # NNN: Title
 
-Decision status: Proposed | Accepted | Superseded by ADR NNN.
+Decision status: Proposed | Accepted.
 
 ## Context
 
@@ -27,5 +27,5 @@ What this decision does not change.
 
 ## Supersession
 
-Which ADR this supersedes, or which ADR supersedes it. Do not edit an accepted ADR to record
-this; add the new ADR.
+Which ADR this supersedes. The relation is recorded in `docs/adr/README.md`; do not edit an
+accepted ADR to record it.

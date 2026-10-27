@@ -1,7 +1,7 @@
 // Checks the document boundaries that need a PR diff:
-// - an existing ADR is a snapshot; only a new ADR may be added
+// - an accepted ADR is a snapshot; a new ADR is needed to change it
 // - a PR changes at most one plugin design unless it carries the cross-module label
-// - a new ADR uses the decision template and carries no implementation status
+// - a new ADR uses the decision template and has no implementation/delivery section
 //
 // Run from the workspace root in a PR checkout:
 //   node scripts/docs-check.mjs --base HEAD^1
@@ -22,13 +22,18 @@ export function parseDiff(text) {
     });
 }
 
-export function checkChanges(changes, {crossModule = false} = {}) {
+export function checkChanges(
+  changes,
+  {crossModule = false, frozen = () => true, erratum = false} = {},
+) {
   const errors = [];
   const designs = new Set();
   for (const {status, paths} of changes) {
     for (const path of paths) {
-      if (adr.test(path) && status !== 'A') {
-        errors.push(`${path}: existing ADRs are frozen; add a new ADR instead of changing this one`);
+      if (adr.test(path) && status !== 'A' && frozen(path) && !erratum) {
+        errors.push(
+          `${path}: accepted ADRs are frozen; add a new ADR, or use the adr-erratum label for a link or typo fix`,
+        );
       }
     }
     // A rename is one design change; count the new path only.
@@ -44,6 +49,11 @@ export function checkChanges(changes, {crossModule = false} = {}) {
     );
   }
   return {errors, designs};
+}
+
+export function isFrozen(text) {
+  // An existing ADR is frozen unless it says it is still proposed.
+  return !/^Decision status:\s*Proposed\b/m.test(text);
 }
 
 export function checkNewAdr(path, text) {
@@ -74,9 +84,19 @@ function option(args, name) {
 if (import.meta.main) {
   const args = process.argv.slice(2);
   const base = option(args, '--base') || process.env.DIM_DOCS_BASE || 'HEAD^1';
-  const crossModule = args.includes('--cross-module') || process.env.DIM_DOCS_CROSS_MODULE === '1';
-  const changes = parseDiff(git(['diff', '--name-status', '--find-renames', base]));
-  const {errors, designs} = checkChanges(changes, {crossModule});
+  const crossModule =
+    args.includes('--cross-module') || process.env.DIM_DOCS_CROSS_MODULE === '1';
+  const erratum = args.includes('--adr-erratum') || process.env.DIM_DOCS_ADR_ERRATUM === '1';
+  const mergeBase = git(['merge-base', base, 'HEAD']).trim();
+  const changes = parseDiff(git(['diff', '--name-status', '--find-renames', mergeBase]));
+  const frozen = path => {
+    try {
+      return isFrozen(git(['show', `${mergeBase}:${path}`]));
+    } catch {
+      return false;
+    }
+  };
+  const {errors, designs} = checkChanges(changes, {crossModule, frozen, erratum});
   for (const {status, paths} of changes) {
     if (status !== 'A') continue;
     for (const path of paths) {

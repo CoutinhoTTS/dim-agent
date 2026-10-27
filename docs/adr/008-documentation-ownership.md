@@ -1,6 +1,6 @@
 # 008: Documentation ownership and immutable ADRs
 
-Decision status: Accepted by the repository owner.
+Decision status: Proposed.
 
 Supersedes the part of [ADR 006](006-plugin-contract.md) D9 that puts delivery status and
 history in ADR delivery tables and design documents. It does not change ADR 006's plugin
@@ -23,8 +23,12 @@ to contain facts owned by another document.
 
 ### D1. An ADR is a snapshot
 
-- After an ADR is merged it is immutable. Do not modify or delete it.
-- A direction change is a new ADR that supersedes the old one. The old file is not rewritten.
+- An accepted ADR is immutable. Do not modify or delete it. A proposed ADR may change until it
+  is accepted.
+- A direction change is a new ADR that supersedes the old one. An accepted ADR is not rewritten;
+  the new ADR states the supersession and `docs/adr/README.md` records the relation.
+- An accepted ADR may be corrected for a broken link or typo under the `adr-erratum` label. The
+  correction may not change the decision.
 - An ADR records the context, the decision and its consequences. It does not record
   implementation status, migration progress or delivery history.
 - Existing ADRs predate this rule. They stay as they are and are not retroactively cleaned.
@@ -53,8 +57,9 @@ No manifest or per-document metadata is added. Existing paths define the type:
 
 ### D4. Status lives in issues
 
-- ADRs, `INDEX.md`, `roadmap.md` and plugin indexes do not record completion status.
-- Issues are the status source. A document that needs to point at progress links to the issue.
+- Documents do not add new completion status. ADRs, `INDEX.md`, `roadmap.md` and plugin indexes
+  link to the issue.
+- Existing status text written before this decision is historical and is not updated.
 - A document may record whether it is a draft or a proposal; it does not record what has been
   delivered.
 
@@ -69,11 +74,17 @@ No manifest or per-document metadata is added. Existing paths define the type:
 
 `scripts/docs-check.mjs` checks the PR diff:
 
-- an existing `docs/adr/*.md` is modified or deleted;
-- more than one `docs/design/plugins/*.md` changes without the cross-module label;
-- a new ADR misses the decision template or carries implementation status.
+- an existing accepted `docs/adr/*.md` is modified or deleted, unless the `adr-erratum` label is
+  present;
+- more than one `docs/design/plugins/*.md` changes without the `cross-module` label;
+- a new ADR lacks `Decision status`, `## Context`, `## Decision` or `## Consequences`, or has an
+  `## Implementation`/`## Delivery` section or an `Implementation:` line.
 
-CI runs it for documentation changes. Checks enforce boundaries and structure; review decides
+The check is structural. It does not scan prose for status words, and it does not cover
+`docs/zh/adr/` or `docs/zh/design/plugins/`: a translation may be updated to match its English
+source and may not add or change a decision.
+
+CI runs the check for pull requests. Checks enforce boundaries and structure; review decides
 whether a decision is right.
 
 ### D7. Templates and AGENTS.md have different jobs
@@ -86,7 +97,7 @@ whether a decision is right.
 
 - Existing ADRs remain valid history, including status text written before this decision.
 - A design that needs another module changes that owner's document separately.
-- Status-only edits to indexes and ADRs stop.
+- New status-only edits to indexes and accepted ADRs stop.
 - Agents get a local, executable failure instead of a prose reminder.
 - A legitimate cross-module change is still possible, but it is explicit and reviewed.
 
@@ -94,4 +105,5 @@ whether a decision is right.
 
 - Removing technical detail from designs.
 - Freezing design documents. They remain living documents within their own scope.
+- Rewriting legacy status text in existing documents.
 - Automating whether a decision is correct.

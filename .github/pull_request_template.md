@@ -21,7 +21,7 @@ Answer each item; write "n/a" with a reason where it does not apply. Rules: [des
 
 ## Documentation
 
-- [ ] No existing ADR is modified or deleted; a changed decision is a new ADR ([ADR 008](../docs/adr/008-documentation-ownership.md)).
+- [ ] No accepted ADR is modified or deleted; a changed decision is a new ADR, and a link or typo fix uses `adr-erratum` ([ADR 008](../docs/adr/008-documentation-ownership.md)).
 - [ ] No other module's design is changed. A PR that changes more than one `docs/design/plugins/*.md` carries the `cross-module` label and owner review.
 - [ ] Delivery status is not added to an ADR, index or roadmap; binding details are in a binding appendix.
 

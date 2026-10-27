@@ -4,8 +4,8 @@ import {classify,groups} from './ci-changes.mjs';
 
 const only=(...names)=>Object.fromEntries(groups.map(group=>[group,names.includes(group)]));
 
-test('documentation-only changes run the documentation boundary check',()=>{
-  assert.deepEqual(classify(['docs/adr/006-plugin-contract.md','docs/zh/INDEX.md']),only('scripts'));
+test('documentation-only changes need no build group',()=>{
+  assert.deepEqual(classify(['docs/adr/006-plugin-contract.md','docs/zh/INDEX.md']),only());
   assert.deepEqual(classify(['README.md','AGENTS.md']),only());
 });
 
@@ -25,7 +25,7 @@ test('source areas select their groups',()=>{
   assert.deepEqual(classify(['crates/dim-app-server/src/lib.rs','runtime/fixtures/session-part.json']),only('rust'));
   assert.deepEqual(classify(['crates/dim-cli/src/main.rs']),only('rust','windows'));
   // A file moved from source into docs/ lists both paths.
-  assert.deepEqual(classify(['docs/notes.md','crates/dim-cli/src/notes.rs']),only('rust','windows','scripts'));
+  assert.deepEqual(classify(['docs/notes.md','crates/dim-cli/src/notes.rs']),only('rust','windows'));
 });
 
 test('workspace, toolchain, workflow and unknown paths run everything',()=>{
