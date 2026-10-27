@@ -1,6 +1,6 @@
-//! The named themes. `system` is not listed: it is Amp's default, the
+//! The named themes. `system` is not listed: it is the default, the
 //! terminal's own colours. Dim Dark and Dim Light take the same structure
-//! with Dim's green as the accent; the rest come from the reference build's
+//! with Dim's green as the accent; the rest come from the theme
 //! registry (`scrollbackPaletteForTheme`; edit deliberately).
 
 /// One registry theme as the scrollback interface reads it.
@@ -22,7 +22,7 @@ pub struct NamedTheme {
     pub danger: &'static str,
     pub highlight: &'static str,
     pub border: &'static str,
-    /// The user-message band; none for themes in Amp's structure.
+    /// The user-message band; none for themes in the default structure.
     pub surface: Option<&'static str>,
     pub keyword: &'static str,
     pub string: &'static str,

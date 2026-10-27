@@ -113,7 +113,7 @@ Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` onl
 | --- | --- |
 | `entryHost` on Transport, call-scoped `authenticate`/`handle` | WebEntry owns its own listener and authenticates in process |
 | Pairing codes, per-device tokens in `remote-devices.json`, rotation, revocation | One bootstrap token per open entry, access tokens in memory; closing the entry revokes everything |
-| `plugin.set_enabled` and Settings source `remote` `web.open`, held by the calling connection; no persisted state |
+| The user-only field `open` and the listener settings of the Settings source `remote` | `web.open`, held by the calling connection; no persisted state |
 | Loopback by default, TLS or explicit plaintext for other addresses | Loopback only |
 | `ConnectionEntry {name, deviceId}` | `entry: Web` on the connection |
 

@@ -603,7 +603,9 @@ async fn node_typescript_row_reads_and_sets_the_title_through_session_metadata()
             session_typescript: Some(rows),
             ..store.config()
         },
-        |_| {},
+        |builder| {
+            builder.require_part("SessionMetadataFixture");
+        },
     )
     .await;
     super::session_typescript::plugin_active(&server, &row).await;

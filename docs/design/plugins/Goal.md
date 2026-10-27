@@ -433,6 +433,7 @@ Status blocks state only the status and the objective is a separate block, so a 
 | Goal's own continuation withdrawn by the user while held | continuation < `input/deleted` | Never applied or consumed, not pending, removed from the fold (N no longer `decided`); the next decision may continue again | Goal |
 | Change withdrawn by the user while held (e.g. a `pause`) | change < `input/deleted` | Refold without it; the latest `turn/end` is decided again if not `decided` | InputQueue; Goal |
 | Other source's Queue follow-up after the same `turn/end` (e.g. Hooks) | both after N | Two turns in order; at most one continuation per `turn/end`; that input does not reset the count unless it is operator input | InputQueue; Goal |
+| A line's opening input (TimelineTree, with a `branch:line` block first; [Timeline branches §7.4](../timeline-branches.md#74-goal-and-pursuit)) | before any local goal | Not operator input (A5); it precedes `set`, so it never affects the count | TimelineTree; Goal |
 | Interrupt before N | interrupt < N | C2: pause (`interrupted`), no continuation | Goal |
 | Interrupt between N and the continuation | N < interrupt < continuation | One extra turn; then the pause (E18) | Loop; Goal |
 | Interrupt after the continuation started its turn | consumed < interrupt | Turn cancelled; pause | Loop; Goal |

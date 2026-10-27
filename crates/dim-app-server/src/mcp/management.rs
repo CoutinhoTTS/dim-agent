@@ -200,6 +200,7 @@ pub(super) fn provide(
         "mcp",
         [
             "mcp.catalog",
+            "mcp.temporary.capabilities",
             "mcp.save",
             "mcp.remove",
             "mcp.set_enabled",
@@ -209,7 +210,7 @@ pub(super) fn provide(
             "mcp.auth.logout",
         ]
         .into_iter()
-        .map(|name| MethodDecl::new(name, name != "mcp.catalog", Interruption::Report))
+        .map(|name| MethodDecl::new(name, !matches!(name, "mcp.catalog" | "mcp.temporary.capabilities"), Interruption::Report))
         .collect(),
         Arc::new(move |method, value, stopping, _| {
             let directory = directory.clone();
@@ -217,6 +218,7 @@ pub(super) fn provide(
             let auth = auth.clone();
             Box::pin(async move {
                 match method.as_str() {
+                    "mcp.temporary.capabilities" => return Ok(serde_json::json!({"transports":["stdio","http","sse"],"leaseSeconds":super::temporary::LEASE.as_secs()})),
                     "mcp.catalog" => {
                         let p: SelectionScope = params(value)?;
                         let project = project(&settings, p.cwd, &stopping).await?;

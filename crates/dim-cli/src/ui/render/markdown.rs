@@ -39,7 +39,7 @@ fn fg(color: &str) -> Style {
     }
 }
 
-/// The role mapping onto the renderer's styles, as Amp draws Markdown: a
+/// The role mapping onto the renderer's styles: a
 /// blue (keybinding hue) first-level heading, highlighted second-level ones,
 /// bold accent inline code, plain bullets, faint table rules with a divider
 /// under every row, accent underlined links.
@@ -360,7 +360,7 @@ fn merge_neutral_gaps(cells: &mut [Cell]) {
 }
 
 /// Hanging indent of a wrapped row: under a numbered list marker or a quote
-/// bar. A `-` item continues at its margin, as Amp wraps it.
+/// bar. A `-` item continues at its margin.
 fn hanging_indent(cells: &[Cell]) -> usize {
     let text: String = cells.iter().map(|c| c.0.as_str()).collect();
     let leading = text.len() - text.trim_start_matches(' ').len();

@@ -2089,6 +2089,8 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
     let (mut builder, _requests, _) = setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
     builder.require_feature(ControlledGate::feature(send));
+    // This flow needs the fixture before publication, including a late registration.
+    builder.require_part("SessionTypeScriptFixture");
     let server = serve(
         builder,
         ServerConfig {

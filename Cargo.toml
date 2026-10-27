@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dim-agent-types", "crates/dim-agent-runtime", "crates/dim-agent-capabilities", "crates/dim-agent-aimux", "crates/dim-agent-attachments", "crates/dim-agent-questions", "crates/dim-app-server", "crates/dim-cli", "crates/dimcode", "xtask", "tests/extension-a", "tests/extension-b", "tests/integration"]
+members = ["crates/dim-agent-types", "crates/dim-agent-runtime", "crates/dim-agent-capabilities", "crates/dim-agent-aimux", "crates/dim-agent-attachments", "crates/dim-agent-questions", "crates/dim-app-server", "crates/dim-client", "crates/dim-acp", "crates/dim-cli", "crates/dimcode", "xtask", "tests/extension-a", "tests/extension-b", "tests/integration"]
 exclude = ["vendor/aimux", "vendor/grok-build"]
 
 [workspace.package]
@@ -25,6 +25,8 @@ aimux-core = { path = "vendor/aimux/aimux-core" }
 aimux-provider-utils = { path = "vendor/aimux/aimux-provider-utils" }
 aimux-providers = { path = "vendor/aimux/aimux-providers", default-features = false }
 dim-app-server = { path = "crates/dim-app-server" }
+dim-client = { path = "crates/dim-client" }
+dim-acp = { path = "crates/dim-acp" }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "sync", "macros", "time", "net", "process", "io-util", "signal", "fs"] }
 tokio-util = { version = "0.7.19", features = ["rt"] }
 serde = { version = "1.0", features = ["derive", "rc"] }

@@ -117,6 +117,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          npm ci --prefix runtime --ignore-scripts --registry=https://registry.npmjs.org
           export DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server"
           export DIM_TEST_NPM_WRAPPER="$PWD/npm/bin/dimcode.mjs"
           cargo test --locked -p dimcode --test cli_flow -- --ignored
@@ -125,7 +126,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm ci --prefix runtime --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/web --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/session-title --ignore-scripts --registry=https://registry.npmjs.org
           npm ci --prefix runtime/plugins/scheduler --ignore-scripts --registry=https://registry.npmjs.org

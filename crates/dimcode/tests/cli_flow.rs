@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "cli_flow/acp.rs"]
+mod acp;
+
 #[path = "cli_flow/permission.rs"]
 mod permission;
 #[path = "cli_flow/question.rs"]
@@ -5278,12 +5281,10 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         terminal.transcript
     );
     terminal.write(b"\x13");
-    terminal.until("Queue (0)");
     terminal.write(b"third\r");
     terminal.until("Queue (1)");
     terminal.until("› third");
     terminal.write(b"\x1b[A");
-    terminal.until("Queue (0)");
     terminal.until("third");
     let plain = {
         let mut out = String::new();
@@ -5310,6 +5311,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         out.push_str(rest);
         out
     };
+    assert!(!plain.contains("Queue (0)"), "{plain}");
     assert!(plain.contains("┃ first"), "{plain}");
     assert!(plain.contains("┃ second"), "{plain}");
     assert!(!plain.contains("┃ third"), "{plain}");

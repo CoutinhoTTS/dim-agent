@@ -4,6 +4,9 @@
 - [Model preferences and Agent configuration](design/model-configuration.md)
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
+- [AcpGateway implementation contract](design/acp-gateway-implementation.md)（中文，#436）：protocol mapping, client-host plugin wiring, lifecycle and unsupported features
+- [AcpGateway acceptance](design/acp-gateway-acceptance.md)（中文）：automated public flows, acpx/Lody runtime verification and client MCP behavior
+- [Temporary MCP](design/plugins/TemporaryMcp.md): disposable Session bindings, server plugins, tool registration and cleanup
 - [Development plan and priorities](design/roadmap.md)（中文）
 - [Agent context: goals and requirements to define](design/agent-context.md)（中文；branches, compaction, model prompts; requirements, not design）
 - [Plugin management: requirements](design/plugin-management.md)（中文；one plugin concept, install, reload, replacement; requirements, not design）
@@ -18,6 +21,7 @@
 - [Architecture decisions and implementation status](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
 - [Owner-independent Timeline instances](design/collaboration-timeline.md) (proposed, #335)
+- [Timeline branches](design/timeline-branches.md): what branches are for, branch versus member and fork, messages between lines, identity across compaction, ending a line (proposed, #427)（[中文](zh/design/timeline-branches.md)）
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)

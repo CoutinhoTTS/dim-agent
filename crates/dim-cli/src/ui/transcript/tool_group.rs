@@ -1,7 +1,7 @@
 //! The tool calls of one model response drawn as one group (port of
 //! `blocks/tool-group.ts` and `tool-group-render.ts`).
 //!
-//! Collapsed, the default, is Amp's summary row alone
+//! Collapsed, the default, is the summary row alone
 //! (`✓ Ran 1 command, ran 1 search, read 1 file · 1 failed`). Expanded (the
 //! `/tools` toggle) adds a row per call with the bodies that matter: command
 //! output, edit diffs. The live region and the committed block both draw
@@ -19,11 +19,11 @@ use crate::ui::theme::ansi::{Paint, fg, paint};
 
 /// Source lines of one edit's diff before the rest is counted, not shown.
 const DIFF_MAX_LINES: usize = 40;
-/// Line numbers take at least this many columns, as Amp pads them.
+/// Line numbers take at least this many columns.
 const LINE_NUMBER_MIN_WIDTH: usize = 3;
 /// Rows one wrapped line may take before the rest is cut.
 const WRAP_MAX_ROWS: usize = 4;
-/// Screen rows of a command's output: its end, unmarked, as Amp shows it.
+/// Screen rows of a command's output: its end, unmarked.
 const TAIL_MAX_ROWS: usize = 15;
 
 /// How much of a group is drawn.
@@ -87,7 +87,7 @@ enum Mark {
 
 /// `Truncate` keeps one row. `Wrap` continues under the text column and keeps
 /// the text's own line breaks, up to [`WRAP_MAX_ROWS`] (`Rows` up to its
-/// own count), ending the last in `…`; `Whole` keeps every row, as Amp prints a command however long.
+/// own count), ending the last in `…`; `Whole` keeps every row, however long the command.
 /// `Tail` keeps the last [`TAIL_MAX_ROWS`] rows, as a command's output is
 /// shown, with a scrollbar beside them when there are more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,7 +435,7 @@ fn classify(call: Call<'_>) -> Item<'_> {
     }
 }
 
-/// A plain read-only command reads as the exploring it is, the way Amp counts
+/// A plain read-only command reads as the exploring it is, counting
 /// `ls`, `wc` and `git log` among the files and searches. Anything with shell
 /// operators, redirection, substitution or a second line stays a command:
 /// what it does is no longer one program's.
@@ -1016,7 +1016,7 @@ enum DiffLine {
     },
 }
 
-/// The diff as Amp prints it: `...` for each skipped stretch, then every hunk
+/// The diff as printed: `...` for each skipped stretch, then every hunk
 /// line behind its file line number, changes coloured whole, context plain.
 fn append_diff(lines: &mut Vec<Line>, diff: &[DiffLine]) {
     let shown = if diff.len() <= DIFF_MAX_LINES + 1 {
@@ -1444,7 +1444,7 @@ fn capitalize(text: &str) -> String {
 
 /// The group's rows at `width`. `spinner` is the glyph of running marks.
 ///
-/// As in Amp, the header ends in `▸` (collapsed) or `▾` (expanded), and so
+/// The header ends in `▸` (collapsed) or `▾` (expanded), and so
 /// does every expanded row with rows of its own under it (a section, a
 /// command with output, an edit with its diff). The marker survives the
 /// header's truncation.

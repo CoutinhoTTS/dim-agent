@@ -114,6 +114,8 @@ impl StreamPlanner {
         self.parked.clear();
     }
 
+    /// `settled` holds the settled assistant blocks that have not been
+    /// written to scrollback yet; a parked stream pairs only with one of them.
     pub fn plan(
         &mut self,
         revision: u64,
@@ -143,9 +145,20 @@ impl StreamPlanner {
         let mut used_settled: Vec<&str> = Vec::new();
         for mut stream in std::mem::take(&mut self.parked) {
             let prefix = &stream.text[..stream.committed_len];
+            // The row keeps its id when it settles; a prefix match is only for
+            // a stream that was re-identified, and an earlier answer with the
+            // same text must never be taken for the twin.
+            let unused = |b: &&TextBlock| !used_settled.contains(&b.id);
             let twin = settled
                 .iter()
-                .find(|b| !used_settled.contains(&b.id) && b.text.starts_with(prefix));
+                .filter(unused)
+                .find(|b| b.id == stream.id && b.text.starts_with(prefix))
+                .or_else(|| {
+                    settled
+                        .iter()
+                        .filter(unused)
+                        .find(|b| b.text.starts_with(prefix))
+                });
             match twin {
                 None => self.parked.push(stream),
                 Some(block) => {
@@ -453,6 +466,64 @@ mod tests {
         p.plan(1, &[block("a", "X.\n\nY")], &[], W, &render_marked);
         let out = p.plan(2, &[block("a", "X.\n\nY")], &[], W, &render_marked);
         assert_eq!(text_of(&out.active).len(), 1, "committed again from zero");
+    }
+
+    /// Two answers with identical text in one session, each streamed and
+    /// settled under its own row id the way `App::transcript` drives the
+    /// planner and the commit state: each answer goes out exactly once.
+    #[test]
+    fn identical_answers_in_sequence_commit_once_each() {
+        use crate::ui::transcript::commit::CommitState;
+
+        let mut answer = String::from("## Heading\n\n");
+        for i in 1..=40 {
+            answer.push_str(&format!("- item {i}\n"));
+        }
+        answer.push_str("\nDone.");
+
+        let mut planner = StreamPlanner::new();
+        let mut commits = CommitState::default();
+        let mut settled: Vec<&str> = Vec::new();
+        let mut written: Vec<String> = Vec::new();
+        let mut frame = |live: &[TextBlock], settled: &[&str], written: &mut Vec<String>| {
+            let ids: Vec<String> = settled.iter().map(|id| id.to_string()).collect();
+            let fresh = commits.plan(&ids).fresh;
+            let unwritten: Vec<TextBlock> = settled
+                .iter()
+                .filter(|id| fresh.iter().any(|f| f == *id))
+                .map(|id| block(id, &answer))
+                .collect();
+            let mut plan = planner.plan(1, live, &unwritten, W, &render_marked);
+            for id in fresh {
+                let lines = match plan.finalized.remove(&id) {
+                    Some(batch) => batch.lines,
+                    None => render_marked(&answer, W),
+                };
+                written.extend(lines);
+            }
+            assert!(plan.finalized.is_empty(), "a remainder had no fresh row");
+            for batch in plan.active {
+                written.extend(batch.lines);
+            }
+        };
+
+        for id in ["assistant-r1", "assistant-r2"] {
+            for end in answer.char_indices().map(|(i, c)| i + c.len_utf8()) {
+                frame(&[block(id, &answer[..end])], &settled, &mut written);
+            }
+            // The model output ends: the same row flips to a settled answer.
+            settled.push(id);
+            frame(&[], &settled, &mut written);
+            frame(&[], &settled, &mut written);
+        }
+
+        for phrase in ["Heading", "item 1", "item 40", "Done."] {
+            let count = written
+                .iter()
+                .filter(|l| l.trim().ends_with(phrase))
+                .count();
+            assert_eq!(count, 2, "{phrase:?} once per answer: {written:#?}");
+        }
     }
 
     /// The whole path: a streamed answer fed one character at a time through

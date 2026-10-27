@@ -416,6 +416,14 @@ impl Projection {
             | EventContent::BranchStart(_)
             | EventContent::BranchCreateFailed(_)
             | EventContent::PermissionChanged(_)
+            | EventContent::InputConsumed(_)
+            | EventContent::InputWithdraw(_)
+            | EventContent::TurnStart(_)
+            | EventContent::ModelUsage(_)
+            | EventContent::ToolUseStart(_)
+            | EventContent::ToolStart(_)
+            | EventContent::CompactionStart(_)
+            | EventContent::Compaction(_)
             | EventContent::Other => {}
         }
         if matches!(

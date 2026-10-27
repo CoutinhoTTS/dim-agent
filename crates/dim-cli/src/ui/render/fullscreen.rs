@@ -377,7 +377,7 @@ impl FullScreen {
     }
 
     /// Picks the message or card before the picked one (the newest when
-    /// none is), Amp's Tab. Stays on the oldest.
+    /// none is), on Tab. Stays on the oldest.
     pub fn focus_older(&mut self, doc: &dyn Document) {
         let from = match self.focus {
             Some(id) => {
@@ -409,7 +409,7 @@ impl FullScreen {
     }
 
     /// Picks the message or card after the picked one; past the newest the
-    /// pick ends and the view follows the bottom again (Amp's Shift+Tab).
+    /// pick ends and the view follows the bottom again (Shift+Tab).
     pub fn focus_newer(&mut self, doc: &dyn Document) {
         let Some(id) = self.focus else { return };
         let index = id.saturating_sub(doc.dropped());
@@ -850,7 +850,7 @@ impl FullScreen {
 
     /// The transcript row shown on viewport row `y`, none past its ends. A
     /// transcript shorter than the viewport sits at its bottom, against the
-    /// composer, as Amp grows its thread upwards.
+    /// composer, so the thread grows upwards.
     fn at(&self, y: usize) -> Option<usize> {
         let top = self.top();
         let pad = match top {
@@ -1134,7 +1134,7 @@ fn stops(doc: &dyn Document, index: usize) -> Vec<Option<String>> {
 /// Where an overlay's top-left cell goes: centred across the screen, and
 /// in the transcript viewport when it fits there.
 /// `row` with the faint attribute held through every SGR it sets: behind an
-/// overlay the transcript keeps its colours, darkened, as Amp's does.
+/// overlay the transcript keeps its colours, darkened.
 fn faint(row: &str) -> String {
     let mut out = String::from("\x1b[2m");
     let mut rest = row;

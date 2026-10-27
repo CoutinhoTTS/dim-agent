@@ -646,7 +646,8 @@ struct App {
     last_pulse: u64,
     /// The most message rows the queue strip has shown in this run: the
     /// strip keeps that height as the queue drains, so the composer does
-    /// not hop while messages leave; the next run starts afresh.
+    /// not hop while messages leave; an empty queue or the next run starts
+    /// afresh.
     queue_rows: usize,
     /// Every committed block, oldest first, as its source: both interfaces
     /// lay it out again from here (a scrollback rewrite, the fullscreen
@@ -737,7 +738,7 @@ struct App {
     upgrade: Option<UpgradeDialog>,
 }
 
-/// Widest the fullscreen command palette is drawn (Amp's).
+/// Widest the fullscreen command palette is drawn.
 const OVERLAY_PALETTE_WIDTH: usize = 80;
 /// Widest a fullscreen picker is drawn.
 const OVERLAY_LIST_WIDTH: usize = 100;
@@ -2393,7 +2394,13 @@ impl App {
         frame.dock = live.len();
         if self.prompt.is_none() {
             let queued = self.queued();
-            self.queue_rows = self.queue_rows.max(queued.len().min(QUEUE_ROWS));
+            // An empty queue draws no strip; the composer keeps its row and
+            // the strip's rows are given back above it.
+            self.queue_rows = if queued.is_empty() {
+                0
+            } else {
+                self.queue_rows.max(queued.len().min(QUEUE_ROWS))
+            };
             if self.queue_rows > 0 {
                 live.extend(queue_strip(&queued, self.queue_rows, cols, &self.palette));
             }
@@ -2714,6 +2721,10 @@ impl App {
 
         let markdown = &self.markdown;
         let render = |source: &str, width: usize| markdown.render(source, width, 0);
+        let fresh = self.commits.plan(&settled_ids).fresh;
+        // A parked stream pairs only with an answer that has not gone out:
+        // an earlier answer with identical text is already in scrollback.
+        settled_assistant.retain(|b| fresh.iter().any(|id| id == b.id));
         let mut plan = self.planner.plan(
             SESSION_REVISION,
             &live_text,
@@ -2790,7 +2801,6 @@ impl App {
                 }
             }
         }
-        let fresh = self.commits.plan(&settled_ids).fresh;
         for id in fresh {
             let Some(index) = snapshot.rows.iter().position(|r| r.row_id == id) else {
                 continue;
@@ -3114,7 +3124,7 @@ impl App {
         }
     }
 
-    /// Fullscreen's bottom border label, Amp's status corner: the run
+    /// Fullscreen's bottom border label, the status corner: the run
     /// status, the slot (a notice in the highlight colour) and the approvals
     /// mode when it is not the default one.
     fn dock_status(&self, run: Option<&str>) -> Option<String> {
@@ -3256,7 +3266,8 @@ const QUEUE_ROWS: usize = 5;
 /// The queue, drawn in a titled border above the composer: the next message
 /// to run reads at the top. `height` message rows are drawn (at least the
 /// queue's, at most [`QUEUE_ROWS`]), blank past the queue's end, so the
-/// strip holds its height while the queue drains.
+/// strip holds its height while the queue drains. An empty queue is not
+/// drawn at all.
 fn queue_strip(items: &[(String, String)], height: usize, cols: usize, p: &Palette) -> Vec<String> {
     use crate::ui::render::panel::bordered;
     use crate::ui::text::truncate_cells;
@@ -3434,8 +3445,8 @@ fn labeled_rows(pairs: &[(&str, &str)], body_width: usize) -> Vec<String> {
     rows
 }
 
-/// The working directory, `~` for the home, and the git branch: what Amp
-/// writes in its prompt box's bottom border.
+/// The working directory, `~` for the home, and the git branch: what the
+/// prompt box writes in its bottom border.
 fn workspace_label(branch: &str) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -3502,7 +3513,7 @@ type Painter<'a> = &'a dyn Fn(&str) -> String;
 /// Rounded box drawing around `rows`, sized to `cols` with the common
 /// margin. Rows that are too long are cut to the inner width. `edge` paints
 /// the border characters. `status`, plain text painted by `label`, is set
-/// into the top border (`╭─ status ───╮`), Amp-style.
+/// into the top border (`╭─ status ───╮`).
 fn boxed(
     rows: &[String],
     cols: usize,
@@ -3537,7 +3548,7 @@ fn boxed(
 }
 
 /// One border row `outer` columns wide between `corners`: a styled label
-/// after `─ ` on the left, another before ` ─` on the right, as Amp's prompt
+/// after `─ ` on the left, another before ` ─` on the right, as the prompt
 /// box carries them. A label that does not fit is left out, the right one
 /// first.
 fn border_line(
@@ -3909,7 +3920,6 @@ mod tests {
         let three: Vec<_> = (1..=3).map(item).collect();
         let full = queue_strip(&three, 3, 80, p);
         assert_eq!(queue_strip(&three[..1], 3, 80, p).len(), full.len());
-        assert_eq!(queue_strip(&[], 3, 80, p).len(), full.len());
     }
 
     /// A finished command keeps the status row its running block had.

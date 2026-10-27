@@ -296,10 +296,10 @@ pub fn render(state: &PaletteState, rows: &[Row], width: usize, p: &Palette) -> 
 }
 
 /// Rows above the list in the fullscreen palette: a gap, the query row and
-/// a gap, as Amp spaces it.
+/// a gap.
 pub const OVERLAY_QUERY_ROWS: usize = 3;
 
-/// The fullscreen palette (Amp's command palette): a box titled
+/// The fullscreen command palette: a box titled
 /// `Command Palette` with its own `> query` row over `page` rows of
 /// commands. The query row is the box's third row.
 pub fn render_overlay(

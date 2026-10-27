@@ -688,7 +688,7 @@ fn enabled(config: &McpServerSettings) -> bool {
 fn connection(port: &Publication, generation: &Generation) -> Arc<McpConnection> {
     Arc::new(McpConnection {
         service: generation.service.clone(),
-        released: port.released.clone(),
+        released: Some(port.released.clone()),
         withdrawn: generation.withdrawn.clone(),
     })
 }

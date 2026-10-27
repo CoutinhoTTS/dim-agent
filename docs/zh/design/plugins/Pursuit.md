@@ -1,6 +1,6 @@
 # Pursuit
 
-状态：已实现（[#422](https://github.com/arcships/dim/issues/422)，里程碑 M2；维护者的确认记录在 [§12](#12-ready-确认)）。作用域：对 [Goal](Goal.md) 的 Session 部分与分支部分的修订，不新增 Capability（[ADR 002](../../adr/002-plugin-scope.md)）。语言：TypeScript，放在 Goal 的包 `runtime/plugins/goal` 里（[Goal §10](Goal.md#10-实现)）。依赖：Goal（P5，已由 [#199](https://github.com/arcships/dim/pull/199) 实现）、C5（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）；都已交付。里程碑 M2，不在当前计划内（[路线图](../../../design/roadmap.md) D3）。
+状态：已实现（[#422](https://github.com/arcships/dim/issues/422)，里程碑 M2；维护者的确认记录在 [§12](#12-ready-确认)）。§13 是随 [#427](https://github.com/arcships/dim/issues/427) 决定的修订，随其线结束一起实现。作用域：对 [Goal](Goal.md) 的 Session 部分与分支部分的修订，不新增 Capability（[ADR 002](../../adr/002-plugin-scope.md)）。语言：TypeScript，放在 Goal 的包 `runtime/plugins/goal` 里（[Goal §10](Goal.md#10-实现)）。依赖：Goal（P5，已由 [#199](https://github.com/arcships/dim/pull/199) 实现）、C5（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）；都已交付。里程碑 M2，不在当前计划内（[路线图](../../../design/roadmap.md) D3）。
 
 需求（[功能列表](../../../feature-list.md)，Agent 行为）：朝明确的目标持续工作，记录完成或受阻，**并且由评审者而不是干活的模型判断是否完成**。
 
@@ -61,7 +61,7 @@
 
 ### 4.2 评审分支
 
-Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `branch/start` 分发时追加的是 Append，不算在内，与 TimelineTree 的创建规则相同）：首行为 `<dim-goal kind="evaluate" branch="B" evaluation="N">` 的用户文本，且 `B` 是本分支 `branch/start` 的 `parent`。
+Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `branch/start` 分发时追加的是 Append，不算在内，与 TimelineTree 的创建规则相同）：首行为 `<dim-goal kind="evaluate" branch="B" evaluation="N">` 的用户文本，且 `B` 是本分支 `branch/start` 的 `parent`。随 #427，识别改为读这条线的来源（[§13](#13-结束评审者随-427)）。
 
 | 消费的事件 | 条件 | 动作 |
 | --- | --- | --- |
@@ -159,8 +159,34 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 | 回复没有结论时追问一次，之后按 `continue` 处理 | 否则评审会在没有结果的情况下结束，或无限追问 |
 | 评审回合失败或取消、创建失败时写 `failed` | 这些是终态事实；没有它，目标会保持 active 却没有评审在进行 |
 
-相对上一版删除了：声明和重新打开状态、截止时间与 `evaluationTimeoutSeconds`、`goal/evaluation-reported` 记录、评审期间针对用户输入的特殊规则，以及停止和退役分支的需求。
+相对上一版删除了：声明和重新打开状态、截止时间与 `evaluationTimeoutSeconds`、`goal/evaluation-reported` 记录、评审期间针对用户输入的特殊规则，以及停止和退役分支的需求。这对本设计仍然成立，本设计不提出需求。结束一条线现在是 [Timeline 分支](../timeline-branches.md#10-结束一条线) 的通用操作，§13 使用它。
 
 ## 12. Ready 确认
 
 没有待定的产品决策。维护者已于 2026-10-26 确认本设计 Ready（[#146](https://github.com/arcships/dim/issues/146)），包括 [Goal](Goal.md#附录-e-假设) 中 A16 的折叠例外（2026-10-22 决定）。它已由 [#422](https://github.com/arcships/dim/issues/422) 实现，[Goal](Goal.md) 现在描述两种裁判。
+
+## 13. 结束评审者（随 #427）
+
+随 [Timeline 分支](../timeline-branches.md)（[#427](https://github.com/arcships/dim/issues/427)）决定，随其线结束一起实现。在那之前，§4.2 照原文成立。所有改动都在 Goal 的部件里。
+
+| # | 改动 |
+| --- | --- |
+| E1 | **从线的来源识别。** 当 `treeCommands.info(自己的 id)` 的 `source = {kind: "host", operation_id: "goal:evaluate:N"}` 且 `parent = B` 时，这条线上的 Goal 担任评审者角色，不再读 prompt 的第一行。prompt 保留 `<dim-goal kind="evaluate" …>` 这一首行，只给模型看（§5） |
+| E2 | **Goal 结束它的评审者。** 评审 `N` 的结论或失败已经决定（§4.1），或者之后的目标变更已经取代了 `N`，`N` 就在 `B` 上了结。了结之后，`B` 上的 Goal 通过一个写入前复核的自有任务，以 `treeCommands.end(E, {kind: "host", operation_id: "goal:evaluate:N"})` 结束 `E`。如果 `B` 的历史里已经有 `E` 的 `branch/ended`，Goal 什么也不做。加载时用同样的检查补齐：已记录的评审者，若它的 `N` 已了结、而 `B` 上没有它的 `branch/ended`，就结束它 |
+| E3 | **结论之前的外部结束算 `failed`。** `N` 仍是当前评审时，如果 `B` 上 `E` 的 `branch/ended` 出现在 `E` 的结论之前，就判为 `failed`：暂停（`evaluation_failed`），与 §4.1 相同 |
+
+接口：
+
+- Goal 的分支部件新增 Dispatcher key `branch/ended`。
+- 分支 TypeScript 绑定在现在暴露 `create`、`input` 的地方暴露 `end(id, source)` 和 `TimelineInfo.source`：
+  - 生成的 `npm/branch-services.d.ts`；
+  - [绑定表](../../../design/branch-typescript.md)中的 `treeCommands` 一行；
+  - Goal 在 `branch.ts` 里自己的 `TreeCommands` 类型。
+
+验收，使用假模型，放在 `goal.test.mjs` 和 `transport_flow/goal.rs` 中：
+
+1. 评审者从来源被识别。prompt 首行相同、但 operation id 不同的 host 线不担任任何角色。
+2. `DONE`、`CONTINUE`、`BLOCKED` 或 `failed` 决定之后，`E` 恰好被结束一次，来源是 `goal:evaluate:N`，`B` 上记录它的 `branch/ended`。
+3. 被取代的 `N`（例如 `B` 上的一次 `pause` 之后）会结束 `E`。
+4. 重启时，若 `N` 已了结而没有 `branch/ended`，加载时结束 `E` 一次。`branch/ended` 已经存在时，什么也不写。
+5. 用户在结论之前结束 `E`，目标暂停（`evaluation_failed`）。用户在结论之后结束 `E`，不决定任何事。

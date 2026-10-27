@@ -1,440 +1,357 @@
 # PluginManager
 
-状态：草案。总体设计：[overview §4 插件目录](../overview.md)，[Settings、Mcp、SkillsCatalog 变更](../overview.md)，[约定](../overview.md)，[多节点](../overview.md)，[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3（依赖 [#3](https://github.com/arcships/dim/issues/3)；非 Rust Capability 插件依赖 [#4](https://github.com/arcships/dim/issues/4)；对端节点依赖 [#5](https://github.com/arcships/dim/issues/5)）。语言：Rust。
+状态：草案，2026-10-27 已与维护者对齐。需求：[插件管理](../../../design/plugin-management.md)（[#432](https://github.com/arcships/dim/issues/432)）。Issue：[#3](https://github.com/arcships/dim/issues/3)、[#384](https://github.com/arcships/dim/issues/384)。作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程：安装按宿主进行）。语言：Rust。里程碑：§0 中标出的部分属于 M1。
 
-> **重新设计时的改动。** (1) [#36](https://github.com/arcships/dim/issues/36)：依赖方向反过来。PluginManager 依赖内容所有者（Mcp、SkillsCatalog 等），通过它们的类型化操作把插件包内容交给它们；所有者不依赖 `pluginContents`，PluginManager 失败或重载时，它们照样用用户和项目来源工作。(2) [#41](https://github.com/arcships/dim/issues/41)：PluginManager 在写入或重新启用插件包的行之前校验它；代码行不在 `apply` 中检查完整性（那时 loader 已经执行过入口）。启用的插件包是可信的（ADR 003 D4）；安装后对文件的篡改不在防护范围内。
+PluginManager 保存一个宿主的插件配置：装了哪些插件，它们从哪里来，每个名字使用哪个插件，哪些名字被关闭。它把这份配置保存在自己的文件 `plugins.json` 中，格式是 Dim 自己的格式。它不保存运行时状态。插件是否已加载、正在运行或已失败，是 rutis 的状态，从 rutis-loader 读取。一个所有者持有什么内容（skill、MCP 服务器、hook），是该所有者的状态。PluginManager 通过向所有者下达命令来执行配置变更：插件代码交给 rutis-loader，内容交给 SkillsCatalog、Mcp 和 Hooks。每个所有者自己做决定，自己保存状态。
 
-> **P3：按 rutis 现有能力重新设计。** rutis 是外部依赖，本文向 rutis 提出的需求已撤回（[原则 §4 第 8 条](../../../architecture/rust-agent/principles.md)）。
+一个插件是一个带有清单的目录。它可以带代码（TypeScript 或 Python 写的 rutis 插件），可以带内容（skill、MCP 配置、hook），也可以两者都带。插件按**名字**识别。可以安装多个同名插件，但同一时间只使用其中一个。打开另一个，就会替换正在使用的那个。内置插件就是这样被替换的。
 
-PluginManager 是一个进程插件（[ADR 002](../../adr/002-plugin-scope.md)：安装按宿主进行）。它从 Git marketplace、本地路径或 Git URL 将插件包安装到目标节点上；通过类型化的 Settings 操作将插件意图（安装、启用、节点绑定、包路径）记录到 loader 行中；并将已启用包的类型化内容发布为命名进程服务 `pluginContents`。内容所有者（SkillsCatalog、Mcp、Hooks、Workflow，任意语言）按名称依赖 `pluginContents`，定义各自的内容类型 key，并读取它们能理解的内容；PluginManager 对它们一无所知。包启用后其代码即运行：没有宿主本地批准，因为安装和启用是经管理方法完成的宿主配置，不属于 Approval 与 Permission 的范围，后两者只管 agent 决策引起的动作（[overview 约定](../overview.md)）。包从不自动升级。PluginManager 只处理结构性操作（安装、启用、禁用、更新、移除），并且是任何插件行上结构性字段的唯一写入方，包括 [RemoteGateway](RemoteGateway.md) 等内置插件的 `enabled` 字段；每个插件声明自己业务配置的 schema，业务配置经 Settings 类型化操作写入它的各个具名 Settings 来源，从不经过 PluginManager。
+## 0. 实施边界
+
+| 部分 | M1（2026-11-01） | 之后 |
+| --- | --- | --- |
+| `plugins.json`、默认配置文件、启动层（§2、§3.1） | 是 | |
+| 从本地路径或 Git 安装、更新、移除、列出（§3.2–§3.6） | 是 | marketplace |
+| 插件代码：创建、打开/关闭、替换、重新加载 loader 行（§3） | 是，TypeScript 和 Python，前提是运行时已经提供（§2.5） | |
+| `plugin.*` 管理方法和 `dimcode plugin` 命令（§6、A.1） | 是 | 变更的客户端通知 |
+| 通过 Session 部件提供的 agent 工具（§6） | 是 | |
+| 默认 CLI 加载默认插件（goal、web、session-title、workflow、scheduler） | 是 | |
+| 每个插件在运行时自己登记 Settings 来源（§9 R1） | 是，内置插件和 TypeScript 插件一起 | |
+| 内容种类：skill、MCP 配置、hook（§3、§9 R2） | skill 和 MCP，前提是它们的所有者按时落地 | hook（Hooks 属于 M2） |
+
+M1 的验收是：用户或 agent 写一个 TypeScript 插件，从本地路径安装它，使用它的工具，修改它并重新加载它，变更不重启就生效；默认 CLI 启动时已加载默认插件。插件代码需要运行时，运行时由 [#476](https://github.com/arcships/dim/issues/476) 提供。
 
 ## 1. 结构
 
 ```mermaid
 flowchart LR
-  subgraph CN["App Server 进程，控制节点"]
-    PM["PluginManagerPlugin<br/>plugin.* 方法、包存储、<br/>pluginContents"]:::new
-    SET["Settings<br/>loader 行上的类型化操作"]
-    LOADER["rutis Loader"]
-    RPC["Rpc<br/>读取 managementMethods"]
-    CONS["内容所有者<br/>SkillsCatalog、Mcp、Hooks、Workflow"]
+  subgraph AS["App Server process"]
+    PM["PluginManager<br/>plugins.json, plugin.* methods"]:::new
+    LOADER["rutis-loader<br/>rows: built-in, default, installed"]
+    RPC["Rpc"]
+    OWN["Content owners<br/>SkillsCatalog, Mcp, Hooks"]
+    SET["Settings"]
+    CODE["Plugin code rows"]
+    PT["PluginTools (Session part)<br/>plugin tools"]:::new
   end
-  subgraph NODE["每个已配置节点，本地或对端"]
-    SVC["该节点的<br/>FileStorage、HostPlatform"]
-    CODE["包代码行<br/>启用时加载"]:::new
-  end
-  PM --> SET
-  PM --> LOADER
-  PM -->|"按节点逐个操作"| SVC
-  RPC -->|"plugin.* managementMethods"| PM
-  CONS -->|"按自有类型 key 取来源、changed"| PM
-  CODE -->|"在 apply 中校验完整性"| SVC
+  RPC -->|"plugin.* (managementMethods)"| PM
+  PM -->|"create, set_disabled, remove, reload"| LOADER
+  LOADER --> CODE
+  PM -->|"register / withdraw (if present)"| OWN
+  CODE -->|"register own Settings sources"| SET
+  PT -->|"same operations"| PM
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-所有依赖都是同一作用域的进程服务（[ADR 002 D3](../../adr/002-plugin-scope.md)）。内容所有者依赖 `pluginContents`，按 D3 予以接受：安装、启用或移除包会以数据更新（`changed`）的方式改变已发布的来源，从不触发重载；而 PluginManager 重载（升级、崩溃）会重载内容所有者。Rpc 按调用查找 PluginManager 注册到 `managementMethods` 的命名空间 `plugin`，不随它重载（[方法 §3.2](../contracts/session-boundary.md#32-管理方法)）。PluginManager 重载是少见的结构性事件，它向内容所有者的传播被记录在案，而非被阻止。包代码行是普通的 loader 行：它们提供其代码在 `provides` 中声明的命名服务（例如 `modalityAdapter`），消费方按服务名和作用域收集它们；它们把自己的工具注册到 `toolRegistry`，把方法命名空间注册到 `sessionMethods`；当某一行卸载时，其注册被撤回，其依赖方按同一规则重载。离线对端节点上的代码行不会卸载：其导入的服务保持注册并以 `node_unavailable` 使调用失败，其依赖方既不重载也不变为 Pending（对 [#5](https://github.com/arcships/dim/issues/5) 的要求，见 [§9](#9-向机制所有者提出的需求)）。
+- PluginManager 是一个进程行。它是锁定的（§2.3）：它不能被关闭，也不能被替换，因为没有东西能把它重新打开。
+- 它注入 loader 句柄和 `managementMethods`。它只在内容所有者存在时读取它们（`Option<Keyed<_>>`，不是门槛）：缺少某个所有者，只跳过那一种内容。
+- 它向 `partRegistry` 登记一个 Session 部件 `PluginTools`。该部件向 Session 的 `toolRegistry` 登记插件工具；每次工具调用都交给 PluginManager 的进程服务。
+- 所有者从不查找插件，也从不读取 `plugins.json`。
 
-| 部分 | 作用域 | 依赖 | 提供 |
-| --- | --- | --- | --- |
-| `PluginManagerPlugin` | 进程，控制节点 | Settings（loader 可编辑层上的类型化操作）、控制节点上的 `pluginFiles`（扩展）、rutis Loader、每个已配置节点的 `FileStorage` 与 `HostPlatform` | `pluginContents` 进程服务；把 `plugin`（`plugin.*`）注册到 `managementMethods` |
-| 包代码行 | 进程，位于包所在节点 | 该节点的 `FileStorage`、代码所声明的依赖 | 在其 `provides` 中声明的命名服务；在使用时读取自己的业务配置（自己的各个具名 Settings 来源与 schema） |
-| 内容所有者 | 进程 | `pluginContents` | —（各自定义自己的类型 key） |
+## 2. 数据
 
-此处定义的契约：包清单 `dim-plugin.json` schema 2、marketplace 索引 `dim-marketplace.json`、`pluginContents` 服务及其 `ContentSource` 形态（[语言中立](../../adr/002-plugin-scope.md)，A.3；Rust 绑定见附录 G）、包目录布局、代码行完整性检查、`plugin.*` 方法。依赖的契约：loader 可编辑层上的类型化 Settings 操作（#3），用于插件意图和结构性字段；控制节点上的 `pluginFiles`（扩展）；rutis-loader `Loader`（`entries`、`reload`、`restart`、`LoaderChanged`）；包所在节点的 `FileStorage` 与 `HostPlatform`（对端节点：经 rutis 链路导入）；[方法](../contracts/session-boundary.md)契约。这些被依赖的服务是现有的类型化 Rust 服务，PluginManager 作为 Rust 插件直接使用它们；将它们按名称暴露给非 Rust 代码行是 [#4](https://github.com/arcships/dim/issues/4) 的工作。PluginManager 从不调用内容所有者，也从不在代码中写出任何内容类型 key。
+### 2.1 插件目录及其清单
 
-## 2. 数据与状态
-
-```mermaid
-flowchart TB
-  subgraph LEL["Loader 可编辑层，经 Settings"]
-    MK["Marketplace 注册"]
-    PR["按节点和 id 的包意图<br/>版本、来源、commit、指纹、<br/>内容、启用；代码行"]
-  end
-  subgraph PS["每个节点上的包根目录，经其 FileStorage"]
-    PKG["包目录<br/>按指纹内容寻址"]
-    STG["暂存区"]
-  end
-  CACHE["Marketplace 克隆与索引<br/>控制节点 pluginFiles（扩展）"]
-  MEM["pluginContents 来源与 revision<br/>内存"]:::new
-  PR -->|"apply 及每次变更：校验"| PKG
-  PKG -->|"发布"| MEM
-  classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
-```
-
-loader 行中的包意图是持久状态；`plugin.list` 由 loader 条目投影而来，从不来自单独的存储。已发布的来源在 `apply` 时从意图重建（校验每个已启用包），并在每次操作后原地更新，同时递增 revision。每插件业务配置既不在行中，也不在 PluginManager 中：每个插件声明其 schema，配置经 Settings 类型化操作写入它的各个具名 Settings 来源，插件在使用时读取，因此配置从不重载任何东西（[ADR 002 D4](../../adr/002-plugin-scope.md)、A16）。包字节存放在其所在节点的包根目录下，marketplace 缓存在控制节点的 `pluginFiles`（扩展）中。没有任何内容是 Session 事实。
-
-## 3. 流程
-
-### 3.1 安装与发布
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant PM as PluginManager
-  participant PS as Package store on node
-  participant S as Settings
-  participant L as Loader
-  participant O as Content owner
-  C->>PM: plugin.install 来源、节点
-  PM->>PM: 锁定节点和 id
-  PM->>PS: 暂存：拉取并校验摘要
-  PM->>PS: 提交：原子 rename
-  PM->>S: plugins.install，带期望 revision
-  S->>L: 包意图与代码行
-  PM->>PM: 发布来源，递增 revision
-  PM-->>C: id、指纹
-  PM-->>O: changed
-  O->>PM: 取其自有类型 key 的来源
-```
-
-纯内容包一经发布即生效；所有者在 `changed` 时自行对齐，从不接收推送。已启用包的代码行立即加载；只有在其运行时不可用时才处于 Pending。
-
-### 3.2 启用、禁用与代码生命周期
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant PM as PluginManager
-  participant S as Settings
-  participant L as Loader
-  participant K as Code row
-  C->>PM: plugin.set_enabled id、true
-  PM->>S: plugins.set_enabled，带期望 revision
-  S->>L: 启用代码行
-  L->>K: apply 校验包的完整性
-  C->>PM: plugin.set_enabled id、false
-  PM->>S: plugins.set_enabled
-  S->>L: 禁用代码行
-  L->>K: dispose
-  PM-->>C: dispose 完成后返回
-```
-
-代码行在自身的 `apply` 中检查完整性；不匹配时以 `integrity_failed` 失败并停止服务。不询问批准：包之所以运行，是因为本地管理员启用了它。禁用代码会卸载该行；其依赖方按 D3 重载，使用了它所提供内容的在途轮次可能失败。该代价被记录在案，而非被阻止。
-
-### 3.3 显式更新，从不自动
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant PM as PluginManager
-  participant PS as Package store
-  participant S as Settings
-  C->>PM: plugin.marketplace.update
-  PM->>PS: 仅重新拉取索引
-  PM-->>C: commit、updateAvailable 标记
-  C->>PM: plugin.update id、expectedRevision
-  PM->>PS: 暂存并提交新的指纹目录
-  PM->>S: plugins.update 版本、指纹
-  Note over PM,S: 代码行在校验后基于新的指纹目录重启
-```
-
-marketplace 刷新只标记 `updateAvailable`；更改已安装的包始终需要显式的 `plugin.update`（决策 E22）。
-
-## 4. 时序与冲突
-
-```mermaid
-sequenceDiagram
-  participant PM as PluginManager
-  participant PS as Package store
-  participant S as Settings
-  participant C as Client
-  PM->>PS: 提交
-  alt 在 Settings 写入前中断
-    PM-->>C: operation_interrupted，无意图，目录稍后回收
-  else 在 Settings 写入后中断
-    PM-->>C: operation_interrupted，意图已存在，重试得到 plugin_exists
-  end
-```
-
-安装的顺序为暂存、提交、Settings 写入；Settings revision 是提交点，因此中断从不会留下半注册的包。
-
-| 场景 | 结果 | 负责方 |
-| --- | --- | --- |
-| 代码行在其提供的内容正被使用时被禁用 | 该行卸载；依赖方重载（D3）；受影响的在途轮次可能失败 | Loader、代码行 |
-| 代码运行时包被更新 | 代码行基于新的指纹目录重启；依赖方重载（D3） | Loader、代码行 |
-| 安装后节点离线 | 该节点上的操作 `node_unavailable`；其来源被撤回；其代码行的服务以 `node_unavailable` 使调用失败；不发生重载，也没有任何东西变为 Pending；其他节点不受影响 | PluginManager |
-| 插件运行时其业务配置变更（Settings 类型化操作） | 业务数据更新与通知；不重载；下次使用读取新值 | 插件、Settings |
-| 同一 id 的两次安装 | 第二次等待锁，然后 `plugin_exists` | PluginManager |
-| 分支使用某包的 Skill 时该包被禁用 | 分支保留其已采纳的提示词，直至重新采纳 | Skills 所有者 |
-| PluginManager 重载 | 内容所有者随之重载（D3）；重新激活前 `plugin.*` 返回 `unknown_method`，Rpc 不重载；在途的 install/remove `operation_interrupted` | PluginManager |
-
-完整表格：[附录 B](#附录-b-完整冲突表)。
-
-## 5. 上下文映射
-
-无直接的模型可见效果。PluginManager 不写输入，不提供工具，也不注册提示词来源。包内容只通过其所有者、以该所有者的形式到达模型：Skills 通过 Skill 提示词来源（按分支采纳，压缩后作为配置重放，子分支从已采纳前缀继承），MCP 与代码行工具通过工具声明和 `ToolResult.content`，Hooks 输出通过 Session 输入。非交互 Session 的差异仅由所有者定义。模型从不看到包 id、指纹、marketplace 数据、配置或诊断。
-
-## 6. 接口（摘要）
-
-| 接口 | 类型 | 用途 |
-| --- | --- | --- |
-| `plugin.marketplace.list/add/remove/update/search/view` | 管理方法 | Marketplace；`update` 仅刷新索引 |
-| `plugin.install/update/list/set_enabled/reload/remove` | 管理方法 | 包生命周期；`set_enabled` 也用于开关内置插件行 |
-| `pluginContents`（`sources`、`changed`） | 进程服务，无 key | 通用内容发布 |
-| 代码行完整性检查 | Loader 行规则 | 代码行在启用且包校验通过时加载 |
-| `dim-plugin.json` v2、`dim-marketplace.json` v1 | 文件格式 | 包与 marketplace 描述 |
-| 类型化 Settings 操作 `plugins.*`、`marketplaces.*` | 依赖（#3、ADR 002 D4） | 持久化意图（仅结构性） |
-| CLI | `/plugins`、`/plugin`、`/reload-plugins`、`dimcode plugin …` | 用户入口 |
-
-详见：[附录 A](#附录-a-接口细节)。
-
-## 7. 安全
-
-安装、启用和移除是管理方法，只由本进程插件提供，从不提供给已配对的远程设备（[方法](../contracts/session-boundary.md)）；RemoteGateway 从不提供它们。包代码一旦加载即为受信任的原生进程代码（AGENTS 规则 11）。它运行是因为本地管理员安装并启用了它，不是 agent 的决策，因此不归 Approval 与 Permission 管，也没有宿主本地批准：这项配置的安全由管理员负责。Git 拉取不运行任何仓库 hooks 或子模块；安装时从不执行包文件；每次加载都重新检查完整性。内容所有者在其解释执行的可执行内容（Hooks、MCP、workflows）启用时运行它，没有批准步骤。插件的业务配置在它的各个具名 Settings 来源中，密钥由插件自己处理（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）；PluginManager 从不读取它，密钥从不进入行、`plugin.list`、诊断或内容来源。代码贡献管理方法的包只有在本地管理员启用后才扩展宿主管理面。
-
-## 8. 规则检查
-
-规则：[principles §1 与 §4](../../../architecture/rust-agent/principles.md)，[ADR 002](../../adr/002-plugin-scope.md) D1–D5。
-
-| 规则 | 本文如何符合 |
-| --- | --- |
-| §4.1 改别的模块拥有的状态时写指令事件 | loader 行是没有 Timeline 的进程状态；PluginManager 只通过所有者的类型化写入操作（基于 #3 的 Settings `plugins.*`）改动它们，从不写入其他插件的业务配置。 |
-| §4.2 交接后不能撤回 | 不适用：PluginManager 不向其他模块交接 Timeline 对象；已发布来源的变化只在所有者重新采纳时才影响分支。 |
-| §4.3 只用 before 回调在写入前干预 | 不适用：PluginManager 不注册 before 回调，也不在 Session 或 RPC 入口加检查；代码行完整性检查在该行自己的 `apply` 中进行。 |
-| §4.4 核心机制不带业务含义 | `pluginContents` 发布不透明的类型化来源；Loader 与 Rpc 不为任何插件做特殊处理。 |
-| §4.5 决定前读完整个批次 | 不适用：PluginManager 不读任何 Timeline 事件。 |
-| §4.6 模型上下文只含交接后被读取的事件 | 包内容只通过其所有者已采纳的提示词、工具或输入规则到达模型。 |
-| §4.7 插件之间只通过公开事件和服务交互 | PluginManager 从不调用内容所有者；所有者读取 `pluginContents`，各插件的业务配置只经 Settings 访问。 |
-| §4.8 向机制所有者提通用需求 | 类型化 loader 操作（#3）、为非 Rust 代码按名字暴露服务（#4）与节点离线行为（#5）在 §9 中提出。 |
-| §4.9 只有后续决定要用的事实才进 Timeline | PluginManager 不写 Timeline 事件；意图留在 loader 行，包留在节点存储，客户端读取 `plugin.list`。 |
-| §1 Capability 与 App Server 边界 | PluginManager 是位于自己 crate 的进程插件，不是 Capability；App Server 只分发它注册到 `managementMethods` 的命名空间。 |
-| ADR 002 D1 作用域跟随状态所有者 | 安装按宿主进行，因此 PluginManager 是进程作用域。 |
-| ADR 002 D2 不设接线模块 | 内容所有者与代码行的消费方按名字收集服务；没有接线模块。 |
-| ADR 002 D3 依赖跟随作用域 | 所有依赖都是进程服务；PluginManager 与代码行的重载传播是已记录的少见结构性事件。 |
-| ADR 002 D4 结构性配置与业务配置分离 | PluginManager 只向 loader 行写入结构性意图（安装、启用、禁用、更新、移除），并且是 RemoteGateway 的 `enabled` 等结构性字段的唯一写入方；业务配置属于各插件的各个具名 Settings 来源。 |
-| ADR 002 D5 合同语言中立 | `pluginContents`、清单与各方法以中立形式给出；附录 G 只是绑定。 |
-
-## 9. 向机制所有者提出的需求
-
-### 9.1 loader 可编辑层上的类型化操作（[#3](https://github.com/arcships/dim/issues/3)）
-
-已撤回：rutis 是外部依赖，不向它提需求。PluginManager 使用 rutis-loader 现有的操作，作为唯一写入方自己检查版本，并在写入行之前校验插件包完整性。
-
-| 项 | 内容 |
-| --- | --- |
-| 被哪条规则挡住 | ADR 002 D4 把结构性插件意图放在 loader 行中，principles §4.1 与 §4.7 禁止直接修改别的模块的状态；rutis-loader 0.10 没有增加、更新或删除行的类型化写入操作。 |
-| 考虑过的现有机制 | `Loader` 的 `entries`、`reload`、`restart` 只能读取或重启行；`VolatileUpdate` 只改已有行的 `x-volatile` 字段，不能增删行；Settings 业务来源存放业务配置，不存放行；PluginManager 自有的存储会成为行的第二个事实来源。 |
-| 需要的通用能力 | 可编辑层上的类型化操作：增加、更新、删除一行，设置其 `disabled` 标志，以及设置已有行的某个字段（`x-volatile` 字段以 `VolatileUpdate` 送达，不重载），每个操作带预期 revision，原子执行，并发出变更通知；不了解包或插件。 |
-| 对序号、批次、中断、重载的影响 | 不涉及 Timeline 序号或批次；被中断的操作要么已提交其 revision，要么什么都没写；增删一行只装载或卸载该行，其依赖方按 D3 重载。 |
-| 由谁实现，对应 issue | rutis-loader，[#3](https://github.com/arcships/dim/issues/3)。包装它的 Settings 类型化操作（A.6）是 Settings 补充，列在 [overview 附录 B.2](../overview.md)。 |
-
-### 9.2 其他需求（在别处写明）
-
-| 需求 | 所有者 | 五项内容 |
-| --- | --- | --- |
-| 从对端节点导入的服务在链路断开期间保持登记，调用以 `node_unavailable` 直接失败 | rutis，[#5](https://github.com/arcships/dim/issues/5) | 见 [ExternalAgent](ExternalAgent.md) §9；PluginManager 需要它，使离线节点从不重载 PluginManager，也不使代码行的依赖方变为 Pending |
-| 运行时服务按名字暴露给非 Rust 插件 | 运行时，[#4](https://github.com/arcships/dim/issues/4) | 见 [session access](../contracts/session-access.md) §9；Node 代码行需要它来使用 `FileStorage` |
-
-## 附录 A. 接口细节
-
-### A.1 包清单 `dim-plugin.json`（schema 2）
-
-版本 1 是原 `--plugin-dir` 账号包的清单，已被 Rust 托管提供方插件取代（[App Server 契约](../../../../crates/dim-app-server/README.md#managed-provider-plugins)）；在此不可安装（A3）。
+一个插件是一个根目录下有 `dim-plugin.json` 的目录。清单中出现的键说明插件带有哪些种类。
 
 ```json
 {
-  "schemaVersion": 2,
-  "id": "acme-review",
-  "version": "1.2.0",
-  "name": "Acme review kit",
-  "description": "Review Skills and hooks",
-  "files": {"skills/review/SKILL.md": "<sha256>", "dist/index.js": "<sha256>"},
-  "contents": [
-    {"type": "skills", "path": "skills"},
-    {"type": "hooks", "path": "hooks/hooks.json"}
-  ],
-  "code": [
-    {"runtime": "node", "entry": "dist/index.js", "hostApiVersion": 2, "rutisVersion": "0.10.0"}
-  ]
+  "name": "my-tool",
+  "description": "Adds the echo tool",
+  "code": {
+    "entry": "index.ts",
+    "inject": ["partRegistry", "settings"],
+    "provides": {},
+    "instanceNames": {},
+    "config": {}
+  },
+  "skills": "skills",
+  "mcp": "mcp.json",
+  "hooks": "hooks.json"
 }
 ```
 
-| 字段 | 规则（在安装边界校验一次） |
-| --- | --- |
-| `id` | `[a-z][a-z0-9-]{0,63}`；每节点唯一（A4） |
-| `version` | SemVer；仅用于显示和比较 `updateAvailable` |
-| `files` | 除 `dim-plugin.json` 和 `.git/` 外的所有文件；相对 POSIX 路径，不含 `..`，无符号链接；未列出的文件或摘要不匹配即拒绝 |
-| `contents` | 不透明的 `type` `[a-z][a-z0-9-]*`（key 由其消费方定义：`skills`、`hooks`、`mcp`、`workflows`，R14），包内的 `path`，可选 `options` ≤ 64 KiB；只校验这一形状 |
-| `code` | 可选；`runtime: "node"` 将 `entry` 作为 rutis 运行时行加载；检查 `hostApiVersion`/`rutisVersion`；其他运行时在 #4 之前被拒绝（A1） |
-| 指纹 | 所存清单字节的 SHA-256；清单列出了每个文件的摘要，因此它绑定全部包字节。它在 `plugin.list` 和 `pluginContents` 中标识确切的包内容，并用于给包目录寻址 |
-
-### A.2 Marketplace 索引 `dim-marketplace.json`（A5）
-
-位于仓库根目录：`{schemaVersion: 1, name, plugins: [{id, version, description, keywords?, source: {path} | {git, ref?}, fingerprint?}]}`。`source.path` 位于 marketplace 仓库内；`fingerprint` 若存在，必须等于所拉取包的指纹。
-
-### A.3 `pluginContents`
-
-服务 `pluginContents`，作用域为进程，无 key，由 PluginManagerPlugin 提供；内容所有者按名称依赖它。错误是数据 `{ code, message }`。
-
-| 方法 | 类型 | 请求 | 回复 |
-| --- | --- | --- | --- |
-| `sources` | 同步 | `{ type }` | `{ revision, sources: ContentSource[] }`：可用节点上已启用且通过完整性校验的包 |
-| `changed` | 异步 | `{ after_revision }` | 一旦已发布的 revision 超过 `after_revision` 即返回 `{ revision }`；消费方通过丢弃该调用来取消 |
-
-`ContentSource`：
-
-| 字段 | 类型 | 含义 |
+| 键 | 种类 | 含义 |
 | --- | --- | --- |
-| `package` | string | 包 id |
-| `version` | string | 包版本 |
-| `fingerprint` | string | 标识确切的包字节 |
-| `node` | string 或 null | null = 控制节点 |
-| `root` | string | `node` 上的包目录 |
-| `path` | string | 声明的路径，相对于 `root` |
-| `options` | object | 来自清单 |
+| `name` | — | 插件的名字。同名插件互相替换。 |
+| `code` | 代码 | rutis 行的字段（[rutis 用法 §2](../rutis-usage.md#2-插件是一行实例挂载它的部件)），`id` 和 `name` 除外：`entry` 是目录内的路径；`inject`、`provides`、`instanceNames` 和 `config` 原样复制到行中。 |
+| `skills` | skill | 插件内的一个目录，里面是 Skill 文档，登记到 SkillsCatalog。 |
+| `mcp` | MCP | 插件内的一个文件，里面是 MCP 服务器条目，登记到 Mcp。 |
+| `hooks` | hook | 插件内的一个文件，里面是一份 hooks 文档，登记到 Hooks。 |
 
-消费方拥有自己的类型 key 与格式，并通过对 `node` 有效的服务读取文件。节点规则（A6）：节点 N 上的来源是节点 N 的内容。针对 Session 执行内容的消费方（例如 Hooks）只使用节点等于该 Session 资源节点（`SessionConfig.resource_node`）的来源；只在控制节点上读取内容的消费方忽略它无法触达的来源，并在自己的目录中报告它们。
+每个路径都是相对路径，在跟随符号链接之后在目录内解析；离开目录的路径在安装时和重新加载时被拒绝（`invalid_manifest`）。清单在这个边界上解析；所有者收到的是已经读好的文档。
 
-### A.4 包存储
+插件的业务配置（它的 Settings 来源）不在清单中：插件的代码在启动时向 Settings 登记自己的来源（§9 R1）。现在 TypeScript 行中的 `settings` 成员将被去掉。
 
-PluginManager 内部组件，不是服务：`stage`（拉取、校验）、`commit`（原子 rename）、`verify`（重新哈希）、`remove`、`fetch_marketplace`，每项都针对目标节点的 `FileStorage` 与 `HostPlatform` 运行；来源是本地路径，或带可选引用的 Git URL。未配置或其服务不可用的节点会使操作以 `node_unavailable` 失败。
+仓库自己的 TypeScript 插件（`runtime/plugins/*`）用 `dim-plugin.json` 代替它们的行文件（`web.json`、`process.json`、`settings.json`、`session-title.json`）。
 
-包存放在其所在节点上 PluginManager 的包根目录下，通过该节点的 `FileStorage` 写入（A13）。Git 通过该节点的 `HostPlatform` 运行，禁用 hooks 和子模块，仅限 `https://` 和 `ssh://`（A7）。本地路径被复制，从不被引用（A8）。目录按指纹内容寻址，因此更新从不改写运行中行正在使用的文件。
+### 2.2 `plugins.json`
 
-### A.5 方法（`managementMethods`，命名空间 `plugin`）
+`<home>/plugins.json`，只由 PluginManager 读取和写入。它只保存配置。
 
-| 方法 | 参数 | 结果 | 中断 |
-| --- | --- | --- | --- |
-| `plugin.marketplace.list` | `{}` | `[{name, url, ref, commit, fetchedAt, error?}]` | Drain |
-| `plugin.marketplace.add` | `{name, url, ref?}` | `{commit}` | Report |
-| `plugin.marketplace.remove` | `{name}` | `{}` | Report |
-| `plugin.marketplace.update` | `{name?}` | `[{name, commit, error?}]`；仅刷新索引 | Report |
-| `plugin.marketplace.search` | `{query, marketplace?}` | `[{marketplace, id, version, description, installed: [{node, version}]}]` | Drain |
-| `plugin.marketplace.view` | `{marketplace, id}` | 条目加清单摘要（`contents` 类型、是否有 `code`） | Drain |
-| `plugin.install` | `{source: {marketplace, id} \| {path} \| {git, ref?}, node?, enabled?}` | `{id, version, node, fingerprint}` | Report |
-| `plugin.update` | `{id, node?, version?, expectedRevision}` | `{version, fingerprint}` | Report |
-| `plugin.list` | `{node?}` | `[{id, version, node, builtin, enabled, status, contents, source, updateAvailable, error?}]`；内置插件行以 `builtin: true` 出现 | Drain |
-| `plugin.set_enabled` | `{id, node?, enabled, expectedRevision}`；`id` 可以指内置插件行（A17） | `{}` | Report |
-| `plugin.reload` | `{id?, node?}` | `[{id, node, status, error?}]` | Report |
-| `plugin.remove` | `{id, node?}` | `{cleanupError?}` | Report |
-
-`status`：`active`、`pending`（等待运行时）、`unavailable`（节点离线；其服务使调用失败）、`failed`（原因）、`disabled`。`install`、`update` 和 `marketplace.update` 通过该调用的进度接收器报告阶段（`fetch`、`verify`、`commit`）（[方法](../contracts/session-boundary.md)，A14）。相对 overview 目录条目新增：`update`、`marketplace.search/view`（A9）。
-
-### A.6 使用的类型化 Settings 操作（#3，拟议的 Settings 补充）
-
-| 操作 | 效果 |
-| --- | --- |
-| `plugins.install(entry, expected_revision)` | 记录包意图，并在可编辑层创建代码行 |
-| `plugins.update(id, node, version, fingerprint, expected_revision)` | 更新包意图；代码行随之变化 |
-| `plugins.set_enabled(id, node, enabled, expected_revision)` | 设置包的启用标记，并对其代码行设置 `set_disabled`；对内置插件行，设置其结构性 `enabled` 字段（为 `x-volatile` 时以 `VolatileUpdate` 送达） |
-| `plugins.remove(id, node, expected_revision)` | 移除包意图及其所有代码行 |
-| `marketplaces.save/remove` | Marketplace 注册 |
-
-`reload`、`restart` 与状态查询直接调用 `Loader`。
-
-### A.7 Capability 机制
-
-| 步骤 | 路径 |
-| --- | --- |
-| Timeline | 无写入，无 Dispatcher 订阅，无 `StateCell`；复查依据是 Settings revision |
-| 安装 | 锁定 `(node, id)`（A10），`stage`，与意图比较，`commit`，`plugins.install`，发布来源，回复；Settings 写入失败会留下一个未被引用的目录，稍后回收（A11） |
-| 发布 | `apply` 时校验每个已启用包并构建来源；每次操作后更新来源并递增 revision；校验失败的包被撤回并报告为 `failed` |
-| 代码行 | `apply` 校验完整性，否则以 `integrity_failed` 失败；`set_enabled`/`update` 通过 `Loader` 重启它们；每个代码行在使用时读取自己的业务配置 |
-| PluginManager 重载 | 内容所有者随之重载（D3）；重新激活前 `plugin.*` 返回 `unknown_method`，Rpc 不重载；在途的 install/remove 返回 `operation_interrupted`；代码行不受影响 |
-| 进程重启 | Loader 恢复各行；包重新校验；暂存区删除；孤立目录在 loader 稳定后回收 |
-
-## 附录 B. 完整冲突表
-
-| 场景 | 序列顺序 | 结果 | 决策负责方 |
-| --- | --- | --- | --- |
-| 轮次或分支中断、分支关闭、并发输入、`input/withdraw`/`input/deleted`、未结算批次、压缩、子分支切分 | — | 对 PluginManager 无影响；适用所有者的采纳规则 | 内容所有者 |
-| Session 使用某包的 Skill 时该包被禁用 | revision 递增 < 下次采纳 | 分支保留其已采纳的提示词，直至重新采纳 | Skills / PromptSourcesBranch |
-| 代码行在使用中被禁用 | — | 该行卸载；其依赖方重载（D3）；受影响的在途轮次可能失败 | Loader |
-| 同一节点上同一 id 的两次安装 | 锁，然后 Settings revision | 第二次 `plugin_exists`（跨进程时为 `plugin_settings_conflict`） | PluginManager、Settings |
-| 代码运行时包被更新 | 新指纹 | 代码行基于新目录重启；依赖方重载（D3） | Loader、代码行 |
-| 代码运行时禁用 | 禁用已持久化 < 重启 | 代码行在结算其工作后 dispose；dispose 后回复 | Loader、代码行 |
-| 安装在提交后、Settings 写入前中断 | — | `operation_interrupted`；无意图；目录被回收 | PluginManager |
-| 安装在 Settings 写入后中断 | — | `operation_interrupted`；意图已存在；重试 `plugin_exists` | 客户端读取状态 |
-| 重复或迟到的 `plugin.install` | — | `plugin_exists` | PluginManager |
-| Marketplace 更新发现更新的版本 | — | 仅 `updateAvailable`；不做任何改变 | PluginManager |
-| 安装前目标节点不可用 | — | `node_unavailable`；不写入任何内容 | PluginManager |
-| 安装后节点离线 | — | 其来源被撤回；其代码行导入的服务保持注册并以 `node_unavailable` 使调用失败；没有依赖方重载或变为 Pending（对 #5 的要求）；其他节点不受影响 | PluginManager、rutis 链路 |
-| 包所在节点与 Session 的资源节点不同 | — | 执行型消费方对该 Session 忽略此来源 | 内容所有者 |
-| 磁盘上的文件被修改 | 下次校验 | `integrity_failed`；来源被撤回；代码行失败 | PluginManager、代码行 |
-| 操作中途 PluginManager 重载或重启 | — | 按 A.7；从不重新执行拉取 | PluginManager |
-| Session 卸载/恢复 | — | 无影响 | — |
-| 客户端脱离 | — | 操作继续；回复与进度被丢弃 | Rpc |
-
-## 附录 C. 错误与恢复
-
-| 代码（`appError`） | 含义 |
-| --- | --- |
-| `manifest_invalid` | 清单或索引缺失或格式错误 |
-| `integrity_failed` | 摘要不匹配、未列出的文件、路径逃逸或符号链接 |
-| `incompatible_host` | `hostApiVersion`/`rutisVersion` 或不支持的 `runtime` |
-| `source_unavailable` | Git 拉取或路径读取失败（stderr 仅出现在诊断中） |
-| `node_unavailable` | 目标节点未配置或其服务不可用 |
-| `plugin_exists`、`plugin_not_found`、`marketplace_not_found` | 身份错误 |
-| `plugin_settings_conflict` | 过期的 `expectedRevision` |
-| `runtime_unavailable` | Node 运行时未配置；代码行 Pending |
-| `operation_interrupted` | 方法契约的 `Report` 规则；重试前先读取 `plugin.list` |
-
-移除先 dispose 代码行，再删除目录；删除失败时返回 `cleanupError`，并由垃圾回收重试。
-
-## 附录 D. 验收
-
-通过 `plugin.*` 方法进行流程测试，使用一个本地测试 marketplace 和一个自定义类型 key 的测试消费方：
-
-1. 添加、更新、搜索、查看 marketplace；无效索引 `manifest_invalid`；更新标记 `updateAvailable` 而不改变已安装的包。
-2. 从 marketplace、路径和 Git URL 安装；被篡改、含未列出文件和指纹不匹配的包被拒绝，且不写入任何内容。
-3. 纯内容包通过 `changed()` 向测试消费方发布来源而不重载它；禁用会撤回来源；移除先删除意图再删除文件；PluginManager 重载会重载测试消费方，之后它读取到相同的来源。
-4. 含 Node 代码的包一启用就加载其代码行，没有批准步骤；`plugin.update` 基于新目录重启它；禁用会 dispose 它；对 RemoteGateway 内置行调用 `plugin.set_enabled` 会以 `VolatileUpdate` 送达，不重载。
-5. 禁用一个其代码行提供测试工具的包会重载其依赖方；测试将失败的在途轮次记录为已记录在案的结果。
-6. 并发安装；过期的 `expectedRevision`；在提交后和 Settings 写入后中断。
-7. 对端测试节点：安装以其为目标；使其离线时只有它的操作及其代码行的服务以 `node_unavailable` 失败，其来源被撤回，且不发生任何重载；恢复后复原。
-8. 重启：各行恢复，完整性已校验，暂存区移除，孤立目录被回收。
-
-## 附录 E. 假设
-
-| # | 假设 | 依据 | 若被否决的影响 |
-| --- | --- | --- | --- |
-| A1 | 包代码是提供和消费命名服务的 Node 运行时行（rutis-bridge）；无动态 Rust 代码；按名称访问运行时的类型化服务需等待 #4 | Overview §4、附录 C；ADR 002 D5 | 更多 `code.runtime` 取值 |
-| A2 | 包启用后其代码即运行；没有宿主本地批准 | 决策 R6（第二轮）；overview 约定 | 代码加载前增加批准步骤 |
-| A3 | 清单 schema 2 扩展原账号包格式；v1 不再接受 | App Server README；判断 | 兼容映射 |
-| A4 | 每个 `(node, id)` 只安装一个版本 | 判断 | 并存多版本 |
-| A5 | Marketplace 索引的格式与名称 | 判断；功能清单“Git plugin marketplaces” | 格式被替换 |
-| A6 | 来源是节点内容；执行型消费方匹配 Session 的资源节点 | Overview 多节点；判断 | 消费方经导入的服务读取对端内容 |
-| A7 | Git 使用节点的 `git`，禁用 hooks/子模块，仅限 `https`/`ssh` | 判断 | 库形式的拉取器或更多协议 |
-| A8 | 本地路径被复制而非链接 | 判断（完整性） | 开发用链接模式 |
-| A9 | 新增方法 `update`、`marketplace.search/view` | 功能清单；overview §4 | 并入其他方法 |
-| A10 | 操作按 `(node, id)` 串行化 | 判断 | 仅依赖 Settings revision |
-| A11 | 未被引用的目录在 loader 稳定后被垃圾回收 | 判断 | 显式清理命令 |
-| A12 | 内容所有者依赖 `pluginContents`；PluginManager 重载会重载它们 | ADR 002 D3 | 单独托管的发布服务 |
-| A13 | 包目录通过节点的 `FileStorage` 写入 PluginManager 包根目录下（该处可用原子 rename） | 判断 | 需要每节点存储服务 |
-| A14 | 安装与更新报告进度阶段 | 方法契约进度接收器；判断 | 仅返回结果 |
-| A15 | 无自动升级，包括纯内容包 | 决策 E22 | 可选启用的自动升级设置 |
-| A16 | 每个插件声明其业务配置的 schema，业务配置经 Settings 类型化操作写入它的各个具名 Settings 来源，在使用时读取；PluginManager 没有 configure 方法 | ADR 002 D4 | PluginManager 将写入其他插件的业务配置 |
-| A17 | `plugin.set_enabled` 也设置内置插件行（例如 RemoteGateway）的结构性 `enabled` 字段；任何插件都不写自己的结构性字段 | 决策 R3（第二轮）；ADR 002 D4 | 每个插件自己写自己的结构性字段 |
-
-## 附录 F. 待对齐问题
-
-| 问题 | 描述 |
-| --- | --- |
-| #3 类型化操作 | A.6 中的 Settings 操作在此提出；其最终形态属于 Settings 补充与 #3（仅结构性意图；业务配置归各插件，ADR 002 D4） |
-| Overview SkillsCatalog 变更 | “安装与移除由 PluginManager 发起”理解为：PluginManager 发布和撤回来源，SkillsCatalog 读取它们；PluginManager 不调用 SkillsCatalog |
-| 对端节点内容 | 控制节点上的消费方是否应通过导入的资源服务读取对端节点上的内容（#5） |
-
-对 [#3](https://github.com/arcships/dim/issues/3)、[#4](https://github.com/arcships/dim/issues/4) 与 [#5](https://github.com/arcships/dim/issues/5) 的要求：见 [§9](#9-向机制所有者提出的需求)。
-
-## 附录 G. Rust 绑定
-
-Rust 内容所有者可以使用生成的绑定；A.3 中的中立形式是规范性的。
-
-```rust
-/// Binding for service `pluginContents` (process, no key).
-impl PluginContents {
-    pub fn sources(&self, type_key: &str) -> Vec<Arc<ContentSource>>;
-    pub fn changed(&self) -> tokio::sync::watch::Receiver<u64>; // revision; maps `changed`
-}
-pub struct ContentSource {
-    pub package: String,
-    pub version: String,
-    pub fingerprint: String,
-    pub node: Option<String>,
-    pub root: PathBuf,
-    pub path: PathBuf,
-    pub options: serde_json::Value,
+```json
+{
+  "version": 1,
+  "installed": [
+    {
+      "id": "my-tool",
+      "name": "my-tool",
+      "source": { "path": "/Users/me/src/my-tool" },
+      "dir": "/Users/me/src/my-tool",
+      "kinds": ["code", "skills"]
+    },
+    {
+      "id": "hooks-plus",
+      "name": "Hooks",
+      "source": { "git": "https://example.com/hooks-plus.git", "ref": "main", "commit": "4f1c…" },
+      "dir": "<home>/plugins/hooks-plus/4f1c…",
+      "kinds": ["code", "hooks"]
+    }
+  ],
+  "names": {
+    "my-tool": { "use": "my-tool" },
+    "Hooks": { "use": "hooks-plus" },
+    "web": { "off": true }
+  }
 }
 ```
 
-PluginManager 将其注册在 `TypeKey::named("pluginContents")` 下；其 `plugin.*` 方法使用[方法](../contracts/session-boundary.md)契约的 `managementMethods` 绑定。
+| 字段 | 含义 |
+| --- | --- |
+| `installed[].id` | 在已安装插件中唯一；它是记录的键，也是克隆目录的名字。必须符合 `[a-z0-9_-]{1,64}`（只用小写，所以在不区分大小写的文件系统上，两个 id 不会指向同一个目录），不能是 `builtin` 或 `default`（§7）。调用方没给时，id 是清单名字转成小写（`Hooks` → `hooks`）；转小写后和已装的重复，报 `plugin_exists`，调用方再给一个别的 id。示例中的 `hooks-plus` 是调用方给的（`--id hooks-plus`）。 |
+| `installed[].name` | 安装时或上一次重新加载时清单中的名字。 |
+| `installed[].source` | 本地目录用 `{path}`，原地使用，从不复制；Git 用 `{git, ref?, commit}`。 |
+| `installed[].dir` | 被加载的目录：本地路径本身，或 `<home>/plugins/<id>/<commit>` 下的克隆。 |
+| `installed[].kinds` | 安装时或上一次重新加载时清单带有的种类。 |
+| `names.<name>.use` | 这个名字使用哪个插件：一个已安装的 id、`"builtin"` 或 `"default"`。不存在时：如果有该名字的内置插件，就用它，否则用该名字的默认插件。 |
+| `names.<name>.off` | 用户关闭了这个名字时为 `true`。 |
+
+没有条目的名字处于出厂状态：内置插件或默认插件处于打开状态。写入时先写到同一目录下的临时文件，在它自己的可写句柄上刷盘（`sync_all`，在 Windows 上也可用），然后改名覆盖 `plugins.json`。文件无法解析时，启动失败，并给出文件路径；PluginManager 从不覆盖一个它读不了的文件。格式带有版本号；未知版本使启动失败。
+
+### 2.3 默认配置文件
+
+随 Dim 发布，只读，用 `--defaults PATH` 交给 App Server（默认 CLI 传入其发布包中的文件；开发时使用 `runtime/default-plugins.json`）。
+
+```json
+{
+  "plugins": {
+    "goal": "plugins/goal",
+    "web": "plugins/web",
+    "session-title": "plugins/session-title",
+    "workflow": "plugins/workflow",
+    "scheduler": "plugins/scheduler"
+  },
+  "locked": ["PluginManager", "Rpc", "Transport"]
+}
+```
+
+- `plugins` 把每个默认插件的名字映射到它的目录，路径相对于这个文件。默认插件和其他插件一样是一个插件目录（§2.1）。
+- `locked` 列出不能关闭、也不能切换所用插件的名字。锁定名字的其他插件仍然可以安装。锁定是产品配置；PluginManager 执行它。
+
+### 2.4 PluginManager 不保存的状态
+
+| 状态 | 所有者 | 读取方式 |
+| --- | --- | --- |
+| 有哪些行，以及它们的 `EntryStatus` | rutis-loader | `Loader::entries()`、`Loader::get(id)`、`Loader::waiting_for`；按附录 A.1 显示 |
+| 有哪些内置 rutis 插件 | App Server 的装配 | `Loader::entries()` 中 `assembly` 层的行；行 id 就是插件的名字 |
+| 从插件登记的 skill、MCP 服务器、hook | SkillsCatalog、Mcp、Hooks | 所有者自己的方法 |
+| 插件的业务配置 | 插件的 Settings 来源 | Settings |
+
+### 2.5 运行时
+
+插件代码在 Node 或 Python 的 rutis 运行时里运行。提供运行时不归 PluginManager 管：运行时怎么获取、固定哪个版本、怎么校验，运行时就绪后插件的行怎么启动，都由运行时获取的设计决定（[#476](https://github.com/arcships/dim/issues/476)，M1）。PluginManager 只负责建行；运行时还没有时，`plugin.list` 显示 rutis 给出的状态和原因。reload 只重新导入入口模块（[需求第 3 条](../../../design/plugin-management.md)）。
+
+## 3. 流程
+
+下面说明 PluginManager 的命令如何对应到 rutis-loader。loader 有两层。`assembly` 存放内置行。`plugins` 是可编辑层，rutis 不持久化它（`NoPersist`）；它存放默认插件和已安装插件的行，以及对内置行的 `disabled` 覆盖。PluginManager 建的行，行 id 是 `plugin:<name>`：每个名字一行，不会和内置行的 id 冲突，因为内置行被禁用后仍留在组合结果里。
+
+| 配置变更 | Loader 命令 |
+| --- | --- |
+| 打开名字 N，使用默认或已安装的插件 P | 先关闭 N 当前使用的插件（见下），然后按 P 的清单 `create` 行 `plugin:N` |
+| 打开名字 N，使用它的内置插件 | 先关闭 N 当前使用的插件（见下），然后 `set_disabled(N, false)` |
+| 关闭名字 N | 内置：`set_disabled(N, true)`。默认或已安装：`remove` 行 `plugin:N` |
+| 重新加载 | `Loader::reload("plugin:N")` |
+
+rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允许改名或移除它，所以替换内置插件时，要关闭它的行，并为新插件加一行。先关闭旧插件，这样新插件不会遇到同一服务的第二个提供者。rutis 会重新加载发生变化的行的依赖方。
+
+内容跟随同样的切换：当名字 N 不再使用 P 时，PluginManager 从每个存在的所有者那里撤回 P 的内容；当 N 开始使用 P 时，它向每个存在的所有者登记 P 的内容（§3.7）。
+
+### 3.1 启动
+
+1. App Server 用 home 和默认配置文件调用 PluginManager 的启动函数。该函数读取 `plugins.json` 和每个被使用插件的清单，并返回：
+   - 初始的 `plugins` 层：处于打开状态的默认插件和已安装插件的行，以及每个被关闭或使用其他插件的内置名字的 `disabled: true`；
+   - catalog 需要其 `instanceNames` 的名字（§4）；
+   - 被关闭的内置行，App Server 把它们从变为 Active 所需的行中去掉。
+2. App Server 以 `plugins` 作为可编辑层，对 `[assembly, plugins]` 进行 reconcile。被关闭的内置插件从不启动。
+3. PluginManager 的行 apply，向 `managementMethods` 登记 `plugin`，向 `partRegistry` 登记 `PluginTools`，然后在激活之后，删除残留的暂存目录，以及没有任何已安装条目引用的 Git 克隆。
+
+默认插件或已安装插件的行失败时，启动不失败；`plugin.list` 把它显示为失败，并带上 rutis 的错误。启动时不会再次登记内容：所有者保存自己的状态（§9 R2）。
+
+### 3.2 安装
+
+`plugin.install {source, id?, enable?}`。`enable` 默认为 `true`（[需求 2](../../../design/plugin-management.md)：已安装就意味着可用）。
+
+1. 调用方给了 `id` 时，先检查它（§7），已经安装的 `id` 直接拒绝（`plugin_exists`），不做任何获取。
+2. 获取（§7）：本地路径在原地检查；Git 来源先克隆到暂存目录并读取清单；没有给 `id` 时，id 取清单名字转成小写，同样检查并拒绝已安装的 id，然后才把暂存目录改名为 `<home>/plugins/<id>/<commit>`。任何失败都会删除暂存目录。
+3. 写入 `plugins.json`，加入新条目；当 `enable` 为 true 且名字未锁定时，同时写入 `names.<name>.use = id`。
+4. 如果已打开：执行"打开"（§3）。回复带上行的状态，以及被所有者拒绝的内容。
+
+安装名字已锁定的插件时，只记录它，不打开它，并在回复中说明这一点。
+
+### 3.3 打开、关闭、切换
+
+- `plugin.enable {name, use?}`：`use` 是一个已安装的 id、`"builtin"` 或 `"default"`；不给时，使用该名字当前的 `use`。对锁定的名字，当 `use` 改变时拒绝（`plugin_locked`）。写入 `names.<name>`（清除 `off`，设置 `use`），然后执行 §3 中的命令：`"builtin"` 对应内置行，其他对应 `plugin:N` 行。
+- `plugin.disable {name}`：对锁定的名字拒绝。写入 `off: true`，然后关闭该名字。
+
+当一个内容所有者本身被打开时（例如 Hooks），PluginManager 登记每个正在使用、并带有该种类的插件的内容（§3.7）。
+
+### 3.4 重新加载
+
+`plugin.reload {name}` 重新加载该名字使用的插件。宿主不监视任何文件；这个调用就是表示有东西变了的信号。
+
+1. 再次读取清单。如果名字变了，拒绝（`name_changed`）；用户用新名字重新安装它。
+2. 代码：`Loader::reload("plugin:<name>")`。rutis 重新导入插件的入口模块（它导入的模块不会被重新导入；[需求 3](../../../design/plugin-management.md)），并开始一个新的世代；它在 Session 和分支中的部件被替换，它的依赖方被重新加载。如果清单的 `code` 字段变了，PluginManager 先移除这一行，再用新字段创建它。
+3. 内容：把每种内容重新登记到存在的所有者；新文档替换旧文档。清单不再带有的种类被撤回。
+4. 如果 `kinds` 变了，更新 `plugins.json` 中的 `kinds`。
+
+使用内置 Rust 插件的名字不能重新加载（`not_reloadable`）：它需要重新构建；它可以被替换（§3.3）。
+
+### 3.5 更新
+
+Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit，检查后放入一个新目录，写入新的 `commit` 和 `dir`，然后，如果插件正在使用，就在新目录上执行一次重新加载（它的行会被重新创建，因为入口路径变了）。旧目录在之后删除。本地路径插件没有可更新的东西（`not_updatable`）；重新加载它即可。是否要求用户确认更新，是客户端的事。
+
+### 3.6 移除和列出
+
+- `plugin.remove {id}`：如果有名字在用它，这个名字就不再用它：该名字有内置插件或默认插件时，删掉 `names.<name>.use`，回到那个插件（原来是关闭的仍然关闭）；否则删掉 `names.<name>` 条目，这个名字下不运行任何插件。从 `plugins.json` 中移除条目，然后删除它的 Git 目录。本地目录从不删除。内置插件和默认插件不能移除（`not_removable`）；它们可以被关闭。
+- `plugin.list {}`：每个名字一项，由 `plugins.json`、默认配置文件和 `assembly` 行构建，列出每个候选者以及正在使用的那一个；状态在调用时从 `Loader::get` 读取。
+
+### 3.7 内容登记
+
+对于 P 带有的每种内容和每个存在的所有者，PluginManager 调用该所有者的 `register({plugin, dir, document})`；撤回时调用 `withdraw({plugin})`，其中 `plugin` 是插件的名字。所有者把登记的内容作为自己的状态保存，持久化它，并在自己重新加载后恢复它。PluginManager 不监视所有者，也不代替它们再次登记任何东西。PluginManager 要调用某个所有者而它不存在时，跳过它；回复中列出被跳过的种类。当 PluginManager 打开该所有者的名字时，它登记该种类的全部内容。
+
+## 4. 时序与冲突
+
+- PluginManager 在内存表上一步完成对 `plugins.json` 的修改，然后写文件，然后向 loader 和所有者下达命令。针对同一个 id 或名字的第二个操作能看到第一个操作的变更（`plugin_exists`，或者它在新状态上执行）。rutis-loader 一次执行一个自己的操作。
+- rutis 或某个所有者拒绝的命令，不改变已写入的配置；该项在 `plugin.list` 中显示这次拒绝（例如，新插件失败，因为另一个不同名的插件提供了同一服务）。
+- `instanceNames`：rutis 需要在运行时启动之前，在 catalog 中拿到插件的部件在 Session 和分支中提供的名字（[rutis 用法 §2](../rutis-usage.md#2-插件是一行实例挂载它的部件)）。安装、切换或重新加载到一个 `instanceNames` 不在运行中 catalog 内的插件时，记录变更并回复 `restart_required`；该行在下次启动时创建。只登记工具、方法或提示来源的插件没有这个限制。
+- 正在使用时的重新加载或替换：旧世代卸载，rutis 取消它正在运行的调用，使用它的进行中轮次可能失败（[ADR 002](../../adr/002-plugin-scope.md) 的后果）。这一点写入文档，不加以阻止。
+
+## 5. 上下文映射
+
+PluginManager 不向模型上下文加入任何东西。插件的工具和提示来源通过它们自己的登记到达模型（[ADR 006 D4](../../adr/006-plugin-contract.md)）。插件工具的工具结果说明变更了什么、状态是什么，以及适用时的 `restart_required`。
+
+## 6. 接口（摘要）
+
+- 管理方法，命名空间 `plugin`（A.1）：`list`、`install`、`enable`、`disable`、`reload`、`update`、`remove`。
+- CLI：`dimcode plugin list | install <path|git-url> [--ref R] [--id ID] [--no-enable] | enable <name> [--use ID|builtin|default] | disable <name> | reload <name> | update <id> | remove <id>`。
+- 来自 `PluginTools` 的 agent 工具：`plugin_list`、`plugin_install`、`plugin_enable`、`plugin_disable`、`plugin_reload`、`plugin_update`、`plugin_remove`，参数相同。它们是工具调用：Permission 像平常一样对每一个做决定（[需求 5](../../../design/plugin-management.md)、[ADR 003](../../adr/003-approval-scope.md)）。
+- PluginManager 调用的所有者操作：SkillsCatalog、Mcp 和 Hooks 上的 `register` / `withdraw`（§9 R2）。
+
+## 7. 安全
+
+安装和打开是通过管理方法或工具调用完成的宿主配置；已启用的插件代码运行时不需要宿主本地审批（[ADR 003](../../adr/003-approval-scope.md)）。PluginManager 不增加作用域、审批或信任步骤（[需求](../../../design/plugin-management.md)）。它守护的是获取过程本身：
+
+- Git 来源只接受 `https://` 或 `ssh://` URL；其他协议（`file://`、`ext::`、scp 风格的路径）以及以 `-` 开头的参数，在 Git 运行之前就被拒绝。克隆时关闭子模块（`--no-recurse-submodules`），关闭 hook（`core.hooksPath` 设为一个空目录），设置 `protocol.file.allow=never`，并且不弹出终端提示。
+- **路径。** 所有为插件动文件系统的操作都用同一条规则：安装（暂存、克隆、改名）、更新、移除和启动时的清理。在任何文件系统改动之前，PluginManager 检查两件事：id（无论是调用方给的，还是取自清单名字）符合 `[a-z0-9_-]{1,64}`，且不是 `builtin` 或 `default`；它将要创建、改名或删除的每个目录，解析后恰好是 `<home>/plugins/.staging/<random>`、`<home>/plugins/<id>` 或 `<home>/plugins/<id>/<commit>` 之一（`.staging` 不可能是 id，因为 id 里没有点）。检查不通过时，操作以 `invalid_id` 或 `path_outside_plugins` 被拒绝，什么都不改：不建目录、不写 `plugins.json`、不发 loader 命令。本地路径插件自己的目录从不被创建、改名或删除，所以这条规则不适用于它。
+- 克隆先放到 `<home>/plugins/.staging/<random>`，只有在清单和路径检查通过后才改名放到正式位置。失败时删除暂存目录；启动时删除残留目录以及没有条目引用的克隆。
+- 清单中的任何路径在跟随符号链接之后都不能离开插件目录；Git 克隆内指向克隆外部的符号链接被拒绝。
+- `plugins.json` 以原子方式写入（§2.2）。
+
+## 8. 规则检查
+
+PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline 事件，也没有分支部件。
+
+| 规则 | 本文档如何遵守 |
+| --- | --- |
+| Principles §4 规则 1（对他人状态使用命令） | Loader 行是 rutis 的状态，内容是其所有者的状态；PluginManager 只向它们下达命令，并在被请求时读取它们的状态。 |
+| Principles §4 规则 2（交接） | 不适用：没有输入交接或 Timeline 交接。 |
+| Principles §4 规则 3（只有 before 回调） | 没有写入之前的干预。 |
+| Principles §4 规则 4（核心中没有业务含义） | 所有者的 `register`/`withdraw` 操作和 Settings 登记（§9）不带插件管理的含义；任何调用方都可以使用它们。 |
+| Principles §4 规则 5（批次） | 不适用。 |
+| Principles §4 规则 6（上下文来自已交接的事件） | 除工具结果外，没有东西进入模型上下文（§5）。 |
+| Principles §4 规则 7（只用公开事件和服务） | rutis-loader 的公开 `Loader` API、`managementMethods`、`partRegistry`、`toolRegistry` 以及所有者的公开服务。 |
+| Principles §4 规则 8（向机制所有者提出需求） | §9：Settings、SkillsCatalog、Mcp 和 Hooks；没有向 rutis 提出的需求。 |
+| Principles §4 规则 9（只保存之后的决定会用到的事实） | 配置保存在 `plugins.json` 中，这是唯一的记录；运行时状态从其所有者读取。 |
+| Principles §1（Capability 与 App Server 的边界） | App Server 的一个进程插件；不是 Capability。 |
+| ADR 002 D1（作用域跟随状态） | 进程：安装按宿主进行。`PluginTools` 是 Session 部件，只是因为工具按 Session 登记。 |
+| ADR 002 D2（没有接线模块） | 没有接线：通过所有者的登记操作调用它们。 |
+| ADR 002 D3（依赖跟随作用域） | 只有进程依赖；所有者是可选读取，所以它们重新加载时不会重新加载 PluginManager。 |
+| ADR 002 D4（结构配置与业务配置） | 结构配置（已安装、使用中、已关闭）在 `plugins.json` 中；业务配置留在每个插件的 Settings 来源中，由插件自己登记。 |
+| ADR 002 D5（语言中立的契约） | 方法和所有者操作都是 JSON 契约。 |
+| ADR 006 D3，由 ADR 007 纠正（插件的代码是一行） | 每个带代码的插件是一个进程行，由 PluginManager 的命令创建、关闭和重新加载；内容不是行（[ADR 007](../../adr/007-plugin-configuration.md)）。 |
+
+## 9. 向机制所有者提出的需求
+
+没有向 rutis 提出的需求：用到的每个 loader 操作在 rutis-loader 0.17.1 中都已存在。
+
+**R1. Settings：在运行时登记来源（M1）。**
+
+| 项 | 内容 |
+| --- | --- |
+| 阻塞点 | Settings 来源在 App Server 构建 Settings 时就固定了：内置 Rust 所有者在代码中列出（`.reserve::<T>()`），TypeScript 行的 `settings` 成员在启动时读取（`.declare()`）。在运行时安装、替换或移除的插件无法添加或撤回它的来源。 |
+| 已考虑的现有机制 | 由 PluginManager 从清单登记来源（业务配置不属于插件管理，ADR 002 D4）；每次安装都重启（违反需求 3）。 |
+| 通用能力 | 在具名 `settings` 服务上提供 `settings.register(declaration)`，声明内容与现在的 `settings` 成员相同（`source`、`userFile`、`projectFile?`、`schema`、`userOnly`）。登记属于调用方，在调用方卸载时撤回；同一来源名的第二次登记失败。每个所有者，不论是内置 Rust 还是 TypeScript，都在自己的 `apply` 中登记来源。不论来源是否已登记，存储的文档都留在 home 中。硬编码的 `.reserve::<T>()` 和 `.declare()` 路径被移除。 |
+| 对 sequence、批次、中断、重新加载的影响 | 对 Timeline 没有影响。重新加载时由新世代再次登记。 |
+| 所有者与 issue | Settings（App Server）；将随 #384 提交。 |
+
+**R2. SkillsCatalog、Mcp、Hooks：登记插件内容并保存它（SkillsCatalog 和 Mcp 若按时落地则为 M1；Hooks 为 M2）。**
+
+| 项 | 内容 |
+| --- | --- |
+| 阻塞点 | 所有者只读取用户来源和项目来源；没有办法把插件的内容交给它们。 |
+| 已考虑的现有机制 | 由所有者读取一个 `pluginContents` 服务（所有者会去查找插件；已否决）；把内容作为 loader 行（Dim 的产品状态放进 rutis；已否决）。 |
+| 通用能力 | 一个进程操作 `register({plugin, dir, document})`，用于添加或替换 `plugin` 的内容，以及 `withdraw({plugin})`。所有者把登记的内容作为自己的状态保存，在自己的存储中持久化，并在自己重新加载后恢复它。Mcp 用 `plugin` 作为服务器 id 的前缀；Hooks 把来源命名为 `plugin:<plugin>`，并给命令设置 `DIM_PLUGIN_ROOT = dir`；SkillsCatalog 读取 `dir` 下的 Skill。 |
+| 对 sequence、批次、中断、重新加载的影响 | 与每个所有者现有的来源相同：一次变更是一次数据更新，由所有者用自己的方式通告。 |
+| 所有者与 issue | SkillsCatalog、Mcp、Hooks（[Hooks](Hooks.md)）。 |
+
+## 附录 A. 接口细节
+
+### A.1 方法（`managementMethods`，命名空间 `plugin`）
+
+| 方法 | 参数 | 结果 |
+| --- | --- | --- |
+| `plugin.list` | `{}` | `[{name, use, off, locked, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?}]` |
+| `plugin.install` | `{source: {path} \| {git, ref?}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], restartRequired?}` |
+| `plugin.enable` | `{name, use?}` | `{status?, skipped?, restartRequired?}` |
+| `plugin.disable` | `{name}` | `{}` |
+| `plugin.reload` | `{name}` | `{status?, skipped?, restartRequired?}` |
+| `plugin.update` | `{id, ref?}` | `{commit, status?, restartRequired?}` |
+| `plugin.remove` | `{id}` | `{}` |
+
+名字在用的插件带代码时，`status` 是该行在 `Loader::get` 中的 `EntryStatus`：`Inactive` → `pending`（附带 `Loader::waiting_for` 给出的 `waitingFor`），`Unresolved` → `failed`（附带 `error`），`Running` → `running`，`Stopped` → `stopped`。关闭的名字没有在用的插件，显示 `off`，不显示状态。`install` 和 `update` 通过调用的进度接收端报告阶段 `fetch`、`check` 和 `load`。
+
+### A.2 错误
+
+`plugin_exists`、`plugin_not_found`、`invalid_id`、`path_outside_plugins`（两者都在任何文件系统改动之前，§7）、`plugin_locked`、`not_removable`、`not_reloadable`、`not_updatable`、`name_changed`、`invalid_manifest`（带字段和原因）、`invalid_source`（协议或参数被拒绝）、`acquire_failed`（Git 的消息）、`record_unreadable`（启动时）。配置写入之后 loader 或所有者的拒绝不是这次调用的错误：它在结果和 `plugin.list` 中报告。
+
+## 附录 B. 冲突表
+
+| 场景 | 结果 | 由谁决定 |
+| --- | --- | --- |
+| 同一个 id 安装两次 | 第二次看到第一次的条目：`plugin_exists` | PluginManager |
+| 不同名的插件提供一个已有提供者的服务 | rutis 使新行失败；`plugin.list` 显示错误 | rutis |
+| 替换一个被其他插件依赖的内置插件 | 内置行关闭，新行启动；rutis 重新加载依赖方 | rutis |
+| Session 正在使用插件的工具时重新加载 | 旧世代卸载，调用被取消，新部件被挂载 | rutis、实例的挂载方 |
+| 安装时内容所有者不存在 | 跳过该种类并报告；PluginManager 打开该所有者时登记 | PluginManager、所有者 |
+| 内容所有者重新加载 | 它恢复自己已登记的内容 | 所有者 |
+| `instanceNames` 不在运行中的 catalog 内 | 记录配置，`restart_required`；该行在下次启动时创建 | PluginManager |
+| Git 安装过程中进程停止 | 下次启动时删除暂存目录；`plugins.json` 未被写入 | PluginManager |
+| `plugins.json` 写入之后、loader 命令之前进程停止 | 下次启动时根据 `plugins.json` 构建行 | PluginManager 启动 |
+
+## 附录 C. 验收（M1）
+
+1. 使用隔离的 home，`dimcode` 启动时已加载 goal、web、session-title、workflow 和 scheduler；`dimcode plugin list` 显示它们和内置插件。
+2. `dimcode plugin install ./my-tool`（一个登记一个工具的 TypeScript 插件）使该工具在新的轮次中对模型可见，不需要重启。
+3. 编辑 `index.ts` 并运行 `dimcode plugin reload my-tool`，会改变该工具在已打开 Session 中的行为。
+4. agent 通过自己的工具完成步骤 2–3，每次调用都由 Permission 决定。
+5. `dimcode plugin disable web` 移除 web 的工具；`enable web` 把它们恢复；该状态在重启后保留。
+6. 安装一个与内置插件同名的插件并启用它，会替换该内置插件；`enable <name> --use builtin` 切换回去。
+7. `disable PluginManager` 被拒绝，错误为 `plugin_locked`。
+8. 使用 `file://` URL 的 Git 安装被拒绝；失败的克隆不会在 `<home>/plugins` 下留下任何东西；id 为 `../x` 的安装以 `invalid_id` 被拒绝，什么都不创建。
+9. `dimcode plugin install <git-url>` 安装一个测试用仓库并打开其插件；仓库有第二个提交后，`dimcode plugin update <id>` 加载新提交并删除旧目录。
+10. 默认插件的 Settings 来源在它启动时出现，在它被关闭时消失。
+11. 从本地路径安装的 Python 插件能登记它的工具，reload 后入口模块的修改生效（Python 运行时由 [#476](https://github.com/arcships/dim/issues/476) 提供）。
+
+## 附录 D. 待对齐问题
+
+本设计没有。运行时获取，包括 Python 插件怎么从它的目录导入模块，见 [#476](https://github.com/arcships/dim/issues/476)。

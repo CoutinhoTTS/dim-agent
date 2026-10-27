@@ -1,6 +1,6 @@
 # Pursuit
 
-Status: Implemented ([#422](https://github.com/arcships/dim/issues/422), milestone M2; the maintainer's confirmation is recorded in [§12](#12-ready-confirmation)). Scope: an amendment of [Goal](Goal.md)'s Session and branch parts; no new Capability ([ADR 002](../../adr/002-plugin-scope.md)). Language: TypeScript, in Goal's package `runtime/plugins/goal` ([Goal §10](Goal.md#10-implementation)). Depends on: Goal (P5, implemented by [#199](https://github.com/arcships/dim/pull/199)), C5 ([branch TypeScript binding](../branch-typescript.md)); both delivered. Milestone M2, not part of the current plan ([roadmap](../roadmap.md) D3).
+Status: Implemented ([#422](https://github.com/arcships/dim/issues/422), milestone M2; the maintainer's confirmation is recorded in [§12](#12-ready-confirmation)). §13 is an amendment decided with [#427](https://github.com/arcships/dim/issues/427) and implemented with its line end. Scope: an amendment of [Goal](Goal.md)'s Session and branch parts; no new Capability ([ADR 002](../../adr/002-plugin-scope.md)). Language: TypeScript, in Goal's package `runtime/plugins/goal` ([Goal §10](Goal.md#10-implementation)). Depends on: Goal (P5, implemented by [#199](https://github.com/arcships/dim/pull/199)), C5 ([branch TypeScript binding](../branch-typescript.md)); both delivered. Milestone M2, not part of the current plan ([roadmap](../roadmap.md) D3).
 
 Requirement ([feature list](../../feature-list.md), Agent behavior): keep working toward an explicit objective and record its completion or blockage, **with completion judged by an evaluator instead of the model doing the work**.
 
@@ -61,7 +61,7 @@ Later conclusions for the same `N`, conclusions from another branch, and conclus
 
 ### 4.2 Evaluator branch
 
-Goal recognizes the role from the branch's first local Queue input (what Prompt appends while `branch/start` dispatches is Append and does not count, as in TimelineTree's creation rule): user text whose first line is `<dim-goal kind="evaluate" branch="B" evaluation="N">`, where `B` is the `parent` of its `branch/start`.
+Goal recognizes the role from the branch's first local Queue input (what Prompt appends while `branch/start` dispatches is Append and does not count, as in TimelineTree's creation rule): user text whose first line is `<dim-goal kind="evaluate" branch="B" evaluation="N">`, where `B` is the `parent` of its `branch/start`. With #427, recognition reads the line's source instead ([§13](#13-ending-the-evaluator-with-427)).
 
 | Consumed event | Condition | Action |
 | --- | --- | --- |
@@ -159,8 +159,34 @@ What is left, and why each piece is needed:
 | One follow-up when the reply has no conclusion, then `continue` | Otherwise the evaluation would end without a result, or ask forever |
 | `failed` on a failed or cancelled evaluator turn or creation | These are terminal facts; without it the goal would stay active with no evaluation running |
 
-Removed from the earlier draft: claim and reopen states, deadline and `evaluationTimeoutSeconds`, the `goal/evaluation-reported` record, special rules for user input during an evaluation, and the requirements to stop and retire branches.
+Removed from the earlier draft: claim and reopen states, deadline and `evaluationTimeoutSeconds`, the `goal/evaluation-reported` record, special rules for user input during an evaluation, and the requirements to stop and retire branches. That stays true for this design, which raises no requirement. Ending a line is now a generic operation of [Timeline branches](../timeline-branches.md#10-ending-a-line), and §13 uses it.
 
 ## 12. Ready confirmation
 
 No product decision remained. The maintainer confirmed the design as Ready on 2026-10-26 ([#146](https://github.com/arcships/dim/issues/146)), including the A16 fold exception in [Goal](Goal.md#appendix-e-assumptions) (decided 2026-10-22). It is implemented ([#422](https://github.com/arcships/dim/issues/422)), and [Goal](Goal.md) describes both judges.
+
+## 13. Ending the evaluator (with #427)
+
+Decided with [Timeline branches](../timeline-branches.md) ([#427](https://github.com/arcships/dim/issues/427)), and implemented together with its line end. Until then, §4.2 holds as written. All changes are in Goal's parts.
+
+| # | Change |
+| --- | --- |
+| E1 | **Recognition from the line's source.** Goal on a line takes the evaluator role when `treeCommands.info(own id)` has `source = {kind: "host", operation_id: "goal:evaluate:N"}` and `parent = B`. It no longer reads the prompt's first line. The prompt keeps its `<dim-goal kind="evaluate" …>` first line, for the model only (§5) |
+| E2 | **Goal ends its evaluator.** Evaluation `N` is settled on `B` once its conclusion or failure is decided (§4.1), or once a later goal change supersedes `N`. When it is settled, Goal on `B` ends `E` with `treeCommands.end(E, {kind: "host", operation_id: "goal:evaluate:N"})`, through an owned task that rechecks first. If `B`'s history already has a `branch/ended` for `E`, Goal does nothing. At load the same check reconciles: a recorded evaluator whose `N` is settled and that has no `branch/ended` on `B` is ended |
+| E3 | **An outside end before the conclusion is `failed`.** A `branch/ended` for `E` on `B` that comes before `E`'s conclusion, while `N` is current, is decided as `failed`: pause (`evaluation_failed`), as in §4.1 |
+
+Interfaces:
+
+- Goal's branch part adds the Dispatcher key `branch/ended`.
+- The branch TypeScript binding exposes `end(id, source)` and `TimelineInfo.source` in the places that expose `create` and `input` today:
+  - the generated `npm/branch-services.d.ts`;
+  - the `treeCommands` row of the [binding table](../branch-typescript.md);
+  - Goal's own `TreeCommands` type in `branch.ts`.
+
+Acceptance, with a fake model, in `goal.test.mjs` and `transport_flow/goal.rs`:
+
+1. The evaluator is recognized from its source. A host line whose prompt has the same first line but whose operation id is different takes no role.
+2. After `DONE`, `CONTINUE`, `BLOCKED` or `failed` is decided, `E` is ended exactly once, with source `goal:evaluate:N`, and `B` records `branch/ended` for it.
+3. A superseded `N`, for example after a `pause` on `B`, ends `E`.
+4. Restart after a settled `N` that has no `branch/ended` ends `E` once at load. When `branch/ended` is already there, nothing is written.
+5. A user end of `E` before its conclusion pauses the goal (`evaluation_failed`). A user end after the conclusion decides nothing.

@@ -166,8 +166,7 @@ pub fn clip(text: &str, max: usize) -> (String, usize) {
 
 /// Borders in `color`, one column of padding, rows padded with blanks to
 /// `height` when given. `title` sits in the top border (`╭─ Queue (1) ──╮`)
-/// and `hint` at the right of the bottom one (`╰── Esc close ─╯`), as Amp
-/// frames its panels.
+/// and `hint` at the right of the bottom one (`╰── Esc close ─╯`).
 pub fn bordered(
     content: &[String],
     width: usize,
@@ -220,7 +219,7 @@ pub fn bordered(
     out
 }
 
-/// A `key action · key action` hint as Amp paints it in a bottom border:
+/// A `key action · key action` hint as painted in a bottom border:
 /// each key (the first word of a part) in the keybinding colour, the rest
 /// muted.
 pub fn key_hints(hint: &str, p: &Palette) -> String {
