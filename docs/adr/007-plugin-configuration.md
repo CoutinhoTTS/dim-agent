@@ -14,7 +14,7 @@ Relation to other decisions:
   reload are that row's": a plugin's code is one row and its reload is that row's, but whether it is
   installed, used or turned off is PluginManager's configuration, and the content a plugin carries is
   not a row (D2, D3). The rest of D3 stands.
-- Withdraws the direction recorded for #3 in [ADR 001](001-harness-foundation.md)'s delivery table,
+- Withdraws the direction recorded for #3 in [ADR 001](001-harness-foundation.md) (its header, delivery table and configuration notes),
   "structural plugin configuration uses the persisted editable layer and loader operations".
 - Keeps [ADR 003](003-approval-scope.md): enabled plugin code runs without host-local approval.
 

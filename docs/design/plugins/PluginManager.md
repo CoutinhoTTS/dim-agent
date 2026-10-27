@@ -118,7 +118,7 @@ The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.
 
 | Field | Meaning |
 | --- | --- |
-| `installed[].id` | Unique among installed plugins. Defaults to the manifest name; the caller gives another when two installed plugins share a name. |
+| `installed[].id` | Unique among installed plugins; the key of the record and the name of the clone directory. `[A-Za-z0-9_-]`, 1–64 characters, not `builtin` or `default`; checked before any filesystem use, whether given by the caller or taken from the manifest name. Defaults to the manifest name; the caller gives another when two installed plugins share a name. |
 | `installed[].name` | The manifest name at install or last reload. |
 | `installed[].source` | `{path}` for a local directory, used in place and never copied; `{git, ref?, commit}` for Git. |
 | `installed[].dir` | The directory that is loaded: the local path itself, or the clone under `<home>/plugins/<id>/<commit>`. |
@@ -152,7 +152,7 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 
 | State | Owner | Read through |
 | --- | --- | --- |
-| Which rows exist, their status (`Pending`, `Running`, `Failed` with error, `Stopped`) | rutis-loader | `Loader::entries()`, `Loader::get(id)`, `Loader::waiting_for` |
+| Which rows exist and their `EntryStatus` | rutis-loader | `Loader::entries()`, `Loader::get(id)`, `Loader::waiting_for`; shown as in A.1 |
 | Which built-in rutis plugins exist | the App Server's assembly | rows of the `assembly` layer in `Loader::entries()`; the row id is the plugin's name |
 | Skills, MCP servers, hooks registered from a plugin | SkillsCatalog, Mcp, Hooks | the owner's own methods |
 | A plugin's business configuration | the plugin's Settings sources | Settings |
@@ -163,16 +163,16 @@ Plugin code runs in the Node or Python rutis runtime. Supplying them is not Plug
 
 ## 3. Flows
 
-How PluginManager's commands map onto rutis-loader. The loader has two layers. `assembly` holds the built-in rows. `plugins` is the editable layer, which rutis does not persist (`NoPersist`); it holds the rows of default and installed plugins and the `disabled` overrides of built-in rows. Every row of a default or installed plugin has the plugin's id as its row id (for a default plugin, its name).
+How PluginManager's commands map onto rutis-loader. The loader has two layers. `assembly` holds the built-in rows. `plugins` is the editable layer, which rutis does not persist (`NoPersist`); it holds the rows of default and installed plugins and the `disabled` overrides of built-in rows. PluginManager's rows have the row id `plugin:<name>`: one row per name, which cannot collide with a built-in row id, since the built-in row of that name stays in the composed tree when it is disabled.
 
 | Configuration change | Loader commands |
 | --- | --- |
-| Turn on name N using plugin P | Turn off the plugin N uses now (below), then `create` P's row |
-| Turn off name N | Built-in: `set_disabled(N, true)`. Default or installed: `remove` its row |
+| Turn on name N using plugin P | Turn off the plugin N uses now (below), then `create` the row `plugin:N` from P's manifest |
+| Turn off name N | Built-in: `set_disabled(N, true)`. Default or installed: `remove` the row `plugin:N` |
 | Turn a built-in back on | `set_disabled(N, false)` |
-| Reload | `Loader::reload(id)` |
+| Reload | `Loader::reload("plugin:N")` |
 
-rutis lets the editable layer disable a built-in row but not change or remove it, so replacing a built-in turns its row off and adds a row for the new plugin. The old plugin is turned off first, so the new one does not meet a second provider of the same services. rutis reloads the dependents of the rows that change.
+rutis lets the editable layer disable a built-in row and override its fields, but not rename or remove it, so replacing a built-in turns its row off and adds a row for the new plugin. The old plugin is turned off first, so the new one does not meet a second provider of the same services. rutis reloads the dependents of the rows that change.
 
 Content follows the same switch: when name N stops using P, PluginManager withdraws P's content from each present owner; when N starts using P, it registers P's content with each present owner (§3.7).
 
@@ -210,7 +210,7 @@ When a content owner itself is turned on (Hooks, for example), PluginManager reg
 `plugin.reload {name}` reloads the plugin the name uses. The host watches no files; the call is the signal that something changed.
 
 1. Read the manifest again. If its name changed, refuse (`name_changed`); the user installs it again under the new name.
-2. Code: `Loader::reload(id)`. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager first removes and creates the row with the new fields.
+2. Code: `Loader::reload("plugin:<name>")`. rutis re-imports the plugin's entry module (modules it imports are not re-imported; [requirement 3](../plugin-management.md)) and starts a new generation; its parts in Sessions and branches are replaced and its dependents reload. If the manifest's `code` fields changed, PluginManager first removes and creates the row with the new fields.
 3. Content: register each kind again with its present owner; the new document replaces the old one. A kind the manifest no longer carries is withdrawn.
 4. Update `kinds` in `plugins.json` if they changed.
 
@@ -222,7 +222,7 @@ A name using a built-in Rust plugin cannot be reloaded (`not_reloadable`): it ne
 
 ### 3.6 Remove and list
 
-- `plugin.remove {id}`: if a name uses it, turn the name off first (back to its built-in or default plugin when one exists, else nothing). Remove the entry from `plugins.json`, then delete its Git directory. A local directory is never deleted. Built-in and default plugins cannot be removed (`not_removable`); they can be turned off.
+- `plugin.remove {id}`: if a name uses it, the name stops using it: when the name has a built-in or default plugin, `names.<name>.use` is dropped and the name goes back to that plugin (still `off` if it was off); otherwise the `names.<name>` entry is removed and nothing runs under that name. Remove the entry from `plugins.json`, then delete its Git directory. A local directory is never deleted. Built-in and default plugins cannot be removed (`not_removable`); they can be turned off.
 - `plugin.list {}`: one item per name, built from `plugins.json`, the default configuration file and the `assembly` rows, with each candidate and the one in use; status comes from `Loader::get` at the time of the call.
 
 ### 3.7 Content registration
@@ -252,6 +252,7 @@ PluginManager adds nothing to model context. A plugin's tools and prompt sources
 Installing and turning on are host configuration done through management methods or tool calls; enabled plugin code runs without host-local approval ([ADR 003](../../adr/003-approval-scope.md)). PluginManager adds no scope, approval or trust step ([requirements](../plugin-management.md)). What it guards is the acquisition itself:
 
 - Git sources are `https://` or `ssh://` URLs only; other schemes (`file://`, `ext::`, scp-style paths) and arguments starting with `-` are refused before Git runs. Clones run with submodules off (`--no-recurse-submodules`), hooks off (`core.hooksPath` set to an empty directory), `protocol.file.allow=never` and no terminal prompt.
+- An id is checked against its rule (§2.2) before any filesystem use. Every directory PluginManager creates, renames or deletes is directly under `<home>/plugins` (`<id>/<commit>` or `.staging/<random>`); install, update, remove and the startup cleanup check that before acting.
 - A clone goes to `<home>/plugins/.staging/<random>` and is renamed into place only after its manifest and paths are checked. A failure deletes the staging directory; startup deletes leftovers and clones no entry refers to.
 - No manifest path may leave the plugin directory after following symbolic links; a symbolic link inside a Git clone that points outside it is refused.
 - `plugins.json` is written atomically (§2.2).
@@ -317,7 +318,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | `plugin.update` | `{id, ref?}` | `{commit, status?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
-`status` is the row's loader status (`pending`, `running`, `failed`, `stopped`) for plugins with code. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
+`status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor` from `Loader::waiting_for`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
 
 ### A.2 Errors
 

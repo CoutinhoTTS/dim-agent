@@ -118,7 +118,7 @@ flowchart LR
 
 | 字段 | 含义 |
 | --- | --- |
-| `installed[].id` | 在已安装插件中唯一。默认是清单中的名字；两个已安装插件同名时，由调用方给出另一个。 |
+| `installed[].id` | 在已安装插件中唯一；它是记录的键，也是克隆目录的名字。只能用 `[A-Za-z0-9_-]`，1–64 个字符，不能是 `builtin` 或 `default`；无论是调用方给的还是取自清单名字，都在第一次用到文件系统之前检查。默认是清单中的名字；两个已安装插件同名时，由调用方给出另一个。 |
 | `installed[].name` | 安装时或上一次重新加载时清单中的名字。 |
 | `installed[].source` | 本地目录用 `{path}`，原地使用，从不复制；Git 用 `{git, ref?, commit}`。 |
 | `installed[].dir` | 被加载的目录：本地路径本身，或 `<home>/plugins/<id>/<commit>` 下的克隆。 |
@@ -152,7 +152,7 @@ flowchart LR
 
 | 状态 | 所有者 | 读取方式 |
 | --- | --- | --- |
-| 有哪些行，它们的状态（`Pending`、`Running`、带错误的 `Failed`、`Stopped`） | rutis-loader | `Loader::entries()`、`Loader::get(id)`、`Loader::waiting_for` |
+| 有哪些行，以及它们的 `EntryStatus` | rutis-loader | `Loader::entries()`、`Loader::get(id)`、`Loader::waiting_for`；按附录 A.1 显示 |
 | 有哪些内置 rutis 插件 | App Server 的装配 | `Loader::entries()` 中 `assembly` 层的行；行 id 就是插件的名字 |
 | 从插件登记的 skill、MCP 服务器、hook | SkillsCatalog、Mcp、Hooks | 所有者自己的方法 |
 | 插件的业务配置 | 插件的 Settings 来源 | Settings |
@@ -163,16 +163,16 @@ flowchart LR
 
 ## 3. 流程
 
-下面说明 PluginManager 的命令如何对应到 rutis-loader。loader 有两层。`assembly` 存放内置行。`plugins` 是可编辑层，rutis 不持久化它（`NoPersist`）；它存放默认插件和已安装插件的行，以及对内置行的 `disabled` 覆盖。默认插件或已安装插件的每一行都以插件的 id 作为行 id（默认插件的 id 就是它的名字）。
+下面说明 PluginManager 的命令如何对应到 rutis-loader。loader 有两层。`assembly` 存放内置行。`plugins` 是可编辑层，rutis 不持久化它（`NoPersist`）；它存放默认插件和已安装插件的行，以及对内置行的 `disabled` 覆盖。PluginManager 建的行，行 id 是 `plugin:<name>`：每个名字一行，不会和内置行的 id 冲突，因为内置行被禁用后仍留在组合结果里。
 
 | 配置变更 | Loader 命令 |
 | --- | --- |
-| 打开名字 N，使用插件 P | 先关闭 N 当前使用的插件（见下），然后 `create` P 的行 |
-| 关闭名字 N | 内置：`set_disabled(N, true)`。默认或已安装：`remove` 它的行 |
+| 打开名字 N，使用插件 P | 先关闭 N 当前使用的插件（见下），然后按 P 的清单 `create` 行 `plugin:N` |
+| 关闭名字 N | 内置：`set_disabled(N, true)`。默认或已安装：`remove` 行 `plugin:N` |
 | 重新打开一个内置插件 | `set_disabled(N, false)` |
-| 重新加载 | `Loader::reload(id)` |
+| 重新加载 | `Loader::reload("plugin:N")` |
 
-rutis 允许可编辑层禁用一个内置行，但不允许修改或移除它，所以替换内置插件时，要关闭它的行，并为新插件加一行。先关闭旧插件，这样新插件不会遇到同一服务的第二个提供者。rutis 会重新加载发生变化的行的依赖方。
+rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允许改名或移除它，所以替换内置插件时，要关闭它的行，并为新插件加一行。先关闭旧插件，这样新插件不会遇到同一服务的第二个提供者。rutis 会重新加载发生变化的行的依赖方。
 
 内容跟随同样的切换：当名字 N 不再使用 P 时，PluginManager 从每个存在的所有者那里撤回 P 的内容；当 N 开始使用 P 时，它向每个存在的所有者登记 P 的内容（§3.7）。
 
@@ -210,7 +210,7 @@ rutis 允许可编辑层禁用一个内置行，但不允许修改或移除它�
 `plugin.reload {name}` 重新加载该名字使用的插件。宿主不监视任何文件；这个调用就是表示有东西变了的信号。
 
 1. 再次读取清单。如果名字变了，拒绝（`name_changed`）；用户用新名字重新安装它。
-2. 代码：`Loader::reload(id)`。rutis 重新导入插件的入口模块（它导入的模块不会被重新导入；[需求 3](../../../design/plugin-management.md)），并开始一个新的世代；它在 Session 和分支中的部件被替换，它的依赖方被重新加载。如果清单的 `code` 字段变了，PluginManager 先移除这一行，再用新字段创建它。
+2. 代码：`Loader::reload("plugin:<name>")`。rutis 重新导入插件的入口模块（它导入的模块不会被重新导入；[需求 3](../../../design/plugin-management.md)），并开始一个新的世代；它在 Session 和分支中的部件被替换，它的依赖方被重新加载。如果清单的 `code` 字段变了，PluginManager 先移除这一行，再用新字段创建它。
 3. 内容：把每种内容重新登记到存在的所有者；新文档替换旧文档。清单不再带有的种类被撤回。
 4. 如果 `kinds` 变了，更新 `plugins.json` 中的 `kinds`。
 
@@ -222,7 +222,7 @@ Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit�
 
 ### 3.6 移除和列出
 
-- `plugin.remove {id}`：如果有名字使用它，先关闭该名字（如果存在内置插件或默认插件，就回到它，否则什么都不用）。从 `plugins.json` 中移除条目，然后删除它的 Git 目录。本地目录从不删除。内置插件和默认插件不能移除（`not_removable`）；它们可以被关闭。
+- `plugin.remove {id}`：如果有名字在用它，这个名字就不再用它：该名字有内置插件或默认插件时，删掉 `names.<name>.use`，回到那个插件（原来是关闭的仍然关闭）；否则删掉 `names.<name>` 条目，这个名字下不运行任何插件。从 `plugins.json` 中移除条目，然后删除它的 Git 目录。本地目录从不删除。内置插件和默认插件不能移除（`not_removable`）；它们可以被关闭。
 - `plugin.list {}`：每个名字一项，由 `plugins.json`、默认配置文件和 `assembly` 行构建，列出每个候选者以及正在使用的那一个；状态在调用时从 `Loader::get` 读取。
 
 ### 3.7 内容登记
@@ -252,6 +252,7 @@ PluginManager 不向模型上下文加入任何东西。插件的工具和提示
 安装和打开是通过管理方法或工具调用完成的宿主配置；已启用的插件代码运行时不需要宿主本地审批（[ADR 003](../../adr/003-approval-scope.md)）。PluginManager 不增加作用域、审批或信任步骤（[需求](../../../design/plugin-management.md)）。它守护的是获取过程本身：
 
 - Git 来源只接受 `https://` 或 `ssh://` URL；其他协议（`file://`、`ext::`、scp 风格的路径）以及以 `-` 开头的参数，在 Git 运行之前就被拒绝。克隆时关闭子模块（`--no-recurse-submodules`），关闭 hook（`core.hooksPath` 设为一个空目录），设置 `protocol.file.allow=never`，并且不弹出终端提示。
+- id 在第一次用到文件系统之前按规则检查（§2.2）。PluginManager 创建、改名或删除的每个目录都直接位于 `<home>/plugins` 下（`<id>/<commit>` 或 `.staging/<random>`）；安装、更新、移除和启动时的清理在动手前都检查这一点。
 - 克隆先放到 `<home>/plugins/.staging/<random>`，只有在清单和路径检查通过后才改名放到正式位置。失败时删除暂存目录；启动时删除残留目录以及没有条目引用的克隆。
 - 清单中的任何路径在跟随符号链接之后都不能离开插件目录；Git 克隆内指向克隆外部的符号链接被拒绝。
 - `plugins.json` 以原子方式写入（§2.2）。
@@ -317,7 +318,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | `plugin.update` | `{id, ref?}` | `{commit, status?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
-对带代码的插件，`status` 是该行的 loader 状态（`pending`、`running`、`failed`、`stopped`）。`install` 和 `update` 通过调用的进度接收端报告阶段 `fetch`、`check` 和 `load`。
+名字在用的插件带代码时，`status` 是该行在 `Loader::get` 中的 `EntryStatus`：`Inactive` → `pending`（附带 `Loader::waiting_for` 给出的 `waitingFor`），`Unresolved` → `failed`（附带 `error`），`Running` → `running`，`Stopped` → `stopped`。关闭的名字没有在用的插件，显示 `off`，不显示状态。`install` 和 `update` 通过调用的进度接收端报告阶段 `fetch`、`check` 和 `load`。
 
 ### A.2 错误
 

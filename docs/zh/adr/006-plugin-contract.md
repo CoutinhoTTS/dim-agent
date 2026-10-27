@@ -14,7 +14,7 @@ D4 把移除写成已完成；按层 API 与 `sessionLifecycle` 的两处说明�
 与其他决策的关系：
 
 - D3 第一点由 [ADR 007](007-plugin-configuration.md) 纠正：插件配置归 PluginManager，插件带的内容不是行。
-- 扩展 [ADR 002](002-plugin-scope.md)。其 D1–D4 不变。本 ADR 补全 D5：
+- 扩展 [ADR 002](002-plugin-scope.md)。其 D1–D4 不变（D4 中结构性配置的存放位置后来由 ADR 007 纠正）。本 ADR 补全 D5：
   Dim 自己的运行时服务成为契约中的命名条目，Rust 成为契约的一种绑定，而不是契约的定义。
 - 保留 [ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)（信封、保留
   领域、描述性的事件声明）和 [ADR 003](003-approval-scope.md)（受信任的进程内插件不靠声明隔离）。
