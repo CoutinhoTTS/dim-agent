@@ -37,6 +37,7 @@ use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::theme::{Palette, Theme, detect};
 use crate::ui::theme_panel::ThemePanel;
+use crate::ui::title::WindowTitle;
 use crate::ui::transcript::block::{Block, Tone, group_rows, opens_group, project_row};
 use crate::ui::transcript::blocks::{
     SHELL_PREVIEW_LINES, boundary_line, gutter_text, live_thinking, render_block, render_shell,
@@ -197,6 +198,7 @@ fn run_terminal(
         .and_then(detect::parse_background_report);
     let env = detect::env_from_process();
     let mut progress = ProgressBar::from_env(&env);
+    let mut title = WindowTitle::new(crate::ui::title::apple_terminal(), Instant::now());
     let detected = Theme::detect(&env, true, background.as_deref());
     let saved = crate::ui::theme_panel::saved_theme_id(&surroundings.home);
     let theme = match &saved {
@@ -258,6 +260,13 @@ fn run_terminal(
         }
         if let Some(bar) = progress.report(&program_status, Instant::now())
             && terminal.report_progress(bar).is_err()
+        {
+            let code = terminal.lost();
+            app.host.shutdown();
+            return code;
+        }
+        if let Some(bytes) = title.report(&program_status, app.topic().as_deref(), Instant::now())
+            && terminal.write(&bytes).is_err()
         {
             let code = terminal.lost();
             app.host.shutdown();
@@ -540,6 +549,7 @@ fn run_terminal(
                     app.request_reflow();
                     status.forget();
                     progress.forget();
+                    title.forget();
                     dirty = true;
                 }
                 Outcome::Exit(code) => break code,
@@ -1965,6 +1975,16 @@ impl App {
             Some(snapshot) => self.runs.status(snapshot, &self.answered),
             None => Status::Idle,
         }
+    }
+
+    /// The window title's topic: the session's first message (`ui::title`).
+    fn topic(&self) -> Option<String> {
+        let snapshot = self.snapshot.as_ref()?;
+        let first = snapshot
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::UserMessage)?;
+        crate::ui::title::topic(&first.text)
     }
 
     /// Opens `/settings` with `select` picked, showing the current values.

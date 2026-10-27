@@ -3844,6 +3844,24 @@
       ]
     },
     {
+      "id": "dim_cli::ui::title",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/title.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::title::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::title",
+      "file": "crates/dim-cli/src/ui/title.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_cli::ui::transcript",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -21886,6 +21904,13 @@
     },
     {
       "from": "dim_cli::ui",
+      "to": "dim_cli::ui::title",
+      "references": [
+        "mod title"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
       "to": "dim_cli::ui::transcript",
       "references": [
         "mod transcript"
@@ -24898,6 +24923,15 @@
       ]
     },
     {
+      "from": "dim_cli::ui::terminal",
+      "to": "dim_cli::ui::title",
+      "references": [
+        "path crate::ui::title::BASE",
+        "path crate::ui::title::apple_terminal",
+        "path crate::ui::title::sequence"
+      ]
+    },
+    {
       "from": "dim_cli::ui::terminal::input",
       "to": "dim_cli::ui::terminal::input::tests",
       "references": [
@@ -25267,6 +25301,43 @@
       "to": "dim_cli::ui::theme_panel",
       "references": [
         "path entries"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::title",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path Status",
+        "path Status::Done",
+        "path Status::Error",
+        "path Status::Idle",
+        "path Status::Permission",
+        "path Status::Question",
+        "path Status::Working",
+        "use crate::ui::status::Status"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::title",
+      "to": "dim_cli::ui::title::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::title::tests",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path Status::Working"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::title::tests",
+      "to": "dim_cli::ui::title",
+      "references": [
+        "path SPINNER_FRAME_MS",
+        "path WindowTitle::new",
+        "path text"
       ]
     },
     {
@@ -26277,6 +26348,16 @@
         "path crate::ui::theme_panel::save_theme_id",
         "path crate::ui::theme_panel::saved_theme_id",
         "use crate::ui::theme_panel::ThemePanel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::title",
+      "references": [
+        "path WindowTitle::new",
+        "path crate::ui::title::apple_terminal",
+        "path crate::ui::title::topic",
+        "use crate::ui::title::WindowTitle"
       ]
     },
     {

@@ -43,6 +43,7 @@ pub mod terminal;
 pub mod text;
 pub mod theme;
 pub mod theme_panel;
+pub mod title;
 pub mod transcript;
 pub mod tui;
 pub mod upgrade_dialog;
