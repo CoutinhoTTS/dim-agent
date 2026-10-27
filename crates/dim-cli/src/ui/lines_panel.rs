@@ -39,8 +39,8 @@ fn tree_order(lines: &[LineView]) -> Vec<(usize, usize)> {
         out.push((index, 0));
         walk(lines, index, 1, &mut seen, &mut out);
     }
-    for index in 0..lines.len() {
-        if !seen[index] {
+    for (index, seen) in seen.iter().enumerate() {
+        if !seen {
             out.push((index, 0));
         }
     }
