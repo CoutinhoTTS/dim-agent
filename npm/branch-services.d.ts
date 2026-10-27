@@ -58,7 +58,8 @@ export interface BranchOptions {
 export interface TreeCommands {
   list(): Promise<TimelineInfo[]>
   /**
-   * The directory record of branch `id`.
+   * The directory record of branch `id`, from its reservation on, so a
+   * part that loads with its own line reads it during its replay.
    * @throws {AgentErrorThrown}
    */
   info(id: string): Promise<TimelineInfo>

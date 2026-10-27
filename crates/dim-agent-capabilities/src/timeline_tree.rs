@@ -143,17 +143,14 @@ impl TreeCommands {
     // The data methods below spell out `std::result::Result` for rutis'
     // export generator, which resolves an alias's item type where the alias
     // is defined (arcships/rutis#463).
-    /// The directory record of branch `id`.
+    /// The directory record of branch `id`, from its reservation on, so a
+    /// part that loads with its own line reads it during its replay.
     pub fn info(&self, id: String) -> std::result::Result<TimelineInfo, AgentError> {
         let tree = self
             .tree
             .upgrade()
             .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
-        tree.list()
-            .into_iter()
-            .find(|info| info.id == id)
-            .or_else(|| tree.ended_info(&id))
-            .ok_or(AgentError::UnknownBranch(id))
+        tree.info(&id).ok_or(AgentError::UnknownBranch(id))
     }
     /// Commits `input` to branch `id` through its validating `Branch::input`
     /// and returns the committed event, or the input already committed with
@@ -646,13 +643,15 @@ impl TimelineTree {
             .get(id)
             .map(|ended| ended.head)
     }
-    fn ended_info(&self, id: &str) -> Option<TimelineInfo> {
-        self.state
-            .lock()
-            .unwrap()
-            .ended
+    /// A line's directory record, published or still opening; absent once a
+    /// failed creation removed it.
+    fn info(&self, id: &str) -> Option<TimelineInfo> {
+        let state = self.state.lock().unwrap();
+        state
+            .nodes
             .get(id)
-            .map(|ended| ended.info.clone())
+            .map(|node| node.info.clone())
+            .or_else(|| state.ended.get(id).map(|ended| ended.info.clone()))
     }
     async fn end(&self, id: &str, source: BranchSource) -> Result<()> {
         let context = {
@@ -1689,6 +1688,7 @@ pub struct BranchLine {
 impl BranchLine {
     /// Rebuilds the fold from the line's own history, without writing.
     fn rebuild(&self, events: &[Arc<AgentEvent>]) {
+        let _ = self.resolved();
         let mut view = self.view.lock().unwrap();
         for event in events {
             Self::fold(&mut view, event);
