@@ -322,23 +322,17 @@ impl TimelineTree {
         stored: &mut BTreeMap<String, StoredBranch>,
     ) -> Result<()> {
         let mut recorded: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let mut complete = BTreeSet::new();
         for id in Self::stored_descendants(&line.id, stored) {
             let parent = stored[&id]
                 .info
                 .parent
                 .clone()
                 .expect("a stored descendant has a parent");
-            if complete.contains(&parent) {
-                complete.insert(id);
-                continue;
-            }
             if !recorded.contains_key(&parent) {
                 let head = stored[&parent].sequence;
                 recorded.insert(parent.clone(), self.stored_ends(&parent, head).await?);
             }
             if recorded[&parent].contains(&id) {
-                complete.insert(id);
                 continue;
             }
             let head = stored[&id].sequence;
@@ -362,7 +356,6 @@ impl TimelineTree {
                 .get_mut(&parent)
                 .expect("the parent is stored")
                 .sequence = head;
-            complete.insert(id);
         }
         Ok(())
     }
