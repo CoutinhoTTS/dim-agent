@@ -935,9 +935,12 @@ Out of scope: a separate summarizer model (§10), summarizer prefix reuse and ca
 `compaction.json` in the product home, `{"summaryReasoning": "inherit" | "off" | "low"}`, unknown
 members rejected.
 
-- `ProductSummaryStrategyPlugin`'s factory captures the file's FileStorage root and relative path,
-  as HostPlatform captures `exec-shell.json` (`exec_shell_file`), and the strategy reads the file
-  through `FileStorage` at the start of each compaction. A change takes effect at the next
+- `ProductSummaryStrategyPlugin`'s factory captures the product home path, and
+  `SummaryStrategy::new` resolves it at load with `FileStorage::register_root`, which returns the
+  root `serve` already registered for that home (idempotent by path, so no new root is opened);
+  the product profile is assembled in `cli.rs`, before `serve` computes the root list, so the
+  factory cannot carry that root's index. The strategy then reads `compaction.json` under that
+  root through `FileStorage` at the start of each compaction. A change takes effect at the next
   compaction without a reload. A missing file means the default (§13.4).
 - An unreadable or invalid file fails the compaction (`failed`, reply `compaction_failed`) with a
   message that names `compaction.json`, as an invalid `exec-shell.json` fails the command that
@@ -1011,9 +1014,13 @@ AGENTS.md keeps automated tests for flows and contracts. It is an `xtask` comman
 `measure`, which already runs with an optional real model configuration:
 
 ```bash
-cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR
+cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR [--reasoning inherit|off|low]
 ```
 
+- Without `--reasoning` the runner runs phase 1: the three reasoning arms (`inherit`, `off`,
+  `low`) with no target instruction. `--reasoning VALUE` runs phase 2 instead: the no-instruction
+  arm plus the four `(α, β)` arms, with `VALUE` being the reasoning value phase 1 chose for the
+  model.
 - `--home` is required and must be an isolated product home in which the operator has configured
   the providers; the runner never uses `~/.dimcode`. Credentials stay in that home and never enter
   the repository, the cases or the output.
@@ -1050,7 +1057,11 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 - `earlierSummary`, when present, becomes the checkpoint's `replacement`
   (`[summary_message(text)]`), so the merge path is evaluated.
 - `contextWindow`, when present, narrows the window facts for that case (a smaller window is always
-  legal), so the folding path runs on an affordable history.
+  legal), so the folding path runs on an affordable history. It also bounds the case's output
+  allowance to a quarter of that window (`config.max_tokens = min(output, contextWindow / 4)`), so
+  the input budget stays positive on a model whose max output is large; each run's JSON records
+  the effective window and the effective output. A case whose input budget would not be positive
+  is refused before any model call.
 - Content is public: built from this repository's own code, documents and command output, with
   paths under `/work/dim`. No real user session, no secret, no home path.
 
@@ -1078,7 +1089,11 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 
 Metrics per model and arm, over cases and runs: fact recall `F`, exact recall `X`, violations `V`,
 cut-off replies `C` (`cutOffCount`), failed compactions, median summary tokens `T`
-(`estimatedSummaryTokens`) and median `durationMs`; for target arms also the ratio `T / S`.
+(`estimatedSummaryTokens`) and median `durationMs`; for target arms also the ratio `T / S`. A
+probe the judge did not answer is counted as `unjudged`, in a column of its own for the operator
+to correct by hand. A failed compaction has no summary: its `fact` and `exact` probes count as
+missed and its `absent` probes count as not violated, without a judge call, so a failure lowers
+`F` and `X` and adds nothing to `V`.
 
 **Models.** At least one model per reasoning class the catalog offers: budget thinking with a
 `thinking: disabled` off declaration (Anthropic), effort-based reasoning (OpenAI Responses),
@@ -1114,12 +1129,12 @@ and one model without reasoning as a control.
 
 | Part | Change |
 | --- | --- |
-| `summary_strategy.rs` | Reads `compaction.json` once per compaction (if the setting ships); maps the config through `reasoning_config`; appends the target sentence when the rule gives one; the strategy value gets a public constructor taking `ModelHost`, `ProviderConnectionResolver` and its factory configuration, for the runner |
+| `summary_strategy.rs` | Reads `compaction.json` once per compaction (if the setting ships); maps the config through `reasoning_config`; appends the target sentence when the rule gives one; the strategy value gets a public constructor taking `ModelHost`, `ProviderConnectionResolver`, its factory configuration and the optional `FileStorage` handle the plugin injects when a home is configured, for the runner |
 | `ProductSummaryStrategyPlugin` | Factory configuration: the `compaction.json` location and the target rule |
 | Provider (`preferences.rs`) | The effort branch moves to `reasoning_config`; behaviour unchanged |
 | Summary diagnostics object | Adds `reasoning` (the value applied: `inherit`, `off`, `low`), `targetTokens` (S, absent without an instruction) and `cutOffCount` (replies stopped at `max_tokens`; today they are only visible inside `chunkCount`). Additive fields of the strategy-owned object in `context/compaction`; no format version change |
-| `xtask` | `summary-eval` command and `xtask/summary-eval/cases/` |
-| App Server product profile | Passes the home's `compaction.json` location to the strategy factory |
+| `xtask` | `summary-eval` command and `xtask/summary-eval/cases/`; `serve_home`, the product assembly on an existing home that `serve_product` (`graph`) and the runner share |
+| App Server product profile | Passes the home's `compaction.json` location to the strategy factory; `RunningServer::service` hands a served profile's process services to `xtask`, so the runner reaches `ProviderService`, `ModelHost`, `ProviderConnectionResolver` and `FileStorage` |
 
 No event, port, Session value, Loop, ContextPolicy, record or replay change. Flow test, once the
 setting ships: in `transport_flow/compaction.rs`, a `compaction.json` with `off` against the mock

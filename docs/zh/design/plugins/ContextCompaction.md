@@ -655,7 +655,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 **放在哪里。** 摘要策略的业务配置（ADR 002 D4）：产品 home 中的用户文件 `compaction.json`，`{"summaryReasoning": "inherit" | "off" | "low"}`，拒绝未知成员。
 
-- `ProductSummaryStrategyPlugin` 的工厂捕获该文件的 FileStorage 根和相对路径，与 HostPlatform 捕获 `exec-shell.json`（`exec_shell_file`）相同；策略在每次压缩开始时经 `FileStorage` 读取该文件。修改在下一次压缩生效，无需重载。文件不存在表示默认值（§13.4）。
+- `ProductSummaryStrategyPlugin` 的工厂捕获产品 home 路径，`SummaryStrategy::new` 在加载时用 `FileStorage::register_root` 把它解析成 FileStorage 根：该调用返回 `serve` 已为该 home 注册的根（按路径幂等，不会新开根）；产品配置在 `cli.rs` 中组装，早于 `serve` 计算根列表，所以工厂无法携带那个根的索引。策略随后在每次压缩开始时经 `FileStorage` 读取该根下的 `compaction.json`。修改在下一次压缩生效，无需重载。文件不存在表示默认值（§13.4）。
 - 文件不可读或无效时压缩失败（`failed`，回复 `compaction_failed`），消息点名 `compaction.json`，与无效的 `exec-shell.json` 让需要它的命令失败相同。这个文件是用户的明确选择，悄悄换成别的值会把它藏起来。
 - 只有用户作用域。不提供项目文件：摘要器推理是用户的成本与质量偏好，不是某个仓库的。
 - 它不是声明式 Settings 源（那是给非 Rust 所有者的），也不是带管理方法的 `BusinessDocument`：#170 中没有客户端编辑它。等客户端需要时，它以同样的文档变成带所有者方法的 `BusinessDocument`。
@@ -697,9 +697,10 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 **放在哪里。** 不在 CI 中：它调用真实模型，结果不确定且要花钱，而 AGENTS.md 把自动化测试留给流程与合同。它是 `measure` 旁边的一个 `xtask` 命令，`measure` 已经可以选配真实模型配置运行：
 
 ```bash
-cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR
+cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR [--reasoning inherit|off|low]
 ```
 
+- 不带 `--reasoning` 时运行器执行第一阶段：三个推理分组（`inherit`、`off`、`low`），不带目标指令。带 `--reasoning VALUE` 时执行第二阶段：无指令分组加四个 `(α, β)` 分组，`VALUE` 是第一阶段为该模型选定的推理值。
 - `--home` 必填，必须是一个隔离的产品 home，由操作者在其中配置好提供方；运行器从不使用 `~/.dimcode`。凭据留在那个 home 里，不进入仓库、用例或输出。
 - 运行器在该 home 上启动产品配置（与 `graph` 相同），用默认偏好（用户得到的配置）从 `ProviderService::configuration` 为 `--model` 构造对话请求，并在其上解析 `ProductContextModel`。
 - 对每个用例和每个分组，它用进程的 `ModelHost` 和 `ProviderConnectionResolver` 构造产品摘要策略，把分组的目标规则作为工厂配置，把分组的 `compaction.json` 写进 home，然后用由用例构造的 `CompactionInput` 直接调用 `compact`。因此每个分组都运行已发布的请求构造、分块、截断处理和推理映射，只有两个可调项不同。
@@ -722,7 +723,7 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 
 - `messages` 使用现有的 `Message` 类型，在运行器边界解析；不新增历史类型。运行器给第 `i` 条消息的来源记为 `m<i>`，唯一的切点是 `retainFrom`（检查它不把工具调用与其结果分开），所以 `retain_limit` 就是这个切点。
 - 有 `earlierSummary` 时，它成为检查点的 `replacement`（`[summary_message(text)]`），从而评估合并路径。
-- 有 `contextWindow` 时，它为该用例收窄窗口事实（更小的窗口总是合法的），使折叠路径能在花费可接受的历史上运行。
+- 有 `contextWindow` 时，它为该用例收窄窗口事实（更小的窗口总是合法的），使折叠路径能在花费可接受的历史上运行。它同时把该用例的输出额度限制到该窗口的四分之一（`config.max_tokens = min(output, contextWindow / 4)`），使最大输出很大的模型上输入预算仍为正；每次运行的 JSON 记录实际生效的窗口和输出。输入预算不会为正的用例在任何模型调用之前被拒绝。
 - 内容公开：由本仓库自己的代码、文档和命令输出构成，路径在 `/work/dim` 下。没有真实用户会话、密钥或 home 路径。
 
 | 用例 | 覆盖什么 | 探针包括 |
@@ -741,7 +742,7 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 - `fact` 和 `absent` 探针由 `--judge` 评判；评判模型尽量与摘要模型不同家族，模型接受时用温度 0。评判模型只看摘要和探针列表，不看记录，对每个探针回答 `present`、`absent` 或 `contradicted`，并附引文。`fact` 为 `present` 时得分；`absent` 探针为 `present` 时算一次违规。评判提示是运行器的一部分。
 - 记录决定之前，操作者阅读每个分组得分最低的摘要，手工纠正评判错误；纠正列在研究笔记中。
 
-每个模型和分组，在用例和运行次数上统计：事实召回 `F`、exact 召回 `X`、违规 `V`、被截断的回复 `C`（`cutOffCount`）、失败的压缩、摘要 token 中位数 `T`（`estimatedSummaryTokens`）和 `durationMs` 中位数；目标分组还统计比值 `T / S`。
+每个模型和分组，在用例和运行次数上统计：事实召回 `F`、exact 召回 `X`、违规 `V`、被截断的回复 `C`（`cutOffCount`）、失败的压缩、摘要 token 中位数 `T`（`estimatedSummaryTokens`）和 `durationMs` 中位数；目标分组还统计比值 `T / S`。评判模型没有作答的判断探针单独计入 `unjudged` 列，由操作者手工纠正。失败的压缩没有摘要：它的事实探针和 exact 探针计为未命中，absent 探针计为未违规，且不调用评判模型，因此一次失败会降低 `F` 和 `X`，不会增加 `V`。
 
 **模型。** 目录中每类推理方式至少一个模型：带 `thinking: disabled` 关闭声明的预算式思考（Anthropic）、按强度的推理（OpenAI Responses）、使用 `enable_thinking` 或 `thinking.type` 的 OpenAI 兼容模型（选一个中文能力强的模型），以及一个没有推理的模型作对照。
 
@@ -761,12 +762,12 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 
 | 部分 | 改动 |
 | --- | --- |
-| `summary_strategy.rs` | 每次压缩读取一次 `compaction.json`（如果设置发布）；经 `reasoning_config` 映射 config；规则给出目标时追加目标句；策略值得到一个公开构造函数，接收 `ModelHost`、`ProviderConnectionResolver` 和它的工厂配置，供运行器使用 |
+| `summary_strategy.rs` | 每次压缩读取一次 `compaction.json`（如果设置发布）；经 `reasoning_config` 映射 config；规则给出目标时追加目标句；策略值得到一个公开构造函数，接收 `ModelHost`、`ProviderConnectionResolver`、它的工厂配置和可选的 `FileStorage` 句柄（配置了 home 时由插件注入），供运行器使用 |
 | `ProductSummaryStrategyPlugin` | 工厂配置：`compaction.json` 的位置和目标规则 |
 | Provider（`preferences.rs`） | 强度分支移到 `reasoning_config`；行为不变 |
 | 摘要诊断对象 | 增加 `reasoning`（实际采用的值：`inherit`、`off`、`low`）、`targetTokens`（S，没有指令时不出现）和 `cutOffCount`（停在 `max_tokens` 的回复数；现在它们只隐含在 `chunkCount` 中）。是 `context/compaction` 中由策略拥有的对象的新增字段；不改格式版本 |
-| `xtask` | `summary-eval` 命令和 `xtask/summary-eval/cases/` |
-| App Server 产品配置 | 把 home 中 `compaction.json` 的位置传给策略工厂 |
+| `xtask` | `summary-eval` 命令和 `xtask/summary-eval/cases/`；`serve_home`，即在已有 home 上组装产品配置，由 `serve_product`（`graph`）和运行器共用 |
+| App Server 产品配置 | 把 home 中 `compaction.json` 的位置传给策略工厂；`RunningServer::service` 把一个已启动配置的进程服务交给 `xtask`，使运行器能取到 `ProviderService`、`ModelHost`、`ProviderConnectionResolver` 和 `FileStorage` |
 
 不改任何事件、端口、Session 值、Loop、ContextPolicy、记录或重放。设置发布后的流程测试：在 `transport_flow/compaction.rs` 中，对 mock 提供方使用值为 `off` 的 `compaction.json`，摘要请求的 config 带有模型关闭推理的字段，而对话请求保留它的推理，记录的诊断显示 `reasoning: "off"`；无效文件让手动压缩以 `compaction_failed` 失败。目标规则不需要单独的测试：它是提示词文本，由评估衡量。
 
