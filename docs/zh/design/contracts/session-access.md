@@ -334,7 +334,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | 错误码 | 含义 |
 | --- | --- |
 | `session_closed`、`branch_missing` | 未写入任何内容（对 `launch` 而言，是启动方已关闭或不存在） |
-| `branch_ended` | 分支持已结束；未写入任何内容（对 `launch` 而言，是启动方） |
+| `branch_ended` | 分支已结束；未写入任何内容（对 `launch` 而言，是启动方） |
 | `agent_unknown` | `launch` 指定的 Agent 没有装载 |
 | `reloading` | Agents 索引、模型选择宿主或该 Session 的 Capability 未激活或正在重载；可重试（`input` 用同一 `submissionId`） |
 | `rejected` | 参数格式以及该方法的边界检查（输入校验、位于批次中间的 history 游标、撤回服务的检查）；未写入任何内容 |
