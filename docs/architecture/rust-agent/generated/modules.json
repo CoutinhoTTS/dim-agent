@@ -19145,6 +19145,8 @@
         "path EventKind::ApprovalRespond",
         "path EventKind::BranchCreate",
         "path EventKind::BranchCreateFailed",
+        "path EventKind::BranchEnd",
+        "path EventKind::BranchEnded",
         "path EventKind::BranchResume",
         "path EventKind::BranchStart",
         "path EventKind::CollaborationCancel",
