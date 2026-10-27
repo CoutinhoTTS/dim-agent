@@ -1006,7 +1006,8 @@ pub(crate) struct SessionAssembly {
     pub closing: CancellationToken,
     pub lifecycle: SessionLifecycle,
     pub loaded: Mutex<Option<Arc<Loaded<SessionScope>>>>,
-    /// The parts the Session's mounters mounted when it opened.
+    /// The parts the Session's mounters mounted when it opened, until its
+    /// creation ends.
     pub(crate) mounted: Arc<Mutex<crate::parts::Opened>>,
     pub(crate) copies: crate::parts::Copies,
 }
@@ -1166,7 +1167,8 @@ pub(crate) struct BranchAssembly {
     ancestors: Mutex<Option<Vec<(String, u64)>>>,
     sequence: u64,
     loaded: Mutex<Option<Arc<LoadedBranch>>>,
-    /// The parts the branch's mounters mounted when it opened.
+    /// The parts the branch's mounters mounted when it opened, until its
+    /// creation ends.
     mounted: Arc<Mutex<crate::parts::Opened>>,
     copies: crate::parts::Copies,
 }
@@ -1316,6 +1318,7 @@ impl TimelineFactory {
                 )
                 .await
             };
+            std::mem::take(&mut *owner.mounted.lock().unwrap());
             let result = AssertUnwindSafe(async {
                 let created = started.as_ref().map_err(|(error, _)| error.clone())?;
                 let branch = {
@@ -1652,6 +1655,7 @@ pub(crate) async fn build_session(
         )
         .await
     };
+    std::mem::take(&mut *owner.mounted.lock().unwrap());
     let result = AssertUnwindSafe(async {
         let created = started.as_ref().map_err(|(error, _)| error.clone())?;
         let current = owner.loaded()?;
