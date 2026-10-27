@@ -1,0 +1,390 @@
+pub fn lookup(english: &str) -> Option<&'static str> {
+    Some(match english {
+        // tui.rs
+        "Enter output / interrupt member · x stop command · Esc close" => {
+            "Enter output / interupsi anggota · x stop perintah · Esc tutup"
+        }
+        "Enter output / interrupt member · x stop command · Ctrl+X stop all · Esc close" => {
+            "Enter output / interupsi anggota · x stop perintah · Ctrl+X stop semua · Esc tutup"
+        }
+        "Loading branch history... Stop-all unavailable" => {
+            "Memuat riwayat cabang… Stop-semua tak tersedia"
+        }
+        "Branch history failed; reopen to retry" => "Riwayat cabang gagal; coba buka ulang",
+        "Branch history is incomplete; stop-all unavailable" => {
+            "Riwayat cabang belum lengkap; stop-semua tak tersedia"
+        }
+        "Running" => "Berjalan",
+        "Starting" => "Memulai",
+        "Delegation result" => "Hasil delegasi",
+        "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {
+            "Enter detail · x stop terpilih · Ctrl+X stop semua · Esc tutup"
+        }
+        "x interrupt member · Esc back" => "x interupsi anggota · Esc kembali",
+        "read-only" => "hanya-baca",
+        "Member Session" => "Sesi Anggota",
+        "Loading conversation..." => "Memuat percakapan…",
+        "No conversation yet" => "Belum ada percakapan",
+        "Observing conversation" => "Mengamati percakapan",
+        "Conversation unavailable" => "Percakapan tak tersedia",
+        "Session closed" => "Sesi ditutup",
+        "Member conversation" => "Percakapan anggota",
+        "x stop command · Esc back" => "x stop perintah · Esc kembali",
+        "Esc back" => "Esc kembali",
+        "Tail preview - last 2,000 lines / 50 KiB" => "Pratinjau akhir - 2.000 baris / 50 KiB",
+        "Loading output..." => "Memuat output…",
+        "No output yet" => "Belum ada output",
+        "Live output unavailable" => "Output langsung tak tersedia",
+        "Live output unavailable in this profile" => "Output langsung tak tersedia di profil ini",
+        "Output read failed" => "Gagal baca output",
+        "Completed" => "Selesai",
+        "Failed" => "Gagal",
+        "Cancelled" => "Dibatalkan",
+        "workflow" => "alur kerja",
+        "Stopping" => "Menghentikan",
+        "Stopped" => "Dihentikan",
+        "Interrupted" => "Diinterupsi",
+        "last observed" => "terakhir diamati",
+        "Loading Workflow runs... Stop-all unavailable" => {
+            "Memuat run Workflow… Stop-semua tak tersedia"
+        }
+        "Workflow: last observed; refresh failed, reopen to retry" => {
+            "Workflow: terakhir diamati; refresh gagal, coba buka ulang"
+        }
+        "Workflow runs unavailable; reopen to retry" => {
+            "Run Workflow tak tersedia; coba buka ulang"
+        }
+        "The selected Workflow run is no longer available" => "Run Workflow terpilih sudah tak ada",
+        "Workflow inventory is incomplete; stop-all unavailable" => {
+            "Daftar Workflow belum lengkap; stop-semua tak tersedia"
+        }
+        "Workflow stop unavailable" => "Stop Workflow tak tersedia",
+        "Run no longer available; last observed record" => {
+            "Run sudah tak ada; catatan terakhir diamati"
+        }
+        "x stop workflow · Esc back" => "x stop workflow · Esc kembali",
+        "Run" => "Run",
+        "Source" => "Sumber",
+        "Stages" => "Tahap",
+        "result" => "hasil",
+        "Log" => "Log",
+        "Report" => "Laporan",
+        "waiting" => "menunggu",
+        "launching" => "memulai",
+        "completed" => "selesai",
+        "failed" => "gagal",
+        "stopped" => "dihentikan",
+        "skipped" => "dilewati",
+        "lost" => "hilang",
+        "none" => "tak ada",
+        "pending" => "tertunda",
+        "delivered" => "terkirim",
+        "undeliverable" => "tak terkirim",
+        "Agent is starting; no member Session to stop yet" => {
+            "Agen memulai; belum ada Sesi anggota untuk dihentikan"
+        }
+        "Provider members are controlled by the leader; no stop here" => {
+            "Anggota provider diatur pemimpin; tak bisa stop di sini"
+        }
+        "Provider members have no conversation to open here" => {
+            "Anggota provider tak punya percakapan di sini"
+        }
+        "That delegation is no longer in this transcript" => {
+            "Delegasi itu sudah tak ada di transkrip ini"
+        }
+        "Member model" => "Model anggota",
+        "No model observed" => "Model belum teramati",
+        "Observing member..." => "Mengamati anggota…",
+        "{model} (observation unavailable)" => "{model} (pengamatan tak tersedia)",
+        "{model} (Session closed)" => "{model} (Sesi ditutup)",
+        "{model} (last observed)" => "{model} (terakhir diamati)",
+        "Agent: {name}" => "Agen: {name}",
+        "Provider member: {name}" => "Anggota provider: {name}",
+        "Task: {task}" => "Tugas: {task}",
+        "Activity: {activity}" => "Aktivitas: {activity}",
+        "Activity: not observed on this attachment" => "Aktivitas: tak teramati di koneksi ini",
+        "Result: {result}" => "Hasil: {result}",
+        "Controlled by the leader" => "Diatur pemimpin",
+        "› Open member conversation" => "› Buka percakapan anggota",
+        "Copied to clipboard" => "Disalin ke clipboard",
+        "Opened link" => "Tautan dibuka",
+        "Link: {url}" => "Tautan: {url}",
+        "Not available" => "Tak tersedia",
+        "files changed  {count}" => "file diubah  {count}",
+        "active session" => "sesi aktif",
+        "new-session draft" => "draf sesi baru",
+        "Tool approvals: {title} ({target})" => "Persetujuan tool: {title} ({target})",
+        "Disconnected · draft kept" => "Terputus · draf disimpan",
+        "The App Server closed this interface: {reason}" => {
+            "App Server menutup antarmuka ini: {reason}"
+        }
+        "Disconnected; draft kept. Exit and resume this Session." => {
+            "Terputus; draf disimpan. Keluar lalu lanjutkan Sesi ini."
+        }
+        "Disconnected; draft kept. Exit and run: {command}" => {
+            "Terputus; draf disimpan. Keluar lalu jalankan: {command}"
+        }
+        "Disconnected; command outcome unknown" => "Terputus; hasil perintah tak diketahui",
+        "Message queued" => "Pesan diantrekan",
+        "Run a shell command · Esc to exit" => "Jalankan perintah shell · Esc keluar",
+        "! shell mode" => "! mode shell",
+        "!! shell mode · not sent to the model" => "!! mode shell · tak dikirim ke model",
+        "Leave shell mode to quote a message" => "Keluar mode shell untuk kutip pesan",
+        "A shell command is already running" => "Perintah shell masih berjalan",
+        "Running… · Ctrl+C to interrupt · {seconds}s" => {
+            "Berjalan… · Ctrl+C interupsi · {seconds}s"
+        }
+        "exit code {code}" => "kode keluar {code}",
+        "killed by {signal}" => "dihentikan oleh {signal}",
+        "interrupted" => "diinterupsi",
+        "done" => "selesai",
+        "failed: {reason}" => "gagal: {reason}",
+        "Shell output was not recorded: {reason}" => "Output shell tak tercatat: {reason}",
+        "Shell: {reason}" => "Shell: {reason}",
+        "Reading clipboard…" => "Membaca clipboard…",
+        "Clipboard: {reason}" => "Clipboard: {reason}",
+        "Wait for clipboard insertion before sending" => {
+            "Tunggu clipboard disisipkan sebelum kirim"
+        }
+        "A submission accepts at most 20 images" => "Maks. 20 gambar per kiriman",
+        "[Image #{index}]" => "[Gambar #{index}]",
+        "The current model does not accept images; remove {label} to send" => {
+            "Model ini tak menerima gambar; hapus {label} untuk kirim"
+        }
+        "Files" => "File",
+        "Searching…" => "Mencari…",
+        "↑↓ select · enter/tab insert · esc close" => {
+            "↑↓ pilih · enter/tab sisip · esc tutup"
+        }
+        "not sent to the model" => "tak dikirim ke model",
+        "… {count} more lines" => "… {count} baris lagi",
+        "… {count} earlier lines" => "… {count} baris sebelumnya",
+        "Interrupt requested; Ctrl+C again to exit" => {
+            "Interupsi diminta; Ctrl+C lagi untuk keluar"
+        }
+        "Press Ctrl+C again to exit" => "Ctrl+C lagi untuk keluar",
+        "User interrupted the run." => "Run diinterupsi pengguna.",
+        "Could not save the language: {error}" => "Gagal simpan bahasa: {error}",
+        "Language set to {locale}" => "Bahasa diatur ke {locale}",
+        "Language set to system default" => "Bahasa diatur ke bawaan sistem",
+        "Connected {provider}" => "{provider} terhubung",
+        "Opened {url}" => "Membuka {url}",
+        "Tool details not saved: {error}" => "Detail tool tak disimpan: {error}",
+        "/{name} needs a session — send a message first" => {
+            "/{name} perlu sesi — kirim pesan dulu"
+        }
+        "Nothing is running" => "Tak ada yang berjalan",
+        "No queued message" => "Antrean kosong",
+        "Only in fullscreen (/tui)" => "Hanya di layar penuh (/tui)",
+        "/{name} is not yet available" => "/{name} belum tersedia",
+        "new session" => "sesi baru",
+        "resumed {id} · {count} messages" => "lanjut {id} · {count} pesan",
+        " · earlier history: /history" => " · riwayat lama: /history",
+        "Error: {message}" => "Error: {message}",
+        "working…  {elapsed}" => "bekerja…  {elapsed}",
+        "thinking…  {elapsed}" => "berpikir…  {elapsed}",
+        "Ask anything..." => "Tanya apa saja…",
+        "Earlier history · {id} · {count} messages · /history for the previous page" => {
+            "Riwayat lama · {id} · {count} pesan · /history halaman sebelumnya"
+        }
+        "No active session" => "Tak ada sesi aktif",
+        "No earlier messages." => "Tak ada pesan lama.",
+        "answer required" => "perlu jawaban",
+        "permission required" => "perlu izin",
+        "esc interrupt" => "esc interupsi",
+        "↑ edit · ctrl+s steer now · /queue" => "↑ edit · ctrl+s steer kini · /queue",
+        "+{count} more · ↑ edit · ctrl+s steer now · /queue" => {
+            "+{count} lagi · ↑ edit · ctrl+s steer kini · /queue"
+        }
+        "Queue ({count})" => "Antrean ({count})",
+        "Thinking…" => "Berpikir…",
+        "Thought" => "Berpikir",
+        "Thought for {duration}" => "Berpikir {duration}",
+        "Welcome to DIM {version}!" => "Selamat datang di DIM {version}!",
+        "Type / for commands · Ctrl+O for the palette" => "Ketik / untuk perintah · Ctrl+O palet",
+        "Workspace" => "Workspace",
+        "Git branch" => "Cabang Git",
+        "Bye!" => "Sampai jumpa!",
+        "DIM Web is ready" => "DIM Web siap",
+        "Opened in your browser" => "Dibuka di browser",
+        "Open the sign-in link below" => "Buka tautan masuk di bawah",
+        "Web" => "Web",
+        "Sign-in link:" => "Tautan masuk:",
+        "Resume" => "Lanjutkan",
+        "Press Ctrl+C to stop the Web workspace." => "Ctrl+C untuk menghentikan workspace Web.",
+        "To resume this session:" => "Lanjutkan sesi ini:",
+
+        // composer/commands.rs: categories
+        "session" => "sesi",
+        "run" => "run",
+        "view" => "tampilan",
+        "model" => "model",
+        "app" => "aplikasi",
+        "skill" => "skill",
+        // composer/commands.rs: descriptions
+        "start a new session" => "mulai sesi baru",
+        "show or set the reasoning effort" => "lihat/atur tingkat penalaran",
+        "show or set the priority service tier (on|off)" => {
+            "lihat/atur tier layanan prioritas (on|off)"
+        }
+        "list agents or switch this session's agent" => "daftar agen atau ganti agen sesi",
+        "list MCP servers, sign in or out (login|logout ID)" => {
+            "daftar server MCP, masuk/keluar (login|logout ID)"
+        }
+        "resume a previous session" => "lanjutkan sesi sebelumnya",
+        "open this session in the browser" => "buka sesi ini di browser",
+        "load the previous page of messages" => "muat halaman pesan sebelumnya",
+        "show the context window usage" => "lihat pemakaian jendela konteks",
+        "interrupt the run" => "interupsi run",
+        "steer with the next queued message" => "steer dengan pesan antrean berikutnya",
+        "scroll to the top" => "gulir ke atas",
+        "scroll to the bottom" => "gulir ke bawah",
+        "pick an earlier message to edit or quote" => "pilih pesan lama untuk diedit/dikutip",
+        "collapse or expand tool details and thoughts" => "lipat/buka detail tool dan pikiran",
+        "switch between fullscreen and scrollback" => "ganti layar penuh/scrollback",
+        "switch theme" => "ganti tema",
+        "switch language" => "ganti bahasa",
+        "select a model" => "pilih model",
+        "connect a provider" => "hubungkan provider",
+        "sign in to DimAgent" => "masuk ke DimAgent",
+        "DimAgent account · usage · sign out" => "akun DimAgent · pemakaian · keluar",
+        "configure tool approvals" => "atur persetujuan tool",
+        "open settings" => "buka pengaturan",
+        "suspend to the shell" => "tangguhkan ke shell",
+        "exit" => "keluar",
+
+        // composer/palette.rs
+        "Enter select · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter pilih · Ctrl+X hapus simpanan · Esc hapus/tutup"
+        }
+        "Enter select · Esc clear/close" => "Enter pilih · Esc hapus/tutup",
+        "esc close" => "esc tutup",
+        "Suggestions" => "Saran",
+        "Skills" => "Skill",
+        "Commands" => "Perintah",
+        "Command Palette" => "Palet Perintah",
+        "No matches" => "Tak ada hasil",
+        " (unavailable)" => " (tak tersedia)",
+
+        // composer/mod.rs
+        "[Text: {preview} ({count} chars)]" => "[Teks: {preview} ({count} karakter)]",
+        "[... {count} lines]" => "[… {count} baris]",
+        "pasted text" => "teks tempelan",
+
+        // list_panel.rs
+
+        // settings_panel.rs
+        "on" => "aktif",
+        "off" => "nonaktif",
+        "Interface" => "Antarmuka",
+        "Theme" => "Tema",
+        "Language" => "Bahasa",
+        "Startup UI form" => "Bentuk UI awal",
+        "fullscreen" => "layar penuh",
+        "scrollback" => "scrollback",
+        "Tool details" => "Detail tool",
+        "expanded" => "terbuka",
+        "collapsed" => "terlipat",
+        "Mouse (fullscreen)" => "Mouse (layar penuh)",
+        "Permissions" => "Izin",
+        "Tool approvals" => "Persetujuan tool",
+        "Models" => "Model",
+        "Model" => "Model",
+        "not set" => "belum diatur",
+        "Settings" => "Pengaturan",
+        "↑↓ move · Enter select · ←→/Space change · Esc close" => {
+            "↑↓ pindah · Enter pilih · ←→/Space ubah · Esc tutup"
+        }
+
+        // language_panel.rs
+        "↑↓ preview · Enter save · Esc restore" => {
+            "↑↓ pratinjau · Enter simpan · Esc pulihkan"
+        }
+        "System default ({locale})" => "Bawaan sistem ({locale})",
+
+        // theme_panel.rs
+        "↑↓ preview · Enter apply · Esc cancel" => {
+            "↑↓ pratinjau · Enter terapkan · Esc batal"
+        }
+        "System" => "Sistem",
+        "Could not save the theme: {error}" => "Tidak bisa menyimpan tema: {error}",
+
+        // sessions_panel.rs
+        "Sessions" => "Sesi",
+        "Enter open · Ctrl+R refresh · Esc close" => "Enter buka · Ctrl+R refresh · Esc tutup",
+        "Loading sessions..." => "Memuat sesi…",
+        "No saved sessions yet." => "Belum ada sesi tersimpan.",
+        "No matching sessions." => "Tak ada sesi cocok.",
+        "now" => "baru saja",
+        "{count}m ago" => "{count}mnt lalu",
+        "{count}h ago" => "{count}j lalu",
+        "{count}d ago" => "{count}hr lalu",
+
+        // models_panel.rs
+        "Select a model" => "Pilih model",
+        "Loading models..." => "Memuat model…",
+        "No models available. Connect a provider first." => {
+            "Tak ada model. Hubungkan provider dulu."
+        }
+        "No matching models." => "Tak ada model cocok.",
+        "current" => "saat ini",
+        "Edit models" => "Edit model",
+        "Editing models is not available yet" => "Edit model belum tersedia",
+        "Enter select · Esc back" => "Enter pilih · Esc kembali",
+        "Subagent models" => "Model subagen",
+        "Subagent models: {policy}" => "Model subagen: {policy}",
+        "Fixed subagent model" => "Model subagen tetap",
+        "Agent choice (default)" => "Pilihan agen (bawaan)",
+        "Agent choice" => "Pilihan agen",
+        "Inherit requesting branch" => "Warisi cabang peminta",
+        "Fixed model" => "Model tetap",
+        "Applies to new members, including named Agents." => {
+            "Untuk anggota baru, termasuk Agen bernama."
+        }
+        "Existing members keep their models." => "Anggota lama tetap pakai modelnya.",
+        "unknown" => "tak diketahui",
+        "Subagent model policy saved" => "Kebijakan model subagen disimpan",
+        "Subagent model policy changed elsewhere; choose again to reread it" => {
+            "Kebijakan model subagen diubah di tempat lain; pilih lagi untuk muat ulang"
+        }
+        "Subagent model policy: {error}" => "Kebijakan model subagen: {error}",
+        "drawing diagram… {count} lines" => "menggambar diagram… {count} baris",
+        // notify.rs
+        "Task complete" => "Tugas selesai",
+        "Permission needed: {tool}" => "Perlu izin: {tool}",
+        "Question waiting for your answer" => "Pertanyaan menunggu jawaban",
+        "Notify when agent needs you" => "Beri tahu saat agen butuh Anda",
+        // keys.rs
+        "show the key bindings" => "lihat pintasan tombol",
+        "Application keys" => "Tombol aplikasi",
+        "Enter submit · Shift+Enter or Ctrl+J newline · ↑↓ history" => {
+            "Enter kirim · Shift+Enter/Ctrl+J baris baru · ↑↓ riwayat"
+        }
+        "Ctrl+O or Ctrl+P commands · Esc interrupt or clear · Ctrl+S steer queued · ↑ edit queued" => {
+            "Ctrl+O/Ctrl+P perintah · Esc interupsi/hapus · Ctrl+S steer antrean · ↑ edit antrean"
+        }
+        "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
+            "Ctrl+C hapus, 2x untuk keluar · Ctrl+D keluar jika draf kosong"
+        }
+        "Fullscreen" => "Layar penuh",
+        "PageUp/PageDown scroll · Home/End top or bottom · Tab pick a message, e edit it, q quote it" => {
+            "PageUp/PageDown gulir · Home/End atas/bawah · Tab pilih pesan, e edit, q kutip"
+        }
+        "wheel scroll · drag select and copy · click a link to open it, a tool group to expand it" => {
+            "roda gulir · seret pilih dan salin · klik tautan/grup tool untuk membukanya"
+        }
+        "mouse off (/settings): the terminal selects and copies" => {
+            "mouse nonaktif (/settings): terminal yang pilih dan salin"
+        }
+        "Terminal-owned history" => "Riwayat milik terminal",
+        "scroll: {value}" => "gulir: {value}",
+        "search: {value}" => "cari: {value}",
+        "copy: {value}" => "salin: {value}",
+        "terminal search" => "cari di terminal",
+        "terminal scrollback" => "scrollback terminal",
+        "terminal copy" => "salin terminal",
+        "drag to select" => "seret untuk pilih",
+        "drag or {shortcut}" => "seret atau {shortcut}",
+        _ => return None,
+    })
+}

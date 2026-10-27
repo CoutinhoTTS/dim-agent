@@ -1,0 +1,90 @@
+pub fn lookup(english: &str) -> Option<&'static str> {
+    Some(match english {
+        // providers_panel.rs
+        "Providers" => "Fornecedores",
+        "Enter open · Esc clear/close" => "Enter abrir · Esc limpar/fechar",
+        "↑↓/Tab move · Enter activate · Esc back" => {
+            "↑↓/Tab mover · Enter ativar · Esc voltar"
+        }
+        "Loading providers..." => "A carregar fornecedores…",
+        "No matching providers." => "Nenhum fornecedor corresponde.",
+        "Custom providers are not available yet" => {
+            "Fornecedores personalizados ainda indisponíveis"
+        }
+        "Testing connection..." => "A testar ligação…",
+        "Connect {providerId}" => "Ligar {providerId}",
+        "(default)" => "(predefinido)",
+        "(required)" => "(obrigatório)",
+        "Test + apply" => "Testar + aplicar",
+        "Testing sends the stored credential to this URL." => {
+            "O teste envia a credencial guardada para este URL."
+        }
+        "Disconnect" => "Desligar",
+        "Enable provider" => "Ativar fornecedor",
+        "Disable provider" => "Desativar fornecedor",
+        "Error: {error}" => "Erro: {error}",
+        "disabled" => "desativado",
+        "current" => "atual",
+        "Sign in" => "Iniciar sessão",
+        "ready" => "pronto",
+        "error" => "erro",
+        "not connected" => "não ligado",
+        "Add custom provider" => "Adicionar fornecedor personalizado",
+        // oauth_view.rs
+        "Checking account…" => "A verificar conta…",
+        "Not signed in" => "Sessão não iniciada",
+        "Signed in as {account}" => "Sessão iniciada como {account}",
+        "Open models" => "Abrir modelos",
+        "View plan" => "Ver plano",
+        "Sign out" => "Terminar sessão",
+        "Checking usage…" => "A verificar utilização…",
+        "Usage: {reason}" => "Utilização: {reason}",
+        "Credits" => "Créditos",
+        "unlimited" => "ilimitado",
+        "{hours}h window" => "janela de {hours} h",
+        "/month" => "/mês",
+        "/year" => "/ano",
+        "expires {date}" => "expira a {date}",
+        "resets {date}" => "repõe a {date}",
+        "↑↓ move · enter activate · ctrl+r refresh · esc close" => {
+            "↑↓ mover · enter ativar · ctrl+r atualizar · esc fechar"
+        }
+        "Login with DimAgent" => "Iniciar sessão com DimAgent",
+        "Enterprise login" => "Início de sessão empresarial",
+        "Device login" => "Início de sessão no dispositivo",
+        "Email" => "Email",
+        "Continue" => "Continuar",
+        "Browser login" => "Início de sessão no navegador",
+        "Print verification URL + pairing code again" => {
+            "Mostrar de novo URL de verificação + código"
+        }
+        "Restart device login" => "Reiniciar início de sessão no dispositivo",
+        "Print OAuth URL again" => "Mostrar de novo URL OAuth",
+        "Callback URL" => "URL de callback",
+        "Submit callback" => "Enviar callback",
+        "The browser could not be opened. Open the link manually, then return here." => {
+            "Impossível abrir o navegador. Abra a ligação manualmente e volte aqui."
+        }
+        "Enter code {code} at {url}" => "Introduza o código {code} em {url}",
+        "Waiting for authorization" => "À espera de autorização",
+        "{name} device login" => "Início de sessão no dispositivo {name}",
+        "Open this URL: {url}" => "Abra este URL: {url}",
+        "Enter code:    {code}" => "Código:    {code}",
+        "Waiting after server slow-down" => "À espera após abrandamento do servidor",
+        "OAuth login cancelled" => "Início de sessão OAuth cancelado",
+        "Enter your work email" => "Introduza o email profissional",
+        "Invalid OAuth state - possible CSRF attempt" => {
+            "Estado OAuth inválido - possível tentativa de CSRF"
+        }
+        "Preparing login... · esc cancel" => "A preparar início de sessão… · esc cancelar",
+        "Completing login... · esc cancel" => "A concluir início de sessão… · esc cancelar",
+        "enter restart · esc back" => "enter reiniciar · esc voltar",
+        "type value · ↑↓/tab move · enter submit · esc cancel" => {
+            "escrever valor · ↑↓/tab mover · enter enviar · esc cancelar"
+        }
+        "↑↓ move · enter activate · esc back" => "↑↓ mover · enter ativar · esc voltar",
+        "↑↓ move · enter activate · esc close" => "↑↓ mover · enter ativar · esc fechar",
+        "(paste here)" => "(colar aqui)",
+        _ => return None,
+    })
+}
