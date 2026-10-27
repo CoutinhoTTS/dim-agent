@@ -29,6 +29,9 @@ sha2 = "0.10.9"
 foldhash = "0.2"
 getrandom = "0.3"
 flate2 = "1.1"
+tar = { version = "0.4", default-features = false }
+# The Windows Node archives are zip files (runtime manager).
+zip = { version = "9.1", default-features = false, features = ["deflate"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 url = "2"
 base64 = "0.22"

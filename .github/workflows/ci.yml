@@ -156,6 +156,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/python.tar.gz" -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/python/bin/python3" -m venv runtime/.venv
           runtime/.venv/bin/python -m pip install --require-hashes --no-deps -r runtime/python-requirements.txt
+          export PATH="$RUNNER_TEMP/python/bin:$PATH"
           export DIM_TEST_NODE="$(command -v node)"
           export DIM_TEST_JS_RUNTIME="$PWD/runtime/node_modules/@arcships/rutis-runtime"
           export DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs"

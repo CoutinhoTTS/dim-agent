@@ -128,6 +128,8 @@ pub struct Defaults {
     /// Each default plugin's name and directory, resolved against the file.
     pub plugins: BTreeMap<String, PathBuf>,
     pub locked: Vec<String>,
+    /// RuntimeManager's preset (RuntimeManager §2.2).
+    pub runtimes: crate::runtime_manager::Choices,
 }
 
 #[derive(Deserialize)]
@@ -137,6 +139,8 @@ struct DefaultsFile {
     plugins: BTreeMap<String, PathBuf>,
     #[serde(default)]
     locked: Vec<String>,
+    #[serde(default)]
+    runtimes: crate::runtime_manager::Choices,
 }
 
 impl Defaults {
@@ -152,6 +156,7 @@ impl Defaults {
                 .map(|(name, dir)| (name, base.join(dir)))
                 .collect(),
             locked: file.locked,
+            runtimes: file.runtimes,
         })
     }
 }

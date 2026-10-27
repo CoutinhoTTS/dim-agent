@@ -21,6 +21,7 @@ pub mod plugin_files;
 pub mod plugin_manager;
 pub mod protocol;
 pub mod provider;
+pub mod runtime_manager;
 pub mod session_typescript;
 pub mod settings;
 pub mod settings_methods;
@@ -683,18 +684,57 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             },
         )?);
     }
+    let acquire = config
+        .session_typescript
+        .as_ref()
+        .and_then(|parts| parts.acquire.clone());
+    let mut optional = Vec::new();
     if let Some(parts) = &session_parts {
+        if let Some(runtimes) = &acquire {
+            let python = parts.python.as_ref().ok_or_else(|| {
+                ServerError::Configuration("RuntimeManager needs the Python runtime".into())
+            })?;
+            if let Some(project) = config
+                .session_typescript
+                .as_ref()
+                .and_then(|parts| parts.python.as_ref())
+                .map(|python| &python.project)
+            {
+                std::fs::create_dir_all(project)?;
+            }
+            let (runtimes, node, python) = (
+                runtimes.clone(),
+                parts.node.runtime.clone(),
+                python.runtime.clone(),
+            );
+            rows.push(register_part(
+                &mut builtins,
+                builder.catalog(),
+                move |names| {
+                    Ok(Box::new(runtime_manager::RuntimeManagerPlugin::new(
+                        names,
+                        runtimes.clone(),
+                        node.clone(),
+                        python.clone(),
+                    )?))
+                },
+            )?);
+        }
         let runtimes = parts.runtimes().zip([
             ("SessionNodeRuntime", "SessionNodeRows"),
             ("SessionPythonRuntime", "SessionPythonRows"),
         ]);
         for (foreign, (runtime_row, rows_row)) in runtimes {
-            let runtime = foreign.runtime.clone();
-            rows.push(register_part(
-                &mut builtins,
-                builder.catalog(),
-                move |_| Ok(Box::new(NodeRuntime(runtime.clone(), runtime_row))),
-            )?);
+            if acquire.is_some() {
+                optional.push(rows_row);
+            } else {
+                let runtime = foreign.runtime.clone();
+                rows.push(register_part(
+                    &mut builtins,
+                    builder.catalog(),
+                    move |_| Ok(Box::new(NodeRuntime(runtime.clone(), runtime_row))),
+                )?);
+            }
             let resolver = foreign.rows.clone();
             let name = foreign.name;
             rows.push(register_part(
@@ -815,6 +855,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut required: Vec<String> = rows
         .iter()
         .map(|row| row["id"].as_str().expect("host row id").to_owned())
+        .filter(|id| !optional.contains(&id.as_str()))
         .collect();
     if let Some(parts) = &session_parts {
         for row in &parts.rows {
@@ -831,6 +872,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     let runtime_rows = session_parts
         .iter()
+        .filter(|_| acquire.is_none())
         .flat_map(|parts| parts.runtimes())
         .map(|foreign| Key::dynamic(foreign.rows.runtime_name().to_owned()))
         .collect();
@@ -997,6 +1039,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<mcp::McpAuth>(catalog, None);
     register::<mcp::Publication>(catalog, None);
     register::<methods::ManagementMethods>(catalog, None);
+    register::<runtime_manager::RuntimeService>(catalog, None);
     register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
     register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
     for name in [

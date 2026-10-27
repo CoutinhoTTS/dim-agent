@@ -10,7 +10,8 @@ use crate::methods::ManagementMethods;
 use acquire::PluginsDir;
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, Progress, RpcError};
 use dim_agent_runtime::{Names, PartRegistry, PartScope};
-use record::{Choice, Defaults, Installed, Kind, Manifest, Record, Source};
+pub use record::Defaults;
+use record::{Choice, Installed, Kind, Manifest, Record, Source};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::report::{EntryInfo, EntryStatus};
@@ -441,6 +442,8 @@ impl Outcome {
 pub(crate) struct Manager {
     state: Arc<State>,
     loader: Arc<Loader>,
+    ctx: Ctx,
+    runtimes: Key<crate::runtime_manager::RuntimeService>,
 }
 
 #[derive(Deserialize)]
@@ -1074,6 +1077,12 @@ impl Manager {
             ..Default::default()
         };
         if let Some(code) = &manifest.code {
+            // RuntimeManager R1: a Python plugin turned on asks for the Python runtime.
+            if is_python(code)
+                && let Some(runtimes) = self.ctx.get_at(&self.runtimes)
+            {
+                runtimes.install(crate::runtime_manager::Kind::Python);
+            }
             if missing_instance_names(self.state.catalog.get().expect("set at startup"), code)
                 .is_empty()
             {
@@ -1205,6 +1214,7 @@ pub(crate) struct PluginManagerPlugin {
     loader: Key<Loader>,
     methods: Key<ManagementMethods>,
     parts: Key<PartRegistry>,
+    runtimes: Key<crate::runtime_manager::RuntimeService>,
 }
 
 impl PluginManagerPlugin {
@@ -1214,6 +1224,7 @@ impl PluginManagerPlugin {
             loader: names.key()?,
             methods: names.key()?,
             parts: names.key()?,
+            runtimes: names.key()?,
         })
     }
 }
@@ -1234,6 +1245,8 @@ impl DynPlugin for PluginManagerPlugin {
             let manager = Manager {
                 state: self.state.clone(),
                 loader: ctx.require_at(&self.loader)?,
+                ctx: ctx.clone(),
+                runtimes: self.runtimes.clone(),
             };
             let keep: Vec<PathBuf> = manager
                 .state

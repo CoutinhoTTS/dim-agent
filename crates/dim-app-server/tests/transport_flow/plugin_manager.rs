@@ -718,6 +718,7 @@ async fn node_python_plugin_installs_and_reloads_through_its_link() {
             .expect("DIM_TEST_PYTHON")
             .into(),
         project: python.canonicalize().unwrap(),
+        packages: None,
     });
     config.session_typescript = Some(parts);
     let (server, _requests, _) = start(config).await;

@@ -38,6 +38,7 @@ fn declaration() -> Value {
 fn rows(rows: Vec<Value>) -> SessionTypeScriptConfig {
     SessionTypeScriptConfig {
         python: None,
+        acquire: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),
