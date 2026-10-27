@@ -40,7 +40,15 @@ Cross-built executables are inspected for their ELF, Mach-O or PE target archite
 
 ## GitHub workflows
 
-`ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. It receives no private plugin credentials. Pushes to `main` and manual runs do all of it; a pull request runs only the groups its changed paths need, as decided by `scripts/ci-changes.mjs` (documentation-only changes skip every group, and unrecognized paths run all of them). `ci-ok` passes when every selected job passed, so it is the check to require. CI builds without debug info (`CARGO_PROFILE_DEV_DEBUG=0`).
+`ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. It builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests, and exercises the ignored actual CLI profile and public Node-backed flows. Pushes to `main` and manual runs also run the account-build ACP Registry check below; pull requests receive no OAuth client IDs. A pull request runs only the groups its changed paths need, as decided by `scripts/ci-changes.mjs` (documentation-only changes skip every group, and unrecognized paths run all of them). `ci-ok` passes when every selected job passed, so it is the check to require. CI builds without debug info (`CARGO_PROFILE_DEV_DEBUG=0`).
+
+### ACP Registry checks
+
+The `acp-registry` job runs on the trusted Linux x64 runner for `main` pushes and manual CI runs. It compiles `dimcode` with both OAuth client ID secrets and executes the unmodified upstream Registry authentication checker and unauthenticated protocol matrix, pinned to the revision in `ci.yml`. Missing secrets, authentication failures, skipped authentication checks or failed advertised protocol methods fail `ci-ok`. Pull requests skip this job and retain the ordinary Gateway/helper flow tests; they never receive the client IDs.
+
+`scripts/check-acp-registry.mjs EXECUTABLE REGISTRY_CHECKOUT REPORT_DIRECTORY` also runs locally with uv and tar available. It uses Python 3.14.2 with no added Python packages, makes a temporary binary manifest with the executable's actual version, disables browser launch to exercise terminal capability negotiation, and stops its isolated daemon on exit. Reports retain upstream/source provenance and the auth/matrix results for one day; the executable and account home are never uploaded. Update the pinned upstream revision only after running the same check against the candidate revision.
+
+The protocol matrix reports unsupported optional methods separately; its process exit status alone is not a gate. The adapter checks initialize, authentication discovery, Session listing and every advertised probed method. Empty model configuration and unauthenticated requests are not successful login or chat. Formal Registry metadata, release version/channel and published-package acceptance remain release checks; this job does not relabel alpha versions or publish anything.
 
 ### Rust dependency checks
 
@@ -101,7 +109,7 @@ Every `ci.yml` job runs on a persistent self-hosted runner, and a pull request's
 
 - The binding boundary is the repository's GitHub settings: forking is disabled, and "Run workflows from fork pull requests" is off for this private repository. Keep both that way while CI uses self-hosted runners.
 - `ci.yml` also skips every job when a pull request's head branch is not in `arcships/dim`, and `ci-ok` then fails rather than reporting an unverified pull request as passing. This guard is defense in depth only: a pull request supplies its own workflow file, so the settings above are what keep untrusted code off the runners.
-- PR runners must hold no release credentials and stay off private networks; `ci.yml` receives no secrets, and its `GITHUB_TOKEN` can only read repository contents.
+- PR runners must hold no release credentials and stay off private networks; PR jobs receive no secrets, and `GITHUB_TOKEN` can only read repository contents. Only the trusted `acp-registry` build step receives the paired OAuth client IDs; the upstream-check step receives neither those environment variables nor user credentials.
 
 Accepting contributions from forks or outside collaborators requires moving their checks to ephemeral runners first.
 

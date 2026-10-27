@@ -99,8 +99,10 @@ EOF -> local cleanup and native detach
 
 - 目标分发是包含 OAuth 插件且配置真实 build-time client IDs 的账户构建；无 IDs 的 API-key 构建不作为 Registry 的认证分发。不得添加虚假 auth method。
 - Registry 稳定字段仅接受 `X.Y.Z`，preview 接受 `X.Y.Z-preview.N` 或 `X.Y.Z`。原生 `0.1.0-alpha.6` 不直接登记，也不伪装成另一个版本。登记的稳定版本仍为 `0.5.21`；preview 低于稳定版本会被上游稳定通道覆盖。须随实际发布确定可用的版本及通道，再填写与该产物一致的分发坐标。
-- 最终发布包尚未构建或发布；Linux runner 上对该包的原始 auth checker、metadata/build validator 和未登录矩阵仍待执行。本机 Docker 拉取构建镜像被现有代理 `127.0.0.1:7890` 拒绝，未修改全局代理。此前本机 npm DNS 解析到非公网地址的结果也不能当作 metadata build 通过。
-- `#480` 保持开放。Registry 检查未接入或启用 CI；具备真实可分发产物后，最小检查只覆盖该产物的原始上游认证门槛与 metadata 校验，是否启用仍单独决定。原生协议与 helper 回归复用已有 CLI/Gateway flow，不复制上游 checker。
+- 最终发布包的 metadata/build validator 和登记版本随正式发布验收；源码 CI 不把 alpha 改名为合法登记版本，也不把临时 binary manifest 当作正式登记 metadata。
+- `ci.yml` 的 `acp-registry` 在 `main` push 和手动 CI 中启用，运行于 Linux x64；它使用真实 build-time client IDs 编译当前提交的账户版，执行固定上游 commit 的原始 auth checker 与未登录协议矩阵。PR 不读取这些 secrets，继续复用原生 Gateway/helper 的无凭据 flow。
+- `scripts/check-acp-registry.mjs` 使用独立 home 和临时归档，强制 checker 通过且不得 skip；矩阵必须只有一个 Dim 结果、版本与待测 executable 一致、initialize/list 成功并声明 terminal auth。已声明的 fork/resume 等探测不得退化为方法不存在、超时或传输失败；未声明的可选方法只记录结果。矩阵进程退出成功本身不代表验收通过。
+- `acp-registry` 失败或取消会使 `ci-ok` 失败；缺少任一 client ID secret 直接失败，不跳过。报告保留 1 天，包含上游 revision、源码 commit、版本、auth 输出和矩阵；不上传带 client IDs 的 executable、归档或账户文件。native helper 回归仍由既有 CLI flow 执行，不复制上游 checker。
 
 ## Limits and unverified environments
 

@@ -156,9 +156,57 @@ jobs:
           export DIM_TEST_RUTIS_SDK="$PWD/runtime/node_modules/@arcships/rutis/src/index.mjs"
           export DIM_TEST_PYTHON="$PWD/runtime/.venv/bin/python"
           cargo test --locked -p dim-app-server --test transport_flow --test mcp_http_flow node_ -- --ignored
+  acp-registry:
+    needs: changes
+    if: github.event_name != 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.scripts == 'true')
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e
+        with:
+          version: "0.13.6"
+          enable-cache: false
+      - name: Build the account executable
+        env:
+          DIM_OAUTH_CLIENT_ID_CN: ${{ secrets.DIM_OAUTH_CLIENT_ID_CN }}
+          DIM_OAUTH_CLIENT_ID_GLOBAL: ${{ secrets.DIM_OAUTH_CLIENT_ID_GLOBAL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$DIM_OAUTH_CLIENT_ID_CN" || -z "$DIM_OAUTH_CLIENT_ID_GLOBAL" ]]; then
+            echo 'ACP Registry acceptance requires both OAuth client ID secrets.' >&2
+            exit 1
+          fi
+          cargo build --locked -p dimcode
+      - uses: actions/checkout@v6
+        with:
+          repository: agentclientprotocol/registry
+          ref: 49f768659a8089f07874f56a0d474312695ad861
+          path: .acp-registry
+          persist-credentials: false
+      - name: Verify upstream Registry authentication and protocol
+        shell: bash
+        run: node scripts/check-acp-registry.mjs target/debug/dimcode .acp-registry "$RUNNER_TEMP/acp-registry-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: acp-registry
+          path: ${{ runner.temp }}/acp-registry-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: ignore
+          retention-days: 1
   ci-ok:
     # The one check to require: it passes when every selected job passed and skipped jobs were not needed.
-    needs: [changes, dependencies, windows-cli, verify]
+    needs: [changes, dependencies, windows-cli, verify, acp-registry]
     if: always()
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 5
