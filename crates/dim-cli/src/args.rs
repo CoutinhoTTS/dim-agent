@@ -27,6 +27,8 @@ Commands:\n\
   mcp enable ID                    Enable an MCP server shown by mcp list\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
+  runtime list                     List the plugin runtimes and their state\n\
+  runtime install node|python      Turn a plugin runtime on and acquire it\n\
   daemon stop                      Gracefully stop an existing daemon\n\
   web [--port N] [--no-open]       Hold the Web workspace until Ctrl+C
 web --off                        Turn off the daemon-owned Web switch
@@ -97,6 +99,10 @@ pub enum Action {
         id: String,
         enabled: bool,
     },
+    /// `runtime list`: the plugin runtimes and their state.
+    RuntimeList,
+    /// `runtime install NAME`: turn a plugin runtime on and acquire it.
+    RuntimeInstall(String),
     DaemonStop,
     /// `web`: hold the daemon's local web entry open in the foreground.
     Web {
@@ -329,6 +335,13 @@ impl Options {
                         session_id: value(&mut args)?,
                         output: None,
                         database: None,
+                    };
+                }
+                "runtime" if matches!(options.action, Action::Chat) => {
+                    options.action = match value(&mut args)?.as_str() {
+                        "list" => Action::RuntimeList,
+                        "install" => Action::RuntimeInstall(value(&mut args)?),
+                        _ => return Err("Use runtime list or runtime install node|python".into()),
                     };
                 }
                 "mcp" if matches!(options.action, Action::Chat) => {

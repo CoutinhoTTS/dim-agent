@@ -599,6 +599,17 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             }
             Ok(0)
         }
+        Action::RuntimeList => {
+            runtime_list(&mut client).await?;
+            Ok(0)
+        }
+        Action::RuntimeInstall(name) => {
+            let status: serde_json::Value = client
+                .typed("runtime.install", serde_json::json!({ "name": name }))
+                .await?;
+            println!("{}", runtime_line(&status));
+            Ok(0)
+        }
         Action::McpList => {
             mcp_command::list(&mut client, &options).await?;
             Ok(0)
@@ -697,4 +708,22 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         | Action::WebInstall
         | Action::DefaultTerminalMode { .. } => unreachable!(),
     }
+}
+
+/// One `runtime.list` entry as a tab-separated line.
+fn runtime_line(status: &serde_json::Value) -> String {
+    ["name", "source", "version", "status", "reason"]
+        .iter()
+        .filter_map(|field| status[field].as_str())
+        .map(|value| crate::sanitize::safe(value).replace(['\n', '\t'], " "))
+        .collect::<Vec<_>>()
+        .join("\t")
+}
+
+async fn runtime_list(client: &mut client::Client) -> Result<()> {
+    let list: Vec<serde_json::Value> = client.typed("runtime.list", serde_json::json!({})).await?;
+    for status in &list {
+        println!("{}", runtime_line(status));
+    }
+    Ok(())
 }

@@ -106,6 +106,33 @@ test('stages public native payload, packs it and rejects modified content', {ski
   assert.equal(existsSync(path.join(temporary,'tampered')),false);
 });
 
+test('stages the default plugins beside bin/ in the native archive and the npm package', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'dimcode'),`#!/bin/sh\nprintf "dimcode ${version}\\n"\n`,{mode:0o755});
+  const plugins=path.join(temporary,'plugins');
+  mkdirSync(path.join(plugins,'plugins/goal/node_modules/@arcships/rutis'),{recursive:true});
+  writeFileSync(path.join(plugins,'default-plugins.json'),'{"plugins":{"goal":"plugins/goal"}}');
+  writeFileSync(path.join(plugins,'plugins/goal/index.ts'),'export {}');
+  writeFileSync(path.join(plugins,'plugins/goal/node_modules/@arcships/rutis/package.json'),'{}');
+  assert.notEqual(run('stage-release.mjs',[bin,path.join(temporary,'empty'),version,commit,'--plugins',bin]).status,0);
+  const stage=path.join(temporary,'stage');
+  const staged=run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins]);
+  assert.equal(staged.status,0,staged.stderr);
+  const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
+  for (const file of ['default-plugins.json','plugins/goal/index.ts','plugins/goal/node_modules/@arcships/rutis/package.json']) assert(manifest.files[file],file);
+  const packed=run('pack-release.mjs',[stage,path.join(temporary,'packed')]);
+  assert.equal(packed.status,0,packed.stderr);
+  const packedManifest=JSON.parse(readFileSync(path.join(temporary,'packed/release-manifest.json')));
+  const npm=path.join(temporary,'packed',packedManifest.npmPackages[0].file);
+  const native=path.join(temporary,'packed',packedManifest.nativeArchives[0].file);
+  assert(entries(npm).includes('package/plugins/goal/node_modules/@arcships/rutis/package.json'));
+  assert(entries(native).includes(`dimcode-${manifest.platform}/default-plugins.json`));
+  const metadata=spawnSync('tar',['-xOzf',npm,'package/package.json'],{encoding:'utf8'});
+  assert.deepEqual(JSON.parse(metadata.stdout).files.slice(-2),['default-plugins.json','plugins']);
+});
+
 test('stages the Web workspace as one native archive and npm package with its protocol record', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const dist=path.join(temporary,'dist');

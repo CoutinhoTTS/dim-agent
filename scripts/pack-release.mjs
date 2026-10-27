@@ -53,7 +53,8 @@ try {
   writeFileSync(path.join(packageRoot, 'package.json'), `${JSON.stringify({
     name, version:manifest.version, description:'Dim native CLI and App Server', license:'SEE LICENSE IN NOTICE',
     repository:{type:'git',url:'git+https://github.com/arcships/dim.git'},
-    os:[osName === 'windows' ? 'win32' : osName],cpu:[cpu],files:['bin','LICENSE','NOTICE','licenses','release-manifest.json'],
+    os:[osName === 'windows' ? 'win32' : osName],cpu:[cpu],files:['bin','LICENSE','NOTICE','licenses','release-manifest.json',
+      ...(files['default-plugins.json'] ? ['default-plugins.json','plugins'] : [])],
   },null,2)}\n`);
   const archive = `${name}-${manifest.version}.tgz`;
   runTar(['-czf', path.join(output, archive), '-C', scratch, 'package']);

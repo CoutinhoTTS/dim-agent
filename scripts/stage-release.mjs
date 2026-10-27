@@ -1,17 +1,24 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
   rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { buildPlatform, checkArchitecture } from './native-binary.mjs';
 
 const [binaryDirectory, destination, version, sourceCommit, ...rest] = process.argv.slice(2);
-const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT [--account]';
+const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT [--account] [--plugins DIR]';
 assert(binaryDirectory && destination && version && sourceCommit, usage);
-assert(rest.length === 0 || (rest.length === 1 && rest[0] === '--account'), usage);
 // Whether the executable is the account build (dim-oauth-plugin-rust).
-const account = rest.length === 1;
+let account = false;
+// The default plugins staged by stage-plugins.mjs, placed beside `bin/`.
+let plugins;
+for (let index = 0; index < rest.length; index += 1) {
+  if (rest[index] === '--account' && !account) account = true;
+  else if (rest[index] === '--plugins' && plugins === undefined && rest[index + 1]) plugins = path.resolve(rest[++index]);
+  else assert.fail(usage);
+}
+assert(plugins === undefined || existsSync(path.join(plugins, 'default-plugins.json')), 'The plugins directory has no default-plugins.json');
 assert(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(version), 'Invalid version');
 assert(/^[a-f0-9]{40}$/.test(sourceCommit), 'Invalid source commit');
 const { platform, host, osName, cpu } = buildPlatform();
@@ -40,6 +47,7 @@ try {
   copyFileSync(cli, path.join(output, 'bin', `dimcode${suffix}`));
   chmodSync(path.join(output, 'bin', `dimcode${suffix}`), 0o755);
   copyFileSync(path.join(repo, 'LICENSE'), path.join(output, 'LICENSE'));
+  if (plugins) cpSync(plugins, output, { recursive: true });
   const notices = ['LICENSE', 'NOTICE', 'xai-ratatui-inline/NOTICE', 'xai-ratatui-textarea/NOTICE'];
   for (const file of notices) {
     const destination = path.join(output, 'licenses/grok-build', file);

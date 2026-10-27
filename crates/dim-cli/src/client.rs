@@ -33,6 +33,20 @@ pub fn server(options: &Options) -> Result<Server> {
 /// own), else `web/` beside the executable's `bin/` (a native archive
 /// unpacked next to it), else `web/` in the product home. A directory
 /// counts when it holds `index.html`.
+/// The default configuration file: `DIMCODE_DEFAULTS`, or the release's
+/// `default-plugins.json` beside the executable's `bin/`.
+fn defaults(executable: &Path) -> Option<PathBuf> {
+    std::env::var_os("DIMCODE_DEFAULTS")
+        .map(PathBuf::from)
+        .or_else(|| {
+            executable
+                .parent()
+                .and_then(Path::parent)
+                .map(|root| root.join("default-plugins.json"))
+        })
+        .filter(|path| path.is_file())
+}
+
 pub fn web_assets(executable: &Path, home: &Path) -> Option<PathBuf> {
     web_assets_in(std::env::var_os("DIMCODE_WEB_ASSETS"), executable, home)
 }
@@ -288,6 +302,10 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     } else {
         let product_home = std::fs::canonicalize(&options.home)?;
         command.arg("--product-home").arg(&product_home);
+    }
+    // The default configuration file ships beside `bin/` (RuntimeManager §6).
+    if let Some(path) = defaults(binary) {
+        command.arg("--defaults").arg(path);
     }
     // The Web workspace is a separate artifact the daemon serves from a
     // directory (web-workspace.md §2.4).
