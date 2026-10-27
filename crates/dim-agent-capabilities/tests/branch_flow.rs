@@ -1430,7 +1430,7 @@ async fn an_ancestors_end_closes_a_descendants_pending_tool_end() {
         )
         .await
         .unwrap();
-    let ended = soon(async {
+    soon(async {
         loop {
             if tool_results(&session, &child)
                 .await
@@ -1443,7 +1443,6 @@ async fn an_ancestors_end_closes_a_descendants_pending_tool_end() {
         }
     })
     .await;
-    let _ = ended;
     let source = BranchSource::Host {
         operation_id: "op:end".into(),
     };
@@ -3162,9 +3161,9 @@ async fn a_turn_that_steered_main_writes_no_idle_notice() {
     .await;
     soon(session.idle("main")).await.unwrap();
     let before = blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len();
-    let call = format!(
-        r#"{{"action":"message","to":"main","content":"the leak is in cache.rs","mode":"steer"}}"#
-    );
+    let call =
+        r#"{"action":"message","to":"main","content":"the leak is in cache.rs","mode":"steer"}"#
+            .to_string();
     let result = tool_call(&session, &child, &call).await;
     assert_eq!(result.is_error, None, "{:?}", result.content);
     until_events(&session, "main", |events| {

@@ -384,7 +384,7 @@ impl TimelineTree {
             sequence,
             create_at: dim_agent_runtime::core::unix_millis(),
             tags: None,
-            kind: EventKind::BranchEnded(data).into(),
+            kind: EventKind::BranchEnded(data),
         });
         let (published, wait) = oneshot::channel();
         self.store.append(
