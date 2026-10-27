@@ -27,6 +27,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "working" => "trabalhando",
         "ended itself" => "encerrou-se",
         "ended by an operation" => "encerrada por uma operação",
+        "ended with {id}" => "encerrada com {id}",
         "creation failed" => "criação falhou",
         "shown" => "exibida",
         "line" => "linha",

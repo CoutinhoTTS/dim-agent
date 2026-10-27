@@ -120,9 +120,10 @@ impl Projection {
                 }
             }
             EventContent::BranchEnded(data) => {
-                let state = match &data.source {
-                    BranchSource::Tool { .. } => LineState::EndedItself,
-                    BranchSource::Host { .. } => LineState::EndedByOperation,
+                let state = match (&data.source, &data.ancestor) {
+                    (_, Some(ancestor)) => LineState::EndedWith(ancestor.clone()),
+                    (BranchSource::Tool { .. }, None) => LineState::EndedItself,
+                    (BranchSource::Host { .. }, None) => LineState::EndedByOperation,
                 };
                 if let Some(line) = self.lines.iter_mut().find(|line| line.id == data.branch) {
                     line.state = state;
@@ -1292,6 +1293,23 @@ mod tests {
         assert_eq!(
             main.line_views().last().map(|line| &line.state),
             Some(&LineState::EndedByOperation)
+        );
+        let cascaded: Event = serde_json::from_value(line_event(
+            15,
+            "ended",
+            serde_json::json!({
+                "branch": "b-90",
+                "endEvent": 14,
+                "source": {"kind": "tool", "turn_id": "t1", "request_id": "r1", "call_id": "c1"},
+                "ancestor": "b-7c",
+            }),
+        ))
+        .unwrap();
+        main.apply("b-7c", &cascaded);
+        assert_eq!(
+            main.line_views().last().map(|line| &line.state),
+            Some(&LineState::EndedWith("b-7c".into())),
+            "a tool source does not make a cascade an end of its own"
         );
     }
 

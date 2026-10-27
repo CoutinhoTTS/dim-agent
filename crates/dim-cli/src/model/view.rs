@@ -114,6 +114,8 @@ pub enum LineState {
     EndedItself,
     /// Another issuer ended it: a host operation or the user.
     EndedByOperation,
+    /// An ancestor's end ended it; the ancestor's id.
+    EndedWith(String),
     /// The tree could not build it.
     CreationFailed,
 }

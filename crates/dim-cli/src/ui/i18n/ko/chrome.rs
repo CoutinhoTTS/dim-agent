@@ -23,6 +23,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "working" => "작업 중",
         "ended itself" => "스스로 종료됨",
         "ended by an operation" => "작업으로 종료됨",
+        "ended with {id}" => "{id}와 함께 종료됨",
         "creation failed" => "생성 실패",
         "shown" => "표시 중",
         "line" => "라인",

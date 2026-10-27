@@ -25,6 +25,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "working" => "bekerja",
         "ended itself" => "berakhir sendiri",
         "ended by an operation" => "diakhiri operasi",
+        "ended with {id}" => "diakhiri bersama {id}",
         "creation failed" => "pembuatan gagal",
         "shown" => "ditampilkan",
         "line" => "jalur",

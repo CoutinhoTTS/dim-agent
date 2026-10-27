@@ -1,6 +1,6 @@
 use crate::model::view::{LineState, LineView, ViewSnapshot};
 use crate::sanitize::safe;
-use crate::ui::i18n::t;
+use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
 use crate::ui::render::markdown::MarkdownRenderer;
@@ -80,6 +80,7 @@ impl LinesPanel {
                     LineState::Waiting => t("waiting").to_owned(),
                     LineState::EndedItself => t("ended itself").to_owned(),
                     LineState::EndedByOperation => t("ended by an operation").to_owned(),
+                    LineState::EndedWith(ancestor) => tf("ended with {id}", &[("id", ancestor)]),
                     LineState::CreationFailed => t("creation failed").to_owned(),
                 };
                 let viewed = if line.id == self.focus {
@@ -148,6 +149,7 @@ impl LinesPanel {
                     line.state,
                     LineState::EndedItself
                         | LineState::EndedByOperation
+                        | LineState::EndedWith(_)
                         | LineState::CreationFailed
                 ) {
                     return Effect::Notice(format!("{} {id}", t("Line has ended:")));
@@ -319,5 +321,28 @@ mod tests {
             Effect::EndLine { branch_id, .. } => assert_eq!(branch_id, "b-91"),
             _ => panic!("a line below a line can be ended"),
         }
+    }
+
+    #[test]
+    fn a_line_an_ancestor_ended_names_that_ancestor() {
+        let mut snapshot = snapshot("main");
+        snapshot.lines[1].state = LineState::EndedWith("main".into());
+        let mut panel = LinesPanel::new(&snapshot);
+        let rows = panel
+            .render(100, 20, &palette(), &markdown())
+            .into_iter()
+            .map(|row| crate::ui::render::panel::strip_escapes(&row))
+            .collect::<Vec<_>>();
+        let row = rows
+            .iter()
+            .find(|row| row.contains("b-7c"))
+            .expect("the line is listed");
+        assert!(row.contains("ended with main"), "{row}");
+        assert!(!row.contains("ended itself"), "{row}");
+        panel.handle_key(key(KeyCode::Down));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Char('x'))),
+            Effect::Notice(_)
+        ));
     }
 }

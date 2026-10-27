@@ -20940,6 +20940,7 @@
         "path LineState::CreationFailed",
         "path LineState::EndedByOperation",
         "path LineState::EndedItself",
+        "path LineState::EndedWith",
         "path LineState::Waiting",
         "path LineView",
         "path MemberCard",
@@ -23176,6 +23177,7 @@
         "path LineState::CreationFailed",
         "path LineState::EndedByOperation",
         "path LineState::EndedItself",
+        "path LineState::EndedWith",
         "path LineState::Main",
         "path LineState::Waiting",
         "path LineState::Working",
@@ -23198,7 +23200,9 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
-        "use crate::ui::i18n::t"
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
       ]
     },
     {
@@ -23278,6 +23282,7 @@
       "from": "dim_cli::ui::lines_panel::tests",
       "to": "dim_cli::model::view",
       "references": [
+        "path LineState::EndedWith",
         "path ViewSnapshot",
         "path ViewSnapshot::default",
         "use crate::model::view::LineState",

@@ -19,6 +19,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "working" => "作業中",
         "ended itself" => "自ら終了",
         "ended by an operation" => "操作で終了",
+        "ended with {id}" => "{id} とともに終了",
         "creation failed" => "作成失敗",
         "shown" => "表示中",
         "line" => "ライン",
