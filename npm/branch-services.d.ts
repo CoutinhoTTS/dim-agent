@@ -75,6 +75,12 @@ export interface TreeCommands {
    */
   end(id: string, source: BranchSource): Promise<void>
   /**
+   * One page of `id`'s committed batches; an ended line reads at its
+   * fixed head.
+   * @throws {AgentErrorThrown}
+   */
+  page(id: string, after: number | bigint, limit: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
+  /**
    * Creates a child of `parent` cut at `at` and returns its id.
    * `cancelled` is the caller's cancellation as an explicit argument, the
    * form every cross-language contract uses for it (C4's `cancelled`): the

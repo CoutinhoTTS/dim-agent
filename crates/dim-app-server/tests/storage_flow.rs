@@ -979,6 +979,17 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
             .iter()
             .any(|event| event.sequence == 4 && event.kind == ended)
     );
+    assert!(!session.branches().iter().any(|line| line.id == "child"));
+    assert_eq!(session.sequence("child").unwrap(), 2);
+    let line = session.local_page("child", 0, 8, 2).await.unwrap();
+    assert_eq!(line.len(), 2);
+    assert_eq!(line[1].kind, end);
+    assert!(matches!(
+        session
+            .submit("late".into(), InputMode::Queue, "child")
+            .await,
+        Err(AgentError::BranchEnded(_))
+    ));
     agent.close().await.unwrap();
     store.close().await.unwrap();
     db.close().await.unwrap();

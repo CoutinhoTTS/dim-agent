@@ -31,6 +31,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// created child wrote while it opened fit in one.
 const CREATION_PAGE: usize = 32;
 
+const TAIL_EVENTS: u64 = 32;
+
 /// How a loaded branch begins on its Timeline.
 enum Opening {
     /// A new branch: the root of a new Session, or a child with its first
@@ -166,6 +168,20 @@ impl TreeCommands {
             .end(&id, source)
             .await
     }
+    /// One page of `id`'s committed batches; an ended line reads at its
+    /// fixed head.
+    pub async fn page(
+        &self,
+        id: String,
+        after: u64,
+        limit: usize,
+    ) -> std::result::Result<Vec<Arc<AgentEvent>>, AgentError> {
+        self.tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
+            .page(&id, after, limit)
+            .await
+    }
     /// Creates a child of `parent` cut at `at` and returns its id.
     /// `cancelled` is the caller's cancellation as an explicit argument, the
     /// form every cross-language contract uses for it (C4's `cancelled`): the
@@ -227,6 +243,26 @@ impl TimelineTree {
             .timeline()
             .append(EventKind::BranchCreateFailed(Self::create_failed(info, error)).into())?;
         Ok(())
+    }
+    fn complete_end(&self, info: &TimelineInfo, end_event: u64, data: BranchEndData) -> Result<()> {
+        let Some(parent) = info.parent.as_deref() else {
+            return Ok(());
+        };
+        let Some(parent) = self.owned_context(parent) else {
+            return Ok(());
+        };
+        parent
+            .timeline()
+            .append(
+                EventKind::BranchEnded(BranchEndedData {
+                    branch: info.id.clone(),
+                    end_event,
+                    source: data.source,
+                    ancestor: data.ancestor,
+                })
+                .into(),
+            )
+            .map(|_| ())
     }
     fn settle_failed(&self, info: &TimelineInfo, error: AgentError) -> AgentError {
         match self.record_create_failed(info, &error) {
@@ -511,6 +547,79 @@ impl TimelineTree {
             state.nodes.remove(&id);
             ready.send_replace(Some(outcome));
         });
+    }
+    async fn page(&self, id: &str, after: u64, limit: usize) -> Result<Vec<Arc<AgentEvent>>> {
+        let ended = self.state.lock().unwrap().ended.get(id).copied();
+        let through = match ended {
+            Some(head) => head,
+            None => self
+                .owned_context(id)
+                .ok_or_else(|| AgentError::UnknownBranch(id.into()))?
+                .timeline()
+                .sequence(),
+        };
+        if through <= after {
+            return Ok(Vec::new());
+        }
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: id.into(),
+        };
+        Ok(self
+            .store
+            .read_page(&key, after, limit, through)
+            .await?
+            .into_iter()
+            .map(|record| record.event)
+            .collect())
+    }
+    async fn own_end(&self, branch: &str, head: u64) -> Result<Option<(u64, BranchEndData)>> {
+        if head == 0 {
+            return Ok(None);
+        }
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: branch.into(),
+        };
+        let mut window = TAIL_EVENTS;
+        loop {
+            let from = head.saturating_sub(window.saturating_sub(1)).max(1);
+            let records = self.store.read(&key, from..=head).await?;
+            if let Some(found) = records
+                .iter()
+                .rev()
+                .find_map(|record| match &record.event.kind {
+                    EventKind::BranchEnd(data) => Some((record.event.sequence, data.clone())),
+                    _ => None,
+                })
+            {
+                return Ok(Some(found));
+            }
+            if from == 1 {
+                return Ok(None);
+            }
+            window = window.saturating_mul(8);
+        }
+    }
+    async fn creation_source(
+        &self,
+        parent: &str,
+        child: &str,
+        anchor: u64,
+    ) -> Result<Option<BranchSource>> {
+        let key = TimelineKey {
+            session_id: self.session_id.clone(),
+            branch_id: parent.into(),
+        };
+        Ok(self
+            .store
+            .read(&key, anchor..=anchor)
+            .await?
+            .into_iter()
+            .find_map(|record| match &record.event.kind {
+                EventKind::BranchCreate(data) if data.branch == child => Some(data.source.clone()),
+                _ => None,
+            }))
     }
     /// The stored head of an ended line, `None` for an open or unknown one.
     fn ended_head(&self, id: &str) -> Option<u64> {
@@ -964,14 +1073,57 @@ impl TimelineTreeControl for TimelineTree {
                     })?;
                 let mut next: TimelineInfo = stored.info.into();
                 next.source = sources.get(&next.id).cloned();
+                if recorded_ends.contains(&next.id) {
+                    self.state
+                        .lock()
+                        .unwrap()
+                        .ended
+                        .insert(next.id.clone(), stored.sequence);
+                    remaining.remove(&next.id);
+                    inactive.insert(next.id);
+                    continue;
+                }
                 if next.parent.as_ref().is_some_and(|parent| {
                     inactive.contains(parent)
-                        || recorded_ends.contains(&next.id)
                         || failed_creates.contains(&(
                             parent.clone(),
                             next.create_anchor.expect("validated creation anchor"),
                         ))
                 }) {
+                    let ended_parent = next
+                        .parent
+                        .as_deref()
+                        .filter(|parent| self.ended_head(parent).is_some());
+                    if let Some(parent) = ended_parent
+                        && self.created(&next.id, stored.sequence).await?
+                    {
+                        if next.source.is_none()
+                            && let Some(anchor) = next.create_anchor
+                        {
+                            next.source = self.creation_source(parent, &next.id, anchor).await?;
+                        }
+                        self.state
+                            .lock()
+                            .unwrap()
+                            .ended
+                            .insert(next.id.clone(), stored.sequence);
+                    }
+                    remaining.remove(&next.id);
+                    inactive.insert(next.id);
+                    continue;
+                }
+                let own_end = if next.parent.is_some() {
+                    self.own_end(&next.id, stored.sequence).await?
+                } else {
+                    None
+                };
+                if let Some((end_event, data)) = own_end {
+                    self.complete_end(&next, end_event, data)?;
+                    self.state
+                        .lock()
+                        .unwrap()
+                        .ended
+                        .insert(next.id.clone(), stored.sequence);
                     remaining.remove(&next.id);
                     inactive.insert(next.id);
                     continue;
