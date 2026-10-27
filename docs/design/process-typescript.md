@@ -427,12 +427,13 @@ catalog; a Session-only configuration must not require a dummy process row.
 
 All trusted consumers use that same host-authorized root. A FileScope owns
 operations and cleanup; it is not a per-package directory sandbox. Consumers
-use their declared relative paths. The embedding host provisions their parent
-directories before enabling them; the existing file API does not create missing
-parents. Scheduler and Workflow use their specified `scheduler/` and `workflow/`
-directories. Provisioning belongs to installation, not feature-specific App
-Server branches or a new filesystem method. PluginManager #3 remains separate;
-explicit embedding can supply the directories and rows today. If a parent is
+use their declared relative paths, under their own id directory. PluginManager
+creates `<root>/<id>/` when it turns a plugin with code on
+([PluginManager §2.1](plugins/PluginManager.md#21-the-plugin-directory-and-its-manifest));
+an embedding host that supplies rows itself provisions the directories. The
+existing file API does not create missing parents. Scheduler and Workflow use
+`scheduler/` and `workflow/`, their ids. Provisioning belongs to installation,
+not feature-specific App Server branches or a new filesystem method. If a parent is
 not provisioned, the first `withLock` fails with the existing `io` result before
 the callback can read or write. The consumer surfaces that storage failure and
 starts no run effect; it does not create a Session or submit input without the

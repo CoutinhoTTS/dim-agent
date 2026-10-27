@@ -4,7 +4,7 @@ Optional TypeScript package implementing the [Workflow contract](../../../docs/d
 The plugin is one process row. It owns definitions, runs and report settlement, and registers its
 Session part (`session.ts`, as `WorkflowSession`) with `partRegistry`; each Session's copy provides
 the `workflow` tool through the declared `workflowRuns` dependency. All native I/O uses existing `sessions`,
-`settings`, `workflowFiles` and `pluginFiles` ports. The package does not install itself in the CLI.
+`settings`, `workflowFiles` and `pluginFiles` ports.
 
 ## Loading
 
@@ -14,11 +14,14 @@ npm ci --prefix runtime/plugins/workflow --ignore-scripts
 (cd runtime && npm install --no-save --package-lock=false --ignore-scripts --install-links ./plugins/workflow)
 ```
 
-Pass the complete [process.json](process.json) row to `ServerConfig.session_typescript.rows`, with
-`anchor` pointing to the host's `package.json` (`runtime/package.json` here). A Session without a
+The plugin directory carries [dim-plugin.json](dim-plugin.json) and is a default plugin listed in
+[runtime/default-plugins.json](../../default-plugins.json), which PluginManager loads (`--defaults`).
+An embedding host may still build a row from the manifest's `code` fields for
+`ServerConfig.session_typescript.rows`. A Session without a
 mount list (`SessionConfig.tools`) declares `workflow` once its Session part registers it; a Session with one
-declares it when the list names it. The host must authorize and provision the product-root `workflow/`
-directory before enabling the process row. A stage Session takes the stage agent's or default
+declares it when the list names it. PluginManager creates the product-root `workflow/`
+directory when it turns the plugin on; a host that builds the row itself provisions it before
+enabling the process row. A stage Session takes the stage agent's or default
 profile's mount list: a profile without one exposes `workflow` inside a stage, and one whose list
 omits it has no Workflow tool; Workflow does not add it to `sessions.launch`. When it is declared,
 the non-interactive handler refuses invocation as A.2 requires. Missing parent directories fail with `io`; the plugin

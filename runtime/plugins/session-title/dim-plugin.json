@@ -1,0 +1,11 @@
+{
+  "name": "session-title",
+  "description": "Titles Sessions from their first exchange",
+  "code": {
+    "entry": "index.ts",
+    "inject": [
+      "partRegistry",
+      "settings"
+    ]
+  }
+}

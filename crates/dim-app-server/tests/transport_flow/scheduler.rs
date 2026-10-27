@@ -78,12 +78,7 @@ impl rutis::host::DynPlugin for AppliedInputGate {
 }
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut parts = session_typescript::fixture();
-    parts.rows = vec![
-        serde_json::from_str(include_str!(
-            "../../../../runtime/plugins/scheduler/process.json"
-        ))
-        .unwrap(),
-    ];
+    parts.rows = vec![session_typescript::manifest_row("scheduler")];
     parts
 }
 
@@ -3595,6 +3590,7 @@ async fn node_scheduler_native_clock_preserves_anchors_collapses_gaps_and_handle
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_scheduler_owner_reload_tracks_the_existing_native_run_without_replaying_input_or_reports()
  {
+    let owner_name = rows().rows[0]["name"].clone();
     let home = home();
     let calls = Arc::new(AtomicUsize::new(0));
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
@@ -3666,7 +3662,7 @@ async fn node_scheduler_owner_reload_tracks_the_existing_native_run_without_repl
             .diagnostics()
             .plugins
             .into_iter()
-            .find(|plugin| plugin.name == "@dimcode/scheduler")
+            .find(|plugin| plugin.name == owner_name)
             .unwrap()
             .generation
     };
@@ -3755,6 +3751,7 @@ async fn node_scheduler_owner_reload_tracks_the_existing_native_run_without_repl
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_native_sessions() {
+    let owner_name = rows().rows[0]["name"].clone();
     for text in [
         "{}",
         "{\"version\":2,\"runs\":[]}",
@@ -3770,8 +3767,7 @@ async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_na
         let failure = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if server.diagnostics().plugins.iter().any(|part| {
-                    part.name == "@dimcode/scheduler"
-                        && part.state == rutis::host::FiberState::Failed
+                    part.name == owner_name && part.state == rutis::host::FiberState::Failed
                 }) {
                     return client.rpc("schedule.list", json!({})).await;
                 }
@@ -3788,7 +3784,7 @@ async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_na
         let owner = diagnostics
             .plugins
             .iter()
-            .find(|part| part.name == "@dimcode/scheduler")
+            .find(|part| part.name == owner_name)
             .unwrap();
         assert_eq!(owner.state, rutis::host::FiberState::Failed, "{owner:?}");
         assert!(

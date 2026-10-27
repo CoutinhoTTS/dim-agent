@@ -8,11 +8,13 @@ jobs, windows, run tracking, reports and retention. The Session part offers
 
 ## Install
 
-Install the package into the runtime that resolves the configured rows. Put
-`process.json` into `SessionTypeScriptConfig.rows`. The plugin is that one row; from its
+The plugin directory carries [dim-plugin.json](dim-plugin.json) and is a default plugin
+listed in [runtime/default-plugins.json](../../default-plugins.json), which PluginManager
+loads (`--defaults`). An embedding host may still build a row from the manifest's `code`
+fields for `SessionTypeScriptConfig.rows`. The plugin is that one row; from its
 `apply` it registers its Session part (`session.ts`, as `SchedulerSession`) with
 `partRegistry`, and each Session mounts a copy.
-The structural configuration is `{}`. The row declares the same
+The structural configuration is `{}`. The manifest declares the same
 `inject` dependencies as its module, matching the Workflow package. It
 declares the `schedule` Settings source with user file
 `schedule.json`, no project source and protected `/max_concurrent_runs`.
@@ -23,9 +25,10 @@ dependencies stay declared. Invalid run data fails the owner and preserves the
 original bytes; calls return `service_unavailable`. The native invalid-record
 acceptance checks this behavior without a package-level loader workaround.
 
-Provision `scheduler/` under the host's authorized plugin storage root before
-enabling the row. The native file transaction does not create parent directories.
-The package is not installed by the default CLI. Agents idle unloading
+PluginManager creates `scheduler/` under the plugin storage root when it turns
+the plugin on. A host that builds the row itself provisions that directory before
+enabling the row: the native file transaction does not create parent directories.
+Agents idle unloading
 [#126](https://github.com/arcships/dim/issues/126) is delivered in main by
 [#331](https://github.com/arcships/dim/pull/331); Scheduler uses its existing
 Session holds and does not implement an unload loop.

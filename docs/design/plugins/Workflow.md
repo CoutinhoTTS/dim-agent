@@ -86,10 +86,10 @@ No runtime, facade, loader, event format or rutis change. New business behavior 
 The optional package lives at `runtime/plugins/workflow`, named
 `@dimcode/workflow`. Its root module owns runs and, from its apply, registers
 `session.ts` with `partRegistry` as the Session definition `WorkflowSession`,
-which provides the Session tool. The package supplies one complete
-`process.json` row for the existing `SessionTypeScriptConfig.rows` array; hosts
-install it explicitly. No default CLI installation or PluginManager
-implementation is included.
+which provides the Session tool. The plugin directory carries `dim-plugin.json`
+and is a default plugin listed in `runtime/default-plugins.json`, which PluginManager
+loads (`--defaults`). An embedding host may still build the row below from the
+manifest's `code` fields.
 
 | Row field | Process row |
 | --- | --- |

@@ -74,11 +74,8 @@ Settings sources adds `settings` (below):
 The empty configuration above means this particular plugin has no structural options. Business
 settings belong to the owning plugin's Settings source, not to this object.
 
-A package that owns Settings sources declares them in a second structural member, `settings`, an
-array of the entries defined in [settings-service §3.1](appserver/settings-service.md#31-source-declaration).
-The host passes them to Settings with the row id as owner and does not hand `settings` to the
-loader. A source is process state, so it belongs to one row: a second row declaring the same
-source fails assembly, as two packages would. Rows without `settings` are unchanged.
+A package that owns Settings sources registers them from its code when its row starts; rows carry
+no `settings` member ([settings-service §3.1](appserver/settings-service.md#31-source-registration)).
 
 The catalog registers every name a row provides, if it does not hold it yet, as a shared service in
 the row's group (a process name for a TypeScript row), and every `instanceNames` entry in its group,

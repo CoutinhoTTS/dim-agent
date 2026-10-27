@@ -1,0 +1,49 @@
+import type { SourceDeclaration } from '../../../npm/plugin.js'
+
+export const settings: SourceDeclaration = {
+  "source": "session-title",
+  "userFile": "session-title.json",
+  "userOnly": [],
+  "schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true
+      },
+      "maxLength": {
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 200,
+        "default": 80
+      },
+      "model": {
+        "default": null,
+        "anyOf": [
+          {
+            "type": "null"
+          },
+          {
+            "type": "object",
+            "required": [
+              "providerId",
+              "modelId"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "providerId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "modelId": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

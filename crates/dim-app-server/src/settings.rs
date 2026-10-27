@@ -1,6 +1,6 @@
 //! Business-owned documents with source-local persistence and CAS: Rust
-//! `BusinessDocument` sources and the JSON Schema sources non-Rust owners
-//! declare (settings-service design).
+//! `BusinessDocument` sources and JSON Schema sources, each registered by
+//! the plugin that owns it (settings-service design).
 mod declared;
 mod native;
 pub mod workflow_files;
@@ -9,7 +9,7 @@ pub(crate) use workflow_files::WorkflowPackages;
 
 use crate::storage::SqliteStorage;
 use dim_agent_capabilities::file_storage::{FilePath, FileStorage, FileStorageError};
-use dim_agent_runtime::Names;
+use dim_agent_runtime::{Names, Registrations};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use rutis::{Ctx, Event};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -33,7 +33,7 @@ pub enum SettingsError {
     Storage(FileStorageError),
     #[error("invalid settings: {0}")]
     Invalid(&'static str),
-    /// Not a declared source; Rust sources are served by their owners.
+    /// No source of this name and kind is registered now.
     #[error("unknown settings source")]
     UnknownSource,
     #[error("invalid settings scope: {0}")]
@@ -131,17 +131,15 @@ fn typed<D: BusinessDocument>() -> Arc<Typed<D>> {
     Arc::new(Typed(PhantomData))
 }
 
-/// Who holds a source name or file: a Rust document type or one declaration.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Claimant {
-    Rust(TypeId),
-    Declared(usize),
+/// A registered source: its files and how its documents are checked.
+struct Source {
+    user_file: String,
+    project_file: Option<String>,
+    kind: Kind,
 }
-fn claim_names(source: &str, user_file: &str, project_file: Option<&str>) -> Vec<String> {
-    [format!("namespace {source}"), format!("user {user_file}")]
-        .into_iter()
-        .chain(project_file.map(|file| format!("project {file}")))
-        .collect()
+enum Kind {
+    Rust(TypeId),
+    Declared(Arc<Declared>),
 }
 
 pub struct SettingsService {
@@ -154,13 +152,72 @@ pub struct SettingsService {
     updates: TaskTracker,
     /// Settings' own plugin context, which emits change events.
     events: Ctx,
-    /// The claimant of each namespace and file; another claimant naming one
-    /// of them would share its persisted source.
-    claims: Mutex<BTreeMap<String, Claimant>>,
-    /// The declared sources, compiled once at apply.
-    declared: BTreeMap<String, Arc<Declared>>,
+    /// The registered sources by name, each withdrawn when the plugin that
+    /// registered it unloads; the documents stay where they are.
+    sources: Arc<Registrations<Source>>,
+    /// Holds a registration's file check and insertion together.
+    registering: Mutex<()>,
 }
 impl SettingsService {
+    /// Registers the Rust source `D` for as long as the plugin that owns
+    /// `ctx` is loaded. A source name or file registered already fails.
+    pub fn register<D: BusinessDocument>(&self, ctx: &Ctx) -> rutis::Result<()> {
+        let failed = |error: SettingsError| registration_failed(D::NAMESPACE, error.to_string());
+        validate_namespace(D::NAMESPACE).map_err(failed)?;
+        validate_file(D::USER_FILE).map_err(failed)?;
+        if let Some(file) = D::PROJECT_FILE {
+            validate_file(file).map_err(failed)?;
+        }
+        self.insert(
+            ctx,
+            D::NAMESPACE,
+            Source {
+                user_file: D::USER_FILE.into(),
+                project_file: D::PROJECT_FILE.map(Into::into),
+                kind: Kind::Rust(TypeId::of::<D>()),
+            },
+        )
+    }
+    /// Checks and registers a JSON Schema source for as long as the plugin
+    /// that owns `ctx` is loaded. An invalid declaration, or a source name or
+    /// file registered already, fails.
+    pub fn register_declared(
+        &self,
+        ctx: &Ctx,
+        declaration: SourceDeclaration,
+    ) -> rutis::Result<()> {
+        let source = declaration.source.clone();
+        let declared = Declared::compile(declaration)
+            .map_err(|reason| registration_failed(&source, reason))?;
+        let (user_file, project_file) = declared.files();
+        self.insert(
+            ctx,
+            &source,
+            Source {
+                user_file,
+                project_file,
+                kind: Kind::Declared(Arc::new(declared)),
+            },
+        )
+    }
+    /// Two sources sharing a name or a file would share a persisted document.
+    fn insert(&self, ctx: &Ctx, name: &str, source: Source) -> rutis::Result<()> {
+        let _guard = self.registering.lock().unwrap();
+        let taken = self.sources.get(name).is_some()
+            || self.sources.all().iter().any(|other| {
+                other.value.user_file == source.user_file
+                    || (other.value.project_file.is_some()
+                        && other.value.project_file == source.project_file)
+            });
+        if taken {
+            return Err(registration_failed(
+                name,
+                "its name or file is registered already".into(),
+            ));
+        }
+        self.sources.register(ctx, name, source)?;
+        Ok(())
+    }
     pub async fn authorize_project(
         self: &Arc<Self>,
         cwd: PathBuf,
@@ -229,15 +286,11 @@ impl SettingsService {
         }
     }
     fn path<D: BusinessDocument>(&self, scope: SettingsScope) -> Result<FilePath> {
-        validate_namespace(D::NAMESPACE)?;
-        validate_file(D::USER_FILE)?;
-        if let Some(file) = D::PROJECT_FILE {
-            validate_file(file)?;
+        match self.sources.get(D::NAMESPACE) {
+            Some(registered) if matches!(registered.value.kind, Kind::Rust(id) if id == TypeId::of::<D>()) =>
+                {}
+            _ => return Err(SettingsError::UnknownSource),
         }
-        self.claim(
-            Claimant::Rust(TypeId::of::<D>()),
-            claim_names(D::NAMESPACE, D::USER_FILE, D::PROJECT_FILE),
-        )?;
         self.locate(D::USER_FILE, D::PROJECT_FILE, scope)
     }
     fn locate(
@@ -257,10 +310,6 @@ impl SettingsService {
             }
         };
         Ok(self.files.path(root, file)?)
-    }
-    fn claim(&self, claimant: Claimant, names: Vec<String>) -> Result<()> {
-        let mut claims = self.claims.lock().unwrap();
-        claim(&mut claims, claimant, names)
     }
     fn check_open(&self, cancel: &CancellationToken) -> Result<()> {
         if self.stopping.is_cancelled() {
@@ -288,6 +337,7 @@ impl SettingsService {
         cancel: &CancellationToken,
     ) -> Result<SettingsSnapshot<D>> {
         document.validate()?;
+        self.check_open(cancel)?;
         let path = self.path::<D>(scope)?;
         self.replace(
             typed::<D>(),
@@ -380,23 +430,10 @@ impl SettingsService {
         }
     }
 }
-fn claim(
-    claims: &mut BTreeMap<String, Claimant>,
-    claimant: Claimant,
-    names: Vec<String>,
-) -> Result<()> {
-    if names
-        .iter()
-        .any(|name| claims.get(name).is_some_and(|claimed| *claimed != claimant))
-    {
-        return Err(SettingsError::Invalid(
-            "settings source belongs to another document type",
-        ));
-    }
-    for name in names {
-        claims.insert(name, claimant);
-    }
-    Ok(())
+fn registration_failed(source: &str, reason: String) -> rutis::Error {
+    rutis::Error::from(ErrorKind::PluginFailed(
+        format!("settings source {source}: {reason}").into(),
+    ))
 }
 fn validate_namespace(value: &str) -> Result<()> {
     if value.is_empty()
@@ -459,10 +496,6 @@ pub struct SettingsPlugin {
     files: Key<FileStorage>,
     /// SqliteStorage only for the native profile.
     database: Option<Key<SqliteStorage>>,
-    /// Rust sources the composition root registers, claimed before any
-    /// declaration so a declaration cannot take one of their names.
-    reserved: Vec<(TypeId, Vec<String>)>,
-    declarations: Vec<SourceDeclaration>,
 }
 impl SettingsPlugin {
     pub fn new(
@@ -476,8 +509,6 @@ impl SettingsPlugin {
             projects: Arc::new(Mutex::new(BTreeMap::new())),
             files: names.key()?,
             database: None,
-            reserved: Vec::new(),
-            declarations: Vec::new(),
         })
     }
     pub fn native(
@@ -489,20 +520,6 @@ impl SettingsPlugin {
             database: Some(names.key()?),
             ..Self::new(names, home_root, project_roots)?
         })
-    }
-    /// Reserves a Rust source's names: a declaration naming one fails assembly.
-    pub fn reserve<D: BusinessDocument>(mut self) -> Self {
-        self.reserved.push((
-            TypeId::of::<D>(),
-            claim_names(D::NAMESPACE, D::USER_FILE, D::PROJECT_FILE),
-        ));
-        self
-    }
-    /// The declared sources this Settings serves. Each is checked and compiled
-    /// in `apply`; an invalid or duplicate declaration fails assembly.
-    pub fn declare(mut self, declarations: Vec<SourceDeclaration>) -> Self {
-        self.declarations.extend(declarations);
-        self
     }
 }
 impl DynPlugin for SettingsPlugin {
@@ -521,36 +538,6 @@ impl DynPlugin for SettingsPlugin {
                 Some(key) => Some(ctx.require_at(key)?),
                 None => None,
             };
-            let mut claims = BTreeMap::new();
-            for (owner, names) in &self.reserved {
-                claim(&mut claims, Claimant::Rust(*owner), names.clone()).map_err(|error| {
-                    rutis::Error::from(ErrorKind::PluginFailed(error.to_string().into()))
-                })?;
-            }
-            let mut declared = BTreeMap::new();
-            for (index, declaration) in self.declarations.iter().enumerate() {
-                let failed = |reason: String| {
-                    rutis::Error::from(ErrorKind::PluginFailed(
-                        format!(
-                            "settings source {} of {}: {reason}",
-                            declaration.source, declaration.owner
-                        )
-                        .into(),
-                    ))
-                };
-                let compiled = Declared::compile(declaration.clone()).map_err(failed)?;
-                claim(
-                    &mut claims,
-                    Claimant::Declared(index),
-                    claim_names(
-                        &declaration.source,
-                        &declaration.user_file,
-                        declaration.project_file.as_deref(),
-                    ),
-                )
-                .map_err(|error| failed(error.to_string()))?;
-                declared.insert(declaration.source.clone(), Arc::new(compiled));
-            }
             for root in &self.project_roots {
                 let path = files
                     .root_path(*root)
@@ -566,8 +553,8 @@ impl DynPlugin for SettingsPlugin {
                 gate: Mutex::new(()),
                 updates: TaskTracker::new(),
                 events: ctx.clone(),
-                claims: Mutex::new(claims),
-                declared,
+                sources: Arc::default(),
+                registering: Mutex::new(()),
             });
             let owner = service.clone();
             ctx.effect(move || async move {

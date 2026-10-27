@@ -1,10 +1,11 @@
-import { definePlugin, type Plugin } from '@arcships/rutis'
+import { definePlugin } from '@arcships/rutis'
 import type {
   AgentEvent, AuxiliaryModel, ModelId, Services, SessionBroadcast, SessionMetadata,
   PartRegistry, SessionMethods, SessionMethodReply, Sessions, Settings, SettingsResult,
 } from '../../../npm/plugin.d.ts'
 import type { UserInput } from '../../../npm/branch-services.d.ts'
-import row from './session-title.json' with { type: 'json' }
+import manifest from './dim-plugin.json' with { type: 'json' }
+import { settings as declaration } from './settings.ts'
 
 type Document = { enabled: boolean; maxLength: number; model: ModelId | null }
 type TitleSettings = { read(request: Parameters<Settings['read']>[0]): Promise<SettingsResult<{ document: Document }>> }
@@ -169,10 +170,10 @@ export const part = definePlugin({
   },
 })
 
-// The plugin's one row registers the Session part (rutis usage §2).
 export default definePlugin({
-  name: 'SessionTitle', inject: row.inject, provides: row.provides as Plugin['provides'],
+  name: 'SessionTitle', inject: manifest.code.inject,
   async apply(ctx) {
+    await ctx.use<Settings>('settings').register(declaration)
     await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'SessionTitle', part)
   },
 })

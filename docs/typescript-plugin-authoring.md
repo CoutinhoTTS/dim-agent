@@ -27,7 +27,7 @@ provider and the methods it serves to other languages. This table says which to 
 | Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
 | Read current branch permissions or host defaults | `sessionPermissions`, process | Generated from Agents: `permission({sessionId, branchId})` and `permissionDefaults({})`. |
 | Read or set a Session's title | `sessionMetadata`, process | Implemented by SessionStore: `read` and the revision-checked `setTitle` ([title metadata](design/appserver/session-title-metadata.md)). SessionTitle is the title's one writer; other plugins only read. |
-| Read/update business configuration | `settings`, process | Owner read/write and Settings event delivery implemented; declare sources in the row's `settings` member. |
+| Read/update business configuration | `settings`, process | Owner registration, read/write and Settings event delivery implemented; a row registers its sources with `register` in its `apply`. |
 | Read/save Workflow definition files | `workflowFiles`, process | Generated `read/list/replace/createDirectory`; fixed project directories and the calling row's read-only packages ([contract](design/p6-p7-bindings.md#3-workflow-definition-files)). |
 | Offer model tools | `toolRegistry`, Session | A Session part registers each tool with `register` ([Session tools](#session-tools-and-client-methods)). |
 | Offer client methods | `sessionMethods`, Session | A Session part registers each method namespace with `register` ([Session tools](#session-tools-and-client-methods)). |
@@ -292,39 +292,48 @@ before retrying. Full semantics and fixed storage error codes are in
 
 Declare `inject: ['settings']` and obtain `ctx.use<Settings>('settings')`.
 Settings owns business documents; loader rows hold structural configuration.
-Declare each source in the `settings` member of its row, next to `provides`,
-through `ServerConfig.session_typescript.rows`. The package keeps one JSON source
-declaration and hands that same file to the host; the TypeScript module does not
-repeat it. There is no separate package manifest or `ServerConfig.settings_sources`.
+Register each source from the plugin's process row, in its `apply`, with
+`settings.register(declaration)`; a Session or branch part does not register.
+The registration lasts as long as the row is loaded and is withdrawn when it
+unloads (turned off, removed or reloaded); the stored document stays in the
+home. Rows carry no `settings` member.
 
-For example, this row declares a user-scoped Web source:
+```ts
+import { definePlugin } from '@arcships/rutis'
+import type { PartRegistry, Settings, SourceDeclaration } from 'dimcode/plugin'
 
-```json
-{
-  "id": "web",
-  "name": "/absolute/path/to/web.ts",
-  "inject": ["settings", "toolRegistry"],
-  "provides": {},
-  "settings": [{
-    "source": "web",
-    "userFile": "web.json",
-    "schema": {
-      "type": "object",
-      "properties": {
-        "maxResults": { "type": "integer", "minimum": 1, "default": 5 }
-      },
-      "additionalProperties": false
-    }
-  }]
+const settings: SourceDeclaration = {
+  source: 'web',
+  userFile: 'web.json',
+  schema: {
+    type: 'object',
+    properties: { maxResults: { type: 'integer', minimum: 1, default: 5 } },
+    additionalProperties: false,
+  },
 }
+
+const part = definePlugin({
+  name: 'WebSession',
+  inject: ['settings'],
+  async apply() {},
+})
+
+export default definePlugin({
+  name: 'Web',
+  inject: ['settings', 'partRegistry'],
+  async apply(ctx) {
+    await ctx.use<Settings>('settings').register(settings)
+    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'Web', part)
+  },
+})
 ```
 
-Each entry requires `source`, `userFile` and `schema`; optional `projectFile`
-adds project scope and `userOnly` lists protected member JSON Pointers. The row's
-`id` supplies the owner; do not put `owner` in the entry. Unknown fields, malformed
-entries, duplicate source claims and claims on Rust sources fail assembly. Rust
+A declaration requires `source`, `userFile` and `schema`; optional `projectFile`
+adds project scope and `userOnly` lists protected member JSON Pointers. Unknown
+fields, a malformed declaration, and a source name or file registered already
+(Rust sources included) reject `register`, which fails the row's `apply`. Rust
 sources such as `mcp` are not served by this named API. See the
-[source declaration contract](design/appserver/settings-service.md#31-source-declaration)
+[source registration contract](design/appserver/settings-service.md#31-source-registration)
 and the working [owner fixture](../runtime/fixtures/settings-owner.ts) and its
 [Settings declaration](../runtime/fixtures/settings-owner.settings.json).
 
