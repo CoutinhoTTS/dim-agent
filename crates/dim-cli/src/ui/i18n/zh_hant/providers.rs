@@ -1,0 +1,80 @@
+pub fn lookup(english: &str) -> Option<&'static str> {
+    Some(match english {
+        // providers_panel.rs
+        "Providers" => "模型供應商",
+        "Enter open · Esc clear/close" => "Enter 開啟 · Esc 清除/關閉",
+        "↑↓/Tab move · Enter activate · Esc back" => "↑↓/Tab 移動 · Enter 執行 · Esc 返回",
+        "Loading providers..." => "正在載入模型供應商…",
+        "No matching providers." => "無相符的模型供應商。",
+        "Custom providers are not available yet" => "尚不支援自訂模型供應商",
+        "Testing connection..." => "正在測試連線…",
+        "Connect {providerId}" => "連線 {providerId}",
+        "(default)" => "（預設）",
+        "(required)" => "（必填）",
+        "Test + apply" => "測試並套用",
+        "Testing sends the stored credential to this URL." => "測試會將已儲存的憑證傳送到此 URL。",
+        "Disconnect" => "中斷連線",
+        "Enable provider" => "啟用模型供應商",
+        "Disable provider" => "停用模型供應商",
+        "Error: {error}" => "錯誤：{error}",
+        "disabled" => "已停用",
+        "current" => "目前",
+        "Sign in" => "需登入",
+        "ready" => "就緒",
+        "error" => "錯誤",
+        "not connected" => "未連線",
+        "Add custom provider" => "新增自訂模型供應商",
+        // oauth_view.rs
+        "Checking account…" => "正在查詢帳號…",
+        "Not signed in" => "未登入",
+        "Signed in as {account}" => "已登入：{account}",
+        "Open models" => "開啟模型清單",
+        "View plan" => "檢視方案",
+        "Sign out" => "登出",
+        "Checking usage…" => "正在查詢用量…",
+        "Usage: {reason}" => "用量：{reason}",
+        "Credits" => "點數",
+        "unlimited" => "無限制",
+        "{hours}h window" => "{hours} 小時區間",
+        "/month" => "/月",
+        "/year" => "/年",
+        "expires {date}" => "{date} 到期",
+        "resets {date}" => "{date} 重設",
+        "↑↓ move · enter activate · ctrl+r refresh · esc close" => {
+            "↑↓ 移動 · enter 執行 · ctrl+r 重新整理 · esc 關閉"
+        }
+        "Login with DimAgent" => "使用 DimAgent 登入",
+        "Enterprise login" => "企業登入",
+        "Device login" => "裝置登入",
+        "Email" => "電子郵件",
+        "Continue" => "繼續",
+        "Browser login" => "瀏覽器登入",
+        "Print verification URL + pairing code again" => "重新顯示驗證 URL 與配對碼",
+        "Restart device login" => "重新開始裝置登入",
+        "Print OAuth URL again" => "重新顯示 OAuth URL",
+        "Callback URL" => "回呼 URL",
+        "Submit callback" => "送出回呼",
+        "The browser could not be opened. Open the link manually, then return here." => {
+            "無法開啟瀏覽器，請手動開啟連結，完成後返回。"
+        }
+        "Enter code {code} at {url}" => "在 {url} 輸入配對碼 {code}",
+        "Waiting for authorization" => "等待授權",
+        "{name} device login" => "{name} 裝置登入",
+        "Open this URL: {url}" => "開啟此 URL：{url}",
+        "Enter code:    {code}" => "輸入配對碼：{code}",
+        "Waiting after server slow-down" => "伺服器要求放慢頻率，繼續等待",
+        "OAuth login cancelled" => "已取消 OAuth 登入",
+        "Enter your work email" => "輸入公司電子郵件",
+        "Invalid OAuth state - possible CSRF attempt" => "無效的 OAuth state - 可能為 CSRF 攻擊",
+        "Preparing login... · esc cancel" => "準備登入… · esc 取消",
+        "Completing login... · esc cancel" => "完成登入… · esc 取消",
+        "enter restart · esc back" => "enter 重新開始 · esc 返回",
+        "type value · ↑↓/tab move · enter submit · esc cancel" => {
+            "輸入值 · ↑↓/tab 移動 · enter 送出 · esc 取消"
+        }
+        "↑↓ move · enter activate · esc back" => "↑↓ 移動 · enter 執行 · esc 返回",
+        "↑↓ move · enter activate · esc close" => "↑↓ 移動 · enter 執行 · esc 關閉",
+        "(paste here)" => "（貼在這裡）",
+        _ => return None,
+    })
+}
