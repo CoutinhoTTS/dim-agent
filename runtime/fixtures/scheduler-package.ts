@@ -79,6 +79,7 @@ export default definePlugin({
     const files = ctx.use<PluginFiles>('pluginFiles')
     const settings = ctx.use<Settings>('settings')
     const observedSettings: Settings = {
+      register: declaration => settings.register(declaration),
       async read(request) {
         const reply = await settings.read(request)
         if (!reply.ok) settingsReadError = reply.error.code

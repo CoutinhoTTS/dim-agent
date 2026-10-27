@@ -1,18 +1,14 @@
 //! Declared sources (settings-service §3–§4): JSON documents checked against
-//! the owner's JSON Schema, the owner's `settings` service and the client's
-//! `settings.*` management methods.
+//! the owner's JSON Schema, the `settings` service owners register and use,
+//! and the client's `settings.*` management methods.
 use super::*;
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value as RpcValue, host_key};
 use serde_json::{Value, json};
 
-/// One `settings` entry of a TypeScript row (§3.1), declared by the row's
-/// package next to its `provides`.
+/// A JSON Schema source an owner registers (§3.1).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceDeclaration {
-    /// The id of the row that declares it; not written in the entry.
-    #[serde(skip)]
-    pub owner: String,
     pub source: String,
     pub user_file: String,
     /// Present when the source also has project scope.
@@ -65,6 +61,12 @@ impl Declared {
             .prepare(json!({}))
             .map_err(|error| format!("default document is invalid: {error}"))?;
         Ok(declared)
+    }
+    pub(super) fn files(&self) -> (String, Option<String>) {
+        (
+            self.declaration.user_file.clone(),
+            self.declaration.project_file.clone(),
+        )
     }
     /// Defaults, then the schema (§3.2).
     fn prepare(&self, mut document: Value) -> std::result::Result<Value, String> {
@@ -142,9 +144,12 @@ fn reachable(schema: &Value, pointer: &str) -> bool {
 impl SettingsService {
     fn declared(&self, source: &str, scope: SettingsScope) -> Result<(Arc<Declared>, FilePath)> {
         let declared = self
-            .declared
+            .sources
             .get(source)
-            .cloned()
+            .and_then(|registered| match &registered.value.kind {
+                Kind::Declared(declared) => Some(declared.clone()),
+                Kind::Rust(_) => None,
+            })
             .ok_or(SettingsError::UnknownSource)?;
         if let SettingsScope::Project(root) = scope {
             if declared.declaration.project_file.is_none() {
@@ -183,6 +188,7 @@ impl SettingsService {
         writer: Writer,
         cancel: &CancellationToken,
     ) -> Result<SettingsSnapshot<Value>> {
+        self.check_open(cancel)?;
         let (declared, path) = self.declared(source, scope)?;
         let document = declared
             .prepare(document)
@@ -259,18 +265,38 @@ fn request<T: DeserializeOwned>(args: RpcValue) -> std::result::Result<T, Error>
     serde_json::from_value(request).map_err(|_| invalid())
 }
 
-/// The owner path: `settings` by name for every language (§4.2). It has no
-/// caller identity; each source has one owner (AGENTS.md rule 11).
+/// The owner path: `settings` by name for every language (§4.2). Only
+/// `register` uses the caller's identity, to withdraw its sources when the
+/// calling row unloads; each source has one owner (AGENTS.md rule 11).
 struct Dispatch(Arc<SettingsService>);
 impl HostDispatch for Dispatch {
     fn methods(&self) -> Option<Value> {
-        Some(json!({"read": "async", "update": "async", "projects": "sync"}))
+        Some(json!({"register": "async", "read": "async", "update": "async", "projects": "sync"}))
     }
     fn invoke(&self, method: &str, args: RpcValue) -> Reply {
         let service = self.0.clone();
         // Dropping the call cancels it; a committed write stays committed.
         let cancel = CancellationToken::new();
         match method {
+            "register" => {
+                let caller = rutis_bridge::session::caller_row()
+                    .map(|row| row.ctx().clone())
+                    .ok_or_else(|| {
+                        Error::Value(
+                            "register needs the calling row's context: only a row of a language runtime can call it"
+                                .into(),
+                        )
+                    })?;
+                // Registered now, while the calling row is known; a refused
+                // registration rejects, failing the caller's apply.
+                let registered = request(args).and_then(|declaration| {
+                    service
+                        .register_declared(&caller, declaration)
+                        .map(|()| RpcValue::Undefined)
+                        .map_err(|error| Error::Value(error.to_string()))
+                });
+                Ok(RpcValue::future(async move { registered }))
+            }
             "projects" => {
                 let Projects {} = request(args)?;
                 let projects: Vec<_> = service

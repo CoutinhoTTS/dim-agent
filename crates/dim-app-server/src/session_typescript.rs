@@ -3,11 +3,7 @@
 //! definitions, and the row lists the names those parts provide in their
 //! instances (`instanceNames`), which the catalog needs before the runtime
 //! starts (rutis usage §2).
-use crate::{
-    Result, ServerError,
-    methods::ManagementMethods,
-    settings::{SourceDeclaration, WorkflowPackages},
-};
+use crate::{Result, ServerError, methods::ManagementMethods, settings::WorkflowPackages};
 use dim_agent_capabilities::{methods::SessionMethods, tool_registry::ToolRegistry};
 use dim_agent_runtime::{AgentBuilder, BRANCH_GROUP, PartRegistry, SESSION_GROUP, names::name_of};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, PluginFactory, TypeKey};
@@ -94,36 +90,6 @@ pub struct SessionTypeScriptConfig {
 pub struct PythonConfig {
     pub interpreter: PathBuf,
     pub project: PathBuf,
-}
-
-/// The rows' `settings` entries (settings-service §3.1, §5.4): a row's
-/// package declares its sources next to `provides`, and the row id is their
-/// owner. Settings checks and compiles each declaration when it applies.
-pub(crate) fn settings_sources(config: &SessionTypeScriptConfig) -> Result<Vec<SourceDeclaration>> {
-    let mut sources = Vec::new();
-    for row in &config.rows {
-        let Some(entries) = row.get("settings") else {
-            continue;
-        };
-        let owner = row
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| {
-                ServerError::Configuration("Session TypeScript row requires id".into())
-            })?;
-        let entries: Vec<SourceDeclaration> =
-            serde_json::from_value(entries.clone()).map_err(|error| {
-                ServerError::Configuration(format!(
-                    "settings of Session TypeScript row {owner}: {error}"
-                ))
-            })?;
-        sources.extend(entries.into_iter().map(|mut entry| {
-            entry.owner = owner.to_owned();
-            entry
-        }));
-    }
-    Ok(sources)
 }
 
 /// A runtime of other languages and the resolver of its rows.
@@ -263,11 +229,9 @@ impl Parts {
                 }
             }
             snapshots.insert(name.to_owned(), provides.clone());
-            // `settings` is the host's input to Settings and `instanceNames`
-            // went to the catalog: neither is a loader field.
+            // `instanceNames` went to the catalog: it is not a loader field.
             let mut row = row.clone();
             if let Value::Object(fields) = &mut row {
-                fields.remove("settings");
                 fields.remove("instanceNames");
             }
             rows.push(row);

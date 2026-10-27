@@ -903,11 +903,14 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
         Err(McpError::Closed)
     ));
     drop(lease);
+    // Settings stays; Mcp's sources went with it, and the document stays.
+    assert!(matches!(
+        fixture
+            .settings
+            .read::<McpSettings>(SettingsScope::User, &cancel)
+            .await,
+        Err(SettingsError::UnknownSource)
+    ));
     assert_eq!(fs::read(fixture.home.join("mcp.json")).unwrap(), bytes);
-    fixture
-        .settings
-        .read::<McpSettings>(SettingsScope::User, &cancel)
-        .await
-        .unwrap();
     fixture.close().await;
 }

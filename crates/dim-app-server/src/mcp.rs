@@ -485,6 +485,8 @@ impl DynPlugin for McpPlugin {
             let files = ctx.require_at(&self.files)?;
             let methods = ctx.require_at(&self.methods)?;
             let parts = ctx.require_at(&self.parts)?;
+            settings.register::<McpSettings>(ctx)?;
+            settings.register::<McpProjectEnablement>(ctx)?;
             let auth = McpAuth::new(files, self.home_root).map_err(ErrorKind::PluginFailed)?;
             let service = Arc::new(McpService {
                 settings,

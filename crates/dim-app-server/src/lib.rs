@@ -594,19 +594,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             Ok(Box::new(provider::ProviderPlugin::new(names)?))
         })?);
     }
-    let settings_sources = config
-        .session_typescript
-        .as_ref()
-        .map(session_typescript::settings_sources)
-        .transpose()?
-        .unwrap_or_default();
-    let settings_root = execution_root.or(product_root);
-    if settings_root.is_none() && !settings_sources.is_empty() {
-        return Err(ServerError::Configuration(
-            "settings sources need a product or target home".into(),
-        ));
-    }
-    if let Some(home_root) = settings_root {
+    if let Some(home_root) = execution_root.or(product_root) {
         // One template, cloned for each load: its copies share the authorized
         // projects. Its dependencies are process names, the same for every copy.
         let build = rutis_loader::resolve::Build::default();
@@ -616,18 +604,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         } else {
             settings::SettingsPlugin::new(&names, home_root, vec![])
         }
-        .map_err(|error| ServerError::Configuration(error.to_string()))?
-        .reserve::<mcp::config::McpSettings>()
-        .reserve::<mcp::config::McpProjectEnablement>()
-        .reserve::<skills_management::SkillDocument>()
-        .reserve::<permission_rules::PermissionSettings>();
-        // Only local execution consumes the subagent model policy.
-        let settings = if config.local_execution() {
-            settings.reserve::<collaboration_model_policy::ModelPolicy>()
-        } else {
-            settings
-        }
-        .declare(settings_sources);
+        .map_err(|error| ServerError::Configuration(error.to_string()))?;
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),

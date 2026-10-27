@@ -65,7 +65,7 @@ flowchart LR
 | Session 工具 | 由进程行经 partRegistry 注册的 C4 Session 定义注入 toolRegistry，在 apply 中以其声明和异步 execute 注册 schedule，注册不做 I/O；注册和提供者代际变化遵循当前 C4 绑定（§1.1）。 |
 | 进程包 / scheduleJobs | ServerConfig.session_typescript.rows 中的一行在共享运行时装载包的普通进程 owner；每个 Session 在该运行时挂载其 Session 定义的一份副本。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）。 |
 | 管理命名空间 | 进程行先恢复运行存储，再把 schedule 注册到 managementMethods 并发布 scheduleJobs。恢复失败时保留 fault，仍注册命名空间后使行失败，让后续调用返回该行的失败状态。原生按调用准入及 report/drain 跟随注册行的生命周期和状态。 |
-| Settings | owner settings.read/update、settings/schedule 已实现（#175/#177）。仅进程 row 声明来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
+| Settings | owner settings.read/update、settings/schedule 已实现（#175/#177）。仅进程 row 登记来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `scheduler/`；父目录缺失时在事务回调前返回 `io`。Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
 | Sessions | 既有信封 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}，lookup 返回 accepted/unknown，直接使用既有形状。 |
 | 原生生命周期 | S2 调用各自持有租约。[#126](https://github.com/arcships/dim/issues/126) 的 Agents 自动空闲卸载由 [#331](https://github.com/arcships/dim/pull/331) 提供。Scheduler 不把断开当作关闭，不自建卸载循环。 |
@@ -359,7 +359,7 @@ schedule 来源沿用 [Settings 的信任边界](../appserver/settings-service.m
 
 ### 7.1 Settings 来源
 
-Scheduler 进程 row 通过普通 row 的 settings 成员声明唯一来源（[Settings §3.1](../appserver/settings-service.md#31-来源声明)）；Session 定义不声明它。
+Scheduler 进程 row 在其 apply 中登记唯一来源（[Settings §3.1](../appserver/settings-service.md#31-来源登记)）；Session 定义不登记它。
 
 | 声明 | 值 |
 | --- | --- |

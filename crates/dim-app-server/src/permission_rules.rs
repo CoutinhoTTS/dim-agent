@@ -157,6 +157,7 @@ impl DynPlugin for PermissionRulesPlugin {
         Box::pin(async move {
             let settings = ctx.require_at(&self.settings)?;
             let methods = ctx.require_at(&self.methods)?;
+            settings.register::<PermissionSettings>(ctx)?;
             methods.register(
                 ctx,
                 "permission",

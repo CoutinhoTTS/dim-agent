@@ -1,7 +1,7 @@
 import { definePlugin } from '@arcships/rutis'
-import { partRow } from './part-row.ts'
 import provides from './settings-owner.json' with { type: 'json' }
-import type { SessionMethods } from '../../npm/plugin.js'
+import sources from './settings-owner.settings.json' with { type: 'json' }
+import type { PartRegistry, SessionMethods, Settings as SettingsService, SourceDeclaration } from '../../npm/plugin.js'
 
 type Envelope = { ok: boolean; value?: unknown; error?: { code: string; message: string } }
 type Settings = { read(request: unknown): Promise<Envelope>; update(request: unknown): Promise<Envelope> }
@@ -35,4 +35,15 @@ export const part = definePlugin({
   },
 })
 
-export default partRow('session', part)
+// The plugin's one row registers its sources (`config.settings`, by default
+// source `example`) and the Session part, as the plugins under
+// runtime/plugins do.
+export default definePlugin<{ settings?: SourceDeclaration[] }>({
+  name: 'SettingsOwner',
+  inject: ['settings', 'partRegistry'],
+  async apply(ctx, config) {
+    const settings = ctx.use<SettingsService>('settings')
+    for (const declaration of config?.settings ?? sources as SourceDeclaration[]) await settings.register(declaration)
+    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'SettingsOwnerFixture', part)
+  },
+})

@@ -3,6 +3,7 @@ import { validateHeaderValue, STATUS_CODES } from 'node:http'
 import type { JsonObject, PartRegistry, Settings, ToolCall, ToolDefinition, ToolRegistry, ToolResult } from '../../../npm/plugin.d.ts'
 import row from './web.json' with { type: 'json' }
 import { convert, plainText, redact } from './content.ts'
+import { settings } from './settings.ts'
 import { DOWNLOAD_LIMIT, WebError, domain, get, hostname, parseUrl, proxyUrl, type Diagnostic, type NetworkConfig } from './network.ts'
 
 type WebDocument = {
@@ -241,10 +242,12 @@ export const part = definePlugin({
   },
 })
 
-// The plugin's one row registers the Session part (rutis usage §2).
+// The plugin's one row registers its Settings source and the Session part
+// (rutis usage §2).
 export default definePlugin({
   name: 'Web', inject: row.inject, provides: row.provides as Plugin['provides'],
   async apply(ctx) {
+    await ctx.use<Settings>('settings').register(settings)
     await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'Web', part)
   },
 })

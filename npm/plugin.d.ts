@@ -30,8 +30,18 @@ export type SettingsErrorCode = 'unknown_source' | 'invalid_scope' | 'invalid_do
 export type SettingsResult<T> = { ok: true; value: T } |
   { ok: false; error: { code: SettingsErrorCode; message: string } };
 
-/** Process service `settings`; TypeScript sources are declared in their C4 row. */
+/** A JSON Schema source: `schema` is draft 2020-12 with an object root; `userOnly` lists
+ * JSON Pointers to members only the user changes. */
+export interface SourceDeclaration {
+  source: string; userFile: string; projectFile?: string; schema: JsonObject; userOnly?: string[];
+}
+
+/** Process service `settings`. */
 export interface Settings {
+  /** Registers a source for as long as the calling row is loaded; its documents stay in the
+   * home when the row unloads. Rejects (failing the caller's apply) when the declaration is
+   * invalid or its name or a file is registered already. Call it from a row's own `apply`. */
+  register(declaration: SourceDeclaration): Promise<void>;
   read(request: { source: string; scope: SettingsScope }): Promise<SettingsResult<SettingsSnapshot>>;
   update(request: { source: string; scope: SettingsScope; expectedRevision: string; document: JsonObject }): Promise<SettingsResult<SettingsSnapshot>>;
   projects(request: Record<string, never>): SettingsResult<{ projects: { root: number; cwd: string }[] }>;
