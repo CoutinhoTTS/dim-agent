@@ -1,0 +1,90 @@
+pub fn lookup(english: &str) -> Option<&'static str> {
+    Some(match english {
+        // providers_panel.rs
+        "Providers" => "Provider",
+        "Enter open · Esc clear/close" => "Enter öffnen · Esc leeren/schließen",
+        "↑↓/Tab move · Enter activate · Esc back" => {
+            "↑↓/Tab bewegen · Enter ausführen · Esc zurück"
+        }
+        "Loading providers..." => "Lade Provider…",
+        "No matching providers." => "Keine passenden Provider.",
+        "Custom providers are not available yet" => "Eigene Provider noch nicht verfügbar",
+        "Testing connection..." => "Teste Verbindung…",
+        "Connect {providerId}" => "{providerId} verbinden",
+        "(default)" => "(Standard)",
+        "(required)" => "(erforderlich)",
+        "Test + apply" => "Testen + anwenden",
+        "Testing sends the stored credential to this URL." => {
+            "Test sendet gespeicherte Zugangsdaten an diese URL."
+        }
+        "Disconnect" => "Trennen",
+        "Enable provider" => "Provider aktivieren",
+        "Disable provider" => "Provider deaktivieren",
+        "Error: {error}" => "Fehler: {error}",
+        "disabled" => "deaktiviert",
+        "current" => "aktuell",
+        "Sign in" => "Anmelden",
+        "ready" => "bereit",
+        "error" => "Fehler",
+        "not connected" => "nicht verbunden",
+        "Add custom provider" => "Eigenen Provider hinzufügen",
+        // oauth_view.rs
+        "Checking account…" => "Prüfe Konto…",
+        "Not signed in" => "Nicht angemeldet",
+        "Signed in as {account}" => "Angemeldet als {account}",
+        "Open models" => "Modelle öffnen",
+        "View plan" => "Tarif anzeigen",
+        "Sign out" => "Abmelden",
+        "Checking usage…" => "Prüfe Nutzung…",
+        "Usage: {reason}" => "Nutzung: {reason}",
+        "Credits" => "Guthaben",
+        "unlimited" => "unbegrenzt",
+        "{hours}h window" => "{hours}-Std.-Fenster",
+        "/month" => "/Monat",
+        "/year" => "/Jahr",
+        "expires {date}" => "endet {date}",
+        "resets {date}" => "Reset am {date}",
+        "↑↓ move · enter activate · ctrl+r refresh · esc close" => {
+            "↑↓ bewegen · enter ausführen · ctrl+r aktualisieren · esc schließen"
+        }
+        "Login with DimAgent" => "Mit DimAgent anmelden",
+        "Enterprise login" => "Firmen-Login",
+        "Device login" => "Geräte-Login",
+        "Email" => "E-Mail",
+        "Continue" => "Weiter",
+        "Browser login" => "Browser-Login",
+        "Print verification URL + pairing code again" => {
+            "Bestätigungs-URL + Kopplungscode erneut ausgeben"
+        }
+        "Restart device login" => "Geräte-Login neu starten",
+        "Print OAuth URL again" => "OAuth-URL erneut ausgeben",
+        "Callback URL" => "Callback-URL",
+        "Submit callback" => "Callback senden",
+        "The browser could not be opened. Open the link manually, then return here." => {
+            "Browser-Start fehlgeschlagen. Link manuell öffnen, dann zurückkehren."
+        }
+        "Enter code {code} at {url}" => "Code {code} auf {url} eingeben",
+        "Waiting for authorization" => "Warte auf Autorisierung",
+        "{name} device login" => "{name}-Geräte-Login",
+        "Open this URL: {url}" => "Diese URL öffnen: {url}",
+        "Enter code:    {code}" => "Code eingeben:    {code}",
+        "Waiting after server slow-down" => "Warte nach Server-Drosselung",
+        "OAuth login cancelled" => "OAuth-Login abgebrochen",
+        "Enter your work email" => "Firmen-E-Mail eingeben",
+        "Invalid OAuth state - possible CSRF attempt" => {
+            "Ungültiger OAuth-State - möglicher CSRF-Versuch"
+        }
+        "Preparing login... · esc cancel" => "Login wird vorbereitet… · esc abbrechen",
+        "Completing login... · esc cancel" => "Login wird abgeschlossen… · esc abbrechen",
+        "enter restart · esc back" => "enter neu starten · esc zurück",
+        "type value · ↑↓/tab move · enter submit · esc cancel" => {
+            "Wert eingeben · ↑↓/tab bewegen · enter senden · esc abbrechen"
+        }
+        "↑↓ move · enter activate · esc back" => "↑↓ bewegen · enter ausführen · esc zurück",
+        "↑↓ move · enter activate · esc close" => {
+            "↑↓ bewegen · enter ausführen · esc schließen"
+        }
+        "(paste here)" => "(hier einfügen)",
+        _ => return None,
+    })
+}
