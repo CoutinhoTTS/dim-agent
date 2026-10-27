@@ -29,6 +29,7 @@ pub mod list_panel;
 pub mod models_panel;
 pub mod notify;
 pub mod oauth_view;
+pub mod plugins_panel;
 pub mod progress;
 pub mod prompts;
 pub mod providers_panel;
