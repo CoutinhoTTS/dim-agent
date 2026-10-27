@@ -478,8 +478,9 @@ fn session_with(policy: Value, cwd: &Path) -> Value {
 
 /// §6: the `plugin` tool routes each command to the `plugin.*` method of
 /// its name with the same result and errors; `help` and a malformed command
-/// give usage; Permission decides each call, admitting the read-only
-/// commands under the read-only preset; the default plugin-authoring Skill
+/// give usage; Permission decides each call, admitting `list` and `help`
+/// under the read-only preset and not `config`, whose documents may hold
+/// secrets; the default plugin-authoring Skill
 /// is listed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn plugin_tool_runs_plugin_commands() {
@@ -531,6 +532,12 @@ async fn plugin_tool_runs_plugin_commands() {
     );
     let (usage, error) = plugin(&mut client, &server, &session, "install a b").await;
     assert!(error && usage.starts_with("Usage: install"), "{usage}");
+    let (refused, error) =
+        plugin(&mut client, &server, &session, r"install C:\work\my-plugin").await;
+    assert!(
+        error && refused.starts_with("invalid_source:") && refused.contains(r"C:\work\my-plugin"),
+        "{refused}"
+    );
     let (list, error) = plugin(&mut client, &server, &session, "frobnicate").await;
     assert!(error && list.starts_with("Commands:"), "{list}");
 
@@ -589,12 +596,14 @@ async fn plugin_tool_runs_plugin_commands() {
         .await;
     assert_ok(&created);
     let watched = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    for command in ["list", "help", "config plugin-authoring"] {
+    for command in ["list", "help"] {
         let (text, error) = plugin(&mut client, &server, &watched, command).await;
         assert!(!error, "{command}: {text}");
     }
-    let (denied, error) = plugin(&mut client, &server, &watched, "install content").await;
-    assert!(error && denied.contains("read-only"), "{denied}");
+    for command in ["install content", "config plugin-authoring"] {
+        let (denied, error) = plugin(&mut client, &server, &watched, command).await;
+        assert!(error && denied.contains("read-only"), "{command}: {denied}");
+    }
     let list = call(&mut client, "plugin.list", json!({})).await;
     assert!(
         list["result"]

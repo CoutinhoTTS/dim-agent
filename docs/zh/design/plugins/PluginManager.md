@@ -251,16 +251,16 @@ PluginManager 不向模型上下文加入任何东西。插件的工具和提示
 
 - 管理方法，命名空间 `plugin`（A.1）：`list`、`install`、`enable`、`disable`、`reload`、`update`、`remove`。
 - CLI：`dimcode plugin list | install <path|git-url> [--ref R] [--id ID] [--no-enable] | enable <name> [--use ID|builtin|default] | disable <name> | reload <name> | update <id> | remove <id>`。
-- 来自 `PluginTools` 的 agent 工具：一个工具 `plugin`，只有一个字符串参数 `command`，写法与 CLI 参数相同（按 shell 的规则拆分单词，含空格的路径要加引号）：
+- 来自 `PluginTools` 的 agent 工具：一个工具 `plugin`，只有一个字符串参数 `command`，写法与 CLI 参数相同：空白分隔单词，单引号或双引号把内容合成一个单词（含空格的路径要加引号），反斜杠是普通字符，所以 Windows 路径照原样写：
 
   | 命令 | 作用 |
   | --- | --- |
   | `list`、`install …`、`enable …`、`disable <name>`、`reload <name>`、`update <id>`、`remove <id>` | 调用同名的 `plugin.*` 方法，参数与 CLI 相同；相对路径按 Session 的工作目录解析。结果和错误相同。 |
-  | `config <name>` | `<name>` 所用插件登记的 Settings 来源（R4）：每个来源的用户文档、revision、schema 和仅限用户的字段。没有运行的插件没有登记来源。 |
+  | `config <name>` | `<name>` 所用插件登记的声明式（JSON Schema）Settings 来源（R4）；Rust 类型的来源（例如 Mcp 的）不经这里提供，也不列出：每个来源的用户文档、revision、schema 和仅限用户的字段。没有运行的插件没有登记来源。 |
   | `config <name> set <key> <value>` | 通过 Settings 替换某个来源的一个顶层成员：读取用户文档，把 `<key>`（插件有多个来源时写成 `<source>.<key>`）设为 `<value>`（能解析为 JSON 就按 JSON，否则按字符串），再用读到的 revision 更新。revision 和 schema 由 Settings 检查；这是所有者写入，所以仅限用户的字段会被拒绝。所有者在需要时读取自己的来源，所以新值不用重启就生效。行的结构配置不在这里修改。 |
   | `help [command]` | 命令列表，或一个命令的用法和细节。 |
 
-  工具描述只带一行命令列表；细节由 `help` 给出，格式错误的命令在错误结果里带上该命令的用法。它是工具调用：Permission 对每一次调用做决定（[需求 5](../../../design/plugin-management.md)、[ADR 003](../../adr/003-approval-scope.md)）。它声明的 risk 是 `persistent_configuration`；`list`、不带 `set` 的 `config <name>` 和 `help` 按 `read_filesystem` 准入（R3）。
+  工具描述只带一行命令列表；细节由 `help` 给出，格式错误的命令在错误结果里带上该命令的用法。它是工具调用：Permission 对每一次调用做决定（[需求 5](../../../design/plugin-management.md)、[ADR 003](../../adr/003-approval-scope.md)）。它声明的 risk 是 `persistent_configuration`；`list` 和 `help` 按 `read_filesystem` 准入（R3）；`config` 的文档可能含有密钥和用户内容，所以按声明的 risk 准入，和这些来源自己的工具一样。
 - 插件编写：默认插件 `plugin-authoring` 带一个 Skill `plugin-authoring`，教 agent 编写 TypeScript 插件并用这个工具安装。它只有内容（§2.1），和其他默认插件一样可以关闭。
 - PluginManager 调用的所有者操作：SkillsCatalog、Mcp 和 Hooks 上的 `register` / `withdraw`（§9 R2）。
 

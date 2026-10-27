@@ -42,7 +42,7 @@ const COMMANDS: [(&str, &str, &str); 9] = [
     (
         "install",
         "install <path|git-url> [--ref R] [--id ID] [--no-enable]",
-        "Installs the plugin directory at <path> (relative to the Session's working directory; used in place) or clones <git-url> (https:// or ssh://, optionally at --ref), and turns it on unless --no-enable. The directory has a dim-plugin.json manifest. The id defaults to the manifest name lowercased; give --id when it is taken. The result has the id, name and load status.",
+        "Installs the plugin directory at <path> (relative to the Session's working directory; used in place; quote a path with spaces, a backslash is taken as is) or clones <git-url> (https:// or ssh://, optionally at --ref), and turns it on unless --no-enable. The directory has a dim-plugin.json manifest. The id defaults to the manifest name lowercased; give --id when it is taken. The result has the id, name and load status.",
     ),
     (
         "enable",
@@ -108,9 +108,33 @@ enum Malformed {
     Unknown,
 }
 
+/// Splits a command into words: whitespace separates them and a pair of
+/// single or double quotes groups one. A backslash is an ordinary character,
+/// so a Windows path needs no quoting. An unclosed quote is `None`.
+fn words(command: &str) -> Option<Vec<String>> {
+    let (mut words, mut word, mut quote) = (Vec::new(), None::<String>, None);
+    for ch in command.chars() {
+        match quote {
+            Some(open) if ch == open => quote = None,
+            Some(_) => word.get_or_insert_default().push(ch),
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                word.get_or_insert_default();
+            }
+            None if ch.is_whitespace() => words.extend(word.take()),
+            None => word.get_or_insert_default().push(ch),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    words.extend(word);
+    Some(words)
+}
+
 impl Command {
     fn parse(command: &str, cwd: &str) -> Result<Self, Malformed> {
-        let words = shlex::split(command).ok_or(Malformed::Unknown)?;
+        let words = words(command).ok_or(Malformed::Unknown)?;
         let Some((first, rest)) = words.split_first() else {
             return Err(Malformed::Unknown);
         };
@@ -184,12 +208,7 @@ impl Command {
     }
 
     fn read_only(&self) -> bool {
-        matches!(
-            self,
-            Command::Method("plugin.list", _)
-                | Command::Config { set: None, .. }
-                | Command::Help(_)
-        )
+        matches!(self, Command::Method("plugin.list", _) | Command::Help(_))
     }
 }
 
