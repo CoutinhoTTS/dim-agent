@@ -13,7 +13,8 @@ use acquire::PluginsDir;
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, Progress, RpcError};
 use dim_agent_capabilities::skills::{SkillIssue, SkillsCatalog};
 use dim_agent_runtime::{Names, PartRegistry, PartScope};
-use record::{Choice, Defaults, Installed, Kind, Manifest, Record, Source};
+pub use record::Defaults;
+use record::{Choice, Installed, Kind, Manifest, Record, Source};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::report::{EntryInfo, EntryStatus};
@@ -455,6 +456,8 @@ struct Change {
 pub(crate) struct Manager {
     state: Arc<State>,
     loader: Arc<Loader>,
+    ctx: Ctx,
+    runtimes: Key<crate::runtime_manager::RuntimeService>,
     owners: Owners,
 }
 
@@ -1250,6 +1253,12 @@ impl Manager {
             .register(plugin, &dir, &manifest, &CONTENT, &mut outcome)
             .await;
         if let Some(code) = &manifest.code {
+            // RuntimeManager R1: a Python plugin turned on asks for the Python runtime.
+            if is_python(code)
+                && let Some(runtimes) = self.ctx.get_at(&self.runtimes)
+            {
+                runtimes.install(crate::runtime_manager::Kind::Python);
+            }
             if missing_instance_names(self.state.catalog.get().expect("set at startup"), code)
                 .is_empty()
             {
@@ -1415,6 +1424,7 @@ pub(crate) struct PluginManagerPlugin {
     parts: Key<PartRegistry>,
     skills: Key<SkillsCatalog>,
     mcp: Key<McpService>,
+    runtimes: Key<crate::runtime_manager::RuntimeService>,
 }
 
 impl PluginManagerPlugin {
@@ -1426,6 +1436,7 @@ impl PluginManagerPlugin {
             parts: names.key()?,
             skills: names.key()?,
             mcp: names.key()?,
+            runtimes: names.key()?,
         })
     }
 }
@@ -1451,6 +1462,8 @@ impl DynPlugin for PluginManagerPlugin {
                     skills: self.skills.clone(),
                     mcp: self.mcp.clone(),
                 },
+                ctx: ctx.clone(),
+                runtimes: self.runtimes.clone(),
             };
             let keep: Vec<PathBuf> = manager
                 .state

@@ -139,10 +139,12 @@ DIM_OAUTH_CLIENT_ID_CN=… DIM_OAUTH_CLIENT_ID_GLOBAL=… cargo build --release 
 node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account
 ```
 
-In CI, set the `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` repository secrets. Every target is then an account build; without both secrets CI builds API-key-only payloads, and a partial configuration fails. The IDs are compiled into the executable and never enter manifests. The account build adds no runtime, package or Node: each platform package and native archive holds only the executable:
+In CI, set the `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` repository secrets. Every target is then an account build; without both secrets CI builds API-key-only payloads, and a partial configuration fails. The IDs are compiled into the executable and never enter manifests. The account build adds no runtime, package or Node. Each platform package and native archive holds the executable, the default configuration file and the default plugins (`scripts/stage-plugins.mjs`, then `stage-release.mjs --plugins DIR`); the Node and Python runtimes are not bundled: RuntimeManager downloads them, verified against pins compiled into Dim, into the home ([RuntimeManager](../design/plugins/RuntimeManager.md)):
 
 ```text
 bin/dimcode[.exe]              # the CLI; runs its daemon as `dimcode app-server`
+default-plugins.json          # the default configuration file, passed as `--defaults`
+plugins/<name>/               # the default plugins with their production node_modules
 LICENSE
 NOTICE
 release-manifest.json         # `account` records whether this is the account build

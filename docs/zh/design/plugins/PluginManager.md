@@ -161,7 +161,7 @@ flowchart LR
 
 ### 2.5 运行时
 
-插件代码在 Node 或 Python 的 rutis 运行时里运行。提供运行时不归 PluginManager 管：运行时怎么获取、固定哪个版本、怎么校验，运行时就绪后插件的行怎么启动，都由运行时获取的设计决定（[#476](https://github.com/arcships/dim/issues/476)，M1）。PluginManager 只负责建行；运行时还没有时，`plugin.list` 显示 rutis 给出的状态和原因。reload 只重新导入入口模块（[需求第 3 条](../../../design/plugin-management.md)）。
+插件代码在 Node 或 Python 的 rutis 运行时里运行。提供运行时不归 PluginManager 管：运行时怎么获取、固定哪个版本、怎么校验，运行时就绪后插件的行怎么启动，都由 [RuntimeManager](RuntimeManager.md) 决定（[#476](https://github.com/arcships/dim/issues/476)，M1）。PluginManager 只负责建行；运行时还没有时，`plugin.list` 显示 rutis 给出的状态和原因。reload 只重新导入入口模块（[需求第 3 条](../../../design/plugin-management.md)）。
 
 TypeScript 的行以入口文件的绝对路径命名。Python 插件通过 PluginManager 维护的链接导入：`<home>/plugins/.python/<package>` 指向插件目录，`<package>` 是插件的 id（默认插件用名字），其中 `-` 换成 `_`；它的行名是 `py:<package>.<入口模块>`，插件在自己的包内使用相对导入。PluginManager 在打开插件时创建链接，更新后把它指向新目录，移除插件时删除它。Python 运行时从 `<home>/plugins/.python/` 导入（#476）。
 

@@ -35,6 +35,8 @@ Commands:\n\
   plugin reload NAME               Reload a plugin after editing it\n\
   plugin update ID                 Load the latest commit of a Git plugin\n\
   plugin remove ID\n\
+  runtime list                     List the plugin runtimes and their state\n\
+  runtime install node|python      Turn a plugin runtime on and acquire it\n\
   daemon stop                      Gracefully stop an existing daemon\n\
   web [--port N] [--no-open]       Hold the Web workspace until Ctrl+C
 web --off                        Turn off the daemon-owned Web switch
@@ -110,6 +112,10 @@ pub enum Action {
         method: String,
         params: serde_json::Value,
     },
+    /// `runtime list`: the plugin runtimes and their state.
+    RuntimeList,
+    /// `runtime install NAME`: turn a plugin runtime on and acquire it.
+    RuntimeInstall(String),
     DaemonStop,
     /// `web`: hold the daemon's local web entry open in the foreground.
     Web {
@@ -346,6 +352,13 @@ impl Options {
                 "plugin" if matches!(options.action, Action::Chat) => {
                     let (method, params) = crate::plugin_command::parse(&mut args)?;
                     options.action = Action::Plugin { method, params };
+                }
+                "runtime" if matches!(options.action, Action::Chat) => {
+                    options.action = match value(&mut args)?.as_str() {
+                        "list" => Action::RuntimeList,
+                        "install" => Action::RuntimeInstall(value(&mut args)?),
+                        _ => return Err("Use runtime list or runtime install node|python".into()),
+                    };
                 }
                 "mcp" if matches!(options.action, Action::Chat) => {
                     options.action = match value(&mut args)?.as_str() {

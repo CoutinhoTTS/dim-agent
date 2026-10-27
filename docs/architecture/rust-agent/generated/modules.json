@@ -2048,6 +2048,33 @@
       ]
     },
     {
+      "id": "dim_app_server::runtime_manager",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/runtime_manager.rs",
+      "unexpandedMacros": [
+        "cfg",
+        "format",
+        "include_str",
+        "matches",
+        "tokio::select",
+        "tracing::warn",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::runtime_manager::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::runtime_manager",
+      "file": "crates/dim-app-server/src/runtime_manager.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format"
+      ]
+    },
+    {
       "id": "dim_app_server::session_typescript",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -12558,6 +12585,15 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::runtime_manager",
+      "references": [
+        "mod runtime_manager",
+        "path runtime_manager::RuntimeManagerPlugin::new",
+        "path runtime_manager::RuntimeService"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::session_typescript",
       "references": [
         "mod session_typescript",
@@ -13483,6 +13519,7 @@
       "from": "dim_app_server::cli",
       "to": "dim_agent_capabilities::defaults",
       "references": [
+        "path defaults",
         "path defaults::install",
         "path defaults::install_local_execution",
         "path defaults::mock_model_hosts",
@@ -13624,6 +13661,13 @@
     },
     {
       "from": "dim_app_server::cli",
+      "to": "dim_app_server::plugin_manager::record",
+      "references": [
+        "path crate::plugin_manager::Defaults::read"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
       "to": "dim_app_server::protocol",
       "references": [
         "path crate::protocol::DaemonProfile::Configured",
@@ -13633,10 +13677,19 @@
     },
     {
       "from": "dim_app_server::cli",
+      "to": "dim_app_server::runtime_manager",
+      "references": [
+        "path Runtimes::load",
+        "use crate::runtime_manager::Runtimes"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
       "to": "dim_app_server::session_typescript",
       "references": [
         "path PythonConfig",
         "path SessionTypeScriptConfig",
+        "path SessionTypeScriptConfig::acquired",
         "use crate::session_typescript::PythonConfig",
         "use crate::session_typescript::SessionTypeScriptConfig"
       ]
@@ -16600,6 +16653,14 @@
       ]
     },
     {
+      "from": "dim_app_server::plugin_manager",
+      "to": "dim_app_server::runtime_manager",
+      "references": [
+        "path crate::runtime_manager::Kind::Python",
+        "path crate::runtime_manager::RuntimeService"
+      ]
+    },
+    {
       "from": "dim_app_server::plugin_manager::acquire",
       "to": "dim_app_server::plugin_manager",
       "references": [
@@ -16624,6 +16685,13 @@
         "path PluginError",
         "path PluginError::new",
         "use super::PluginError"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager::record",
+      "to": "dim_app_server::runtime_manager",
+      "references": [
+        "path crate::runtime_manager::Choices"
       ]
     },
     {
@@ -17764,6 +17832,63 @@
       ]
     },
     {
+      "from": "dim_app_server::runtime_manager",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError::invalid",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_app_server::runtime_manager",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::runtime_manager",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::runtime_manager",
+      "to": "dim_app_server::runtime_manager::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::runtime_manager::tests",
+      "to": "dim_app_server::runtime_manager",
+      "references": [
+        "path Archive",
+        "path PINS",
+        "path Pins",
+        "path checksum",
+        "path client",
+        "path download",
+        "path unpack",
+        "use super::Archive",
+        "use super::PINS",
+        "use super::Pins",
+        "use super::checksum",
+        "use super::client",
+        "use super::download",
+        "use super::unpack"
+      ]
+    },
+    {
       "from": "dim_app_server::session_typescript",
       "to": "dim_agent_capabilities::methods",
       "references": [
@@ -17855,6 +17980,13 @@
       "references": [
         "path ManagementMethods",
         "use crate::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_app_server::runtime_manager",
+      "references": [
+        "path crate::runtime_manager::Runtimes"
       ]
     },
     {
@@ -19246,6 +19378,8 @@
         "path Action::McpLogout",
         "path Action::Models",
         "path Action::Plugin",
+        "path Action::RuntimeInstall",
+        "path Action::RuntimeList",
         "path Action::Timeline",
         "path Action::Tui",
         "path Action::Version",
@@ -19437,7 +19571,8 @@
       "from": "dim_cli",
       "to": "dim_cli::sanitize",
       "references": [
-        "mod sanitize"
+        "mod sanitize",
+        "path crate::sanitize::safe"
       ]
     },
     {
@@ -19518,6 +19653,7 @@
       "from": "dim_cli",
       "to": "dim_client",
       "references": [
+        "path client::Client",
         "path client::RpcError",
         "path client::app_error"
       ]
@@ -27114,6 +27250,22 @@
     {
       "module": "dim_app_server::provider::preferences",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::runtime_manager",
+      "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_app_server::runtime_manager::tests",
+      "path": "SimpleFileOptions::default"
+    },
+    {
+      "module": "dim_app_server::session_typescript",
+      "path": "Kind::Node"
+    },
+    {
+      "module": "dim_app_server::session_typescript",
+      "path": "Kind::Python"
     },
     {
       "module": "dim_app_server::settings",

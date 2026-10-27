@@ -1,7 +1,9 @@
 //! The App Server command line, shared by `dim-app-server` and `dimcode app-server`.
 
 use crate::{
-    ServerConfig, ShutdownReason, collaboration, permission_rules, serve,
+    ServerConfig, ShutdownReason, collaboration, permission_rules,
+    runtime_manager::Runtimes,
+    serve,
     session_typescript::{PythonConfig, SessionTypeScriptConfig},
 };
 use dim_agent_aimux::{AimuxModels, config::ModelConfigFile};
@@ -165,6 +167,9 @@ pub fn run_with(
     if config.web_assets.is_none() {
         config.web_assets = config.product_home.as_ref().map(|home| home.join("web"));
     }
+    if node.is_some() != js_runtime.is_some() || (python.is_some() && node.is_none()) {
+        return Err("--node and --js-runtime go together, and --python needs them".into());
+    }
     if session_rows.is_some() && (node.is_none() || js_runtime.is_none()) {
         return Err("--session-rows requires --node and --js-runtime".into());
     }
@@ -188,14 +193,27 @@ pub fn run_with(
         let python = python.map(|interpreter| PythonConfig {
             interpreter,
             project: anchor.parent().expect("a file has a directory").to_owned(),
+            packages: None,
         });
         config.session_typescript = Some(SessionTypeScriptConfig {
             node,
             js_runtime,
             anchor,
             python,
+            acquire: None,
             rows,
         });
+    } else if let Some(defaults) = &config.plugin_defaults {
+        let home = config
+            .product_home
+            .as_ref()
+            .or(config.target_home.as_ref())
+            .ok_or("--defaults needs --product-home or --home")?;
+        let home = std::path::absolute(home)?;
+        let preset = crate::plugin_manager::Defaults::read(defaults)?.runtimes;
+        let runtimes = Arc::new(Runtimes::load(&home, &preset)?);
+        config.session_typescript =
+            Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![]));
     }
     if threads == 0 {
         return Err("--threads must be positive".into());

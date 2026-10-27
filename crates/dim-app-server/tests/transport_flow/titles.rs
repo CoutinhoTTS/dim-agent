@@ -582,6 +582,7 @@ async fn node_typescript_row_reads_and_sets_the_title_through_session_metadata()
         .unwrap();
     let rows = SessionTypeScriptConfig {
         python: None,
+        acquire: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),

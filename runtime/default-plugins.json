@@ -6,5 +6,9 @@
     "workflow": "plugins/workflow",
     "scheduler": "plugins/scheduler"
   },
-  "locked": ["PluginManager", "Rpc", "Transport"]
+  "locked": ["PluginManager", "Rpc", "Transport"],
+  "runtimes": {
+    "node": { "source": "download", "auto": true },
+    "python": { "source": "download", "auto": false }
+  }
 }
