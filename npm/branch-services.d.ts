@@ -7,11 +7,16 @@ export interface RustError<Name extends string = string, Code extends string = s
   readonly data: Data
 }
 
+export type BranchSource =
+  | { kind: "tool"; turn_id: string; request_id: string; call_id: string }
+  | { kind: "host"; operation_id: string }
+
 export interface TimelineInfo {
   id: string
   parent?: string | null
   branch_point?: number | bigint | null
   create_anchor?: number | bigint | null
+  source?: BranchSource | null
 }
 
 export type ImageSourceType = "base64" | "url"
@@ -43,10 +48,6 @@ export interface InputMessageData {
   blocks?: InputBlock[]
   mode?: InputMode | null
 }
-
-export type BranchSource =
-  | { kind: "tool"; turn_id: string; request_id: string; call_id: string }
-  | { kind: "host"; operation_id: string }
 
 export interface BranchOptions {
   prompt: string

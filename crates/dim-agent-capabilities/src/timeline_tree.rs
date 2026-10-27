@@ -41,12 +41,21 @@ enum Opening {
     },
     /// A stored branch loaded again at its stored head. While it opens, its
     /// build reads its history up to that head, the history its capabilities
-    /// rebuild from, and sends the `branch/create` sequences of the creates
-    /// it recorded as failed: the restore checks its children against them.
+    /// rebuild from, and reports the facts it holds about its own lines: the
+    /// creates it saw fail, and the source each create recorded. The restore
+    /// checks its children against them.
     Resume {
         head: u64,
-        failed_creates: oneshot::Sender<BTreeSet<u64>>,
+        lines: oneshot::Sender<LineFacts>,
     },
+}
+
+#[derive(Default)]
+struct LineFacts {
+    /// The `branch/create` sequences the line recorded as failed.
+    failed_creates: BTreeSet<u64>,
+    /// Each child it created, with the source that create recorded.
+    sources: BTreeMap<String, BranchSource>,
 }
 
 struct Node {
@@ -358,26 +367,28 @@ impl TimelineTree {
                     .context = Some(context.clone());
                 let (opening, first) = match opening {
                     Opening::Start { start, first } => (EventKind::BranchStart(start), first),
-                    Opening::Resume {
-                        head,
-                        failed_creates,
-                    } => {
+                    Opening::Resume { head, lines } => {
                         let history = tokio::select! {
                             result = context.timeline().local(..=head) => result?,
                             _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
                             _ = tokio::time::sleep_until(deadline) => return Err(AgentError::Build("branch opening timed out".into())),
                         };
-                        let failed = history
-                            .iter()
-                            .filter_map(|event| match &event.kind {
+                        let mut facts = LineFacts::default();
+                        for event in &history {
+                            match &event.kind {
                                 EventKind::BranchCreateFailed(
                                     BranchCreateFailedData::Failed { create_event, .. }
                                     | BranchCreateFailedData::Cancelled { create_event, .. },
-                                ) => Some(*create_event),
-                                _ => None,
-                            })
-                            .collect();
-                        let _ = failed_creates.send(failed);
+                                ) => {
+                                    facts.failed_creates.insert(*create_event);
+                                }
+                                EventKind::BranchCreate(data) => {
+                                    facts.sources.insert(data.branch.clone(), data.source.clone());
+                                }
+                                _ => {}
+                            }
+                        }
+                        let _ = lines.send(facts);
                         (EventKind::BranchResume(BranchResumeData {}), None)
                     }
                 };
@@ -594,6 +605,7 @@ impl TimelineTreeControl for TimelineTree {
                         parent: None,
                         branch_point: None,
                         create_anchor: None,
+                        source: None,
                     },
                 )?;
                 self.launch(
@@ -625,6 +637,7 @@ impl TimelineTreeControl for TimelineTree {
                 .map(|branch| (branch.info.id.clone(), branch))
                 .collect();
             let mut failed_creates = BTreeSet::new();
+            let mut sources = BTreeMap::new();
             let mut inactive = BTreeSet::new();
             while !remaining.is_empty() {
                 let stored = remaining
@@ -640,7 +653,8 @@ impl TimelineTreeControl for TimelineTree {
                             "branch directory contains missing parents or a cycle".into(),
                         )
                     })?;
-                let next = stored.info;
+                let mut next: TimelineInfo = stored.info.into();
+                next.source = sources.get(&next.id).cloned();
                 if next.parent.as_ref().is_some_and(|parent| {
                     inactive.contains(parent)
                         || failed_creates.contains(&(
@@ -692,26 +706,25 @@ impl TimelineTreeControl for TimelineTree {
                         };
                         (Opening::Start { start, first: None }, None)
                     } else {
-                        let (failed_creates, reported) = oneshot::channel();
+                        let (lines, reported) = oneshot::channel();
                         let head = stored.sequence;
-                        (
-                            Opening::Resume {
-                                head,
-                                failed_creates,
-                            },
-                            Some(reported),
-                        )
+                        (Opening::Resume { head, lines }, Some(reported))
                     };
                     self.launch(&mut state, next.id.clone(), ancestors, None, opening);
                     (ready, reported)
                 };
                 Self::await_branch(ready).await?;
                 if let Some(reported) = reported {
-                    let failed = reported.await.expect(
-                        "a resumed branch reports its failed creates before it is published",
+                    let facts = reported.await.expect(
+                        "a resumed branch reports its own lines before it is published",
                     );
-                    failed_creates
-                        .extend(failed.into_iter().map(|create| (next.id.clone(), create)));
+                    failed_creates.extend(
+                        facts
+                            .failed_creates
+                            .into_iter()
+                            .map(|create| (next.id.clone(), create)),
+                    );
+                    sources.extend(facts.sources);
                 }
                 remaining.remove(&next.id);
             }
@@ -782,6 +795,7 @@ impl TimelineTreeControl for TimelineTree {
                             parent: Some(parent.clone()),
                             branch_point: Some(branch_point),
                             create_anchor: Some(event.sequence),
+                            source: Some(final_data.source.clone()),
                         },
                     )?);
                     Ok(())

@@ -508,6 +508,84 @@ async fn wait_create(session: &Session, after: u64) -> Arc<AgentEvent> {
 /// built. Its cancellation wait is call-owned and must release with the
 /// caller; the tree still settles the accepted creation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_reports_the_source_its_create_recorded_open_or_restored() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    let probe = Arc::new(Probe::default());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(store.clone());
+    defaults::mock_hosts(&mut builder);
+    defaults::install(&mut builder);
+    let writer = probe.clone();
+    builder.require_feature(
+        Feature::new("test.branch-probe").branch("test.branch-probe", move |names| {
+            Ok(Box::new(ProbePlugin::new(names, writer.clone())?))
+        }),
+    );
+    let agent = builder.build();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    soon(session.submit("ancestor".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let high = session.sequence("main").unwrap();
+    let host = BranchSource::Host {
+        operation_id: "op:1".into(),
+    };
+    let child = soon(session.branch(
+        "main".into(),
+        high,
+        BranchOptions {
+            prompt: "work".into(),
+            source: host.clone(),
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    let source = |infos: Vec<TimelineInfo>, id: &str| {
+        infos
+            .into_iter()
+            .find(|info| info.id == id)
+            .unwrap()
+            .source
+    };
+    assert_eq!(source(session.branches(), &child), Some(host.clone()));
+    assert_eq!(source(session.branches(), "main"), None);
+    let commands = probe.commands.lock().unwrap().clone().unwrap();
+    assert_eq!(commands.info(child.clone()).unwrap().source, Some(host.clone()));
+    let id = session.id().to_owned();
+    soon(agent.close()).await.unwrap();
+
+    let probe = Arc::new(Probe::default());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(store.clone());
+    defaults::mock_hosts(&mut builder);
+    defaults::install(&mut builder);
+    let writer = probe.clone();
+    builder.require_feature(
+        Feature::new("test.branch-probe").branch("test.branch-probe", move |names| {
+            Ok(Box::new(ProbePlugin::new(names, writer.clone())?))
+        }),
+    );
+    let agent = builder.build();
+    let session = soon(agent.restore_session(id)).await.unwrap();
+    assert_eq!(source(session.branches(), &child), Some(host));
+    assert_eq!(source(session.branches(), "main"), None);
+    assert_eq!(
+        session
+            .branches()
+            .into_iter()
+            .find(|info| info.id == child)
+            .unwrap()
+            .parent,
+        Some("main".into())
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn data_creation_releases_its_cancellation_wait_when_the_caller_leaves() {
     let probe = Arc::new(Probe::default());
     let agent = setup(&probe);

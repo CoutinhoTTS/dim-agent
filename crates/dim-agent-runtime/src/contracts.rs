@@ -87,7 +87,18 @@ pub trait ConfigureControl: Send + Sync + 'static {
     ) -> BoxFuture<'static, Result<ConfigureOutcome>>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchRecord {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_point: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_anchor: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimelineInfo {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +107,20 @@ pub struct TimelineInfo {
     pub branch_point: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub create_anchor: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<dim_agent_types::BranchSource>,
+}
+
+impl From<BranchRecord> for TimelineInfo {
+    fn from(record: BranchRecord) -> Self {
+        Self {
+            id: record.id,
+            parent: record.parent,
+            branch_point: record.branch_point,
+            create_anchor: record.create_anchor,
+            source: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9283,6 +9283,7 @@
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
         "path BranchResumeData",
+        "path BranchSource",
         "path BranchSource::Host",
         "path BranchSource::Tool",
         "path BranchStartData",
@@ -11494,8 +11495,8 @@
       "from": "dim_agent_runtime::memory_timeline_store",
       "to": "dim_agent_runtime::contracts",
       "references": [
-        "path TimelineInfo",
-        "use crate::TimelineInfo"
+        "path BranchRecord",
+        "use crate::BranchRecord"
       ]
     },
     {
@@ -11853,8 +11854,8 @@
       "from": "dim_agent_runtime::timeline_store",
       "to": "dim_agent_runtime::contracts",
       "references": [
-        "path TimelineInfo",
-        "use crate::TimelineInfo"
+        "path BranchRecord",
+        "use crate::BranchRecord"
       ]
     },
     {
@@ -18582,8 +18583,8 @@
       "from": "dim_app_server::storage::export",
       "to": "dim_agent_runtime::contracts",
       "references": [
-        "path TimelineInfo",
-        "use dim_agent_runtime::TimelineInfo"
+        "path BranchRecord",
+        "use dim_agent_runtime::BranchRecord"
       ]
     },
     {
@@ -18855,8 +18856,8 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_runtime::contracts",
       "references": [
-        "path TimelineInfo",
-        "use dim_agent_runtime::TimelineInfo"
+        "path BranchRecord",
+        "use dim_agent_runtime::BranchRecord"
       ]
     },
     {

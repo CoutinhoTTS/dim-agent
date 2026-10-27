@@ -115,7 +115,7 @@ they carry. Export version 1:
 | Line | Fields |
 | --- | --- |
 | `header`, first | `export` (1), `session_id`, `store_format` (the format of the database read), `sensitive` (always `true`) |
-| `branch`, one per branch | `info`: the branch's `TimelineInfo` as stored (`id`, and for a child `parent`, `branch_point`, `create_anchor`); `head`: the branch's last sequence in the snapshot |
+| `branch`, one per branch | `info`: the branch's stored directory row (`BranchRecord`: `id`, and for a child `parent`, `branch_point`, `create_anchor`, never `source`); `head`: the branch's last sequence in the snapshot |
 | `event`, every event | `branch_id`; `event`: the `AgentEvent` serialization; `trace`: the before trace (`TimelineTrace`) or `null`; `batch_end`: the last sequence of the atomic batch the event was committed in |
 | `end`, last | `branches` and `events`: the counts written |
 
@@ -136,7 +136,7 @@ they carry. Export version 1:
   request, usage, compaction, branch creation and failure, collaboration and turn outcomes. Nothing is filtered,
   merged or re-derived; output deltas appear as the separate events they are.
 - **No second schema.** `event`, `trace` and `info` are the existing serde serializations of `AgentEvent`,
-  `TimelineTrace` and `TimelineInfo`. Event bodies change with their event types, not with the export version.
+  `TimelineTrace` and `BranchRecord`. Event bodies change with their event types, not with the export version.
 - **Versioning.** A reader ignores unknown line kinds and unknown envelope fields. Adding either keeps the version;
   removing or changing the meaning of one raises it.
 - **Completeness.** Only a file that ends with the `end` line, whose counts match, is complete.
