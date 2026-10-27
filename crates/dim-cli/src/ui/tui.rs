@@ -21,6 +21,7 @@ use crate::ui::language_panel::LanguagePanel;
 use crate::ui::lines_panel::LinesPanel;
 use crate::ui::models_panel::ModelsPanel;
 use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
+use crate::ui::plugins_panel::PluginsPanel;
 use crate::ui::progress::ProgressBar;
 use crate::ui::prompts::{AskUserPrompt, Effect, ExitConfirm, ExitReason, PermissionPrompt};
 use crate::ui::providers_panel::ProvidersPanel;
@@ -769,6 +770,7 @@ enum Prompt {
     Lines(Box<LinesPanel>),
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
+    Plugins(PluginsPanel),
     Login(Box<OauthView>),
     Approvals(ApprovalsPanel),
     Theme(ThemePanel),
@@ -984,6 +986,7 @@ impl App {
             | Some(Prompt::Sessions(_))
             | Some(Prompt::Models(_))
             | Some(Prompt::Providers(_))
+            | Some(Prompt::Plugins(_))
             | Some(Prompt::Login(_))
             | Some(Prompt::Approvals(_))
             | Some(Prompt::Theme(_))
@@ -1248,6 +1251,20 @@ impl App {
                     panel.set_providers(providers);
                 }
             }
+            Update::Plugins(plugins) => {
+                if let Some(Prompt::Plugins(panel)) = &mut self.prompt {
+                    panel.set_items(plugins);
+                }
+            }
+            Update::PluginResult {
+                action,
+                result,
+                plugins,
+            } => {
+                if let Some(Prompt::Plugins(panel)) = &mut self.prompt {
+                    panel.set_result(&action, result, plugins);
+                }
+            }
             Update::Login(account) => {
                 let signed_in = matches!(account, Ok(Some(_)));
                 self.signed_in = signed_in;
@@ -1392,6 +1409,7 @@ impl App {
                 Prompt::Lines(p) => p.handle_key(key),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
+                Prompt::Plugins(p) => p.handle_key(key),
                 Prompt::Login(p) => match p.handle_key(key) {
                     Effect::OauthBack => Effect::Close,
                     Effect::OauthCancel => {
@@ -1771,14 +1789,11 @@ impl App {
                 self.composer.clear();
                 self.host.send(Command::Resume(id));
             }
-            Effect::Refresh => {
-                self.host
-                    .send(if matches!(self.prompt, Some(Prompt::Providers(_))) {
-                        Command::ListProviders
-                    } else {
-                        Command::ListSessions
-                    })
-            }
+            Effect::Refresh => self.host.send(match self.prompt {
+                Some(Prompt::Providers(_)) => Command::ListProviders,
+                Some(Prompt::Plugins(_)) => Command::ListPlugins,
+                _ => Command::ListSessions,
+            }),
             Effect::FullAccess {
                 request_id,
                 branch_id,
@@ -1888,6 +1903,7 @@ impl App {
                 self.host.send(Command::SetApprovals(mode));
             }
             Effect::Provider(action) => self.host.send(Command::Provider(action)),
+            Effect::Plugin(action) => self.host.send(Command::Plugin(action)),
             Effect::OauthStart(start) => self.host.send(Command::OauthStart(start)),
             Effect::OauthCancel => self.host.send(Command::OauthCancel),
             Effect::OauthBack => {}
@@ -2140,6 +2156,34 @@ impl App {
         }
     }
 
+    /// `/plugins` opens the list; `/plugins install PATH` installs the
+    /// directory at PATH (relative to the workspace) and opens the list on
+    /// the outcome.
+    fn plugins(&mut self, args: &str) {
+        let args = args.trim();
+        if args.is_empty() {
+            self.prompt = Some(Prompt::Plugins(PluginsPanel::new()));
+            self.host.send(Command::ListPlugins);
+            return;
+        }
+        let Some(path) = args
+            .strip_prefix("install")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .map(str::trim)
+        else {
+            self.set_notice(t("Usage: /plugins [install PATH]"));
+            return;
+        };
+        let path = match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+            _ => PathBuf::from(&self.cwd_key).join(path),
+        };
+        self.prompt = Some(Prompt::Plugins(PluginsPanel::installing(&path)));
+        self.host.send(Command::Plugin(
+            crate::model::session::PluginAction::Install(path),
+        ));
+    }
+
     fn run_command(&mut self, name: &str, args: &str) -> Outcome {
         if let Some(command) = COMMANDS.iter().find(|c| c.name == name)
             && !command.available(self.context())
@@ -2231,6 +2275,10 @@ impl App {
             }
             "approvals" => {
                 self.prompt = Some(Prompt::Approvals(ApprovalsPanel::new(&self.approvals)));
+                Outcome::Continue
+            }
+            "plugins" => {
+                self.plugins(args);
                 Outcome::Continue
             }
             "connect" => {
@@ -2662,6 +2710,7 @@ impl App {
                 }
                 Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
+                Some(Prompt::Plugins(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Login(prompt)) => list(prompt.render(list_width, p)),
                 Some(Prompt::Approvals(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Theme(prompt)) => list(prompt.render(list_width, budget, p)),
@@ -2691,6 +2740,7 @@ impl App {
             }
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Plugins(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Login(prompt)) => Some(prompt.render(outer, p)),
             Some(Prompt::Approvals(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Theme(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -3882,6 +3932,90 @@ mod tests {
             Vec::new()
         }
         fn shutdown(self: Box<Self>) {}
+    }
+
+    /// A session that keeps every command the interface sends.
+    struct Recorder(std::rc::Rc<std::cell::RefCell<Vec<Command>>>);
+
+    impl SessionPort for Recorder {
+        fn send(&self, command: Command) {
+            self.0.borrow_mut().push(command);
+        }
+        fn drain(&self) -> Vec<Update> {
+            Vec::new()
+        }
+        fn shutdown(self: Box<Self>) {}
+    }
+
+    /// `/plugins` lists through the worker, the panel's changes reach it as
+    /// plugin commands, and `/plugins install PATH` installs the directory
+    /// relative to the workspace.
+    #[test]
+    fn plugins_commands_reach_the_worker() {
+        use crate::model::session::{PluginAction, PluginCandidate, PluginItem};
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let last = |sent: &std::cell::RefCell<Vec<Command>>| match sent.borrow().last() {
+            Some(Command::ListPlugins) => "list".to_owned(),
+            Some(Command::Plugin(action)) => format!("{action:?}"),
+            Some(_) => "other".to_owned(),
+            None => "none".to_owned(),
+        };
+        app.run_command("plugins", "");
+        assert!(matches!(app.prompt, Some(Prompt::Plugins(_))));
+        assert_eq!(last(&sent), "list");
+        app.apply(Update::Plugins(Ok(vec![PluginItem {
+            name: "web".into(),
+            in_use: None,
+            off: true,
+            locked: false,
+            candidates: vec![PluginCandidate {
+                id: "default".into(),
+            }],
+            status: Some("off".into()),
+            error: None,
+            waiting_for: Vec::new(),
+            refused: Vec::new(),
+        }])));
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            last(&sent),
+            format!("{:?}", PluginAction::Enable("web".into()))
+        );
+        app.apply(Update::PluginResult {
+            action: PluginAction::Enable("web".into()),
+            result: Ok(Default::default()),
+            plugins: Ok(Vec::new()),
+        });
+        app.handle_input(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            KeyCode::Char('r'),
+            Modifiers::CTRL,
+        )));
+        assert_eq!(last(&sent), "list");
+        app.handle_input(key(KeyCode::Esc));
+        assert!(app.prompt.is_none());
+        app.run_command("plugins", "install tools/my-tool");
+        assert_eq!(
+            last(&sent),
+            format!(
+                "{:?}",
+                PluginAction::Install(std::path::Path::new("/work").join("tools/my-tool"))
+            )
+        );
+        let count = sent.borrow().len();
+        app.prompt = None;
+        app.run_command("plugins", "remove web");
+        assert_eq!(sent.borrow().len(), count, "git and remove stay in the CLI");
+        assert!(app.prompt.is_none());
     }
 
     /// The interface drawn into an emulated terminal, frame by frame.
