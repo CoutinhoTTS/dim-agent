@@ -1556,6 +1556,89 @@ async fn an_ancestors_end_names_itself_on_every_descendant() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_line_that_ended_itself_names_itself_on_its_descendants() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let line = soon(session.branch(
+        "main".into(),
+        0,
+        BranchOptions {
+            prompt: "tool line".into(),
+            source: BranchSource::Tool {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                call_id: "call".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    let child = soon(session.branch(line.clone(), 0, options("child")))
+        .await
+        .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    let result = tool_call(
+        &session,
+        &line,
+        r#"{"action":"end","content":"the work is done"}"#,
+    )
+    .await;
+    assert_eq!(result.is_error, None, "{:?}", result.content);
+    until_events(&session, &line, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BranchEnded(_)))
+    })
+    .await;
+    let own = local_events(&session, &line)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::BranchEnd(data) => Some((event.sequence, data.clone())),
+            _ => None,
+        })
+        .expect("the line ended itself");
+    assert!(matches!(own.1.source, BranchSource::Tool { .. }));
+    assert_eq!(own.1.ancestor, None);
+    let descendant = local_events(&session, &child)
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::BranchEnd(data) => Some((event.sequence, data.clone())),
+            _ => None,
+        })
+        .expect("the descendant ended with its line");
+    assert_eq!(
+        (descendant.1.source, descendant.1.ancestor),
+        (own.1.source.clone(), Some(line.clone()))
+    );
+    let ended: Vec<BranchEndedData> = local_events(&session, &line)
+        .await
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchEnded(data) => Some(data.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ended,
+        [BranchEndedData {
+            branch: child.clone(),
+            end_event: descendant.0,
+            source: own.1.source,
+            ancestor: Some(line.clone()),
+        }],
+        "the descendant carries the line's own end"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_line_cannot_open_under_an_ending_ancestor() {
     let probe = Arc::new(Probe::default());
     let agent = setup(&probe);
