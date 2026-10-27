@@ -25,17 +25,14 @@ try {
   const revision=run('git',['-C',registry,'rev-parse','HEAD']).trim();
   cpSync(path.join(registry,'.github'),path.join(checkout,'.github'),{recursive:true});
   mkdirSync(path.join(checkout,'dimcode'),{recursive:true});
-  const payload=path.join(temporary,'payload');
-  mkdirSync(payload);
-  cpSync(binary,path.join(payload,'dimcode'));
   const archive=path.join(temporary,'dimcode.tar');
-  run('tar',['-cf',archive,'-C',payload,'dimcode']);
+  run('tar',['-cf',archive,'-C',path.dirname(binary),'--',path.basename(binary)]);
   const digest=createHash('sha256');
   for await (const chunk of createReadStream(archive)) digest.update(chunk);
   writeFileSync(path.join(checkout,'dimcode/agent.json'),JSON.stringify({
     id:'dimcode',name:'Dim',version,
     distribution:{binary:{[`${platform}-${architecture}`]:{
-      archive:pathToFileURL(archive).href,sha256:digest.digest('hex'),cmd:'./dimcode',
+      archive:pathToFileURL(archive).href,sha256:digest.digest('hex'),cmd:`./${path.basename(binary)}`,
       args:['acp','--home',home],env:{DIMCODE_OAUTH_MANUAL:'1'},
     }}},
   },null,2)+'\n');

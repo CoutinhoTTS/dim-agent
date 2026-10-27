@@ -176,6 +176,10 @@ jobs:
         with:
           version: "0.13.6"
           enable-cache: false
+      - uses: actions-rust-lang/setup-rust-toolchain@c8ff772090ab9d00f7f7bd7b388f3c3032282e3b
+        with:
+          cache: false
+          build-warnings: ""
       - name: Build the account executable
         env:
           DIM_OAUTH_CLIENT_ID_CN: ${{ secrets.DIM_OAUTH_CLIENT_ID_CN }}
