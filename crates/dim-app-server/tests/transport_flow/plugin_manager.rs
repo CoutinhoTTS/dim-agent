@@ -460,8 +460,37 @@ async fn node_plugin_manager_installs_reloads_and_replaces_typescript_plugins() 
     )
     .await;
     assert_eq!(installed["result"]["status"], "running", "{installed}");
+    // Its data directory under the pluginFiles root (the product home).
+    let data = home.join("rules-ts");
+    assert!(std::fs::symlink_metadata(&data).unwrap().is_dir());
     let reply = client.rpc("permission.rules", json!({})).await;
     assert!(reply.get("error").is_some(), "{reply}");
+
+    // A data directory that already is a symbolic link out of the root is
+    // not followed: the plugin still runs, nothing is created outside.
+    let outside = home.join("../").join(format!(
+        "{}-outside",
+        home.file_name().unwrap().to_string_lossy()
+    ));
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, home.join("linked")).unwrap();
+    let linked = home.join("src/linked");
+    write_tool_plugin(&linked, "linked", "linked_echo", "linked");
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":linked}}),
+    )
+    .await;
+    assert_eq!(installed["result"]["status"], "running", "{installed}");
+    assert!(
+        std::fs::symlink_metadata(home.join("linked"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    std::fs::remove_dir_all(&outside).unwrap();
     let back = call(
         &mut client,
         "plugin.enable",

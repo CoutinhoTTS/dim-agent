@@ -98,6 +98,8 @@ fn module(code: &record::Code) -> String {
 pub(crate) struct State {
     record_path: PathBuf,
     dirs: PluginsDir,
+    /// The canonical `pluginFiles` root, when the host has one.
+    files: Option<PathBuf>,
     defaults: Defaults,
     record: Mutex<Record>,
     /// The built-in rows of the assembly.
@@ -127,6 +129,7 @@ impl State {
     /// canonical.
     pub fn read(
         home: &Path,
+        files: Option<&Path>,
         defaults: Option<&Path>,
         catalog: &mut ServiceCatalog,
     ) -> Result<Arc<Self>, String> {
@@ -154,6 +157,7 @@ impl State {
         Ok(Arc::new(Self {
             record_path,
             dirs: PluginsDir::new(home),
+            files: files.map(Path::to_owned),
             defaults,
             record: Mutex::new(record),
             builtins: OnceLock::new(),
@@ -226,6 +230,9 @@ impl State {
                 Ok(Manifest {
                     code: Some(code), ..
                 }) if missing_instance_names(catalog, &code).is_empty() => {
+                    if let Some(used) = &used {
+                        self.provide_data_dir(&name, used);
+                    }
                     rows.push(row_value(&name, &code));
                 }
                 Ok(_) => {}
@@ -242,6 +249,55 @@ impl State {
         (patches, off)
     }
 }
+impl State {
+    /// A plugin with code that is turned on gets `<pluginFiles root>/<id>/`
+    /// (§2.1): its installed id, or a default plugin's name. It is created
+    /// if missing and never deleted. An existing entry is used only if it
+    /// is a directory, not a symbolic link, inside the root.
+    fn provide_data_dir(&self, name: &str, used: &Use) {
+        let Some(root) = &self.files else {
+            return;
+        };
+        let id = match used {
+            Use::Installed(id) => id.as_str(),
+            Use::Default => name,
+            Use::Builtin => return,
+        };
+        if let Err(error) = acquire::check_id(id) {
+            tracing::warn!(%name, %error, "no plugin data directory");
+            return;
+        }
+        let dir = root.join(id);
+        let result = match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+                match std::fs::canonicalize(&dir) {
+                    Ok(resolved) if resolved == dir => Ok(()),
+                    _ => Err("it leaves the plugin files root".to_owned()),
+                }
+            }
+            Ok(_) => Err("it exists and is not a directory".to_owned()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                private_dir(&dir).map_err(|error| error.to_string())
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        if let Err(error) = result {
+            tracing::warn!(dir = %dir.display(), %error, "plugin data directory refused");
+        }
+    }
+}
+
+/// Creates one directory (not its parents), owner-only on Unix.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
 fn register_names(catalog: &mut ServiceCatalog, code: &record::Code) {
     for (service, group) in &code.instance_names {
         if matches!(

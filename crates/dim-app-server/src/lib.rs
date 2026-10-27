@@ -677,6 +677,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         Some(home) => Some(
             plugin_manager::State::read(
                 home,
+                // pluginFiles serves the product home.
+                product_root.and(config.product_home.as_deref()),
                 config.plugin_defaults.as_deref(),
                 builder.catalog_mut(),
             )
