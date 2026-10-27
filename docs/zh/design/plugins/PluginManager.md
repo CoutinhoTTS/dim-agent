@@ -230,7 +230,9 @@ Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit�
 
 ### 3.7 内容登记
 
-对于 P 带有的每种内容和每个存在的所有者，PluginManager 调用该所有者的 `register({plugin, dir, document})`；撤回时调用 `withdraw({plugin})`，其中 `plugin` 是插件的名字。所有者把登记的内容作为自己的状态保存，持久化它，并在自己重新加载后恢复它。PluginManager 不监视所有者，也不代替它们再次登记任何东西。PluginManager 要调用某个所有者而它不存在时，跳过它；回复中列出被跳过的种类。当 PluginManager 打开该所有者的名字时，它登记该种类的全部内容。
+对于 P 带有的每种内容和每个存在的所有者，PluginManager 调用该所有者的 `register({plugin, dir, document})`；撤回时调用 `withdraw({plugin})`，其中 `plugin` 是插件的 id：已安装插件的 id，或默认插件的名字（§7），因此可以安全地用在服务器 id 和文件名中。一个名字从一个插件切换到另一个插件时，撤回旧插件的内容；插件不再带有的种类被撤回。所有者把登记的内容作为自己的状态保存，持久化它，并在自己重新加载后恢复它。PluginManager 不监视所有者，也不代替它们再次登记任何东西。PluginManager 要调用某个所有者而它不存在时，跳过它；回复中列出被跳过的种类。当 PluginManager 打开该所有者的名字时，它为每个正在使用的插件登记该种类的内容，并为它知道的其他插件撤回该种类的内容。
+
+所有者校验交给它的内容。它拒绝的内容（不通过 Mcp 校验的 MCP 文档，`SKILL.md` 无法解析的 Skill）不影响插件的其他内容和代码：回复在 `refused` 中列出它，`plugin.list` 显示调用时各所有者对该插件报告的内容。
 
 ## 4. 时序与冲突
 
@@ -303,7 +305,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | --- | --- |
 | 阻塞点 | 所有者只读取用户来源和项目来源；没有办法把插件的内容交给它们。 |
 | 已考虑的现有机制 | 由所有者读取一个 `pluginContents` 服务（所有者会去查找插件；已否决）；把内容作为 loader 行（Dim 的产品状态放进 rutis；已否决）。 |
-| 通用能力 | 一个进程操作 `register({plugin, dir, document})`，用于添加或替换 `plugin` 的内容，以及 `withdraw({plugin})`。所有者把登记的内容作为自己的状态保存，在自己的存储中持久化，并在自己重新加载后恢复它。Mcp 用 `plugin` 作为服务器 id 的前缀；Hooks 把来源命名为 `plugin:<plugin>`，并给命令设置 `DIM_PLUGIN_ROOT = dir`；SkillsCatalog 读取 `dir` 下的 Skill。 |
+| 通用能力 | 一个进程操作 `register({plugin, dir, document})`，用于添加或替换 `plugin`（插件 id，§3.7）的内容，以及 `withdraw({plugin})`，再加上读取所有者为 `plugin` 拒绝了什么。所有者把登记的内容作为自己的状态保存，在自己的存储中持久化，并在自己重新加载后恢复它。Mcp 用 `plugin` 作为服务器 id 的前缀（`<plugin>:<server>`）；Hooks 把来源命名为 `plugin:<plugin>`，并给命令设置 `DIM_PLUGIN_ROOT = dir`；SkillsCatalog 读取 `dir` 下的 Skill。 |
 | 对 sequence、批次、中断、重新加载的影响 | 与每个所有者现有的来源相同：一次变更是一次数据更新，由所有者用自己的方式通告。 |
 | 所有者与 issue | SkillsCatalog、Mcp、Hooks（[Hooks](Hooks.md)）。 |
 
@@ -313,12 +315,12 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `plugin.list` | `{}` | `[{name, use, off, locked, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?}]` |
-| `plugin.install` | `{source: {path} \| {git, ref?}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], restartRequired?}` |
-| `plugin.enable` | `{name, use?}` | `{status?, skipped?, restartRequired?}` |
+| `plugin.list` | `{}` | `[{name, use, off, locked, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?, refused?}]` |
+| `plugin.install` | `{source: {path} \| {git, ref?}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], refused?: [{kind, error}], restartRequired?}` |
+| `plugin.enable` | `{name, use?}` | `{status?, skipped?, refused?, restartRequired?}` |
 | `plugin.disable` | `{name}` | `{}` |
-| `plugin.reload` | `{name}` | `{status?, skipped?, restartRequired?}` |
-| `plugin.update` | `{id, ref?}` | `{commit, status?, restartRequired?}` |
+| `plugin.reload` | `{name}` | `{status?, skipped?, refused?, restartRequired?}` |
+| `plugin.update` | `{id, ref?}` | `{commit, status?, skipped?, refused?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
 名字在用的插件带代码时，`status` 是该行在 `Loader::get` 中的 `EntryStatus`：`Inactive` → `pending`（附带 `Loader::waiting_for` 给出的 `waitingFor`），`Unresolved` → `failed`（附带 `error`），`Running` → `running`，`Stopped` → `stopped`。关闭的名字没有在用的插件，显示 `off`，不显示状态。`install` 和 `update` 通过调用的进度接收端报告阶段 `fetch`、`check` 和 `load`。

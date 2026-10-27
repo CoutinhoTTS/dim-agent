@@ -230,7 +230,9 @@ A name using a built-in Rust plugin cannot be reloaded (`not_reloadable`): it ne
 
 ### 3.7 Content registration
 
-For each kind P carries and each owner present, PluginManager calls the owner's `register({plugin, dir, document})` and, to withdraw, `withdraw({plugin})`, where `plugin` is the plugin's name. The owner keeps what was registered as its own state, persists it, and restores it after its own reload. PluginManager does not watch owners and registers nothing again on their behalf. An owner that is absent when PluginManager would call it is skipped; the reply names the skipped kinds. When PluginManager turns that owner's name on, it registers all content of that kind.
+For each kind P carries and each owner present, PluginManager calls the owner's `register({plugin, dir, document})` and, to withdraw, `withdraw({plugin})`, where `plugin` is the plugin's id: its installed id, or a default plugin's name (§7), so it is safe in server ids and file names. When a name switches from one plugin to another, the old plugin's content is withdrawn; a kind the plugin no longer carries is withdrawn. The owner keeps what was registered as its own state, persists it, and restores it after its own reload. PluginManager does not watch owners and registers nothing again on their behalf. An owner that is absent when PluginManager would call it is skipped; the reply names the skipped kinds. When PluginManager turns that owner's name on, it registers that kind of content of every plugin in use and withdraws it for every other plugin it knows.
+
+An owner validates what it is given. Content it refuses (an MCP document that fails Mcp's validation, a Skill whose `SKILL.md` does not parse) does not stop the plugin's other content or code: the reply names it under `refused`, and `plugin.list` shows what the owners report for the plugin at the time of the call.
 
 ## 4. Timing and conflicts
 
@@ -303,7 +305,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | --- | --- |
 | Blocked by | Owners read only user and project sources; there is no way to hand them a plugin's content. |
 | Existing mechanisms considered | A `pluginContents` service owners read (owners would look for plugins; rejected); content as loader rows (Dim product state in rutis; rejected). |
-| Generic capability | A process operation `register({plugin, dir, document})` that adds or replaces the content of `plugin`, and `withdraw({plugin})`. The owner keeps registered content as its own state, persists it in its own storage, and restores it after its own reload. Mcp prefixes server ids with `plugin`; Hooks names the source `plugin:<plugin>` and gives commands `DIM_PLUGIN_ROOT = dir`; SkillsCatalog reads Skills under `dir`. |
+| Generic capability | A process operation `register({plugin, dir, document})` that adds or replaces the content of `plugin` (a plugin id, §3.7), and `withdraw({plugin})`, plus a read of what the owner refused for `plugin`. The owner keeps registered content as its own state, persists it in its own storage, and restores it after its own reload. Mcp prefixes server ids with `plugin` (`<plugin>:<server>`); Hooks names the source `plugin:<plugin>` and gives commands `DIM_PLUGIN_ROOT = dir`; SkillsCatalog reads Skills under `dir`. |
 | Effect on sequence, batch, interrupt, reload | As each owner's existing sources: a change is a data update the owner announces its own way. |
 | Owner and issue | SkillsCatalog, Mcp, Hooks ([Hooks](Hooks.md)). |
 
@@ -313,12 +315,12 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `plugin.list` | `{}` | `[{name, use, off, locked, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?}]` |
-| `plugin.install` | `{source: {path} \| {git, ref?}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], restartRequired?}` |
-| `plugin.enable` | `{name, use?}` | `{status?, skipped?, restartRequired?}` |
+| `plugin.list` | `{}` | `[{name, use, off, locked, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?, refused?}]` |
+| `plugin.install` | `{source: {path} \| {git, ref?}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], refused?: [{kind, error}], restartRequired?}` |
+| `plugin.enable` | `{name, use?}` | `{status?, skipped?, refused?, restartRequired?}` |
 | `plugin.disable` | `{name}` | `{}` |
-| `plugin.reload` | `{name}` | `{status?, skipped?, restartRequired?}` |
-| `plugin.update` | `{id, ref?}` | `{commit, status?, restartRequired?}` |
+| `plugin.reload` | `{name}` | `{status?, skipped?, refused?, restartRequired?}` |
+| `plugin.update` | `{id, ref?}` | `{commit, status?, skipped?, refused?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
 `status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor` from `Loader::waiting_for`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
