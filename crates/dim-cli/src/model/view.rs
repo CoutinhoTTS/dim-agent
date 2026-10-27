@@ -94,6 +94,8 @@ pub struct MemberCard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineView {
     pub id: String,
+    /// The line it was opened from; `None` for `main`.
+    pub parent: Option<String>,
     /// The first line of the purpose it was opened with.
     pub purpose: String,
     pub state: LineState,

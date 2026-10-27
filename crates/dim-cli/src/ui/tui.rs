@@ -4078,11 +4078,13 @@ mod tests {
             lines: vec![
                 crate::model::view::LineView {
                     id: "main".into(),
+                    parent: None,
                     purpose: String::new(),
                     state: LineState::Main,
                 },
                 crate::model::view::LineView {
                     id: "b-91".into(),
+                    parent: Some("main".into()),
                     purpose: "review".into(),
                     state: LineState::Working,
                 },

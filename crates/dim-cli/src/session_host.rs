@@ -2494,6 +2494,7 @@ impl Worker {
     fn line_views(&self) -> Vec<LineView> {
         let mut lines = vec![LineView {
             id: "main".into(),
+            parent: None,
             purpose: String::new(),
             state: LineState::Main,
         }];

@@ -88,6 +88,50 @@ impl Projection {
             }
     }
 
+    /// Folds one line's creation or end into the Session's lines, whichever
+    /// line recorded it: `parent` is the line whose history holds the fact
+    /// (design §14).
+    fn lines(&mut self, parent: &str, event: &Event) {
+        match &event.content {
+            EventContent::BranchCreate(data) => {
+                let purpose = data
+                    .prompt
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                if !self.lines.iter().any(|line| line.id == data.branch) {
+                    self.lines.push(LineView {
+                        id: data.branch.clone(),
+                        parent: Some(parent.to_owned()),
+                        purpose,
+                        state: LineState::Waiting,
+                    });
+                }
+            }
+            EventContent::BranchCreateFailed(data) => {
+                let branch = match data {
+                    BranchCreateFailedData::Failed { branch, .. }
+                    | BranchCreateFailedData::Cancelled { branch, .. } => branch,
+                };
+                if let Some(line) = self.lines.iter_mut().find(|line| line.id == *branch) {
+                    line.state = LineState::CreationFailed;
+                }
+            }
+            EventContent::BranchEnded(data) => {
+                let state = match &data.source {
+                    BranchSource::Tool { .. } => LineState::EndedItself,
+                    BranchSource::Host { .. } => LineState::EndedByOperation,
+                };
+                if let Some(line) = self.lines.iter_mut().find(|line| line.id == data.branch) {
+                    line.state = state;
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn apply(&mut self, branch_id: &str, event: &Event) {
         match &event.content {
             EventContent::ToolCall(data) => {
@@ -109,6 +153,7 @@ impl Projection {
             }
             _ => {}
         }
+        self.lines(branch_id, event);
         if !self.owns(branch_id)
             && !matches!(
                 &event.content,
@@ -151,40 +196,6 @@ impl Projection {
             }
             EventContent::InputDeleted(data) => {
                 self.held.retain(|(id, _)| *id != data.input_id);
-            }
-            EventContent::BranchCreate(data) => {
-                let purpose = data
-                    .prompt
-                    .lines()
-                    .next()
-                    .unwrap_or_default()
-                    .trim()
-                    .to_owned();
-                if !self.lines.iter().any(|line| line.id == data.branch) {
-                    self.lines.push(LineView {
-                        id: data.branch.clone(),
-                        purpose,
-                        state: LineState::Waiting,
-                    });
-                }
-            }
-            EventContent::BranchCreateFailed(data) => {
-                let branch = match &data {
-                    BranchCreateFailedData::Failed { branch, .. }
-                    | BranchCreateFailedData::Cancelled { branch, .. } => branch,
-                };
-                if let Some(line) = self.lines.iter_mut().find(|line| line.id == *branch) {
-                    line.state = LineState::CreationFailed;
-                }
-            }
-            EventContent::BranchEnded(data) => {
-                let state = match &data.source {
-                    BranchSource::Tool { .. } => LineState::EndedItself,
-                    BranchSource::Host { .. } => LineState::EndedByOperation,
-                };
-                if let Some(line) = self.lines.iter_mut().find(|line| line.id == data.branch) {
-                    line.state = state;
-                }
             }
             EventContent::BranchEnd(data) => {
                 let issuer = match data.source {
@@ -485,6 +496,9 @@ impl Projection {
             EventContent::Configuration(_)
             | EventContent::ToolCall(_)
             | EventContent::BranchStart(_)
+            | EventContent::BranchCreate(_)
+            | EventContent::BranchCreateFailed(_)
+            | EventContent::BranchEnded(_)
             | EventContent::PermissionChanged(_)
             | EventContent::InputConsumed(_)
             | EventContent::InputWithdraw(_)
@@ -1219,6 +1233,7 @@ mod tests {
             main.line_views(),
             &[LineView {
                 id: "b-7c".into(),
+                parent: Some("main".into()),
                 purpose: "parser race hypothesis".into(),
                 state: LineState::Waiting,
             }]
@@ -1250,6 +1265,34 @@ mod tests {
             )],
         );
         assert_eq!(main.line_views()[1].state, LineState::EndedByOperation);
+        let nested: Event =
+            serde_json::from_value(create(13, "b-90", "review the change")).unwrap();
+        main.apply("b-7c", &nested);
+        assert_eq!(
+            main.line_views().last(),
+            Some(&LineView {
+                id: "b-90".into(),
+                parent: Some("b-7c".into()),
+                purpose: "review the change".into(),
+                state: LineState::Waiting,
+            }),
+            "a line a line opened is still a line of the Session"
+        );
+        let nested_end: Event = serde_json::from_value(line_event(
+            14,
+            "ended",
+            serde_json::json!({
+                "branch": "b-90",
+                "endEvent": 13,
+                "source": {"kind": "host", "operation_id": "op-2"},
+            }),
+        ))
+        .unwrap();
+        main.apply("b-7c", &nested_end);
+        assert_eq!(
+            main.line_views().last().map(|line| &line.state),
+            Some(&LineState::EndedByOperation)
+        );
     }
 
     #[test]

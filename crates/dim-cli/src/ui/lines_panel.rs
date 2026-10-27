@@ -10,6 +10,26 @@ use crate::ui::theme::ansi::fg;
 
 const HINT: &str = "Enter show the line · x end it · Esc close";
 
+/// How far below `main` the line sits, so the panel reads as a tree (§14).
+fn depth(lines: &[LineView], id: &str) -> usize {
+    let mut depth = 0;
+    let mut parent = lines
+        .iter()
+        .find(|line| line.id == id)
+        .and_then(|line| line.parent.clone());
+    while let Some(id) = parent.filter(|parent| parent != "main") {
+        depth += 1;
+        if depth > lines.len() {
+            break;
+        }
+        parent = lines
+            .iter()
+            .find(|line| line.id == id)
+            .and_then(|line| line.parent.clone());
+    }
+    depth
+}
+
 pub struct LinesPanel {
     session_id: String,
     projection_id: u64,
@@ -72,7 +92,15 @@ impl LinesPanel {
                 } else {
                     format!("{} · {state}{viewed}", safe(&line.purpose))
                 };
-                Item::new(line.id.clone(), safe(&line.id), detail)
+                Item::new(
+                    line.id.clone(),
+                    format!(
+                        "{}{}",
+                        "  ".repeat(depth(&snapshot.lines, &line.id)),
+                        safe(&line.id)
+                    ),
+                    detail,
+                )
             })
             .collect();
         let preselect = selected
@@ -176,22 +204,41 @@ mod tests {
             lines: vec![
                 LineView {
                     id: "main".into(),
+                    parent: None,
                     purpose: String::new(),
                     state: LineState::Main,
                 },
                 LineView {
                     id: "b-7c".into(),
+                    parent: Some("main".into()),
                     purpose: "parser race".into(),
                     state: LineState::Working,
                 },
                 LineView {
                     id: "b-02".into(),
+                    parent: Some("main".into()),
                     purpose: "docs pass".into(),
                     state: LineState::EndedItself,
+                },
+                LineView {
+                    id: "b-91".into(),
+                    parent: Some("b-7c".into()),
+                    purpose: "review".into(),
+                    state: LineState::Waiting,
                 },
             ],
             ..ViewSnapshot::default()
         }
+    }
+
+    fn palette() -> Palette {
+        use crate::ui::theme::{Appearance, ColorMode, Theme};
+        Theme::system(ColorMode::TrueColor, Appearance::Dark, None).palette
+    }
+
+    fn markdown() -> MarkdownRenderer {
+        use crate::ui::theme::{Appearance, ColorMode, Theme};
+        MarkdownRenderer::new(&Theme::system(ColorMode::TrueColor, Appearance::Dark, None))
     }
 
     #[test]
@@ -249,5 +296,28 @@ mod tests {
         let mut other = snapshot("main");
         other.session_id = "s2".into();
         assert!(!panel.current(&other));
+    }
+
+    #[test]
+    fn a_line_below_a_line_is_listed_under_its_parent_and_can_be_ended() {
+        let snapshot = snapshot("main");
+        assert_eq!(depth(&snapshot.lines, "main"), 0);
+        assert_eq!(depth(&snapshot.lines, "b-7c"), 0);
+        assert_eq!(depth(&snapshot.lines, "b-91"), 1);
+        let mut panel = LinesPanel::new(&snapshot);
+        let rows = panel
+            .render(100, 20, &palette(), &markdown())
+            .into_iter()
+            .map(|row| crate::ui::render::panel::strip_escapes(&row))
+            .collect::<Vec<_>>();
+        assert!(rows.iter().any(|row| row.contains("  b-91")), "{rows:#?}");
+        for _ in 0..3 {
+            panel.handle_key(key(KeyCode::Down));
+        }
+        panel.handle_key(key(KeyCode::Char('x')));
+        match panel.handle_key(key(KeyCode::Char('y'))) {
+            Effect::EndLine { branch_id, .. } => assert_eq!(branch_id, "b-91"),
+            _ => panic!("a line below a line can be ended"),
+        }
     }
 }

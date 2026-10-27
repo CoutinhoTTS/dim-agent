@@ -403,7 +403,7 @@ These are run locally on real models, and the results are reported in the implem
 
 **TUI.** Lines get their own panel, view and controls:
 
-- `/lines` (alias `/branches`) lists `main` and the lines `main` opened, each with its state: working, waiting, ended itself, ended by an operation, or creation failed. The panel folds `main`'s own facts, so a line that a line opened, such as a Goal evaluator under a line, is not listed; the user reaches those through their opener or a client.
+- `/lines` (alias `/branches`) lists every line of the Session, each indented under the line that opened it, with its state: working, waiting, ended itself, ended by an operation, or creation failed.
 - Enter shows the selected line's conversation. The composer submits to the line shown, and the composer's bottom border names it, with the first eight characters of its id.
 - `x`, then `y`, ends the selected line, refused on `main`.
 - Questions and approvals carry the line's label, so two lines asking for the same thing are told apart (`(branch NAME)` on a question, `Permission on branch NAME` on an approval).
@@ -427,6 +427,7 @@ The panel is separate from the tasks panel, which lists background commands, mem
 │ ● main                          the session itself · shown      │
 │   b-7c  parser race hypothesis          working                 │
 │   b-91  review the cache change         waiting                 │
+│     b-c3  the guard in cache.rs         working                 │
 │   b-02  docs pass                       ended itself            │
 └────────── Enter show the line · x end it · Esc close ───────────┘
 ```

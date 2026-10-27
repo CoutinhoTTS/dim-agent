@@ -23189,7 +23189,6 @@
       "from": "dim_cli::ui::lines_panel",
       "to": "dim_cli::sanitize",
       "references": [
-        "path safe",
         "use crate::sanitize::safe"
       ]
     },
@@ -23302,6 +23301,21 @@
     },
     {
       "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::ui::render::markdown",
+      "references": [
+        "path MarkdownRenderer",
+        "path MarkdownRenderer::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path crate::ui::render::panel::strip_escapes"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path KeyCode",
@@ -23314,6 +23328,13 @@
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::KeyEvent",
         "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette"
       ]
     },
     {
@@ -27880,6 +27901,18 @@
     {
       "module": "dim_cli::ui::composer",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::ui::lines_panel::tests",
+      "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::lines_panel::tests",
+      "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::lines_panel::tests",
+      "path": "Theme::system"
     },
     {
       "module": "dim_cli::ui::oauth_view::tests",

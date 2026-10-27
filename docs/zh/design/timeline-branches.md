@@ -403,7 +403,7 @@ WorkspaceTools 不变。
 
 **TUI。** 线有自己的面板、视图和操作：
 
-- `/lines`（别名 `/branches`）列出 `main` 和 `main` 打开的线，每条带状态：工作中、等待中、自行结束、被某个操作结束，或创建失败。面板只折叠 `main` 自己的事实，所以一条线打开出来的线（例如某条线下的 Goal 评审者）不在列表里；用户经它的开线方或客户端操作它。
+- `/lines`（别名 `/branches`）列出这个 Session 的每条线，各自缩进在打开它的那条线之下，每条带状态：工作中、等待中、自行结束、被某个操作结束，或创建失败。
 - Enter 显示所选线的对话。输入框向正在显示的线提交，输入框的下边框标出这条线，用 id 的前八个字符。
 - `x` 再 `y` 结束所选线；`main` 上被拒绝。
 - 提问和审批都带线的标签，两条线问同一件事也能分辨（提问显示 `(branch NAME)`，审批显示 `Permission on branch NAME`）。
@@ -427,6 +427,7 @@ WorkspaceTools 不变。
 │ ● main                          the session itself · shown      │
 │   b-7c  parser race hypothesis          working                 │
 │   b-91  review the cache change         waiting                 │
+│     b-c3  the guard in cache.rs         working                 │
 │   b-02  docs pass                       ended itself            │
 └────────── Enter show the line · x end it · Esc close ───────────┘
 ```
