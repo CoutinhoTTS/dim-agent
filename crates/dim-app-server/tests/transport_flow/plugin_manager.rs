@@ -670,6 +670,9 @@ async fn node_plugin_manager_installs_reloads_and_replaces_typescript_plugins() 
     assert!(!tools.contains(&"my_echo".into()), "{tools:?}");
     let enabled = call(&mut client, "plugin.enable", json!({"name":"my-tool"})).await;
     assert_eq!(enabled["result"]["status"], "running", "{enabled}");
+    submit(&mut client, &session, "plain").await;
+    let tools = requests.recv().await.unwrap();
+    assert!(tools.contains(&"my_echo".into()), "{tools:?}");
 
     let list = call(&mut client, "plugin.list", json!({})).await;
     assert_eq!(item(&list, "my-tool")["status"], "running", "{list}");
