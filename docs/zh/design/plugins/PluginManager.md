@@ -118,7 +118,7 @@ flowchart LR
 
 | 字段 | 含义 |
 | --- | --- |
-| `installed[].id` | 在已安装插件中唯一；它是记录的键，也是克隆目录的名字。必须符合 `[A-Za-z0-9_-]{1,64}`，不能是 `builtin` 或 `default`（§7）。默认是清单中的名字；两个已安装插件同名时，由调用方给出另一个。 |
+| `installed[].id` | 在已安装插件中唯一；它是记录的键，也是克隆目录的名字。必须符合 `[a-z0-9_-]{1,64}`（只用小写，所以在不区分大小写的文件系统上，两个 id 不会指向同一个目录），不能是 `builtin` 或 `default`（§7）。默认是清单中的名字；两个已安装插件同名时，由调用方给出另一个。 |
 | `installed[].name` | 安装时或上一次重新加载时清单中的名字。 |
 | `installed[].source` | 本地目录用 `{path}`，原地使用，从不复制；Git 用 `{git, ref?, commit}`。 |
 | `installed[].dir` | 被加载的目录：本地路径本身，或 `<home>/plugins/<id>/<commit>` 下的克隆。 |
@@ -191,8 +191,8 @@ rutis 允许可编辑层禁用一个内置行、覆盖它的字段，但不允�
 
 `plugin.install {source, id?, enable?}`。`enable` 默认为 `true`（[需求 2](../../../design/plugin-management.md)：已安装就意味着可用）。
 
-1. 获取（§7）：本地路径在原地检查；Git 来源先克隆到暂存目录，检查后改名为 `<home>/plugins/<id>/<commit>`。任何失败都会删除暂存目录。
-2. 读取清单。拒绝已经安装的 `id`（`plugin_exists`）。
+1. 调用方给了 `id` 时，先检查它（§7），已经安装的 `id` 直接拒绝（`plugin_exists`），不做任何获取。
+2. 获取（§7）：本地路径在原地检查；Git 来源先克隆到暂存目录并读取清单；没有给 `id` 时，id 取清单名字，同样检查并拒绝已安装的 id，然后才把暂存目录改名为 `<home>/plugins/<id>/<commit>`。任何失败都会删除暂存目录。
 3. 写入 `plugins.json`，加入新条目；当 `enable` 为 true 且名字未锁定时，同时写入 `names.<name>.use = id`。
 4. 如果已打开：执行"打开"（§3）。回复带上行的状态，以及被所有者拒绝的内容。
 
@@ -252,7 +252,7 @@ PluginManager 不向模型上下文加入任何东西。插件的工具和提示
 安装和打开是通过管理方法或工具调用完成的宿主配置；已启用的插件代码运行时不需要宿主本地审批（[ADR 003](../../adr/003-approval-scope.md)）。PluginManager 不增加作用域、审批或信任步骤（[需求](../../../design/plugin-management.md)）。它守护的是获取过程本身：
 
 - Git 来源只接受 `https://` 或 `ssh://` URL；其他协议（`file://`、`ext::`、scp 风格的路径）以及以 `-` 开头的参数，在 Git 运行之前就被拒绝。克隆时关闭子模块（`--no-recurse-submodules`），关闭 hook（`core.hooksPath` 设为一个空目录），设置 `protocol.file.allow=never`，并且不弹出终端提示。
-- **路径。** 所有为插件动文件系统的操作都用同一条规则：安装（暂存、克隆、改名）、更新、移除和启动时的清理。在任何文件系统改动之前，PluginManager 检查两件事：id（无论是调用方给的，还是取自清单名字）符合 `[A-Za-z0-9_-]{1,64}`，且不是 `builtin` 或 `default`；它将要创建、改名或删除的每个目录，解析后都是 `<home>/plugins` 或 `<home>/plugins/<id>` 的直接子目录。检查不通过时，操作以 `invalid_id` 或 `path_outside_plugins` 被拒绝，什么都不改：不建目录、不写 `plugins.json`、不发 loader 命令。本地路径插件自己的目录从不被创建、改名或删除，所以这条规则不适用于它。
+- **路径。** 所有为插件动文件系统的操作都用同一条规则：安装（暂存、克隆、改名）、更新、移除和启动时的清理。在任何文件系统改动之前，PluginManager 检查两件事：id（无论是调用方给的，还是取自清单名字）符合 `[a-z0-9_-]{1,64}`，且不是 `builtin` 或 `default`；它将要创建、改名或删除的每个目录，解析后恰好是 `<home>/plugins/.staging/<random>`、`<home>/plugins/<id>` 或 `<home>/plugins/<id>/<commit>` 之一（`.staging` 不可能是 id，因为 id 里没有点）。检查不通过时，操作以 `invalid_id` 或 `path_outside_plugins` 被拒绝，什么都不改：不建目录、不写 `plugins.json`、不发 loader 命令。本地路径插件自己的目录从不被创建、改名或删除，所以这条规则不适用于它。
 - 克隆先放到 `<home>/plugins/.staging/<random>`，只有在清单和路径检查通过后才改名放到正式位置。失败时删除暂存目录；启动时删除残留目录以及没有条目引用的克隆。
 - 清单中的任何路径在跟随符号链接之后都不能离开插件目录；Git 克隆内指向克隆外部的符号链接被拒绝。
 - `plugins.json` 以原子方式写入（§2.2）。
@@ -348,8 +348,9 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 6. 安装一个与内置插件同名的插件并启用它，会替换该内置插件；`enable <name> --use builtin` 切换回去。
 7. `disable PluginManager` 被拒绝，错误为 `plugin_locked`。
 8. 使用 `file://` URL 的 Git 安装被拒绝；失败的克隆不会在 `<home>/plugins` 下留下任何东西；id 为 `../x` 的安装以 `invalid_id` 被拒绝，什么都不创建。
-9. 默认插件的 Settings 来源在它启动时出现，在它被关闭时消失。
-10. 从本地路径安装的 Python 插件能登记它的工具，reload 后入口模块的修改生效（Python 运行时由 [#476](https://github.com/arcships/dim/issues/476) 提供）。
+9. `dimcode plugin install <git-url>` 安装一个测试用仓库并打开其插件；仓库有第二个提交后，`dimcode plugin update <id>` 加载新提交并删除旧目录。
+10. 默认插件的 Settings 来源在它启动时出现，在它被关闭时消失。
+11. 从本地路径安装的 Python 插件能登记它的工具，reload 后入口模块的修改生效（Python 运行时由 [#476](https://github.com/arcships/dim/issues/476) 提供）。
 
 ## 附录 D. 待对齐问题
 

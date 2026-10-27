@@ -118,7 +118,7 @@ The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.
 
 | Field | Meaning |
 | --- | --- |
-| `installed[].id` | Unique among installed plugins; the key of the record and the name of the clone directory. Matches `[A-Za-z0-9_-]{1,64}` and is not `builtin` or `default` (§7). Defaults to the manifest name; the caller gives another when two installed plugins share a name. |
+| `installed[].id` | Unique among installed plugins; the key of the record and the name of the clone directory. Matches `[a-z0-9_-]{1,64}` (lowercase, so two ids never name one directory on a case-insensitive file system) and is not `builtin` or `default` (§7). Defaults to the manifest name; the caller gives another when two installed plugins share a name. |
 | `installed[].name` | The manifest name at install or last reload. |
 | `installed[].source` | `{path}` for a local directory, used in place and never copied; `{git, ref?, commit}` for Git. |
 | `installed[].dir` | The directory that is loaded: the local path itself, or the clone under `<home>/plugins/<id>/<commit>`. |
@@ -191,8 +191,8 @@ A default or installed plugin whose row fails does not fail startup; `plugin.lis
 
 `plugin.install {source, id?, enable?}`. `enable` defaults to `true` ([requirement 2](../plugin-management.md): installed means usable).
 
-1. Acquire (§7): a local path is checked in place; a Git source is cloned into a staging directory, checked, then renamed to `<home>/plugins/<id>/<commit>`. Any failure deletes the staging directory.
-2. Read the manifest. Refuse an `id` already installed (`plugin_exists`).
+1. When the caller gives `id`, check it (§7) and refuse an `id` already installed (`plugin_exists`) before acquiring anything.
+2. Acquire (§7): a local path is checked in place; a Git source is cloned into a staging directory and its manifest read; without a given `id`, the id is the manifest name, checked and refused if installed in the same way, before the staging directory is renamed to `<home>/plugins/<id>/<commit>`. Any failure deletes the staging directory.
 3. Write `plugins.json` with the new entry, and, when `enable` is true and the name is not locked, `names.<name>.use = id`.
 4. If it was turned on: carry out "turn on" (§3). The reply carries the row's status and any content an owner refused.
 
@@ -252,7 +252,7 @@ PluginManager adds nothing to model context. A plugin's tools and prompt sources
 Installing and turning on are host configuration done through management methods or tool calls; enabled plugin code runs without host-local approval ([ADR 003](../../adr/003-approval-scope.md)). PluginManager adds no scope, approval or trust step ([requirements](../plugin-management.md)). What it guards is the acquisition itself:
 
 - Git sources are `https://` or `ssh://` URLs only; other schemes (`file://`, `ext::`, scp-style paths) and arguments starting with `-` are refused before Git runs. Clones run with submodules off (`--no-recurse-submodules`), hooks off (`core.hooksPath` set to an empty directory), `protocol.file.allow=never` and no terminal prompt.
-- **Paths.** One rule covers every operation that touches the file system for a plugin: install (staging, clone, rename), update, remove and the startup cleanup. Before any file system change, PluginManager checks that the id, whether the caller gave it or it came from the manifest name, matches `[A-Za-z0-9_-]{1,64}` and is not `builtin` or `default`, and that every directory it is about to create, rename or delete resolves to a direct child of `<home>/plugins` or of `<home>/plugins/<id>`. A failed check refuses the operation with `invalid_id` or `path_outside_plugins` and changes nothing: no directory, no `plugins.json` write, no loader command. A local-path plugin's own directory is never created, renamed or deleted, so the rule does not apply to it.
+- **Paths.** One rule covers every operation that touches the file system for a plugin: install (staging, clone, rename), update, remove and the startup cleanup. Before any file system change, PluginManager checks that the id, whether the caller gave it or it came from the manifest name, matches `[a-z0-9_-]{1,64}` and is not `builtin` or `default`, and that every directory it is about to create, rename or delete resolves to exactly one of `<home>/plugins/.staging/<random>`, `<home>/plugins/<id>` or `<home>/plugins/<id>/<commit>` (`.staging` cannot be an id, since an id has no dot). A failed check refuses the operation with `invalid_id` or `path_outside_plugins` and changes nothing: no directory, no `plugins.json` write, no loader command. A local-path plugin's own directory is never created, renamed or deleted, so the rule does not apply to it.
 - A clone goes to `<home>/plugins/.staging/<random>` and is renamed into place only after its manifest and paths are checked. A failure deletes the staging directory; startup deletes leftovers and clones no entry refers to.
 - No manifest path may leave the plugin directory after following symbolic links; a symbolic link inside a Git clone that points outside it is refused.
 - `plugins.json` is written atomically (§2.2).
@@ -348,8 +348,9 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 6. Installing a plugin named like a built-in and enabling it replaces the built-in; `enable <name> --use builtin` switches back.
 7. `disable PluginManager` is refused with `plugin_locked`.
 8. A Git install with a `file://` URL is refused; a failed clone leaves nothing under `<home>/plugins`; an install with the id `../x` is refused with `invalid_id` and creates nothing.
-9. A default plugin's Settings source appears when it starts and disappears when it is turned off.
-10. A Python plugin installed from a local path registers its tool, and reload picks up an edit to its entry module (with the Python runtime supplied by [#476](https://github.com/arcships/dim/issues/476)).
+9. `dimcode plugin install <git-url>` of a fixture repository installs and turns on its plugin; after a second commit, `dimcode plugin update <id>` loads the new commit and deletes the old directory.
+10. A default plugin's Settings source appears when it starts and disappears when it is turned off.
+11. A Python plugin installed from a local path registers its tool, and reload picks up an edit to its entry module (with the Python runtime supplied by [#476](https://github.com/arcships/dim/issues/476)).
 
 ## Appendix D. Open questions
 

@@ -1,6 +1,6 @@
 # Hooks
 
-状态：草案，Ready 候选（[#143](https://github.com/arcships/dim/issues/143)）；已采纳 2026-10-22 的维护者决定（§10），达到 Ready 还差 §10.2。总体设计：[overview](../overview.md)（Hooks）。阶段：M2（用户与项目来源）；插件来源在 #3 之后。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session + 分支）。
+状态：草案，Ready 候选（[#143](https://github.com/arcships/dim/issues/143)）；已采纳 2026-10-22 的维护者决定（§10），达到 Ready 还差 §10.2。总体设计：[overview](../overview.md)（Hooks）。阶段：M2（用户与项目来源）；插件来源由 PluginManager 登记（#3）。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session + 分支）。
 
 Hooks 在 Session **业务操作**的固定节点运行用户配置的命令，并把每个命令的决定交给该操作的所有者。Dim 只读取自己的 Hook 配置，不加载 Claude Code 或 Codex 的 Hook 文件。为便于迁移，文档形状（事件名、匹配组、命令处理器、`timeout`、`onFailure`）与脚本协议（stdin JSON、退出码、决定与输出字段）沿用 Claude Code 与 Codex，所以现有脚本和粘贴过来的配置都能工作（附录 G）。
 
@@ -307,7 +307,7 @@ AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 
 | --- | --- |
 | 接受 A.6.1（向 Permission 登记的建议方，含 `allow`）并开 issue | Permission、Approval |
 | 接受 A.6.2（`submitChecks` 表，`input_blocked`，未提交错误集合）并开 issue | Rpc（App Server）、InputQueue、CLI |
-| 插件来源（插件包的 Hook 文档） | #3 之后，附录 F |
+| 插件来源（插件包的 Hook 文档） | 由 PluginManager 登记（[PluginManager §9 R2](PluginManager.md#9-向机制所有者提出的需求)） |
 
 本文中没有等待维护者回答的问题。
 
@@ -351,7 +351,7 @@ AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 
 | --- | --- | --- |
 | `user` | Settings 来源 `hooks`，用户作用域 | 按所写 |
 | `project` | `<workspace>/.dimcode/hooks.json`，经 FileStorage 读取 | `hooks-projects` 列出该工作区时 |
-| `plugin:<id>` | 插件包的 Hook 文档 | #3 之后（附录 F） |
+| `plugin:<id>` | 插件包的 Hook 文档 | 由 PluginManager 登记（[PluginManager §9 R2](PluginManager.md#9-向机制所有者提出的需求)） |
 
 `HookSources.read(cwd, cancel)` 按来源返回其 id、路径、启用状态与文档或错误。工作区是 Settings 为 `cwd` 授权的项目根，如同 `mcp.catalog` 的解析方式；没有项目的 `cwd` 没有项目来源。目录顺序为表中顺序，再按文档顺序。同一 Hook 点上 `command` 字符串相同的处理器只运行一次。文档在每个 Hook 点读取；缺失的项目文件视为空，无法读取或无效的文件列为 `invalid` 并记诊断，其中的 Hook 都不运行。
 
@@ -526,7 +526,6 @@ AcpGateway 已经把 `session.submit` 的 `input_blocked` 映射为停止原因 
 
 | 问题 | 说明 |
 | --- | --- |
-| 插件来源 | PluginManager 把插件的 Hook 文档登记给 Hooks（`register({plugin, dir, document})`，用 `withdraw({plugin})` 撤回）；登记的文档由 Hooks 自己保存并持久化（[PluginManager §9 R2](PluginManager.md#9-向机制所有者提出的需求)）；只来自 Session 资源节点上的来源 |
 | 把 Questions 作为通知 | Questions 经 `ask_user` 工具调用提问（[Questions](Questions.md)）；Claude `Notification` 的 `elicitation_dialog` 对应物将观察该调用。Questions 已达到 Ready；该对应物尚未设计，仍不支持 |
 | pi 扩展 | pi 的 Hook 是 TypeScript 扩展处理器，不是命令；运行它们需要 TypeScript 插件运行时（#4），不属于本机制 |
 
