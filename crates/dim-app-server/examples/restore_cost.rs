@@ -63,7 +63,7 @@ use dim_agent_capabilities::{
     defaults,
     history::HistoryRenderer,
     host::*,
-    summary_strategy::ProductSummaryStrategyPlugin,
+    summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
@@ -407,11 +407,15 @@ fn product(builder: &mut AgentBuilder, root: &rutis::Ctx) -> std::result::Result
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(
             ProductContextModel,
         )))))
-        .require_feature(
-            Feature::new("ProductSummaryStrategy").session("ProductSummaryStrategy", |names| {
-                Ok(Box::new(ProductSummaryStrategyPlugin::new(names)?))
-            }),
-        )
+        .require_feature(Feature::new("ProductSummaryStrategy").session(
+            "ProductSummaryStrategy",
+            |names| {
+                Ok(Box::new(ProductSummaryStrategyPlugin::new(
+                    names,
+                    ProductSummaryStrategyConfig::default(),
+                )?))
+            },
+        ))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
                 Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))

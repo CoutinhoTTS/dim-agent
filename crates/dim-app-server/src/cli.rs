@@ -15,7 +15,7 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
-    summary_strategy::ProductSummaryStrategyPlugin,
+    summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
@@ -312,14 +312,21 @@ pub fn run_with(
                     .session_value(Arc::new(CompactionStrategyHost(None)));
                 dim_agent_aimux::install(&mut builder);
             } else {
+                let home = product_home.clone();
                 builder
                     .session_value(Arc::new(ContextModelHost(Some(Arc::new(
                         ProductContextModel,
                     )))))
                     .require_feature(
                         dim_agent_runtime::Feature::new("ContextCompaction")
-                            .session("ProductSummaryStrategy", |names| {
-                                Ok(Box::new(ProductSummaryStrategyPlugin::new(names)?))
+                            .session("ProductSummaryStrategy", move |names| {
+                                Ok(Box::new(ProductSummaryStrategyPlugin::new(
+                                    names,
+                                    ProductSummaryStrategyConfig {
+                                        home: Some(home.clone()),
+                                        target: None,
+                                    },
+                                )?))
                             })
                             .session("ContextMethods", |names| {
                                 Ok(Box::new(ContextMethodsPlugin::new(names)?))

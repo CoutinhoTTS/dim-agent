@@ -4,8 +4,9 @@
 //! (ContextCompaction §5.1, §5.2).
 use super::*;
 use dim_agent_capabilities::{
-    agent_loop::AgentLoop, context_model::ProductContextModel,
-    summary_strategy::ProductSummaryStrategyPlugin,
+    agent_loop::AgentLoop,
+    context_model::ProductContextModel,
+    summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
 };
 
 const WINDOW: u64 = 4_000;
@@ -80,11 +81,15 @@ async fn product_session(
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(
             ProductContextModel,
         )))))
-        .require_feature(
-            Feature::new("ProductSummaryStrategy").session("ProductSummaryStrategy", |names| {
-                Ok(Box::new(ProductSummaryStrategyPlugin::new(names)?))
-            }),
-        )
+        .require_feature(Feature::new("ProductSummaryStrategy").session(
+            "ProductSummaryStrategy",
+            |names| {
+                Ok(Box::new(ProductSummaryStrategyPlugin::new(
+                    names,
+                    ProductSummaryStrategyConfig::default(),
+                )?))
+            },
+        ))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
                 Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))

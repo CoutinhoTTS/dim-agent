@@ -8,7 +8,7 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::{ContextModelHost, IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
-    summary_strategy::ProductSummaryStrategyPlugin,
+    summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
@@ -37,9 +37,10 @@ pub async fn serve_product(
     dir: &Path,
     observe: impl FnOnce(&mut AgentBuilder),
 ) -> Result<RunningServer> {
+    let home = dir.join("home");
     let mut config = ServerConfig {
         websocket_address: Some(([127, 0, 0, 1], 0).into()),
-        product_home: Some(dir.join("home")),
+        product_home: Some(home.clone()),
         target_home: Some(dir.join("rust")),
         ..Default::default()
     };
@@ -61,8 +62,14 @@ pub async fn serve_product(
         )))))
         .require_feature(
             Feature::new("ContextCompaction")
-                .session("ProductSummaryStrategy", |names| {
-                    Ok(Box::new(ProductSummaryStrategyPlugin::new(names)?))
+                .session("ProductSummaryStrategy", move |names| {
+                    Ok(Box::new(ProductSummaryStrategyPlugin::new(
+                        names,
+                        ProductSummaryStrategyConfig {
+                            home: Some(home.clone()),
+                            target: None,
+                        },
+                    )?))
                 })
                 .session("ContextMethods", |names| {
                     Ok(Box::new(ContextMethodsPlugin::new(names)?))

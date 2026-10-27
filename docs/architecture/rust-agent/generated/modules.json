@@ -9147,6 +9147,16 @@
     },
     {
       "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "path FileStorageError::Io",
+        "use crate::file_storage::FileStorage",
+        "use crate::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
       "to": "dim_agent_capabilities::history",
       "references": [
         "path summary_message",
@@ -9160,11 +9170,14 @@
         "path CompactionInput",
         "path CompactionStrategy",
         "path CompactionStrategyHost",
+        "path ContextModel",
         "path HostError",
         "path HostError::failed",
         "path HostFuture",
         "path ModelChunk::MessageStop",
         "path ModelChunk::Text",
+        "path ModelConnection",
+        "path ModelConnection::Http",
         "path ModelHost",
         "path ModelStopReason::MaxTokens",
         "path ModelStopReason::ToolUse",
@@ -9173,7 +9186,8 @@
         "path StrategyDiagnostics",
         "path StrategyOutcome",
         "path StrategyOutcome::Completed",
-        "path StrategyOutcome::Skipped"
+        "path StrategyOutcome::Skipped",
+        "path reasoning_config"
       ]
     },
     {
@@ -9228,7 +9242,8 @@
         "path CompactionStrategyRecord",
         "path ModelRequest",
         "path ModelRequest::new",
-        "path SystemPrompt::Text"
+        "path SystemPrompt::Text",
+        "path model"
       ]
     },
     {
@@ -13680,7 +13695,9 @@
       "from": "dim_app_server::cli",
       "to": "dim_agent_capabilities::summary_strategy",
       "references": [
+        "path ProductSummaryStrategyConfig",
         "path ProductSummaryStrategyPlugin::new",
+        "use dim_agent_capabilities::summary_strategy::ProductSummaryStrategyConfig",
         "use dim_agent_capabilities::summary_strategy::ProductSummaryStrategyPlugin"
       ]
     },
