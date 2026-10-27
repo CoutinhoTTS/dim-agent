@@ -82,10 +82,39 @@ pub struct SessionTypeScriptConfig {
     pub anchor: PathBuf,
     /// The Python runtime of rows named `py:<module>`, if any.
     pub python: Option<PythonConfig>,
+    /// Set when RuntimeManager acquires the runtimes at these paths: the
+    /// runtime processes start only once it has installed them.
+    pub acquire: Option<Arc<crate::runtime_manager::Runtimes>>,
     /// Loader rows, each a process row. A row may list `instanceNames`, the
     /// names its plugin's parts provide in each Session or branch, as
     /// `{"name": "session" | "branch"}`.
     pub rows: Vec<Value>,
+}
+
+impl SessionTypeScriptConfig {
+    /// The runtimes RuntimeManager acquires into `home` (RuntimeManager
+    /// §2.3), with `rows`. The Python runtime imports plugins from
+    /// `<home>/plugins/python/` (§4).
+    pub fn acquired(
+        home: &std::path::Path,
+        runtimes: Arc<crate::runtime_manager::Runtimes>,
+        rows: Vec<Value>,
+    ) -> Self {
+        use crate::runtime_manager::Kind;
+        let python = runtimes.plan(Kind::Python);
+        Self {
+            node: runtimes.plan(Kind::Node).interpreter.clone(),
+            js_runtime: runtimes.js_runtime(),
+            anchor: runtimes.anchor(),
+            python: Some(PythonConfig {
+                interpreter: python.interpreter.clone(),
+                project: home.join("plugins").join("python"),
+                packages: Some(python.packages.clone()),
+            }),
+            acquire: Some(runtimes),
+            rows,
+        }
+    }
 }
 
 /// Python 3.10 or later with the `rutis` package, running the modules of
@@ -94,6 +123,9 @@ pub struct SessionTypeScriptConfig {
 pub struct PythonConfig {
     pub interpreter: PathBuf,
     pub project: PathBuf,
+    /// A directory put ahead on the runtime's `PYTHONPATH`: the installed
+    /// `rutis` package.
+    pub packages: Option<PathBuf>,
 }
 
 /// The rows' `settings` entries (settings-service §3.1, §5.4): a row's
@@ -278,8 +310,11 @@ impl Parts {
         let node = ForeignRuntime::new("session-node", node, RuntimeResolver::node, builder);
         // Named `py`, so its rows are named `py:<module>`.
         let python = config.python.as_ref().map(|python| {
-            let runtime =
+            let mut runtime =
                 LocalRuntime::python(&python.project).interpreter(python.interpreter.clone());
+            if let Some(packages) = &python.packages {
+                runtime = runtime.python_path(packages);
+            }
             ForeignRuntime::new("py", runtime, RuntimeResolver::modules, builder)
         });
         let resolver = Arc::new(SessionResolver {
@@ -478,6 +513,7 @@ mod tests {
             js_runtime: "/nonexistent/runtime.js".into(),
             anchor: "/nonexistent/package.json".into(),
             python: None,
+            acquire: None,
             rows: vec![serde_json::json!({
                 "id": "legacy",
                 "name": "/nonexistent/legacy.js",

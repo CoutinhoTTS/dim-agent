@@ -52,6 +52,7 @@ async fn node_python_plugin_is_one_row_and_its_parts_mount_in_session_and_branch
             .expect("DIM_TEST_PYTHON")
             .into(),
         project: parts.anchor.parent().unwrap().join("fixtures/python"),
+        packages: None,
     });
     parts.rows = vec![json!({
         "id": "python", "name": "py:python_plugin", "provides": {}, "config": {},
@@ -228,6 +229,7 @@ async fn node_python_import_failure_is_local_to_its_row() {
             .expect("DIM_TEST_PYTHON")
             .into(),
         project: parts.anchor.parent().unwrap().join("fixtures/python"),
+        packages: None,
     });
     parts.rows = vec![json!({
         "id": "python-missing", "name": "py:no_such_fixture_module",

@@ -13,6 +13,7 @@ fn rows() -> SessionTypeScriptConfig {
         serde_json::from_str(include_str!("../../../../runtime/plugins/web/web.json")).unwrap();
     SessionTypeScriptConfig {
         python: None,
+        acquire: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),

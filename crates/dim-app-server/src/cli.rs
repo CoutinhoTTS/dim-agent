@@ -1,7 +1,9 @@
 //! The App Server command line, shared by `dim-app-server` and `dimcode app-server`.
 
 use crate::{
-    ServerConfig, ShutdownReason, collaboration, permission_rules, serve,
+    ServerConfig, ShutdownReason, collaboration, permission_rules,
+    runtime_manager::Runtimes,
+    serve,
     session_typescript::{PythonConfig, SessionTypeScriptConfig},
 };
 use dim_agent_aimux::{AimuxModels, config::ModelConfigFile};
@@ -85,6 +87,7 @@ pub fn run_with(
     let mut js_runtime = None;
     let mut session_rows = None;
     let mut python = None;
+    let mut defaults = None;
     let mut args = argv.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -137,6 +140,11 @@ pub fn run_with(
                     args.next().ok_or("--session-rows requires a path")?,
                 ))
             }
+            "--defaults" => {
+                defaults = Some(PathBuf::from(
+                    args.next().ok_or("--defaults requires a path")?,
+                ))
+            }
             "--python" => {
                 python = Some(PathBuf::from(
                     args.next().ok_or("--python requires a path")?,
@@ -144,7 +152,7 @@ pub fn run_with(
             }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--session-rows FILE] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
+                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--session-rows FILE] [--defaults PATH] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
                      dim-app-server --export-timeline SESSION_ID --database PATH"
                 );
                 return Ok(());
@@ -167,16 +175,14 @@ pub fn run_with(
     if config.web_assets.is_none() {
         config.web_assets = config.product_home.as_ref().map(|home| home.join("web"));
     }
-    if let Some(path) = session_rows {
-        let (Some(node), Some(js_runtime)) = (node, js_runtime) else {
-            return Err("--session-rows requires --node and --js-runtime".into());
-        };
-        // Package names in the rows resolve from the file's own location.
+    // Session rows: package names in them resolve from the file's own
+    // location.
+    let rows = |path: &PathBuf| -> Result<(PathBuf, Vec<serde_json::Value>), String> {
         let unreadable =
             |error: std::io::Error| format!("Cannot read Session rows {}: {error}", path.display());
-        let anchor = std::fs::canonicalize(&path).map_err(unreadable)?;
+        let anchor = std::fs::canonicalize(path).map_err(unreadable)?;
         let bytes = std::fs::read(&anchor).map_err(unreadable)?;
-        let rows: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|error| {
+        let rows = serde_json::from_slice(&bytes).map_err(|error| {
             format!(
                 "Invalid Session rows {} at line {}, column {}",
                 path.display(),
@@ -184,16 +190,44 @@ pub fn run_with(
                 error.column()
             )
         })?;
+        Ok((anchor, rows))
+    };
+    config.defaults = defaults.clone();
+    // The default configuration file without explicit runtimes: RuntimeManager
+    // acquires them into the home (RuntimeManager §2).
+    if let (Some(defaults), None) = (&defaults, &node) {
+        if python.is_some() {
+            return Err("--python needs --node and --js-runtime".into());
+        }
+        let home = config
+            .product_home
+            .as_ref()
+            .or(config.target_home.as_ref())
+            .ok_or("--defaults needs --product-home or --home")?;
+        let home = std::path::absolute(home)?;
+        let runtimes = Arc::new(Runtimes::load(&home, defaults)?);
+        let rows = match &session_rows {
+            Some(path) => rows(path)?.1,
+            None => vec![],
+        };
+        config.session_typescript = Some(SessionTypeScriptConfig::acquired(&home, runtimes, rows));
+    } else if let Some(path) = session_rows {
+        let (Some(node), Some(js_runtime)) = (node, js_runtime) else {
+            return Err("--session-rows requires --node and --js-runtime".into());
+        };
+        let (anchor, rows) = rows(&path)?;
         // `py:` modules are imported from the file's directory.
         let python = python.map(|interpreter| PythonConfig {
             interpreter,
             project: anchor.parent().expect("a file has a directory").to_owned(),
+            packages: None,
         });
         config.session_typescript = Some(SessionTypeScriptConfig {
             node,
             js_runtime,
             anchor,
             python,
+            acquire: None,
             rows,
         });
     }

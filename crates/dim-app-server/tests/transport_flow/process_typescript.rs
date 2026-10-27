@@ -312,6 +312,7 @@ async fn process_typescript_rejects_invalid_embedding_before_runtime_start() {
                     js_runtime: "/unstarted/runtime".into(),
                     anchor: "/unstarted/package.json".into(),
                     python: None,
+                    acquire: None,
                     rows: rows.clone(),
                 }),
                 ..Default::default()

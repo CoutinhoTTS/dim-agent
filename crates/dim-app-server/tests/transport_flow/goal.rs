@@ -26,6 +26,7 @@ fn goal_rows() -> SessionTypeScriptConfig {
     let goal = repository().join("runtime/plugins/goal");
     SessionTypeScriptConfig {
         python: None,
+        acquire: None,
         node: std::env::var_os("DIM_TEST_NODE")
             .expect("DIM_TEST_NODE")
             .into(),
