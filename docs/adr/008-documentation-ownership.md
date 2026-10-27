@@ -84,9 +84,8 @@ The check is structural. It does not scan prose for status words, and it does no
 `docs/zh/adr/` or `docs/zh/design/plugins/`: a translation may be updated to match its English
 source and may not add or change a decision.
 
-CI runs the check for pull requests. A label change does not start a new run, so add the label
-and push again. Checks enforce boundaries and structure; review decides whether a decision is
-right.
+CI runs the check for pull requests. Checks enforce boundaries and structure; review decides
+whether a decision is right.
 
 ### D7. Templates and AGENTS.md have different jobs
 

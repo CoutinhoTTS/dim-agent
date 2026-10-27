@@ -32,7 +32,7 @@ export function checkChanges(
     for (const path of paths) {
       if (adr.test(path) && status !== 'A' && frozen(path) && !erratum) {
         errors.push(
-          `${path}: accepted ADRs are frozen; add a new ADR, or add the adr-erratum label and push again for a link or typo fix`,
+          `${path}: accepted ADRs are frozen; add a new ADR, or use the adr-erratum label for a link or typo fix`,
         );
       }
     }
@@ -45,7 +45,7 @@ export function checkChanges(
   if (designs.size > 1 && !crossModule) {
     errors.push(
       `this PR changes ${designs.size} plugin designs (${[...designs].join(', ')}); ` +
-        'split it, or add the cross-module label, get review from the affected owners, and push again',
+        'split it or add the cross-module label and review from the affected owners',
     );
   }
   return {errors, designs};
