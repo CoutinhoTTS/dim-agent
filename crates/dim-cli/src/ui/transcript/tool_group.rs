@@ -904,6 +904,12 @@ fn append_card(lines: &mut Vec<Line>, card: &MemberCard, now: u64, detail: Detai
 
 fn append_command(lines: &mut Vec<Line>, call: &Call<'_>, command: &str) {
     let mut spans = highlight_command(command);
+    if let Some(sandbox) = call.string("sandbox") {
+        spans.push(span(
+            tf(" (boundary: {sandbox})", &[("sandbox", sandbox)]),
+            Tone::Muted,
+        ));
+    }
     if call.background() {
         spans.push(span(t(" (detached)"), Tone::Muted));
     }
