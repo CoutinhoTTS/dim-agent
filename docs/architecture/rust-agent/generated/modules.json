@@ -16810,7 +16810,11 @@
       "to": "dim_app_server::settings::declared",
       "references": [
         "path Writer::Owner",
-        "use crate::settings::Writer"
+        "path holds_write_only",
+        "path without_write_only",
+        "use crate::settings::Writer",
+        "use crate::settings::holds_write_only",
+        "use crate::settings::without_write_only"
       ]
     },
     {
@@ -18189,7 +18193,9 @@
         "use declared::Read",
         "use declared::SourceDeclaration",
         "use declared::Update",
-        "use declared::Writer"
+        "use declared::Writer",
+        "use declared::holds_write_only",
+        "use declared::without_write_only"
       ]
     },
     {

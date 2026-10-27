@@ -112,7 +112,8 @@ Rules:
   export's `apply` with `settings.register(declaration)`: `source` (lowercase letters, digits,
   `-`, `_`), `userFile` (a file name), `schema` (a JSON Schema whose root is `type: object`;
   give members a `default`), and optionally `userOnly` (JSON Pointers of members only the user
-  may change, such as a secret). Source names and files are unique on the host. Read the
+  may change). Give a secret such as an API key `"writeOnly": true` in its schema and list it in
+  `userOnly`: `plugin config` then never shows or writes its value. Source names and files are unique on the host. Read the
   document when you need it, as the tool above does, so a changed value applies at once.
   `read` returns `{ ok: true, value: { revision, document } }` or `{ ok: false, error }`.
 - **Lifetime.** Do no work at module top level besides imports and constants. Register in

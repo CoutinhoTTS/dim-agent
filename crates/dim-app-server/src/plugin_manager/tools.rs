@@ -2,7 +2,7 @@
 //! the `plugin` tool. A command goes to PluginManager's methods, or to
 //! Settings for `config`; Permission decides each call like any tool call.
 use super::{Manager, PluginError};
-use crate::settings::{SettingsScope, Writer};
+use crate::settings::{SettingsScope, Writer, holds_write_only, without_write_only};
 use dim_agent_capabilities::{
     host::{HostFuture, ToolExecutionContext},
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
@@ -68,7 +68,7 @@ const COMMANDS: [(&str, &str, &str); 9] = [
     (
         "config",
         "config <name> [set <key> <value>]",
-        "Without set: shows the business configuration of the plugin a name uses, each Settings source it registered while running, with its user document, revision, JSON Schema and user-only fields. With set: replaces the top-level member <key> of that document (write <source>.<key> when the plugin has several sources) with <value>, parsed as JSON or else taken as a string; quote a value with spaces. Settings checks the schema and the revision read just before; user-only fields are changed only by the user. The plugin reads the new value when it next needs it, without a restart.",
+        "Without set: shows the business configuration of the plugin a name uses, each Settings source it registered while running, with its user document, revision, JSON Schema and user-only fields. A member the schema marks writeOnly (a secret) is left out of the document and its JSON Pointer listed in writeOnlySet when it holds a value. With set: replaces the top-level member <key> of that document (write <source>.<key> when the plugin has several sources) with <value>, parsed as JSON or else taken as a string; quote a value with spaces. Settings checks the schema and the revision read just before; user-only fields, and members that are or contain writeOnly ones, are changed only by the user. The plugin reads the new value when it next needs it, without a restart.",
     ),
     (
         "help",
@@ -255,13 +255,18 @@ impl Plugin {
                         .read_declared(&source.source, SettingsScope::User, cancel)
                         .await
                     {
-                        Ok(snapshot) => json!({
-                            "source": source.source,
-                            "revision": snapshot.revision,
-                            "document": snapshot.document,
-                            "schema": source.schema,
-                            "userOnly": source.user_only,
-                        }),
+                        Ok(snapshot) => {
+                            let (document, set) =
+                                without_write_only(&source.schema, snapshot.document);
+                            json!({
+                                "source": source.source,
+                                "revision": snapshot.revision,
+                                "document": document,
+                                "writeOnlySet": set,
+                                "schema": source.schema,
+                                "userOnly": source.user_only,
+                            })
+                        }
                         Err(error) => json!({"source": source.source, "error": error.to_string()}),
                     },
                 );
@@ -286,6 +291,14 @@ impl Plugin {
                     )
                 })?,
         };
+        if source.schema["properties"]
+            .get(member)
+            .is_some_and(holds_write_only)
+        {
+            return Err(format!(
+                "settings member {member} holds a write-only value; only the user sets it"
+            ));
+        }
         let current = settings
             .read_declared(&source.source, SettingsScope::User, cancel)
             .await
@@ -303,10 +316,12 @@ impl Plugin {
             )
             .await
             .map_err(|error| error.to_string())?;
+        let (document, set) = without_write_only(&source.schema, updated.document);
         Ok(json!({
             "source": source.source,
             "revision": updated.revision,
-            "document": updated.document,
+            "document": document,
+            "writeOnlySet": set,
         }))
     }
 }

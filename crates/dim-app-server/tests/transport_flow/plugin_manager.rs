@@ -849,6 +849,49 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     )
     .await;
     assert!(error && refused.contains("maxContinuations"), "{refused}");
+
+    // A `writeOnly` member (web's search key and proxy) is a secret toward
+    // the agent: never returned, never written through the tool.
+    let read = json!({"source": "web", "scope": "user"});
+    let current = call(&mut client, "settings.read", read.clone()).await;
+    let secret = "dim-test-secret-key";
+    let document = json!({"allowPrivateHosts": [], "proxy": "http://user:pass@127.0.0.1:9",
+        "searchService": {"kind": "brave", "apiKey": secret}});
+    assert_ok(
+        &call(
+            &mut client,
+            "settings.update",
+            json!({"source": "web", "scope": "user",
+                "expectedRevision": current["result"]["revision"], "document": document}),
+        )
+        .await,
+    );
+    let (shown, error) = plugin(&mut client, &server, &session, "config web").await;
+    assert!(
+        !error && !shown.contains(secret) && !shown.contains("user:pass"),
+        "{shown}"
+    );
+    let shown: Value = serde_json::from_str(&shown).unwrap();
+    let web = &shown["sources"][0];
+    assert_eq!(
+        web["document"]["searchService"],
+        json!({"kind": "brave"}),
+        "{shown}"
+    );
+    assert_eq!(
+        web["writeOnlySet"],
+        json!(["/searchService/apiKey", "/proxy"]),
+        "{shown}"
+    );
+    for set in [
+        "config web set proxy http://127.0.0.1:8",
+        r#"config web set searchService '{"kind":"brave"}'"#,
+    ] {
+        let (refused, error) = plugin(&mut client, &server, &session, set).await;
+        assert!(error && refused.contains("write-only"), "{set}: {refused}");
+    }
+    let stored = call(&mut client, "settings.read", read).await;
+    assert_eq!(stored["result"]["document"], document, "{stored}");
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
