@@ -150,7 +150,6 @@ export function parameters(definition: Definition, supplied: Record<string, stri
     if (size > 32 * 1024) throw new WorkflowError('invalid_parameters', `Parameter ${parameter.name} exceeds 32 KiB`)
     total += size
     if (total > 256 * 1024) throw new WorkflowError('invalid_parameters', 'Parameters exceed 256 KiB in total')
-    // An omitted optional text parameter contributes no text to the template.
     accepted[parameter.name] = value ?? ''
   }
   return accepted

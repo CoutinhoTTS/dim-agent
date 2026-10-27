@@ -87,7 +87,6 @@ impl Projection {
             }
             _ => {}
         }
-        // The transcript is main; the Session's task list also includes other branches.
         if branch_id != "main"
             && !matches!(
                 &event.content,
@@ -102,14 +101,8 @@ impl Projection {
         }
         let sequence = event.sequence;
         match &event.content {
-            // Inputs without `user` carry context blocks, not a message; of
-            // those only a shell run the App Server recorded is shown.
             EventContent::Input(data) => {
                 if let Some(user) = &data.user {
-                    // While a turn runs InputQueue holds a queued message
-                    // until the turn ends, and a steer until the next tool
-                    // result. An append (a notice the server adds for the
-                    // model) is applied at once and is nobody's queue.
                     let held = self.running && data.mode != Some(InputMode::Append);
                     if held {
                         self.held.push((event.id.clone(), user.clone()));
@@ -183,8 +176,6 @@ impl Projection {
                             .and_then(Value::as_i64),
                     });
                 }
-                // The call's own result only said the command detached; its
-                // end is what the command block shows.
                 if let Some(call_id) = self.background.remove(&target)
                     && branch_id == "main"
                     && let Some(index) = self.rows.iter().position(|row| row.row_id == call_id)
@@ -210,8 +201,6 @@ impl Projection {
                     started_at: event.create_at,
                     finished: None,
                 };
-                // The open call that made the request, in its own batch: a
-                // call id can repeat in another batch.
                 if branch_id == "main"
                     && let Some(index) = self.tool_rows.get(&data.call_id).copied()
                     && self.rows[index].batch.as_deref() == Some(data.request_id.as_str())
@@ -221,7 +210,6 @@ impl Projection {
                         CollaborationTarget::Agent { agent_id }
                         | CollaborationTarget::Member { agent_id, .. } => {
                             let name = self.agent_names.get(agent_id).unwrap_or(agent_id);
-                            // A provider member's id is no native Agent to name.
                             (
                                 name.clone(),
                                 (!agent_id.contains(':')).then(|| agent_id.clone()),
@@ -289,15 +277,12 @@ impl Projection {
                     && starting(&card.task)
                 {
                     update(&mut card.task);
-                    // The Agent that actually took the request; a temporary
-                    // profile keeps its own name.
                     match delivered {
                         Some((name, agent_id)) if card.agent_id.is_some() => {
                             card.agent = name;
                             card.agent_id = agent_id;
                         }
                         Some(_) => {}
-                        // No member took the request: its id names no Agent to read.
                         None => card.agent_id = None,
                     }
                 }
@@ -365,7 +350,6 @@ impl Projection {
                 let text = thought.written.clone();
                 let row = self.row(index);
                 row.text = text;
-                // A thought is written whole when it ends.
                 row.elapsed_ms = elapsed;
             }
             EventContent::Text(data) => {
@@ -389,8 +373,6 @@ impl Projection {
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
-                // A call id another batch already used still needs its own
-                // row: the screen commits rows by id.
                 let row_id = if self.rows.iter().any(|row| row.row_id == data.call.id) {
                     format!("{}-{}", data.call.id, self.rows.len())
                 } else {
@@ -421,7 +403,6 @@ impl Projection {
                 }
             }
             EventContent::TurnEnd(data) => {
-                // A turn that ends mid-thought settles what it had.
                 let open: Vec<String> = self.thinking_rows.keys().cloned().collect();
                 for request_id in open {
                     self.close_thinking(&request_id);
@@ -584,7 +565,6 @@ impl Projection {
                 WorkflowState::Running | WorkflowState::Stopping => unreachable!("terminal"),
             };
             TaskFinish {
-                // The owner records `ended_at` with every terminal state.
                 at: run.ended_at.unwrap_or(run.created_at),
                 status,
                 failed,
@@ -699,7 +679,6 @@ impl Projection {
             };
             let observed = card.task.finished.is_none()
                 && card.task.kind == TaskKind::Member(MemberTarget::Session(session_id.to_owned()));
-            // A failed read keeps the last model it saw.
             let model = model.map(str::to_owned).or_else(|| card.model.clone());
             if !observed
                 || (card.model == model
@@ -883,7 +862,6 @@ impl Projection {
         row.result_is_error = result.is_error == Some(true);
         row.result_text = Some(result_text(result));
         let structured = |key: &str| result.structured_content.as_ref()?.get(key);
-        // The edit tool reports the display diff of what it changed.
         row.diff = structured("diff")
             .and_then(Value::as_str)
             .map(str::to_owned);
@@ -955,12 +933,10 @@ mod tests {
         apply(
             &mut projection,
             &[
-                // Context-only input: not a user message.
                 serde_json::json!({ "id": "in-1", "sequence": 1, "create_at": 1000, "type": "input", "name": "message", "data": {} }),
                 model_start(2),
             ],
         );
-        // Unwritten reasoning shows while it streams.
         projection.progress(&progress("Look at the\nparser", 0));
         let rows = projection.snapshot().rows;
         assert_eq!(rows.len(), 1, "{rows:?}");
@@ -968,12 +944,10 @@ mod tests {
         assert!(rows[0].streaming);
         assert_eq!(rows[0].text, "Look at the\nparser");
 
-        // The thought is written whole when it ends, timed from model start.
         apply(
             &mut projection,
             &[step(5, "thinking", "Look at the\nparser first")],
         );
-        // Progress the written deltas overtook changes nothing.
         projection.progress(&progress("Look at the\nparser", 0));
         let rows = projection.snapshot().rows;
         assert_eq!(rows[0].text, "Look at the\nparser first");
@@ -999,7 +973,6 @@ mod tests {
         );
         let rows = projection.snapshot().rows;
         assert!(!rows[0].streaming);
-        // Never written: the transcript draws nothing for it.
         assert_eq!(rows[0].text, "");
     }
 
@@ -1013,8 +986,6 @@ mod tests {
         let before = projection.snapshot().rows;
         apply(&mut projection, &[step(3, "text", "lo")]);
         let after = projection.snapshot().rows;
-        // The settled thought is the same allocation in both snapshots; the
-        // streaming answer was copied once, and the old snapshot kept its text.
         assert!(Arc::ptr_eq(&before[0], &after[0]));
         assert!(!Arc::ptr_eq(&before[1], &after[1]));
         assert_eq!(

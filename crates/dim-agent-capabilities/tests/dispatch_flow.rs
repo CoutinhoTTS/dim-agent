@@ -46,8 +46,6 @@ impl DynPlugin for PanicFlowProbe {
         let counter = self.delivered.clone();
         Box::pin(async move {
             let dispatcher = ctx.require_at(&self.dispatcher_key)?;
-            // One apply registers both listeners in order; independent plugins
-            // have no initialization ordering without an injects dependency.
             dispatcher.subscribe(
                 ctx,
                 "test.counting-subscriber",
@@ -69,6 +67,8 @@ impl DynPlugin for PanicFlowProbe {
     }
 }
 
+/// Both listeners must be registered in one `apply`; independent plugins have
+/// no initialization order without an injects dependency.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handler_panic_is_attributed_and_freezes_the_dispatch_cursor() {
     let delivered = Arc::new(AtomicUsize::new(0));
@@ -107,16 +107,12 @@ async fn handler_panic_is_attributed_and_freezes_the_dispatch_cursor() {
     );
     assert_eq!(delivered.load(Ordering::SeqCst), 1);
     assert_eq!(dispatcher.get().unwrap().sequence(), input.sequence - 1);
-    // The dispatch loop exited on the defect: the facade now rejects input
-    // with the attributed failure, and no further event is ever delivered.
     let rejected = session
         .submit("second".into(), InputMode::Queue, "main")
         .await
         .unwrap_err();
     assert!(rejected.to_string().contains("test.panic-subscriber"));
     assert_eq!(delivered.load(Ordering::SeqCst), 1);
-    // Close aggregates the same failure from the dispatcher state and the
-    // root error sink; either way the attribution must survive.
     match soon(agent.close()).await {
         Ok(()) => {}
         Err(error) => assert!(error.to_string().contains("test.panic-subscriber")),
@@ -197,7 +193,6 @@ impl DynPlugin for PhaseProbe {
     fn name(&self) -> &str {
         "test.phase-probe"
     }
-    // Loop provides the state cell: this probe handles each event after it.
     fn injects(&self) -> Vec<TypeKey> {
         vec![self.dispatcher.erase(), self.state.erase()]
     }
@@ -247,7 +242,6 @@ async fn loop_publishes_running_only_once_turn_start_is_dispatched() {
         .iter()
         .position(|(key, _)| key == "turn/start")
         .unwrap();
-    // Before turn/start is dispatched, the prefix shows no open turn.
     assert!(
         seen[..start]
             .iter()

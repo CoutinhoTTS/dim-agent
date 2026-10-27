@@ -34,7 +34,6 @@ async def apply(ctx, config):
         if written is not None:
             await written
 
-    # The replayed history first, then live events after it.
     await dispatcher.consume("python-branch-fixture", ["input/message", "turn/start", "turn/end"], handler)
 
 

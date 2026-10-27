@@ -120,7 +120,6 @@ fn native_product_events_round_trip_without_a_v1_view() {
         json!({"type":"exec","name":"ended","data":{"task_id":"exec-id","status":"completed","result":{"content":"Output path: /tmp/output.log"}}}),
         json!({"type":"exec","name":"ended","data":{"task_id":"exec-id","status":"failed","result":{"content":"exit code 1"}}}),
         json!({"type":"exec","name":"ended","data":{"task_id":"exec-id","status":"cancelled","result":{"content":"stopped"}}}),
-        // ADR agent-029: a started call and the result closing undispatched calls.
         json!({"type":"step","name":"tool-use-start","data":{"turn_id":"t","request_id":"r","call_id":"c","name":"echo"}}),
         json!({"type":"step","name":"tool-result","data":{"turn_id":"t","request_id":"r","results":[{"call_id":"c","result":{"content":"Tool was not executed: the model output ended","isError":true}}]}}),
     ] {

@@ -90,18 +90,13 @@ fn kept_tokens(request: &ModelRequest) -> f64 {
 #[tokio::test]
 async fn retention_keeps_the_longest_tail_that_fits_its_token_budget_baseline_included() {
     let block = "k".repeat(400);
-    // Unkeyed, the block is part of the first turn and is summarized with it.
     let (events, plain) = compact_after_small_turns(context_block::raw(block.clone(), None)).await;
-    // Many small turns fit the budget: more than a fixed count of two.
     assert!(plain > 2, "kept {plain} turns");
     let request = first_call_after_compaction(&events);
     let sent = serde_json::to_string(&request.messages).unwrap();
     assert!(!sent.contains("xxxx") && !sent.contains("kkkk"));
-    // The tail fits up to the message separators the per-entry count leaves out.
     assert!(kept_tokens(&request) <= RETAINED + request.messages.len() as f64);
 
-    // Keyed, the same block is replayed after every cut, so it takes its
-    // share of the budget and fewer turns stay verbatim.
     let (events, keyed) =
         compact_after_small_turns(context_block::raw(block.clone(), Some("state".into()))).await;
     assert!(keyed < plain, "keyed {keyed}, plain {plain}");
@@ -144,9 +139,6 @@ impl ModelDriver for ReportedPrompt {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recovery_compares_the_provider_baseline_estimate_with_the_input_budget() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        // The local count of the second request is about 3,100 tokens, below
-        // the window; the provider counted the first at `prompt`. The
-        // trigger is above the window, so only validation can react.
         for (prompt, recovers) in [(4_000., true), (2_000., false)] {
             let agent = builder(Arc::new(ReportedPrompt(prompt))).build();
             let session = agent
@@ -170,8 +162,6 @@ async fn recovery_compares_the_provider_baseline_estimate_with_the_input_budget(
                 .nth(1)
                 .unwrap();
             assert_eq!(budget.baseline_source, BaselineSource::ProviderBaseline);
-            // `prompt` plus the new reply and input: above `4096 − 64` only
-            // for 4,000.
             assert_eq!(
                 budget.estimated_input_tokens > 4096. - 64.,
                 recovers,

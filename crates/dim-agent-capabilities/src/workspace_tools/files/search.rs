@@ -311,8 +311,6 @@ fn is_file(entry: &ignore::DirEntry) -> bool {
     entry.file_type().is_some_and(|kind| kind.is_file())
 }
 
-// --- glob ---
-
 pub(super) async fn glob(
     tools: &FileTools,
     input: &JsonObject,
@@ -522,8 +520,6 @@ fn has_literal_anchor(chars: &[char]) -> bool {
     }
     false
 }
-
-// --- grep ---
 
 pub(super) async fn grep(
     tools: &FileTools,
@@ -1025,8 +1021,6 @@ impl FileSearch<'_> {
             let Ok(Some(found_match)) = self.matcher.find_at(haystack, at) else {
                 break;
             };
-            // Byte regexes may start or end inside UTF-8. Widen only the
-            // displayed span; keep advancing in the matcher's byte domain.
             let start = text.floor_char_boundary(found_match.start());
             let end = if found_match.is_empty() {
                 start
@@ -1218,8 +1212,6 @@ impl FileSink<'_> {
                     .ok()
                     .flatten()
                     .map_or(0, |found| found.start());
-                // A byte pattern may match inside a character; count from the
-                // character it falls in.
                 let start = text.floor_char_boundary(start);
                 let mut record = ContentMatch {
                     file: self.file.clone(),

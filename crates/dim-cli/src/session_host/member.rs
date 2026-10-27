@@ -102,7 +102,6 @@ impl Worker {
         if selected == self.members.selected {
             return;
         }
-        // Opening a member is the explicit retry of a failed or closed read.
         if let Some((_, id)) = &selected {
             self.members.unavailable.remove(id);
         }
@@ -153,7 +152,6 @@ impl Worker {
             }
         }
         for id in needed {
-            // A released observation of the same member finishes first.
             if !self.members.observations.contains_key(&id) {
                 self.members.observations.insert(
                     id.clone(),
@@ -201,7 +199,6 @@ impl Worker {
                 Pending::Detach(request)
             });
         }
-        // One history page at a time, in the order members asked.
         if self
             .members
             .observations
@@ -271,7 +268,6 @@ impl Worker {
             self.members.agents.take_if(|(id, _, _)| *id == request_id)
         {
             if projection_id == self.projection_id {
-                // A failed read shows Agent IDs: no name is invented.
                 let names = result
                     .ok()
                     .and_then(|value| serde_json::from_value::<Vec<AgentSummary>>(value).ok())
@@ -331,7 +327,6 @@ impl Worker {
                                 observation.apply(notice);
                             }
                         } else {
-                            // Behind the members already waiting.
                             self.members.pages.push_back(id.clone());
                         }
                         self.member_changed(&id);

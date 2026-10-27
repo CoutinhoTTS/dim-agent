@@ -59,7 +59,6 @@ impl Config {
             .envs(&self.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Never mix arbitrary server output (possibly secrets) into product logs.
             .stderr(Stdio::null())
             .kill_on_drop(true);
         if let Some(cwd) = &self.cwd {
@@ -114,8 +113,6 @@ impl Transport<RoleClient> for StdioTransport {
     }
     async fn close(&mut self) -> Result<()> {
         self.stopping.cancel();
-        // Closing stdin gives cooperative servers a chance to exit. Always reap,
-        // including broken pipes, handshake failures and uncooperative servers.
         self.write.lock().await.take();
         match tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await {
             Ok(result) => {

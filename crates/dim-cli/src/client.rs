@@ -124,7 +124,6 @@ fn links_to(link: &Path, exe: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // Without inode identity the hard link is remade every start.
         false
     }
 }
@@ -223,9 +222,6 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     match Client::open(&connection, false).await {
         Ok(mut client) => {
             let version = client.hello().await?;
-            // A daemon this executable would start but of another version
-            // (left running across an upgrade) is replaced: it would serve
-            // that version's tools and behavior to this CLI.
             if !(start && server.embedded && version != env!("CARGO_PKG_VERSION")) {
                 return Ok(Some(client));
             }
@@ -264,8 +260,6 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
             return Err("Daemon log must be a private file owned by the current user".into());
         }
     }
-    // The embedded server runs through a link named after it, so process
-    // lists tell the daemon from the clients that share its executable.
     let program = if server.embedded {
         server_link(&native_home, binary)
     } else {
@@ -315,7 +309,6 @@ pub async fn connect_inner(options: &Options, start: bool) -> Result<Option<Clie
     let mut child = command.spawn()?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        // Only the newly spawned owner's socket may be awaiting chmod.
         match Client::open(&connection, true).await {
             Ok(mut client) => {
                 client.hello().await?;

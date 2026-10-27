@@ -18,7 +18,6 @@ fn alive(pid: i32) -> bool {
 }
 
 async fn gone(pid: i32) -> bool {
-    // An orphaned grandchild is reaped by init shortly after it exits.
     for _ in 0..100 {
         if !alive(pid) {
             return true;
@@ -87,7 +86,6 @@ async fn spawn_isolates_the_environment_and_terminate_releases_the_tree() {
     .unwrap();
     let cwd = std::env::temp_dir();
 
-    // Only the given environment; stdin is empty.
     let mut tree = platform
         .spawn(ProcessSpec {
             executable: "/bin/sh".into(),
@@ -102,7 +100,6 @@ async fn spawn_isolates_the_environment_and_terminate_releases_the_tree() {
     assert!(output.contains("ONLY=this"), "{output}");
     assert!(!output.contains("HOME="), "{output}");
 
-    // A grandchild dies with the tree.
     let spawn_tree = || {
         platform
             .spawn(ProcessSpec {
@@ -130,13 +127,11 @@ async fn spawn_isolates_the_environment_and_terminate_releases_the_tree() {
     tree.terminate().await.unwrap();
     assert!(gone(pid).await, "terminate left the grandchild");
 
-    // Dropping an unterminated handle kills the tree as the last resort.
     let mut tree = spawn_tree();
     let pid = grandchild(&mut tree).await;
     drop(tree);
     assert!(gone(pid).await, "drop left the grandchild");
 
-    // A missing cwd fails the start.
     assert!(
         platform
             .spawn(ProcessSpec {
@@ -168,7 +163,6 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
             .to_string(),
         )
         .unwrap();
-        // A subprocess isolates the service environment from parallel tests.
         let output = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -219,7 +213,6 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
             ..
         }
     ));
-    // Startup detection can recover without changing the preference.
     std::os::unix::fs::symlink("/bin/bash", &shell).unwrap();
     let selected = platform.exec_shell().await;
     assert!(matches!(selected, ShellStatus::Available(_)));
@@ -240,7 +233,6 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
         }
     ));
     std::os::unix::fs::symlink("/bin/bash", &shell).unwrap();
-    // A failed refresh also retries with unchanged preference bytes.
     assert_eq!(platform.exec_shell().await, selected);
     std::fs::write(&config, "invalid").unwrap();
     assert!(matches!(

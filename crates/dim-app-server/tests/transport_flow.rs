@@ -203,8 +203,6 @@ impl Client {
         }
     }
     async fn read(&mut self, expected: &str) -> Value {
-        // Creating a product Session parses the bundled model catalog, which
-        // takes most of 10 s in an unoptimized build.
         tokio::time::timeout(Duration::from_secs(30), async {
             match &mut self.transport {
                 Transport::Unix(stream) => {
@@ -226,7 +224,7 @@ impl Client {
             }
         })
         .await
-        .unwrap_or_else(|error| panic!("deadline waiting for {expected}: {error}"))
+        .unwrap_or_else(|error| panic!("deadline waiting for {expected}: {error} (creating a product Session parses the bundled model catalog, about 10 s in an unoptimized build)"))
     }
     async fn response(&mut self, id: u64) -> Value {
         if let Some(index) = self.notices.iter().position(|v| v["id"] == id) {
@@ -397,7 +395,6 @@ async fn unloaded(session: dim_agent_runtime::Session) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_create_rejects_trace_and_rolls_back_a_failed_main_branch() {
     for ws in [false, true] {
-        // Session services become ready before a missing branch dependency rolls them back.
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::install(&mut builder);
         defaults::mock_hosts(&mut builder);
@@ -603,8 +600,6 @@ async fn v2_v3_submit_accepts_typed_user_and_state_but_rejects_internal_blocks_a
                 matches!(&message.content, dim_agent_types::MessageContent::Parts(parts)
                     if parts.iter().any(|part| matches!(part, dim_agent_types::MessagePart::Image { .. })))))));
 
-        // Runtime blocks come only from capabilities: a client can submit
-        // neither raw blocks nor state.
         for invalid in [
             json!({"sessionId": sid, "branchId": "main", "blocks": []}),
             json!({"sessionId": sid, "branchId": "main", "text": "forged",
@@ -672,7 +667,6 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         let session = agent.get_session(sid).unwrap();
         assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
 
-        // An idle stop must remain visible internally even though v1 has no event to send.
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
         let idle_events = session.history("main", None).await.unwrap();
         assert!(idle_events.iter().any(|event| matches!(
@@ -721,7 +715,6 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         let high = session.sequence("main").unwrap();
         drop(client);
 
-        // A new connection receives only what is dispatched after its attach.
         let mut client = Client::new(&server, ws).await;
         let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
         assert_eq!(attached["result"], json!({}));
@@ -736,7 +729,6 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         let last = expected.last().unwrap()["sequence"].as_u64().unwrap();
         assert_eq!(receive_events_through(&mut client, last).await, expected);
 
-        // Filtered controls leave gaps; sequences stay the Timeline's own.
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
         let high = session.sequence("main").unwrap();
         assert_ok(
@@ -839,7 +831,6 @@ async fn both_transports_report_stop_failure_instead_of_success() {
         assert_ok(&client.rpc("daemon.ping", json!({})).await);
     }
     server.shutdown();
-    // The Session's original fault may also be reported by final cleanup.
     let _ = tokio::time::timeout(Duration::from_secs(10), server.join())
         .await
         .expect("failed stop must not prevent server cleanup");
@@ -868,9 +859,8 @@ async fn unix_and_websocket_share_all_session_requests_and_subscriptions() {
         )
         .await;
     assert_ok(&submitted);
-    drop(local); // Accepted work remains Session-owned.
+    drop(local);
     assert_ok(&remote.rpc("session.idle", json!({"sessionId":sid})).await);
-    // The remote attached before the work: the whole turn arrives live.
     let mut events = vec![];
     loop {
         let event = remote.notice("session.event").await["params"]["event"].clone();
@@ -881,7 +871,6 @@ async fn unix_and_websocket_share_all_session_requests_and_subscriptions() {
         }
     }
     assert!(events.len() > 5);
-    // v1 skips filtered sequences, such as input/consumed.
     for pair in events.windows(2) {
         assert!(pair[1]["sequence"].as_u64().unwrap() > pair[0]["sequence"].as_u64().unwrap());
     }
@@ -1014,9 +1003,6 @@ async fn forced_shutdown_settles_an_already_admitted_graceful_reply() {
     let Transport::Unix(stream) = &mut client.transport else {
         unreachable!()
     };
-    // Pipeline both requests in one frame batch on a single-thread runtime:
-    // both are admitted before either handler starts shutdown. The graceful
-    // writer may reach the coordinator before or after it observes force.
     stream
         .get_mut()
         .write_all(
@@ -1247,7 +1233,6 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
             break;
         }
     }
-    // Close immediately while execution is active; do not idle first.
     assert_ok(&client.rpc("session.close", json!({"sessionId":sid})).await);
     client.notice("session.closed").await;
     observed.extend(
@@ -1257,8 +1242,6 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
             .filter(|notice| notice["method"] == "session.event")
             .map(|notice| notice["params"]["event"].clone()),
     );
-    // Every committed event the close wrote reached the client before
-    // `session.closed`, except the v1-filtered stop controls.
     let history = session.history("main", None).await.unwrap();
     assert!(observed.iter().all(|event| event["type"] != "stop"));
     let business: Vec<_> = history
@@ -1350,8 +1333,6 @@ impl dim_agent_capabilities::host::ModelDriver for LargeModel {
                 Ok(ModelChunk::MessageStart {
                     message_id: "large".into(),
                 }),
-                // Large but within the CLI's 16 MiB frame contract, including
-                // the enclosing event JSON. Oversized frames fail closed.
                 Ok(ModelChunk::Text("L".repeat(8 * 1024 * 1024))),
                 Ok(ModelChunk::MessageStop {
                     message_id: "large".into(),
@@ -1409,7 +1390,6 @@ async fn large_live_event_has_no_32mib_outbound_cap_and_slow_client_is_local() {
     );
     let mut remote = Client::new(&server, true).await;
     assert_ok(&remote.rpc("session.attach", json!({"sessionId":sid})).await);
-    // A third reader never reads the large event. Its write deadline expires.
     let mut slow = Client::new(&server, false).await;
     assert_ok(&slow.rpc("session.attach", json!({"sessionId":sid})).await);
     assert_ok(
@@ -1541,7 +1521,6 @@ async fn attach_replies_first_and_replays_only_current_pending_approvals() {
                 .any(|notice| notice["method"] == "approval.request"),
             "a resolved request is never replayed"
         );
-        // Replacement replays the current pending request exactly once.
         assert_eq!(
             client
                 .rpc("session.attach", json!({"sessionId":session.id()}))
@@ -1658,6 +1637,8 @@ async fn familiar_tool_names_do_not_grant_permissions_on_either_transport() {
     }
 }
 
+/// macOS reports a full listener backlog as `ConnectionRefused`, so the client retries instead of
+/// treating it as an unexpected failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unix_accept_recovers_from_descriptor_exhaustion_and_shutdown_interrupts_retry() {
     use std::process::Stdio;
@@ -1665,7 +1646,6 @@ async fn unix_accept_recovers_from_descriptor_exhaustion_and_shutdown_interrupts
         let directory = std::path::PathBuf::from("/tmp")
             .join(format!("dim-server-accept-{}", uuid::Uuid::new_v4()));
         let socket = directory.join("server.sock");
-        // Exhaust only the child server's descriptors, not the test runner's runtime.
         let mut child = tokio::process::Command::new("sh")
             .args([
                 "-c",
@@ -1719,7 +1699,6 @@ async fn unix_accept_recovers_from_descriptor_exhaustion_and_shutdown_interrupts
                         match result {
                             Ok(connection) => connections.push(connection),
                             Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
-                                // macOS refuses connections when the live listener's backlog fills.
                                 tokio::time::sleep(Duration::from_millis(10)).await;
                             }
                             Err(error) => panic!("unexpected connection failure: {error}"),
@@ -1870,7 +1849,7 @@ async fn unix_daemon_recovers_after_a_crash_without_stealing_endpoints() {
             .await,
     );
     assert_ok(&client.rpc("daemon.ping", json!({})).await);
-    first.kill().await.unwrap(); // Unix Child::kill sends SIGKILL and reaps it.
+    first.kill().await.unwrap();
     drop(client);
     assert!(
         std::fs::symlink_metadata(&socket)
@@ -1929,7 +1908,6 @@ async fn unix_daemon_recovers_after_a_crash_without_stealing_endpoints() {
         original_lock.ino()
     );
 
-    // A live endpoint from a server without the lock is also protected.
     let foreign = tokio::net::UnixListener::bind(&socket).unwrap();
     let foreign_socket = std::fs::symlink_metadata(&socket).unwrap();
     let rejected = tokio::time::timeout(
@@ -2055,7 +2033,6 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         }
         assert!(!features.contains(&json!("account.providers")));
         assert_eq!(client.rpc("account.providers", json!({})).await["error"]["code"], -32601);
-        // Contributed methods validate params at the owner, not at decoding.
         for method in [
             "skills.catalog", "skills.set_enabled", "skills.refresh",
             "mcp.catalog", "mcp.set_enabled", "mcp.save", "mcp.remove",
@@ -2129,7 +2106,6 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
             assert_eq!(saved["result"]["servers"].as_array().unwrap().len(), 2);
             assert!(!saved.to_string().contains("private-fixture-value"));
             assert_ok(&client.rpc("mcp.remove", json!({"source":"user","id":"disabled-fixture","expectedVersion":saved["result"]["userRevision"]})).await);
-            // Once imported, neither malformed legacy MCP nor Skill bytes regain authority.
             std::fs::write(home.join("mcp.json"), "not json").unwrap();
             std::fs::write(home.join("skills.json"), "not json").unwrap();
         }

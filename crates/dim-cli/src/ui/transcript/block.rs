@@ -59,7 +59,6 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
     let row = &rows[index];
     match row.kind {
         RowKind::UserMessage => Block::User(row.text.clone()),
-        // The projection made it a shell row because it parses.
         RowKind::Shell => {
             ShellRun::parse(&row.text).map_or_else(|| Block::User(row.text.clone()), Block::Shell)
         }
@@ -71,8 +70,6 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
         },
         RowKind::ToolCall => Block::ToolGroup(project_group(&group_rows(rows, index), detail)),
         RowKind::Error => Block::Error(row.text.clone()),
-        // A still-streaming answer met outside the live region (history
-        // pages) reads as a status line, as it always has.
         RowKind::StreamingAssistant | RowKind::Status | RowKind::Other => Block::Status {
             text: row.text.clone(),
             tone: match row.tone {
@@ -307,7 +304,6 @@ mod tests {
             .map(|i| format!("    line {i}"))
             .collect();
         assert_eq!(shown, expected);
-        // The scrollbar in the last column has its thumb at the end.
         assert!(lines[2..].iter().all(|l| l.chars().count() == 80));
         assert!(lines[16].ends_with('█') && lines[2].ends_with(' '));
     }

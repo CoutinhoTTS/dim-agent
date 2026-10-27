@@ -102,7 +102,6 @@ async function fixture(t, options = {}) {
           : request.policy ?? { preset: 'read-only', allowedTools: [], disallowedTools: [] } })
       },
       async input(request) {
-        // The branch accepts each submission id once.
         if (state.receipts.has(request.submissionId)) return ok(state.receipts.get(request.submissionId))
         state.inputs.push(structuredClone(request))
         if (request.mode === 'steer') await state.reportInput?.(request)
@@ -166,7 +165,6 @@ async function fixture(t, options = {}) {
     loaded = await load(plugin, { config: { packages: options.packages ?? [] }, services: {
       ...services,
       managementMethods: { async register(namespace, declarations, call) { methods = call } },
-      // The row registers its Session part; the test mounts that copy.
       partRegistry: { async registerDefinition(scope, name, definition) { part = { scope, name, definition } } },
     } })
     assert.equal(part.scope, 'session')

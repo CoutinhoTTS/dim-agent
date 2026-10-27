@@ -165,8 +165,6 @@ fn collapse(text: &str) -> String {
     out.trim().to_owned()
 }
 
-// ---- exit confirmation ------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitReason {
     AgentRunning,
@@ -261,8 +259,6 @@ impl ExitConfirm {
         )
     }
 }
-
-// ---- permission -------------------------------------------------------------
 
 /// The confirmation full access takes, here and in the `/approvals` panel.
 pub const CONFIRM_HINT: &str = "Tab switch  Enter confirm  Esc cancel";
@@ -443,8 +439,6 @@ impl PermissionPrompt {
             );
         }
         let inner = width.saturating_sub(4).max(1);
-        // The panel frame: the title in the top border, the keys in the
-        // bottom one.
         let title = paint(
             &truncate_cells(t("Permission required"), inner),
             Paint {
@@ -483,8 +477,6 @@ impl PermissionPrompt {
         bordered(&content, width, None, &p.border, Some(&title), Some(&hint))
     }
 }
-
-// ---- AskUser ----------------------------------------------------------------
 
 pub struct AskUserPrompt {
     pub call: Call,
@@ -619,9 +611,6 @@ impl AskUserPrompt {
         self.draft = LineInput::new(&draft);
     }
 
-    /// The draft is the free-text answer as it is typed: non-empty text
-    /// checks the row (and, for a single choice, replaces the preset), empty
-    /// text clears it.
     fn sync_draft(&mut self) {
         let Some(question) = self.question() else {
             return;
@@ -640,8 +629,6 @@ impl AskUserPrompt {
         }
     }
 
-    /// Leaves the editor, keeping the answer; Enter with an answer also
-    /// moves on to the next question.
     fn stop_typing(&mut self, advance: bool) {
         self.typing = false;
         self.draft.clear();
@@ -708,7 +695,6 @@ impl AskUserPrompt {
         if self.typing {
             return self.handle_typing_key(key);
         }
-        // On the free-text row a typed character starts the answer.
         if let KeyCode::Char(c) = key.code
             && plain(key)
             && c != ' '
@@ -832,13 +818,9 @@ impl AskUserPrompt {
             .iter()
             .enumerate()
             .find_map(|(index, line)| Some((index, line.caret?)))?;
-        // The top border, the tab row, the branch row and any error come
-        // first; the left border and its space precede each line.
         let above = 3 + usize::from(self.error.is_some());
         Some((above + index, 2 + caret.min(inner)))
     }
-
-    // ---- view -----------------------------------------------------------
 
     fn tab_row(&self, inner: usize, p: &Palette) -> String {
         let mut labels: Vec<String> = self
@@ -1006,7 +988,6 @@ impl AskUserPrompt {
         if !question.allow_custom {
             return Body { head, rows };
         }
-        // The free-text row closes the list.
         let index = question.options.len();
         let selected = self.option_index == index;
         let stored = self
@@ -1029,8 +1010,6 @@ impl AskUserPrompt {
         let lines = if !self.typing && draft.is_empty() {
             vec![Line::choice(label, selected)]
         } else {
-            // While editing, the line shows the editor's window over the
-            // text and carries the caret; the terminal draws the cursor.
             let field = |lead: &str, line: fn(String, bool) -> Line| {
                 let lead_width = display_width(lead);
                 if !self.typing {
@@ -1357,7 +1336,6 @@ mod tests {
             } => assert!(allow && remember),
             other => panic!("{other:?}"),
         }
-        // Without a rule to offer, "always" is neither listed nor a key.
         let mut p = PermissionPrompt::new(
             "r2".into(),
             "main".into(),
@@ -1375,9 +1353,6 @@ mod tests {
             p.handle_key(key(KeyCode::Enter)),
             Effect::Approval { allow: false, .. }
         ));
-        // Full access is the last choice and asks for confirmation, with
-        // Cancel focused: Enter there goes back; y confirms, so the
-        // session switches and the call runs.
         p.handle_key(key(KeyCode::Right));
         assert!(matches!(p.handle_key(key(KeyCode::Enter)), Effect::None));
         assert!(matches!(p.handle_key(key(KeyCode::Enter)), Effect::None));
@@ -1404,11 +1379,9 @@ mod tests {
             .iter()
             .map(|r| strip(r))
             .collect();
-        // The panel frame: the title in the top border, the keys in the bottom.
         assert!(rows[0].starts_with("╭─ Permission required ─"));
         assert!(rows[2].contains("# source: tool_rule"));
         assert!(rows[3].contains("$ edit {\"path\":\"src/index.ts\"}"));
-        // An edit offers no rule, so "always" is not among the choices.
         assert!(rows[5].contains("› Allow once   "));
         assert!(!rows[5].contains("Allow always"));
         assert!(rows[5].contains("Reject   "));
@@ -1423,7 +1396,6 @@ mod tests {
         ask.handle_key(key(KeyCode::Down));
         ask.handle_key(key(KeyCode::Down));
         ask.handle_key(key(KeyCode::Char(' ')));
-        // Enter on a multi-select moves on to the review tab.
         ask.handle_key(key(KeyCode::Enter));
         assert!(ask.on_confirm_tab());
         let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
@@ -1454,12 +1426,10 @@ mod tests {
     #[test]
     fn single_select_enter_advances_and_review_flags_missing_answers() {
         let mut ask = dinner(false);
-        // Review without answering: the missing question is focused and flagged.
         ask.set_tab(1);
         assert_eq!(ask.handle_key(key(KeyCode::Enter)), Effect::None);
         assert_eq!(ask.active_tab, 0);
         assert_eq!(ask.missing_tab, Some(0));
-        // A digit picks and advances.
         ask.handle_key(key(KeyCode::Char('2')));
         assert!(ask.on_confirm_tab());
         assert!(matches!(
@@ -1532,8 +1502,6 @@ mod tests {
         for _ in 0..3 {
             ask.handle_key(key(KeyCode::Down));
         }
-        // Typing on the free-text row starts the answer; the cursor moves
-        // and inserts mid-text, and a paste lands at the cursor.
         for c in "面条".chars() {
             ask.handle_key(key(KeyCode::Char(c)));
         }
@@ -1547,7 +1515,6 @@ mod tests {
             .collect();
         let (row, column) = ask.cursor(100, 20).unwrap();
         assert!(rows[row].contains("面牛肉 条"), "{rows:?}");
-        // The caret sits after "面牛肉 ": three wide characters and a space.
         let value = rows[row].find("面").unwrap();
         assert_eq!(column, display_width(&rows[row][..value]) + 7);
         assert!(!rows.concat().contains('▌'));
@@ -1555,8 +1522,6 @@ mod tests {
         assert!(ask.cursor(100, 20).is_none());
         assert_eq!(ask.custom_answers["dinner"], "面牛肉 条");
 
-        // In a multi-select the typed answer checks its row as it is typed,
-        // alongside the presets, and Esc leaves the editor keeping it.
         let mut ask = dinner(true);
         ask.handle_key(key(KeyCode::Char(' ')));
         for _ in 0..3 {
@@ -1568,7 +1533,6 @@ mod tests {
         ask.handle_key(key(KeyCode::Esc));
         assert!(!ask.typing);
         assert_eq!(ask.collect().unwrap()[0].custom.as_deref(), Some("饺"));
-        // Erasing the text unchecks it; Enter with text saves and moves on.
         ask.handle_key(key(KeyCode::Enter));
         ask.handle_key(key(KeyCode::Backspace));
         assert!(!ask.custom_answers.contains_key("dinner"));
@@ -1576,7 +1540,6 @@ mod tests {
         ask.handle_key(key(KeyCode::Enter));
         assert!(!ask.typing && ask.on_confirm_tab());
 
-        // Without allowCustom there is no free-text row to reach.
         let mut ask = dinner(false);
         ask.call.questions[0].allow_custom = false;
         for _ in 0..5 {

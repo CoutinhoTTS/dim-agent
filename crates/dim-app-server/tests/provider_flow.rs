@@ -271,7 +271,6 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
     let cancel = CancellationToken::new();
     for restart in [false, true] {
         let root = Ctx::root().unwrap();
-        // The management table the process providers register with.
         root.plugin(
             dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
                 .unwrap(),
@@ -390,7 +389,6 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             }
         }
         if restart {
-            // A failed explicit proxy must not silently use a reachable origin.
             let unused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let dead = format!("http://user:private-proxy@{}", unused.local_addr().unwrap());
             drop(unused);
@@ -410,7 +408,6 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 .unwrap();
             assert!(!error.to_string().contains("private-proxy"));
             assert_eq!(direct.lock().unwrap().len(), 2);
-            // Clearing the override restores direct/default transport.
             config.network = Some(ModelNetwork::default());
             provider
                 .save_static(config.clone(), Some(version), &cancel)
@@ -572,7 +569,6 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     std::fs::create_dir_all(&home).unwrap();
     let home = home.canonicalize().unwrap();
     let root = Ctx::root().unwrap();
-    // The management table the process providers register with.
     root.plugin(
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
@@ -820,7 +816,6 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     };
     let (_, _, probe_reply) = lookups.recv().await.unwrap();
 
-    // Dependency removal must unload Provider and settle its old handles.
     tokio::time::timeout(std::time::Duration::from_secs(5), secrets.dispose())
         .await
         .unwrap()
@@ -874,7 +869,6 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     std::fs::create_dir_all(&home).unwrap();
     let home = home.canonicalize().unwrap();
     let root = Ctx::root().unwrap();
-    // The management table the process providers register with.
     root.plugin(
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
@@ -1053,7 +1047,6 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         dim_agent_capabilities::host::ModelProtocol::OpenaiResponses
     );
 
-    // A malformed or rejected refresh cannot erase the last usable catalog.
     for (status, body) in [
         (
             StatusCode::UNAUTHORIZED,
@@ -1239,7 +1232,10 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             assert_eq!(page.models[1].config.max_tokens, Some(109.0));
             assert!(page.models[1].unavailable_reason.is_some());
         } else {
-            assert!(page.models.iter().all(|m| m.unavailable_reason.is_none()));
+            assert!(
+                page.models.iter().all(|m| m.unavailable_reason.is_none()),
+                "Anthropic's `type: \"model\"` is an object discriminator, not a modality; the refresh removes it from raw so every remote Anthropic model stays non-media"
+            );
         }
         let refresh = spawn(id, cancel.clone());
         requests
@@ -1612,7 +1608,6 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         .unwrap();
     root.shutdown().await.unwrap();
     {
-        // Simulate a new bundled definition without changing the user record.
         let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
         db.execute("UPDATE providers SET record=json_set(record,'$.definitionFingerprint','previous-bundle') WHERE provider_id='openai'", []).unwrap();
         db.execute("UPDATE providers SET record=json_set(record,'$.modelPreferences',json(?1)) WHERE provider_id='openai'",
@@ -1621,7 +1616,6 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             [json!({"gone":{"reasoningEffort":"high"}}).to_string()]).unwrap();
     }
     let root = Ctx::root().unwrap();
-    // The management table the process providers register with.
     root.plugin(
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
@@ -1726,7 +1720,6 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
         .join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&home).unwrap();
     let root = Ctx::root().unwrap();
-    // The management table the process providers register with.
     root.plugin(
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
@@ -1969,7 +1962,6 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                 connection.base_url,
                 "https://fixture.services.ai.azure.com/openai/v1"
             );
-            // Exercise the real adapter locally after production endpoint admission.
             connection.base_url = format!("http://{address}/{id}/openai/v1");
         }
         assert_eq!(
@@ -2092,7 +2084,6 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
     let mut saved_version = 0;
     for restart in [false, true] {
         let root = Ctx::root().unwrap();
-        // The management table the process providers register with.
         root.plugin(
             dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
                 .unwrap(),
@@ -2551,7 +2542,6 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     std::fs::write(home.join("auth.json"), "{broken").unwrap();
 
     let root = Ctx::root().unwrap();
-    // The management table the process providers register with.
     root.plugin(
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
@@ -2779,7 +2769,6 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         "http://127.0.0.1:9/"
     );
 
-    // User preferences survive descriptor changes; each patch validates only its sets.
     let stale_id = "018ec73f-4d19-7f61-bc79-7130618bb451";
     let mut stale_creation = creation.clone();
     stale_creation["providerId"] = json!(stale_id);
@@ -3332,7 +3321,6 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .is_err()
     );
 
-    // A missing, disabled model keeps its preference through edits and rediscovery.
     let disabled = provider
         .set_enabled_models("b".into(), reset.version, vec![], &cancel)
         .await
@@ -3389,7 +3377,6 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .is_err()
     );
 
-    // Invalid persisted provider choices are retained but skipped before the global choice.
     {
         let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
         database.execute("UPDATE provider_selections SET provider_id='missing-provider', model_id='missing' WHERE scope='workspace:/workspace/provider-flow'", []).unwrap();
@@ -3532,7 +3519,6 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     root.shutdown().await.unwrap();
 
     let restarted = Ctx::root().unwrap();
-    // The management table the process providers register with.
     restarted.plugin(
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
@@ -3601,11 +3587,8 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     );
     restarted.shutdown().await.unwrap();
 
-    // An unreadable optional record must neither block startup nor be reseeded.
     let collision = {
         let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-        // Simulate an older bundled definition and a removed builtin. Connection
-        // fields and user model preferences must survive the definition upgrade.
         let body: String = database
             .query_row(
                 "SELECT record FROM providers WHERE provider_id='openai'",
@@ -3674,7 +3657,6 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         (id, collision)
     };
     let isolated = Ctx::root().unwrap();
-    // The management table the process providers register with.
     isolated.plugin(
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
@@ -4041,7 +4023,6 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     std::fs::create_dir_all(&home).unwrap();
 
     let root = Ctx::root().unwrap();
-    // The management table the process providers register with.
     root.plugin(
         dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
             .unwrap(),
@@ -4098,7 +4079,6 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
             .and_then(Value::as_u64)
     };
 
-    // The given model gets the system text and messages, a capped budget and no tools.
     let reply = auxiliary
         .0
         .complete(target("aux"), request(Some(32)), cancel.clone())
@@ -4114,7 +4094,6 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     assert!(sent.body.to_string().contains("hello"));
     assert!(sent.body.get("tools").is_none());
     assert_eq!(max_tokens(&sent.body), Some(32));
-    // An omitted or oversized budget is the model's limit.
     auxiliary
         .0
         .complete(target("aux"), request(Some(1_000_000)), cancel.clone())
@@ -4125,7 +4104,6 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
         Some(4096)
     );
 
-    // Caller defects are rejected before any request.
     let mut empty = request(None);
     empty.messages.clear();
     for invalid in [empty, request(Some(0))] {
@@ -4138,7 +4116,6 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     }
     assert!(seen.lock().unwrap().is_empty());
 
-    // Cancelling, or dropping, an in-flight call ends it.
     let call_cancel = CancellationToken::new();
     let call = auxiliary
         .0
@@ -4166,7 +4143,6 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
         .is_err()
     );
 
-    // A disabled model is unavailable: nothing is sent and nothing else is tried.
     let disabled = provider
         .set_enabled_models("aux".into(), saved.version, vec![], &cancel)
         .await
@@ -4178,7 +4154,6 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
         .unwrap_err();
     assert_eq!(error.code, AuxiliaryErrorCode::ModelUnavailable);
     assert!(seen.lock().unwrap().is_empty());
-    // So is a model whose Provider was deleted.
     provider
         .delete_static("aux".into(), disabled.version, &cancel)
         .await
@@ -4191,7 +4166,6 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     assert_eq!(error.code, AuxiliaryErrorCode::ModelUnavailable);
     assert!(seen.lock().unwrap().is_empty());
 
-    // Unloading Provider ends an in-flight call as cancelled.
     let pending = tokio::spawn({
         let auxiliary = auxiliary.clone();
         async move {

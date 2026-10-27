@@ -118,10 +118,6 @@ pub(crate) fn sha256_version(text: &str) -> String {
     version
 }
 
-// Copied from TS `packages/agent/src/prompt/catalog/locales/en.ts` (`identity`
-// with the `dim` brand, `defaults`). Lines about tools and features absent from
-// the first release (TodoWrite, AskUserQuestion, web tools) are omitted, as is
-// the line treating system-reminder tags as instructions.
 const IDENTITY: &str = "You are DimAgent. You and the user work together in their workspace toward whatever they're trying to get done.";
 const DEFAULTS: &str = "Safety:
 Never introduce code that exposes, logs, or commits secrets, tokens, or credentials.
@@ -461,7 +457,6 @@ impl DynPlugin for PromptSourcesBranchPlugin {
             let (every, lifecycle) = (self.every, ctx.cancellation_token());
             let tasks = TaskTracker::new();
             tasks.spawn(async move {
-                // Background work begins once the branch is Active.
                 tokio::select! {
                     _ = lifecycle.cancelled() => return,
                     active = branch.activated() => if !active { return },
@@ -479,7 +474,6 @@ impl DynPlugin for PromptSourcesBranchPlugin {
                                 changed.push(key.0);
                             }
                             Ok(_) => {}
-                            // Retried at the next check.
                             Err(error) => tracing::warn!(%error, source = key.0, "prompt source was not checked"),
                         }
                     }

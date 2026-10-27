@@ -199,7 +199,6 @@ mod tests {
     fn tilde_fences_and_longer_closers() {
         let text = "~~~\ncode\n~~~~\n\nafter";
         assert_eq!(settled(text), "~~~\ncode\n~~~~\n\n");
-        // A shorter fence line does not close.
         let open = "````\ncode\n```\nstill code";
         assert_eq!(settled(open), "");
         assert_eq!(

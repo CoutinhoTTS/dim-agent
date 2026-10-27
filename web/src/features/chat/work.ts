@@ -37,7 +37,6 @@ export function groupRows(rows: readonly TimelineRow[]): DisplayRow[] {
   }
   for (const row of rows) {
     if (row.kind === "thinking") {
-      // A settled thought that was never written (interrupted) shows nothing.
       if (row.text === "" && !row.streaming) continue
       work.push({ id: row.key, kind: "thinking", content: row.text, running: row.streaming, ...(row.elapsedMs === undefined ? {} : { durationMs: row.elapsedMs }) })
     } else if (row.kind === "tool") {

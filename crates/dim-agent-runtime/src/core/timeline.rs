@@ -191,7 +191,6 @@ impl Timeline {
                 ..Default::default()
             }),
             commit: Mutex::new(()),
-            // A new branch has no inputs to index.
             restored: if sequence == 0 {
                 OnceLock::from(HashMap::new())
             } else {
@@ -308,8 +307,6 @@ impl Timeline {
                 draft: original.clone(),
                 steps: Mutex::default(),
             });
-            // Any failure, including a closing branch scope whose hooks
-            // are unloading, commits the original without a trace.
             let result = self
                 .0
                 .ctx
@@ -461,8 +458,6 @@ impl Timeline {
                     )));
                 }
                 let hot_start = data.hot.front().map_or(u64::MAX, |r| r.event.sequence);
-                // From the hot window alone when it covers `start`; otherwise
-                // only what the store does not have yet.
                 let from = if start >= hot_start {
                     start
                 } else {
@@ -479,13 +474,10 @@ impl Timeline {
             if start >= hot_start {
                 return Ok(hot);
             }
-            // The hot window may start inside a batch; the published sequence
-            // is always a batch boundary and everything up to it is stored.
             let mut stored = self.stored(start, end.min(published)).await?;
             stored.extend(hot);
             return Ok(stored);
         }
-        // An ancestor's events, up to its cut.
         let segment = [(branch.to_owned(), start, end)];
         if let Some(mut shared) = self.shared_ancestry(&segment).await? {
             return Ok(shared.pop().unwrap_or_default());
@@ -592,7 +584,6 @@ impl Timeline {
         };
         let mut shared = Vec::with_capacity(segments.len());
         for (branch, start, end) in segments {
-            // Only ranges inside the ancestry the branch was built with.
             let Some(index) = opening
                 .ancestry
                 .iter()
@@ -614,8 +605,6 @@ impl Timeline {
         if let [(branch, start, end)] = &segments[..] {
             return Ok(vec![self.records(branch, *start, *end).await?]);
         }
-        // Ancestor prefixes come from the store in one read; this branch's
-        // own segment also covers events not yet published.
         let own = segments
             .last()
             .filter(|(branch, _, _)| *branch == self.0.key.branch_id)
@@ -664,7 +653,6 @@ impl Timeline {
             .filter(|(_, cut)| *cut > 0)
             .cloned()
             .collect();
-        // A new branch without ancestry has nothing to share.
         if head == 0 && ancestry.is_empty() {
             return;
         }
@@ -763,10 +751,6 @@ impl Timeline {
             {
                 continue;
             }
-            // The anchor is a fact, not copied cache metadata. Reading to the
-            // legal branch cut also supports an anchor inside an atomic batch.
-            // Only structure is checked here; whether the anchor can carry
-            // the state is the interpreter's decision.
             let anchor = self
                 .records(branch, snapshot.sequence, *cut)
                 .await?

@@ -56,8 +56,6 @@ impl SubscriptionListener {
             return Ok(None);
         }
         let (name, failures) = (&self.name, &self.failures);
-        // Unloading waits for running listeners; ending the call when the
-        // registering part is cancelled keeps branch close prompt.
         let cancelled = ctx.cancelled();
         let future = match catch_unwind(AssertUnwindSafe(|| (self.handler)(event.event.clone()))) {
             Ok(future) => future,
@@ -178,7 +176,6 @@ impl Dispatcher {
         handler: impl Fn(Delivery) -> BoxFuture<'static, Result<()>> + Send + Sync + 'static,
     ) -> Result<()> {
         let handler = Arc::new(handler);
-        // The replayed cutoff; nothing passes until a replay succeeds.
         let cutoff = Arc::new(tokio::sync::Mutex::new(u64::MAX));
         let mut replayed = cutoff.lock().await;
         let live = handler.clone();

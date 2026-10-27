@@ -198,7 +198,6 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
     assert!(agent.sessions().is_empty());
     agent.close().await.unwrap();
 
-    // Debug publication checks reject an owner returning with an unready child.
     if cfg!(debug_assertions) {
         for scope in [PartScope::Session, PartScope::Branch] {
             let mut b = builder();
@@ -218,7 +217,6 @@ async fn missing_dependency_and_undeclared_read_fail_before_session_publication(
             agent.close().await.unwrap();
         }
     }
-    // Scoped service reads are strict in every build.
     let mut undeclared = builder();
     test_extension_a::register_names(undeclared.catalog_mut());
     undeclared
@@ -283,7 +281,6 @@ fn owning_agent_can_close_or_drop_outside_the_runtime_enter_guard() {
     let session = runtime
         .block_on(agent.create_session(SessionConfig::default()))
         .unwrap();
-    // Construct the close future before entering block_on.
     let close = agent.close();
     runtime.block_on(close).unwrap();
     runtime.block_on(session.close()).unwrap();
@@ -354,8 +351,6 @@ async fn initialization_preserves_each_distinct_cleanup_failure_once() {
     let detail = format!("{error:?}");
     assert_eq!(cleanups.load(std::sync::atomic::Ordering::SeqCst), 3);
     assert_eq!(detail.matches("build-marker").count(), 1, "{detail}");
-    // Equal text from different disposers must survive; repeated observation of
-    // the very same failure through tree/root close must not multiply it.
     assert_eq!(detail.matches("cleanup-marker").count(), 3, "{detail}");
     assert!(agent.sessions().is_empty());
     agent.close().await.unwrap();
@@ -412,7 +407,6 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_fail_publica
         .await
         .unwrap();
     assert!(seen.load(std::sync::atomic::Ordering::SeqCst));
-    // The second Session reads the first Session's key: out of scope, not resolvable.
     let second = agent
         .create_session(SessionConfig::default())
         .await
@@ -422,7 +416,6 @@ async fn scoped_services_stay_inside_their_session_and_unkeyed_ones_fail_publica
     second.close().await.unwrap();
     agent.close().await.unwrap();
 
-    // Assembly validation runs in debug builds only.
     if !cfg!(debug_assertions) {
         return;
     }
@@ -478,12 +471,6 @@ async fn closed_session_and_branch_subtrees_leave_no_plugins_or_bindings() {
         let counts = (diagnostics.plugins.len(), diagnostics.bindings.len());
         assert_eq!(*baseline.get_or_insert(counts), counts, "round {round}");
     }
-    // What remains is the Agent's own: the root, its loader, the Agent
-    // instance with its anchor and process values, the row providing its
-    // registry and the 13 plugins of the profile's features; and the
-    // loader's service and its mounter of other languages' plugin
-    // definitions, the process ModelHost, and `partRegistry` at its type's
-    // key and, as a marked service, by name for other languages.
     assert_eq!(baseline, Some((19, 5)));
     agent.close().await.unwrap();
 }
@@ -555,8 +542,6 @@ async fn plugin_names_cannot_replace_other_capabilities_or_loader_groups() {
     .enumerate()
     {
         let installed = installed.clone();
-        // The feature and part names are the test's; the part's plugin name
-        // is the colliding one.
         let feature = format!("test.named-{i}");
         b.require_feature(Feature::new(feature.clone()).session(feature, move |_| {
             Ok(Box::new(NamedCapability {
@@ -590,9 +575,6 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-    // A required part's factory runs when an instance mounts it, once per
-    // Session: the Session whose copy fails to build is rejected, the ones
-    // before it are not.
     for panic_at in [0, 1] {
         let mut b = builder();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -623,7 +605,6 @@ async fn factory_and_extension_failures_reject_the_session_instead_of_omitting_c
             .await
             .err()
             .expect("a required factory failure rejects creation");
-        // The mounter's load fails with the factory's panic.
         assert!(error.to_string().contains("factory failure"), "{error}");
         assert_eq!(agent.sessions().len(), panic_at);
         agent.close().await.unwrap();
@@ -725,7 +706,6 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
     let mut b = builder();
     b.timeline_store(store);
     let catalog = b.catalog();
-    // A display-name collision must not change which row the builder requires.
     let pending = register_part(&mut builtins, catalog, |_| {
         Ok(Box::new(NamedCapability {
             name: "SessionScope",
@@ -755,7 +735,6 @@ async fn optional_loader_rows_do_not_block_create_restore_or_initial_input_and_c
         Ok(Box::new(AssemblyAnchor(send.clone())))
     })
     .unwrap();
-    // The features' plugins are this host's rows, as the App Server's are.
     let plugins = b.plugin_rows(&mut builtins).await.unwrap();
     let mut session_row = b.install(&mut builtins, []).await.unwrap();
     let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

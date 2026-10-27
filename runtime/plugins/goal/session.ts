@@ -65,7 +65,6 @@ export default definePlugin({
           if (op === 'edit') {
             input = changes.edit(branchId, objective)
           } else {
-            // The judge is per goal; `model` when the caller does not choose.
             const judge = call.params.judge ?? 'model'
             if (judge !== 'model' && judge !== 'evaluator') return invalid('judge must be "model" or "evaluator"')
             input = changes.set(branchId, objective, judge)
@@ -75,7 +74,6 @@ export default definePlugin({
         } else {
           return invalid(`unknown method ${call.method}`)
         }
-        // A native write failure propagates; Rpc maps it to the wire.
         const event = await tree.input(branchId, input)
         return { kind: 'value', value: { sequence: event.sequence } }
       },

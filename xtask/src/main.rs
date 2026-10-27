@@ -169,7 +169,6 @@ async fn graph() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let session = agent.create_session(config).await?;
     let session_diagnostics = session.diagnostics()?;
     let main_diagnostics = session.branch_diagnostics("main")?;
-    // Scoped keys carry the instance of the scope plugin's loader group.
     let instance = |d: &RuntimeDiagnostics, name: &str| {
         let scope = d
             .plugins

@@ -551,8 +551,6 @@ impl<'a> EventRef<'a> {
                     | crate::EventKind::PermissionChanged(_)
                     | crate::EventKind::ExecStarted(_)
                     | crate::EventKind::ExecEnded(_)
-                    // The frozen compaction form cannot carry the changed
-                    // record; the command and the start are new.
                     | crate::EventKind::ContextCompact(_)
                     | crate::EventKind::ContextCompactionStart(_)
                     | crate::EventKind::ContextCompaction(_)
@@ -564,7 +562,6 @@ impl<'a> EventRef<'a> {
                     matches!(data.source, crate::BranchSource::Tool { .. })
                 }
                 crate::EventKind::BranchStart(data) => data.parent.is_some(),
-                // Results closing undispatched calls have no frozen form (ADR agent-029).
                 crate::EventKind::ToolResult(data) => data.call_event_id.is_some(),
                 _ => true,
             };
@@ -812,7 +809,6 @@ impl Serialize for SharedEvent {
     }
 }
 
-// Version 1 exposes display content only; native continuation stays on the Timeline.
 fn strip_continuation(messages: &mut serde_json::Value) {
     for message in messages.as_array_mut().into_iter().flatten() {
         for part in message["content"].as_array_mut().into_iter().flatten() {

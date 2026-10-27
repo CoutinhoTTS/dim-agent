@@ -164,10 +164,6 @@ impl TimelineContext {
         let stop = this.stop.clone();
         let mut dispatcher = this.dispatcher.watch();
         let monitor = tokio::spawn(async move {
-            // Signals every change of what the status is read from: Loop's
-            // state channel, dispatch progress, and Loop leaving or returning
-            // on reload. Readers compare against what they last reported; the
-            // monitor keeps no status of its own.
             let mut phase: Option<watch::Receiver<LoopSnapshot>> = None;
             let mut signal = true;
             loop {
@@ -189,7 +185,6 @@ impl TimelineContext {
                     Some(rx) => {
                         tokio::select! {_=stop.cancelled()=>return,_=rx.changed()=>true,_=dispatcher.changed()=>true}
                     }
-                    // Loop is reloading: look for its successor again.
                     None => {
                         tokio::select! {_=stop.cancelled()=>return,_=dispatcher.changed()=>true,_=tokio::time::sleep(LOOP_RETURN_POLL)=>false}
                     }
@@ -250,7 +245,6 @@ impl TimelineContext {
         }
         let phase = match self.loop_state() {
             Ok(state) => state.state().phase,
-            // Closing unloads Loop with the rest of the subtree.
             Err(_) if lifecycle == BranchPhase::Closing => LoopPhase::Idle,
             Err(error) => return Err(error),
         };
@@ -314,8 +308,6 @@ impl TimelineContext {
     /// input whose submission id the branch already holds writes nothing and
     /// returns the committed input.
     pub(crate) async fn input(&self, data: InputMessageData) -> Result<Arc<AgentEvent>> {
-        // A dispatch defect is the root cause of any concurrent close: report
-        // it before the generic closed rejection so callers keep the context.
         if let Some(error) = self.dispatcher.failure() {
             return Err(error);
         }
@@ -386,9 +378,6 @@ impl TimelineContext {
             return Box::pin(async move { Err(AgentError::Closed(id)) });
         }
         let mut active = self.stop_operation.lock().unwrap();
-        // A stop joins the previous one while that one still covers the
-        // current turn: its interrupt is not yet dispatched, or Loop is still
-        // stopping. A turn started after it needs an interrupt of its own.
         let (operation, written) = match &*active {
             Some((operation, written))
                 if !operation.finished() && {
@@ -420,9 +409,6 @@ impl TimelineContext {
                 })
                 .await
             };
-            // Stop is an operation: its errors go to the caller. Only a defect
-            // in the stop itself (a caught panic) faults the branch; a write
-            // refused while the branch unloads or closes does not.
             if let Err(error @ AgentError::Fault { .. }) = &result
                 && !this.close.started()
             {
@@ -446,9 +432,6 @@ impl TimelineContext {
         if let Some(error) = self.dispatcher.failure() {
             return Err(error);
         }
-        // The sequence is recorded under the commit lock, before the
-        // interrupt can be dispatched, so a later stop never sees it unset
-        // once a turn after it has started.
         let interrupt = self.timeline.append_registered(
             EventKind::StopInterrupt(StopInterruptData { reason, scope }).into(),
             |event| {
@@ -467,10 +450,6 @@ impl TimelineContext {
         written: Option<&AtomicU64>,
     ) -> Result<u64> {
         let interrupt = self.commit_interrupt(reason, scope, written)?;
-        // Capabilities release their resources before writing cancellation
-        // terminals, and Loop closes the turn after those terminals. Once Loop
-        // has dispatched the interrupt and no longer stops a turn, the stopped
-        // turn has settled; input written afterwards may already run a new one.
         let mut dispatch = self.dispatcher.watch();
         let mut phase = self.loop_watch().await?;
         let mut settled_through = None;
@@ -483,9 +462,6 @@ impl TimelineContext {
                 && dispatched >= interrupt
                 && phase.borrow().phase != LoopPhase::Stopping
             {
-                // Loop can settle from committed events during reload, before
-                // their publication or dispatch. Capture that fence once,
-                // without chasing later turns.
                 settled_through = Some(self.timeline.committed());
             }
             if settled_through.is_some_and(|through| dispatched >= through) {
@@ -514,7 +490,6 @@ impl TimelineContext {
             if let Some(error) = self.dispatcher.failure() {
                 return Err(error);
             }
-            // rutis offers no signal for a service being provided again.
             tokio::time::sleep(LOOP_RETURN_POLL).await;
         }
     }
@@ -555,9 +530,6 @@ impl TimelineContext {
             let stopped = if unloading {
                 Ok(this.timeline.sequence())
             } else {
-                // An idle release may have frozen appends at its check and then
-                // lost the race to this close: the close settles the branch
-                // itself, so it reopens appends for its interrupt and terminals.
                 this.timeline.thaw();
                 guarded("timeline.stop", async {
                     this.stop_inner("timeline closed".into(), InterruptScope::Branch, None)
@@ -565,16 +537,11 @@ impl TimelineContext {
                 })
                 .await
             };
-            // A Loop reloading when the close started never returns to this
-            // branch: the interrupt is committed and nothing is left to wait
-            // for. Its unfinished turn settles as a reload does.
             let stopped = match stopped {
                 Err(AgentError::Closed(_)) if this.loop_state().is_err() => Ok(0),
                 stopped => stopped,
             };
             errors.extend(stopped.err());
-            // Business settlement has drained dispatchable work. Stop the driver
-            // before unloading subscribers, but keep storage open for finalizers.
             this.stop.cancel();
             let tasks = this.tasks.lock().unwrap().take();
             if let Some((driver, monitor)) = tasks {
@@ -585,8 +552,6 @@ impl TimelineContext {
                     errors.push(AgentError::fault("timeline monitor", error.to_string()));
                 }
             }
-            // An idle release froze appends at its check; with dispatch
-            // stopped, reopen them so finalizers can commit terminal facts.
             if unloading {
                 this.timeline.thaw();
             }
@@ -594,9 +559,6 @@ impl TimelineContext {
             if let Err(error) = crate::assembly::shutdown_scope(&this.view, &members).await {
                 errors.push(error);
             }
-            // Cleanup can enqueue terminal facts even after a handler failure.
-            // Closing now waits for every accepted write; storage faults still
-            // reject appends and propagate through this result.
             errors.extend(this.timeline.close().await.err());
             this.lifecycle.advance(BranchPhase::Closed);
             this.changed.send_replace(());

@@ -51,18 +51,14 @@ impl Mode {
     /// The sequence that turns the mode on.
     pub const fn enable_sequence(self) -> &'static [u8] {
         match self {
-            // flags 1 (disambiguate) | 4 (alternate keys)
             Self::KittyKeyboard => b"\x1b[>5u",
             Self::ModifyOtherKeys => b"\x1b[>4;2m",
             Self::BracketedPaste => b"\x1b[?2004h",
             Self::CursorHidden => b"\x1b[?25l",
-            // Each bar is the interface's: see `Terminal::report_progress`.
             Self::Progress => b"",
             Self::AltScreen => b"\x1b[?1049h",
             Self::Mouse => b"\x1b[?1002h\x1b[?1006h",
-            // Depends on the terminal: see `Terminal::set_title`.
             Self::Title => b"",
-            // Each report is the interface's: see `Terminal::report_status`.
             Self::Status => b"",
         }
     }
@@ -77,11 +73,7 @@ impl Mode {
             Self::Progress => b"\x1b]9;4;0\x07",
             Self::AltScreen => b"\x1b[?1049l",
             Self::Mouse => b"\x1b[?1006l\x1b[?1002l",
-            // Clear, then pop: a terminal with a title stack gets the shell's
-            // title back, one without (Apple Terminal) shows its default.
             Self::Title => b"\x1b]2;\x07\x1b[23;0t",
-            // Without an id the clear removes every record of the terminal,
-            // which are only ours while we run.
             Self::Status => b"\x1b]7501;state=clear\x1b\\",
         }
     }
@@ -119,9 +111,6 @@ pub const MAX_RESTORE_LEN: usize = 128;
 /// a CRLF so the shell prompt starts on a fresh line.
 pub fn restore_into(live: u16, out: &mut [u8; MAX_RESTORE_LEN]) -> usize {
     let mut len = 0;
-    // A signal can land inside a synchronized frame or mid-SGR: close the
-    // synchronized update (the terminal would otherwise hold its display) and
-    // drop any styling before the shell prompt appears.
     const PREAMBLE: &[u8] = b"\x1b[?2026l\x1b[0m";
     let mut put = |bytes: &[u8], out: &mut [u8; MAX_RESTORE_LEN]| {
         out[len..len + bytes.len()].copy_from_slice(bytes);
@@ -190,6 +179,17 @@ mod tests {
         assert_eq!(
             restore(&[Mode::Status]),
             b"\x1b[?2026l\x1b[0m\x1b]7501;state=clear\x1b\\\x1b[?2004l\x1b[?25h\r\n".to_vec()
+        );
+    }
+
+    /// A terminal with a title stack gets the shell's title back only when
+    /// the program's title is cleared before the stack is popped; popping
+    /// first would erase the restored title.
+    #[test]
+    fn a_title_restore_clears_before_it_pops() {
+        assert_eq!(
+            restore(&[Mode::Title]),
+            b"\x1b[?2026l\x1b[0m\x1b]2;\x07\x1b[23;0t\x1b[?2004l\x1b[?25h\r\n".to_vec()
         );
     }
 

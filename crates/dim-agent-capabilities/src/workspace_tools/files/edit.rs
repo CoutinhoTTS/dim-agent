@@ -188,15 +188,12 @@ fn edit_locked(
         Ok(Err(NotRegular)) => return done(not_regular(display)),
         Err(error) => return done(read_failure(error)),
     };
-    // Without a binding the content is never needed.
     let Some(binding) = established else {
         return done(failed(
             "Read the file before editing it so its encoding and line endings can be preserved.",
             json!({ "code": "text_binding_required" }),
         ));
     };
-    // The file may have grown since the stat: the limit applies to the bytes
-    // actually read, and reading stops one byte past it.
     let mut bytes = Vec::with_capacity(size as usize);
     let mut limited = file.take(EDIT_TARGET_MAX_BYTES + 1);
     let mut chunk = vec![0; READ_CHUNK_BYTES];
@@ -517,7 +514,6 @@ fn detect_local_eol(text: &str) -> Option<Eol> {
 
 fn nearest_eol(text: &str, start: usize, end: usize) -> Option<Eol> {
     let bytes = text.as_bytes();
-    // JS `lastIndexOf("\n", max(0, start - 1))` searches at or before that index.
     let before_end = (start.saturating_sub(1) + 1).min(bytes.len());
     let previous = bytes[..before_end].iter().rposition(|byte| *byte == b'\n');
     let next = bytes

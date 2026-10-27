@@ -79,7 +79,6 @@ export const useChatStore = defineStore("chat", () => {
     const { view, projection } = channel
     channel.syncing = true
     channel.queued = []
-    // The server replays the approvals still pending when it attaches.
     view.approvals = []
     try {
       await client().call("session.attach", { sessionId: view.sessionId }, readAck)
@@ -105,7 +104,6 @@ export const useChatStore = defineStore("chat", () => {
       view.status = "ready"
       view.error = ""
     } catch (error) {
-      // A lost connection retries on reconnect; anything else is shown.
       if (error instanceof RpcError && error.appError === "session_closed") view.status = "closed"
       else if (!(error instanceof ConnectionLost)) {
         view.status = "failed"
@@ -151,7 +149,6 @@ export const useChatStore = defineStore("chat", () => {
         useSessionsStore().setRunning(view.sessionId, notification.running)
         break
       case "approval.request":
-        // A replayed request may repeat one already shown.
         if (!view.approvals.some((approval) => approval.requestId === notification.request.requestId)) {
           view.approvals = [...view.approvals, notification.request]
         }

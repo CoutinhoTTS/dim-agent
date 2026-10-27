@@ -56,7 +56,6 @@ impl rutis::host::DynPlugin for OwnerPlugin {
     ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
         Box::pin(async move {
             let identity = ctx.require_at(&self.identity)?;
-            // Removed with this plugin's context.
             let owner = Owner {
                 ctx: ctx.clone(),
                 session_id: identity.session_id.clone(),
@@ -124,7 +123,6 @@ async fn an_owner_notice_follows_its_observed_event_to_v3_clients_only() {
         let mut ws = Client::new_version(&server, true, 3).await;
         let mut legacy = Client::new_version(&server, false, 2).await;
         let sid = attached_submit(&mut [&mut ipc, &mut ws]).await;
-        // A Session belongs to one protocol version: v2 observes its own.
         let legacy_sid = attached_submit(&mut [&mut legacy]).await;
         for client in [&mut ipc, &mut ws] {
             let seen = delivered(client, &sid).await;
@@ -157,8 +155,6 @@ async fn an_owner_notice_follows_its_observed_event_to_v3_clients_only() {
                 })
             );
         }
-        // The owner announces this Session's change too; v2 receives the
-        // events and no notice.
         let seen = delivered(&mut legacy, &legacy_sid).await;
         assert!(seen.iter().any(|value| value["method"] == "session.event"
             && value["params"]["event"]["name"] == "applied"));
@@ -209,14 +205,12 @@ async fn notices_without_a_listener_are_dropped_and_never_replayed() {
             server.notify(&sid, notice("attached"));
             next_notice(&mut client, &sid, "attached").await;
 
-            // Loaded, but nobody observes the Session.
             assert_ok(&client.rpc("session.detach", attach.clone()).await);
             server.notify(&sid, notice("detached"));
             assert_ok(&client.rpc("session.attach", attach.clone()).await);
             server.notify(&sid, notice("reattached"));
             next_notice(&mut client, &sid, "reattached").await;
 
-            // Stored but not loaded; the attach restores it.
             assert_ok(&client.rpc("session.detach", attach.clone()).await);
             super::collaboration::unload(&agent, &sid).await;
             server.notify(&sid, notice("unloaded"));
@@ -224,8 +218,6 @@ async fn notices_without_a_listener_are_dropped_and_never_replayed() {
             server.notify(&sid, notice("restored"));
             next_notice(&mut client, &sid, "restored").await;
 
-            // The close reply follows `Closed`, so this notice follows it on
-            // the channel; the subscription ends with `session.closed`.
             assert_ok(&client.rpc("session.close", attach).await);
             server.notify(&sid, notice("closed"));
             client.notice("session.closed").await;

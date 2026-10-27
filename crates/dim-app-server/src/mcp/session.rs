@@ -162,7 +162,6 @@ impl McpSession {
         }
     }
 }
-// The public management service must not expose executable handlers.
 struct Sources(Arc<McpSession>);
 impl ToolProvider for Sources {
     fn sets(&self) -> Vec<Arc<ToolSourceSet>> {
@@ -213,7 +212,6 @@ impl DynPlugin for McpSessionPlugin {
             let session = ctx.require_at(&self.lifecycle)?;
             let tools = ctx.require_at(&self.tools)?;
             let project = directory.settings.project_root(Path::new(&config.cwd));
-            // Subscribe before any file reads, including the first discovery.
             let settings = super::config::settings_changes(ctx)?;
             let applied = directory.publication.applied();
             let stopped = ctx.cancellation_token();
@@ -236,30 +234,19 @@ impl DynPlugin for McpSessionPlugin {
             let cleanup = owner.clone();
             let drain = tasks.clone();
             let publication = directory.publication.clone();
-            ctx.effect(move || {
-                async move {
-                    drain.close();
-                    drain.wait().await;
-                    // The registration is withdrawn before this runs;
-                    // shutdown needs no change notice.
-                    cleanup.sets.lock().unwrap().clear();
-                    cleanup.state.set(McpSessionState {
-                        closed: true,
-                        ..Default::default()
-                    });
-                    // Wake eligibility bookkeeping even when stale bindings
-                    // keep every lease alive. Never await the coordinator:
-                    // Session tree disposal already owns these instances.
-                    publication.refresh();
-                    Ok(())
-                }
+            ctx.effect(move || async move {
+                drain.close();
+                drain.wait().await;
+                cleanup.sets.lock().unwrap().clear();
+                cleanup.state.set(McpSessionState {
+                    closed: true,
+                    ..Default::default()
+                });
+                publication.refresh();
+                Ok(())
             })?;
             ctx.provide_at(self.mcp.clone(), owner.clone())?;
             tools.register_source(ctx, "mcp", Arc::new(Sources(owner.clone())))?;
-            // No network await in apply, and all owned resources have a disposer.
-            // Discovery creates Session-owned instances and may start servers,
-            // so it waits for publication; an unpublished Session never starts it,
-            // and it ends when the Session starts closing.
             let workers = tasks.clone();
             tasks.spawn(async move {
                 tokio::select! {
@@ -312,8 +299,6 @@ async fn reconcile(
                 owner.state.update(|state| state.catalog_error = None);
                 let entries = catalog.servers;
                 active.retain(|id, (entry, cancel)| {
-                    // A cancelled discovery ended with its entry withdrawn;
-                    // this read selects the entry again.
                     let keep = !force
                         && !cancel.is_cancelled()
                         && entries.get(id).is_some_and(|next| {
@@ -321,8 +306,6 @@ async fn reconcile(
                         });
                     if !keep {
                         cancel.cancel();
-                        // Keep a complete old set until a replacement is ready or
-                        // fails. A deletion/disable, unlike refresh, withdraws now.
                         if !entries.get(id).is_some_and(McpServerEntry::enabled) {
                             owner.remove(id);
                         }
@@ -352,8 +335,6 @@ async fn reconcile(
                 }
             }
             Err(error) => {
-                // A failed read supplies no new configuration intent. Keep the
-                // last accepted sources and their live connection subscriptions.
                 owner
                     .state
                     .update(|state| state.catalog_error = Some(error.to_string()));
@@ -422,13 +403,11 @@ async fn discover(
                             _ = cancel.cancelled() => return Ok(()),
                             result = state.changed() => { if result.is_err() { return Err(McpError::Unavailable); } },
                             result = changed.changed() => { if result.is_err() { return Err(McpError::Unavailable); } continue 'discover; },
-                            // Another Session expired or signed out the key.
                             usable = credential_change(credential.as_mut()) => { if !usable? { continue 'discover; } },
                         }
                     }
                 }
             };
-            // Without tools until the credential changes, then rediscover.
             if let Some(expired) = refused {
                 owner.publish(&id, None, McpSourceState::AuthRequired { expired }, &cancel);
                 previous = None;
@@ -440,10 +419,6 @@ async fn discover(
             }
         }
     }.await;
-    // A generation retired because its entry was disabled or removed, even
-    // while the source is unreadable, reports the entry as disabled. The
-    // discovery then marks itself ended, so the next read selects the entry
-    // again, for example once it is re-enabled.
     let withdrawn = lease.take().is_some_and(|lease| lease.withdrawn());
     match result {
         Ok(()) => {}
@@ -483,8 +458,6 @@ pub(super) fn contribution(
     connection: Arc<McpConnection>,
     stopped: CancellationToken,
 ) -> Arc<ToolContribution> {
-    // Length-delimited identity avoids ambiguous concatenations. A full digest
-    // keeps punctuation, long names and Unicode distinct after label sanitizing.
     let mut hash = Sha256::new();
     hash.update((id.len() as u64).to_be_bytes());
     hash.update(id.as_bytes());
@@ -545,8 +518,6 @@ impl ToolHandler for McpToolHandler {
                 _ = self.stopped.cancelled() => { cancel.cancel(); operation.await },
                 result = &mut operation => result,
             };
-            // Authorization failures are fixed text: no URL, token or issuer
-            // reaches the model (design §8).
             let server = &self.server;
             let refused = |text: String| {
                 Ok(ToolResult {

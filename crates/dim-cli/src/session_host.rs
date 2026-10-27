@@ -253,8 +253,6 @@ async fn run(
     mut commands: UnboundedReceiver<Command>,
     updates: mpsc::Sender<Update>,
 ) {
-    // The channel's newest version, once per start; the answer opens the
-    // update dialog and a failure is nothing, so the session never waits.
     if update::enabled() {
         let offers = updates.clone();
         let home = options.home.clone();
@@ -297,10 +295,6 @@ async fn run(
             let _ = updates.send(Update::Failed(error.to_string()));
             return;
         }
-        // A new session can still start once `/login` or `/models` gives
-        // it a usable model; until then the interface stays up. No model
-        // to choose from is the ordinary state before signing in, so only
-        // the hint shows; any other failure keeps its reason.
         let notice = match error.downcast_ref::<client::RpcError>().and_then(app_error) {
             Some("provider_failed") => NO_SESSION.to_owned(),
             _ => format!("{error}. {NO_SESSION}"),
@@ -360,12 +354,8 @@ async fn run(
                 },
             _ = tokio::time::sleep_until(login_poll.unwrap_or_else(tokio::time::Instant::now)),
                 if login_poll.is_some() => worker.poll_login().await,
-            // The next pass sends the due status read.
             _ = tokio::time::sleep_until(workflow_poll.unwrap_or_else(tokio::time::Instant::now)),
                 if workflow_poll.is_some() => {},
-            // The deadline is set by the first change and kept: a sleep made
-            // afresh on every pass would restart with each event and hold the
-            // snapshot back until the stream paused.
             _ = tokio::time::sleep_until(worker.publish_at.unwrap_or_else(tokio::time::Instant::now)),
                 if worker.publish_at.is_some() => worker.publish(),
         }
@@ -514,8 +504,6 @@ impl Worker {
         kind: SwitchKind,
         attached_session: String,
     ) -> crate::Result<()> {
-        // A resumed Session takes the chosen preset before anything runs
-        // under its old one, as `--permission` does in the line client.
         if let (SwitchKind::Resumed, Some(preset)) = (kind, self.options.permission)
             && self.client.supports(&permission::PRESET_METHODS)
             && let Err(error) = permission::select(&mut self.client, &session_id, preset).await
@@ -524,8 +512,6 @@ impl Worker {
                 "The permission preset was not applied: {error}"
             )));
         }
-        // Leaving a Session detaches from it, which also ends this
-        // interface's registration there; the Session itself keeps running.
         if !attached_session.is_empty() && attached_session != session_id {
             self.client
                 .rpc("session.detach", json!({"sessionId": attached_session}))
@@ -625,8 +611,6 @@ impl Worker {
     }
 
     async fn list(&mut self) -> crate::Result<Vec<SessionSummary>> {
-        // Only the summaries carry the preview and update time the picker
-        // shows; the reply is the bare list.
         self.client.typed("session.summaries", json!({})).await
     }
 
@@ -786,8 +770,6 @@ impl Worker {
             }
             Command::ListSessions => {
                 let sessions = self.list().await.map(|mut sessions| {
-                    // The daemon lists in no particular order; the picker
-                    // shows the most recent first.
                     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
                     sessions
                         .into_iter()
@@ -818,8 +800,6 @@ impl Worker {
                         let browser = state.enabled
                             && state.open
                             && url.as_deref().is_some_and(crate::browser::open);
-                        // The sign-in link carries the token; show it only
-                        // when no browser took it, as `dimcode web` does.
                         state.url = (state.enabled && state.open && !browser)
                             .then_some(url)
                             .flatten();
@@ -918,7 +898,6 @@ impl Worker {
                 let providers = self.providers().await;
                 self.send(Update::ProviderResult { result, providers });
             }
-            // Codex and Grok keep their native sign-in, not offered here yet.
             Command::OauthStart(start)
                 if !matches!(start.provider_id.as_str(), "openai-codex" | "grok-build") =>
             {
@@ -929,7 +908,6 @@ impl Worker {
                 event: OauthEvent::Done(Err(Some(format!("Sign-in is {UNAVAILABLE}")))),
             }),
             Command::OauthCancel => self.login_cancel().await,
-            // Installing runs beside the session; the dialog hears the end.
             Command::UpgradeInstall(install) => {
                 let updates = self.updates.clone();
                 tokio::spawn(async move {
@@ -968,7 +946,6 @@ impl Worker {
                     Ok(_) => "Signed out of DimAgent.".into(),
                     Err(error) => format!("Sign-out failed: {error}"),
                 }));
-                // An open `/login` panel follows the account.
                 let account = self
                     .account(&provider_id)
                     .await
@@ -994,8 +971,6 @@ impl Worker {
                     "command": command,
                     "mode": if private { "private" } else { "record" },
                 });
-                // Not awaited: the reply comes once the command ends, and
-                // other commands keep going meanwhile.
                 match self.client.send("shell.run", params).await {
                     Ok(id) => self.shell = Some((id, run_id)),
                     Err(error) => self.send(Update::ShellDone {
@@ -1127,9 +1102,6 @@ impl Worker {
                 self.report_failure(result);
             }
             Command::InputControl { input_id, action } => {
-                // InputQueue withdraws a message it still holds; with
-                // `steer` it re-submits the content in the same batch, so
-                // the message is never lost between the two.
                 let mut params = json!({
                     "sessionId": self.session_id,
                     "branchId": "main",
@@ -1168,7 +1140,6 @@ impl Worker {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct ContextUsage {
-            // Token counts travel as JSON numbers that may carry a fraction.
             context_window: f64,
             output_tokens: f64,
             threshold_tokens: f64,
@@ -1191,8 +1162,6 @@ impl Worker {
                         "Context usage needs the model's capabilities; select the model again"
                             .into()
                     }
-                    // An explicit --model-config adopts no capability
-                    // snapshot, so the daemon has no context policy.
                     Some("unknown_method") => {
                         "Context usage is not tracked for an explicit model configuration".into()
                     }
@@ -1242,8 +1211,6 @@ impl Worker {
             return;
         }
         let mut params = json!({"sessionId": self.session_id, "kind": "tui"});
-        // A hosted leaf `Tui` registers as its leaf; an ordinary terminal
-        // has no identity and registers its connection.
         if let Some(identity) = &self.options.ui_identity {
             params["uiId"] = json!(identity.ui_id);
             params["token"] = json!(identity.token);
@@ -1334,8 +1301,6 @@ impl Worker {
             "approval.request" => {
                 let notice: ApprovalNotice = serde_json::from_value(params)?;
                 if notice.session_id == self.session_id {
-                    // "Always" is offered for a simple command when the
-                    // daemon keeps command rules.
                     let always = self
                         .client
                         .supports(&permission::RULE_METHODS)
@@ -1627,8 +1592,6 @@ impl Worker {
                 enabled: summary.enabled,
                 custom: summary.source == "custom",
                 base_url: Some(summary.base_url).filter(|url| !url.is_empty()),
-                // The App Server never returns a credential; a saved key
-                // shows as a mask.
                 api_key_preview: summary.credential_configured.then(|| "••••••••".into()),
                 id: summary.provider_id,
                 version: summary.version,
@@ -1821,7 +1784,6 @@ impl Worker {
             .filter(|provider| provider.enabled)
             .map(|provider| (provider.provider_id, provider.display_name))
             .collect();
-        // Without an account plugin there are no managed providers.
         let managed: Vec<Managed> = self
             .client
             .typed("account.providers", json!({}))
@@ -1944,7 +1906,6 @@ impl Worker {
             self.send(features);
             updated.model
         };
-        // The switch stands even when the default cannot be saved.
         if let Err(error) = self.make_default(&model).await {
             self.send(Update::Notice(format!(
                 "The model was not saved as the default: {error}"
@@ -1966,7 +1927,6 @@ impl Worker {
         }
         let current: Current = self.client.typed("provider.selection", json!({})).await?;
         let mut params = json!({"providerId": model.provider_id, "modelId": model.model_id});
-        // The first default has no version; the field takes no null.
         if let Some(selection) = current.selection {
             params["expectedVersion"] = json!(selection.version);
         }
@@ -2384,7 +2344,6 @@ impl Worker {
             let (_, run_id) = self.shell.take().expect("shell run");
             let result = result
                 .map_err(|error| match app_error(&error) {
-                    // The wait ended, not necessarily the run.
                     Some("operation_interrupted") => {
                         format!("{error}; the command may still be running")
                     }
@@ -2411,7 +2370,6 @@ impl Worker {
         {
             self.model = Some(configuration.clone());
         }
-        // A change from any client, including this one's /approvals.
         if branch_id == "main"
             && let EventContent::PermissionChanged(data) = &event.content
         {

@@ -114,7 +114,6 @@ async fn compact(branch: &Branch, cancel: &CancellationToken) -> Result<Value, R
                     return Err(RpcError::closed());
                 }
             }
-            // The unload's interrupted reply has already been handed over.
             _ = cancel.cancelled() => return Err(RpcError::interrupted()),
         }
     }

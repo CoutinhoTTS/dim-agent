@@ -44,7 +44,6 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
             .contains(&json!("ui.leaf"))
     );
     let session_id = attached_session(&mut first).await;
-    // A leaf that is not there is refused, and nothing is registered.
     let missing = first
         .rpc(
             "ui.open",
@@ -56,7 +55,6 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
         "{missing}"
     );
 
-    // Registering needs the attachment; then it is idempotent.
     let unattached = first
         .rpc("ui.attach", json!({"sessionId":"missing","kind":"tui"}))
         .await;
@@ -74,7 +72,6 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
         .await;
     assert_eq!(again["result"]["uiId"], ui_id);
 
-    // A second viewer of the same Session is just another registration.
     let mut second = Client::new_version(&server, false, 3).await;
     assert_ok(
         &second
@@ -98,8 +95,6 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
     );
     assert_eq!(status["result"]["webConnections"], 0);
 
-    // Asking the first to leave reaches the first connection only; the
-    // Session is untouched and the second viewer stays.
     assert_ok(
         &second
             .rpc(
@@ -128,8 +123,6 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
         "ui_unknown"
     );
 
-    // Replacing: the caller registers and the old interface is asked to
-    // leave; a vanished old interface does not undo the new registration.
     let mut third = Client::new_version(&server, false, 3).await;
     assert_ok(
         &third
@@ -164,7 +157,6 @@ async fn interfaces_register_any_number_per_session_and_leave_on_request() {
             .any(|i| i["uiId"] == replaced["result"]["uiId"])
     );
 
-    // The registry is managed from local connections only.
     let mut bare = Client::new_version(&server, true, 3).await;
     assert_eq!(
         bare.rpc("ui.status", json!({})).await["error"]["data"]["appError"],
@@ -194,7 +186,6 @@ async fn a_registration_leaves_when_its_session_is_detached_or_closed() {
             .collect()
     };
 
-    // Detaching ends this connection's registration on that Session only.
     assert_ok(
         &client
             .rpc("session.detach", json!({"sessionId": first}))
@@ -203,7 +194,6 @@ async fn a_registration_leaves_when_its_session_is_detached_or_closed() {
     let status = client.rpc("ui.status", json!({})).await;
     assert_eq!(registered(&status), std::slice::from_ref(&second));
 
-    // A closed Session takes its viewers' registrations with it.
     assert_ok(
         &client
             .rpc("session.close", json!({"sessionId": second}))
@@ -496,8 +486,6 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
         params
     };
 
-    // Hosting: `ui.open` settles once the leaf's `Tui` is loaded; it is
-    // online when that `Tui` attached.
     let (first, host, features) = FakeLeaf::unhosted(&server).await;
     let opened = {
         let mut state = host.link_state().unwrap();
@@ -525,7 +513,6 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
     })
     .await;
 
-    // Configuration is checked at the boundary.
     let mut other = Client::new_version(&server, false, 3).await;
     assert_ok(
         &other
@@ -547,8 +534,6 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
         "{generation_alone}"
     );
 
-    // Two replacements observing the same generation: exactly one wins and
-    // the old leaf's `Tui` is unloaded.
     let generation = opened["result"]["generation"].clone();
     let (a, b) = (
         FakeLeaf::start(&server).await,
@@ -582,8 +567,6 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
     })
     .await;
 
-    // A failed replacement leaves the old leaf and releases its claim: a
-    // later replacement still wins.
     let failed = client
         .rpc(
             "ui.open",
@@ -604,7 +587,6 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
     );
     assert_eq!(winner.unloaded.load(Ordering::SeqCst), 1);
 
-    // A leaf whose process ends leaves the registry with its link.
     let third_id = third.peer.clone();
     eventually(&mut client, |s| {
         s == [(third_id.clone(), "online".to_owned())]
@@ -613,7 +595,6 @@ async fn the_daemon_hosts_replaces_and_closes_leaf_nodes() {
     third.exit().await;
     eventually(&mut client, |s| s.is_empty()).await;
 
-    // `ui.close` unloads the hosted `Tui` and removes the registration.
     let fourth = FakeLeaf::start(&server).await;
     assert_ok(&client.rpc("ui.open", open(&fourth, json!({}))).await);
     assert_ok(&client.rpc("ui.close", json!({"uiId": fourth.peer})).await);

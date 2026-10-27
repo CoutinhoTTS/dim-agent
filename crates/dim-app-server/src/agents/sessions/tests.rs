@@ -80,8 +80,6 @@ async fn typed_input_retains_admitted_io_and_accepts_each_submission_once() {
     assert_eq!(waiting.submission_id, "settlement:typed:dropped");
     call.abort();
     assert!(call.await.unwrap_err().is_cancelled());
-    // A resubmission while the first write is still unpublished writes
-    // nothing and replies its receipt once it is published.
     let resubmitted = tokio::spawn({
         let index = server.root.get::<AgentIndex>().unwrap();
         let request = write("settlement:typed:dropped");
@@ -120,13 +118,11 @@ async fn typed_input_retains_admitted_io_and_accepts_each_submission_once() {
         (input_id.as_str(), sequence),
         (receipt.input_id.as_str(), receipt.sequence)
     );
-    // After publication too, a resubmission replies the first receipt.
     let again = index
         .input(write("settlement:typed:dropped"))
         .await
         .unwrap();
     assert_eq!((again.input_id, again.sequence), (input_id, sequence));
-    // Concurrent submissions with one id write one input and share its receipt.
     let (one, two) = tokio::join!(
         index.input(write("test:concurrent")),
         index.input(write("test:concurrent"))

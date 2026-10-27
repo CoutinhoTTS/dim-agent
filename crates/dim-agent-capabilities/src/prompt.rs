@@ -229,7 +229,6 @@ impl Prompt {
                 self.host.0.load(target.clone(), cancel.clone())
             }))
             .map_err(defect)?;
-            // Cancellation only signals the host. Once constructed, its future is always joined.
             let value = AssertUnwindSafe(future)
                 .catch_unwind()
                 .await
@@ -314,7 +313,6 @@ impl Prompt {
         let owner = self.clone();
         let id = id.to_owned();
         self.tasks.spawn(async move {
-            // A started load settles through its own cancellation.
             let result = if cancel.is_cancelled() {
                 Err(AgentError::Cancelled("prompt load".into()))
             } else if let Some(loaded) = loaded {
@@ -422,8 +420,6 @@ impl Prompt {
     fn schedule_adoption(self: &Arc<Self>, event: Arc<AgentEvent>) -> Result<()> {
         match self.adoption.send(Adoption::Event(event)) {
             Ok(()) => Ok(()),
-            // Unloading: the adoption task is gone and its operations settle
-            // through the disposer, not as a dispatch fault.
             Err(_) if self.lifecycle.is_cancelled() => Ok(()),
             Err(_) => Err(AgentError::Closed("Prompt".into())),
         }
@@ -519,8 +515,6 @@ impl Prompt {
                     .pending
                     .get_mut(id)
                     .expect("valid pending adoption")
-                    // Settled once this Prompt has consumed its own
-                    // events; the rule input is Loop's to consume.
                     .waiting_through = events
                     .iter()
                     .rev()
@@ -764,18 +758,14 @@ impl DynPlugin for PromptPlugin {
                     .catch_unwind()
                     .await
                     .unwrap_or_else(|panic| Err(AgentError::fault("Prompt", panic_message(panic))));
-                    if let Err(error) = &result {
-                        // A cold-read failure belongs to this adoption. The
-                        // Timeline itself reports failed durable commits.
-                        if !matches!(error, AgentError::Storage(_)) {
-                            owner.faults.report(error.clone());
-                        }
+                    if let Err(error) = &result
+                        && !matches!(error, AgentError::Storage(_))
+                    {
+                        owner.faults.report(error.clone());
                     }
                 }
             });
 
-            // Subscribe, then read the snapshot under the gate: handlers skip
-            // what the snapshot covers and miss nothing dispatched meanwhile.
             let state = Arc::new(StateCell::new(PromptSnapshot::default()));
             let gate = Arc::new(tokio::sync::Mutex::new(0u64));
             let mut projecting = gate.lock().await;
@@ -853,8 +843,6 @@ impl DynPlugin for PromptPlugin {
                                 }
                             }
                         }
-                        // The branch takes input only after this dispatch:
-                        // what the sources hold now precedes every input.
                         if matches!(
                             event.kind,
                             EventKind::BranchStart(_) | EventKind::BranchResume(_)
@@ -911,8 +899,6 @@ impl Prompt {
         let Some(initial) = self.initial.get() else {
             return Ok(());
         };
-        // A new Session adopts everything; a child or a resumed branch keeps
-        // its system prompt, which changes only by explicit configuration.
         let new_session = matches!(
             &event.kind,
             EventKind::BranchStart(BranchStartData { parent: None, .. })

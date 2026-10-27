@@ -54,6 +54,12 @@ builder (`AgentBuilder::plugin`), and an Agent that places itself mounts them in
 registry belongs to a placement: an Agent that places itself mounts only the parts its own plugins
 register, so two Agents built from one builder do not mount each other's parts.
 
+**Isolation labels.** A label that separates rows is numbered by one process-wide counter, not one per
+loader or builder. A per-builder counter restarts at 1, so two Agents built from one builder isolate
+their values under the same label, and generated descriptions of the assembly change between runs. A
+label derived per loader lets two Agents sharing a host give their loader, part registry and language
+mounter one label, so they mount each other's parts. Numbering in the process prevents both.
+
 **Mounting.** Every Session and branch instance holds two mounter rows, the only rows of its group
 besides the scope's own mechanisms.
 
@@ -68,7 +74,10 @@ besides the scope's own mechanisms.
     opens to the instance's creation, which lets them settle before publishing, as it does its
     optional rows. A failed or Pending optional part stays local.
 - While the instance is open, the mounters follow the registry: they mount a new registration and
-  unmount a withdrawn one. A withdrawal finishes when every instance has unloaded its copy.
+  unmount a withdrawn one. A withdrawal finishes when every instance has unloaded its copy. A
+  registration that arrives after publication and fails to build is logged and leaves the live
+  instance alone; failing the instance instead would tear down a published Session or branch because
+  one plugin registered a broken part.
 - The instance closes its mounted parts with itself, through rutis's ownership of children.
 
 **What a plugin registers.**

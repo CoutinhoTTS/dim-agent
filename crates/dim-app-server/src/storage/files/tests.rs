@@ -67,7 +67,6 @@ impl Fixture {
             .unwrap();
         let db = SqliteStorage::open(home.join("dimcode.sqlite")).unwrap();
         let timeline = SqliteTimelineStore::new(db.clone());
-        // Without `start`, nothing sweeps behind the test's back.
         let files = SessionFiles::new(db.clone(), root.clone(), 0, Arc::new(Notify::new()));
         Self {
             home,
@@ -167,7 +166,6 @@ async fn a_fork_shares_files_until_their_last_owner_is_released() {
         .unwrap();
     assert_eq!(fixture.rows(), [format!("{}|-|2", stored.file_id)]);
 
-    // Releasing the source keeps the fork's file, with the same identity.
     fixture.timeline.rollback_session("source").await.unwrap();
     assert!(fixture.files.0.sweep().await);
     assert_eq!(fixture.rows(), [format!("{}|-|1", stored.file_id)]);
@@ -175,8 +173,6 @@ async fn a_fork_shares_files_until_their_last_owner_is_released() {
     assert_eq!(std::fs::read(&stored.path).unwrap(), b"pasted");
     assert_eq!(fixture.entries(), std::slice::from_ref(&stored.file_id));
 
-    // Releasing the last owner leaves the file unowned, and the sweep
-    // removes its directory and then its row.
     fixture.timeline.rollback_session("fork").await.unwrap();
     assert_eq!(fixture.rows(), [format!("{}|-|0", stored.file_id)]);
     assert!(fixture.files.0.sweep().await);
@@ -193,7 +189,6 @@ async fn puts_ended_before_txn_2_are_abandoned_and_swept() {
     let fixture = Fixture::new().await;
     let database = fixture.home.join("dimcode.sqlite");
 
-    // The Session is deleted between the write and txn 2.
     fixture.session("put-deleted").await;
     on_commit("put-deleted", {
         let database = database.clone();
@@ -214,7 +209,6 @@ async fn puts_ended_before_txn_2_are_abandoned_and_swept() {
         Err(SessionFileErrorCode::NotFound)
     );
 
-    // The caller cancels between the write and txn 2.
     fixture.session("cancelled").await;
     let cancel = CancellationToken::new();
     on_commit("cancelled", {
@@ -226,7 +220,6 @@ async fn puts_ended_before_txn_2_are_abandoned_and_swept() {
         Err(SessionFileErrorCode::Cancelled)
     );
 
-    // A later generation's sweep claims the pending row first.
     fixture.session("claimed").await;
     on_commit("claimed", move || {
         Connection::open(database)
@@ -242,7 +235,6 @@ async fn puts_ended_before_txn_2_are_abandoned_and_swept() {
         Err(SessionFileErrorCode::Cancelled)
     );
 
-    // Each file was written, and none is owned or pending.
     let rows = fixture.rows();
     assert_eq!(rows.len(), 3);
     assert!(rows.iter().all(|row| row.ends_with("|-|0")), "{rows:?}");
@@ -289,7 +281,6 @@ async fn an_interrupted_delete_converges_on_retry_and_the_next_sweep() {
             .unwrap()
     };
 
-    // Stopped after the removal: every row stays, the output is gone.
     STOP_AFTER_OUTPUT.lock().unwrap().push("deleted".into());
     assert!(store.delete_session("deleted").await.is_err());
     assert_eq!(sessions(), ["deleted", "deleted", "kept", "kept"]);
@@ -301,18 +292,15 @@ async fn an_interrupted_delete_converges_on_retry_and_the_next_sweep() {
         .await
         .expect("the Session still loads without its output");
 
-    // The retry removes every row; the released file waits for a sweep.
     assert!(store.delete_session("deleted").await.unwrap());
     assert_eq!(sessions(), ["kept", "kept"]);
     assert_eq!(fixture.rows(), [format!("{}|-|0", stored.file_id)]);
     assert_eq!(fixture.entries(), std::slice::from_ref(&stored.file_id));
     assert!(output("kept").exists());
-    // Deleting it again, or an unknown id, finds nothing to remove.
     assert!(!store.delete_session("deleted").await.unwrap());
     assert!(!store.delete_session("unknown").await.unwrap());
     assert_eq!(sessions(), ["kept", "kept"]);
 
-    // The next generation's first put sweeps what the delete released.
     let next = SessionFiles::new(
         fixture.db.clone(),
         fixture.root.clone(),

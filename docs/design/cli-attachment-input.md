@@ -163,8 +163,11 @@ If the OS clipboard component is unavailable, show that error and keep the draft
 copying does not provide an image/file clipboard-read channel.
 
 macOS uses AppKit's pasteboard; Windows uses Win32 clipboard formats. Linux uses `wl-paste`
-when `WAYLAND_DISPLAY` is set and otherwise `xclip` with the CLIPBOARD selection. These Linux
-utilities must be installed on the CLI's machine; they are not bundled or installed automatically.
+when `WAYLAND_DISPLAY` is set and otherwise `xclip` with the CLIPBOARD selection. On macOS the
+copy path also hands the text to `pbcopy`, for terminals that do not take OSC 52; `pbcopy`
+decodes its stdin in the locale's encoding, so a non-ASCII copy needs a UTF-8 locale (the CLI
+sets `LANG`). These Linux utilities must be installed on the CLI's machine; they are not bundled
+or installed automatically.
 All are read only after Ctrl+V. No shell evaluates pasted paths or clipboard data. The Linux
 reader is the editor's owned, cancellable subprocess; Ctrl+C clears the draft and releases it.
 On Linux, editing remains available during the read, and the result inserts at the current
@@ -322,7 +325,9 @@ flow stores a paste and reads its exact file through the real read tool.
 Native tmux calibration on macOS covers wrapped/multiline input, bracketed paste and viewport
 changes at 80x24, 40x10 and 15x6. The renderer accounts for previously painted lines reflowing
 when terminal width changes. Unix input owns a separately opened descriptor for the inherited
-terminal, so nonblocking reads cannot change stdout's status flags. The CLI flow also verifies
+terminal, so nonblocking reads cannot change stdout's status flags. On macOS it names that
+descriptor with `F_GETPATH`: `ttyname_r` scans `/dev` and can miss this terminal while another
+terminal's entry is removed. The CLI flow also verifies
 complete model output while a terminal reader pauses. Windows input uses virtual-terminal mode with the existing console
 record reader. Its ConPTY flow exercises Unicode/grapheme editing, arrow/delete input,
 bracketed paste boundaries and raw Ctrl+C clearing through the real console. It reuses the
