@@ -1,4 +1,4 @@
-//! The rows of the palette and the list panels as Amp lays them out:
+//! The rows of the palette and the list panels:
 //! category, label, detail and key in columns shared by every row, under a
 //! panel title. Panels and the palette draw through these.
 
@@ -22,7 +22,7 @@ pub enum Kind {
     Skill(String),
 }
 
-/// One palette row as Amp lays it out: category, label (bold), detail,
+/// One palette row: category, label (bold), detail,
 /// and the key that runs it at the right edge.
 #[derive(Debug, Clone)]
 pub struct Row {
@@ -107,7 +107,7 @@ impl Columns {
 
 const UNAVAILABLE: &str = " (unavailable)";
 
-/// One row in Amp's columns: category (faint, right-aligned), label (bold),
+/// One row in the shared columns: category (faint, right-aligned), label (bold),
 /// detail (faint), key (keybind colour, at the right edge). An unavailable
 /// row is faint throughout; the selected row sits on an accent bar.
 pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &Palette) -> String {

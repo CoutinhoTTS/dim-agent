@@ -1,7 +1,7 @@
 //! The command palette registry: the actions the native interface runs,
 //! grouped by category, in palette order. A slash command is also typed as
 //! `/name`; the other entries are actions a key reaches (named in `key`),
-//! listed so the palette teaches the key, as Amp's does.
+//! listed so the palette teaches the key.
 
 #[derive(Debug)]
 pub struct Command {

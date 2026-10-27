@@ -144,7 +144,7 @@ impl OauthView {
         if dim {
             view.focus = Focus::Submit;
         } else {
-            // Codex and Grok start at once, the way the reference does.
+            // Codex and Grok start at once.
             view.focus = if view.device {
                 Focus::DeviceTab
             } else {
