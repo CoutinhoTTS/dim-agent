@@ -13196,7 +13196,6 @@
       "from": "dim_app_server::cli",
       "to": "dim_agent_capabilities::defaults",
       "references": [
-        "path defaults",
         "path defaults::install",
         "path defaults::install_local_execution",
         "path defaults::mock_model_hosts",
@@ -13347,19 +13346,10 @@
     },
     {
       "from": "dim_app_server::cli",
-      "to": "dim_app_server::runtime_manager",
-      "references": [
-        "path Runtimes::load",
-        "use crate::runtime_manager::Runtimes"
-      ]
-    },
-    {
-      "from": "dim_app_server::cli",
       "to": "dim_app_server::session_typescript",
       "references": [
         "path PythonConfig",
         "path SessionTypeScriptConfig",
-        "path SessionTypeScriptConfig::acquired",
         "use crate::session_typescript::PythonConfig",
         "use crate::session_typescript::SessionTypeScriptConfig"
       ]
