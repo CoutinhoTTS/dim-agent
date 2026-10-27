@@ -78,9 +78,8 @@ A17 已确认：在首阶段准入时捕获上限；工具启动与首准入之�
 
 可选包位于 `runtime/plugins/workflow`，包名 `@dimcode/workflow`；根模块拥有运行，
 并在 apply 中经 `partRegistry` 把 `session.ts` 注册为 Session 定义 `WorkflowSession`，
-由它提供 Session 工具。完整 `process.json` 这一行放入现有
-`SessionTypeScriptConfig.rows` 数组，由宿主显式安装；
-不包含默认 CLI 安装或 PluginManager 实现。
+由它提供 Session 工具。插件目录带有 `dim-plugin.json`，是 `runtime/default-plugins.json`
+列出的默认插件，由 PluginManager 加载（`--defaults`）。嵌入宿主仍可从清单的 `code` 字段构造下面这一行。
 
 | row 字段 | 进程行 |
 | --- | --- |

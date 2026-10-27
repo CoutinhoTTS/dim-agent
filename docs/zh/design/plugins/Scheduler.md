@@ -78,8 +78,8 @@ flowchart LR
 
 可选包位于 `runtime/plugins/scheduler`，包名 `@dimcode/scheduler`；根模块为进程插件，
 并在 apply 中经 `partRegistry` 把 `session.ts` 注册为 Session 定义 `SchedulerSession`，即 Session 工具。
-包提供完整的 `process.json` 这一行，宿主把它放入现有 `SessionTypeScriptConfig.rows`。
-这是包的显式安装行；不包含默认 CLI 安装或 PluginManager 实现。
+插件目录带有 `dim-plugin.json`，是 `runtime/default-plugins.json` 列出的默认插件，由 PluginManager 加载（`--defaults`）。
+嵌入宿主仍可从清单的 `code` 字段构造下面这一行。
 
 | row 字段 | 进程行 |
 | --- | --- |

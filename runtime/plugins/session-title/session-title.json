@@ -1,7 +1,0 @@
-{
-  "id": "session-title",
-  "name": "@dimcode/session-title",
-  "config": {},
-  "inject": ["partRegistry", "settings"],
-  "provides": {}
-}
