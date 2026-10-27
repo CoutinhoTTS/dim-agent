@@ -891,22 +891,9 @@ impl TimelineTree {
             errors.push(error);
         }
         let head = context.timeline().sequence();
-        {
-            let mut state = self.state.lock().unwrap();
-            state.pending.remove(id);
-            state.nodes.remove(id);
-            state.ended.insert(
-                id.into(),
-                EndedLine {
-                    head,
-                    info: info.clone(),
-                },
-            );
-        }
-        if let Some(parent) = parent {
-            let recorded = self
-                .owned_context(&parent)
-                .ok_or_else(|| AgentError::UnknownBranch(parent.clone()))
+        let recorded = parent.as_deref().map_or(Ok(()), |parent| {
+            self.owned_context(parent)
+                .ok_or_else(|| AgentError::UnknownBranch(parent.into()))
                 .and_then(|parent| {
                     parent
                         .timeline()
@@ -920,12 +907,24 @@ impl TimelineTree {
                             .into(),
                         )
                         .map(|_| ())
-                });
-            if let Err(error) = recorded {
-                errors.push(AgentError::Storage(format!(
-                    "ending line {id}: its result could not be recorded: {error}"
-                )));
-            }
+                })
+        });
+        {
+            let mut state = self.state.lock().unwrap();
+            state.pending.remove(id);
+            state.nodes.remove(id);
+            state.ended.insert(
+                id.into(),
+                EndedLine {
+                    head,
+                    info: info.clone(),
+                },
+            );
+        }
+        if let Err(error) = recorded {
+            errors.push(AgentError::Storage(format!(
+                "ending line {id}: its result could not be recorded: {error}"
+            )));
         }
         AgentError::aggregate(errors)
     }
