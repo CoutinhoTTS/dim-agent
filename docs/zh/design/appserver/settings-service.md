@@ -24,8 +24,9 @@ Settings 为不是用 Rust 写的插件提供业务来源。这类插件在启�
 写入有两条路径。客户端写入（`settings.update`）可以改任何字段。所有者写入（`settings` 服务）
 不能改仅限用户的字段。所有者代其工具发起的写入属于所有者写入，因此改动仅限用户字段时被拒绝。
 
-Settings 不赋予任何字段特殊含义。密钥是所有者文档中的普通字段，是否保存、如何保存、加密或查找，
-由所有者自己决定（§1.2）。
+Settings 不赋予任何字段特殊含义，只有一个例外：schema 带 JSON Schema 注解 `writeOnly: true` 的成员
+对 agent 来说是密钥（§1.2）。除此之外，密钥是所有者文档中的普通字段，是否保存、如何保存、加密或查找，
+由所有者自己决定。
 
 `BusinessDocument` 仍是 Rust 绑定；Rust 所有者以同样方式登记自己的文档类型（§4.5）。Rust 来源保留
 其所有者的管理方法。F2 的
@@ -42,7 +43,7 @@ Settings 不赋予任何字段特殊含义。密钥是所有者文档中的普�
 - 不向客户端通用地开放 Rust 来源（`mcp`、`mcp-projects`、`mcp-plugins`、`skills`、`permission`）。它们的校验是
   Rust 代码，Settings 无法拿来校验客户端传来的 JSON。
 - 不提供来源发现方法，不做设置界面。见 §10。
-- 不提供密钥存储、凭据服务或字段名规则（§1.2）。
+- 不提供密钥存储、凭据服务或字段名规则（§1.2）。唯一的标记是 schema 的 `writeOnly` 注解。
 - MCP 的内联 token、`env` 和 `headers` 保持原样（ADR 004 D4）。
 
 ### 1.2 决定：密钥归其所有者
@@ -63,6 +64,11 @@ Settings 不赋予任何字段特殊含义。密钥是所有者文档中的普�
   0700，Windows 继承父目录 DACL，已有目录权限保持不变。`settings.read` 只服务本地连接（§7），
   所以本地客户端可以读到密钥，远程与配对客户端不能。所有者从不把它放进工具声明、结果、事件、
   诊断、错误或日志。
+- 能经 `properties` 到达的成员上的 `writeOnly: true` 标记密钥。它不改变校验。agent 读取文档的途径，
+  即 `plugin` 工具的 `config` 命令（[PluginManager §6](../plugins/PluginManager.md#6-接口摘要)），
+  从不返回它的值：该成员被去掉，有值时列出它的 JSON Pointer 表示已设置；该命令也拒绝写入本身是或
+  含有 `writeOnly` 成员的成员。客户端不变：本地的 `settings.read` 和 `settings.update` 像其他字段
+  一样读写它（§7）。所有者在 schema 中给每个凭据声明 `writeOnly`，同时也声明 `userOnly`。
 - 需要钥匙串或加密的所有者在自己的插件内实现，只把它选择的内容放进文档。
 - Provider 保留自己的 `ProviderSecretHost` / `ResolveProviderSecret`（`provider/secrets.rs`），
   与 S8b 之前相同。这是 Provider 自己的扩展点，不是共享契约。

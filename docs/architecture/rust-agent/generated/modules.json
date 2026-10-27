@@ -1916,7 +1916,9 @@
       "parent": "dim_app_server::plugin_manager",
       "file": "crates/dim-app-server/src/plugin_manager/tools.rs",
       "unexpandedMacros": [
+        "format",
         "json",
+        "matches",
         "vec"
       ]
     },
@@ -16928,6 +16930,22 @@
       ]
     },
     {
+      "from": "dim_app_server::plugin_manager",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path SourceDeclaration",
+        "use crate::settings::SourceDeclaration"
+      ]
+    },
+    {
       "from": "dim_app_server::plugin_manager::acquire",
       "to": "dim_app_server::plugin_manager",
       "references": [
@@ -16973,6 +16991,14 @@
     },
     {
       "from": "dim_app_server::plugin_manager::tools",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager::tools",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
         "path ToolContribution",
@@ -16983,6 +17009,14 @@
         "use dim_agent_capabilities::tool_registry::ToolHandler",
         "use dim_agent_capabilities::tool_registry::ToolRegistry",
         "use dim_agent_capabilities::tool_registry::definition"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager::tools",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "use dim_agent_runtime::SessionConfig"
       ]
     },
     {
@@ -17012,7 +17046,21 @@
       "to": "dim_app_server::plugin_manager",
       "references": [
         "path Manager",
-        "use super::Manager"
+        "path PluginError",
+        "use super::Manager",
+        "use super::PluginError"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager::tools",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path Writer::Owner",
+        "path holds_write_only",
+        "path without_write_only",
+        "use crate::settings::Writer",
+        "use crate::settings::holds_write_only",
+        "use crate::settings::without_write_only"
       ]
     },
     {
@@ -18391,7 +18439,9 @@
         "use declared::Read",
         "use declared::SourceDeclaration",
         "use declared::Update",
-        "use declared::Writer"
+        "use declared::Writer",
+        "use declared::holds_write_only",
+        "use declared::without_write_only"
       ]
     },
     {
