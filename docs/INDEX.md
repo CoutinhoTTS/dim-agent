@@ -13,7 +13,6 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Agent context: goals and requirements to define](design/agent-context.md)（中文；branches, compaction, model prompts; requirements, not design）
 - [Plugin management: requirements](design/plugin-management.md)（中文；one plugin concept, install, reload, replacement; requirements, not design）
 - [Document templates](templates/README.md)
-- [Document examples](examples/README.md)
 - [ADR 002 — Plugin scope](adr/002-plugin-scope.md)（[中文](zh/adr/002-plugin-scope.md)）
 - [ADR 003 — Approval scope](adr/003-approval-scope.md)（[中文](zh/adr/003-approval-scope.md)）
 - [ADR 004 — Session-owned MCP and business configuration](adr/004-loader-plugin-management.md)

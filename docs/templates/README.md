@@ -6,8 +6,11 @@ are in [AGENTS.md](../../AGENTS.md).
 | Type | Template | Example |
 | --- | --- | --- |
 | ADR | [adr.md](adr.md) | [ADR 008](../adr/008-documentation-ownership.md) |
-| Feature or plugin design | [design.md](design.md) | — |
-| Contract | [contract.md](contract.md) | — |
+| Feature or plugin design | [design.md](design.md) | [Web](../design/plugins/Web.md) |
+| Contract | [contract.md](contract.md) | [Session access](../design/contracts/session-access.md) |
+
+Document type comes from the existing path; there is no manifest. Older examples still carry
+status lines from before ADR 008; do not copy those lines.
 
 Use the template for the document's own layer. An ADR records a decision; a design records what
 one owner provides and requires; a contract records one cross-module interface. Do not copy

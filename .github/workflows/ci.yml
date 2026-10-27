@@ -43,7 +43,6 @@ jobs:
       - name: Check documentation boundaries
         if: github.event_name == 'pull_request'
         env:
-          DIM_DOCS_CROSS_MODULE: ${{ contains(github.event.pull_request.labels.*.name, 'cross-module') && '1' || '0' }}
           DIM_DOCS_ADR_ERRATUM: ${{ contains(github.event.pull_request.labels.*.name, 'adr-erratum') && '1' || '0' }}
         run: node scripts/docs-check.mjs --base HEAD^1
   dependencies:
