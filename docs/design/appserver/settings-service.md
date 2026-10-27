@@ -44,7 +44,7 @@ root indices. See the [native definition-file contract](../p6-p7-bindings.md#3-w
 
 - No `subscribe(source)`. The issue text lists it, but S8a moved change notification to the rutis
   event bus (issue comment). Settings keeps no watch channel of its own.
-- No generic client access to Rust sources (`mcp`, `mcp-projects`, `skills`, `permission`).
+- No generic client access to Rust sources (`mcp`, `mcp-projects`, `mcp-plugins`, `skills`, `permission`).
   Their validation is Rust code that Settings cannot run on client JSON.
 - No source discovery method and no settings UI. See §10.
 - No secret store, credential service or field-name rule (§1.2).
@@ -302,7 +302,7 @@ impl SettingsService {
 
 - Both registrations are effects of the plugin owning `ctx`, withdrawn when it unloads, and are
   checked under one registry state (§3.1). `register_declared` compiles the schema with
-  `jsonschema`. The process owners register in their `apply`: Mcp (`mcp`, `mcp-projects`),
+  `jsonschema`. The process owners register in their `apply`: Mcp (`mcp`, `mcp-projects`, `mcp-plugins`),
   SkillsCatalog (`skills`), PermissionRules (`permission`) and CollaborationModelPolicy
   (`collaboration`). Readers in other plugins only read; `read::<D>`/`update::<D>` of a type that
   is not the registered one for its name is `UnknownSource`. The `settings` service's

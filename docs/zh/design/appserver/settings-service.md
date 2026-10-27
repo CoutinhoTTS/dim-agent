@@ -39,7 +39,7 @@ Settings 不赋予任何字段特殊含义。密钥是所有者文档中的普�
 
 - 不做 `subscribe(source)`。issue 正文列了它，但 S8a 已把变更通知移到 rutis 事件总线（见 issue
   评论）。Settings 不保留自己的监听通道。
-- 不向客户端通用地开放 Rust 来源（`mcp`、`mcp-projects`、`skills`、`permission`）。它们的校验是
+- 不向客户端通用地开放 Rust 来源（`mcp`、`mcp-projects`、`mcp-plugins`、`skills`、`permission`）。它们的校验是
   Rust 代码，Settings 无法拿来校验客户端传来的 JSON。
 - 不提供来源发现方法，不做设置界面。见 §10。
 - 不提供密钥存储、凭据服务或字段名规则（§1.2）。
@@ -274,7 +274,7 @@ impl SettingsService {
 
 - 两种登记都是拥有 `ctx` 的插件的副作用，在它卸载时撤回，并在同一份登记状态下检查（§3.1）。
   `register_declared` 用 `jsonschema` 编译 schema。进程级所有者在 `apply` 中登记：Mcp（`mcp`、
-  `mcp-projects`）、SkillsCatalog（`skills`）、PermissionRules（`permission`）和
+  `mcp-projects`、`mcp-plugins`）、SkillsCatalog（`skills`）、PermissionRules（`permission`）和
   CollaborationModelPolicy（`collaboration`）。其他插件中的读取方只读；对某个名字用不是其已登记类型的
   `read::<D>`/`update::<D>` 得到 `UnknownSource`。`settings` 服务的 `register` 以调用行的上下文调用
   `register_declared`。

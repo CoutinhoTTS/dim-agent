@@ -188,7 +188,7 @@ TypeScript 的行以入口文件的绝对路径命名。Python 插件通过 Plug
 2. App Server 对 `[assembly, plugins]` 进行 reconcile。被关闭的内置插件从不启动。
 3. PluginManager 的行 apply，向 `managementMethods` 登记 `plugin`，向 `partRegistry` 登记 `PluginTools`，然后在激活之后，删除残留的暂存目录，以及没有任何已安装条目引用的 Git 克隆。
 
-默认插件或已安装插件的行失败时，启动不失败；`plugin.list` 把它显示为失败，并带上 rutis 的错误。启动时不会再次登记内容：所有者保存自己的状态（§9 R2）。
+默认插件或已安装插件的行失败时，启动不失败；`plugin.list` 把它显示为失败，并带上 rutis 的错误。进程行全部就绪之后、接纳客户端之前，App Server 调用 PluginManager 的内容启动步骤，让每个存在的所有者与记录一致（§3.7）。
 
 ### 3.2 安装
 
@@ -230,7 +230,9 @@ Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit�
 
 ### 3.7 内容登记
 
-对于 P 带有的每种内容和每个存在的所有者，PluginManager 调用该所有者的 `register({plugin, dir, document})`；撤回时调用 `withdraw({plugin})`，其中 `plugin` 是插件的名字。所有者把登记的内容作为自己的状态保存，持久化它，并在自己重新加载后恢复它。PluginManager 不监视所有者，也不代替它们再次登记任何东西。PluginManager 要调用某个所有者而它不存在时，跳过它；回复中列出被跳过的种类。当 PluginManager 打开该所有者的名字时，它登记该种类的全部内容。
+对于 P 带有的每种内容和每个存在的所有者，PluginManager 调用该所有者的 `register({plugin, dir, document})`；撤回时调用 `withdraw({plugin})`，其中 `plugin` 是插件的 id：已安装插件的 id，或默认插件的名字（§7），因此可以安全地用在服务器 id 和文件名中。一个名字从一个插件切换到另一个插件时，撤回旧插件的内容；插件不再带有的种类被撤回。所有者把登记的内容作为自己的状态保存，持久化它，并在自己重新加载后恢复它。PluginManager 不监视所有者，也不代替它们再次登记任何东西。PluginManager 要调用某个所有者而它不存在时，跳过它；回复中列出被跳过的种类。所有者报告它持有哪些插件 id 的内容。在启动时，以及 PluginManager 打开某个所有者的名字时，PluginManager 为每个正在使用的插件登记该种类的内容，并为该所有者持有的其他 id 撤回这种内容；所有者从不查找插件。因此，所有者关闭期间被删除的插件，或进程在写入 `plugins.json` 之后、向所有者发命令之前停止而留下的内容，都不会再次运行；拒绝的原因在重启后会再次报告。
+
+所有者校验交给它的内容。它拒绝的内容（不通过 Mcp 校验的 MCP 文档，`SKILL.md` 无法解析的 Skill）不影响插件的其他内容和代码：回复在 `refused` 中列出它，`plugin.list` 显示调用时各所有者对该插件报告的内容。
 
 ## 4. 时序与冲突
 
@@ -303,7 +305,7 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | --- | --- |
 | 阻塞点 | 所有者只读取用户来源和项目来源；没有办法把插件的内容交给它们。 |
 | 已考虑的现有机制 | 由所有者读取一个 `pluginContents` 服务（所有者会去查找插件；已否决）；把内容作为 loader 行（Dim 的产品状态放进 rutis；已否决）。 |
-| 通用能力 | 一个进程操作 `register({plugin, dir, document})`，用于添加或替换 `plugin` 的内容，以及 `withdraw({plugin})`。所有者把登记的内容作为自己的状态保存，在自己的存储中持久化，并在自己重新加载后恢复它。Mcp 用 `plugin` 作为服务器 id 的前缀；Hooks 把来源命名为 `plugin:<plugin>`，并给命令设置 `DIM_PLUGIN_ROOT = dir`；SkillsCatalog 读取 `dir` 下的 Skill。 |
+| 通用能力 | 一个进程操作 `register({plugin, dir, document})`，用于添加或替换 `plugin`（插件 id，§3.7）的内容，以及 `withdraw({plugin})`，再加上读取所有者为 `plugin` 拒绝了什么。所有者把登记的内容作为自己的状态保存，在自己的存储中持久化，并在自己重新加载后恢复它。Mcp 用 `plugin` 作为服务器 id 的前缀（`<plugin>:<server>`）；Hooks 把来源命名为 `plugin:<plugin>`，并给命令设置 `DIM_PLUGIN_ROOT = dir`；SkillsCatalog 读取 `dir` 下的 Skill。 |
 | 对 sequence、批次、中断、重新加载的影响 | 与每个所有者现有的来源相同：一次变更是一次数据更新，由所有者用自己的方式通告。 |
 | 所有者与 issue | SkillsCatalog、Mcp、Hooks（[Hooks](Hooks.md)）。 |
 
@@ -313,12 +315,12 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `plugin.list` | `{}` | `[{name, use, off, locked, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?}]` |
-| `plugin.install` | `{source: {path} \| {git, ref?}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], restartRequired?}` |
-| `plugin.enable` | `{name, use?}` | `{status?, skipped?, restartRequired?}` |
+| `plugin.list` | `{}` | `[{name, use, off, locked, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?, refused?}]` |
+| `plugin.install` | `{source: {path} \| {git, ref?}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], refused?: [{kind, error}], restartRequired?}` |
+| `plugin.enable` | `{name, use?}` | `{status?, skipped?, refused?, restartRequired?}` |
 | `plugin.disable` | `{name}` | `{}` |
-| `plugin.reload` | `{name}` | `{status?, skipped?, restartRequired?}` |
-| `plugin.update` | `{id, ref?}` | `{commit, status?, restartRequired?}` |
+| `plugin.reload` | `{name}` | `{status?, skipped?, refused?, restartRequired?}` |
+| `plugin.update` | `{id, ref?}` | `{commit, status?, skipped?, refused?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
 名字在用的插件带代码时，`status` 是该行在 `Loader::get` 中的 `EntryStatus`：`Inactive` → `pending`（附带 `Loader::waiting_for` 给出的 `waitingFor`），`Unresolved` → `failed`（附带 `error`），`Running` → `running`，`Stopped` → `stopped`。关闭的名字没有在用的插件，显示 `off`，不显示状态。`install` 和 `update` 通过调用的进度接收端报告阶段 `fetch`、`check` 和 `load`。
@@ -337,9 +339,10 @@ PluginManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | Session 正在使用插件的工具时重新加载 | 旧世代卸载，调用被取消，新部件被挂载 | rutis、实例的挂载方 |
 | 安装时内容所有者不存在 | 跳过该种类并报告；PluginManager 打开该所有者时登记 | PluginManager、所有者 |
 | 内容所有者重新加载 | 它恢复自己已登记的内容 | 所有者 |
+| 所有者关闭期间插件被删除 | 所有者被打开时或下次启动时撤回它的内容 | PluginManager |
 | `instanceNames` 不在运行中的 catalog 内 | 记录配置，`restart_required`；该行在下次启动时创建 | PluginManager |
 | Git 安装过程中进程停止 | 下次启动时删除暂存目录；`plugins.json` 未被写入 | PluginManager |
-| `plugins.json` 写入之后、loader 命令之前进程停止 | 下次启动时根据 `plugins.json` 构建行 | PluginManager 启动 |
+| `plugins.json` 写入之后、loader 或所有者命令之前进程停止 | 下次启动时根据 `plugins.json` 构建行，并让所有者与它一致 | PluginManager 启动 |
 
 ## 附录 C. 验收（M1）
 
