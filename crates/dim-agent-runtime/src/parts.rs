@@ -499,7 +499,13 @@ impl DynPlugin for PartMounter {
             let registry = site.registry.clone();
             ctx.effect(move || async move {
                 cancel.cancel();
-                let seen = follow.await.unwrap_or_default();
+                let seen = match follow.await {
+                    Ok(seen) => seen,
+                    Err(error) => {
+                        tracing::warn!(%error, "a part mounter's follow task ended abnormally");
+                        HashMap::new()
+                    }
+                };
                 registry.shared.detach(id);
                 unmount(seen.into_values().flatten()).await
             })?;

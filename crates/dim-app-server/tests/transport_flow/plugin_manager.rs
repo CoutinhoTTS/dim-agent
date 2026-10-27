@@ -670,8 +670,7 @@ async fn node_plugin_manager_installs_reloads_and_replaces_typescript_plugins() 
     assert!(!tools.contains(&"my_echo".into()), "{tools:?}");
     let enabled = call(&mut client, "plugin.enable", json!({"name":"my-tool"})).await;
     assert_eq!(enabled["result"]["status"], "running", "{enabled}");
-    submit(&mut client, &session, "plain").await;
-    let tools = requests.recv().await.unwrap();
+    let tools = offered(&mut client, &mut requests, &session).await;
     assert!(tools.contains(&"my_echo".into()), "{tools:?}");
 
     let list = call(&mut client, "plugin.list", json!({})).await;
@@ -901,7 +900,6 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-/// A Python plugin of one tool answering `text`, in one module.
 /// A server on `home` that loads the default plugins.
 fn defaults_config(home: &Path) -> ServerConfig {
     let mut config = config(home);
@@ -983,6 +981,7 @@ async fn node_web_tools_follow_disable_enable_and_restart() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// A Python plugin of one tool answering `text`, in one module.
 fn write_python_plugin(dir: &Path, text: &str) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(
