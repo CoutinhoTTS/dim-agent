@@ -612,7 +612,20 @@ impl Connection {
                             Err(dim_agent_runtime::AgentError::Reloading(_)) => {
                                 watches.push(state_change(branch, receiver));
                             }
-                            Err(_) => {}
+                            Err(_) => {
+                                if session.ended_head(&branch).is_some() {
+                                    let closed = BranchStatus {
+                                        closed: true,
+                                        ..Default::default()
+                                    };
+                                    if reported.get(&branch) != Some(&closed)
+                                        && !self.notify(&id, generation, state_notice(version, &id, &branch, &closed))
+                                    {
+                                        return;
+                                    }
+                                    reported.insert(branch, closed);
+                                }
+                            }
                         }
                     }
                 }

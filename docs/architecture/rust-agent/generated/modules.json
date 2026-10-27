@@ -14583,6 +14583,7 @@
         "path Call::ApprovalRespond",
         "path Call::Attach",
         "path Call::BranchCreate",
+        "path Call::BranchEnd",
         "path Call::Close",
         "path Call::Contributed",
         "path Call::Create",
@@ -14984,6 +14985,7 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path BranchCreate",
+        "path BranchEnd",
         "path History",
         "path InputLookup",
         "path InputLookupResult::Accepted",
@@ -14993,6 +14995,7 @@
         "path Reply::History",
         "path Reply::InputLookup",
         "path Reply::Submit",
+        "path Reply::empty",
         "path Submit",
         "path SubmitResult"
       ]
