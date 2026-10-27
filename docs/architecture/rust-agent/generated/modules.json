@@ -814,6 +814,18 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::timeline_tree::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::timeline_tree",
+      "file": "crates/dim-agent-capabilities/src/timeline_tree.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "format",
+        "json",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::tool_binding",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -2795,6 +2807,15 @@
       ]
     },
     {
+      "id": "dim_cli::session_host::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::session_host",
+      "file": "crates/dim-cli/src/session_host.rs",
+      "unexpandedMacros": [
+        "assert"
+      ]
+    },
+    {
       "id": "dim_cli::session_host::workflow",
       "crate": "dim_cli",
       "parent": "dim_cli::session_host",
@@ -3341,6 +3362,29 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::lines_panel",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/lines_panel.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::lines_panel::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::lines_panel",
+      "file": "crates/dim-cli/src/ui/lines_panel.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "panic",
+        "vec"
       ]
     },
     {
@@ -5684,6 +5728,7 @@
       "to": "dim_agent_capabilities::timeline_tree",
       "references": [
         "mod timeline_tree",
+        "path timeline_tree::BranchLine",
         "path timeline_tree::TimelineTree",
         "path timeline_tree::TreeCommands"
       ]
@@ -6681,6 +6726,7 @@
         "path EmptyPromptHost",
         "path IdentityContext",
         "path LoadPrompt",
+        "path ModelDriver",
         "path ModelHost",
         "path PrepareContextHost",
         "path PromptHost",
@@ -6787,6 +6833,7 @@
       "references": [
         "path TimelineTreePlugin::new",
         "path TreeTimelinePlugin::new",
+        "path crate::timeline_tree::BranchLinePlugin::new",
         "path crate::timeline_tree::BranchToolPlugin::new",
         "use crate::timeline_tree::TimelineTreePlugin",
         "use crate::timeline_tree::TreeTimelinePlugin"
@@ -7454,6 +7501,7 @@
       "references": [
         "path AgentError",
         "path AgentError::AmbiguousSubmission",
+        "path AgentError::BranchEnded",
         "path AgentError::Build",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
@@ -9229,6 +9277,16 @@
     },
     {
       "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_capabilities::context_block",
+      "references": [
+        "path crate::context_block::element",
+        "path crate::context_block::raw",
+        "path crate::context_block::retire",
+        "path crate::context_block::text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_capabilities::context_policy",
       "references": [
         "path crate::context_policy::check_cancel"
@@ -9246,6 +9304,7 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path HostError",
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
@@ -9253,6 +9312,13 @@
         "use crate::host::HostError",
         "use crate::host::HostFuture",
         "use crate::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_capabilities::timeline_tree::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -9288,9 +9354,13 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_runtime::config",
       "references": [
+        "path BranchLifecycle",
         "path SessionIdentity",
+        "path TimelineIdentity",
         "path dim_agent_runtime::TimelineIdentity",
-        "use dim_agent_runtime::SessionIdentity"
+        "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::TimelineIdentity"
       ]
     },
     {
@@ -9309,7 +9379,10 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -9318,6 +9391,7 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path Timeline",
+        "path dim_agent_runtime::core::unix_millis",
         "use dim_agent_runtime::Timeline"
       ]
     },
@@ -9326,6 +9400,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::BranchEnded",
         "path AgentError::Build",
         "path AgentError::Cancelled",
         "path AgentError::Closed",
@@ -9364,8 +9439,16 @@
         "path TimelineKey",
         "path TimelineStore",
         "use dim_agent_runtime::StoredBranch",
+        "use dim_agent_runtime::StoredEvent",
         "use dim_agent_runtime::TimelineKey",
         "use dim_agent_runtime::TimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path content"
       ]
     },
     {
@@ -9379,21 +9462,51 @@
         "path BranchCreateFailedData",
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
+        "path BranchEndData",
+        "path BranchEndedData",
         "path BranchResumeData",
+        "path BranchSource",
         "path BranchSource::Host",
         "path BranchSource::Tool",
         "path BranchStartData",
         "path EventKind::BranchCreate",
         "path EventKind::BranchCreateFailed",
+        "path EventKind::BranchEnd",
+        "path EventKind::BranchEnded",
         "path EventKind::BranchResume",
         "path EventKind::BranchStart",
+        "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::ModelStart",
+        "path EventKind::StopInterrupt",
+        "path EventKind::Text",
+        "path EventKind::ToolCall",
+        "path EventKind::ToolResult",
+        "path EventKind::ToolUse",
+        "path EventKind::ToolUseStart",
+        "path EventKind::TurnEnd",
+        "path InputBlock",
+        "path InputBlock::Raw",
         "path InputMessageData",
         "path InputMessageData::default",
-        "path InputMessageData::text",
+        "path InputMode",
+        "path InputMode::Append",
         "path InputMode::Queue",
+        "path InputMode::Steer",
+        "path TurnOutcome::Cancelled",
+        "path TurnOutcome::Completed",
+        "path TurnOutcome::Failed",
+        "path UserInput",
         "path events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_types::prompt",
+      "references": [
+        "path prompt"
       ]
     },
     {
@@ -9403,7 +9516,37 @@
         "path ToolCall",
         "path ToolDefinition",
         "path ToolResult",
+        "path ToolResult::error",
         "path ToolResult::text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree::tests",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path BranchLine::fold",
+        "path LineRole::Tool",
+        "path LineView",
+        "path LineView::default"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path EventKind",
+        "path EventKind::ToolResult",
+        "path EventKind::ToolUse",
+        "path ToolResultData",
+        "path ToolUseData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree::tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall"
       ]
     },
     {
@@ -11061,6 +11204,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::BranchEnded",
         "path AgentError::Cancelled",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
@@ -11111,10 +11255,12 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path BranchSource",
         "path InputMessageData",
         "path InputMessageData::text",
         "path InputMode",
         "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::BranchSource",
         "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InputMode"
       ]
@@ -11591,8 +11737,8 @@
       "from": "dim_agent_runtime::memory_timeline_store",
       "to": "dim_agent_runtime::contracts",
       "references": [
-        "path TimelineInfo",
-        "use crate::TimelineInfo"
+        "path BranchRecord",
+        "use crate::BranchRecord"
       ]
     },
     {
@@ -11865,6 +12011,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::BranchEnded",
         "path AgentError::Build",
         "path AgentError::Closed",
         "path AgentError::Fault",
@@ -11950,8 +12097,8 @@
       "from": "dim_agent_runtime::timeline_store",
       "to": "dim_agent_runtime::contracts",
       "references": [
-        "path TimelineInfo",
-        "use crate::TimelineInfo"
+        "path BranchRecord",
+        "use crate::BranchRecord"
       ]
     },
     {
@@ -13174,6 +13321,7 @@
       "references": [
         "path AgentError",
         "path AgentError::AmbiguousSubmission",
+        "path AgentError::BranchEnded",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
         "path AgentError::Reloading",
@@ -13567,6 +13715,7 @@
       "from": "dim_app_server::approval",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::BranchEnded",
         "path AgentError::UnknownBranch",
         "use dim_agent_runtime::AgentError"
       ]
@@ -14566,6 +14715,7 @@
         "path Call::ApprovalRespond",
         "path Call::Attach",
         "path Call::BranchCreate",
+        "path Call::BranchEnd",
         "path Call::Close",
         "path Call::Contributed",
         "path Call::Create",
@@ -14940,6 +15090,7 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::BranchEnded",
         "path AgentError::InvalidInput"
       ]
     },
@@ -14967,6 +15118,7 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path BranchCreate",
+        "path BranchEnd",
         "path History",
         "path InputLookup",
         "path InputLookupResult::Accepted",
@@ -14976,6 +15128,7 @@
         "path Reply::History",
         "path Reply::InputLookup",
         "path Reply::Submit",
+        "path Reply::empty",
         "path Submit",
         "path SubmitResult"
       ]
@@ -18767,8 +18920,8 @@
       "from": "dim_app_server::storage::export",
       "to": "dim_agent_runtime::contracts",
       "references": [
-        "path TimelineInfo",
-        "use dim_agent_runtime::TimelineInfo"
+        "path BranchRecord",
+        "use dim_agent_runtime::BranchRecord"
       ]
     },
     {
@@ -19040,8 +19193,8 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_runtime::contracts",
       "references": [
-        "path TimelineInfo",
-        "use dim_agent_runtime::TimelineInfo"
+        "path BranchRecord",
+        "use dim_agent_runtime::BranchRecord"
       ]
     },
     {
@@ -19330,6 +19483,8 @@
         "path EventKind::ApprovalRespond",
         "path EventKind::BranchCreate",
         "path EventKind::BranchCreateFailed",
+        "path EventKind::BranchEnd",
+        "path EventKind::BranchEnded",
         "path EventKind::BranchResume",
         "path EventKind::BranchStart",
         "path EventKind::CollaborationCancel",
@@ -20922,6 +21077,10 @@
       "from": "dim_cli::projection",
       "to": "dim_agent_types::events",
       "references": [
+        "path BranchCreateFailedData::Cancelled",
+        "path BranchCreateFailedData::Failed",
+        "path BranchSource::Host",
+        "path BranchSource::Tool",
         "path CollaborationDelivery::Error",
         "path CollaborationDelivery::Ok",
         "path CollaborationOutcome::Cancelled",
@@ -20933,7 +21092,9 @@
         "path ExecStatus::Cancelled",
         "path ExecStatus::Completed",
         "path ExecStatus::Failed",
+        "path InputMode",
         "path InputMode::Append",
+        "path InputMode::Steer",
         "path ModelOutputOutcome::Failed",
         "path TurnOutcome",
         "path TurnOutcome::Cancelled",
@@ -20941,6 +21102,8 @@
         "path TurnOutcome::Failed",
         "path UserInput",
         "path dim_agent_types::InputBlock::Raw",
+        "use dim_agent_types::BranchCreateFailedData",
+        "use dim_agent_types::BranchSource",
         "use dim_agent_types::CollaborationDelivery",
         "use dim_agent_types::CollaborationOutcome",
         "use dim_agent_types::CollaborationTarget",
@@ -20972,6 +21135,12 @@
       "to": "dim_cli::model::view",
       "references": [
         "path ApprovalView",
+        "path LineState::CreationFailed",
+        "path LineState::EndedByOperation",
+        "path LineState::EndedItself",
+        "path LineState::EndedWith",
+        "path LineState::Waiting",
+        "path LineView",
         "path MemberCard",
         "path MemberConversationState",
         "path MemberTarget::Provider",
@@ -21003,6 +21172,8 @@
         "path ViewSnapshot::default",
         "path WorkflowView",
         "use crate::model::view::ApprovalView",
+        "use crate::model::view::LineState",
+        "use crate::model::view::LineView",
         "use crate::model::view::MemberCard",
         "use crate::model::view::MemberConversationState",
         "use crate::model::view::MemberTarget",
@@ -21045,6 +21216,7 @@
       "from": "dim_cli::projection",
       "to": "dim_client::question",
       "references": [
+        "path crate::question::Call",
         "path crate::question::Pending",
         "path crate::question::TOOL"
       ]
@@ -21056,6 +21228,8 @@
         "path Event",
         "path EventContent::BranchCreate",
         "path EventContent::BranchCreateFailed",
+        "path EventContent::BranchEnd",
+        "path EventContent::BranchEnded",
         "path EventContent::BranchStart",
         "path EventContent::CollaborationDelivered",
         "path EventContent::CollaborationRequest",
@@ -21096,7 +21270,8 @@
       "to": "dim_cli::projection",
       "references": [
         "path Projection",
-        "path Projection::default"
+        "path Projection::default",
+        "path Projection::for_branch"
       ]
     },
     {
@@ -21461,6 +21636,8 @@
         "path Command::AskCancel",
         "path Command::ClearModelPreferences",
         "path Command::Configure",
+        "path Command::EndLine",
+        "path Command::FocusLine",
         "path Command::InputControl",
         "path Command::ListModels",
         "path Command::ListPlugins",
@@ -21575,11 +21752,16 @@
       "from": "dim_cli::session_host",
       "to": "dim_cli::model::view",
       "references": [
+        "path LineState::Waiting",
+        "path LineState::Working",
+        "path LineView",
         "path TaskOutputState::Live",
         "path TaskOutputState::ReadError",
         "path TaskOutputState::Unavailable",
         "path TaskOutputState::Unsupported",
         "path TaskTarget",
+        "use crate::model::view::LineState",
+        "use crate::model::view::LineView",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::WorkflowInventory"
@@ -21616,6 +21798,7 @@
       "references": [
         "path Projection",
         "path Projection::default",
+        "path Projection::for_branch",
         "use crate::projection::Projection"
       ]
     },
@@ -21650,6 +21833,13 @@
         "use tasks::BranchHistory",
         "use tasks::HistoryRequest",
         "use tasks::StopBatch"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::session_host::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -21832,6 +22022,8 @@
       "to": "dim_cli::session_host",
       "references": [
         "path History::decode",
+        "path LineProjection",
+        "path LineProjection::new",
         "path Worker"
       ]
     },
@@ -21864,6 +22056,21 @@
         "path EventContent::BranchCreate",
         "path EventContent::BranchCreateFailed",
         "path EventContent::BranchStart"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tests",
+      "to": "dim_cli::projection",
+      "references": [
+        "path Projection::default"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tests",
+      "to": "dim_cli::session_host",
+      "references": [
+        "path LineProjection::new",
+        "path transcript_mut"
       ]
     },
     {
@@ -21986,6 +22193,13 @@
       "to": "dim_cli::ui::line_input",
       "references": [
         "mod line_input"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
+      "to": "dim_cli::ui::lines_panel",
+      "references": [
+        "mod lines_panel"
       ]
     },
     {
@@ -23331,6 +23545,179 @@
         "path KeyEvent::new",
         "path Modifiers::NONE",
         "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path LineState::CreationFailed",
+        "path LineState::EndedByOperation",
+        "path LineState::EndedItself",
+        "path LineState::EndedWith",
+        "path LineState::Main",
+        "path LineState::Waiting",
+        "path LineState::Working",
+        "path LineView",
+        "path ViewSnapshot",
+        "use crate::model::view::LineState",
+        "use crate::model::view::LineView",
+        "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
+      "to": "dim_cli::ui::lines_panel::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
+      "to": "dim_cli::ui::list_panel",
+      "references": [
+        "path Event::Close",
+        "path Event::None",
+        "path Event::Pick",
+        "path Event::Refresh",
+        "path Item::new",
+        "path ListPanel",
+        "path ListPanel::new",
+        "use crate::ui::list_panel::Event",
+        "use crate::ui::list_panel::Item",
+        "use crate::ui::list_panel::ListPanel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect",
+        "path Effect::Close",
+        "path Effect::EndLine",
+        "path Effect::FocusLine",
+        "path Effect::None",
+        "path Effect::Notice",
+        "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
+      "to": "dim_cli::ui::render::markdown",
+      "references": [
+        "path MarkdownRenderer",
+        "use crate::ui::render::markdown::MarkdownRenderer"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode::Char",
+        "path KeyCode::Esc",
+        "path KeyEvent",
+        "path Modifiers::NONE",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path fg",
+        "use crate::ui::theme::ansi::fg"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette",
+        "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path LineState::EndedWith",
+        "path ViewSnapshot",
+        "path ViewSnapshot::default",
+        "use crate::model::view::LineState",
+        "use crate::model::view::LineView",
+        "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::ui::lines_panel",
+      "references": [
+        "path LinesPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect::EndLine",
+        "path Effect::FocusLine"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::ui::render::markdown",
+      "references": [
+        "path MarkdownRenderer",
+        "path MarkdownRenderer::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path crate::ui::render::panel::strip_escapes"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode",
+        "path KeyCode::Char",
+        "path KeyCode::Down",
+        "path KeyCode::Enter",
+        "path KeyEvent",
+        "path KeyEvent::new",
+        "path Modifiers::NONE",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette"
       ]
     },
     {
@@ -26380,6 +26767,8 @@
         "path Command::AskCancel",
         "path Command::ClearModelPreferences",
         "path Command::Configure",
+        "path Command::EndLine",
+        "path Command::FocusLine",
         "path Command::InputControl",
         "path Command::ListModels",
         "path Command::ListPlugins",
@@ -26469,6 +26858,7 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::model::view",
       "references": [
+        "path LineState::Working",
         "path RowKind::AssistantMessage",
         "path RowKind::Status",
         "path RowKind::StreamingAssistant",
@@ -26478,6 +26868,7 @@
         "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
+        "use crate::model::view::LineState",
         "use crate::model::view::RowKind",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewRow",
@@ -26594,6 +26985,15 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::lines_panel",
+      "references": [
+        "path LinesPanel",
+        "path LinesPanel::new",
+        "use crate::ui::lines_panel::LinesPanel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::models_panel",
       "references": [
         "path ModelsPanel",
@@ -26653,7 +27053,9 @@
         "path Effect::ClearModelPreferences",
         "path Effect::Close",
         "path Effect::Connected",
+        "path Effect::EndLine",
         "path Effect::Exit",
+        "path Effect::FocusLine",
         "path Effect::FullAccess",
         "path Effect::LanguageApply",
         "path Effect::LanguagePreview",
@@ -27091,7 +27493,10 @@
         "path SessionPort",
         "path Update",
         "path Update::PluginResult",
-        "path Update::Plugins"
+        "path Update::Plugins",
+        "path Update::Snapshot",
+        "path Update::Switched",
+        "path crate::model::session::SwitchKind::Resumed"
       ]
     },
     {
@@ -27100,6 +27505,16 @@
       "references": [
         "path ShellOutcome::Exited",
         "path ShellRun"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path RowKind::AssistantMessage",
+        "path ViewRow",
+        "path ViewSnapshot",
+        "path ViewSnapshot::default"
       ]
     },
     {
@@ -27406,6 +27821,8 @@
       "references": [
         "path BranchCreateData",
         "path BranchCreateFailedData",
+        "path BranchEndData",
+        "path BranchEndedData",
         "path BranchStartData",
         "path CollaborationDeliveredData",
         "path CollaborationRequestData",
@@ -28098,6 +28515,18 @@
     {
       "module": "dim_cli::ui::composer",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::ui::lines_panel::tests",
+      "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::lines_panel::tests",
+      "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::lines_panel::tests",
+      "path": "Theme::system"
     },
     {
       "module": "dim_cli::ui::oauth_view::tests",
