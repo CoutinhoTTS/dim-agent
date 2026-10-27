@@ -22,8 +22,8 @@ use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
     Account, Command, DraftPart, ModelItem, ModelList, ModelPolicyUpdate, OauthEvent, OauthStart,
-    ProviderAction, ProviderEntry, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind,
-    Update,
+    PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
+    SubagentModelPolicy, SwitchKind, Update,
 };
 use crate::model::view::{TaskOutputState, TaskTarget, WorkflowInventory};
 use crate::projection::Projection;
@@ -992,6 +992,24 @@ impl Worker {
                     self.report(mcp::error(error).to_string(), true);
                 }
             }
+            Command::ListPlugins => {
+                let plugins = self.plugins().await;
+                self.send(Update::Plugins(plugins));
+            }
+            Command::Plugin(action) => {
+                let (method, params) = crate::plugin_command::call(&action);
+                let result = self
+                    .client
+                    .typed::<PluginReply>(method, params)
+                    .await
+                    .map_err(|error| error.to_string());
+                let plugins = self.plugins().await;
+                self.send(Update::PluginResult {
+                    action,
+                    result,
+                    plugins,
+                });
+            }
             Command::Configure(text) => {
                 let model = self.model.clone();
                 match configure::run(&mut self.client, &self.session_id, model.as_ref(), &text)
@@ -1570,6 +1588,17 @@ impl Worker {
                 self.report(mcp::error(error).to_string(), true);
             }
         }
+    }
+
+    /// The `/plugins` list: every name `plugin.list` returns.
+    async fn plugins(&mut self) -> Result<Vec<PluginItem>, String> {
+        if !self.client.supports(&["plugin.list"]) {
+            return Err("This daemon cannot manage plugins".into());
+        }
+        self.client
+            .typed("plugin.list", json!({}))
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// The `/connect` list: every static provider the App Server knows (the

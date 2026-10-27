@@ -237,6 +237,13 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash(
+        "plugins",
+        "model",
+        "list plugins, turn them on or off, reload (install PATH)",
+        &["plugin"],
+        Needs::Nothing,
+    ),
+    slash(
         "approvals",
         "model",
         "set the session's permission preset",
