@@ -188,7 +188,7 @@ Content follows the same switch: when name N stops using P, PluginManager withdr
 2. The App Server reconciles `[assembly, plugins]`. A built-in that is off never starts.
 3. PluginManager's row applies, registers `plugin` with `managementMethods` and `PluginTools` with `partRegistry`, then, after activation, deletes leftover staging directories and Git clones no installed entry refers to.
 
-A default or installed plugin whose row fails does not fail startup; `plugin.list` shows it as failed with rutis' error. Content is not registered again at startup: owners keep their own state (§9 R2).
+A default or installed plugin whose row fails does not fail startup; `plugin.list` shows it as failed with rutis' error. Once the process rows are up, before clients are admitted, the App Server calls PluginManager's content startup, which brings every present owner to the record (§3.7).
 
 ### 3.2 Install
 
@@ -230,7 +230,7 @@ A name using a built-in Rust plugin cannot be reloaded (`not_reloadable`): it ne
 
 ### 3.7 Content registration
 
-For each kind P carries and each owner present, PluginManager calls the owner's `register({plugin, dir, document})` and, to withdraw, `withdraw({plugin})`, where `plugin` is the plugin's id: its installed id, or a default plugin's name (§7), so it is safe in server ids and file names. When a name switches from one plugin to another, the old plugin's content is withdrawn; a kind the plugin no longer carries is withdrawn. The owner keeps what was registered as its own state, persists it, and restores it after its own reload. PluginManager does not watch owners and registers nothing again on their behalf. An owner that is absent when PluginManager would call it is skipped; the reply names the skipped kinds. When PluginManager turns that owner's name on, it registers that kind of content of every plugin in use and withdraws it for every other plugin it knows.
+For each kind P carries and each owner present, PluginManager calls the owner's `register({plugin, dir, document})` and, to withdraw, `withdraw({plugin})`, where `plugin` is the plugin's id: its installed id, or a default plugin's name (§7), so it is safe in server ids and file names. When a name switches from one plugin to another, the old plugin's content is withdrawn; a kind the plugin no longer carries is withdrawn. The owner keeps what was registered as its own state, persists it, and restores it after its own reload. PluginManager does not watch owners and registers nothing again on their behalf. An owner that is absent when PluginManager would call it is skipped; the reply names the skipped kinds. An owner reports the plugin ids it holds. At startup, and when PluginManager turns an owner's name on, PluginManager registers that kind of content of every plugin in use and withdraws it for every other id the owner holds; owners never look for plugins. So content restored by an owner for a plugin removed while the owner was off, or left by a process that stopped between writing `plugins.json` and commanding the owner, does not run again, and a refusal is reported again after a restart.
 
 An owner validates what it is given. Content it refuses (an MCP document that fails Mcp's validation, a Skill whose `SKILL.md` does not parse) does not stop the plugin's other content or code: the reply names it under `refused`, and `plugin.list` shows what the owners report for the plugin at the time of the call.
 
@@ -339,9 +339,10 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | Reload while a Session uses the plugin's tools | Old generation unloads, calls cancelled, new parts mounted | rutis, the instance's mounters |
 | Content owner absent at install | That kind is skipped and reported; registered when PluginManager turns the owner on | PluginManager, owner |
 | Content owner reloads | It restores its own registered content | owner |
+| Plugin removed while its owner is off | Its content is withdrawn when the owner is turned on or at the next start | PluginManager |
 | `instanceNames` not in the running catalog | Configuration recorded, `restart_required`; row created at next start | PluginManager |
 | Process stops during a Git install | Staging directory deleted at next start; `plugins.json` was not written | PluginManager |
-| Process stops after `plugins.json` was written, before the loader command | Next start builds rows from `plugins.json` | PluginManager startup |
+| Process stops after `plugins.json` was written, before the loader or owner command | Next start builds rows from `plugins.json` and brings the owners to it | PluginManager startup |
 
 ## Appendix C. Acceptance (M1)
 

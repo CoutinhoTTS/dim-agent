@@ -220,7 +220,8 @@ impl McpService {
 
     /// Adds or replaces the MCP document of `plugin` (a plugin id, PluginManager
     /// §3.7), whose stdio entries run in `dir` unless they name another `cwd`
-    /// inside it. Its entries run as `<plugin>:<server>`. The registration is
+    /// inside it; a `cwd` that is absolute, uses `..` or resolves outside `dir`
+    /// through a symbolic link refuses the document. Its entries run as `<plugin>:<server>`. The registration is
     /// kept in `mcp-plugins.json` and survives Mcp's reload. A document that
     /// fails validation is refused: the plugin then has no entries, and
     /// [`Self::plugin_refusal`] reports why.
@@ -243,6 +244,7 @@ impl McpService {
                     extra: BTreeMap::new(),
                 }
                 .validate()
+                .and_then(|()| registration.confine())
                 .map(|()| registration)
             });
         let result = match valid {
@@ -277,6 +279,20 @@ impl McpService {
     /// Why Mcp refused the last document `plugin` registered.
     pub fn plugin_refusal(&self, plugin: &str) -> Option<String> {
         self.refused.lock().unwrap().get(plugin).cloned()
+    }
+
+    /// The plugin ids whose MCP documents Mcp holds.
+    pub async fn plugins(&self, cancel: &CancellationToken) -> Result<Vec<String>> {
+        self.run(cancel, move |settings, cancel| async move {
+            Ok(settings
+                .read::<McpPluginServers>(SettingsScope::User, &cancel)
+                .await?
+                .document
+                .plugins
+                .into_keys()
+                .collect())
+        })
+        .await
     }
 
     async fn set_plugin(

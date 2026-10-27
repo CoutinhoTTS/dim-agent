@@ -279,6 +279,47 @@ impl State {
     }
 }
 impl State {
+    /// Startup (§3.1), last part, once the process rows are up: brings every
+    /// content owner to the record.
+    pub(crate) async fn startup_content(&self, owners: &Owners) {
+        self.reconcile_content(owners, &CONTENT).await;
+    }
+
+    /// Brings what the present owners hold of `kinds` to the record (§3.7):
+    /// registers the content of every plugin in use and withdraws it for
+    /// every other plugin id an owner holds. Turning an owner's name on calls
+    /// it for that owner's kind.
+    async fn reconcile_content(&self, owners: &Owners, kinds: &[Kind]) {
+        let record = self.record.lock().unwrap().clone();
+        let builtins = self.builtins.get().expect("set at startup");
+        let mut in_use = BTreeSet::new();
+        for name in names(&record, &self.defaults, builtins) {
+            let Some(used @ (Use::Default | Use::Installed(_))) =
+                using(&record, &self.defaults, builtins, &name)
+            else {
+                continue;
+            };
+            let Some(dir) = dir_of(&record, &self.defaults, &name, &used) else {
+                continue;
+            };
+            let plugin = own_id(&name, &used).expect("not a built-in").to_owned();
+            match Manifest::read(&dir) {
+                Ok(manifest) => {
+                    owners
+                        .register(&plugin, &dir, &manifest, kinds, &mut Outcome::default())
+                        .await;
+                }
+                Err(error) => tracing::warn!(%name, %error, "plugin manifest unreadable"),
+            }
+            in_use.insert(plugin);
+        }
+        for plugin in owners.held(kinds).await {
+            if !in_use.contains(&plugin) {
+                owners.withdraw(&plugin, kinds).await;
+            }
+        }
+    }
+
     /// A plugin with code that is turned on gets `<pluginFiles root>/<id>/`
     /// (§2.1): its installed id, or a default plugin's name. It is created
     /// if missing and never deleted. An existing entry is used only if it
@@ -464,7 +505,7 @@ pub(crate) struct Manager {
 /// The content owners, read only if present (§1): an absent owner skips
 /// only its kind of content.
 #[derive(Clone)]
-struct Owners {
+pub(crate) struct Owners {
     ctx: Ctx,
     skills: Key<SkillsCatalog>,
     mcp: Key<McpService>,
@@ -495,6 +536,37 @@ fn skill_issues(issues: Vec<SkillIssue>) -> Option<String> {
 }
 
 impl Owners {
+    /// The owners as `ctx` reads them, keyed from `names`.
+    pub fn new(ctx: Ctx, names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            ctx,
+            skills: names.key()?,
+            mcp: names.key()?,
+        })
+    }
+
+    /// The plugin ids the present owners hold content of `kinds` for.
+    async fn held(&self, kinds: &[Kind]) -> BTreeSet<String> {
+        let mut held = BTreeSet::new();
+        if kinds.contains(&Kind::Skills)
+            && let Some(catalog) = self.ctx.get_at(&self.skills)
+        {
+            match catalog.plugins().await {
+                Ok(plugins) => held.extend(plugins),
+                Err(error) => tracing::warn!(%error, "Skills plugin roots unreadable"),
+            }
+        }
+        if kinds.contains(&Kind::Mcp)
+            && let Some(mcp) = self.ctx.get_at(&self.mcp)
+        {
+            match mcp.plugins(&self.ctx.cancellation_token()).await {
+                Ok(plugins) => held.extend(plugins),
+                Err(error) => tracing::warn!(%error, "MCP plugin documents unreadable"),
+            }
+        }
+        held
+    }
+
     /// Registers each content kind `manifest` carries with its owner, and
     /// withdraws the kinds it does not carry (§3.7). `kinds` limits the
     /// owners called.
@@ -1226,7 +1298,7 @@ impl Manager {
         if change.after.is_some()
             && let Some((_, kind)) = OWNERS.iter().find(|(owner, _)| *owner == name)
         {
-            self.sync(*kind).await;
+            self.state.reconcile_content(&self.owners, &[*kind]).await;
         }
         let used = change.after.as_ref();
         let Some(used @ (Use::Default | Use::Installed(_))) = used else {
@@ -1268,38 +1340,6 @@ impl Manager {
             }
         }
         outcome
-    }
-
-    /// Registers `kind` for every plugin in use and withdraws it for every
-    /// other plugin PluginManager knows: what a content owner turned on is
-    /// given (§3.7).
-    async fn sync(&self, kind: Kind) {
-        let record = self.state.record.lock().unwrap().clone();
-        for name in names(&record, &self.state.defaults, self.builtins()) {
-            let used = self.using(&record, &name);
-            let candidates = record
-                .installed
-                .iter()
-                .filter(|entry| entry.name == name)
-                .map(|entry| (Use::Installed(entry.id.clone()), entry.dir.clone()))
-                .chain(
-                    self.state
-                        .defaults
-                        .plugins
-                        .get(&name)
-                        .map(|dir| (Use::Default, dir.clone())),
-                );
-            for (candidate, dir) in candidates {
-                let plugin = own_id(&name, &candidate).expect("not a built-in");
-                if used.as_ref() != Some(&candidate) {
-                    self.owners.withdraw(plugin, &[kind]).await;
-                } else if let Ok(manifest) = Manifest::read(&dir) {
-                    self.owners
-                        .register(plugin, &dir, &manifest, &[kind], &mut Outcome::default())
-                        .await;
-                }
-            }
-        }
     }
 
     fn status_of(&self, name: &str, used: Option<&Use>) -> Outcome {

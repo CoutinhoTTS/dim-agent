@@ -341,6 +341,40 @@ impl BusinessDocument for McpPluginServers {
                 extra: BTreeMap::new(),
             }
             .validate()?;
+            for config in document.mcp_servers.values() {
+                if let McpServerSettings::Stdio { cwd: Some(cwd), .. } = config
+                    && !Path::new(cwd).components().all(|part| {
+                        matches!(
+                            part,
+                            std::path::Component::Normal(_) | std::path::Component::CurDir
+                        )
+                    })
+                {
+                    return Err(OUTSIDE_PLUGIN);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A plugin stdio entry's `cwd` that is absolute, climbs with `..`, or
+/// resolves outside the plugin directory.
+pub(crate) const OUTSIDE_PLUGIN: SettingsError =
+    SettingsError::Invalid("MCP plugin cwd must be a directory inside the plugin");
+
+impl McpPluginDocument {
+    /// Refuses a stdio `cwd` that, after following symbolic links, is not a
+    /// directory inside the canonical plugin directory.
+    pub(crate) fn confine(&self) -> Result<()> {
+        let dir = std::fs::canonicalize(&self.dir).map_err(|_| OUTSIDE_PLUGIN)?;
+        for config in self.mcp_servers.values() {
+            if let McpServerSettings::Stdio { cwd: Some(cwd), .. } = config {
+                match std::fs::canonicalize(dir.join(cwd)) {
+                    Ok(resolved) if resolved.starts_with(&dir) && resolved.is_dir() => {}
+                    _ => return Err(OUTSIDE_PLUGIN),
+                }
+            }
         }
         Ok(())
     }

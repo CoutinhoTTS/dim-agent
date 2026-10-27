@@ -280,6 +280,12 @@ impl SkillsCatalog {
         self.reload_settings().await
     }
 
+    /// The plugin ids whose skills roots the catalog holds.
+    pub async fn plugins(&self) -> Result<Vec<String>, SkillsError> {
+        self.query(None).await?;
+        Ok(self.state.lock().await.plugins.keys().cloned().collect())
+    }
+
     /// The issues of the skills root `plugin` registered, as the catalog
     /// holds them now.
     pub async fn plugin_issues(&self, plugin: &str) -> Result<Vec<SkillIssue>, SkillsError> {

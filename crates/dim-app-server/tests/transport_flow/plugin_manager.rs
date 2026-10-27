@@ -1005,3 +1005,156 @@ async fn plugin_content_reaches_sessions_through_its_owners() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// The server ids of `mcp.catalog`.
+async fn mcp_ids(client: &mut Client) -> Vec<String> {
+    let catalog = when_served(client, "mcp.catalog", json!({})).await;
+    catalog["result"]["servers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{catalog}"))
+        .iter()
+        .map(|server| server["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The ids of the plugin Skills `skills.catalog` lists.
+async fn plugin_skill_ids(client: &mut Client) -> Vec<String> {
+    let catalog = when_served(client, "skills.catalog", json!({})).await;
+    catalog["result"]["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{catalog}"))
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap().to_owned())
+        .filter(|id| id.starts_with("plugin:"))
+        .collect()
+}
+
+/// A plugin stdio entry runs inside its plugin directory: a `cwd` that is
+/// absolute, climbs with `..`, or leaves through a symbolic link refuses
+/// the plugin's MCP document, which is reported and not published.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_mcp_cwd_stays_inside_the_plugin() {
+    let home = home();
+    let config = config(&home);
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let source = home.join("src/paths");
+    std::fs::create_dir_all(source.join("inside")).unwrap();
+    std::fs::create_dir_all(home.join("outside")).unwrap();
+    std::os::unix::fs::symlink(home.join("outside"), source.join("link")).unwrap();
+    let entry = |cwd: &str| json!({"tool": {"command": "dim-test-absent-mcp-server", "cwd": cwd}});
+    write_content_plugin(&source, "paths", &["paths"], entry("inside"));
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert!(installed["result"].get("refused").is_none(), "{installed}");
+    assert_eq!(mcp_ids(&mut client).await, ["paths:tool"]);
+
+    let outside = home.join("outside").to_string_lossy().into_owned();
+    for cwd in [
+        outside.as_str(),
+        "../outside",
+        "inside/../../outside",
+        "link",
+    ] {
+        write_content_plugin(&source, "paths", &["paths"], entry(cwd));
+        let reloaded = call(&mut client, "plugin.reload", json!({"name":"paths"})).await;
+        assert_eq!(
+            reloaded["result"]["refused"][0]["kind"], "mcp",
+            "{cwd}: {reloaded}"
+        );
+        assert!(mcp_ids(&mut client).await.is_empty(), "{cwd}");
+        assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:paths:paths"]);
+        write_content_plugin(&source, "paths", &["paths"], entry("inside"));
+        let reloaded = call(&mut client, "plugin.reload", json!({"name":"paths"})).await;
+        assert!(reloaded["result"].get("refused").is_none(), "{reloaded}");
+        assert_eq!(mcp_ids(&mut client).await, ["paths:tool"]);
+    }
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// Startup brings the owners to the record (§3.7): content of a plugin
+/// removed while its owner was off, or left behind when the process stopped
+/// between writing `plugins.json` and commanding the owner, is withdrawn,
+/// and an MCP refusal is reported again after a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_content_follows_the_record_over_restarts() {
+    let home = home();
+    let config = config(&home);
+    let absent = json!({"command": "dim-test-absent-mcp-server"});
+    let gone = home.join("src/gone");
+    write_content_plugin(&gone, "gone", &["gone"], json!({"tool": absent}));
+    let stale = home.join("src/stale");
+    write_content_plugin(&stale, "stale", &["stale"], json!({"tool": absent}));
+    let broken = home.join("src/broken");
+    write_content_plugin(&broken, "broken", &[], json!({"tool": {"command": ""}}));
+
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for source in [&gone, &stale, &broken] {
+        call(
+            &mut client,
+            "plugin.install",
+            json!({"source":{"path":source}}),
+        )
+        .await;
+    }
+    assert_eq!(mcp_ids(&mut client).await, ["gone:tool", "stale:tool"]);
+    assert_ok(&call(&mut client, "plugin.disable", json!({"name":"Mcp"})).await);
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.disable",
+            json!({"name":"SkillsCatalog"}),
+        )
+        .await,
+    );
+    assert_ok(&call(&mut client, "plugin.remove", json!({"id":"gone"})).await);
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"SkillsCatalog"}),
+        )
+        .await,
+    );
+    assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:stale:stale"]);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(&call(&mut client, "plugin.enable", json!({"name":"Mcp"})).await);
+    assert_eq!(mcp_ids(&mut client).await, ["stale:tool"]);
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "broken")["refused"][0]["kind"], "mcp", "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let record = home.join("plugins.json");
+    let mut written: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    written["installed"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|entry| entry["id"] != "stale");
+    written["names"].as_object_mut().unwrap().remove("stale");
+    std::fs::write(&record, written.to_string()).unwrap();
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert!(mcp_ids(&mut client).await.is_empty());
+    assert!(plugin_skill_ids(&mut client).await.is_empty());
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "broken")["refused"][0]["kind"], "mcp", "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

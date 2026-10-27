@@ -12552,6 +12552,7 @@
       "references": [
         "mod plugin_manager",
         "path plugin_manager::LAYER",
+        "path plugin_manager::Owners::new",
         "path plugin_manager::PluginManagerPlugin::new",
         "path plugin_manager::State::read"
       ]
@@ -15466,6 +15467,7 @@
       "references": [
         "path BusinessDocument",
         "path Result",
+        "path SettingsError",
         "path SettingsError::Invalid",
         "path SettingsService",
         "path crate::settings::ProjectAuthorized",

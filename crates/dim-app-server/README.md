@@ -130,7 +130,8 @@ An old `mcp-approvals.json` is ignored, not migrated or removed.
 Plugins add entries through PluginManager, which registers each plugin's MCP document with Mcp
 under the plugin id ([PluginManager §3.7](../../docs/design/plugins/PluginManager.md#37-content-registration)).
 Mcp keeps them in `mcp-plugins` and lists them with `source: "plugin"` as `<plugin id>:<server>`;
-a stdio entry runs in the plugin directory unless its `cwd` names another directory inside it.
+a stdio entry runs in the plugin directory, or in the directory inside it that its `cwd` names;
+a `cwd` that is absolute, uses `..` or leaves the plugin through a symbolic link refuses the document.
 They run while the plugin is on and change only through the plugin: `mcp.save`, `mcp.remove`
 and `mcp.set_enabled` refuse them, while `mcp.disconnect` and sign-in work as for other entries.
 
