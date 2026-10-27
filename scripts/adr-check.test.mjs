@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {checkChanges, isFrozen, parseDiff} from './docs-check.mjs';
+import {checkChanges, isFrozen, parseDiff} from './adr-check.mjs';
 
 const adr = 'docs/adr/001-harness-foundation.md';
 
@@ -22,7 +22,7 @@ test('accepted ADRs are frozen', () => {
   for (const status of ['M', 'D', 'R100']) {
     const paths = status === 'R100' ? [adr, 'docs/adr/009-new.md'] : [adr];
     const errors = checkChanges([{status, paths}]);
-    assert.equal(errors.length, status === 'R100' ? 2 : 1, status);
+    assert.equal(errors.length, 1, status);
     assert.match(errors[0], /accepted ADRs are frozen/);
   }
 });
@@ -35,6 +35,12 @@ test('a proposed ADR may still change', () => {
 test('the adr-erratum label allows a correction', () => {
   const errors = checkChanges([{status: 'M', paths: [adr]}], {erratum: true});
   assert.deepEqual(errors, []);
+});
+
+test('an unreadable base version fails instead of allowing the edit', () => {
+  const errors = checkChanges([{status: 'M', paths: [adr]}], {frozen: () => undefined});
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /cannot read the base version/);
 });
 
 test('a new ADR is allowed', () => {

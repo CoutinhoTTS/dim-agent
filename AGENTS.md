@@ -32,7 +32,7 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 - An accepted ADR is a snapshot ([ADR 008](docs/adr/008-documentation-ownership.md)). Do not modify or delete an accepted ADR; a proposed ADR may change until accepted. A direction change is a new ADR; a link or typo fix to an accepted ADR uses the `adr-erratum` label. Existing ADRs are not retroactively cleaned.
 - A document owns only its own scope. A feature or plugin design states its own inputs, outputs, events, state, errors and declared dependencies, and links to another module's contract instead of restating or changing it. Put a cross-module requirement in the design that raises it; the owner changes its own document.
 - Technical detail stays at its layer: public contract terms in the contract or design, language spelling in a binding appendix, current implementation in architecture pages. Do not describe another module's internals.
-- Document type comes from the existing path; there is no manifest. Templates live in `docs/templates/`, whose README links the examples. Run `node scripts/docs-check.mjs --base <ref>` in a PR checkout; CI uses `HEAD^1`.
+- Document type comes from the existing path; there is no manifest. Templates live in `docs/templates/`, whose README links the examples. Run `node scripts/adr-check.mjs --base <ref>` in a PR checkout; CI uses `HEAD^1`.
 
 ## Testing
 

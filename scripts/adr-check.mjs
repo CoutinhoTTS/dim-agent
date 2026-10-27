@@ -2,7 +2,7 @@
 // A link or typo fix uses the adr-erratum label.
 //
 // Run from the workspace root in a PR checkout:
-//   node scripts/docs-check.mjs --base HEAD^1
+//   node scripts/adr-check.mjs --base HEAD^1
 // Locally, pass origin/main or another base.
 import {execFileSync} from 'node:child_process';
 
@@ -26,12 +26,17 @@ export function isFrozen(text) {
 export function checkChanges(changes, {frozen = () => true, erratum = false} = {}) {
   const errors = [];
   for (const {status, paths} of changes) {
-    for (const path of paths) {
-      if (adr.test(path) && status !== 'A' && frozen(path) && !erratum) {
-        errors.push(
-          `${path}: accepted ADRs are frozen; add a new ADR, or add the adr-erratum label and push again for a link or typo fix`,
-        );
-      }
+    if (status === 'A') continue;
+    // A rename's old path is the ADR that existed; the new path is new.
+    const path = paths[0];
+    if (!adr.test(path)) continue;
+    const state = frozen(path);
+    if (state === undefined) {
+      errors.push(`${path}: cannot read the base version; fetch the base ref and retry`);
+    } else if (state && !erratum) {
+      errors.push(
+        `${path}: accepted ADRs are frozen; add a new ADR, or add the adr-erratum label and push again for a link or typo fix`,
+      );
     }
   }
   return errors;
@@ -56,7 +61,7 @@ if (import.meta.main) {
     try {
       return isFrozen(git(['show', `${mergeBase}:${path}`]));
     } catch {
-      return false;
+      return undefined;
     }
   };
   const errors = checkChanges(changes, {frozen, erratum});
@@ -64,6 +69,6 @@ if (import.meta.main) {
     console.error(errors.join('\n'));
     process.exitCode = 1;
   } else {
-    console.log(`documentation boundaries passed: ${changes.length} changed files`);
+    console.log(`ADR freeze passed: ${changes.length} changed files`);
   }
 }

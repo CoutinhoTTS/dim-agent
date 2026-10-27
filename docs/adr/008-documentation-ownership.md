@@ -31,9 +31,6 @@ to contain facts owned by another document.
 - An ADR records the context, the decision and its consequences. It does not record
   implementation status, migration progress or delivery history.
 - Existing ADRs predate this rule. They stay as they are and are not retroactively cleaned.
-- `scripts/docs-check.mjs` enforces the freeze in a pull request: an accepted ADR cannot be
-  modified or deleted without `adr-erratum`. A label change does not start a new run, so add the
-  label and push again.
 
 ### D2. Delivery status lives in issues
 
@@ -56,8 +53,9 @@ to contain facts owned by another document.
 
 ## Checks and guidance
 
-- The check enforces only D1: an accepted `docs/adr/*.md` cannot be modified or deleted without
-  `adr-erratum`. It does not scan prose for status words and does not check translations.
+- `scripts/adr-check.mjs` enforces only D1: an accepted `docs/adr/*.md` cannot be modified or
+  deleted without `adr-erratum`. It does not scan prose for status words and does not check
+  translations. A label change does not start a new run, so add the label and push again.
 - Templates live in `docs/templates/`. The README there links the examples.
 - `AGENTS.md` states the constraints and routing. It also states the technical-detail layers and
   that document type comes from the existing path, with no manifest.
@@ -67,7 +65,7 @@ to contain facts owned by another document.
 - Existing ADRs remain valid history, including status text written before this decision.
 - A design that needs another module changes that owner's document separately.
 - New status-only edits to indexes and accepted ADRs stop.
-- Agents get a local, executable failure instead of a prose reminder.
+- An attempted edit to an accepted ADR gets a local, executable failure before review.
 - Cross-owner design edits are caught by review, not by a file count.
 
 ## Non-goals
