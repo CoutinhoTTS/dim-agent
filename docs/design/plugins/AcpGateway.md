@@ -134,6 +134,8 @@ None for the first delivery. It does not reserve future mechanism changes as hid
 
 `dimcode acp [--agent ID]` uses the existing explicit home/cwd/server/model-profile options. It mounts the gateway in a client rutis tree, without Tui, UiLeaf or a daemon-side ACP part. It does not run a terminal update prompt or read stdin as a one-shot chat prompt. Stdout contains protocol only. The separate `--auth-setup METHOD_ID` helper uses the existing interactive login flow.
 
+Zed's existing `dim acp` invocation and legacy environment configuration follow [plan §3.2](../acp-gateway-implementation.md#32-插件输入和装配顺序).
+
 ### A.2 ACP methods
 
 The exhaustive stable, unstable and extension decisions are [plan §4](../acp-gateway-implementation.md#4-稳定-acp-v1-方法逐项映射) and [§8](../acp-gateway-implementation.md#8-lody-方法和能力逐项决策). No capability is inferred from an SDK type or the historical implementation.

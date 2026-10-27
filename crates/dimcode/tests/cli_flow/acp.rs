@@ -1491,69 +1491,93 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let model = thread::spawn(move || {
-        let deadline = Instant::now() + PATIENCE;
-        let stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "The production daemon did not request the model"
-                    );
-                    thread::sleep(Duration::from_millis(10));
+        for (prompt, response) in [
+            ("ACP_REAL_REQUEST", "ACP_REAL_OK"),
+            ("ACP_REAL_FOLLOWUP", "ACP_REAL_FOLLOWUP_OK"),
+            ("ACP_NEW_REQUEST", "ACP_NEW_OK"),
+        ] {
+            let deadline = Instant::now() + PATIENCE;
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "The production daemon did not request the model"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
                 }
-                Err(error) => panic!("{error}"),
-            }
-        };
-        stream.set_nonblocking(false).unwrap();
-        stream.set_read_timeout(Some(PATIENCE)).unwrap();
-        let mut stream = BufReader::new(stream);
-        let mut line = String::new();
-        stream.read_line(&mut line).unwrap();
-        assert!(line.starts_with("POST /v1/chat/completions "), "{line}");
-        let mut length = 0;
-        loop {
-            line.clear();
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(PATIENCE)).unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
             stream.read_line(&mut line).unwrap();
-            if line == "\r\n" {
-                break;
+            assert!(line.starts_with("POST /v1/chat/completions "), "{line}");
+            let mut length = 0;
+            loop {
+                line.clear();
+                stream.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                let (name, value) = line.split_once(':').unwrap();
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse().unwrap();
+                }
             }
-            let (name, value) = line.split_once(':').unwrap();
-            if name.eq_ignore_ascii_case("content-length") {
-                length = value.trim().parse().unwrap();
+            let mut bytes = vec![0; length];
+            stream.read_exact(&mut bytes).unwrap();
+            let request: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(request["model"], "fixture-model");
+            assert!(
+                request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|message| message["role"] == "user"
+                        && message["content"].to_string().contains(prompt))
+            );
+            if prompt == "ACP_REAL_FOLLOWUP" {
+                assert!(
+                    request["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|message| message["role"] == "assistant"
+                            && message["content"].to_string().contains("ACP_REAL_OK")),
+                    "A follow-up must retain the Session's earlier reply"
+                );
+                assert!(request["messages"].to_string().contains("ACP_REAL_REQUEST"));
+            } else if prompt == "ACP_NEW_REQUEST" {
+                let messages = request["messages"].to_string();
+                assert!(
+                    !messages.contains("ACP_REAL_REQUEST")
+                        && !messages.contains("ACP_REAL_FOLLOWUP")
+                        && !messages.contains("ACP_REAL_OK"),
+                    "A new Session must not inherit the other Session's context"
+                );
             }
+            let chunk = |delta: Value, finish: Value| {
+                json!({"id":"fixture-response","object":"chat.completion.chunk","model":"fixture-model","choices":[{"index":0,"delta":delta,"finish_reason":finish}]}).to_string()
+            };
+            let data = format!(
+                "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                chunk(json!({"role":"assistant","content":response}), Value::Null),
+                chunk(json!({}), json!("stop"))
+            );
+            write!(stream.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len()).unwrap();
+            stream.get_mut().flush().unwrap();
         }
-        let mut bytes = vec![0; length];
-        stream.read_exact(&mut bytes).unwrap();
-        let request: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(request["model"], "fixture-model");
-        assert!(
-            request["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|message| message["role"] == "user"
-                    && message["content"].to_string().contains("ACP_REAL_REQUEST"))
-        );
-        let chunk = |delta: Value, finish: Value| {
-            json!({"id":"fixture-response","object":"chat.completion.chunk","model":"fixture-model","choices":[{"index":0,"delta":delta,"finish_reason":finish}]}).to_string()
-        };
-        let data = format!(
-            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-            chunk(
-                json!({"role":"assistant","content":"ACP_REAL_OK"}),
-                Value::Null
-            ),
-            chunk(json!({}), json!("stop"))
-        );
-        write!(stream.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len()).unwrap();
-        stream.get_mut().flush().unwrap();
     });
     let config = home.0.join("model.json");
     fs::write(&config, json!({"defaultModel":{"providerId":"local","modelId":"fixture-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","config":{"maxTokens":256}}]}]}).to_string()).unwrap();
     let mut child = home
         .command()
         .args(["--model-config", config.to_str().unwrap(), "acp"])
+        .env("ACP_STICKY_SESSION", "true")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1589,8 +1613,36 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
         .collect();
     assert_eq!(text, "ACP_REAL_OK");
     peer.updates.clear();
-    peer.send(4, "session/resume", json!({"sessionId":id,"cwd":home.0}));
-    assert!(peer.response(4).get("error").is_none());
+    peer.send(
+        4,
+        "session/prompt",
+        json!({"sessionId":id,"prompt":[{"type":"text","text":"ACP_REAL_FOLLOWUP"}]}),
+    );
+    assert_eq!(peer.response(4)["result"]["stopReason"], "end_turn");
+    assert!(
+        peer.updates
+            .iter()
+            .any(|frame| frame["params"]["update"]["content"]["text"] == "ACP_REAL_FOLLOWUP_OK")
+    );
+    peer.send(5, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    let other = peer.response(5);
+    assert!(other.get("error").is_none(), "{other}");
+    let other_id = other["result"]["sessionId"].as_str().unwrap();
+    assert_ne!(other_id, id);
+    peer.send(
+        6,
+        "session/prompt",
+        json!({"sessionId":other_id,"prompt":[{"type":"text","text":"ACP_NEW_REQUEST"}]}),
+    );
+    assert_eq!(peer.response(6)["result"]["stopReason"], "end_turn");
+    assert!(
+        peer.updates
+            .iter()
+            .any(|frame| frame["params"]["update"]["content"]["text"] == "ACP_NEW_OK")
+    );
+    peer.updates.clear();
+    peer.send(7, "session/resume", json!({"sessionId":id,"cwd":home.0}));
+    assert!(peer.response(7).get("error").is_none());
     assert!(
         !peer.updates.iter().any(|frame| matches!(
             frame["params"]["update"]["sessionUpdate"].as_str(),

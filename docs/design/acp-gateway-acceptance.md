@@ -25,6 +25,7 @@
 | --- | --- |
 | CLI compatibility | `cli_flow -- --skip acp_stdio_recovery_deadline`：123 passed，11 ignored，1 filtered；包括当前 CLI 的旧 daemon 替换行为。本轮没有复跑被过滤的恢复截止用例 |
 | ACP stdio | 回归覆盖现有 ACP 和 terminal-auth helper；19 个非 ignored ACP 流程通过，Node MCP stdio 流程另行执行通过。表单和 usage 通知由固定版本 schema 1.12.0 实际反序列化 |
+| Zed legacy configuration | 设置 `ACP_STICKY_SESSION=true` 的原生 stdio 流程通过：同 Session 第二次真实模型请求包含前一轮输入和回复；同 cwd 新建 Session 的 id 与上下文独立；resume 原 Session 不重放旧消息。Zed 启动配置见合同 §3.2，GUI 未实机验收 |
 | 临时 MCP | native MCP Session suite 13 passed，含真实 30 秒租约过期、失败清理、Session 隔离、无设置写入和真实工具调用；工具列表变更另行复核通过 |
 | 既有 MCP | `mcp_flow` 5 passed；`mcp_http_flow` 7 passed、4 ignored。原有配置、连接代际、HTTP/SSE、取消和关闭行为回归通过 |
 | 共享传输 | `dim-client` 两个公共连接/callback 测试通过；身份/profile 校验、交错响应、半帧取消和受限 loopback callback |

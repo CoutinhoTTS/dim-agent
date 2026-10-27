@@ -85,6 +85,21 @@ parse CLI options (including isolated --home / --cwd / --server / --agent)
 
 `--agent` 只选择 `session.create.agentId`；不创建 Agent、不改变默认 Agent 配置。插件不得拿走 Desktop/TUI 正在使用的 RPC connection。一个 ACP connection 拥有一个独立 RPC connection，多 Session 在该连接上按 Session id 分发。
 
+Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一原生 CLI，`command:"dim"`、`args:["acp"]` 无需调整。`ACP_STICKY_SESSION` 可作为旧环境配置保留，不改变协议行为：同一 Session id 的连续 prompt 保留上下文；`session/new` 始终创建独立 Session；继续已有 Session 使用 load/resume。它不自动选择最近会话，也不把同目录的新会话合并。已核对的历史源码 `8bb52a93a` 的 newSession 同样直接创建 Session；可追溯记录中的这个环境变量仅出现在文档，没有可移植的开关实现。兼容通过原有会话能力与公开流程验证完成，不增加无效的环境变量分支。
+
+```json
+{
+  "agent_servers": {
+    "dim": {
+      "type": "custom",
+      "command": "dim",
+      "args": ["acp"],
+      "env": { "ACP_STICKY_SESSION": "true" }
+    }
+  }
+}
+```
+
 ### 3.3 原生调用白名单
 
 必需：`hello`、`session.create`、`session.attach`、`session.detach`、`session.submit`、`session.input_lookup`、`session.history`、`session.stop`。先验证协议 v3 及执行 profile 的 create/history/input_lookup flags；缺失时 initialize 失败。hello.features 不是完整方法目录：attach/detach/submit/stop/list/close 属于已协商 v3 的基础调用，没有逐项重复列出，不能据其未列出而判断不支持。可选管理方法和新能力仍按实际 flags / Session methods 判断。
