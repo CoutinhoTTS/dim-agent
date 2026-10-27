@@ -5368,15 +5368,13 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         terminal.transcript
     );
     terminal.write(b"\x13");
-    // Applied as Steer: the strip empties (it keeps its height while the
-    // turn runs) once the message entered the transcript.
-    terminal.until("Queue (0)");
+    // Applied as Steer: the strip goes away once the message entered the
+    // transcript; an empty queue is never drawn.
     terminal.write(b"third\r");
     terminal.until("Queue (1)");
     terminal.until("› third");
     terminal.write(b"\x1b[A");
-    // Gone from the queue and back in the composer, drawn below the strip.
-    terminal.until("Queue (0)");
+    // Gone from the queue and back in the composer.
     terminal.until("third");
     // The transcript holds the applied messages in the model's order and
     // never the withdrawn one; styling is stripped for the check.
@@ -5406,6 +5404,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         out.push_str(rest);
         out
     };
+    assert!(!plain.contains("Queue (0)"), "{plain}");
     assert!(plain.contains("┃ first"), "{plain}");
     assert!(plain.contains("┃ second"), "{plain}");
     assert!(!plain.contains("┃ third"), "{plain}");

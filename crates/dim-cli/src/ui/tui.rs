@@ -697,7 +697,8 @@ struct App {
     last_pulse: u64,
     /// The most message rows the queue strip has shown in this run: the
     /// strip keeps that height as the queue drains, so the composer does
-    /// not hop while messages leave; the next run starts afresh.
+    /// not hop while messages leave; an empty queue or the next run starts
+    /// afresh.
     queue_rows: usize,
     /// Every committed block, oldest first, as its source: both interfaces
     /// lay it out again from here (a scrollback rewrite, the fullscreen
@@ -2476,7 +2477,13 @@ impl App {
         frame.dock = live.len();
         if self.prompt.is_none() {
             let queued = self.queued();
-            self.queue_rows = self.queue_rows.max(queued.len().min(QUEUE_ROWS));
+            // An empty queue draws no strip; the composer keeps its row and
+            // the strip's rows are given back above it.
+            self.queue_rows = if queued.is_empty() {
+                0
+            } else {
+                self.queue_rows.max(queued.len().min(QUEUE_ROWS))
+            };
             if self.queue_rows > 0 {
                 live.extend(queue_strip(&queued, self.queue_rows, cols, &self.palette));
             }
@@ -3412,7 +3419,8 @@ const QUEUE_ROWS: usize = 5;
 /// The queue, drawn in a titled border above the composer: the next message
 /// to run reads at the top. `height` message rows are drawn (at least the
 /// queue's, at most [`QUEUE_ROWS`]), blank past the queue's end, so the
-/// strip holds its height while the queue drains.
+/// strip holds its height while the queue drains. An empty queue is not
+/// drawn at all.
 fn queue_strip(items: &[(String, String)], height: usize, cols: usize, p: &Palette) -> Vec<String> {
     use crate::ui::render::panel::bordered;
     use crate::ui::text::truncate_cells;
@@ -4059,7 +4067,6 @@ mod tests {
         let three: Vec<_> = (1..=3).map(item).collect();
         let full = queue_strip(&three, 3, 80, p);
         assert_eq!(queue_strip(&three[..1], 3, 80, p).len(), full.len());
-        assert_eq!(queue_strip(&[], 3, 80, p).len(), full.len());
     }
 
     /// A finished command keeps the status row its running block had.
