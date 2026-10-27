@@ -68,6 +68,7 @@ impl PluginsDir {
             .collect::<Result<_, _>>()?;
         let shaped = match parts.as_slice() {
             [".staging", random] => !random.is_empty(),
+            [".python"] => true,
             [id] => check_id(id).is_ok(),
             [id, commit] => self.clone_dir(id, commit).is_ok(),
             _ => false,
@@ -83,6 +84,57 @@ impl PluginsDir {
             return Err(outside(dir));
         }
         Ok(())
+    }
+
+    /// Links `<root>/.python/<package>` to the Python plugin directory
+    /// `target`, the import path of the Python runtime. An existing link to
+    /// another directory is replaced; anything else there is refused.
+    pub fn python_link(&self, package: &str, target: &Path) -> Result<(), PluginError> {
+        let python = self.python_dir(package)?;
+        let link = python.join(package);
+        std::fs::create_dir_all(&self.root).map_err(acquire_failed)?;
+        match std::fs::symlink_metadata(&python) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+            Ok(_) => return Err(outside(&python)),
+            Err(_) => std::fs::create_dir(&python).map_err(acquire_failed)?,
+        }
+        match std::fs::symlink_metadata(&link) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                if std::fs::read_link(&link).is_ok_and(|current| current == target) {
+                    return Ok(());
+                }
+                remove_link(&link).map_err(acquire_failed)?;
+            }
+            Ok(_) => return Err(outside(&link)),
+            Err(_) => {}
+        }
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, &link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(target, &link);
+        made.map_err(acquire_failed)
+    }
+
+    /// Removes the link of a removed Python plugin, never what it points to.
+    pub fn remove_python_link(&self, package: &str) {
+        let Ok(python) = self.python_dir(package) else {
+            return;
+        };
+        let link = python.join(package);
+        if std::fs::symlink_metadata(&link).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            let _ = remove_link(&link);
+        }
+    }
+
+    /// `<root>/.python`, checked, for a valid package name. The link itself
+    /// is not resolved: it points outside by design.
+    fn python_dir(&self, package: &str) -> Result<PathBuf, PluginError> {
+        if !python_package(package) {
+            return Err(outside(package));
+        }
+        let python = self.root.join(".python");
+        self.check(&python)?;
+        Ok(python)
     }
 
     /// A new, empty staging directory.
@@ -114,7 +166,8 @@ impl PluginsDir {
         };
         for id in ids.flatten() {
             let id_dir = id.path();
-            if id.file_name() == ".staging" || self.check(&id_dir).is_err() {
+            // `.staging` and `.python` are not ids: an id has no dot.
+            if id.file_name().to_string_lossy().starts_with('.') || self.check(&id_dir).is_err() {
                 continue;
             }
             if let Ok(commits) = std::fs::read_dir(&id_dir) {
@@ -161,6 +214,26 @@ impl Drop for Staging {
                 let _ = std::fs::remove_dir(parent);
             }
         }
+    }
+}
+
+/// A Python package name: what an id becomes with `-` as `_`.
+pub fn python_package(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// A directory link is a file on Unix and a directory on Windows.
+fn remove_link(link: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        std::fs::remove_dir(link)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::remove_file(link)
     }
 }
 

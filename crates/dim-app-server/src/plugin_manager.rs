@@ -77,19 +77,40 @@ fn row_id(name: &str) -> String {
     format!("plugin:{name}")
 }
 
-/// The loader module of a plugin's code: `py:<module>` for a Python entry,
-/// else the entry file, which the Node runtime loads.
-fn module(code: &record::Code) -> String {
-    match code.entry.extension().and_then(|e| e.to_str()) {
-        Some("py") => format!(
-            "py:{}",
-            code.entry
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-        ),
-        _ => code.entry.to_string_lossy().into_owned(),
+/// The id a used plugin's own files are named by: its installed id, or a
+/// default plugin's name.
+fn own_id<'a>(name: &'a str, used: &'a Use) -> Option<&'a str> {
+    match used {
+        Use::Installed(id) => Some(id),
+        Use::Default => Some(name),
+        Use::Builtin => None,
     }
+}
+
+/// A Python plugin's package: its id with `-` as `_`.
+fn python_package(id: &str) -> String {
+    id.replace('-', "_")
+}
+
+/// The loader module of a plugin's code. A Python entry is
+/// `py:<package>.<module>`, imported through the plugin's link under
+/// `<home>/plugins/.python/` (§2.5); another entry is its file, which the
+/// Node runtime loads.
+fn module(id: &str, dir: &Path, code: &record::Code) -> String {
+    if code.entry.extension().and_then(|e| e.to_str()) != Some("py") {
+        return code.entry.to_string_lossy().into_owned();
+    }
+    let relative = code.entry.strip_prefix(dir).unwrap_or(&code.entry);
+    let module: Vec<_> = relative
+        .with_extension("")
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    format!("py:{}.{}", python_package(id), module.join("."))
+}
+
+fn is_python(code: &record::Code) -> bool {
+    code.entry.extension().and_then(|e| e.to_str()) == Some("py")
 }
 
 /// The configuration PluginManager works on; it outlives a generation of
@@ -230,10 +251,15 @@ impl State {
                 Ok(Manifest {
                     code: Some(code), ..
                 }) if missing_instance_names(catalog, &code).is_empty() => {
-                    if let Some(used) = &used {
-                        self.provide_data_dir(&name, used);
+                    let used = used.as_ref().expect("a plugin in use");
+                    self.provide_data_dir(&name, used);
+                    let id = own_id(&name, used).expect("not a built-in");
+                    if is_python(&code)
+                        && let Err(error) = self.dirs.python_link(&python_package(id), &dir)
+                    {
+                        tracing::warn!(%name, %error, "Python plugin link refused");
                     }
-                    rows.push(row_value(&name, &code));
+                    rows.push(row_value(&name, id, &dir, &code));
                 }
                 Ok(_) => {}
                 Err(error) => tracing::warn!(%name, %error, "plugin manifest unreadable"),
@@ -255,13 +281,8 @@ impl State {
     /// if missing and never deleted. An existing entry is used only if it
     /// is a directory, not a symbolic link, inside the root.
     fn provide_data_dir(&self, name: &str, used: &Use) {
-        let Some(root) = &self.files else {
+        let (Some(root), Some(id)) = (&self.files, own_id(name, used)) else {
             return;
-        };
-        let id = match used {
-            Use::Installed(id) => id.as_str(),
-            Use::Default => name,
-            Use::Builtin => return,
         };
         if let Err(error) = acquire::check_id(id) {
             tracing::warn!(%name, %error, "no plugin data directory");
@@ -328,10 +349,10 @@ fn missing_instance_names(catalog: &ServiceCatalog, code: &record::Code) -> Vec<
         .collect()
 }
 
-fn row_value(name: &str, code: &record::Code) -> Value {
+fn row_value(name: &str, id: &str, dir: &Path, code: &record::Code) -> Value {
     json!({
         "id": row_id(name),
-        "name": module(code),
+        "name": module(id, dir, code),
         "inject": code.inject,
         "config": code.config,
     })
@@ -804,6 +825,9 @@ impl Manager {
             },
         )?;
         self.switch(&entry.name, after.as_ref()).await;
+        self.state
+            .dirs
+            .remove_python_link(&python_package(&entry.id));
         if let Source::Git { .. } = entry.source {
             self.state
                 .dirs
@@ -881,15 +905,20 @@ impl Manager {
             }
             Some(code) => {
                 let current = self.loader.get(&row);
+                let module = module(
+                    own_id(name, used.as_ref().expect("in use")).expect("not a built-in"),
+                    &dir,
+                    code,
+                );
                 let same = current.as_ref().is_some_and(|entry| {
-                    entry.options["name"] == json!(module(code))
+                    entry.options["name"] == json!(module)
                         && entry.options.get("inject").cloned().unwrap_or(json!([]))
                             == json!(code.inject)
                         && entry.options.get("config") == Some(&code.config)
                 });
                 if same {
                     if let Some(Some(node)) = self.state.node.get() {
-                        node.invalidate(&module(code));
+                        node.invalidate(&module);
                     }
                     if let Err(error) = self.loader.reload(&row).await {
                         tracing::warn!(%row, %error, "plugin reload refused");

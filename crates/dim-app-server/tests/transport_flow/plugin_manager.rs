@@ -571,3 +571,106 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// A Python plugin of one tool answering `text`, in one module.
+fn write_python_plugin(dir: &Path, text: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(
+        dir.join("dim-plugin.json"),
+        json!({"name": "py-tool", "code": {"entry": "plugin.py", "inject": ["partRegistry"]}})
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("plugin.py"),
+        format!(
+            r#"from rutis import define_plugin
+
+inject = ["partRegistry"]
+provides = {{}}
+
+
+async def part_apply(ctx, config):
+    async def execute(call, cancelled):
+        return {{"content": {text:?}}}
+
+    await ctx.use("toolRegistry").register({{
+        "name": "py_tool", "description": "test tool", "inputSchema": {{"type": "object"}},
+        "source": "extension", "risk": "session",
+    }}, execute)
+
+
+part = define_plugin(part_apply, inject=["toolRegistry"], name="PyToolPart")
+
+
+async def apply(ctx, config):
+    await ctx.use("partRegistry").registerDefinition("session", "PyToolPart", part)
+"#
+        ),
+    )
+    .unwrap();
+}
+
+/// Acceptance 11: a Python plugin installed from a local path is imported
+/// through its link under `<home>/plugins/.python/`, the Python runtime's
+/// import path, registers its tool, and reload picks up an edit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_python_plugin_installs_and_reloads_through_its_link() {
+    let home = home();
+    let mut config = config(&home);
+    // Without a product home, PluginManager's home is the target home.
+    config.product_home = None;
+    let python = home.join("rust/plugins/.python");
+    std::fs::create_dir_all(&python).unwrap();
+    let mut parts = fixture();
+    parts.rows.clear();
+    parts.python = Some(dim_app_server::session_typescript::PythonConfig {
+        interpreter: std::env::var_os("DIM_TEST_PYTHON")
+            .expect("DIM_TEST_PYTHON")
+            .into(),
+        project: python.canonicalize().unwrap(),
+    });
+    config.session_typescript = Some(parts);
+    let (server, _requests, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let source = home.join("src/py-tool");
+    write_python_plugin(&source, "python one");
+
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert_eq!(installed["result"]["status"], "running", "{installed}");
+    let link = python.join("py_tool");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        source.canonicalize().unwrap()
+    );
+    let mut params = create(json!(["py_tool"]));
+    params["permissionPolicy"]["allowedTools"] = json!(["py_tool"]);
+    let created = client.rpc("session.create", params).await;
+    assert_ok(&created);
+    let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    submit(&mut client, &session, "tool:py_tool {}").await;
+    assert_eq!(last_tool_text(&server, &session).await, "python one");
+
+    write_python_plugin(&source, "python after the edit");
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"py-tool"})).await;
+    assert_eq!(reloaded["result"]["status"], "running", "{reloaded}");
+    submit(&mut client, &session, "tool:py_tool {}").await;
+    assert_eq!(
+        last_tool_text(&server, &session).await,
+        "python after the edit"
+    );
+
+    assert_ok(&call(&mut client, "plugin.remove", json!({"id":"py-tool"})).await);
+    assert!(std::fs::symlink_metadata(&link).is_err());
+    assert!(source.join("plugin.py").is_file());
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

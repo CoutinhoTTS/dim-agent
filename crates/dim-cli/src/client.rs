@@ -53,15 +53,15 @@ fn web_assets_in(configured: Option<OsString>, executable: &Path, home: &Path) -
 }
 
 /// The default plugin configuration file (PluginManager §2.3):
-/// `DIMCODE_DEFAULT_PLUGINS`, else `plugins/default-plugins.json` beside the
-/// executable's `bin/`.
+/// `DIMCODE_DEFAULT_PLUGINS`, else `default-plugins.json` beside the
+/// executable's `bin/`, next to the `plugins/` directory it lists.
 fn default_plugins(executable: &Path) -> Option<PathBuf> {
     [
         std::env::var_os("DIMCODE_DEFAULT_PLUGINS").map(PathBuf::from),
         executable
             .parent()
             .and_then(Path::parent)
-            .map(|root| root.join("plugins").join("default-plugins.json")),
+            .map(|root| root.join("default-plugins.json")),
     ]
     .into_iter()
     .flatten()
