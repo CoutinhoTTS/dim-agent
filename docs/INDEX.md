@@ -1,5 +1,7 @@
 # Documentation
 
+This index is navigation. Delivery status lives in issues, not here.
+
 - [CLI feature list](feature-list.md)
 - [Model preferences and Agent configuration](design/model-configuration.md)
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
@@ -10,56 +12,60 @@
 - [Development plan and priorities](design/roadmap.md)（中文）
 - [Agent context: goals and requirements to define](design/agent-context.md)（中文；branches, compaction, model prompts; requirements, not design）
 - [Plugin management: requirements](design/plugin-management.md)（中文；one plugin concept, install, reload, replacement; requirements, not design）
+- [Document templates](templates/README.md)
+- [Document examples](examples/README.md)
 - [ADR 002 — Plugin scope](adr/002-plugin-scope.md)（[中文](zh/adr/002-plugin-scope.md)）
 - [ADR 003 — Approval scope](adr/003-approval-scope.md)（[中文](zh/adr/003-approval-scope.md)）
 - [ADR 004 — Session-owned MCP and business configuration](adr/004-loader-plugin-management.md)
 - [ADR 005 — Observe runs through the Timeline and process logs](adr/005-observability.md)
-- [ADR 006 — The plugin contract is concepts and conventions, not types](adr/006-plugin-contract.md) (accepted; implemented, except R5's second form)（[中文](zh/adr/006-plugin-contract.md)）
-- [Plugin contract](design/plugin-contract.md): Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability (accepted; implemented, except R5's second form; ADR 006)（[中文](zh/design/plugin-contract.md)）
-- [How Dim uses rutis](design/rutis-usage.md): parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, and the Rust/TypeScript bindings (accepted; implemented, except R5's second form; ADR 006)（[中文](zh/design/rutis-usage.md)）
+- [ADR 006 — The plugin contract is concepts and conventions, not types](adr/006-plugin-contract.md)（[中文](zh/adr/006-plugin-contract.md)）
+- [ADR 007 — PluginManager keeps plugin configuration; rutis and content owners keep state](adr/007-plugin-configuration.md)
+- [ADR 008 — Documentation ownership and immutable ADRs](adr/008-documentation-ownership.md)
+- [Plugin contract](design/plugin-contract.md): Dim's architecture as it applies to plugins: instance tree, placement, Dim's services and bus events, facts and their consumption, Capability（[中文](zh/design/plugin-contract.md)）
+- [How Dim uses rutis](design/rutis-usage.md): parts as loader rows, services by name, the catalog, crossing languages, the rutis lifecycle and bus, and the Rust/TypeScript bindings（[中文](zh/design/rutis-usage.md)）
 - [Architecture and ownership](architecture/README.md)
-- [Architecture decisions and implementation status](adr/README.md)
+- [Architecture decisions](adr/README.md)
 - [Rust agent design documents](architecture/README.md#design-documents)
-- [Owner-independent Timeline instances](design/collaboration-timeline.md) (proposed, #335)
-- [Timeline branches](design/timeline-branches.md): what branches are for, branch versus member and fork, messages between lines, identity across compaction, ending a line (proposed, #427)（[中文](zh/design/timeline-branches.md)）
+- [Owner-independent Timeline instances](design/collaboration-timeline.md) (#335)
+- [Timeline branches](design/timeline-branches.md): what branches are for, branch versus member and fork, messages between lines, identity across compaction, ending a line (#427)（[中文](zh/design/timeline-branches.md)）
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)
-- [Clients](design/clients.md): which clients exist, what they share, capability coverage per client, gaps and open decisions (draft)（[中文](zh/design/clients.md)）
+- [Clients](design/clients.md): which clients exist, what they share, capability coverage per client, gaps and open decisions（[中文](zh/design/clients.md)）
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
-- [Read-only member conversations in the CLI](design/member-conversation.md) (accepted #300, #333; detail #324 and transcript cards #263 implemented)
-- [Subagent model policy](design/subagent-model-policy.md) (implemented, #263; native new-member model choice)
-- [CLI background command output](design/background-task-output.md) (native C1 read implemented; CLI detail and refresh in progress in #324)
-- [Commands and members in the background-task list](design/background-task-list.md) (command/member implementation in progress in #324; Workflow integration is separate)
-- [Workflows in the CLI task view](design/workflow-task-view.md) (implemented in the native CLI, #264; existing management reads/stops)
+- [Read-only member conversations in the CLI](design/member-conversation.md) (#300, #333, #324, #263)
+- [Subagent model policy](design/subagent-model-policy.md) (#263)
+- [CLI background command output](design/background-task-output.md) (#324)
+- [Commands and members in the background-task list](design/background-task-list.md) (#324)
+- [Workflows in the CLI task view](design/workflow-task-view.md) (#264)
 - [App Server and public provider bridge](../crates/dim-app-server/README.md)
 - [TypeScript plugin authoring and named-service types](typescript-plugin-authoring.md)
-- [Upgrading to rutis 0.16.0](design/rutis-0.16-upgrade.md) (implemented; plugin contract P1)（[中文](zh/design/rutis-0.16-upgrade.md)）
-- [Upgrading to rutis 0.15.0](design/rutis-0.15-upgrade.md) (superseded by the 0.16 design)（[中文](zh/design/rutis-0.15-upgrade.md)）
+- [Upgrading to rutis 0.16.0](design/rutis-0.16-upgrade.md)（[中文](zh/design/rutis-0.16-upgrade.md)）
+- [Upgrading to rutis 0.15.0](design/rutis-0.15-upgrade.md)（superseded by the 0.16 design）（[中文](zh/design/rutis-0.15-upgrade.md)）
 - [C4 Session TypeScript spike and measurements](design/session-typescript-spike.md)
 - [C4 Session TypeScript binding design](design/session-typescript.md)
 - [TypeScript process rows and management binding](design/process-typescript.md)
-- [Scheduler/Workflow native access](design/p6-p7-bindings.md) (native bindings implemented; Scheduler package and acceptance in [#317](https://github.com/arcships/dim/pull/317); Workflow delivery follows its owner design)
+- [Scheduler/Workflow native access](design/p6-p7-bindings.md) (#317)
 - [C5 branch TypeScript binding](design/branch-typescript.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
 - [Compaction trigger point and verbatim retention (research, #128)](design/research/compaction-trigger.md)（[中文](zh/design/research/compaction-trigger.md)）
-- [F5 HostPlatform process isolation policy](design/host-platform-isolation.md) (implemented)
+- [F5 HostPlatform process isolation policy](design/host-platform-isolation.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
 - [Management methods](design/appserver/management-methods.md)
-- [Provider management for Desktop and CLI](design/appserver/provider-management.md)（[中文](zh/design/appserver/provider-management.md)） (implemented, #329; snapshots, partial writes, user models and explicit client preferences)
-- [Settings service](design/appserver/settings-service.md) (S8b owner read/write and events implemented)（[中文](zh/design/appserver/settings-service.md)）
-- [MCP OAuth](design/appserver/mcp-oauth.md) (implemented on the daemon side, F4)（[中文](zh/design/appserver/mcp-oauth.md)）
+- [Provider management for Desktop and CLI](design/appserver/provider-management.md) (#329)（[中文](zh/design/appserver/provider-management.md)）
+- [Settings service](design/appserver/settings-service.md)（[中文](zh/design/appserver/settings-service.md)）
+- [MCP OAuth](design/appserver/mcp-oauth.md)（[中文](zh/design/appserver/mcp-oauth.md)）
 - [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
 - [Agents sessions service](design/appserver/sessions-service.md)（[中文](zh/design/appserver/sessions-service.md)）
 - [Session deletion, cleanup and fork](design/appserver/session-deletion-and-fork.md)（[中文](zh/design/appserver/session-deletion-and-fork.md)）
-- [Session broadcast notices](design/appserver/session-notices.md) (C6)（[中文](zh/design/appserver/session-notices.md)）
-- [SessionStore title metadata](design/appserver/session-title-metadata.md) (S5b)（[中文](zh/design/appserver/session-title-metadata.md)）
-- [Restore-scoped shared history read](design/appserver/restore-shared-read.md) (implemented, #193 phase 3)（[中文](zh/design/appserver/restore-shared-read.md)）
-- [Idle Session unload](design/appserver/idle-unload.md) (implemented, #126, #331)（[中文](zh/design/appserver/idle-unload.md)）
+- [Session broadcast notices](design/appserver/session-notices.md)（[中文](zh/design/appserver/session-notices.md)）
+- [SessionStore title metadata](design/appserver/session-title-metadata.md)（[中文](zh/design/appserver/session-title-metadata.md)）
+- [Restore-scoped shared history read](design/appserver/restore-shared-read.md) (#193)（[中文](zh/design/appserver/restore-shared-read.md)）
+- [Idle Session unload](design/appserver/idle-unload.md) (#126, #331)（[中文](zh/design/appserver/idle-unload.md)）
 - [Request delta storage](design/appserver/request-delta-storage.md) (#193)（[中文](zh/design/appserver/request-delta-storage.md)）
-- [Timeline export](design/appserver/timeline-export.md) (implemented, ADR 005 D3, #275)（[中文](zh/design/appserver/timeline-export.md)）
+- [Timeline export](design/appserver/timeline-export.md) (ADR 005 D3, #275)（[中文](zh/design/appserver/timeline-export.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

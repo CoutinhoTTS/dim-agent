@@ -1,0 +1,17 @@
+# Document templates
+
+These files describe the shape of a document. They are not rules. The constraints and routing
+are in [AGENTS.md](../../AGENTS.md).
+
+| Type | Template | Example |
+| --- | --- | --- |
+| ADR | [adr.md](adr.md) | [ADR 008](../adr/008-documentation-ownership.md) |
+| Feature or plugin design | [design.md](design.md) | — |
+| Contract | [contract.md](contract.md) | — |
+
+Use the template for the document's own layer. An ADR records a decision; a design records what
+one owner provides and requires; a contract records one cross-module interface. Do not copy
+another module's mechanism into a design.
+
+Technical detail stays. Put public terms and invariants in the contract or design body, language
+spelling in a binding appendix, and current implementation facts in architecture documents.

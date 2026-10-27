@@ -19,6 +19,12 @@ Answer each item; write "n/a" with a reason where it does not apply. Rules: [des
 - [ ] Missing mechanism capabilities are raised as requirements (problem, why existing mechanisms fail, generic capability, ordering impact, owner/issue).
 - [ ] Timeline holds only facts later decisions use; UI-only changes go through Session broadcast notices; process-level state is changed through its owner's typed write operation, not the Timeline.
 
+## Documentation
+
+- [ ] No existing ADR is modified or deleted; a changed decision is a new ADR ([ADR 008](../docs/adr/008-documentation-ownership.md)).
+- [ ] No other module's design is changed. A PR that changes more than one `docs/design/plugins/*.md` carries the `cross-module` label and owner review.
+- [ ] Delivery status is not added to an ADR, index or roadmap; binding details are in a binding appendix.
+
 ## Verification
 
 <!-- Tests and checks run. -->

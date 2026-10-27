@@ -84,11 +84,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          # HEAD^1 is the base of the PR merge commit for the documentation check.
+          fetch-depth: 2
           persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version-file: .node-version
           package-manager-cache: false
+      - name: Check documentation boundaries
+        if: needs.changes.outputs.scripts == 'true'
+        env:
+          DIM_DOCS_CROSS_MODULE: ${{ contains(toJSON(github.event.pull_request.labels), '"cross-module"') && '1' || '0' }}
+        run: node scripts/docs-check.mjs --base HEAD^1
       - name: Verify the Rust workspace
         if: needs.changes.outputs.rust == 'true'
         shell: bash

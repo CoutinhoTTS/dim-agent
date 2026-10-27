@@ -4,8 +4,9 @@ import {classify,groups} from './ci-changes.mjs';
 
 const only=(...names)=>Object.fromEntries(groups.map(group=>[group,names.includes(group)]));
 
-test('documentation-only changes skip every check',()=>{
-  assert.deepEqual(classify(['docs/adr/006-plugin-contract.md','docs/zh/INDEX.md','README.md','AGENTS.md']),only());
+test('documentation-only changes run the documentation boundary check',()=>{
+  assert.deepEqual(classify(['docs/adr/006-plugin-contract.md','docs/zh/INDEX.md']),only('scripts'));
+  assert.deepEqual(classify(['README.md','AGENTS.md']),only());
 });
 
 test('documents that code reads keep their checks',()=>{
@@ -14,7 +15,7 @@ test('documents that code reads keep their checks',()=>{
 });
 
 test('dependency policy changes select the scan without compiling the workspace',()=>{
-  assert.deepEqual(classify(['deny.toml','LICENSE','docs/release/README.md']),only('dependencies'));
+  assert.deepEqual(classify(['deny.toml','LICENSE']),only('dependencies'));
 });
 
 test('source areas select their groups',()=>{
@@ -24,7 +25,7 @@ test('source areas select their groups',()=>{
   assert.deepEqual(classify(['crates/dim-app-server/src/lib.rs','runtime/fixtures/session-part.json']),only('rust'));
   assert.deepEqual(classify(['crates/dim-cli/src/main.rs']),only('rust','windows'));
   // A file moved from source into docs/ lists both paths.
-  assert.deepEqual(classify(['docs/notes.md','crates/dim-cli/src/notes.rs']),only('rust','windows'));
+  assert.deepEqual(classify(['docs/notes.md','crates/dim-cli/src/notes.rs']),only('rust','windows','scripts'));
 });
 
 test('workspace, toolchain, workflow and unknown paths run everything',()=>{
