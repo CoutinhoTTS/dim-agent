@@ -271,7 +271,7 @@ WorkspaceTools 不变。
 | `{kind: "tool", turn_id, request_id, call_id}` | 要结束的那条线自己的一次工具调用：`branch` 工具的 `end` |
 | `{kind: "host", operation_id}` | 一次宿主操作。可以是 App Server 的 `session.branch_end`，它像 `session.branch_create` 那样生成 `operation_id`（一个 uuid，[connection/tree.rs](../../../crates/dim-app-server/src/connection/tree.rs)），也可以是带自己 id 的插件，例如 Goal 的 `goal:evaluate:N` |
 
-一条线因为某个祖先结束而结束时，带上 `ancestor`，`source` 则从那个祖先的 `branch/end` 复制。`branch/ended` 从这条线的 `branch/end` 复制 `source` 和 `ancestor`。
+`ancestor` 指向用自己那次结束发起连锁的线：也就是本身不带 `ancestor` 的那次结束。无论多深，每条后代都带这条线，`source` 也从同一次结束复制，于是（source, ancestor）这对值指明一次结束操作：谁要求的，在哪条线上。自己要求结束的线有 `source`、没有 `ancestor`。`branch/ended` 从这条线的 `branch/end` 复制 `source` 和 `ancestor`，并且总是写在结束的那条线自己的父分支上，取自目录。
 
 **一个通用操作。** `TreeCommands.end(id, source)` 和 `Session::end_branch(id, source)` 只检查目标：它存在、未结束、不是 `main`。结束 `main` 就等于关闭 Session，所以这是关于目标的检查，不是关于调用方的。它们从不检查是谁在调用。
 
@@ -286,7 +286,7 @@ WorkspaceTools 不变。
 
 1. 入口在这条线上提交 `branch/end`。此后这条线不再接受新输入，也不再开出新线，它下面的线也不再开出新线：这些入口都以 `branch_ended` 失败。它下面的线仍可接受输入，直到它自己提交 `branch/end`（第 3 步）。
 2. 这条线上的 TreeTimeline 消费 `branch/end`，转给 TimelineTree。
-3. TimelineTree 先结束这条线的后代，每条后代都把 `ancestor` 设为这条线、带上这个 `source`，走同样的步骤。
+3. TimelineTree 先结束这条线的后代，走同样的步骤；无论多深，每条后代都复制这个 `source`，并把 `ancestor` 设为这条线。
 4. 关闭时机：
    - `tool` 来源：在 `branch/end` 之后这条线第一次结束一轮时关闭，因为这次调用就在那一轮里；线空闲时立即关闭；
    - `host` 来源，以及因祖先结束而结束的线：立即关闭，中断当前这一轮。
@@ -298,7 +298,7 @@ WorkspaceTools 不变。
 - 工具线经工具结束自己时（`tool` 来源且没有 `ancestor`），只写名册更新。这条线的最终消息已经在 `branch/end` 之前以 steer 送到 `main`。
 - 工具线的其他任何结束，写名册更新加上结束通知（§12.1），以 steer 写在同一条输入里。
 
-`tool` 来源时，客户端显示"自行结束"；其他情况显示结束它的操作。
+`tool` 来源且没有 `ancestor` 时，客户端显示"自行结束"；其他情况显示结束它的操作；由连锁结束的线还会写明它的祖先，例如"ended with X"。
 
 **恢复。** 父分支上有某个子分支的 `branch/ended` 时，这个子分支不活跃。恢复中的父分支读取历史时会报告这些事件（§5）。这条规则加入现有的几条：父分支不活跃、父分支上有这个子分支的 `branch/create-failed`、子分支的创建从未完成。
 

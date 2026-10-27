@@ -271,7 +271,7 @@ This pair mirrors `branch/create` and `branch/create-failed`: a command on one T
 | `{kind: "tool", turn_id, request_id, call_id}` | A tool call on the ending line itself: the `branch` tool's `end` |
 | `{kind: "host", operation_id}` | A host operation. Either App Server's `session.branch_end`, which mints `operation_id` the way `session.branch_create` does (a uuid, [connection/tree.rs](../../crates/dim-app-server/src/connection/tree.rs)), or a plugin with its own id, such as Goal's `goal:evaluate:N` |
 
-`ancestor` is present when the line ends because that ancestor ended, and `source` is then copied from the ancestor's `branch/end`. `branch/ended` copies `source` and `ancestor` from the line's `branch/end`.
+`ancestor` names the line whose own end started the cascade: the end that carries no `ancestor` of its own. Every descendant at any depth carries that line, `source` is copied from that same end, and the pair therefore names one end operation: who asked, and on which line. A line ended at its own request has a `source` and no `ancestor`. `branch/ended` copies `source` and `ancestor` from the line's `branch/end`, and is always written on the ending line's own parent, taken from the directory.
 
 **A general operation.** `TreeCommands.end(id, source)` and `Session::end_branch(id, source)` check only the target: it exists, it is open, and it is not `main`. Ending `main` would close the Session, so that check is about the target, not the caller. They never check who calls.
 
@@ -286,7 +286,7 @@ Sequence:
 
 1. The entry commits `branch/end` on the line. From then on the line accepts no new input and opens no line, and no line opens under any line below it: those entries fail with `branch_ended`. A line below takes input until its own `branch/end` (step 3).
 2. TreeTimeline on the line consumes `branch/end` and hands it to TimelineTree.
-3. TimelineTree ends the line's descendants first, each with `ancestor` set to this line and with this `source`, through these same steps.
+3. TimelineTree ends the line's descendants first, through these same steps, each with `source` copied and `ancestor` naming this line, however deep it is.
 4. The close happens:
    - for a `tool` source: at the line's first turn end after `branch/end`, because the call is part of that turn, or at once if the line is idle;
    - for a `host` source, and for a line ending because of an ancestor: at once, interrupting the current turn.
@@ -298,7 +298,7 @@ On the parent, BranchLine acts only for tool lines; host lines belong to their c
 - When a tool line ended itself through the tool (a `tool` source and no `ancestor`), it writes the roster update only. The line's final message already reached `main` as a steer before `branch/end`.
 - For any other end of a tool line, it writes the roster update plus the ended notice (§12.1), as a steer, in the same input.
 
-Clients show "ended itself" for a `tool` source, and otherwise the operation that ended the line.
+Clients show "ended itself" for a `tool` source and no `ancestor`, and otherwise the operation that ended the line; a line ended by a cascade names its ancestor, for example "ended with X".
 
 **Restore.** A child is inactive when its parent has a `branch/ended` for it. The resumed parent's history read reports these (§5). This joins the existing rules: the parent is inactive, the parent has a `branch/create-failed` for the child, or the child's creation never completed.
 
