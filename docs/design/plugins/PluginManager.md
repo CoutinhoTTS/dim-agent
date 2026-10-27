@@ -15,7 +15,7 @@ A plugin is a directory with a manifest. It may carry code (a rutis plugin in Ty
 | Plugin code: create, turn on/off, replace, reload loader rows (§3) | yes, TypeScript and Python, once their runtimes are supplied (§2.5) | |
 | `plugin.*` management methods and `dimcode plugin` commands (§6, A.1) | yes | client notifications of changes |
 | Agent tools through a Session part (§6) | yes | |
-| The default CLI loads the default plugins (goal, web, session-title, workflow, scheduler) | yes | |
+| The default CLI loads the default plugins (goal, web, session-title, workflow, scheduler, plugin-authoring) | yes | |
 | Settings sources registered at run time by every plugin itself (§9 R1) | yes, built-in and TypeScript plugins together | |
 | Content kinds: skills, MCP configuration, hooks (§3, §9 R2) | skills and MCP if their owners land in time | hooks (Hooks is M2) |
 
@@ -32,7 +32,7 @@ flowchart LR
     OWN["Content owners<br/>SkillsCatalog, Mcp, Hooks"]
     SET["Settings"]
     CODE["Plugin code rows"]
-    PT["PluginTools (Session part)<br/>plugin tools"]:::new
+    PT["PluginTools (Session part)<br/>plugin tool"]:::new
   end
   RPC -->|"plugin.* (managementMethods)"| PM
   PM -->|"reconcile derived layer, reload"| LOADER
@@ -40,12 +40,13 @@ flowchart LR
   PM -->|"register / withdraw (if present)"| OWN
   CODE -->|"register own Settings sources"| SET
   PT -->|"same operations"| PM
+  PT -->|"config: read, update"| SET
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
 - PluginManager is one process row. It is locked (§2.3): it cannot be turned off or replaced, because nothing could turn it back on.
 - It injects the loader handle and `managementMethods`. It reads the content owners only if present (`Option<Keyed<_>>`, not a gate): a missing owner skips only that kind of content.
-- It registers a Session part, `PluginTools`, with `partRegistry`. The part registers the plugin tools with the Session's `toolRegistry`; each tool call goes to PluginManager's process service.
+- It registers a Session part, `PluginTools`, with `partRegistry`. The part registers the `plugin` tool with the Session's `toolRegistry`; each call goes to PluginManager's process service, and `config` goes to Settings (§6).
 - Owners never look for plugins and never read `plugins.json`.
 
 ## 2. Data
@@ -141,7 +142,8 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
     "web": "plugins/web",
     "session-title": "plugins/session-title",
     "workflow": "plugins/workflow",
-    "scheduler": "plugins/scheduler"
+    "scheduler": "plugins/scheduler",
+    "plugin-authoring": "plugins/plugin-authoring"
   },
   "locked": ["PluginManager", "Rpc", "Transport"]
 }
@@ -243,13 +245,23 @@ An owner validates what it is given. Content it refuses (an MCP document that fa
 
 ## 5. Context mapping
 
-PluginManager adds nothing to model context. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). Tool results of the plugin tools say what changed, the status, and `restart_required` when it applies.
+PluginManager adds nothing to model context. A plugin's tools and prompt sources reach the model through their own registrations ([ADR 006 D4](../../adr/006-plugin-contract.md)). Results of the `plugin` tool say what changed, the status, and `restart_required` when it applies.
 
 ## 6. Interfaces (summary)
 
 - Management methods, namespace `plugin` (A.1): `list`, `install`, `enable`, `disable`, `reload`, `update`, `remove`.
 - CLI: `dimcode plugin list | install <path|git-url> [--ref R] [--id ID] [--no-enable] | enable <name> [--use ID|builtin|default] | disable <name> | reload <name> | update <id> | remove <id>`.
-- Agent tools from `PluginTools`: `plugin_list`, `plugin_install`, `plugin_enable`, `plugin_disable`, `plugin_reload`, `plugin_update`, `plugin_remove`, with the same parameters. They are tool calls: Permission decides each one as usual ([requirement 5](../plugin-management.md), [ADR 003](../../adr/003-approval-scope.md)).
+- Agent tool from `PluginTools`: one tool, `plugin`, with one string parameter `command`, written like the CLI's arguments (words split as a shell does, so a path with spaces is quoted):
+
+  | Command | Does |
+  | --- | --- |
+  | `list`, `install …`, `enable …`, `disable <name>`, `reload <name>`, `update <id>`, `remove <id>` | The `plugin.*` method of the same name, with the CLI's arguments; a relative path is resolved against the Session's working directory. Same result and errors. |
+  | `config <name>` | The Settings sources the plugin that `<name>` uses registered (R4): for each, its user document, revision, schema and user-only fields. A plugin that is not running has registered none. |
+  | `config <name> set <key> <value>` | Replaces one top-level member of a source through Settings: reads the user document, sets `<key>` (`<source>.<key>` when the plugin has several sources) to `<value>` (JSON, else a string) and updates with the revision it read. Settings checks the revision and schema; the write is an owner write, so a user-only field is refused. The owner reads its source when it needs it, so the value takes effect without a restart. Structural row configuration is not edited here. |
+  | `help [command]` | The command list, or one command's usage and details. |
+
+  The tool's description carries only the one-line command list; `help` gives the details, and a malformed command's error result carries that command's usage. The tool is a tool call: Permission decides each one ([requirement 5](../plugin-management.md), [ADR 003](../../adr/003-approval-scope.md)). Its declared risk is `persistent_configuration`; `list`, `config <name>` without `set`, and `help` are admitted as `read_filesystem` (R3).
+- Plugin authoring: the default plugin `plugin-authoring` carries one Skill, `plugin-authoring`, which teaches the agent to write a TypeScript plugin and install it with this tool. It is content only (§2.1) and can be turned off like any default plugin.
 - Owner operations PluginManager calls: `register` / `withdraw` on SkillsCatalog, Mcp and Hooks (§9 R2).
 
 ## 7. Security
@@ -275,7 +287,7 @@ PluginManager is not a Capability: it has no Timeline state, writes no Timeline 
 | Principles §4 rule 5 (batch) | Not applicable. |
 | Principles §4 rule 6 (context from handed-over events) | Nothing enters model context except tool results (§5). |
 | Principles §4 rule 7 (public events and services only) | rutis-loader's public `Loader` API, `managementMethods`, `partRegistry`, `toolRegistry` and the owners' public services. |
-| Principles §4 rule 8 (requirements to mechanism owners) | §9: Settings, SkillsCatalog, Mcp and Hooks; none to rutis. |
+| Principles §4 rule 8 (requirements to mechanism owners) | §9: Settings, SkillsCatalog, Mcp, Hooks, ToolExecutor and Permission; none to rutis. |
 | Principles §4 rule 9 (only facts later decisions use) | Configuration lives in `plugins.json`, the only record; runtime state is read from its owners. |
 | Principles §1 (Capability and App Server boundary) | A process plugin of the App Server; no Capability. |
 | ADR 002 D1 (scope follows state) | Process: installation is per host. `PluginTools` is a Session part only because tools are registered per Session. |
@@ -308,6 +320,26 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | Generic capability | A process operation `register({plugin, dir, document})` that adds or replaces the content of `plugin` (a plugin id, §3.7), and `withdraw({plugin})`, plus a read of what the owner refused for `plugin`. The owner keeps registered content as its own state, persists it in its own storage, and restores it after its own reload. Mcp prefixes server ids with `plugin` (`<plugin>:<server>`); Hooks names the source `plugin:<plugin>` and gives commands `DIM_PLUGIN_ROOT = dir`; SkillsCatalog reads Skills under `dir`. |
 | Effect on sequence, batch, interrupt, reload | As each owner's existing sources: a change is a data update the owner announces its own way. |
 | Owner and issue | SkillsCatalog, Mcp, Hooks ([Hooks](Hooks.md)). |
+
+**R3. ToolExecutor and Permission: the risk of one call (M1).**
+
+| Item | Content |
+| --- | --- |
+| Blocked by | A tool's risk is fixed in its definition, so one tool with read-only and changing commands is admitted at its highest risk: `plugin list` would ask for approval under workspace-write and be denied under read-only. |
+| Existing mechanisms considered | One tool per operation (the seven tools this replaces; too many for the model); `execute_process` with a `command` input (Permission would apply shell command rules to plugin commands). |
+| Generic capability | A tool handler may name the risk of one call; Approval and Permission admit the call under it, and a handler that names none is admitted under its definition's risk. |
+| Effect on sequence, batch, interrupt, reload | None: admission order and events are unchanged. |
+| Owner and issue | ToolExecutor and Permission (capabilities); with #384. |
+
+**R4. Settings: the sources a plugin registered (M1).**
+
+| Item | Content |
+| --- | --- |
+| Blocked by | Settings knows each source's name and schema but not which plugin registered it, so `plugin config <name>` cannot find a plugin's sources. |
+| Existing mechanisms considered | Listing sources in the manifest (business configuration is not plugin management, R1); naming sources after plugins (not a rule; one plugin may register several). |
+| Generic capability | Settings keeps, with each registration, the identity of the registering plugin's fiber, and lists the declared sources one fiber registered. PluginManager finds the fiber of the row a name uses through the loader. |
+| Effect on sequence, batch, interrupt, reload | None. A reloaded row keeps its fiber identity and registers again. |
+| Owner and issue | Settings (App Server); with #384. |
 
 ## Appendix A. Interface details
 
@@ -346,10 +378,10 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 
 ## Appendix C. Acceptance (M1)
 
-1. With an isolated home, `dimcode` starts with goal, web, session-title, workflow and scheduler loaded; `dimcode plugin list` shows them and the built-in plugins.
+1. With an isolated home, `dimcode` starts with goal, web, session-title, workflow, scheduler and plugin-authoring loaded; `dimcode plugin list` shows them and the built-in plugins.
 2. `dimcode plugin install ./my-tool` (a TypeScript plugin registering one tool) makes the tool visible to the model in a new turn without a restart.
 3. Editing `index.ts` and running `dimcode plugin reload my-tool` changes the tool's behavior in the open Session.
-4. The agent does steps 2–3 through its tools, each call decided by Permission.
+4. The agent does steps 2–3 through the `plugin` tool, each call decided by Permission; `plugin config goal set maxContinuations 5` changes goal's setting without a restart.
 5. `dimcode plugin disable web` removes web's tools; `enable web` brings them back; the state survives a restart.
 6. Installing a plugin named like a built-in and enabling it replaces the built-in; `enable <name> --use builtin` switches back.
 7. `disable PluginManager` is refused with `plugin_locked`.
@@ -357,6 +389,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 9. `dimcode plugin install <git-url>` of a fixture repository installs and turns on its plugin; after a second commit, `dimcode plugin update <id>` loads the new commit and deletes the old directory.
 10. A default plugin's Settings source appears when it starts and disappears when it is turned off.
 11. A Python plugin installed from a local path registers its tool, and reload picks up an edit to its entry module (with the Python runtime supplied by [#476](https://github.com/arcships/dim/issues/476)).
+12. In a new Session the agent lists the `plugin-authoring` Skill and, asked to write a plugin with an echo tool and install it, does so without reading Dim's source.
 
 ## Appendix D. Open questions
 
