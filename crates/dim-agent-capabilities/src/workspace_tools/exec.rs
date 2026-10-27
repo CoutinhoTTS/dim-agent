@@ -74,7 +74,7 @@ pub fn definition_for(platform: &HostPlatform) -> ToolDefinition {
                 "sandbox": {
                     "type": "string",
                     "enum": ["workspace", "network", "host"],
-                    "description": "Process boundary for this command. Omit it to use the node's policy. \"workspace\" writes only inside the session workspace and has no network; \"network\" adds host networking; \"host\" drops isolation. A boundary wider than the node's policy runs only where host-isolation.json sets escalation to \"ask\", and the approval prompt still applies."
+                    "description": "Process boundary for this command. Omit it to use the node's policy. \"workspace\" writes only inside the session workspace and has no network; \"network\" adds host networking; \"host\" drops isolation. A boundary wider than the node's policy runs only where host-isolation.json sets escalation to \"ask\"; it is approved only where the permission preset asks for this command, and a pre-allowed tool or command runs at the requested boundary without a prompt."
                 }
             },
             "required": ["command"]

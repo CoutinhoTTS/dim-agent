@@ -36,10 +36,12 @@ and the ceiling. A request at or below it applies directly. A request above it r
 node sets `escalation: "ask"`, and otherwise fails with `isolation_denied` before any payload
 starts. The argument is the model's decision, so Permission and Approval admit the call as usual;
 neither widens anything by itself, and a permission preset is not authority (ADR 003 D5). The
-approval prompt shows the call, `sandbox` argument included. Under `workspace-write` commands ask,
-so an escalated command is approved per call; under `read-only` they are denied; under
-`full-access` they run without a prompt, which makes `escalation: "ask"` the only gate there. The
-persistent shell has no argument and keeps the node tier.
+approval prompt shows the call with the requested `sandbox` boundary. Under `workspace-write`
+commands ask, so an escalated command is approved per call; under `read-only` they are denied;
+under `full-access` they run without a prompt. A tool in `allowedTools` or a command matched by an
+allow rule is admitted without a prompt at any tier, since neither looks at `sandbox`. Where no
+prompt appears, `escalation: "ask"` is the only gate. The persistent shell has no argument and
+keeps the node tier.
 
 | Resource | Default and configuration |
 | --- | --- |
@@ -111,7 +113,7 @@ git read the user's global configuration and name a writable workspace:
 ```
 
 `sandbox` is `workspace`, `network` or `host`. `escalation` is `deny` (default) or `ask`: `deny`
-refuses every request above the node tier, `ask` runs an approved request at the tier it names.
+refuses every request above the node tier, `ask` runs a request Permission admits at the tier it names.
 Version 1 maps `enabled: false` to `host`, `network: true` to `network` and everything else to
 `workspace`, with `escalation` denied. A field that belongs to another version, an unknown field,
 an unknown version, malformed/unreadable files, non-absolute or nonexistent roots, a read-only

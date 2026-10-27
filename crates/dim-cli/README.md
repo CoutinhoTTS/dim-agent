@@ -415,8 +415,10 @@ Each other field replaces its default:
 `workspace` writes only inside the session workspace and has no network; `network` adds host
 networking; `host` runs commands as your user with no sandbox at all. A model command names a
 tier with its `sandbox` argument. A tier at or below the file's runs directly; a wider one runs
-only when the file sets `"escalation": "ask"`, and otherwise fails with `isolation_denied`. An
-approval never widens the boundary by itself. Version 1 spelled the tier as `enabled` and
+only when the file sets `"escalation": "ask"`, and otherwise fails with `isolation_denied`. The
+approval prompt shows the requested boundary; under `full-access`, for a tool in `allowedTools`
+or for a command you allowed always, a wider tier runs without a prompt. An approval never widens
+the boundary by itself. Version 1 spelled the tier as `enabled` and
 `network` (`false` runs commands as ordinary processes, `true` allows networking) and never
 allowed escalation.
 
