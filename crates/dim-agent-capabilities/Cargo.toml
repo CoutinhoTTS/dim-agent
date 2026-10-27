@@ -43,4 +43,7 @@ testing = []
 
 [dev-dependencies]
 dim-agent-runtime = { workspace = true, features = ["testing"] }
+# The flow tests drive the projection with recorded histories through the
+# `testing` module; a self dev-dependency enables the feature for them.
+dim-agent-capabilities = { path = ".", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
