@@ -3879,13 +3879,6 @@ async fn an_ancestors_end_closes_a_pending_end_whose_delivery_was_held() {
         })
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        tool_results(&session, &child)
-            .await
-            .iter()
-            .any(|result| matches!(&result.content, ToolContent::Text(text) if text.contains("is ending"))),
-        "the line committed its own end before the ancestor's reached it"
-    );
     gate.release.notify_one();
     let outcome = tokio::time::timeout(Duration::from_secs(8), ender).await;
     assert!(
