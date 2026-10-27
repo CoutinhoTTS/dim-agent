@@ -18,6 +18,7 @@ pub mod permission_rules;
 #[cfg(windows)]
 mod pipe_client;
 pub mod plugin_files;
+mod plugin_manager;
 pub mod protocol;
 pub mod provider;
 pub mod session_typescript;
