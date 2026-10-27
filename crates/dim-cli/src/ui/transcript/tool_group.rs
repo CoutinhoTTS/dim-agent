@@ -177,9 +177,6 @@ struct Call<'a> {
 
 impl<'a> Call<'a> {
     fn of(row: &'a ViewRow) -> Self {
-        // A call parked on an approval is still running: the group waits for
-        // it. One with no result once it stopped never got one — the run
-        // ended on top of it — and reads as failed, not as done.
         let state = if row.pending {
             State::Running
         } else if row.result_is_error || row.result_text.is_none() {
@@ -306,13 +303,10 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
         let members: Vec<&Item<'_>> = items.iter().collect();
         append_section(&mut expanded, sections[0], &members, false);
     } else {
-        // In call order: each run of same-kind calls is drawn where the
-        // batch made it.
         for run in section_runs(&items) {
             append_section(&mut expanded, run[0].section(), &run, true);
         }
     }
-    // With no rows under it nothing else would say some calls failed.
     let mut header = header;
     let failed = states.iter().filter(|s| **s == State::Failed).count();
     if failed > 0 && failed < states.len() {
@@ -321,7 +315,6 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
             Tone::Danger,
         ));
     }
-    // Delegation cards show under a collapsed header too.
     let mut collapsed = vec![header_line(0, mark, header)];
     let now = now_ms();
     for item in &items {
@@ -393,8 +386,6 @@ fn classify(call: Call<'_>) -> Item<'_> {
         }
         "exec" | "bash" => {
             let command = call.string("command").unwrap_or("").to_owned();
-            // A read-only command that exited non-zero still explored, as
-            // Amp shows it: done, with its output and without the exit note.
             let output = call.exit_code.filter(|code| *code != 0).and_then(|code| {
                 let note = format!("Command exited with code {code}.");
                 call.result
@@ -419,7 +410,6 @@ fn classify(call: Call<'_>) -> Item<'_> {
         }
         "wait" => Item::Check { call },
         "agent" => {
-            // What the leader said to the team, by the action's own words.
             let action = call.string("action").unwrap_or("");
             let detail = match action {
                 "request" => call.string("prompt"),
@@ -461,7 +451,6 @@ fn explore_command(
     let args: Vec<&str> = words.filter(|word| !word.starts_with('-')).collect();
     match program {
         "ls" | "tree" | "find" | "fd" => {
-            // Amp lists the paths after the listing's own output.
             let listed = output_lines(result);
             let detail = args
                 .iter()
@@ -496,14 +485,12 @@ fn header_spans(items: &[Item<'_>], sections: &[Section]) -> Vec<Span> {
         return match section {
             Section::Explore => explore_header(&members),
             Section::Edit => edit_header(&members),
-            // Only Explored mutes its counts; Amp prints these headers whole.
             _ => vec![span(
                 capitalize(&phrase(phrase_key(&items[0]), &members)),
                 Tone::Text,
             )],
         };
     }
-    // Mixed: one phrase per kind of work, in the order the batch started it.
     let mut keys: Vec<PhraseKey> = Vec::new();
     for item in items {
         let key = phrase_key(item);
@@ -580,7 +567,6 @@ fn phrase(key: PhraseKey, members: &[&Item<'_>]) -> String {
                     ],
                 ),
             };
-            // Amp reads files, and explores only once web pages are among them.
             let verb = if pages == 0 {
                 verb("read", "reading")
             } else {
@@ -675,7 +661,6 @@ fn append_section(lines: &mut Vec<Line>, section: Section, items: &[&Item<'_>], 
         .collect();
     match section {
         Section::Explore => {
-            // Nested under a mixed header, the explore calls get a header of their own.
             if nested {
                 let states: Vec<State> = members.iter().map(|i| i.call().state).collect();
                 lines.push(header_line(
@@ -809,8 +794,6 @@ fn append_card(lines: &mut Vec<Line>, card: &MemberCard, now: u64, detail: Detai
     } else {
         tf("Agent: {name}", &[("name", &safe(&card.agent))])
     };
-    // The model is member state, never the leader's; loading or failing to
-    // observe it is not the delegation failing.
     let model = if provider {
         None
     } else {
@@ -915,7 +898,6 @@ fn append_card(lines: &mut Vec<Line>, card: &MemberCard, now: u64, detail: Detai
             Overflow::Truncate,
         )
     } else {
-        // A failed delivery has no member Session to open.
         return;
     });
 }
@@ -937,8 +919,6 @@ fn append_command(lines: &mut Vec<Line>, call: &Call<'_>, command: &str) {
         hang: 0,
         action: None,
     });
-    // A detached command's result only says it started; its output arrives
-    // through a later check, as in Amp.
     if call.state == State::Running || (call.background() && call.state == State::Done) {
         return;
     }
@@ -960,7 +940,6 @@ fn append_edit(lines: &mut Vec<Line>, call: &Call<'_>, write: bool, single: bool
         edit_lines(call, write)
     };
     let (added, removed) = diff_counts(&diff);
-    // Amp names a written file by what happened to it.
     let label = match (write, removed) {
         (true, 0) => "Create",
         (true, _) => "Write",
@@ -1226,7 +1205,6 @@ fn group_state(states: &[State]) -> State {
     if states.contains(&State::Running) {
         State::Running
     } else if states.iter().all(|s| *s == State::Failed) {
-        // The header is a failure only when nothing in the group worked.
         State::Failed
     } else {
         State::Done
@@ -1298,8 +1276,6 @@ fn highlight_command(command: &str) -> Vec<Span> {
             let (text, next) = take(len);
             (text, Tone::Text, next)
         } else if c == '"' || c == '\'' {
-            // Up to the closing quote (a `"` string honours `\` escapes), or
-            // the end of an unterminated one.
             let mut end = rest.len();
             let mut escaped = false;
             for (i, ch) in rest.char_indices().skip(1) {
@@ -1318,7 +1294,6 @@ fn highlight_command(command: &str) -> Vec<Span> {
             (text, Tone::Quoted, next)
         } else if let Some(len) = operator_len(rest) {
             let (text, next) = take(len);
-            // A redirection's target is a file, not the next program.
             expect_program = !text.contains(['<', '>']);
             (text, Tone::Operator, next)
         } else {
@@ -1467,8 +1442,6 @@ fn capitalize(text: &str) -> String {
     }
 }
 
-// ---- Rendering ----
-
 /// The group's rows at `width`. `spinner` is the glyph of running marks.
 ///
 /// As in Amp, the header ends in `▸` (collapsed) or `▾` (expanded), and so
@@ -1523,7 +1496,6 @@ pub fn card_rows(
     let first = lines
         .iter()
         .position(|line| line.action.as_deref() == Some(action))?;
-    // The card ends where the next card or call starts.
     let end = lines[first + 1..]
         .iter()
         .position(|line| line.mark.is_some() && line.indent <= lines[first].indent)
@@ -1557,8 +1529,6 @@ fn lay_out_group(
         };
         let mark = line.mark.map(|mark| mark_text(mark, spinner, p));
         let lead = line.indent + if mark.is_some() { 2 } else { 0 };
-        // Output with more rows than the tail shows gets a scrollbar in the
-        // last column, its thumb at the end, as Amp draws it.
         let content = (line.overflow == Overflow::Tail)
             .then(|| wrapped_rows(&line.spans, width.saturating_sub(lead + 2).max(1)))
             .filter(|rows| *rows > TAIL_MAX_ROWS);
@@ -1680,7 +1650,6 @@ fn layout(
             ellipsize(&cells, first_width)
         }];
     }
-    // Source lines, each a run of spans; a row starts at every newline.
     let mut sources: Vec<Vec<(String, Tone)>> = vec![Vec::new()];
     for s in spans {
         for (index, part) in normalize(&s.text).split('\n').enumerate() {
@@ -1695,8 +1664,6 @@ fn layout(
         }
     }
     let widest = first_width.max(rest_width);
-    // Every grapheme takes at least one cell, so `rows` rows never need more
-    // graphemes than this from the kept end of a line.
     let rows_of = |source: &[(String, Tone)], index: usize, tail: bool, max_rows: usize| {
         let mut cells: Vec<Cell> = source
             .iter()

@@ -128,14 +128,12 @@ impl StreamPlanner {
         }
         self.transfer_reidentified(live);
 
-        // Streams whose live row disappeared.
         let live_ids: Vec<&str> = live.iter().map(|b| b.id).collect();
         let (still, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.active)
             .into_iter()
             .partition(|s| live_ids.contains(&s.id.as_str()));
         self.active = still;
         for stream in gone {
-            // Nothing went out: the settled twin takes the normal path.
             if stream.wrote() {
                 self.parked.push(stream);
             }
@@ -152,7 +150,6 @@ impl StreamPlanner {
                 None => self.parked.push(stream),
                 Some(block) => {
                     used_settled.push(block.id);
-                    // The persisted text is the authority on the remainder.
                     stream.text = block.text.to_owned();
                     let batch = plan_blocks(&mut stream, width, true, render);
                     plan.finalized.insert(block.id.to_owned(), batch);
@@ -164,15 +161,12 @@ impl StreamPlanner {
             let existing = self.take_active(block.id).or_else(|| self.unpark(block));
             let mut stream = match existing {
                 Some(mut stream) if block.text.starts_with(&stream.text) => {
-                    // An unchanged stream keeps its copy.
                     if block.text.len() != stream.text.len() {
                         stream.text = block.text.to_owned();
                     }
                     stream
                 }
                 other => {
-                    // A fresh stream: a parked one is never going to settle
-                    // (an interrupt discarded its buffer).
                     drop(other);
                     self.parked.clear();
                     ActiveStream {
@@ -266,8 +260,6 @@ fn plan_blocks(
     render: &RenderFn<'_>,
 ) -> Batch {
     let split = (!finalize).then(|| split_streaming_markdown(&stream.text));
-    // A diagram is laid out from its whole source: it neither streams its
-    // lines out nor closes early, and its source shows until it closes.
     stream.open_diagram = split
         .as_ref()
         .is_some_and(|s| is_diagram(s.open_fence_info.as_deref()));
@@ -284,13 +276,8 @@ fn plan_blocks(
         continues: stream.open_rows > 0,
     };
     if end > stream.committed_len {
-        // An answer that ended inside a fence (cut off at max_tokens, say)
-        // closes it, so the block reads as code to the end, like its rows
-        // already written.
         let closed;
         let mut source = &stream.text[stream.committed_len..end];
-        // A diagram cut off half way is left as its source: drawing half of it
-        // would show a diagram that never was.
         let cut = finalize.then(|| split_streaming_markdown(&stream.text));
         if let Some(cut) = cut
             && !is_diagram(cut.open_fence_info.as_deref())
@@ -307,9 +294,6 @@ fn plan_blocks(
         stream.open_rows = 0;
         return out;
     }
-    // An open fence writes its finished lines as they come, so a long code
-    // block never piles up in the live region: highlighting only looks back,
-    // so a finished line's rows never change.
     if let Some(run) = stream.open_fence.clone() {
         let stable = stream.text.rfind('\n').map_or(0, |at| at + 1);
         if stable > stream.committed_len {
@@ -362,10 +346,8 @@ mod tests {
         );
         let out = plan(&mut p, &[block("a", "First para\n\nSecond")], &[]);
         assert_eq!(text_of(&out.active), vec!["First para"]);
-        // The same text again writes nothing.
         let again = plan(&mut p, &[block("a", "First para\n\nSecond")], &[]);
         assert!(again.active.is_empty());
-        // The next block closes: only it is new, without the answer mark.
         let out = plan(&mut p, &[block("a", "First para\n\nSecond\n\nThird")], &[]);
         assert_eq!(text_of(&out.active), vec!["Second"]);
     }
@@ -374,22 +356,18 @@ mod tests {
     fn an_open_fence_writes_its_finished_lines_as_they_come() {
         let mut p = StreamPlanner::new();
         let fence = "Intro\n\n```rust\nfn a() {}\nfn b";
-        // The intro closes; the fence's finished lines follow next frame.
         let out = plan(&mut p, &[block("a", fence)], &[]);
         assert_eq!(text_of(&out.active), vec!["Intro"]);
         let out = plan(&mut p, &[block("a", fence)], &[]);
         assert_eq!(text_of(&out.active), vec!["```rust", "fn a() {}"]);
         assert!(!out.active[0].continues);
-        // The unfinished line stays live, skipping the rows already out.
         assert_eq!(p.pending("a").map(|pending| pending.written), Some(2));
         let more = "Intro\n\n```rust\nfn a() {}\nfn b() {}\n";
         let out = plan(&mut p, &[block("a", more)], &[]);
         assert_eq!(text_of(&out.active), vec!["fn b() {}"]);
         assert!(out.active[0].continues);
-        // The whole fence so far is the history source.
         let source = out.active[0].source.as_ref().unwrap();
         assert_eq!(source.text, "```rust\nfn a() {}\nfn b() {}\n");
-        // Settling writes the closing fence only.
         let done = "Intro\n\n```rust\nfn a() {}\nfn b() {}\n```";
         let out = plan(&mut p, &[], &[block("msg", done)]);
         let batch = out.finalized.get("msg").expect("finalized");
@@ -424,8 +402,7 @@ mod tests {
     #[test]
     fn settling_writes_only_the_remainder() {
         let mut p = StreamPlanner::new();
-        plan(&mut p, &[block("live", "One.\n\nTwo")], &[]); // "One." is out
-        // The run ends: live row gone, settled twin arrives with the full text.
+        plan(&mut p, &[block("live", "One.\n\nTwo")], &[]);
         let out = plan(&mut p, &[], &[block("msg", "One.\n\nTwo\n\nThree.")]);
         let batch = out.finalized.get("msg").expect("finalized");
         assert_eq!(
@@ -438,7 +415,6 @@ mod tests {
     fn a_parked_stream_waits_for_its_twin() {
         let mut p = StreamPlanner::new();
         plan(&mut p, &[block("live", "A.\n\nB")], &[]);
-        // Live row gone, no twin yet: nothing is written, nothing is lost.
         let out = plan(&mut p, &[], &[]);
         assert!(out.finalized.is_empty() && out.active.is_empty());
         let out = plan(&mut p, &[], &[block("msg", "A.\n\nB")]);
@@ -535,7 +511,6 @@ mod tests {
                 &mut screen,
             );
         }
-        // Run ends: the live row is replaced by its settled twin.
         step(
             &mut planner,
             &[],
@@ -562,7 +537,6 @@ mod tests {
                 "{phrase:?} must be committed exactly once: {transcript:#?}"
             );
         }
-        // Order is preserved.
         let positions: Vec<usize> = [
             "Title",
             "First paragraph here.",
@@ -574,7 +548,6 @@ mod tests {
         .map(|p| transcript.iter().position(|l| l.contains(p)).unwrap())
         .collect();
         assert!(positions.windows(2).all(|w| w[0] < w[1]), "{positions:?}");
-        // Nothing of the unclosed tail is left behind after settling.
         assert!(!emu.rows_text().iter().any(|r| r.starts_with('~')));
     }
 }

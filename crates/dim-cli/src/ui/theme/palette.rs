@@ -42,7 +42,10 @@ pub struct Palette {
     pub scroll_track: String,
 }
 
-/// Syntax colours for fenced code, kept apart from the chrome roles.
+/// Syntax colours for fenced code, kept apart from the chrome roles. A
+/// colour written as a palette slot (`ansi:N`) follows the terminal's scheme,
+/// so the highlighter must use its polarity-safe syntax mode; hex colours are
+/// used as they are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodePalette {
     pub keyword: String,

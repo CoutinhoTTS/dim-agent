@@ -102,7 +102,6 @@ impl DynPlugin for LeafNode {
             );
             let daemon = PeerId::new(DAEMON_PEER).expect("valid daemon peer id");
             let mut link = LinkConfig::dial(daemon, LINKS, LINKS, "accept");
-            // One connection, from the daemon: no reconnect once it ends.
             link.reconnect = false;
             let peer = PeerPlugin::new(
                 link,
@@ -211,7 +210,6 @@ impl DynPlugin for HostedTui {
         Box::pin(async move {
             let link = ctx.plugin(DaemonLink {
                 options: self.options.clone(),
-                // The daemon hosting this row is running.
                 start: false,
             });
             (&link).await.map_err(unwrap)?;
@@ -271,12 +269,9 @@ enum Listener {
 impl Accept {
     #[cfg(unix)]
     fn bind(options: &Options) -> crate::Result<(Self, String)> {
-        // The daemon's connect already checked this directory is private
-        // (0700, ours); `daemon.sock` relies on the same.
         let home = std::fs::canonicalize(options.home.join("rust"))?;
         let mut attempts = 0;
         let (listener, path) = loop {
-            // `ui-` and 8 hex digits: as long as `daemon.sock`.
             let id = &uuid::Uuid::new_v4().simple().to_string()[..8];
             let path = home.join(format!("ui-{id}"));
             match std::os::unix::net::UnixListener::bind(&path) {
@@ -312,7 +307,6 @@ impl Accept {
 
 impl Drop for Accept {
     fn drop(&mut self) {
-        // Never accepted: the socket goes with the leaf.
         #[cfg(unix)]
         if let Some(Listener::Unix { path, .. }) = self
             .listener
@@ -340,7 +334,6 @@ impl Transport for Accept {
                 .ok_or_else(|| ConnectError::Incompatible {
                     reason: "the leaf accepts one connection".into(),
                 })?;
-            // Async, so a leaf that is never dialed can still be unloaded.
             accept(listener).await
         })
     }
@@ -353,7 +346,6 @@ async fn accept(listener: Listener) -> Result<Channel, ConnectError> {
             listener.set_nonblocking(true).map_err(failed)?;
             let listener = tokio::net::UnixListener::from_std(listener).map_err(failed)?;
             let accepted = listener.accept().await;
-            // Nobody else may reach it after the daemon.
             let _ = std::fs::remove_file(&path);
             let stream = accepted.map_err(failed)?.0.into_std().map_err(failed)?;
             stream.set_nonblocking(false).map_err(failed)?;
@@ -367,7 +359,6 @@ async fn accept(listener: Listener) -> Result<Channel, ConnectError> {
             listener.set_nonblocking(true).map_err(failed)?;
             let listener = tokio::net::TcpListener::from_std(listener).map_err(failed)?;
             let (mut stream, _) = listener.accept().await.map_err(failed)?;
-            // Byte by byte: what follows the line belongs to the session.
             let mut line = Vec::new();
             while line.len() <= token.len() {
                 let byte = stream.read_u8().await.map_err(failed)?;

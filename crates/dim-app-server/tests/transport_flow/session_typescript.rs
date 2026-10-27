@@ -164,7 +164,6 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
         before.iter().map(|event| &event.id).collect::<Vec<_>>(),
         after.iter().map(|event| &event.id).collect::<Vec<_>>()
     );
-    // Closing the caller propagates cancellation without unloading Provider.
     let pending = client
         .send(
             "session.auxiliary.complete",
@@ -200,7 +199,6 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
     server.join().await.unwrap();
     http.abort();
 
-    // A known name without Provider keeps only the foreign row Pending.
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -218,7 +216,6 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
             json!({"sessionId":created["result"]["sessionId"],"request":request}),
         )
         .await;
-    // Pending, the row never registers its namespace.
     assert_eq!(
         missing["error"]["data"]["appError"], "unknown_method",
         "{missing}"
@@ -396,8 +393,6 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     )
     .await;
     assert_ok(&initial);
-    // The row listens from its bind: it sees the Session's own events from
-    // then on, loading included, in order, and nothing earlier is replayed.
     let loading: Vec<Value> = first_session
         .local("main", ..=first_after)
         .await
@@ -625,8 +620,6 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             .any(|row| row["generation"] == reloaded["result"]["generation"]
                 && row["closed"] == true
                 && row["settled"] == true
-                // Listeners start in emit order and do not wait for a held
-                // one, so the turn's later events may still arrive before close.
                 && row["count"].as_u64().unwrap()
                     >= before_close["result"]["records"].as_array().unwrap().len() as u64)
     );
@@ -711,7 +704,6 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
                 "dm-ts-{}/server.sock",
                 &uuid::Uuid::new_v4().simple().to_string()[..8]
             ))),
-            // Idle release needs stored Sessions.
             database_path: Some(home.join("sessions.sqlite")),
             session_typescript: Some(observers(&audit)),
             ..Default::default()
@@ -726,7 +718,6 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
         reply["result"].clone()
     }
 
-    // Released by the call: one release ends it, a second finds nothing.
     let id = new_session(&mut client, json!(["echo"])).await;
     controls.recv().await.unwrap();
     let session = server.agent().unwrap().get_session(&id).unwrap();
@@ -755,7 +746,6 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
     );
     assert!(session.unload_if_idle().await.unwrap());
 
-    // Released by the row's unload.
     let id = new_session(&mut client, json!(["echo"])).await;
     let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
     let session = server.agent().unwrap().get_session(&id).unwrap();
@@ -778,7 +768,6 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
         .await
         .unwrap()
         .unwrap();
-    // The new generation never took the hold.
     let release = json!({"sessionId":id, "id":hold});
     assert_eq!(
         call(&mut client, "session.observer.release_session", release).await,
@@ -829,8 +818,6 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
         .into_iter()
         .enumerate()
     {
-        // The attach restores the Session in the second round, and holds it
-        // until the observers have caught up.
         assert_ok(&client.rpc("session.attach", attach.clone()).await);
         assert_eq!(loads.of(&id), (round + 1, round == 1));
         let session = server.agent().unwrap().get_session(&id).unwrap();
@@ -874,8 +861,6 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
             "the observer generation {generation} ended with the unload"
         );
     }
-    // The Session's own leaf, still stalled in a listener when the Session
-    // unloads, lets go as its generation ends, and the instance is released.
     assert_ok(&client.rpc("session.attach", attach.clone()).await);
     let session = server.agent().unwrap().get_session(&id).unwrap();
     assert_ok(&when_served(&mut client, "session.observer.arm", json!({"sessionId":id})).await);
@@ -920,8 +905,6 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             })
             .await
             .unwrap();
-        // Native member Sessions have no client protocol owner; use public C1.
-        // The optional observer can still be publishing after native creation.
         let methods = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match session
@@ -961,9 +944,6 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
     server.join().await.unwrap();
     std::fs::remove_file(&audit).unwrap();
 
-    // A Session part naming a branch service is misplaced: its copy cannot
-    // be built in a Session, so it never mounts there, and nothing else is
-    // affected: the row that registered it keeps running.
     {
         let mut parts = observers(&audit);
         let root = parts.anchor.parent().unwrap().join("fixtures");
@@ -1005,9 +985,6 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
         })
         .await
         .unwrap_or_else(|_| panic!("the registering row is Active: {:?}", row.state()));
-        // The row records only what it sees after it starts listening, and a
-        // Session is published without waiting for its optional rows: wait
-        // until it serves before the input it is asked about.
         assert_ok(
             &when_served(
                 &mut client,
@@ -1025,8 +1002,6 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             .unwrap()
             .sequence("main")
             .unwrap();
-        // Retries as `when_served` does, and names the Session's rows and
-        // their states if the row never serves.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let reply = loop {
             let reply = client
@@ -1054,7 +1029,6 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         assert_ok(&reply);
-        // A mounted copy would have marked the turn's end.
         let agent = server.agent().unwrap();
         assert_eq!(
             super::branch_typescript::count(&agent, &id, "main", "<c5-marker").await,
@@ -1218,8 +1192,6 @@ pub(super) fn setup() -> (
 /// TypeScript §2.1, ADR 006 D3).
 pub(super) async fn plugin_active(server: &RunningServer, row: &Value) {
     let name = row["name"].as_str().unwrap();
-    // The process loader, whose children are the plugin rows; it is Active
-    // once `serve` returns.
     let loader = server
         .diagnostics()
         .plugins
@@ -1691,8 +1663,6 @@ impl ControlledGate {
             instance: names.instance(SESSION_GROUP)?,
             controls,
             loader: names.key()?,
-            // Observe the settled initial metadata, rather than a fiber replaced
-            // by RuntimeRows' offline-to-online refresh (as in the C4 spike).
             rows: rutis::host::Key::dynamic("session-node"),
             registry: names.key()?,
         })
@@ -1748,7 +1718,6 @@ impl rutis_bridge::session::HostDispatch for GateValue {
 async fn node_session_typescript_pending_parts_keep_native_sessions_available() {
     let mut parts = fixture();
     let entry = PathBuf::from(parts.rows.remove(0)["name"].as_str().unwrap());
-    // `lateGate` is a Session name that nothing provides until the test does.
     parts.rows.push(json!({"id":"typescript", "name":entry.with_file_name("session-late.ts"), "provides":{}, "instanceNames":{"lateGate":"session"}}));
     let (mut builder, mut requests, _) = setup();
     let (send, mut controls) = tokio::sync::mpsc::unbounded_channel();
@@ -1834,7 +1803,6 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     let session = created["result"]["sessionId"].as_str().unwrap();
     submit(&mut client, session, r#"tool:echo {"text":"native"}"#).await;
     assert!(!requests.recv().await.unwrap().contains(&"ts_echo".into()));
-    // The registration without a risk was refused; the row keeps its methods.
     let status = when_served(
         &mut client,
         "session.typescript.status",
@@ -1855,9 +1823,6 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
     server.shutdown();
     server.join().await.unwrap();
 
-    // Refused declarations fail the Session's copy, and a row whose provides
-    // differs from its module's is Unresolved: neither registers its
-    // namespace.
     for bad_methods in [json!(true), json!("unsupported"), Value::Null] {
         let mut parts = fixture();
         if !bad_methods.is_null() {
@@ -1918,8 +1883,6 @@ async fn node_session_typescript_rejects_invalid_boundaries_without_disabling_na
         server.join().await.unwrap();
     }
 
-    // A foreign row cannot take a built-in method's namespace or one a
-    // native part registered: its registration is refused, which fails it.
     for (namespace, expected) in [
         ("session.create", "invalid Session namespace"),
         ("session.delete", "invalid Session namespace"),

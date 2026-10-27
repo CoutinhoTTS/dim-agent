@@ -88,7 +88,6 @@ export class Projection {
         if (content.error !== undefined) this.push({ kind: "error", key: `error-${event.sequence}`, text: content.error })
         break
       case "turn-end":
-        // A turn that ends mid-stream settles what the Timeline holds.
         for (const requestId of [...this.thoughts.keys()]) this.closeThinking(requestId)
         for (const requestId of [...this.answers.keys()]) this.closeAnswer(requestId)
         this.requestStarts.clear()

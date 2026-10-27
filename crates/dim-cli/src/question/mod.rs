@@ -245,7 +245,6 @@ impl Pending {
     }
 
     pub fn answered(&mut self, branch_id: &str, data: &ToolResultData) -> Vec<Settled> {
-        // Results without a call event close calls that were never dispatched.
         let Some(event_id) = &data.call_event_id else {
             return Vec::new();
         };

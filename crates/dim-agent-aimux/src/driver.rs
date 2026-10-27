@@ -293,7 +293,6 @@ impl ModelDriver for AimuxDriver {
     }
 }
 
-// The owner can release native HTTP resources even when a consumer stops polling.
 struct OwnedStream {
     stream: Arc<Mutex<Option<ModelStream>>>,
     ended: bool,

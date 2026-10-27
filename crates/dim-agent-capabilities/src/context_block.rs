@@ -62,7 +62,6 @@ pub fn preview(segments: &[&str]) -> String {
     while !escaped.is_char_boundary(end) {
         end -= 1;
     }
-    // Never cut inside an entity.
     if let Some(amp) = escaped[..end].rfind('&')
         && !escaped[amp..end].contains(';')
     {

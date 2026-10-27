@@ -1,23 +1,3 @@
-// Build and publish the Rust CLI to the npm `alpha` dist-tag in one command,
-// the counterpart of the TypeScript CLI's `publish:bin`. Beta and stable
-// releases go through .github/workflows/release.yml instead.
-//
-//   node scripts/publish-alpha.mjs               # next alpha
-//   node scripts/publish-alpha.mjs 0.1.0-alpha.3 # explicit alpha
-//   node scripts/publish-alpha.mjs --dry-run     # build and validate, no commit or npm write
-//   node scripts/publish-alpha.mjs --platform darwin-arm64  # only these platforms (repeatable)
-//
-// Picks the version, commits the version bump, cross-builds all six platforms
-// on this Mac (Linux and Windows through cargo-zigbuild), stages and packs them
-// with the release scripts, then publishes through scripts/publish-npm.mjs.
-// Rerunning after a failure resumes: an unpublished alpha already in Cargo.toml
-// is reused, and packages already on npm with identical bytes are skipped.
-// Disk use stays near one target at a time: each target's build directory is
-// removed once its package is packed, intermediate staging is dropped as soon
-// as the next step has consumed it, and a successful publish removes it all.
-// When mbx is installed, `mbx gc` runs at the end, whether the run succeeded or not.
-// Set DIM_OAUTH_SOURCE_DIR to a dim-oauth-plugin-rust checkout beside this one
-// to publish account builds from it; without it the build is API-key only.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from 'node:fs';
@@ -40,17 +20,13 @@ const repo = path.resolve(import.meta.dirname, '..');
 const targets = {
   'darwin-arm64': { triple: 'aarch64-apple-darwin' },
   'darwin-x64': { triple: 'x86_64-apple-darwin' },
-  // Linked against glibc 2.28 so the binaries run on older distributions.
   'linux-arm64': { triple: 'aarch64-unknown-linux-gnu', zig: '.2.28' },
   'linux-x64': { triple: 'x86_64-unknown-linux-gnu', zig: '.2.28' },
   'windows-arm64': { triple: 'aarch64-pc-windows-gnullvm', zig: '' },
   'windows-x64': { triple: 'x86_64-pc-windows-gnu', zig: '' },
 };
 assert(selected.every((platform) => platform in targets) && new Set(selected).size === selected.length, usage);
-// Without --platform an alpha ships every platform.
 const platforms = selected.length ? Object.keys(targets).filter((platform) => selected.includes(platform)) : Object.keys(targets);
-// The release scripts run under `node` even when this script runs under bun:
-// staging bundles the running Node and checks it against .node-version.
 const versionFiles = ['Cargo.toml', 'Cargo.lock', 'npm/package.json', 'runtime/package.json', 'runtime/package-lock.json'];
 
 const run = (command, commandArgs, options = {}) => {
@@ -72,7 +48,6 @@ const compare = (left, right) => {
   return 0;
 };
 
-// Registry state decides the version, so read it before any build.
 const listed = output('npm', ['view', 'dimcode', 'versions', '--json', '--registry', 'https://registry.npmjs.org']);
 let published = JSON.parse(listed.stdout || '[]');
 if (listed.status !== 0) {
@@ -92,9 +67,7 @@ if (!version) {
 assert(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-alpha\.(0|[1-9]\d*)$/.test(version),
   `Expected X.Y.Z-alpha.N, got ${version}`);
 assert(!published.includes(version), `dimcode@${version} is already on npm`);
-// publish-npm.mjs enforces this again before writing; checking here saves a full build.
 const betas = published.filter((value) => /^\d+\.\d+\.\d+-beta\.\d+$/.test(value)).sort(compare);
-// An alpha sorts below a beta of the same X.Y.Z, so comparing the cores is enough.
 assert(betas.length === 0 || compare(version.split('-')[0], betas.at(-1).split('-')[0]) <= 0,
   `Alpha ${version} must stay below the newest dimcode beta ${betas.at(-1)}`);
 
@@ -105,12 +78,10 @@ assert(!versionFiles.some((file) => dirty.split('\n').some((line) => line.slice(
 
 const staging = path.join(repo, 'staging', `alpha-${version}`);
 const remove = (directory) => rmSync(directory, { recursive: true, force: true });
-// Leftovers of earlier alphas are never resumed.
 mkdirSync(path.join(repo, 'staging'), { recursive: true });
 for (const entry of readdirSync(path.join(repo, 'staging'), { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
   if (entry.name.startsWith('alpha-') && entry.name !== `alpha-${version}`) remove(path.join(repo, 'staging', entry.name));
 }
-// The private crate reaches this checkout as its sibling `../dim`.
 const account = process.env.DIM_OAUTH_SOURCE_DIR ? path.resolve(process.env.DIM_OAUTH_SOURCE_DIR) : null;
 if (account) run(path.join(account, 'scripts/sync-lock.sh'), [], { env: { ...process.env, DIM_PUBLIC_REPO: repo } });
 console.log(`\ndimcode ${current} → ${version} (npm tag alpha${dryRun ? ', dry run' : ''}, ${account ? 'with' : 'without'} Dim account, ${platforms.join(' ')})\n`);
@@ -134,8 +105,6 @@ try {
   const sourceCommit = output('git', ['rev-parse', 'HEAD']).stdout.trim();
   const packages = path.join(staging, 'complete', 'npm');
 
-  // A partial npm publish can only resume with the same bytes, so reuse the
-  // packages already built from this commit instead of rebuilding them.
   let reused = false;
   try { reused = !dryRun && JSON.parse(readFileSync(path.join(packages, 'release-manifest.json'), 'utf8')).sourceCommit === sourceCommit; }
   catch {}
@@ -160,7 +129,6 @@ try {
     remove(path.join(staging, 'stage', platform));
   }
   if (!reused) {
-    // The frontend is built once, for every platform.
     run('node', ['scripts/stage-web.mjs', path.join(staging, 'platforms', 'release-web'), version, sourceCommit]);
     run('node', ['scripts/collect-release.mjs', path.join(staging, 'platforms'), path.join(staging, 'complete'),
       ...(platforms.length < Object.keys(targets).length ? ['--platforms', platforms.join(',')] : [])]);
@@ -178,8 +146,6 @@ try {
   }
 } finally {
   if (dryRun && bumped) run('git', ['checkout', '--', ...versionFiles]);
-  // When mbx manages target/, let it trim its caches back to their budgets.
-  // A cleanup failure never fails the release.
   if (spawnSync('mbx', ['--version'], { stdio: 'ignore' }).status === 0) {
     console.log('\n$ mbx gc');
     spawnSync('mbx', ['gc'], { cwd: repo, stdio: 'inherit' });

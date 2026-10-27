@@ -70,7 +70,6 @@ fn native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader
     let holder = agents[0]["agentId"].as_str().unwrap().to_owned();
     let sessions = rpc(&mut stream, "session.summaries", json!({}));
     let leader = sessions[0]["sessionId"].as_str().unwrap().to_owned();
-    // Only the model is scripted; the CLI, RPC, member executor and Timelines are native.
     let model = thread::spawn(move || {
         for phase in 0..4 {
             let deadline = Instant::now() + Duration::from_secs(15);
@@ -451,7 +450,6 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
         wire.reply(&main, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        // No creation is present in main's local page: initial state discovers the child.
         state(wire, "child");
         let child = wire.read("session.history");
         assert_eq!(child["params"]["branchId"], "child");
@@ -463,7 +461,6 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
         event(wire, "child", fact("child-end", 5, 9000, "exec", "ended", json!({
             "task_id":"child-command","status":"failed","result":{"content":"real child terminal","structuredContent":{"exitCode":7}},
         })));
-        // The child read remains the only outstanding page while discovery continues.
         wire.quiet(Duration::from_millis(150));
         wire.reply(&child, json!({"events":[command("child-command",1,1000,"restored child command")],"through":4,"nextAfter":2,"done":false}));
         for _ in 0..2 {
@@ -498,7 +495,6 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
             fact("child-end",5,9000,"exec","ended",json!({"task_id":"child-command","status":"failed","result":{"content":"real child terminal","structuredContent":{"exitCode":7}}})),
             command("failed-period-command",6,10000,"created while history failed"),
         ],"through":6,"nextAfter":6,"done":true}));
-        // Finished details are the actual terminal fact, with no live-output request.
         control.recv_timeout(Duration::from_secs(10)).unwrap();
         wire.quiet(Duration::from_millis(200));
         ready.send(()).unwrap();
@@ -519,7 +515,6 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"\x1b[27u/tasks\r");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
-    // Reopening again cannot duplicate an outstanding retry.
     terminal.write(b"\x1b[27u/tasks\r");
     proceed.send(()).unwrap();
     terminal.until("Failed");
@@ -567,7 +562,6 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
         assert_eq!(held["params"]["branchId"], "nested");
         ready.send(()).unwrap();
 
-        // Reopening queues the failed child behind the held page; switching must discard it.
         let create = wire.read("session.create");
         wire.reply(
             &create,
@@ -583,10 +577,10 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
         wire.quiet(Duration::from_millis(150));
         ready.send(()).unwrap();
         let summaries = json!([
-            {"sessionId":"session","cwd":"/workspace","preview":"Back to original",
-                "model":{"providerId":"test","modelId":"model"},"updatedAt":2},
             {"sessionId":"other","cwd":"/workspace","preview":"Other workspace",
                 "model":{"providerId":"test","modelId":"model"},"updatedAt":1},
+            {"sessionId":"session","cwd":"/workspace","preview":"Back to original",
+                "model":{"providerId":"test","modelId":"model"},"updatedAt":2},
         ]);
         let picker = wire.read("session.summaries");
         wire.reply(&picker, summaries.clone());
@@ -659,6 +653,19 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"/resume\r");
     terminal.until("Back to original");
+    terminal.until("Other workspace");
+    let newest = terminal
+        .transcript
+        .find("Back to original")
+        .expect("newest first");
+    let older = terminal
+        .transcript
+        .find("Other workspace")
+        .expect("older second");
+    assert!(
+        newest < older,
+        "the resume picker must show the most recently updated session first"
+    );
     terminal.write(b"session\r");
     terminal.until("resumed session");
     terminal.write(b"/tasks\r");
@@ -693,8 +700,6 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
             command("finished-command",7,7000,"finished retained command"),
             fact("finished-end",8,8000,"exec","ended",json!({"task_id":"finished-command","status":"completed","result":{"content":"already complete"}})),
         ],"through":8,"nextAfter":8,"done":true}));
-        // The cards' one shared member observation; refusing it leaves the
-        // stop targets as they are.
         let observe = wire.read("session.attach");
         assert_eq!(observe["params"], json!({"sessionId":"member"}));
         let providers = wire.read("account.providers");
@@ -707,7 +712,6 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
         assert_eq!(first["params"], json!({"sessionId":"session","branchId":"main","taskId":"main-command"}));
         event(wire, "main", fact("leader-notice",9,9000,"input","message",json!({"mode":"append","user":{"content":[{"type":"text","text":"leader notification while stop waits"}]}})));
         event(wire, "main", command("late-command",10,11000,"arrived after stop admission"));
-        // A leader input is accepted while the first stop reply is withheld.
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["sessionId"], "session");
         assert_eq!(submit["params"]["text"], "leader stays usable");
@@ -720,7 +724,6 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
         let child = wire.read("session.exec.stop");
         assert_eq!(child["params"], json!({"sessionId":"session","branchId":"child","taskId":"child-command"}));
         wire.reply(&child, json!({}));
-        // No fourth request for the duplicate member, starting/finished row or new arrival.
         wire.quiet(Duration::from_millis(200));
         ready.send(()).unwrap();
         let mut line = String::new();
@@ -733,8 +736,6 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
     terminal.write(b"\x18\x18");
     terminal.until("Stop-all requests are already in progress");
     terminal.write(b"\x1b[27uleader stays usable\r");
-    // The notification can arrive before the notice is drawn: one frame
-    // then draws both, the notification above the notice.
     if !terminal
         .transcript
         .contains("leader notification while stop waits")
@@ -774,7 +775,6 @@ fn tui_task_stop_all_excludes_delayed_discovery_and_settles_failed_branch_reads(
         wire.reply(&providers, json!([]));
         let stop = wire.read("session.exec.stop");
         assert_eq!(stop["params"], json!({"sessionId":"session","branchId":"main","taskId":"captured"}));
-        // Initial branch watches have no completion barrier and can arrive after admission.
         state(wire, "late-child");
         let late = wire.read("session.history");
         assert_eq!(late["params"], json!({"sessionId":"session","branchId":"late-child","after":0,"limit":256}));
@@ -878,7 +878,6 @@ fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
         terminal.until("test / model");
         terminal.write(b"/usage\r");
         readiness.recv_timeout(Duration::from_secs(10)).unwrap();
-        // The worker is in the read while these user actions capture the old panel.
         terminal.write(b"/new\r/tasks\r\x18queued-proof");
         terminal.until("No matching tasks.");
         proceed.send(()).unwrap();
@@ -1024,7 +1023,6 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
     terminal.until("row-51");
     terminal.write(b"row-02");
     terminal.until("No matching tasks.");
-    // 53 terminal facts retain 49 commands plus the failed delivery.
     terminal.write(b"\x1b[27urow-03\r");
     terminal.until("original result without an exit code");
     terminal.write(b"x\x1b[27u\x1b[27uequal timestamp\r");
@@ -1048,7 +1046,6 @@ fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history, json!({"events":[delegation("leader-member",1,"Inspect member code"),delivery("leader-delivery",2,"leader-member")],"through":2,"nextAfter":2,"done":true}));
-        // The unfinished delegation's card observes its member at once.
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"member"}));
         let providers = wire.read("account.providers");
@@ -1150,7 +1147,6 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
             let attach = wire.read("session.attach");
             wire.reply(&attach, json!({}));
             let history = wire.read("session.history");
-            // Ended delegations: only the selected detail observes a member.
             wire.reply(&history, json!({"events":[
                 delegation("request-a",1,"old member detail"),delivery("delivery-a",2,"request-a"),
                 delegation("request-b",3,"new member detail"),
@@ -1169,8 +1165,6 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
             };
             ready.send(()).unwrap();
             control.recv_timeout(Duration::from_secs(10)).unwrap();
-            // Another member is its own observation: it need not wait for
-            // the old one, whose late reply cannot reach it.
             let attach = wire.read("session.attach");
             assert_eq!(attach["params"], json!({"sessionId":"member-b"}));
             ready.send(()).unwrap();
@@ -1213,7 +1207,6 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
 
 #[test]
 fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history() {
-    // Closed, RPC failure and malformed later page each retain their real meaning.
     for outcome in 0..4 {
         let home = Home::new();
         let (ready, readiness) = std::sync::mpsc::channel();
@@ -1503,15 +1496,12 @@ fn tui_workflow_runs_are_discovered_from_facts_and_stopped_through_their_owner()
         let attach = wire.read("session.attach");
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
-        // A restored terminal report names a run without starting a read for it.
         wire.reply(&history, json!({"events":[fact("old-report",1,1000,"input","message",json!({
             "mode":"steer","blocks":[{"type":"raw","text":"<dim-workflow kind=\"report\" run=\"run-old\" status=\"completed\">Workflow run-old: completed.</dim-workflow>"}],
         }))],"through":1,"nextAfter":1,"done":true}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         workflow_facts(wire);
-        // The tool result's structured ID is read by itself; no full array
-        // goes out while the panel is closed.
         let discovery = next_request(wire, &|_| tool_started("run-a"));
         assert_eq!(discovery["method"], "workflow.status");
         assert_eq!(discovery["params"], json!({}));
@@ -1528,7 +1518,6 @@ fn tui_workflow_runs_are_discovered_from_facts_and_stopped_through_their_owner()
         assert_eq!(stop["params"], json!({"run_id":"run-a"}));
         stop_read.send(()).unwrap();
         repeat.recv_timeout(Duration::from_secs(10)).unwrap();
-        // A pending stop disables a repeated `x`; status reads continue.
         let deadline = Instant::now() + Duration::from_millis(1500);
         while Instant::now() < deadline {
             wire.0.get_ref().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
@@ -1545,7 +1534,6 @@ fn tui_workflow_runs_are_discovered_from_facts_and_stopped_through_their_owner()
             json!({"kind":"tool","session_id":"session","branch_id":"main","call_id":"wf-call"}),
             json!({"session_id":"session","branch_id":"main"}));
         wire.reply(&stop, stopped);
-        // The terminal run is not refreshed again.
         wire.quiet(Duration::from_millis(1500));
     });
     let mut terminal = Terminal::launch_tui(home.command());
@@ -1561,7 +1549,6 @@ fn tui_workflow_runs_are_discovered_from_facts_and_stopped_through_their_owner()
         );
     }
     assert!(terminal.transcript.contains("managed run"));
-    // Unfinished rows come first, so the running run is selected.
     terminal.write(b"\r");
     terminal.until("Run: run-a");
     terminal.until("analysis stored result");
@@ -1596,21 +1583,16 @@ fn tui_workflow_inventory_errors_block_stop_all_until_reopen_and_stops_follow_ot
         let discovery = next_request(wire, &|_| tool_started("run-a"));
         assert_eq!(discovery["params"], json!({}));
         wire.send(json!({"jsonrpc":"2.0","id":discovery["id"],"error":{"code":-32000,"message":"store busy","data":{"appError":"service_unavailable"}}}));
-        // A failure stops automatic reads: the next read is the reopened
-        // panel's discovery, sent after the refresh interval has passed.
         let discovery = wire.read("workflow.status");
         assert_eq!(discovery["params"], json!({}));
         wire.reply(&discovery, json!([
             tool_started("run-a"),
             workflow_run("run-managed","managed run","completed",json!("management"),json!({"session_id":"session","branch_id":"main"})),
         ]));
-        // Stop-all sends the command stop before the Workflow stop.
         let command = next_request(wire, &|_| tool_started("run-a"));
         assert_eq!(command["method"], "session.exec.stop");
         assert_eq!(command["params"], json!({"sessionId":"session","branchId":"main","taskId":"main-command"}));
         wire.reply(&command, json!({}));
-        // The held Workflow stop gates neither leader input nor status reads;
-        // they arrive in any order around it.
         let (mut stop, mut refresh, mut submitted) = (None, None, false);
         while stop.is_none() || refresh.is_none() || !submitted {
             let mut line = String::new();
@@ -1639,9 +1621,7 @@ fn tui_workflow_inventory_errors_block_stop_all_until_reopen_and_stops_follow_ot
             json!({"kind":"tool","session_id":"session","branch_id":"main","call_id":"wf-call"}),
             json!({"session_id":"session","branch_id":"main"}));
         wire.reply(&stop, stopped);
-        // The read sent before the stop settled cannot replace its result.
         wire.reply(&refresh, tool_started("run-a"));
-        // A failed reopen shows the last observed rows, the stop's result.
         let discovery = wire.read("workflow.status");
         assert_eq!(discovery["params"], json!({}));
         wire.send(json!({"jsonrpc":"2.0","id":discovery["id"],"error":{"code":-32000,"message":"store busy","data":{"appError":"service_unavailable"}}}));
@@ -1656,7 +1636,6 @@ fn tui_workflow_inventory_errors_block_stop_all_until_reopen_and_stops_follow_ot
     terminal.until("Workflow inventory is incomplete");
     std::thread::sleep(Duration::from_millis(1500));
     terminal.write(b"\x1b[27u/tasks\r");
-    // The completed discovery, not the last observed rows.
     terminal.until("managed run");
     terminal.write(b"\x18");
     terminal.write(b"\x1b[27uleader stays usable\r");
@@ -1735,17 +1714,13 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         let mut events = Vec::new();
-        // A named Agent and a temporary profile reuse one call id in two batches.
         events.extend(agent_request(1, "r1", "call-1", json!({"kind":"agent","agent_id":"reviewer"}), "Check crate dependencies"));
         events.push(delivered(4, "req-1", "reviewer", "member-a"));
         events.extend(agent_request(5, "r2", "call-1", json!({"kind":"temporary","profile":{"name":"inspect tests","description":"","systemPrompt":""}}), "Review the integration coverage"));
         events.push(delivered(8, "req-5", "temporary-agent", "member-b"));
-        // A provider member's opaque ID looks like a Session ID.
         events.extend(agent_request(9, "r3", "call-3", json!({"kind":"agent","agent_id":"external-agent:node:agent"}), "Inspect the repository"));
         events.push(delivered(12, "req-9", "external-agent:node:agent", "member-c"));
         wire.reply(&history, json!({"events":events,"through":12,"nextAfter":12,"done":true}));
-        // One shared Agent list names the cards; each native member is
-        // attached once; the provider member never is.
         let mut requests = [wire.read_any(), wire.read_any(), wire.read_any()];
         requests.sort_by_key(|request| format!("{}{}", request["method"], request["params"]));
         let [list, attach_a, attach_b] = requests;
@@ -1757,7 +1732,6 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
         wire.reply(&list, json!([{"agentId":"reviewer","default":false,"name":"Code Reviewer","description":"","sessions":1}]));
         wire.reply(&attach_a, json!({}));
         wire.reply(&attach_b, json!({}));
-        // Members read their history through one page slot.
         for _ in 0..2 {
             let page = wire.read("session.history");
             wire.quiet(Duration::from_millis(150));
@@ -1772,10 +1746,8 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
             };
             wire.reply(&page, json!({"events":events,"through":2,"nextAfter":2,"done":true}));
         }
-        // A live model change is the member's own fact.
         member_event(wire, "member-a", fact("configured-a2",3,3000,"context","configured",json!({"timeline":"main","revision":"a2","previous":"a","prompt":null,"provider_id":"member-provider","model_id":"member-model-2"})));
         wait_opened.recv_timeout(PATIENCE).unwrap();
-        // The opened detail shares the card's observation: no second attach.
         wire.quiet(Duration::from_millis(150));
         event(wire, "main", fact("leader-result",13,20000,"collaboration","result",json!({"request_event_id":"req-5","agent_id":"temporary-agent","session_id":"member-b","status":"completed","text":"Found two missing restart cases"})));
         let detach = wire.read("session.detach");
@@ -1793,24 +1765,20 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
     let mut terminal = Terminal::launch_tui(command);
     terminal.until("Agent: Code Reviewer");
     terminal.until("member-provider / member-model-2");
-    // Drawn with the first frame; it has no conversation or Session stop.
     assert!(
         terminal
             .transcript
             .contains("Provider member: external-agent:node:agent")
     );
-    // Tab picks the newest Session card; Enter opens its member read-only.
     terminal.write(b"\t\r");
     terminal.until("Member Session: member-b");
     terminal.until("Member model: No model observed");
     terminal.write(b"\x1b[27u");
-    // Back on the card: the next older card opens its own member.
     terminal.write(b"\x1b[A\r");
     terminal.until("Member Session: member-a");
     terminal.until("Member model: member-provider / member-model-2");
     terminal.write(b"\x1b[27u");
     opened.send(()).unwrap();
-    // The real result ends the card, while its detail is closed.
     terminal.until("Completed");
     terminal.signal(libc::SIGKILL);
     terminal.wait();
@@ -1834,13 +1802,11 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
         events.extend(agent_request(6, "r2", "call-2", json!({"kind":"agent","agent_id":"running"}), "Still running delegation"));
         events.push(delivered(9, "req-6", "running", "member-running"));
         wire.reply(&history, json!({"events":events,"through":9,"nextAfter":9,"done":true}));
-        // Only the unfinished delegation's member is observed.
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"member-running"}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         wire.send(json!({"jsonrpc":"2.0","id":attach["id"],"error":{"code":-32000,"message":"member unavailable"}}));
-        // The unfinished card does not reattach after a known failure.
         let mut line = String::new();
         assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected observation: {line}");
     });
@@ -1850,7 +1816,6 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
     terminal.until("No model observed");
     terminal.until("(observation unavailable)");
     assert!(terminal.transcript.contains("restored result text"));
-    // The ended card has no observation to show, and no model is copied in.
     assert!(!terminal.transcript.contains("test / model · Completed"));
     thread::sleep(Duration::from_millis(300));
     terminal.signal(libc::SIGKILL);
@@ -1867,8 +1832,6 @@ fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
         let attach = wire.read("session.attach");
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
-        // A failed request and a still-starting one name Agents the list
-        // never returns.
         let mut events = Vec::new();
         events.extend(agent_request(
             1,
@@ -1903,7 +1866,6 @@ fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
         assert_eq!(list["method"], "agent.list");
         wire.reply(&providers, json!([]));
         wire.reply(&list, json!([]));
-        // One read covered both ids; a reply without them is not retried.
         wire.quiet(Duration::from_millis(1000));
     });
     let mut command = home.command();

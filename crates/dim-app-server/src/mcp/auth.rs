@@ -326,8 +326,6 @@ impl McpAuth {
             if self.stopping.is_cancelled() {
                 return Err(McpAuthError::Closed);
             }
-            // Read before the record: a sign-out completing after this read
-            // supersedes the attempt prepared from it.
             let signouts = self
                 .lock_attempts(cancel)
                 .await?
@@ -350,7 +348,6 @@ impl McpAuth {
                 previous: previous.as_ref(),
                 missing_scopes: &missing_scopes,
             };
-            // Unload cancels discovery and registration; nothing is persisted.
             let authorization = tokio::select! {
                 biased;
                 _ = self.stopping.cancelled() => return Err(McpAuthError::Closed),
@@ -367,9 +364,6 @@ impl McpAuth {
                 issuer: authorization.binding.issuer.clone(),
                 expires_at,
             };
-            // A new start replaces the key's attempt, unless a sign-out
-            // deleted the record it was prepared from. A publication under
-            // way holds the lock, so the new attempt is current after it.
             let mut attempts = self.lock_attempts(cancel).await?;
             let slot = attempts.entry(key.clone()).or_default();
             if slot.signouts != signouts {
@@ -401,8 +395,6 @@ impl McpAuth {
         cancel: &CancellationToken,
     ) -> Result<(), McpAuthError> {
         let started = Instant::now();
-        // Validate under the attempts lock; a failed check leaves the
-        // attempt pending so a wrong paste can be retried.
         let (key, issuer, code) = {
             let mut attempts = self.lock_attempts(cancel).await?;
             let (key, slot) = attempts
@@ -461,7 +453,6 @@ impl McpAuth {
         let mut locked = match self.store.lock(&self.stopping).await {
             Ok(locked) => locked,
             Err(error) => {
-                // The code was not sent, so the user can retry.
                 if let Some(attempt) = self
                     .attempts
                     .lock()
@@ -484,7 +475,6 @@ impl McpAuth {
                 let a = &attempt.authorization;
                 (a.verifier.clone(), a.client.clone(), a.binding.clone())
             });
-        // Superseded while waiting for the store lock: the code is never sent.
         let Some((verifier, client, binding)) = current else {
             return Err(McpAuthError::AttemptClosed);
         };
@@ -500,20 +490,14 @@ impl McpAuth {
             &binding.requested_scopes,
         )
         .await;
-        // The final currency check.
         let mut attempts = self.attempts.lock().await;
         let Some(slot) = attempts.get_mut(&key).filter(|slot| slot.is(attempt_id)) else {
             drop(attempts);
-            // Superseded while the request was out: it is settled, but writes
-            // and wakes nothing. Its tokens are revoked while the store lock
-            // is held, so the revocation precedes any later token request.
             if let (Ok(tokens), Some(endpoint)) = (&response, &binding.revocation_endpoint) {
                 self.revoke(endpoint, &client, tokens).await;
             }
             return Err(McpAuthError::AttemptClosed);
         };
-        // Tokens whose record could not be written, revoked once the
-        // attempts lock is released.
         let mut unwritten = None;
         let result = match response {
             Ok(tokens) => {
@@ -531,7 +515,6 @@ impl McpAuth {
                 }
                 written
             }
-            // The code may still be unredeemed, so the user can retry.
             Err(oauth::TokenError::Unavailable) => {
                 if let Some(attempt) = &mut slot.current {
                     attempt.exchanging = false;
@@ -539,8 +522,6 @@ impl McpAuth {
                 return Err(McpAuthError::Unavailable);
             }
             Err(oauth::TokenError::InvalidClient) => {
-                // That registration is gone: clear it, and its tokens, if
-                // the record holds the same client.
                 if let Some(record) = locked.document.get_mut(&key)
                     && record
                         .client
@@ -558,8 +539,6 @@ impl McpAuth {
             Err(oauth::TokenError::Rejected) => Err(McpAuthError::Failed("invalid_grant")),
             Err(oauth::TokenError::Failed(code)) => Err(McpAuthError::Failed(code)),
         };
-        // The code is spent whether or not the record was written: the
-        // attempt ends with its publication.
         slot.current = None;
         drop(attempts);
         if let (Some(tokens), Some(endpoint)) = (&unwritten, &binding.revocation_endpoint) {
@@ -594,15 +573,12 @@ impl McpAuth {
         let started = Instant::now();
         let target = key.clone();
         let result = async {
-            // Accepted: the pending attempt is closed before the store lock
-            // wait, so an exchange still waiting for it never sends its code.
             if let Some(slot) = self.lock_attempts(cancel).await?.get_mut(key) {
                 slot.current = None;
             }
             self.owned(cancel, move |auth| async move {
                 let mut locked = auth.store.lock(&auth.stopping).await.map_err(closed)?;
                 let record = locked.document.remove(&target);
-                // The record is deleted whatever the revocation outcome.
                 let revoked = match &record {
                     Some(Record {
                         revocation_endpoint: Some(endpoint),
@@ -615,8 +591,6 @@ impl McpAuth {
                 if record.is_some() {
                     locked.write().await?;
                 }
-                // Completed: an attempt started meanwhile may have been
-                // prepared from the deleted record, so it is closed too.
                 {
                     let mut attempts = auth.attempts.lock().await;
                     let slot = attempts.entry(target.clone()).or_default();
@@ -650,7 +624,6 @@ impl McpAuth {
             .map_err(|_| Refusal::Unavailable)?;
         let record = locked.document.get(&key).ok_or(Refusal::Required)?;
         let tokens = record.tokens.as_ref().ok_or(Refusal::Expired)?;
-        // Re-check after the lock: another holder may have refreshed already.
         match &stale {
             Stale::Expiring if fresh(tokens) => return Ok(tokens.access_token.clone()),
             Stale::Rejected(sent) if *sent != tokens.access_token => {
@@ -664,7 +637,6 @@ impl McpAuth {
         let (Some(refresh_token), Some(client)) =
             (tokens.refresh_token.clone(), record.client.clone())
         else {
-            // Without a refresh token the access token serves until it expires.
             if matches!(stale, Stale::Expiring) && still_valid {
                 return Ok(current);
             }
@@ -688,8 +660,6 @@ impl McpAuth {
         let record = locked.document.get_mut(&key).unwrap();
         let result = match response {
             Ok(mut tokens) => {
-                // Rotation: a new refresh token replaces the old one, else the
-                // old one stays. Persisted before any lease uses the token.
                 tokens.refresh_token.get_or_insert(refresh_token);
                 let access = tokens.access_token.clone();
                 record.tokens = Some(tokens);
@@ -854,7 +824,6 @@ impl Credential {
     async fn bearer(&self) -> Result<Option<String>, Refusal> {
         let document = match self.auth.store.read(&self.auth.stopping).await {
             Ok(document) => document,
-            // A store in an unknown format turns OAuth off, not the servers.
             Err(McpAuthError::Unsupported) => return Ok(None),
             Err(_) => return Err(Refusal::Unavailable),
         };
@@ -899,7 +868,6 @@ impl Credential {
         Fut: Future<Output = Result<T, E>>,
     {
         let sent = match self.bearer().await {
-            // The server may need no credential; only a `401` decides.
             Err(Refusal::Unavailable) => None,
             bearer => bearer?,
         };
@@ -910,7 +878,6 @@ impl Credential {
         self.challenge(challenge);
         let retry = match sent {
             Some(sent) => self.refresh(Stale::Rejected(sent)).await?,
-            // A sign-in may have completed while the request was in flight.
             None => self.bearer().await?.ok_or(Refusal::Required)?,
         };
         let result = call(Some(retry.clone())).await;

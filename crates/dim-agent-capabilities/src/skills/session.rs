@@ -165,11 +165,7 @@ impl DynPlugin for SkillsPlugin {
             let tools = ctx.require_at(&self.tools)?;
             let cwd = PathBuf::from(&config.cwd);
             let lifecycle = ctx.cancellation_token();
-            // Listen before the first query, so no later change goes unseen.
             let (wake, mut changes) = watch::channel(());
-            // rutis awaits one channel's listeners in turn, so the owner works
-            // in its own task, never in the listener; wakes coalesce and the
-            // owner rereads current state.
             ctx.listen::<CatalogChanged>()
                 .name(super::catalog_changes())
                 .on(move |_, _| {
@@ -187,8 +183,6 @@ impl DynPlugin for SkillsPlugin {
                 joined.wait().await;
                 Ok(cleanup.lock().await.close().await?)
             })?;
-            // Apply can be dropped on cancellation. The tracked task still settles
-            // creation and rolls it back before the disposer finishes joining.
             let initial = tasks
                 .spawn({
                     let (contents, catalog, cwd, loader, stopped) = (
@@ -211,22 +205,17 @@ impl DynPlugin for SkillsPlugin {
             let owner = skills.clone();
             let stopped = lifecycle.clone();
             tasks.spawn(async move {
-                // Replacing instances during assembly would race Session readiness.
-                // The receiver keeps changes announced meanwhile for the first update.
                 tokio::select! {
                     _ = stopped.cancelled() => return,
                     published = session.activated() => if !published { return },
                 }
                 loop {
-                    // Closing wins over a change that arrived at the same time.
                     tokio::select! {
                         biased;
                         _ = stopped.cancelled() => return,
                         _ = session.closing() => return,
                         changed = changes.changed() => if changed.is_err() { return },
                     }
-                    // A closing Session creates no more instances: cancel the
-                    // update, but await it so no partial instance is abandoned.
                     let cancel = stopped.child_token();
                     let update = async {
                         let view = catalog.query(Some(&cwd)).await;
@@ -318,7 +307,6 @@ impl ToolHandler for SkillTool {
                 }
                 None => return Ok(failure(format!("Unknown skill: {name}"))),
             };
-            // TS `loadSkill`.
             let mut parts = vec![
                 format!("Skill: {}", skill.name),
                 format!("Description: {}", skill.description),
@@ -402,8 +390,6 @@ impl DynPlugin for SkillsBranchPlugin {
             changed.mark_unchanged();
             let tasks = TaskTracker::new();
             tasks.spawn(async move {
-                // Background work begins once the branch is Active; a view
-                // change before that stays marked in `changed`.
                 tokio::select! {
                     _ = lifecycle.cancelled() => return,
                     active = phase.activated() => if !active { return },

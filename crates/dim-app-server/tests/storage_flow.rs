@@ -903,13 +903,11 @@ fn request_history() -> Vec<(&'static str, StoredEvent)> {
     };
     let (user, assistant) = (Role::User, Role::Assistant);
     let first = request(vec![text(user, "u1")], Some("one"), Some(&["echo"]));
-    // Equal values in new allocations: reused by `==`, not by pointer.
     let second = request(
         vec![text(user, "u1"), text(assistant, "a1"), text(user, "u2")],
         Some("one"),
         Some(&["echo"]),
     );
-    // An early message changed: keeps one message, found by stepping back.
     let third = request(
         vec![
             text(user, "u1"),
@@ -921,7 +919,6 @@ fn request_history() -> Vec<(&'static str, StoredEvent)> {
         None,
         Some(&["echo", "grep"]),
     );
-    // After a compaction: a new list.
     let fourth = request(
         vec![
             text(user, "summary"),
@@ -1112,8 +1109,6 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
                 }
             }
             "one round" => {
-                // The writer is held after a first round, so the rest queue
-                // up for one round.
                 let release = hold_writer(&store, key("bad", "main"), vec![text(1, "warm")]).await;
                 let queued: Vec<_> = history
                     .iter()
@@ -1138,10 +1133,6 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
                 }
             }
             "failed neighbour" => {
-                // The writer is held after the round of entry 2, so `bad`'s
-                // write and entry 3 meet in one round. Its combined commit
-                // fails on Session `bad`; `session` commits alone, and its
-                // later writes continue from what committed.
                 connection.execute_batch("CREATE TRIGGER fail_bad BEFORE INSERT ON timeline_events WHEN NEW.session_id = 'bad' BEGIN SELECT RAISE(ABORT, 'injected failure'); END").unwrap();
                 let mut release = None;
                 for (index, (branch, record)) in history.iter().enumerate() {
@@ -1193,11 +1184,6 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
         store.close().await.unwrap();
         db.close().await.unwrap();
     }
-    // Nodes: 1 for the first request; its drafts 1 appended and 1
-    // rewritten; 2 for the second; 4 for the third, which keeps one; 3 for
-    // the new list after the compaction; 2 for the child and 1 for the
-    // grandchild, which share 3 from `main`. `tools` and `system` once per
-    // distinct value; no `message` rows.
     let (_, content) = &written[0].1;
     let kinds = |kind: &str| {
         content
@@ -1227,8 +1213,6 @@ async fn request_lists_round_trip_with_the_same_bytes_however_writes_meet_rounds
 /// in one round or each commits in its own.
 #[tokio::test]
 async fn only_output_deltas_wait_for_a_round_until_another_batch_or_close() {
-    // Twice `PUBLISHED`: a wait the writer should end or not begin holds a
-    // write past its timeout and fails the test, which still ends.
     const WINDOW: Duration = Duration::from_secs(10);
     let thinking = |sequence, delta: &str| {
         record(
@@ -1248,8 +1232,6 @@ async fn only_output_deltas_wait_for_a_round_until_another_batch_or_close() {
     };
     let mut pair = vec![text(4, "c"), text(5, "d")];
     pair[0].batch_end = 5;
-    // In queue order: deltas of two Sessions, an input between them, and a
-    // batch of two deltas.
     let batches = [
         ("s", vec![thinking(1, "a")]),
         ("t", vec![text(1, "x")]),
@@ -1287,9 +1269,6 @@ async fn only_output_deltas_wait_for_a_round_until_another_batch_or_close() {
             append(&store, key("warm", "main"), vec![input(1, "first")])
                 .await
                 .unwrap();
-            // Held after the next round, the writer finds every batch
-            // pending. Each batch publishes with every other one already
-            // durable: they committed in one round.
             let before = Instant::now();
             let release = hold_writer(&store, key("warm", "main"), vec![input(2, "held")]).await;
             let held = Instant::now();
@@ -1320,9 +1299,6 @@ async fn only_output_deltas_wait_for_a_round_until_another_batch_or_close() {
                 result.unwrap();
                 assert_eq!(durable.unwrap(), ["s/5", "t/2"]);
             }
-            // The held round, an input after a round, started at once. The
-            // last one began with deltas, so it was to wait until the window
-            // after the held round started, and the input ended the wait.
             let deadlines = store.take_round_deadlines();
             let [None, None, Some(deadline)] = deadlines[..] else {
                 panic!("{deadlines:?}");
@@ -1334,8 +1310,6 @@ async fn only_output_deltas_wait_for_a_round_until_another_batch_or_close() {
                     .await
                     .unwrap();
             }
-            // After the first round, each round of deltas waited for the
-            // window and the input's round did not.
             let waited: Vec<_> = store
                 .take_round_deadlines()
                 .iter()
@@ -1360,8 +1334,6 @@ async fn only_output_deltas_wait_for_a_round_until_another_batch_or_close() {
             session_rows(&connection, "s"),
             session_rows(&connection, "t"),
         ]);
-        // A delta waits again, and closing ends the wait: the close returns
-        // once its round committed.
         let last = queue(&store, key("t", "main"), vec![text(3, "z")]);
         tokio::time::timeout(PUBLISHED, store.close())
             .await
@@ -1405,8 +1377,6 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
         .await
         .unwrap();
     let main = key("long", "main");
-    // Turn t: a queued input and its consumption in one batch, then at 3t a
-    // model call whose request extends the previous one by that input.
     let mut messages = vec![];
     let mut records = vec![];
     for turn in 1..=TURNS {
@@ -1434,8 +1404,6 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
         records.push(model_call(input + 2, messages.clone()));
     }
     append(&store, main.clone(), records).await.unwrap();
-    // A compaction keeps the last three turns, and the next call starts a
-    // new list of four messages.
     let through = 3 * TURNS;
     let timeline = Timeline::restore(
         rutis::Ctx::root().unwrap(),
@@ -1475,10 +1443,6 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
         .await
         .unwrap();
     store.close().await.unwrap();
-    // Every node once, also without the content cache (a budget no body
-    // fits in): the reader keeps the last request it rebuilt with its node
-    // addresses. The TURNS nodes of the list before the compaction and the
-    // four of the new list.
     let nodes = TURNS as usize + 4;
     for budget in [None, Some(0)] {
         let store = match budget {
@@ -1492,16 +1456,11 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
         let loads = store.take_node_loads();
         assert_eq!(loads.loads, nodes, "budget {budget:?}");
         assert!(loads.max_per_hold <= 256);
-        // A validation pass reads the compaction's preparation boundary
-        // again after its in-order pass; the content cache serves that.
         store.branches("long").await.unwrap();
         let validation = store.take_node_loads();
         if budget.is_none() {
             assert_eq!(validation.loads, nodes);
         }
-        // A page from turn 280's model call, with both boundaries on input
-        // batches: that call's list, then one node for each of the next
-        // nine.
         let page = store
             .read_page(&main, 3 * 280 - 1, 30, 3 * 295 - 1)
             .await
@@ -1522,8 +1481,6 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
             },
             "budget {budget:?}"
         );
-        // The store's read from `resume`: its first request's list, one
-        // node for each later call before the compaction, and the new list.
         let from_resume = store.read(&main, resume..=head).await.unwrap();
         assert_eq!(from_resume.len() as u64, head - resume + 1);
         let loads = store.take_node_loads();
@@ -1532,8 +1489,6 @@ async fn reads_rebuild_lists_from_where_they_start_in_bounded_holds() {
         store.close().await.unwrap();
     }
     let store = SqliteTimelineStore::new(db.clone());
-    // A checkpoint read through the compaction gives the same context once
-    // every row ending before `resume` is unreadable, so it read none.
     let context = || async {
         let timeline = Timeline::restore(
             rutis::Ctx::root().unwrap(),
@@ -1598,7 +1553,6 @@ async fn a_long_request_is_read_and_extended_in_bounded_holds() {
                 .collect();
             model_call(turn as u64, messages)
         };
-        // Turn `turn`'s list loaded in full, and `encoded` new nodes.
         let holds = |turn: usize, encoded| NodeLoads {
             loads: length(turn),
             holds: length(turn).div_ceil(256),
@@ -1689,7 +1643,6 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
             .await
             .unwrap();
     }
-    // A request the runtime still holds when its Session's commit fails.
     let history = request_history();
     let request = record(1, history[1].1.event.kind.clone());
     append(&store, key("bad", "main"), vec![request])
@@ -1698,8 +1651,6 @@ async fn failed_session_rolls_back_directory_and_does_not_block_other_sessions()
     assert_eq!(store.writer_memo_requests("bad"), 1);
     let connection = Connection::open(&database.0).unwrap();
     connection.execute_batch("CREATE TRIGGER fail_bad BEFORE INSERT ON timeline_events WHEN NEW.session_id = 'bad' BEGIN SELECT RAISE(ABORT, 'injected failure'); END").unwrap();
-    // The writer is held after a round of `warm`, so the three writes below
-    // meet in its next round.
     let release = hold_writer(&store, key("warm", "main"), vec![text(1, "warm")]).await;
     let bad_event = record(
         2,
@@ -1765,8 +1716,6 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         let error = bad.closed().await.unwrap_err();
         assert!(error.to_string().contains("injected output commit failure"));
         good.idle("main").await.unwrap();
-        // The writer remembers the last request a running Session wrote and
-        // forgets a Session whose commit failed.
         assert_eq!(store.writer_memo_requests(good.id()), 1);
         assert_eq!(store.writer_memo_requests(&bad_id), 0);
         assert!(agent.get_session(&bad_id).is_none());
@@ -1803,7 +1752,6 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         session.submit("after recovery".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
         assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after recovery"))));
-        // Once the Session unloads, the writer memo holds no live request of it.
         assert_eq!(store.writer_memo_requests(session.id()), 1);
         assert!(session.unload_if_idle().await.unwrap());
         session.closed().await.unwrap();
@@ -1886,10 +1834,6 @@ async fn recovery_rejects_corrupt_records_and_preserves_them() {
         "missing"
     );
 
-    // Damaged request lists: each damage fails every read of the request
-    // and the recovery validation with a storage error, and the row keeps
-    // its bytes. Sequence 2 calls the request 1 prepared, so a damaged list
-    // there is also checked against the request read before it.
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let store = SqliteTimelineStore::new(db.clone());
@@ -1931,8 +1875,6 @@ async fn recovery_rejects_corrupt_records_and_preserves_them() {
             .collect()
     };
     let short = request(messages("m", 3));
-    // A list long enough to cross holds of node loads, a compaction, and a
-    // new list after it.
     let long = request(messages("long", 600));
     let after = request(messages("after", 2));
     for (session, records) in [
@@ -2104,14 +2046,10 @@ async fn recovery_rejects_corrupt_records_and_preserves_them() {
             store.branches("lists").await,
             Err(AgentError::Storage(message)) if message.contains(failure)
         ));
-        // The bad row kept its bytes.
         assert_eq!(connection.execute(&set, [&intact, &damaged]).unwrap(), 1);
     }
     store.branches("lists").await.unwrap();
 
-    // A damaged node in the middle of a long list fails every read whose
-    // requests pass through it, and none whose requests come after the
-    // compaction.
     let middle = hash("long", "node", "%long 300%");
     let node: String = connection
         .query_row(
@@ -2264,7 +2202,6 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 2));
             INSERT INTO agent_store_format VALUES (2);"#,
         ),
-        // v4 records keep input state, business blocks and prompt deliveredBy.
         (
             Base::V13,
             r#"DROP TABLE agent_store_format;
@@ -2278,35 +2215,30 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 5));
             INSERT INTO agent_store_format VALUES (5);"#,
         ),
-        // v6 stores a derived account catalog, without canonical model overrides.
         (
             Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 6));
             INSERT INTO agent_store_format VALUES (6);"#,
         ),
-        // v7 selections identify only a model; v8 fixes the full provider/model identity.
         (
             Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 7));
             INSERT INTO agent_store_format VALUES (7);"#,
         ),
-        // v8 has no managed OAuth binding in the provider record.
         (
             Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 8));
             INSERT INTO agent_store_format VALUES (8);"#,
         ),
-        // v10 has a private account catalog JSON variant, not normalized managed records.
         (
             Base::V13,
             r#"DROP TABLE agent_store_format;
             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 10));
             INSERT INTO agent_store_format VALUES (10);"#,
         ),
-        // v11's inline checkpoint schema must be preserved and rejected.
         (
             Base::V13,
             r#"DROP TABLE agent_store_format;
@@ -2316,7 +2248,6 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             ALTER TABLE timeline_events ADD COLUMN checkpoint INTEGER NOT NULL DEFAULT 0;
             CREATE INDEX timeline_events_checkpoints ON timeline_events(session_id,branch_id,checkpoint,sequence);"#,
         ),
-        // v9 is an unpublished development format without import markers.
         (
             Base::V13,
             r#"DROP TABLE provider_imports; DROP TABLE agent_store_format;
@@ -2324,7 +2255,6 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             INSERT INTO agent_store_format VALUES (9);
             INSERT INTO providers VALUES ('preserve',7,'{"credential":"original"}');"#,
         ),
-        // The removed branch-only v14 envelope must not be downgraded to v13.
         (
             Base::V13,
             r#"DROP TABLE settings_documents; DROP TABLE agent_store_format;
@@ -2333,19 +2263,15 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             CREATE TABLE user_configuration (layer TEXT NOT NULL PRIMARY KEY CHECK(layer = 'user'), version INTEGER NOT NULL CHECK(version > 0), envelope TEXT NOT NULL);
             INSERT INTO user_configuration VALUES ('user', 7, '{"format":1,"patches":[],"documents":{},"imports":{}}');"#,
         ),
-        // A matching v13 schema cannot disguise a v14 format marker either.
         (
             Base::V13,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=14",
         ),
-        // A matching schema still requires a valid format marker; a v13
-        // schema without marker 13 is never upgraded.
         (Base::V13, "DELETE FROM agent_store_format"),
         (
             Base::V13,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=99",
         ),
-        // A v15 schema requires marker 15; it is never read as v13 or v16.
         (Base::V15, "DELETE FROM agent_store_format"),
         (
             Base::V15,
@@ -2355,7 +2281,6 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V15,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=16",
         ),
-        // A v16 schema requires marker 16; it is never read as v15 or v17.
         (Base::V16, "DELETE FROM agent_store_format"),
         (
             Base::V16,
@@ -2365,7 +2290,6 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V16,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=17",
         ),
-        // A v17 schema requires marker 17; it is never read as v16 or v18.
         (Base::V17, "DELETE FROM agent_store_format"),
         (
             Base::V17,
@@ -2375,7 +2299,6 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V17,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=18",
         ),
-        // A v18 schema requires marker 18; it is never read as v17 or v19.
         (Base::V18, "DELETE FROM agent_store_format"),
         (
             Base::V18,
@@ -2385,13 +2308,11 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V18,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=19",
         ),
-        // A v19 schema requires marker 19; it is never read as v18.
         (Base::V19, "DELETE FROM agent_store_format"),
         (
             Base::V19,
             "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=18",
         ),
-        // A partly upgraded store is neither format.
         (
             Base::V13,
             "CREATE TABLE session_files (file_id TEXT NOT NULL PRIMARY KEY, node TEXT, writer TEXT)",
@@ -2406,7 +2327,6 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         let database = Database::new();
         match base {
             Base::Empty => {}
-            // v1 to v13 used the same tables; only their markers differ.
             Base::V13 => drop(v13_store(&database.0)),
             Base::V15 => drop(v15_store(&database.0)),
             Base::V16 => drop(v16_tables_store(&database.0, 16)),
@@ -2419,7 +2339,6 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         drop(connection);
         let original = std::fs::read(&database.0).unwrap();
         for _ in 0..2 {
-            // A failed startup must release its maintenance lease for retry.
             let Err(AgentError::Storage(message)) = SqliteStorage::open(database.0.clone()) else {
                 panic!("unsupported database must return a storage error");
             };
@@ -2486,10 +2405,6 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         assert!(rows(&connection, table).is_empty());
     }
 
-    // The upgraded store reopens as v19 and reports nothing. `main`'s next
-    // request row is a v17 list; its previous request, the v16 row at 4, has no
-    // list to share, so it writes a node for every message, and content
-    // addresses meet the node the child already has for "Hi".
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), None);
     let store = SqliteTimelineStore::new(db.clone());
@@ -2749,8 +2664,6 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
     reopened.close().await.unwrap();
 }
 
-// Hold a child before exec, when close-on-exec descriptors are still inherited.
-// The database must release ownership on close, not when that child reaches exec.
 #[cfg(unix)]
 #[tokio::test]
 async fn sqlite_close_releases_ownership_while_a_spawned_child_inherits_descriptors() {
@@ -2791,11 +2704,10 @@ async fn sqlite_close_releases_ownership_while_a_spawned_child_inherits_descript
     assert_eq!(ready, [1]);
     let closed = db.close().await;
     let replacement = SqliteStorage::open(database.0.clone());
-    // Always release and reap the child before asserting the observed result.
     parent.write_all(&[1]).unwrap();
     assert!(spawning.join().unwrap().success());
     closed.unwrap();
-    let replacement = replacement.expect("successful close must release native ownership");
+    let replacement = replacement.expect("successful close must release native ownership while the child still holds inherited descriptors before exec");
     db.close().await.unwrap();
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     replacement.close().await.unwrap();
@@ -2989,7 +2901,6 @@ async fn damaged_snapshot_cannot_silently_remove_retained_output_after_restart()
     )
     .await
     .unwrap();
-    // The cut keeps the answer: the model-start of its request.
     let checkpoint = projection_checkpoint(&timeline.context(5).await.unwrap(), "event-3").unwrap();
     assert_eq!(checkpoint.resume.sequence, 5);
     assert!(!checkpoint.state.output.is_empty());
@@ -3102,7 +3013,6 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
     append(&store, key("session", "main"), input_batch)
         .await
         .unwrap();
-    // Nothing is kept: the cut is the fact's own event, after every entry.
     let compaction = completed("event-3", "retained summary", 2);
     let original = record(3, EventKind::ContextCompaction(compaction));
     append(&store, key("session", "main"), vec![original.clone()])
@@ -3198,8 +3108,6 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
         Some(("unsupported/v99", "not json".to_owned())),
         Some((INTERPRETER, "not json".to_owned())),
     ];
-    // Sequence 2 is a legal resume address, but this state omits the pending
-    // input consumed there. Decoding and anchor checks alone cannot accept it.
     for (branch, sequence) in [("unknown", 1), ("main", 0), ("main", 3), ("main", 2)] {
         states.push(Some((
             INTERPRETER,
@@ -3330,8 +3238,6 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
     connection
         .execute("DELETE FROM timeline_snapshots", [])
         .unwrap();
-    // Inject malformed cache metadata through this disposable connection;
-    // ordinary writes retain their foreign-key enforcement.
     connection
         .pragma_update(None, "foreign_keys", false)
         .unwrap();
@@ -3432,7 +3338,6 @@ async fn nested_branches_read_fixed_ancestor_checkpoints_after_their_parents_clo
     )
     .await
     .unwrap();
-    // The cut replaces the earlier input; the queued one is not placed yet.
     let checkpoint = projection_checkpoint(&prefix.context(3).await.unwrap(), "event-3").unwrap();
     append(
         &store,
@@ -3715,14 +3620,8 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let store = SqliteTimelineStore::new(db.clone());
-    // Room for one request's content, and below it: each load evicts the
-    // one before it.
     let fitting = SqliteTimelineStore::with_content_budget(db.clone(), 256);
     let small = SqliteTimelineStore::with_content_budget(db.clone(), 150);
-    // One request of two ~100-byte messages, called on 300 sequences: reads
-    // cross 256-sequence pages and validation crosses 64-row pages. `lists`
-    // keeps the v17 rows; `legacy` holds the same records as a v16 daemon
-    // wrote them.
     let request = Arc::new(ModelRequest::new(
         "mock",
         "test",
@@ -3759,8 +3658,6 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
         EventKind::ModelCall(data) => data.request.messages[0].clone(),
         _ => panic!("not a model call"),
     };
-    // A v17 read shares the kept request's messages whatever its budget; a
-    // v16 read shares one decode unless the budget evicted it.
     for (session, budget_shares) in [("lists", true), ("legacy", false)] {
         for (reader, shares) in [(&store, true), (&fitting, true), (&small, budget_shares)] {
             let page = reader
@@ -3788,11 +3685,6 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
         }
     }
 
-    // A damaged reference or content row still fails every read and the
-    // recovery validation. The reference is damaged on sequence 299, past
-    // the first page and before `through`, after the same content was
-    // loaded intact: in `lists` the list's last node, in `legacy` the first
-    // message.
     let query = |sql: &str, session: &str| -> String {
         connection
             .query_row(sql, [session], |row| row.get(0))
@@ -3858,7 +3750,6 @@ async fn reads_share_bounded_content_across_pages_and_still_check_every_load() {
                     Err(AgentError::Storage(message)) if message.contains(failure)
                 ));
             }
-            // The bad row kept its bytes.
             assert_eq!(
                 connection
                     .execute(&set, [&intact, session, &damaged])
@@ -4126,7 +4017,6 @@ async fn creation_rollback_drains_accepted_writes_and_deletes_atomically() {
         1,
         "failed deletion must roll back the preceding event deletion"
     );
-    // A request the runtime still holds when its Session is rolled back.
     let history = request_history();
     let (_, first) = &history[1];
     append(&store, key("new", "main"), vec![first.clone()])
@@ -4152,8 +4042,6 @@ async fn creation_rollback_drains_accepted_writes_and_deletes_atomically() {
         assert_eq!(count, 0);
     }
     assert!(store.session_config("new").await.unwrap().is_none());
-    // A new Session of the same id shares no list with the rolled-back
-    // request: its request extending that one writes every node.
     store
         .create_session("new", &SessionConfig::default())
         .await
@@ -4382,7 +4270,6 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let sessions =
         dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
-    // Rows are written as the Timeline writer writes them.
     let store = SqliteTimelineStore::new(db.clone());
     let config = SessionConfig {
         interactive: false,
@@ -4427,8 +4314,6 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             }),
         )
     };
-    // `main` is mixed: 1 is a v16 row, as a v16 daemon wrote it before the
-    // upgrade; a store started after it writes the rest as lists.
     append(&store, key("source", "main"), vec![call(1, &["first"])])
         .await
         .unwrap();
@@ -4436,7 +4321,6 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
     let connection = Connection::open(&database.0).unwrap();
     as_v16_rows(&connection, "source");
     let store = SqliteTimelineStore::new(db.clone());
-    // 2 carries a before trace whose draft holds its own request.
     let mut second = call(2, &["first", "before the cut"]);
     let EventKind::ModelCall(traced) = &second.event.kind else {
         unreachable!()
@@ -4455,7 +4339,6 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             result: Some(EventDraft::new(EventKind::ModelCall(traced))),
         }],
     });
-    // 5 extends 2's list past the cut.
     for records in [
         vec![second],
         vec![compaction(3, 2)],
@@ -4509,7 +4392,6 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             .collect::<rusqlite::Result<_>>()
             .unwrap()
     };
-    // The copied rows, then the fork's own fact in the same transaction.
     assert_eq!(
         column(
             "SELECT sequence || ':' || body FROM timeline_events WHERE session_id='fork' AND sequence<=4 ORDER BY sequence"
@@ -4535,9 +4417,6 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             "SELECT branch_id || ':' || CASE branch_id WHEN 'main' THEN 5 ELSE 0 END || ':' || info FROM timeline_branches WHERE session_id='source' AND branch_id IN ('main', 'child') ORDER BY branch_id"
         )
     );
-    // Exactly the closure of the copied rows' references: 1's message, and
-    // every node of 2's list and of its draft's, but no node only a request
-    // after the cut or another branch reaches.
     let content = column(
         "SELECT kind || ':' || json_extract(body, '$.content') FROM timeline_content WHERE session_id='fork' AND kind='message' \
          UNION ALL SELECT kind || ':' || json_extract(body, '$.message.content') FROM timeline_content WHERE session_id='fork' AND kind='node' ORDER BY 1",
@@ -4587,8 +4466,6 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
         column("SELECT config FROM agent_sessions WHERE session_id='fork'"),
         column("SELECT config FROM agent_sessions WHERE session_id='source'")
     );
-    // The copy is a valid Session: the child is a creation that never
-    // started, and the fork's main resumes after its `session/forked`.
     let branches = store.branches("fork").await.unwrap();
     assert_eq!(
         branches

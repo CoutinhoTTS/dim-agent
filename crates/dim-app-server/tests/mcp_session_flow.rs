@@ -263,7 +263,6 @@ impl Env {
         )
         .unwrap();
         let root = Ctx::root().unwrap();
-        // The management table the process providers register with.
         root.plugin(
             dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
                 .unwrap(),
@@ -315,11 +314,9 @@ impl Env {
             }),
         );
         mcp::install(&mut builder);
-        // The Agent's own plugin: it registers McpSession with the Agent.
         builder.plugin(|names| Ok(Box::new(McpPlugin::new(names, 0)?)));
         configure(&mut builder, &remote);
         let agent = builder.build_in(&root);
-        // The directory runs before any Session does.
         agent.start().await.unwrap();
         let directory = root.get::<McpService>().unwrap();
         Self {
@@ -367,7 +364,6 @@ impl Env {
             .unwrap();
     }
     async fn turn(&self, session: &Session, action: Action) {
-        // A rejected tool can end its turn without requesting the text step.
         *self.model.actions.lock().unwrap() = VecDeque::from([action, Action::Text]);
         session
             .submit("go".into(), InputMode::Queue, "main")
@@ -459,7 +455,6 @@ async fn adopted(session: &Session, version: Option<&str>) {
             }
             changed.changed().await.unwrap();
         }
-        // Registry acceptance precedes the branch's persisted adoption.
         loop {
             let events = session.history("main", None).await.unwrap();
             if events.iter().rev().find_map(|e| match &e.kind {
@@ -535,10 +530,7 @@ async fn project_discovery_does_not_connect_until_the_user_enables_it() {
     .await;
     let enabled = ready(&session).await;
     assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
-    // The choice is the user's, recorded outside the shared project file.
     assert_eq!(std::fs::read(&file).unwrap(), written);
-    // A project-scope edit reaches the open Session through the Settings
-    // event alone: nothing else wakes it for a change that withdraws nothing.
     env.update(
         SettingsScope::Project(1),
         "docs",
@@ -609,8 +601,6 @@ async fn enabled_project_entry_serves_tools_and_disabling_stops_it_in_every_sess
     tokio::time::timeout(Duration::from_secs(5), env.model.entered.notified())
         .await
         .unwrap();
-    // Disabling stops the server in both Sessions before it returns,
-    // including the connection that the paused request has already bound.
     env.update(
         SettingsScope::Project(1),
         "docs",
@@ -655,7 +645,6 @@ async fn closing_one_session_drains_only_its_connections_with_retained_requests(
         },
     )
     .await;
-    // Model keeps the request (and its tool binding) alive after Session close.
     let retained = env.model.requests.lock().unwrap()[0].clone();
     first.close().await.unwrap();
     assert_eq!(env.remote.deletes.load(Ordering::SeqCst), 1);
@@ -935,8 +924,6 @@ async fn unreadable_catalog_preserves_adopted_tools_until_a_valid_update() {
         assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
 
         if disconnect {
-            // Preserving sources must also preserve their failure subscription;
-            // a broken catalog does not keep a dead connection callable.
             env.directory
                 .disconnect(
                     SettingsScope::User,
@@ -972,7 +959,6 @@ async fn unreadable_catalog_preserves_adopted_tools_until_a_valid_update() {
         .unwrap();
         version = ready(&session).await;
     }
-    // A successfully read empty directory really removes the source.
     std::fs::write(env.home.join("mcp.json"), r#"{"mcpServers":{}}"#).unwrap();
     view.refresh().unwrap();
     adopted(&session, None).await;
@@ -1015,8 +1001,6 @@ async fn disabling_an_entry_whose_project_file_is_unreadable_withdraws_it() {
     .await
     .unwrap();
     ready(&session).await;
-    // The user's choice does not depend on the file: the running server
-    // stops before the call returns, and the Session reports it disabled.
     env.directory
         .update(
             SettingsScope::Project(1),
@@ -1036,8 +1020,6 @@ async fn disabling_an_entry_whose_project_file_is_unreadable_withdraws_it() {
     adopted(&session, None).await;
     assert_eq!(std::fs::read(&file).unwrap(), b"{ invalid json");
 
-    // Another process enables it again; once the file is readable, the Session
-    // follows the publisher without its own refresh and connects again.
     std::fs::write(&record, granted).unwrap();
     std::fs::write(&file, written).unwrap();
     env.directory
@@ -1061,8 +1043,6 @@ async fn a_closing_session_starts_no_connection() {
     .await;
     let session = env.session(true, PermissionPreset::FullAccess).await;
     state(&session, McpSourceState::Disabled).await;
-    // A held turn keeps the close waiting for its branch, with every Session
-    // capability still loaded.
     *env.model.actions.lock().unwrap() = VecDeque::from([Action::Hold]);
     session
         .submit("hold".into(), InputMode::Queue, "main")
@@ -1124,7 +1104,6 @@ async fn slow_source_isolated_notifications_adopt_and_disconnect_withdraws_witho
     .await;
     assert!(results(&session).await[0].contains("one:8"));
 
-    // A completed list from a cancelled worker must not republish a disabled source.
     env.update(SettingsScope::User, "slow", McpChange::SetEnabled(false))
         .await;
     let mut status = view.subscribe();
@@ -1235,7 +1214,6 @@ async fn an_unpublished_session_never_starts_discovery() {
         error.contains("assembly failed after McpSession"),
         "{error}"
     );
-    // An enabled user server is eligible; only publication may start discovery.
     assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 0);
     env.close().await;
 }
@@ -1245,10 +1223,8 @@ async fn a_shadowed_user_server_closes_its_unused_connection() {
     let env = Env::new().await;
     let session = env.session(true, PermissionPreset::FullAccess).await;
     ready(&session).await;
-    // The branch adopts the user tools, so a binding holds the connection.
     env.turn(&session, Action::Text).await;
     assert_eq!(env.remote.initializes.load(Ordering::SeqCst), 1);
-    // A project entry shadows the user server even while disabled.
     let mut shadow = configuration(&env.url, "project");
     shadow["enabled"] = json!(false);
     env.update(
@@ -1268,8 +1244,6 @@ async fn a_shadowed_user_server_closes_its_unused_connection() {
     })
     .await
     .unwrap();
-    // The next request adopts the tool set without it, releasing the binding;
-    // the user generation is still current but now unused, so it closes.
     env.turn(&session, Action::Text).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while env.remote.deletes.load(Ordering::SeqCst) < 1 {

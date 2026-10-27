@@ -194,13 +194,6 @@ impl SqliteTimelineStore {
                     }
                     Command::Close => break,
                 };
-                // A round takes every pending batch up to the next control
-                // command. While they all hold output-row events only, it
-                // waits for more until the window after the previous round
-                // started (timeline storage §3): an output row grows by
-                // rewriting its page, and a round writes each page it
-                // touched to the WAL and syncs once, so the window bounds
-                // those rewrites and syncs. Any other batch ends the wait.
                 let outputs = |batch: &Pending| {
                     batch
                         .events
@@ -282,8 +275,6 @@ impl SqliteTimelineStore {
                     .push(batch);
             }
         }
-        // Each Session's request records are prepared before the write
-        // transaction, which then loads no node.
         let mut prepared = BTreeMap::new();
         for (session, batches) in sessions {
             match self.prepare(&session, &batches) {
@@ -299,7 +290,6 @@ impl SqliteTimelineStore {
         if !prepared.is_empty() {
             self.commit_prepared(prepared);
         }
-        // Dead entries go at the end of each round.
         if let Some(memo) = &self.memo {
             memo.lock().unwrap().retain(|_, branches| {
                 branches.retain(|_, entry| entry.request.strong_count() > 0);
@@ -352,7 +342,6 @@ impl SqliteTimelineStore {
                         )
                     }),
             };
-            // Callbacks may read or append; never run them under the database lock.
             drop(guard);
             match &result {
                 Ok(()) => self.remember(&session, encoding),
@@ -537,8 +526,6 @@ impl SqliteTimelineStore {
                     .clone()
                     .ok_or_else(|| error("request list length mismatch"))?;
                 let mut steps = previous.refs.length - keep;
-                // Nodes of the round first, then committed ones, a hold of
-                // node loads at a time.
                 while steps > 0
                     && let Some(parent) = round.fresh.get(&address)
                 {
@@ -593,7 +580,6 @@ impl SqliteTimelineStore {
             }) {
                 return Ok(Some(previous.clone()));
             }
-            // The memo entry is the branch's last committed request row.
             if let Some(memo) = &self.memo
                 && let Some(entry) = memo
                     .lock()
@@ -667,7 +653,6 @@ impl SqliteTimelineStore {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
-        // Owner rows go before the Session record they reference.
         let released = files::release(&tx, session_id).map_err(error)?;
         for table in [
             "timeline_snapshots",
@@ -939,15 +924,11 @@ impl SessionStore {
     /// database, or to none. `id` is one path component, as Agents checked
     /// (D3). Returns whether this database had rows of the id.
     pub async fn delete_session(&self, id: &str) -> Result<bool> {
-        // Rows outlive their directory: once a commit removed the rows, the
-        // directory was already durably gone, so a retry needs no removal.
         let stored = self.has_records(id).await?;
         if stored {
             self.files.remove_command_output(id).await?;
         }
         self.timeline.rollback_session(id).await?;
-        // Also on a retry that released nothing: an earlier attempt may have
-        // committed and stopped before its sweep.
         self.timeline.sweep_files.notify_one();
         Ok(stored)
     }
@@ -1003,8 +984,6 @@ impl SessionStore {
                     .map_err(error)?;
                 for (id, info) in branches {
                     let parsed: TimelineInfo = serde_json::from_str(&info).map_err(error)?;
-                    // `main` through the cut; a branch `main` created by
-                    // then as a creation that never started.
                     let head = if id == "main" {
                         cut
                     } else if parsed.parent.as_deref() == Some("main")
@@ -1027,10 +1006,6 @@ impl SessionStore {
                     params![source, fork, cut],
                 )
                 .map_err(error)?;
-                // Only the content rows the copied events reference, and
-                // every node on the way from a referenced list's last node
-                // to its first: `UNION` visits a shared prefix once, and
-                // `CROSS JOIN` keeps each step one primary-key lookup.
                 let mut references = BTreeSet::new();
                 {
                     let mut bodies = tx
@@ -1088,8 +1063,6 @@ impl SessionStore {
                         session_id: fork.clone(),
                         branch_id: "main".into(),
                     };
-                    // `session/forked` carries no request, so it has no
-                    // list and the fork's closure above needs no node more.
                     let wire = codec::encode(&forked, std::iter::empty())?;
                     insert_event(
                         &tx,
@@ -1169,8 +1142,6 @@ impl DynPlugin for SessionStorePlugin {
             let (timeline, owned_files, titles) =
                 (store.timeline.clone(), files.clone(), store.titles.clone());
             ctx.effect(move || async move {
-                // Admitted title writes and puts settle before the
-                // native store stops writing.
                 titles.close().await;
                 owned_files.close().await;
                 timeline.close().await.map_err(Into::into)
@@ -1795,7 +1766,6 @@ impl TimelineStore for SqliteTimelineStore {
             if after > through {
                 return Err(AgentError::InvalidInput("future Timeline cursor".into()));
             }
-            // Validate both caller-supplied boundaries, including empty pages.
             self.read(key, through..=through).await?;
             if after > 0 && after != through {
                 self.read(key, after..=after).await?;
@@ -1897,8 +1867,6 @@ impl TimelineStore for SqliteTimelineStore {
         Box::pin(async move {
             let key = key.clone();
             let mut reader = self.reader();
-            // The anchor is decoded across holds; the last one checks it
-            // and writes the snapshot.
             let sequence = snapshot.sequence;
             holds(&self.db, &mut reader, None, move |connection, reader, rows: &mut Option<Rows>| {
                 let rows = match rows {

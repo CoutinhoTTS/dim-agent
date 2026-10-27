@@ -32,7 +32,6 @@ mod linux {
         network: u64,
     }
     #[repr(C, packed)]
-    // The kernel's path-rule ABI is a packed u64 followed by i32.
     struct PathRule {
         access: u64,
         fd: i32,
@@ -112,7 +111,6 @@ mod linux {
             Some(mode) if mode == "--landlock" => {
                 let workspace = PathBuf::from(args.next().ok_or("missing workspace")?);
                 let executable = args.next().ok_or("missing executable")?;
-                // Restrict the single-threaded wrapper before exec or any Tokio runtime.
                 restrict(&workspace)?;
                 Err(Command::new(executable).args(args).exec().into())
             }

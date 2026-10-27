@@ -91,8 +91,6 @@ impl Plugin for Tui {
     }
 
     async fn apply(&self, ctx: &Ctx, (connection,): Self::Deps) -> rutis::Result {
-        // Registered before the render thread enters raw mode, so every
-        // way out of the tree hands the terminal back.
         ctx.effect(|| async move {
             ui::terminal::restore_if_held();
             Ok(())
@@ -113,24 +111,18 @@ impl Plugin for Tui {
         let render = std::thread::Builder::new()
             .name("dim-tui".into())
             .spawn(move || {
-                // The interface shuts the session thread down before it
-                // returns; a dropped sender means the root stopped waiting.
                 let _ = leave.send(ui::tui::run(Box::new(host), env));
             })
             .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
-        ctx.effect(|| {
-            async move {
-                // Finished once `leave` was sent; bounded for an unload
-                // that did not wait for it.
-                let deadline = std::time::Instant::now() + Duration::from_secs(1);
-                while !render.is_finished() && std::time::Instant::now() < deadline {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                if render.is_finished() {
-                    let _ = render.join();
-                }
-                Ok(())
+        ctx.effect(|| async move {
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while !render.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
             }
+            if render.is_finished() {
+                let _ = render.join();
+            }
+            Ok(())
         })?;
         Ok(())
     }
@@ -168,8 +160,6 @@ impl Plugin for WebHold {
             .ok_or_else(|| {
                 rutis::Error::from(ErrorKind::PluginFailed("WebHold was loaded twice".into()))
             })?;
-        // The signals are listened for before the panel says how to
-        // stop, so a Ctrl+C that follows it at once is ours.
         let signals = Signals::listen()
             .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
         let opened = self
@@ -177,12 +167,9 @@ impl Plugin for WebHold {
             .await
             .map_err(ErrorKind::PluginFailed)?;
         if !opened {
-            // The hint is printed; there is nothing to hold.
             let _ = done.send(Ok(1));
             return Ok(());
         }
-        // The entry stays open while this connection does: the task
-        // owns it until a signal or the daemon's end, then reports.
         let wait = tokio::spawn(async move {
             let _ = done.send(hold(client, signals).await);
         });
@@ -211,8 +198,6 @@ impl WebHold {
         let opened: Opened = match client.typed("web.open", params).await {
             Ok(opened) => opened,
             Err(error) => {
-                // A frontend that is missing or of another version is not
-                // an error of this command: say how to get it, exit 1.
                 let executable = std::env::current_exe().unwrap_or_default();
                 let Some((problem, fix)) = client::web_hint(&error, &executable, &self.home) else {
                     return Err(error);
@@ -224,8 +209,6 @@ impl WebHold {
         let fragment = opened.url.split_once('#').map_or("", |(_, f)| f);
         let url = format!("http://{}/", opened.address);
         let sign_in = format!("{url}#{fragment}");
-        // The sign-in link carries the token; it is shown only to this user
-        // when no browser took it.
         let opened_browser = self.open_browser && browser::open(&sign_in);
         ui::tui::print_web_panel(&WebOpened {
             url: &url,
@@ -274,7 +257,6 @@ impl Signals {
 async fn hold(mut client: Client, mut signals: Signals) -> crate::Result<i32> {
     tokio::select! {
         _ = signals.received() => {}
-        // Nothing is subscribed, so the stream ends only with the daemon.
         error = async { loop { if let Err(error) = client.next().await { break error } } } => {
             return Err(format!("The App Server stopped; the Web workspace is closed ({error})").into());
         }

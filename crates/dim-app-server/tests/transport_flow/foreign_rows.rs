@@ -77,7 +77,6 @@ async fn node_python_plugin_is_one_row_and_its_parts_mount_in_session_and_branch
     }
     for session in &sessions {
         submit(&mut client, session, r#"tool:py_echo {"text":"hello"}"#).await;
-        // The Session part's tool ran with its own Session's identity.
         let history = agent
             .get_session(session)
             .unwrap()
@@ -99,8 +98,6 @@ async fn node_python_plugin_is_one_row_and_its_parts_mount_in_session_and_branch
             echoed,
             json!({"session":session, "callSession":session, "branch":"main", "text":"hello"})
         );
-        // The branch part folded its own branch's facts in order and wrote
-        // its input there.
         let marker = marked(&agent, session, "main", "<py-marker").await;
         assert!(
             marker.contains(&format!(r#"session="{session}" branch="main""#)),
@@ -156,7 +153,6 @@ async fn node_cordis_plugin_registered_as_a_branch_part_gets_its_own_branch() {
             format!(r#"<cordis-marker session="{session}" branch="main"/>"#)
         );
     }
-    // A child branch is an instance of its own: its copy writes its own id.
     let parent = agent.get_session(&sessions[0]).unwrap();
     let child = parent
         .branch(

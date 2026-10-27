@@ -335,8 +335,6 @@ async fn a_steer_before_any_model_output_ends_the_request_and_continues_the_turn
                 ..
             }) if reason == dim_agent_capabilities::steer::REPLACED_BY_STEER
         ));
-        // The replaced request wrote no output; the next one starts after
-        // its terminal and consumes the steer there.
         assert!(!events.iter().any(|event| matches!(&event.kind,
             EventKind::Text(data) if data.request_id == *replaced)));
         let consumed = position(
@@ -360,7 +358,6 @@ async fn a_steer_before_any_model_output_ends_the_request_and_continues_the_turn
                 ..
             })
         ));
-        // The replaced request leaves no message in the next context.
         assert!(
             requests[1]
                 .messages
@@ -595,9 +592,6 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    // The second turn compacts the first, which delivered the keyed block:
-    // the retained turns hold no cut, so the latest cut that keeps the
-    // current input is taken (#169).
     session.input(context_input(), "main").await.unwrap();
     session.idle("main").await.unwrap();
     for text in ["next", "third"] {
@@ -636,7 +630,6 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
             .iter()
             .any(|message| message.as_ref() == &baseline[0].message)
     }));
-    // The budget of the request whose compaction first completed.
     let compacted = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -903,7 +896,6 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
                 .into(),
             )
             .unwrap();
-        // The turn consumed the input before the restart.
         timeline
             .append(
                 EventKind::TurnStart(TurnStartData {
@@ -1255,7 +1247,6 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    // The third turn compacts the first.
     for text in ["x".repeat(500), "y".repeat(500)] {
         session
             .submit(text, InputMode::Queue, "main")
@@ -1273,7 +1264,6 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
         .expect("the second request compacts");
     let stopping = session.clone();
     let stop = tokio::spawn(async move { stopping.stop("main", "user stop".into()).await });
-    // The interrupt cancels the preparation while the host still runs.
     let mut dispatch = session.dispatch_watch("main").unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
@@ -1326,9 +1316,6 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
 
 #[tokio::test]
 async fn a_single_long_turn_compacts_inside_itself_instead_of_skipping() {
-    // Past the threshold within the first turn: the retained turns hold every
-    // cut, yet the request after the tool result compacts at the latest cut
-    // that keeps something, instead of skipping until overflow (#169).
     let context = Context {
         threshold: Some(200.),
         ..Context::default()
@@ -1371,8 +1358,6 @@ async fn a_single_long_turn_compacts_inside_itself_instead_of_skipping() {
         })
         .collect();
     assert_eq!(completed.len(), 1, "the long turn compacted inside itself");
-    // The cut keeps something: the replacement never swallows the whole
-    // request outside budget recovery.
     let last_call = events
         .iter()
         .rev()

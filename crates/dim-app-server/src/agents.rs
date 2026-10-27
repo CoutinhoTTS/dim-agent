@@ -421,9 +421,6 @@ impl AgentIndex {
     }
     pub fn remove_version(&self, session_id: &str) {
         if self.session_store.is_some() {
-            // A Session closed with its rows kept keeps a closed slot (S5c
-            // D5). Only a Session this index knows does: closing an unknown
-            // or deleted id leaves no admission state.
             if let Some((_, slot)) = self.owned_slot(session_id) {
                 slot.closed.store(true, Ordering::Release);
             }
@@ -501,10 +498,6 @@ impl AgentIndex {
                 .into_iter()
                 .filter(|record| !self.running(&record.id))
             {
-                // The process seeds the default Agent, so a readable stored
-                // default follows the current process default profile: tools
-                // added since it was stored are mounted. A damaged one stays
-                // unavailable rather than being replaced.
                 let profile = record
                     .profile
                     .and_then(|profile| self.check_profile(&profile).map(|_| profile))
@@ -756,10 +749,6 @@ impl AgentIndex {
                     return;
                 }
                 let id = session.id();
-                // A lookup: the pass creates no slot. A loaded Session of a
-                // native store has its slot, since its creation is admitted
-                // under the gate, its restore runs in `acquire`, and a slot
-                // goes only once its Session is not loaded.
                 let Some(slot) = self
                     .directory
                     .inner
@@ -771,17 +760,12 @@ impl AgentIndex {
                 else {
                     continue;
                 };
-                // Read before `uses`, which `acquire` raises first: with no
-                // lease at the read of `uses`, every later lease raises the
-                // count past this one.
                 let acquired = slot.acquired.load(Ordering::Acquire);
                 if slot.closed.load(Ordering::Acquire) || slot.uses.load(Ordering::Acquire) > 0 {
                     continue;
                 }
                 if marks.get(id).is_some_and(|(_, marked)| *marked == acquired)
                     && let Ok(_gate) = slot.gate.try_lock()
-                    // No `acquire` runs under the gate, so an unchanged count
-                    // means no lease since the previous pass, nor now.
                     && slot.acquired.load(Ordering::Acquire) == acquired
                 {
                     match session.unload_if_idle().await {
@@ -789,26 +773,17 @@ impl AgentIndex {
                             tracing::debug!(session_id = id, "Idle Session unloaded");
                             continue;
                         }
-                        // Busy: an open turn, publication, dispatch, a hold,
-                        // a close or a fault. The next pass tries again.
                         Ok(false) => {}
-                        // Released all the same: the next `acquire` restores
-                        // it, settling what the release could not write.
                         Err(error) => {
                             tracing::warn!(session_id = id, %error, "Idle Session unload failed");
                             continue;
                         }
                     }
                 }
-                // The mark holds the slot, so the slot stays until the next
-                // pass compares this count with its own: a slot made anew in
-                // between would restart the count.
                 next.insert(id.to_owned(), (slot, acquired));
             }
         }
         *marks = next;
-        // Slots of the Sessions this pass unloaded, and of those that ended
-        // or were released otherwise, once nothing holds them.
         self.directory.inner.lock().expect("agent index").sweep();
     }
     pub(crate) async fn session_directory(
@@ -856,14 +831,11 @@ impl AgentIndex {
         through: u64,
         created_at: u64,
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
-        // Capture one source and the directory's main head for both reads.
-        // A concurrent turn cannot move updatedAt beyond the returned sequence.
         let loaded = match self.session(id) {
             Some((_, session)) => match async {
                 let events = session
                     .local_page("main", 0, Self::SUMMARY_SCAN_LIMIT, through)
                     .await?;
-                // A range may start inside a batch; a page cursor may not.
                 let last = session.local("main", through..=through).await?.pop();
                 Ok::<_, AgentError>((events, last))
             }
@@ -1012,8 +984,6 @@ impl AgentIndex {
         let created = creation.await;
         match &created {
             Ok(_) => self.insert_version(id, agent_id, version),
-            // A delete waiting for the gate holds the slot, and drops it
-            // when it ends.
             Err(_) => {
                 drop(gate);
                 drop(slot);
@@ -1041,24 +1011,16 @@ impl AgentIndex {
             return Err(AgentError::InvalidInput(format!("invalid Session id {id}")));
         }
         let slot = self.slot(id);
-        // A creation of S holds the gate until S is published (`admit`).
         let gate = slot.gate.lock().await;
-        // A business close, as `session.close`: capabilities settle accepted
-        // work and release processes, leases and member requests. Owners of
-        // process state, such as Collaboration's relations, treat it as the
-        // Session's end, so from here on S does not load again in this
-        // process, whether or not its rows go.
         let loaded = self
             .host_by_session(id)
             .and_then(|host| host.agent.get_session(id));
         if let Some(session) = &loaded {
             slot.closed.store(true, Ordering::Release);
             if let Err(error) = session.close().await {
-                // The facts the close could not write go with the rest.
                 tracing::error!(%error, session_id = id, "Session cleanup failed before its delete");
             }
         }
-        // Neither loaded nor closed in this process: no close will end it.
         let unloaded = loaded.is_none() && !slot.closed.load(Ordering::Acquire);
         let stored = match &self.session_store {
             Some(store) => store.delete_session(id).await?,
@@ -1068,20 +1030,12 @@ impl AgentIndex {
             let mut inner = self.directory.inner.lock().expect("agent index");
             let owner = inner.versions.remove(id);
             inner.unavailable_sessions.remove(id);
-            // S's rows are gone, or it had none: no close of it must outlive
-            // the slot. Callers waiting at the gate find S closed.
             if stored || slot.closed.load(Ordering::Acquire) {
                 slot.closed.store(true, Ordering::Release);
                 slot.deleted.store(true, Ordering::Release);
             }
             owner
         };
-        // The owners of process state learn of the end of an unloaded
-        // Session here, as of a loaded one from its close; by now it is no
-        // longer among its Agent's `unloaded_sessions`. A delete may finish
-        // after its index generation ends (S2), so it emits on the process
-        // root, which reaches the listeners of the owners loaded now. An
-        // owner reloading meanwhile has none; it reconciles when it loads.
         if let Some((agent_id, _)) = owner.filter(|_| unloaded && stored) {
             let (_, root) = self
                 .loader
@@ -1092,12 +1046,9 @@ impl AgentIndex {
                 session_id: id.to_owned(),
             });
             if let Err(error) = root.parallel(deleted).await {
-                // The rows are gone: the delete stands.
                 tracing::warn!(%error, session_id = id, "Deletion of an unloaded Session was not announced");
             }
         }
-        // A slot a caller still holds, such as a lease taken before the
-        // delete, goes by the first pass after it is released.
         drop(gate);
         drop(slot);
         self.directory.inner.lock().expect("agent index").sweep();
@@ -1183,9 +1134,6 @@ impl AgentIndex {
                 .insert(agent_id.to_owned(), entry.host.clone());
             entry
         };
-        // Business settlement first, from a plain task context: Session close
-        // awaits its own subtree, which a finalizer must not. The scope effect
-        // repeats it idempotently when rutis releases the subtree.
         let closed = entry.host.agent.close().await;
         let unloaded = entry.view.shutdown().await;
         self.directory
@@ -1262,7 +1210,6 @@ impl AgentIndex {
             }
             Err(_) => {
                 self.forget(&agent_id);
-                // Dispose the instance once its creation ends.
                 tokio::spawn(async move {
                     if let Ok(Ok(instance)) = creation.await {
                         let _ = instance.view.shutdown().await;
@@ -1292,7 +1239,6 @@ impl AgentIndex {
                 result => Some(AgentError::Build(format!("{row}: {result:?}"))),
             });
         if let Some(error) = failed {
-            // Forget any partial registration before reporting the failure.
             self.forget(&agent_id);
             let _ = view.shutdown().await;
             self.directory
@@ -1371,17 +1317,13 @@ fn rest_point(events: &[Arc<dim_agent_types::AgentEvent>]) -> Result<(), String>
     let mut turn = false;
     let mut interrupted_at = 0;
     let mut closing = false;
-    // Inputs that drive a turn, by event id, with their `input/applied`.
     let mut inputs: BTreeMap<&str, Option<u64>> = BTreeMap::new();
     let mut tasks = BTreeSet::new();
-    // Waking `exec/ended` events without their wake input.
     let mut wakes = BTreeSet::new();
     for event in events {
         match &event.kind {
             EventKind::TurnStart(_) => turn = true,
             EventKind::TurnEnd(_) => turn = false,
-            // A branch close ends its generation's wakes; the next
-            // generation, which opens the branch again, posts them.
             EventKind::BranchStart(_) | EventKind::BranchResume(_) => closing = false,
             EventKind::StopInterrupt(data) => {
                 interrupted_at = event.sequence;
@@ -1408,7 +1350,6 @@ fn rest_point(events: &[Arc<dim_agent_types::AgentEvent>]) -> Result<(), String>
             EventKind::InputConsumed(data) => {
                 inputs.remove(data.input_id.as_str());
             }
-            // A withdrawn input InputQueue deleted is never applied.
             EventKind::InputDeleted(data) => {
                 inputs.remove(data.input_id.as_str());
             }
@@ -1522,8 +1463,6 @@ impl DynPlugin for AgentsPlugin {
             let loader = ctx.require_at(&self.loader)?;
             let directory = ctx.require_at(&self.directory)?;
             let parts = ctx.require_at(&self.parts)?;
-            // Its Session part, which reads the index this generation
-            // provides below.
             parts.register(
                 ctx,
                 dim_agent_runtime::PartScope::Session,
@@ -1553,9 +1492,6 @@ impl DynPlugin for AgentsPlugin {
                 None => None,
             }
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            // Fixed by the first generation so every lookup of the default
-            // Agent succeeds from the moment the service is visible, and an
-            // Agent loaded by an earlier generation keeps its identity.
             let _ = directory.default_agent_id.set(default_id);
             let index = AgentIndex {
                 directory,
@@ -1572,18 +1508,10 @@ impl DynPlugin for AgentsPlugin {
             };
             let index = Arc::new(index);
             let cleanup = index.clone();
-            ctx.effect(move || {
-                async move {
-                    // Agents do not depend on the index: they keep
-                    // running, and the next generation finds them in
-                    // the directory.
-                    cleanup.stopping.cancel();
-                    Ok(())
-                }
+            ctx.effect(move || async move {
+                cleanup.stopping.cancel();
+                Ok(())
             })?;
-            // Stored Agents and Session owners are installed before the
-            // index is visible: until then `sessions` replies `reloading`,
-            // never that a healthy stored Session has no owner.
             if self.config.session_execution {
                 index.install_default().await.map_err(|error| {
                     rutis::Error::from(ErrorKind::PluginFailed(
@@ -1592,12 +1520,6 @@ impl DynPlugin for AgentsPlugin {
                 })?;
             }
             ctx.provide_as::<AgentIndex>(index.clone())?;
-            // Idle unload (§6): one pass every grace period. rutis runs the
-            // effect factory at once, during this apply, so the task starts
-            // here and makes its first pass one grace period later; the
-            // cleanup registered with it stops the task with this
-            // generation. Without a native store nothing unloaded could be
-            // restored.
             if index.session_store.is_some() {
                 let grace = self.config.idle_unload_after;
                 ctx.effect(move || {
@@ -1614,8 +1536,6 @@ impl DynPlugin for AgentsPlugin {
                     });
                     async move {
                         stopping.cancel();
-                        // A release under way finishes before the
-                        // generation ends; the next one marks again.
                         pass.await.map_err(|error| {
                             rutis::Error::from(ErrorKind::PluginFailed(
                                 format!("idle unload pass failed: {error}").into(),

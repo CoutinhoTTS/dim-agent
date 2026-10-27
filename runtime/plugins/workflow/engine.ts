@@ -83,7 +83,6 @@ export class Workflow {
       }
       return runs.filter(run => run.report.state === 'pending').map(run => run.run_id)
     })
-    // Completing startup also schedules retention, even when no report is pending.
     this.own(Symbol('startup'), async () => {
       for (const id of pending) this.own(id, () => this.report(id))
     })
@@ -116,7 +115,6 @@ export class Workflow {
       log(run, 'Run accepted')
       runs.push(run)
     })
-    // Cancellation after the committed handover does not cancel accepted run work.
     this.own(run.run_id, () => this.drive(run.run_id, configured.document.max_concurrent_stages))
     return run
   }
@@ -192,7 +190,6 @@ export class Workflow {
             await this.executeStage(id, stage.id, prompts.get(stage.id)!)
           }
         } catch (error) {
-          // Join siblings whose admitted native calls still own record writes.
           this.fail(error)
         }
       }))
@@ -289,7 +286,6 @@ export class Workflow {
             await this.store.update(runs => { need(runs, id).stages.find(stage => stage.id === stageId)!.state = 'stopped' })
             return
           }
-          // Resubmitting is safe: the branch accepts the submission id once.
           await this.pause()
           receipt = await this.sessions.input(input)
           break
@@ -342,7 +338,6 @@ export class Workflow {
             })
             return
           }
-          // notHeld requires another complete history read, not an inferred consumption.
         } else if (!stopSent) {
           const reply = await this.sessions.stop({ sessionId, branchId: 'main', reason: 'workflow stopping' })
           if (reply.ok) stopSent = true
@@ -393,7 +388,6 @@ export class Workflow {
         const run = need(runs, id)
         if (reply.ok) run.report = { state: 'delivered' }
         else if (reply.error.code === 'ambiguous') {
-          // Several inputs were written with this id before branches accepted each id once.
           run.report = { state: 'delivered' }
           log(run, 'Duplicate report violation: input ambiguous')
         } else if (['session_closed', 'branch_missing', 'rejected'].includes(reply.error.code)) {

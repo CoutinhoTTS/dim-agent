@@ -67,8 +67,6 @@ async fn stop_ends_the_turn_and_a_waiting_queue_input_runs_next() {
             .await
             .unwrap();
         session.stop("main", "test stop".into()).await.unwrap();
-        // Stop ends only the current turn: the queue input waiting behind it
-        // is applied after that turn ends and runs the next one.
         session.idle("main").await.unwrap();
         let after = session.history("main", None).await.unwrap();
         let position = |predicate: &dyn Fn(&EventKind) -> bool| {
@@ -146,7 +144,6 @@ async fn branch_tool_reuses_capabilities_without_replaying_ancestor_inputs() {
         assert!(
             child_events
                 .iter()
-                // The model-created branch works on the delegated task.
                 .any(|e| matches!(&e.kind, EventKind::Text(d) if d.delta.starts_with("Echo: <dim-branch-task parent=\"main\">") && d.delta.contains("delegated this task to you:\nchild")))
         );
         let history = session.history(&child.id, None).await.unwrap();
@@ -214,7 +211,6 @@ async fn repeated_idle_release_checks_never_reject_a_running_turn() {
             .await
             .unwrap();
         let mut events = Events::follow(&root, &session, "main", 0).await;
-        // The last input keeps its turn open while the checks stop.
         for index in 0..=TURNS {
             let millis = if index == TURNS { 500 } else { 1 };
             session
@@ -226,8 +222,6 @@ async fn repeated_idle_release_checks_never_reject_a_running_turn() {
                 .await
                 .unwrap();
         }
-        // Queued input keeps the Loop busy, so every check must refuse. Checks
-        // follow each event rather than spin, landing between the turn's appends.
         let done = tokio_util::sync::CancellationToken::new();
         let mut observed = Events::follow(&root, &session, "main", 0).await;
         let checks = tokio::spawn({
@@ -303,10 +297,8 @@ async fn a_refused_idle_release_reopens_the_branch_for_the_running_turn() {
             .await
             .unwrap();
         while !matches!(events.next().await.unwrap().kind, EventKind::ToolCall(_)) {}
-        // The release checks the branch without freezing it and refuses a running turn.
         assert!(!session.unload_if_idle().await.unwrap());
         session.idle("main").await.unwrap();
-        // The running turn still committed its results after the refusal.
         assert!(matches!(
             session
                 .history("main", None)

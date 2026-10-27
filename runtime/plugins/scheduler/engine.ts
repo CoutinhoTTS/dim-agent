@@ -275,7 +275,7 @@ export class Scheduler {
         rawBlocks: [{ text: `<dim-scheduler kind="scheduled-run" job="${escaped(snapshot.id)}" run="${escaped(accepted.run_id)}">${escaped(snapshot.name)}</dim-scheduler>` }],
         content: [{ type: 'text', text: snapshot.prompt }],
       })
-    } catch { /* An admitted input settles before its uncertain reply is reconciled. */ }
+ } catch { }
     if (inputReply?.ok) receipt = inputReply.value
     else if (inputReply && !['reloading', 'publication_unknown', 'ambiguous'].includes(inputReply.error.code)) {
       await this.finish(accepted.run_id, 'failed', inputReply.error.code)
@@ -334,18 +334,16 @@ export class Scheduler {
         if (!history.applied && !history.consumed) {
           let withdrawn
           try { withdrawn = await this.sessions.withdraw({ sessionId: run.session_id!, branchId: 'main', inputId: run.input_event_id!, reason: 'scheduled run timed out' }) }
-          catch { /* Re-read the actual prefix after an uncertain withdrawal. */ }
+ catch { }
           if (withdrawn?.ok && withdrawn.value.status === 'deleted') { await this.finish(run.run_id, 'timed_out', 'withdrawn_at_deadline'); return }
-          // notHeld is not consumption; read a complete prefix again before deciding.
           await history.read()
         } else if (history.consumed && !stopIssued) {
           stopIssued = true
-          // shortcut: branch-addressed stop may reach a later turn; revisit with an agreed targeting contract.
           try {
             const stopped = await this.sessions.stop({ sessionId: run.session_id!, branchId: 'main', reason: 'scheduled run timed out' })
             if (!stopped.ok && stopped.error.code === 'reloading') stopIssued = false
           }
-          catch { /* The following history read decides what actually ended. */ }
+ catch { }
         }
       } else if (history.consumed && run.state !== 'running') {
         await this.store.update(runs => { runs.find(value => value.run_id === run.run_id)!.state = 'running' })
@@ -389,7 +387,6 @@ export class Scheduler {
     this.retryPruneAt = undefined
     try {
       const runs = await this.store.read()
-      // A run's job is committed first; read its references after the run snapshot.
       const { document } = await this.jobs.read()
       const keep = new Set(runs.filter(run => !terminal(run) || this.work.has(run.run_id)).map(run => run.run_id))
       for (const job of document.jobs) {
@@ -422,7 +419,6 @@ export class Scheduler {
       })
     } catch (error) {
       this.retryPruneAt = Date.now() + 60_000
-      // An unreadable Settings document or record file never means its references vanished.
       console.error('Scheduler retention', error instanceof Error ? error.message : String(error))
     } finally { this.pruning = false }
   }

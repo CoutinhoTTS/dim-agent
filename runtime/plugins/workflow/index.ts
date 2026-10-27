@@ -68,7 +68,6 @@ export default definePlugin({
       },
     }
     ctx.provide('workflowRuns', owner)
-    // Each Session mounts the `workflow` tool part (session.ts).
     await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'WorkflowSession', session)
 
     await ctx.use<ManagementMethods>('managementMethods').register(

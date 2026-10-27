@@ -112,7 +112,6 @@ async fn boundary_frames_and_oversized_frames_on_both_transports() {
         let mut client = Client::connect(&server, ws).await;
         client.send(padded_ping(LIMIT)).await.unwrap();
         assert!(client.read().await.unwrap()["result"].is_object());
-        // NDJSON also accepts CRLF without charging framing bytes to payload.
         if !ws {
             let mut text = padded_ping(LIMIT);
             text.push('\r');
@@ -163,8 +162,6 @@ async fn partial_ndjson_and_fragmented_websocket_are_bounded() {
     let server = launch().await;
     let mut local = Client::connect(&server, false).await;
     if let Client::Local(s) = &mut local {
-        // No delimiter: the server must enforce the limit before read_line
-        // could ever return, rather than waiting for a terminator or EOF.
         let _ = s
             .get_mut()
             .write_all(padded_ping(LIMIT + 1).as_bytes())
@@ -199,7 +196,6 @@ async fn partial_ndjson_and_fragmented_websocket_are_bounded() {
     };
     send_fragments(&mut ws, padded_ping(LIMIT)).await;
     assert!(ws.read().await.unwrap()["result"].is_object());
-    // Each fragment is below the frame limit, but the assembled message is not.
     send_fragments(&mut ws, padded_ping(LIMIT + 1)).await;
     assert!(
         tokio::time::timeout(Duration::from_secs(5), ws.read())
@@ -228,8 +224,6 @@ async fn outbound_size_limit_preserves_large_valid_replies() {
             client.read().await.unwrap()["id"].as_str().unwrap().len(),
             15 * 1024 * 1024
         );
-        // The inbound envelope fits exactly, but the echoed id plus the
-        // result envelope exceeds the outbound contract. Close explicitly.
         let overhead = ping(String::new()).len();
         let text = ping("x".repeat(LIMIT - overhead));
         assert_eq!(text.len(), LIMIT);
@@ -315,7 +309,6 @@ async fn admission_reserves_cleanup_and_disconnect_settles_accepted_commands() {
             .unwrap();
         assert_eq!(busy["id"], 100);
         assert_eq!(busy["error"]["data"]["appError"], "connection_busy");
-        // Eight more cleanup calls are admitted; the ninth is rejected.
         for id in 66..75 {
             client.send(json!({"jsonrpc":"2.0","id":id,"method":"session.close","params":{"sessionId":sid}}).to_string()).await.unwrap();
         }
@@ -347,8 +340,6 @@ async fn slow_consumer_closes_and_server_settles_on_both_transports() {
     for ws in [false, true] {
         let server = launch_with(Duration::from_secs(2), |_| {}).await;
         let mut client = Client::connect(&server, ws).await;
-        // Large echoed request ids generate large replies without runtime
-        // fixtures; do not read any response while filling the connection.
         tokio::time::timeout(Duration::from_secs(15), async {
             for i in 0..100 {
                 let id = format!("{i}{}", "x".repeat(1024 * 1024));

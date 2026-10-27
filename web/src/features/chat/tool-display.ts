@@ -26,7 +26,6 @@ function normalize(toolName: string): string {
 
 export function resolveToolDisplay(toolName: string, input: Record<string, unknown>): { renderer: ToolRenderer; labelKey: TranslationKey } {
   const raw = toolName.trim().toLowerCase()
-  // MCP tools (`mcp__server__tool`) show their generic input.
   if (raw.startsWith("mcp__")) return { renderer: "generic", labelKey: "prompt.useTool" }
   const name = normalize(toolName)
   if (["exec", "bash", "shell", "run_command", "exec_command"].includes(name)) {

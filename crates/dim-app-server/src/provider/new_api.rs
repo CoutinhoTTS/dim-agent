@@ -145,7 +145,6 @@ fn candidates(values: Option<Vec<String>>) -> Result<Option<Vec<Endpoint>>, Host
 pub(super) fn base_url(base: &str, protocol: ModelProtocol) -> String {
     let (root, tail) = base.rsplit_once('/').unwrap_or((base, ""));
     let tail = tail.to_ascii_lowercase();
-    // Only a path suffix is a version, never the authority (e.g. http://v1).
     let root = if root.contains("://") && (tail == "v1" || tail.starts_with("v1beta")) {
         root
     } else {

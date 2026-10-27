@@ -71,8 +71,6 @@ impl QueueState {
                     !entry.released && entry.mode == InputMode::Queue && entry.id != event.id
                 });
                 match mode {
-                    // A queue input waits for the running or starting turn
-                    // to end, and behind any queue input still waiting.
                     InputMode::Queue if self.turn_open || self.starting || held_queue => Vec::new(),
                     _ => self.release(&event.id),
                 }
@@ -88,7 +86,6 @@ impl QueueState {
             }
             EventKind::TurnEnd(_) => {
                 self.turn_open = false;
-                // The next queue input runs after the turn, however it ended.
                 match self
                     .entries
                     .iter()
@@ -105,8 +102,6 @@ impl QueueState {
                 self.entries.retain(|entry| entry.id != data.input_id);
                 Vec::new()
             }
-            // Only an input still held unapplied can be withdrawn; once
-            // applied it belongs to Loop.
             EventKind::InputWithdraw(data) => {
                 match self
                     .entries
@@ -207,9 +202,6 @@ impl InputQueue {
             decided
                 .into_iter()
                 .filter(|decision| !written.contains(decision.input_id()))
-                // An applied input still present was not consumed; Loop
-                // consumes only applied inputs, so this second check
-                // guards that invariant rather than filtering in practice.
                 .filter(|decision| match decision {
                     Decision::Apply(id, _) => state.entries.iter().any(|entry| entry.id == *id),
                     Decision::Delete(_) => true,

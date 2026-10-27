@@ -25,11 +25,9 @@ export const part = definePlugin({
     const alive = () => { if (stopped) throw new Error('provider unloaded') }
     const pending = new Set<Promise<void>>()
     ctx.effect(async () => {
-      // Cancellation is asynchronous; keep owned state until accepted calls settle.
       await Promise.all(pending)
       stopped = true
     })
-    // A declaration without its risk is refused; the row keeps its methods.
     let refused: string | undefined
     await ctx.use<ToolRegistry>('toolRegistry').register(
       {
@@ -50,8 +48,6 @@ export const part = definePlugin({
         return { content: JSON.stringify({ ...call, generation, calls, processGeneration: owner?.status().generation }) }
       },
     ).catch((error: Error) => { refused = error.message })
-    // Invalid declarations, or a namespace the row may not take, are refused,
-    // which fails the row.
     const namespace = config.namespace ?? 'session.typescript'
     const declarations = config.badMethods === 'unsupported'
       ? [{ name: 'session.typescript.bad', mutating: false, interruption: 'report', progress: false, notifications: [] }]

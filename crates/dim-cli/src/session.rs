@@ -216,7 +216,6 @@ pub async fn chat(
     options: &Options,
     images: Vec<ContentBlock>,
 ) -> Result<i32> {
-    // Keep the listener registered while prompts and RPC responses alternate.
     #[cfg(unix)]
     let mut interrupts = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     #[cfg(windows)]
@@ -241,7 +240,6 @@ pub async fn chat(
                 params["modelPreferences"] = preferences.clone();
             }
         }
-        // The creation policy also reaches the Session's child branches and agent members.
         if let Some(preset) = options.permission {
             params["permissionPolicy"] = json!({"preset":preset});
         }
@@ -264,12 +262,10 @@ pub async fn chat(
                 "This daemon cannot change a Session's permission preset; omit --permission".into(),
             );
         }
-        // Before attach: nothing this invocation submits runs under the old preset.
         permission::select(client, &session_id, preset)
             .await
             .map_err(|error| format!("Cannot set the permission preset: {error}"))?;
     }
-    // Print the handle even in headless mode so an uncertain submission can be resumed.
     display.record(&format!(
         "{}: {}\nsession: {}",
         if interactive {
@@ -280,7 +276,6 @@ pub async fn chat(
         options.cwd.display(),
         session_id
     ))?;
-    // exec keeps its diagnostics unless the preset was chosen.
     let preset = match options.permission {
         Some(preset) => Some(Ok(preset)),
         None if interactive && client.supports(&["session.permission.get"]) => Some(
@@ -332,7 +327,6 @@ pub async fn chat(
             match text.as_deref().and_then(|text| text.split_whitespace().next()) {
                 Some("/mcp") => {
                     let text = text.as_deref().expect("plain MCP command");
-                    // MCP owns interrupts until its command finishes draining.
                     drop(interrupts);
                     let result = crate::mcp_command::command(client, options, reader, &session_id, text).await;
                     #[cfg(unix)]
@@ -552,7 +546,6 @@ async fn wait_turn(
     let mut approvals: VecDeque<Approval> = VecDeque::new();
     let mut deferred = VecDeque::new();
     let mut prompted = false;
-    // The prompted approval is waiting for the words of its "always" rule.
     let mut rule_stage = false;
     let mut rule_write: Option<RuleWrite> = None;
     let rules_available = client.supports(&permission::RULE_METHODS);
@@ -589,7 +582,6 @@ async fn wait_turn(
                 "[approval] {}: {}",
                 approval.call.name, approval.reason
             ))?;
-            // Review executable code verbatim, but never dump arbitrary extension arguments.
             let keys: &[&str] = match approval.call.name.as_str() {
                 "exec" | "execute" => &["command", "cwd", "description"],
                 _ => &["path", "filePath", "description"],
@@ -615,7 +607,6 @@ async fn wait_turn(
                 questions.open(display, reader)?;
             }
         } else {
-            // Without terminal input every question read is given up (A8).
             let branches = questions.unanswerable();
             if !branches.is_empty() {
                 let reason = "Interactive answer required";
@@ -650,7 +641,6 @@ async fn wait_turn(
         } else {
             tokio::select! {
                 _ = interrupts.recv() => {
-                    // A question of another branch after `main` settled.
                     if settled.is_some() && stop.is_none() && questions.asking() {
                         if !display.json { println!(); }
                         questions.interrupt(client, session_id).await?;
@@ -687,7 +677,6 @@ async fn wait_turn(
                         questions.line(client, session_id, text, display, reader).await?;
                         continue;
                     }
-                    // The prompted approval's simple command when "always" is offered.
                     let always = approvals
                         .front()
                         .filter(|approval| prompted && rules_available && !approval.once)
@@ -708,7 +697,6 @@ async fn wait_turn(
                         rule_stage = true;
                     } else if prompted {
                         let approval = approvals.pop_front().ok_or("No approval awaits this answer")?;
-                        // EOF at the rule prompt denies, as an empty answer does.
                         let allow = !rule_stage && matches!(answer.as_deref(), Some("y" | "yes"));
                         approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":if allow {"allow"} else {"deny"}})).await?);
                         prompted = false;
@@ -871,7 +859,6 @@ async fn wait_turn(
             {
                 let mut write = rule_write.take().expect("rule write reply");
                 let outcome = match write.add.reply(result.map_err(Into::into)) {
-                    // Ctrl+C abandons the rule along with the turn.
                     permission::Step::Send(_) if code == 130 => {
                         Err("the turn was stopped before the rule was written".into())
                     }
@@ -882,7 +869,6 @@ async fn wait_turn(
                     }
                     permission::Step::Done(outcome) => outcome,
                 };
-                // A cancelled request or a stopped turn gets no answer.
                 let current = approvals
                     .front()
                     .is_some_and(|approval| approval.request_id == write.request_id);
@@ -1024,7 +1010,6 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
             let changed = permission::changed(&params["event"]);
             let notice: EventNotice = decode(params, &method)?;
             if notice.session_id == session_id && notice.branch_id == "main" {
-                // Stored changes are not replayed; a live one may come from any client.
                 if let Some((sequence, preset)) = changed
                     && sequence > display.cursor.max(display.permission_seen)
                 {

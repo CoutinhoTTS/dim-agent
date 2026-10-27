@@ -137,6 +137,9 @@ blindly. Use these methods rather than editing imported user files. `skills.set_
 persists in SQLite; legacy `skills.json` is only an import source. Private server configuration
 stays inside its owning service and is excluded from catalog replies, notifications and diagnostics.
 
+A stdio server's stderr is discarded: arbitrary server output may contain secrets, so it never
+reaches tracing or the daemon log.
+
 ### MCP OAuth
 
 HTTP and SSE servers that answer `401` use OAuth ([design](../../docs/design/appserver/mcp-oauth.md)).

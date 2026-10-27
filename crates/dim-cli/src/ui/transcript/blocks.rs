@@ -15,9 +15,9 @@ pub(crate) const SHELL_PREVIEW_LINES: usize = 10;
 const SHELL_COMMAND_LINES: usize = 3;
 const BOUNDARY_MAX_WIDTH: usize = 60;
 
-pub const ASSISTANT_MARK: &str = "\u{25c6}"; // ◆
+pub const ASSISTANT_MARK: &str = "\u{25c6}";
 /// The bar in front of every row of a user message, as Amp draws it.
-pub const USER_MARK: &str = "\u{2503}"; // ┃
+pub const USER_MARK: &str = "\u{2503}";
 
 /// Gutter columns for a terminal of `width` (narrow terminals get one).
 pub fn gutter_width(width: usize) -> usize {
@@ -92,7 +92,7 @@ pub fn render_user(text: &str, width: usize, style: &UserStyle<'_>) -> Vec<Strin
 /// text, with one `…` row standing for what scrolled away (as Grok draws it).
 pub(crate) const THINKING_ROWS: usize = 4;
 /// The bar in front of every row of a thought shown whole.
-const THINKING_BAR: &str = "\u{258e}"; // ▎
+const THINKING_BAR: &str = "\u{258e}";
 
 /// Running reasoning, in the form its settled block will take so the
 /// transcript never shrinks when the thought ends: expanded, its title and
@@ -238,7 +238,6 @@ const CLOSING: &str = "。，、；：！？）」』】》〉…";
 /// a word longer than the row is cut.
 fn wrap_prose(line: &str, width: usize) -> Vec<String> {
     use unicode_segmentation::UnicodeSegmentation;
-    // Unbreakable units, each with whether a space came before it.
     let mut units: Vec<(String, bool)> = Vec::new();
     let mut spaced = false;
     for cluster in line.graphemes(true) {
@@ -418,7 +417,6 @@ pub(crate) fn render_block(
     markdown: &MarkdownRenderer,
 ) -> Vec<String> {
     match block {
-        // The startup banner is drawn at the full width by `banner`.
         Block::Banner => Vec::new(),
         Block::User(text) => render_user(
             &crate::sanitize::safe(text),
@@ -443,8 +441,6 @@ pub(crate) fn render_block(
         Block::ToolGroup(group) => render_group(group, width, p, "·"),
         Block::Shell(run) => {
             let shown = run.output.len().saturating_sub(SHELL_PREVIEW_LINES);
-            // A status row always: the running block had one, so the rows
-            // under it stay put when the command ends.
             let mut notes = Vec::new();
             if run.outcome.success() {
                 notes.push(t("done").to_owned());
@@ -530,21 +526,18 @@ mod tests {
             }
             out
         };
-        // Wide terminal: two-column gutter.
         let rows: Vec<String> = render_user(&"word ".repeat(10), 40, &style)
             .iter()
             .map(|r| strip(r))
             .collect();
         assert!(rows[0].starts_with("┃ word"));
         assert!(rows[1].starts_with("┃ "));
-        // Narrow terminal: one-column gutter.
         let narrow: Vec<String> = render_user("one two three", 12, &style)
             .iter()
             .map(|r| strip(r))
             .collect();
         assert_eq!(narrow[0], "┃one two thr");
         assert_eq!(narrow[1], "┃ee");
-        // A surface tint pads every row to the content width.
         let banded = UserStyle {
             surface: Some("#2a2a31"),
             ..style

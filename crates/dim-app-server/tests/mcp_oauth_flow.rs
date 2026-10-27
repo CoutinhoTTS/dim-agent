@@ -315,7 +315,6 @@ async fn token(
         .collect();
     let refused =
         |status: StatusCode, error: &str| (status, Json(json!({"error":error}))).into_response();
-    // The public DCR client names itself; the confidential one uses HTTP Basic.
     let basic = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -358,7 +357,6 @@ async fn token(
             {
                 return refused(StatusCode::BAD_REQUEST, "invalid_grant");
             }
-            // Rotation: the old refresh token is spent.
             Json(authority.issue(3600, "files:read offline_access")).into_response()
         }
         _ => refused(StatusCode::BAD_REQUEST, "unsupported_grant_type"),
@@ -645,15 +643,12 @@ impl Daemon {
     }
     async fn client(&self) -> Client {
         let mut client = self.connect().await;
-        // A model to create Sessions with; the mock host never contacts it.
         let caps = dim_agent_types::ModelCapabilities {
             context_window: 32000,
             max_output_tokens: 2048,
             ..Default::default()
         };
         client.ok("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000001","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-access"}},"models":[{"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps}],"enabled":true})).await;
-        // Select it as a user would; the no-selection fallback costs seconds
-        // in a debug build and is covered by provider_flow.
         client
             .ok(
                 "provider.select",
@@ -733,14 +728,11 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
     let logs = logs();
     let servers = Servers::start().await;
     let (resource, authority) = (servers.resource.clone(), servers.authority.clone());
-    // The first tokens expire within the 30 s margin, so their first use
-    // refreshes them.
     authority.code_expires_in.store(10, Ordering::SeqCst);
     let daemon = Daemon::start(&[("docs", json!({"type":"http","url":resource.url()}))]).await;
     let mut client = daemon.client().await;
     let first = daemon.session(&mut client).await;
 
-    // Unauthorized: the Session publishes no tools and waits for sign-in.
     let state = client.mcp_state(&first, "docs", "auth_required").await;
     assert_eq!(state["message"], "authorization required");
     assert!(state["adoptedVersion"].is_null());
@@ -749,7 +741,6 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
         json!({"status":"required"})
     );
 
-    // Discovery from the 401 challenge through PRM, then DCR.
     let started = client.ok("mcp.auth.start", user("docs")).await;
     assert_eq!(started["redirectUri"], "http://localhost:1456/callback");
     assert_eq!(started["resource"], resource.url());
@@ -778,8 +769,6 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
         json!(["authorization_code", "refresh_token"])
     );
 
-    // A wrong redirect, state or issuer is refused before any token request,
-    // and the attempt stays pending.
     let callback = consent(&authority, &started, "code-1-secret");
     let attempt = started["attemptId"].clone();
     for wrong in [
@@ -824,9 +813,6 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
         0o600
     );
 
-    // The waiting Session reconnects by itself. Its first use refreshed the
-    // short-lived token; the rotated refresh token is persisted and the
-    // first access token never reached the server.
     client.mcp_state(&first, "docs", "ready").await;
     assert_eq!(authority.refreshes.load(Ordering::SeqCst), 1);
     let refresh_token =
@@ -845,7 +831,6 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
         json!({"status":"authorized"})
     );
 
-    // A 401 refreshes once and retries with the new token.
     resource.valid.lock().unwrap().remove("access-2-secret");
     client
         .ok("session.mcp.refresh", json!({"sessionId":first}))
@@ -858,7 +843,6 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
     assert_eq!(authority.refreshes.load(Ordering::SeqCst), 2);
     assert_eq!(refresh_token(&daemon), "refresh-3-secret");
 
-    // Two Sessions rejected together: exactly one refresh request.
     let second = daemon.session(&mut client).await;
     client.mcp_state(&second, "docs", "ready").await;
     let refreshing = authority.hold("refresh_token");
@@ -891,8 +875,6 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
     }
     assert_eq!(authority.refreshes.load(Ordering::SeqCst), 3);
 
-    // A refresh already sent when Mcp reloads is still persisted: the unload
-    // waits for it.
     let refreshing = authority.hold("refresh_token");
     resource.valid.lock().unwrap().remove("access-4-secret");
     client
@@ -902,7 +884,6 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
         .await
         .unwrap();
     let release = async {
-        // Release once Mcp is unloading, behind the held request.
         let _ = tokio::time::timeout(Duration::from_secs(5), async {
             while !daemon.server.diagnostics().plugins.iter().any(|plugin| {
                 matches!(plugin.name.as_str(), "Mcp" | "McpServer" | "McpSession")
@@ -923,9 +904,6 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
         client.mcp_state(session, "docs", "ready").await;
     }
 
-    // Sign-out revokes the refresh token, then the access token, and deletes
-    // the record. Every Session on the key then finds the server requires
-    // sign-in, without waiting for a request of its own.
     let logout = client.ok("mcp.auth.logout", user("docs")).await;
     assert_eq!(logout, json!({"revoked":true}));
     assert_eq!(
@@ -949,7 +927,6 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
         json!({"revoked":false})
     );
 
-    // No secret in any log line, at debug level for every target.
     let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
     assert!(logs.contains("mcp.auth"), "auth operations are traced");
     let verifiers: Vec<_> = authority
@@ -971,6 +948,8 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
     servers.stop.cancel();
 }
 
+/// A POST `401` without `WWW-Authenticate` reaches rmcp as `UnexpectedServerResponse` text; that
+/// form must still count as an auth refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sign_in_refuses_unverifiable_servers_and_expires_rejected_grants() {
     let servers = Servers::start().await;
@@ -996,8 +975,6 @@ async fn sign_in_refuses_unverifiable_servers_and_expires_rejected_grants() {
     ])
     .await;
     let mut client = daemon.client().await;
-    // OAuth needs HTTPS or loopback HTTP, a remote entry and no static
-    // credentials; sign-in needs an enabled entry.
     for id in ["cleartext", "static", "local"] {
         assert_eq!(
             client.error("mcp.auth.start", user(id)).await,
@@ -1009,7 +986,6 @@ async fn sign_in_refuses_unverifiable_servers_and_expires_rejected_grants() {
         client.error("mcp.auth.start", user("off")).await,
         "mcp_unavailable"
     );
-    // A client secret goes only with a configured client.
     assert_eq!(
         client
             .error(
@@ -1025,7 +1001,6 @@ async fn sign_in_refuses_unverifiable_servers_and_expires_rejected_grants() {
         "mcp_invalid_config"
     );
 
-    // Metadata without PKCE S256, or with a cleartext endpoint, is refused.
     authority.s256.store(false, Ordering::SeqCst);
     assert_eq!(
         client.error("mcp.auth.start", user("docs")).await,
@@ -1038,8 +1013,6 @@ async fn sign_in_refuses_unverifiable_servers_and_expires_rejected_grants() {
         "mcp_auth_discovery_failed"
     );
     authority.cleartext.store(false, Ordering::SeqCst);
-    // Without PRM Dim never guesses an authorization server; the configured
-    // override is used only then.
     resource.prm.store(false, Ordering::SeqCst);
     assert_eq!(
         client.error("mcp.auth.start", user("docs")).await,
@@ -1049,12 +1022,10 @@ async fn sign_in_refuses_unverifiable_servers_and_expires_rejected_grants() {
     let revision = client.ok("mcp.catalog", json!({})).await["userRevision"].clone();
     client.ok("mcp.save", json!({"source":"user","id":"docs","expectedVersion":revision,"configuration":{"type":"http","url":resource.url(),"oauth":{"authServerMetadataUrl":format!("{}/.well-known/oauth-authorization-server", authority.base())}}})).await;
     let started = client.ok("mcp.auth.start", user("docs")).await;
-    // Without PRM the resource is the server URL.
     assert_eq!(started["resource"], resource.url());
     resource.prm.store(true, Ordering::SeqCst);
     assert!(authority.token_requests.lock().unwrap().is_empty());
 
-    // A reload of Mcp drops pending attempts; the store survives.
     daemon.server.restart("Mcp").await.unwrap();
     let callback = consent(&authority, &started, "code-reload-secret");
     assert_eq!(
@@ -1067,7 +1038,6 @@ async fn sign_in_refuses_unverifiable_servers_and_expires_rejected_grants() {
         "mcp_auth_attempt_closed"
     );
 
-    // An authorization server error ends the attempt with its code only.
     let started = client.ok("mcp.auth.start", user("docs")).await;
     let denied = consent(&authority, &started, "unused").replace(
         "code=unused",
@@ -1083,8 +1053,6 @@ async fn sign_in_refuses_unverifiable_servers_and_expires_rejected_grants() {
     assert!(reply.to_string().contains("access_denied"));
     assert!(!reply.to_string().contains("private-detail"));
 
-    // Signed in, then the refresh grant is rejected: the record expires and
-    // the Session reports it until the next sign-in.
     let session = daemon.session(&mut client).await;
     client
         .sign_in(&authority, user("docs"), "code-2-secret")
@@ -1103,7 +1071,6 @@ async fn sign_in_refuses_unverifiable_servers_and_expires_rejected_grants() {
     );
     assert!(daemon.store()["credentials"][0].get("tokens").is_none());
     authority.reject_refresh.store(false, Ordering::SeqCst);
-    // Re-authorization reuses the registered client and recovers the Session.
     let registrations = authority.registrations.lock().unwrap().len();
     client
         .sign_in(&authority, user("docs"), "code-3-secret")
@@ -1111,8 +1078,6 @@ async fn sign_in_refuses_unverifiable_servers_and_expires_rejected_grants() {
     client.mcp_state(&session, "docs", "ready").await;
     assert_eq!(authority.registrations.lock().unwrap().len(), registrations);
 
-    // `invalid_client` on refresh clears the registration as well; the next
-    // sign-in registers again.
     authority.invalid_client.store(true, Ordering::SeqCst);
     resource.valid.lock().unwrap().clear();
     client
@@ -1180,8 +1145,6 @@ async fn step_up_project_entries_confidential_clients_and_sse() {
     client.ok("mcp.set_enabled", json!({"source":"project","id":"docs","cwd":daemon.work,"expectedVersion":catalog["projectRevision"],"enabled":true})).await;
     client.mcp_state(&session, "docs", "ready").await;
 
-    // Step-up: a 403 insufficient_scope while discovering asks the user to
-    // sign in again; the next sign-in requests the union of scopes.
     resource.require_write.store(true, Ordering::SeqCst);
     client
         .ok("session.mcp.refresh", json!({"sessionId":session}))
@@ -1207,8 +1170,6 @@ async fn step_up_project_entries_confidential_clients_and_sse() {
     );
     resource.require_write.store(false, Ordering::SeqCst);
 
-    // A legacy SSE server signs in, reconnects, and refreshes on a 401 to a
-    // POST.
     client
         .sign_in(&authority, user("legacy"), "code-sse-secret")
         .await;
@@ -1230,8 +1191,6 @@ async fn step_up_project_entries_confidential_clients_and_sse() {
     until(|| authority.refreshes.load(Ordering::SeqCst) == refreshes + 1).await;
     client.mcp_state(&session, "legacy", "ready").await;
 
-    // A pre-registered confidential client: no registration, and the secret
-    // entered at sign-in authenticates the code exchange with HTTP Basic.
     let registrations = authority.registrations.lock().unwrap().len();
     let started = client
         .ok(
@@ -1289,8 +1248,6 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
             .to_owned()
     };
 
-    // The review's interleaving. A refresh holds the store lock, sign-out
-    // queues behind it, then the pending attempt's callback arrives.
     let started = client.ok("mcp.auth.start", user("docs")).await;
     let attempt = started["attemptId"].clone();
     let callback = consent(&authority, &started, "code-a-secret");
@@ -1302,8 +1259,6 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
     arrived(held).await;
     let mut signing_out = daemon.connect().await;
     let logout = tokio::spawn(async move { signing_out.ok("mcp.auth.logout", user("docs")).await });
-    // Sign-out closed the attempt when it was accepted, so the callback is
-    // refused instead of queueing behind it.
     client.until_closed(&attempt, &callback).await;
     assert_eq!(
         client
@@ -1316,8 +1271,6 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
     );
     authority.unhold("refresh_token");
     assert_eq!(logout.await.unwrap(), json!({"revoked":true}));
-    // Sign-out stands: the code was never sent and nothing is stored, so no
-    // Session can take a credential from the attempt.
     assert!(!sent(&authority, "code-a-secret"));
     assert_eq!(daemon.store()["credentials"], json!([]));
     client.mcp_state(&session, "docs", "auth_required").await;
@@ -1326,8 +1279,6 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
         json!({"status":"required"})
     );
 
-    // A newer start supersedes an attempt whose exchange waits for the store
-    // lock: once the lock is free the code is not sent.
     client
         .sign_in(&authority, user("docs"), "code-2-secret")
         .await;
@@ -1347,7 +1298,6 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
         async move { completing.error("mcp.auth.complete", complete).await }
     });
     client.until_closed(&first["attemptId"], &callback).await;
-    // A second callback for the attempt is refused while the first waits.
     assert_eq!(
         client.error("mcp.auth.complete", complete).await,
         "mcp_auth_attempt_closed"
@@ -1365,8 +1315,6 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
         .await;
     client.mcp_state(&session, "docs", "ready").await;
 
-    // A newer start supersedes an attempt whose token request is out. The
-    // request is settled; its tokens are revoked, not stored, and never used.
     let stored = daemon.store()["credentials"].clone();
     let revoked = authority.revocations.lock().unwrap().len();
     let first = client.ok("mcp.auth.start", user("docs")).await;
@@ -1398,10 +1346,6 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
     assert!(!resource.bearers.lock().unwrap().contains(&access_token));
     client.mcp_state(&session, "docs", "ready").await;
 
-    // The review's publication window. A newer start finishes discovery while
-    // an exchange past its final check is writing its record: the start
-    // becomes current only once that publication is done, so a superseded
-    // attempt never stores or wakes after a newer start returned.
     let first = client.ok("mcp.auth.start", user("docs")).await;
     let callback = consent(&authority, &first, "code-e-secret");
     let discovering = authority.hold("metadata");
@@ -1429,7 +1373,6 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
     let second = newer.await.unwrap();
     let issued = authority.issued.load(Ordering::SeqCst);
     assert_eq!(access(&daemon), format!("access-{issued}-secret"));
-    // The newer attempt is current and replaces the published credential.
     let callback = consent(&authority, &second, "code-f-secret");
     client
         .ok(
@@ -1440,9 +1383,6 @@ async fn sign_out_and_newer_sign_ins_supersede_pending_attempts() {
     assert_eq!(access(&daemon), format!("access-{}-secret", issued + 1));
     client.mcp_state(&session, "docs", "ready").await;
 
-    // A sign-out that completes while a start prepares its attempt from the
-    // record supersedes that start, so the deleted client never returns: the
-    // next start registers again.
     let registrations = authority.registrations.lock().unwrap().len();
     let held = authority.hold("metadata");
     let mut starting = daemon.connect().await;

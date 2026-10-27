@@ -326,7 +326,6 @@ impl MethodProvider {
         )));
         let _guard = self.gate.lock().unwrap();
         if self.stopping.is_cancelled() {
-            // This generation is unloading; the next one serves the namespace.
             return Err(RpcError::reloading());
         }
         let (send, reply) = tokio::sync::oneshot::channel();
@@ -337,7 +336,6 @@ impl MethodProvider {
             CancellationToken::new(),
         );
         self.calls.spawn(async move {
-            // Dropped when the operation has settled, after any early reply.
             let _settle = settle;
             let operation = handler(method, params, cancel.clone(), progress.clone());
             tokio::pin!(operation);
@@ -347,7 +345,6 @@ impl MethodProvider {
                     _ = stopping.cancelled() => {},
                 }
             };
-            // An unload wins a tie: a result racing it is not reported.
             let result = tokio::select! {
                 biased;
                 _ = unloading => None,
@@ -527,8 +524,6 @@ impl MethodTable {
         let provider = MethodProvider::new(ctx, namespace, declarations, handler)?;
         self.entries.register(ctx, namespace, Entry { provider })?;
         self.left.lock().unwrap().remove(namespace);
-        // Runs before the registration is withdrawn, so a lookup between the
-        // two still finds the provider, which refuses as it unloads.
         let (left, namespace) = (Arc::downgrade(&self.left), namespace.to_owned());
         ctx.effect(move || async move {
             if let Some(left) = left.upgrade() {
@@ -664,8 +659,6 @@ impl HostDispatch for ForeignMethods {
                 "register needs a namespace, its declarations and its call function".into(),
             ));
         };
-        // Registered now, while the calling row is known; the caller awaits
-        // the outcome.
         let registered = self
             .0
             .register_foreign(&caller, &namespace, declarations, call)

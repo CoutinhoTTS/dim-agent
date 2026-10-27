@@ -30,7 +30,6 @@ async fn completion(State(provider): State<Arc<Provider>>, Json(body): Json<Valu
     provider.requests.lock().unwrap().push(body);
     if summarizer && provider.hold.swap(false, Ordering::SeqCst) {
         provider.entered.notify_one();
-        // Held until released or the process is killed.
         provider.release.notified().await;
     }
     let text = if summarizer {
@@ -207,29 +206,22 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         assert_ok(&created);
         let sid = created["result"]["sessionId"].clone();
         assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
-        // The usage query reads the adopted window facts and writes nothing.
         let usage = client
             .rpc("session.context.usage", json!({"sessionId":sid,"branchId":"main"}))
             .await;
         assert_ok(&usage);
         assert_eq!(usage["result"]["contextWindow"], 4000.0);
         assert_eq!(usage["result"]["outputTokens"], 200.0);
-        // A small window: the reserve is capped at 20 % of the input budget.
         assert_eq!(usage["result"]["thresholdTokens"], 3800.0 - 0.2 * 3800.0);
         assert_eq!(usage["result"]["baselineSource"], "full_estimate");
         let overhead = usage["result"]["estimatedInputTokens"].as_f64().unwrap();
         assert!(overhead > 0.);
-        // Each input fits the retention budget `0.25 × 3800 = 950` alone, two
-        // do not; several turns cross the threshold.
         let size = 600.;
         let missing = client
             .rpc("session.context.compact", json!({"sessionId":sid}))
             .await;
         assert_eq!(missing["error"]["code"], -32602);
 
-        // Acceptance 1: past the threshold, a preparation compacts everything
-        // before the longest tail that fits the retention budget, with one
-        // summarizer request.
         let mut index = 0;
         let events = loop {
             turn(&mut client, &sid, &big(index, size)).await;
@@ -267,13 +259,10 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
             .iter()
             .filter(|event| is(event, "turn/start"))
             .collect();
-        // The tail keeps the latest input and the previous reply: the earliest
-        // cut that fits lies inside the previous turn.
         let position = |id: &Value| events.iter().position(|event| &event["id"] == id).unwrap();
         let cut = position(&data["retain_from"]);
         assert!(position(&starts[starts.len() - 2]["id"]) < cut);
         assert!(cut < position(&starts[starts.len() - 1]["id"]));
-        // The request starts with the replacement and keeps the latest input.
         let request = provider
             .requests
             .lock()
@@ -289,8 +278,6 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         assert!(!sent.contains(&format!("turn-{} ", index - 2)));
         assert!(!sent.contains("turn-0 "));
 
-        // Acceptance 3 and 8: with no turn, the method writes the command,
-        // the start and the result, and v3 clients receive them live.
         turn(&mut client, &sid, "small one").await;
         let before = history(&mut client, &sid).await.len();
         let reply = client
@@ -321,8 +308,6 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
             assert_eq!(live["params"]["branchId"], "main");
         }
 
-        // A repeated request while a compaction is in flight joins it: the
-        // Timeline holds one command and both callers get the same result.
         turn(&mut client, &sid, "small extra").await;
         let before = history(&mut client, &sid).await.len();
         provider.hold.store(true, Ordering::SeqCst);
@@ -356,9 +341,6 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
             1
         );
 
-        // Acceptance 6 and 8: a client that connects while the summarizer is
-        // held sees a running compaction from history; a crash leaves it
-        // unmatched and the next load settles it.
         turn(&mut client, &sid, "small two").await;
         provider.hold.store(true, Ordering::SeqCst);
         client
@@ -402,14 +384,12 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
                 .count(),
             completed_before
         );
-        // A new compaction runs normally.
         let reply = client
             .rpc("session.context.compact", json!({"sessionId":sid,"branchId":"main"}))
             .await;
         assert_ok(&reply);
         assert_eq!(reply["result"]["status"], "completed");
 
-        // The same holds for an automatic compaction.
         provider.hold.store(true, Ordering::SeqCst);
         let mut held = None;
         for _ in 0..10 {
@@ -422,8 +402,6 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
             }
         }
         assert!(held.is_some(), "no automatic compaction was held");
-        // The start commits before the summarizer request; its publication
-        // may follow the request.
         let mut observer = connect(&server).await;
         let running = loop {
             let start = history(&mut observer, &sid)

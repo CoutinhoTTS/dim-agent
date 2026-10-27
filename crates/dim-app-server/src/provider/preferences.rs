@@ -47,7 +47,6 @@ impl ModelPreferences {
                 .effort_options
                 .as_ref()
                 .is_some_and(|options| options.contains(effort));
-            // Effort replaces the mutually exclusive enable/budget mode.
             if let Some(previous) = &mut config.reasoning {
                 previous.effort = None;
                 previous.enabled = None;

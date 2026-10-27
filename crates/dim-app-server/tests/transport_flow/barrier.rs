@@ -145,8 +145,6 @@ async fn execution_does_not_reply_ahead_of_delayed_broadcasts() {
             let request = client
                 .send(method, json!({"sessionId":sid,"branchId":"main"}))
                 .await;
-            // Negative assertion while the explicit gate is closed, not a
-            // sleep intended to make the race happen.
             let early =
                 tokio::time::timeout(Duration::from_millis(100), client.response(request)).await;
             gate.release();
@@ -262,6 +260,8 @@ async fn execution_cutoff_stays_fixed_while_new_input_advances_the_timeline() {
     server.join().await.unwrap();
 }
 
+/// Fence allocation and emission share the `issued` lock, so concurrent fences reach the listener
+/// in token order and a single monotonic `reached` watch suffices.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delivery_is_subscription_local_and_concurrent_waiters_complete() {
     let (server, mut client, sid, gate) = setup(false).await;
@@ -274,8 +274,6 @@ async fn delivery_is_subscription_local_and_concurrent_waiters_complete() {
         );
     }
     let mut observer = Client::new_version(&server, false, 2).await;
-    // An unattached client only waits for execution, even when another
-    // subscription to the same Session has outstanding fences.
     assert_ok(
         &observer
             .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))

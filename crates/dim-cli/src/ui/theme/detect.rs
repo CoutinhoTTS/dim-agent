@@ -51,8 +51,6 @@ pub fn color_mode(env: &Env, is_tty: bool) -> ColorMode {
     if term.contains("256color") {
         return ColorMode::Ansi256;
     }
-    // `dumb`, `vt100` and friends have 8 colours at best; they share the
-    // 16-colour palette like every other low-colour terminal.
     ColorMode::Ansi16
 }
 
@@ -204,7 +202,6 @@ mod tests {
             Appearance::Light
         );
         assert_eq!(resolve_appearance(&env(&[]), None).0, Appearance::Dark);
-        // Not a palette index: ignored rather than guessed at.
         assert_eq!(
             resolve_appearance(&env(&[("COLORFGBG", "0;default")]), None).0,
             Appearance::Dark

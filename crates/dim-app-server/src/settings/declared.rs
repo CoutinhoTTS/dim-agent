@@ -268,7 +268,6 @@ impl HostDispatch for Dispatch {
     }
     fn invoke(&self, method: &str, args: RpcValue) -> Reply {
         let service = self.0.clone();
-        // Dropping the call cancels it; a committed write stays committed.
         let cancel = CancellationToken::new();
         match method {
             "projects" => {

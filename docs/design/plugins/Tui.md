@@ -250,7 +250,8 @@ fresh id it chooses), and a `PeerPlugin` whose only feature is `host` with
 native home, beside `daemon.sock` and of the same length, so any home that
 fits the daemon's socket path fits the leaf's; on Windows it is a loopback
 TCP address that requires a one-time token as its first line. The leaf accepts exactly
-one connection and then removes the socket. `ui.open {peer, address}` makes
+one connection and then removes the socket. The token is read byte by byte, so the bytes after
+its newline stay for the session. `ui.open {peer, address}` makes
 the daemon mount a `UiLeaf`: a `PeerPlugin` that dials `address` with the
 link expecting `peer` (the endpoint handshake checks it), without reconnect,
 then `TuiRow`. Both links are the same rutis link; nothing is spawned.

@@ -81,7 +81,6 @@ async fn agent_close_joins_cancelled_construction_and_retains_async_rollback_fai
             .await
             .is_err()
     );
-    // Abandoning the create waiter must not abandon the admitted construction.
     create.abort();
     release.notify_one();
     let error = tokio::time::timeout(Duration::from_secs(2), close)
@@ -97,8 +96,6 @@ async fn agent_close_joins_cancelled_construction_and_retains_async_rollback_fai
 
 #[test]
 fn agent_close_freezes_build_ownership_before_the_close_task_can_be_polled() {
-    // The owner runtime is deliberately not driven until construction finishes on
-    // a second runtime. This makes the admission-to-first-poll gap observable.
     let owner_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -189,8 +186,6 @@ impl Plugin for Failing {
 async fn a_failed_row_ends_the_wait_while_an_earlier_row_stays_pending() {
     let root = Ctx::root().unwrap();
     let views = vec![root.plugin(Dependent), root.plugin(Failing)];
-    // The wait sits on the Pending row first; the timeout would only be
-    // reached if the Failed row were not watched.
     let started = std::time::Instant::now();
     let error = wait_active(
         &root,
@@ -201,7 +196,6 @@ async fn a_failed_row_ends_the_wait_while_an_earlier_row_stays_pending() {
     .await
     .unwrap_err();
     assert!(contains(&error, "required row failed"), "{error}");
-    // Well under the 30 s deadline, with room for a loaded scheduler.
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "{:?}",

@@ -23,8 +23,6 @@ async fn interrupt_commits_before_later_input_without_waiting_for_dispatch() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    // No executor yield between the synchronous interrupt and the next input.
-    // A spawned stop can land after that input and cancel its turn instead.
     let interrupt = session.interrupt("main", "reload".into()).unwrap();
     let input = session
         .submit("new work".into(), InputMode::Queue, "main")
@@ -199,7 +197,6 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
     let sequence = observed.borrow().unwrap();
     let snapshot = session.history("main", None).await.unwrap();
     assert!(snapshot.iter().any(|event| event.sequence == sequence && matches!(&event.kind, EventKind::StopInterrupt(data) if data.reason == "user interrupt")));
-    // The work is outside any turn: its owner cleans up after the stop returns.
     tokio::time::timeout(Duration::from_secs(2), first)
         .await
         .unwrap()
@@ -225,7 +222,6 @@ async fn external_capability_receives_interrupt_and_owns_cleanup_outside_the_sto
         .await
         .unwrap()
         .unwrap();
-    // No pause: the next input runs a turn.
     assert!(session.history("main", None).await.unwrap().iter().any(
         |event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("continue"))
     ));

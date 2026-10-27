@@ -61,7 +61,6 @@ pub fn run_cli() -> i32 {
 async fn run(options: Options) -> Result<i32> {
     let root = rutis::Ctx::root()?;
     let outcome = act(&root, options).await;
-    // The action's own error is the one to report.
     let closed = root.shutdown().await;
     let code = outcome?;
     closed?;
@@ -136,8 +135,6 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
         return run_tui_with_connection(root, options, link, connection).await;
     }
     let mut client = connection.take().ok_or("App Server did not start")?;
-    // The hosted `Tui` mounts its own `DaemonLink`; this one's service goes
-    // first, while its client stays here for the bootstrap.
     link.dispose().await?;
     let session_id = if let Some(id) = &options.resume {
         if let Some(preset) = options.permission {
@@ -173,7 +170,6 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
                     && options.model_config.is_none()
                     && client::app_error(&error) == Some("provider_failed") =>
             {
-                // Initial setup needs a TUI before there is a Session to host a leaf.
                 drop(client);
                 let (link, connection) = daemon_link(root, options, false).await?;
                 return run_tui_with_connection(root, options, link, connection).await;
@@ -210,7 +206,6 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
             }),
         )
         .await;
-    // The link owns the leaf from here; the bootstrap connection is done.
     drop(client);
     if let Err(error) = opened {
         node.dispose().await?;
@@ -220,13 +215,10 @@ async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
         leave = left => leave.ok(),
         () = leaf::stopped(&state) => None,
     };
-    // Unloads a `Tui` still hosted (its effect restores the terminal) and
-    // closes the link.
     node.dispose().await?;
     match leave {
         Some(ui::tui::Leave::Exit(code)) => Ok(code),
         Some(ui::tui::Leave::Restart(restart)) => relaunch(root, options, restart).await,
-        // The daemon closed this interface.
         None => Ok(0),
     }
 }
@@ -272,8 +264,6 @@ async fn relaunch(root: &rutis::Ctx, options: &Options, restart: ui::tui::Restar
     command.args(args);
     #[cfg(unix)]
     {
-        // Replacing this process keeps the terminal and its signals with the
-        // updated CLI, as the npm launcher does.
         use std::os::unix::process::CommandExt;
         let error = command.exec();
         Err(format!("Cannot start {}: {error}", restart.relaunch.display()).into())
@@ -426,7 +416,6 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         return hold_web(root, &options, port, open_browser).await;
     }
 
-    // The Timeline export reads the database without a daemon.
     if let Action::Timeline {
         session_id,
         output,
@@ -553,15 +542,11 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         }
         Action::McpLogout(id) => mcp_command::sign_out(&mut client, &options, id).await,
         Action::McpEnable { id, enabled } => {
-            // Target the entry `mcp list` shows: a project entry shadows the
-            // user's, and enabling it is recorded for this user only.
             let catalog: mcp::Catalog = match client
                 .typed("mcp.catalog", serde_json::json!({"cwd":options.cwd}))
                 .await
             {
                 Ok(catalog) => catalog,
-                // Disabling never depends on reading the sources: the user's
-                // record for this workspace is withdrawn without them.
                 Err(error) if !*enabled && error.downcast_ref::<client::RpcError>().is_some() => {
                     client
                         .rpc(
@@ -579,8 +564,6 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 }
                 Err(error) => return Err(error),
             };
-            // Disabling an id the workspace no longer lists still withdraws the
-            // user's project record, so the entry stays off if it returns.
             let (source, listed) = match catalog.servers.into_iter().find(|server| server.id == *id)
             {
                 Some(server) => (server.source, true),

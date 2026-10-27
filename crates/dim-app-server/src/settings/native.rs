@@ -126,7 +126,6 @@ impl SettingsService {
                     .map_err(|_| SettingsError::Persistence)?;
                     tx.commit().map_err(|_| SettingsError::Persistence)?;
                     let revision = token(format.source(), version);
-                    // Publish under the connection gate, in durable commit order.
                     owner.publish(format.source(), SettingsScope::User, &revision);
                     Ok(SettingsSnapshot { revision, document })
                 })();

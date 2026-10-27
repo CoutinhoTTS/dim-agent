@@ -40,9 +40,6 @@ impl rutis::host::DynPlugin for FailChildBuild {
         Box::pin(async move {
             let identity = ctx.require_at(&self.1)?;
             if identity.branch_id != "main" {
-                // Trigger the real assembly validation error, rather than a
-                // framework error (whose wire mapping is already sanitized):
-                // an undeclared read of a service provided outside the scope.
                 let _ = ctx.get_at(&self.0);
             }
             Ok(rutis::host::Effect::Done)
@@ -50,7 +47,6 @@ impl rutis::host::DynPlugin for FailChildBuild {
     }
 }
 
-// The failure comes from the debug-build assembly check.
 #[cfg_attr(not(debug_assertions), ignore)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_branch_build_keeps_private_details_off_both_transports() {
@@ -119,7 +115,6 @@ async fn failed_branch_build_keeps_private_details_off_both_transports() {
             "a failed candidate is not listed"
         );
         assert_ok(&client.rpc("session.close", json!({"sessionId":sid})).await);
-        // The Timeline fact names the rejected branch and its anchor.
         let history = session.history("main", None).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind,
             dim_agent_types::EventKind::BranchCreateFailed(
@@ -168,8 +163,6 @@ async fn v2_tree_history_resume_and_protocol_isolation_work_on_both_transports()
         let sid = created["result"]["sessionId"].as_str().unwrap();
         let session = agent.get_session(sid).unwrap();
 
-        // A v2 request may never silently select main, and a v1 connection may
-        // neither discover nor operate on a v2 session.
         for (method, params) in [
             ("session.submit", json!({"sessionId":sid,"text":"parent"})),
             ("session.stop", json!({"sessionId":sid})),
@@ -205,7 +198,6 @@ async fn v2_tree_history_resume_and_protocol_isolation_work_on_both_transports()
             )
             .await;
         assert_ok(&idle);
-        // The barrier is main's Timeline end: a user-observed history boundary.
         let at = idle["result"]["sequence"].as_u64().unwrap();
         assert_eq!(at, session.sequence("main").unwrap());
         let attached = tree.rpc("session.attach", json!({"sessionId":sid})).await;
@@ -264,7 +256,6 @@ async fn v2_tree_history_resume_and_protocol_isolation_work_on_both_transports()
                 .await,
         );
 
-        // Only events after attach arrive, for every branch.
         let child_end = session.sequence(child_id).unwrap();
         loop {
             let notice = tree.notice("session.event").await;
@@ -281,7 +272,6 @@ async fn v2_tree_history_resume_and_protocol_isolation_work_on_both_transports()
         }
 
         assert_ok(&tree.rpc("session.close", json!({"sessionId":sid})).await);
-        // An Rpc branch creation records a host source with its operation id.
         let history = session.history("main", None).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind,
             dim_agent_types::EventKind::BranchCreate(data) if data.branch == child_id
@@ -306,8 +296,6 @@ async fn host_branch_creation_publishes_the_anchor_before_the_child_start() {
                 .rpc("session.attach", json!({"sessionId":sid}))
                 .await,
         );
-        // The first release has no branch creation admission: the trusted
-        // entry creates the branch without an approval request.
         let mut creator = Client::new_version(&server, !ws, 2).await;
         let child = creator
             .rpc(
@@ -318,8 +306,6 @@ async fn host_branch_creation_publishes_the_anchor_before_the_child_start() {
         assert_ok(&child);
         let child_id = child["result"]["branch"]["branchId"].as_str().unwrap();
         assert_eq!(session.branches().len(), 2);
-        // The observer attached before the create: the anchor and the child's
-        // start arrive live, in that order, and main's model steps stay private.
         let (mut anchor, mut start) = (None, None);
         while start.is_none() {
             let notice = observer.notice("session.event").await;
@@ -381,8 +367,6 @@ async fn builtin_branch_is_a_session_tool_under_the_permission_policy() {
                     .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
                     .await,
             );
-            // `branch` declares the session risk: allowed without approval
-            // unless the policy disallows it by name.
             assert_eq!(session.branches().len(), if denied { 1 } else { 2 });
             assert!(
                 client

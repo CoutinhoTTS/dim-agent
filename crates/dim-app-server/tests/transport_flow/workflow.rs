@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 
 fn rows() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
     let mut config = session_typescript::fixture();
-    // Tests address the row as `rows[0]`.
     config.rows = vec![
         serde_json::from_str(include_str!(
             "../../../../runtime/plugins/workflow/process.json"
@@ -180,8 +179,6 @@ async fn report_restart(kill_runtime: bool) {
     } else {
         "workflow"
     };
-    // Workflow's cleanup joins its own report call, so SQLite commits while
-    // the row restarts; a replacement generation resubmits the same id.
     let (restarted, ()) = tokio::join!(loader.restart(name), async {
         tokio::time::sleep(Duration::from_millis(200)).await;
         connection.execute_batch("COMMIT").unwrap();
@@ -313,8 +310,6 @@ async fn report_crash(phase: &str, fault: ReportFault) {
         let EventKind::InputMessage(data) = &report.kind else {
             unreachable!()
         };
-        // The branch holds this submission id: a resubmission writes nothing
-        // and returns the committed report.
         let resubmitted = target.input(data.clone(), "main").await.unwrap();
         assert_eq!(resubmitted.id, report.id);
         assert_eq!(report_count(&target, run).await, 1);
@@ -763,7 +758,6 @@ async fn node_workflow_project_enablement_invalid_sources_and_tool_policy() {
         let mut near_limit = document.clone();
         near_limit["name"] = json!("near-limit");
         let definition = serde_json::to_vec(&near_limit).unwrap();
-        // A YAML comment keeps the decoded definition small while exercising the binary frame.
         let mut bytes = vec![b'x'; 8 * 1024 * 1024 - 1];
         bytes[0] = b'#';
         let offset = bytes.len() - definition.len();
@@ -1316,7 +1310,6 @@ async fn node_workflow_captures_live_first_admission_and_survives_starter_and_in
         })
         .await
         .unwrap();
-        // Consume the first stage's independent row observation before the next starter.
         let _ = controls.recv().await.unwrap();
         let _ = controls.recv().await.unwrap();
     }
@@ -1934,7 +1927,6 @@ async fn native_retention(fault: &str) {
     assert_ok(&fork);
     let fork = fork["result"]["sessionId"].as_str().unwrap().to_owned();
 
-    // The disabled original row has joined its writers before persisted fixtures are installed.
     loader
         .set_overlay(
             "retention-fixture",
@@ -1996,7 +1988,6 @@ async fn native_retention(fault: &str) {
     })
     .await
     .unwrap();
-    // Listed, not merely loaded: an idle unload may have released it.
     let listed = client.rpc("session.list", json!({})).await;
     assert!(
         listed["result"]
@@ -2115,7 +2106,6 @@ async fn native_retention(fault: &str) {
     for id in [&retained, &external, &fork] {
         assert!(sessions.iter().any(|session| session["sessionId"] == *id));
     }
-    // Read through a call: the fork may have been unloaded since.
     let forked = client
         .rpc(
             "session.history",

@@ -94,8 +94,6 @@ impl Columns {
                 .unwrap_or(0)
         };
         let category = widest(&|r| Some(display_width(&r.category)));
-        // Only labels with a detail after them set the detail column: an
-        // action named by its description runs on into the free space.
         let label = widest(&|r| (!r.detail.is_empty()).then(|| display_width(&r.label)));
         let room = inner.saturating_sub(ROW_INDENT + category + DETAIL_GAP);
         Self {
@@ -112,7 +110,6 @@ const UNAVAILABLE: &str = " (unavailable)";
 /// row is faint throughout; the selected row sits on an accent bar.
 pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &Palette) -> String {
     if !row.selectable() {
-        // A group header sits left of the rows it introduces.
         return paint(
             &truncate_cells(&row.label, inner),
             Paint {

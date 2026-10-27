@@ -19,7 +19,12 @@ indices across reload; rebuilding from the original list could reuse indices.
 Cancellation is checked before commit, not treated as rollback after installation.
 Roots reject symlinked traversal; this is a trusted host storage boundary, not
 isolation from the host or same-user processes. Do not automatically retry an
-uncertain committed mutation.
+uncertain committed mutation. The native `open` used by each operation receives
+exactly one already validated path component, never a multi-part path, so `..`
+or an intermediate symlink cannot escape the held parent handle. Native Windows
+opens leave `OBJECT_ATTRIBUTES.Attributes` at 0 so the actual directory's
+case-sensitivity setting governs lookup; forcing `OBJ_CASE_INSENSITIVE` or
+folding names would break case-sensitive directories and their aliases.
 
 ## Bounded reads
 
@@ -50,6 +55,10 @@ lock inode 1              -> before: B and C both hold d/x
                              finds inode 2 held and returns Locked
 ```
 
+Creating a nonexclusive key creates it once and then opens that inode:
+concurrent creation can return `ENOENT` on macOS even after the winner
+created the key.
+
 A replacement writes its temporary file in
 `.dim-file-storage-locks/.dim-file-storage-temps` under its key's name, so only
 that key's holder writes or removes it. A leftover from an interrupted
@@ -61,7 +70,13 @@ is older than 30 seconds and names a process that is no longer running; a
 marker naming this process counts as live. The exception is a marker this
 process failed to release: it keeps the owner record, whose nonce only that
 marker carries, and reclaims the marker at once, so removal and locking need
-not wait for the process to exit.
+not wait for the process to exit. The marker is the external TypeScript wire
+format: PID, wall-clock milliseconds, nonce and a trailing newline, with no
+other fields.
+
+On Windows, releasing a `PhysicalLock` unlocks its byte range explicitly before
+release completes, because `CloseHandle` may defer the implicit unlock; a later
+generation would otherwise see a stale `Locked` lock.
 
 ## Directory creation
 
@@ -176,6 +191,14 @@ Locking and replacement never delete leftovers. A non-directory in place of
 the lock or temporary directory, or a directory in place of a key or a
 temporary file, makes `lock` or `replace` fail with an I/O error, without
 following or writing through it, until the directory is removed.
+
+On Windows the replacement's temporary file is created with the target ACL in
+the create call, never under the maintenance directory's inherited ACL and
+tightened afterwards. Native replacement does not merge alternate data streams,
+so a target with a non-default stream fails explicitly. Its rename uses
+`NtSetInformationFile` with the held parent handle and a basename, without
+resolving an absolute path again, so a parent or symlink replaced after
+validation cannot be followed.
 
 Removal therefore never unlinks a key or temporary file that a holder has
 locked. An absent entry counts as removed. Removal is not atomic: an error or

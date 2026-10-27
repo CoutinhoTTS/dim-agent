@@ -2971,7 +2971,8 @@
       "file": "crates/dim-cli/src/ui/render/markdown.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "format"
       ]
     },
     {
@@ -20829,6 +20830,15 @@
     },
     {
       "from": "dim_cli::ui::composer::palette::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::Locale::En",
+        "path crate::ui::i18n::Locale::ZhCn",
+        "path crate::ui::i18n::set"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::palette::tests",
       "to": "dim_cli::ui::text",
       "references": [
         "use crate::ui::text::display_width"
@@ -22264,6 +22274,13 @@
       "references": [
         "path MarkdownRenderer",
         "path MarkdownRenderer::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::render::markdown::tests",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path crate::ui::render::panel::strip_escapes"
       ]
     },
     {

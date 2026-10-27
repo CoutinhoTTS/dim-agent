@@ -166,7 +166,6 @@ pub fn restore_terminal_once() {
 
 unsafe extern "system" fn on_ctrl(_kind: u32) -> i32 {
     restore_terminal_once();
-    // Not handled: the default handler still terminates the process.
     0
 }
 

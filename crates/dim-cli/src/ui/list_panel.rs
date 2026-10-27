@@ -242,7 +242,6 @@ impl ListPanel {
                 .filter(|i| !i.heading)
                 .nth(self.selected)
                 .map_or(Event::None, |item| Event::Pick(item.id.clone())),
-            // Anything else edits the filter like the composer edits a line.
             _ if self.filterable && self.filter.handle_key(key) => {
                 self.selected = 0;
                 Event::None
@@ -264,7 +263,6 @@ impl ListPanel {
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
         let inner = width.saturating_sub(4).max(1);
         let shown = self.shown();
-        // A filterable list has Amp's `> query` row between blank rows.
         let query_rows = if self.filterable { 3 } else { 0 };
         let page = rows.saturating_sub(2 + query_rows).max(1);
         self.page.set(page);
@@ -325,7 +323,6 @@ impl ListPanel {
             self.window.set(start);
             for (offset, row) in list.iter().skip(start).take(page).enumerate() {
                 if matches!(row.kind, Kind::Heading) {
-                    // A section sits in the marker column's step, not left of it.
                     content.push(fg(
                         &truncate_cells(&format!("  {}", row.label), inner),
                         &p.muted,
@@ -379,8 +376,6 @@ mod tests {
         }
         assert_eq!(panel.selected, 0);
         assert_eq!(panel.shown().len(), 1);
-        // The cursor sits after the query; Left moves it, Delete edits there
-        // (Home and End stay the list's: first and last row).
         assert_eq!(panel.cursor(40), Some((2, 7)));
         for _ in 0..3 {
             panel.handle_key(key(KeyCode::Left));
@@ -403,12 +398,10 @@ mod tests {
                 .join("\n")
                 .contains("> t omus")
         );
-        // Esc clears a query before it closes the list.
         assert_eq!(panel.handle_key(key(KeyCode::Esc)), Event::None);
         assert!(panel.filter_is_empty());
         assert_eq!(panel.shown().len(), 3);
         assert_eq!(panel.handle_key(key(KeyCode::Esc)), Event::Close);
-        // Without a filter, typed characters do nothing.
         let mut plain = three_rows().without_filter();
         assert_eq!(plain.handle_key(key(KeyCode::Char('x'))), Event::None);
         assert!(plain.filter_is_empty());

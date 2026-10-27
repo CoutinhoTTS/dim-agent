@@ -11,32 +11,26 @@ fn file(root: &Path) -> PathBuf {
 
 fn declarations(root: &Path) -> Result<String> {
     rutis_bridge::build::Exports::new()
-        // Native reads serialize every policy field; reuse the SDK's complete shape.
         .declared(
             "dim_agent_types::PermissionPolicy",
             "import('./plugin.js').PermissionPolicy",
         )
-        // Custom serde: reuse the SDK envelope with native bridge sequence values.
         .declared(
             "dim_agent_types::AgentEvent",
             "import('./plugin.js').BranchEvent",
         )
-        // The same envelope before the Timeline assigns identity and order.
         .declared(
             "dim_agent_types::EventDraft",
             "{ type: string; name: string; data: unknown; tags?: string[] }",
         )
-        // Reuse the identity envelope; the service keeps its own TypeScript name.
         .declared(
             "dim_agent_runtime::TimelineIdentity",
             "import('./plugin.js').SessionRef",
         )
-        // The identity as data; the service keeps its own TypeScript name.
         .declared(
             "dim_agent_runtime::SessionIdentity",
             "{ sessionId: string; restored: boolean }",
         )
-        // Provider-owned nested configuration stays JSON in the SDK.
         .declared(
             "dim_agent_runtime::SessionConfig",
             "import('./plugin.js').SessionConfig",

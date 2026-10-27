@@ -144,7 +144,6 @@ impl BroadcastProbe {
             }
             SessionBroadcastEvent::Closed => json!({"kind":"closed"}),
         };
-        // Probe-only encoding and optional run-time lookup on the existing bus.
         if let Some(target) = ctx.get_at(&host_key_in("c4Probe", self.0)) {
             call(&target, "notice", vec![record.into()]).await?;
         }
@@ -325,7 +324,6 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
             )?))
         },
     ));
-    // The Node runtime and its rows are rutis's, at the runtime's own keys.
     let mut builtins = Modules::new();
     let node = register_part(&mut builtins, builder.catalog(), {
         let runtime = runtime.clone();
@@ -339,7 +337,6 @@ async fn run(root: &Ctx) -> Result<Json, Box<dyn std::error::Error>> {
     let anchor = register_part(&mut builtins, builder.catalog(), move |names| {
         Ok(Box::new(Anchor::new(names, anchor_send.clone())?))
     })?;
-    // The features' plugins are rows of this host, as the App Server's are.
     let plugins = builder.plugin_rows(&mut builtins).await?;
     let mut session_row = builder.install(&mut builtins, []).await?;
     session_row["config"]

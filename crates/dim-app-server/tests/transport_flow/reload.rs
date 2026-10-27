@@ -51,7 +51,6 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
                 .is_some()
         );
     }
-    // Both scope levels must still load each extension, not just avoid a crash.
     for (name, count) in names.into_iter().zip(counts) {
         assert_eq!(count.load(Ordering::SeqCst), 4, "{name}");
     }
@@ -62,7 +61,6 @@ async fn scoped_plugin_names_cannot_replace_process_modules() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // Group IDs are public instance selectors, unlike plugin display names.
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.session_extension_part("Rpc", "extension", |_, _: &()| {
         Ok(Box::new(NamedExtension(
@@ -130,9 +128,6 @@ async fn process_plugin_reloads_keep_sessions() {
     assert_ok(&created);
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
 
-    // Rpc: accepted commands drain before unload; new requests in the window
-    // are rejected as retryable and succeed once the new generation registers.
-    // Stop waits for the held tool without client input, holding the drain open.
     assert_ok(
         &client
             .rpc(
@@ -173,7 +168,6 @@ async fn process_plugin_reloads_keep_sessions() {
     let listed = observer.rpc("session.list", json!({})).await;
     assert_eq!(listed["result"][0]["sessionId"], sid);
 
-    // Connection: connections drop, listeners rebind, Sessions remain attachable.
     server.restart("Connection").await.unwrap();
     let mut reconnected = Client::new(&server, false).await;
     assert_eq!(reconnected.instance, client.instance);
@@ -183,9 +177,6 @@ async fn process_plugin_reloads_keep_sessions() {
             .await,
     );
 
-    // Agents: only the directory reloads. Sessions, the protocol instance
-    // and connections stay. Session capabilities that depend on the
-    // directory reload with it; meanwhile requests are retryable.
     server.restart("Agents").await.unwrap();
     let listed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -203,7 +194,6 @@ async fn process_plugin_reloads_keep_sessions() {
     assert_eq!(fresh.instance, client.instance);
     assert_ok(&fresh.rpc("session.create", create(json!([]))).await);
 
-    // Plugins without an explicit restart are rejected.
     for plugin in ["ServerControl", "Missing"] {
         assert!(server.restart(plugin).await.is_err(), "{plugin}");
     }
@@ -232,8 +222,6 @@ fn process_initialization_is_covered_by_the_startup_deadline() {
                 startup_timeout: Duration::from_millis(50),
                 ..Default::default()
             };
-            // FileStorage cannot open its roots until the only file worker is
-            // released. Rollback may wait for it, but startup must not succeed.
             let (result, ()) = tokio::join!(
                 serve(AgentBuilder::new(AgentConfig::default()), config),
                 async {
@@ -279,9 +267,6 @@ async fn dropping_serve_during_startup_releases_the_listener() {
         AgentBuilder::new(AgentConfig::default()),
         config.clone(),
     ));
-    // Startup advances only while `serve` is polled, while its plugins run
-    // on their own; polling once per check drops it after the transport bound
-    // the socket and before startup can finish.
     tokio::time::timeout(Duration::from_secs(5), async {
         while !path.exists() {
             assert!(
@@ -433,8 +418,6 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
         .await
         .expect("model request in flight");
 
-    // Loop reloads through ToolHost → ToolRegistry → PrepareModelHost; the
-    // model request is not part of that chain.
     tools.restart().await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while !loop_generation().is_some_and(|(generation, state)| {
@@ -472,7 +455,6 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
         }
     );
 
-    // The rebuilt Loop runs later turns normally.
     assert_ok(
         &client
             .rpc("session.submit", json!({"sessionId":sid,"text":"again"}))
@@ -615,7 +597,6 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
     .await
     .unwrap();
     let mut client = Client::new(&server, false).await;
-    // `branch` and `task` remain registered contributions but are not enabled.
     let created = client
         .rpc(
             "session.create",
@@ -658,10 +639,6 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
     };
     for expected in ["probe call 1", "probe call 2"] {
         if expected == "probe call 2" {
-            // ToolHost → ToolRegistry → ToolBinding → Loop reloads, and the
-            // contributor with the registry it registers with. Registry
-            // readiness does not imply the branch accepts input; wait for its
-            // new Loop generation.
             let (probe, before) = (generation("Probe").unwrap(), loop_generation().unwrap());
             tools.restart().await;
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -684,7 +661,6 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
         assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
         let result = last_result().await;
         assert!(result.contains(expected), "{result}");
-        // Fixed tools are declared in `SessionConfig.tools` order.
         assert_eq!(
             declared.0.lock().unwrap().last().unwrap(),
             &["probe", "echo"]
@@ -755,7 +731,6 @@ async fn a_stop_while_loop_reloads_waits_for_its_successor() {
     tokio::time::timeout(Duration::from_secs(5), entered.notified())
         .await
         .expect("model request in flight");
-    // Loop stays unloaded until the provider is let go.
     let gate = tools.hold_next();
     let restart = tokio::spawn({
         let tools = tools.clone();
@@ -879,7 +854,6 @@ async fn state_notifications_follow_a_loop_reload() {
     })
     .await
     .expect("Loop unloaded");
-    // Subscribes while Loop is gone: there is no state to report yet.
     let mut watcher = Client::new(&server, false).await;
     assert_ok(
         &watcher

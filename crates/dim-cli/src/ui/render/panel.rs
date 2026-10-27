@@ -122,7 +122,6 @@ pub fn clip(text: &str, max: usize) -> (String, usize) {
     let mut rest = text;
     'outer: while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix('\x1b') {
-            // Escape sequences are free: copy CSI and OSC whole.
             let len = if let Some(body) = after.strip_prefix('[') {
                 let end = body
                     .char_indices()
@@ -180,7 +179,6 @@ pub fn bordered(
     let inner = width.saturating_sub(2);
     let content_width = inner.saturating_sub(2);
     let edge = |s: &str| fg(s, color);
-    // The title keeps its own styling (Amp's are accent and bold).
     let top = match title {
         Some(title) if inner > visible_width(title) + 3 => {
             let fill = inner - visible_width(title) - 3;

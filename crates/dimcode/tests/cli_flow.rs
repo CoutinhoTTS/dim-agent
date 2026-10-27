@@ -28,8 +28,6 @@ impl Home {
         let path = PathBuf::from("/tmp").join(format!("dim-cli-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(path.join("rust")).unwrap();
         fs::set_permissions(path.join("rust"), fs::Permissions::from_mode(0o700)).unwrap();
-        // The flows read the terminal UI's English text. A saved language
-        // outranks the machine's locale; a localization test saves its own.
         fs::write(path.join("config.json"), r#"{"locale":"en"}"#).unwrap();
         Self(path)
     }
@@ -39,8 +37,6 @@ impl Home {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            // Some flows end when the CLI stops sending, so this bound is
-            // part of their run time, not a success bound.
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
@@ -51,7 +47,6 @@ impl Home {
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dimcode"));
         command.args(["--home", self.0.to_str().unwrap()]);
-        // The scripted daemons never see the registry.
         command.env("DIMCODE_UPDATE_CHECK", "0");
         command
     }
@@ -295,8 +290,6 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"old","serverVersion":"0.0.1-old","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","daemon.shutdown.completed"]}));
         let shutdown = wire.read("daemon.shutdown");
-        // The successor accepts before the old daemon closes, so the server
-        // the CLI spawns finds the endpoint in use and exits.
         fs::remove_file(&socket).unwrap();
         let successor = UnixListener::bind(&socket).unwrap();
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
@@ -318,7 +311,6 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
             stream.set_read_timeout(Some(PATIENCE)).unwrap();
             let mut wire = Wire(BufReader::new(stream));
             let mut line = String::new();
-            // The spawned server's liveness probe sends nothing.
             if wire.0.read_line(&mut line).unwrap() == 0 {
                 continue;
             }
@@ -742,7 +734,6 @@ fn resume_advances_filtered_history_positions_and_does_not_reprint_old_output() 
         let next = wire.read("session.history");
         assert_eq!(next["params"]["after"],7); assert_eq!(next["params"]["through"],10);
         wire.reply(&next,json!({"events":[{"sequence":8,"create_at":2,"type":"step","name":"model-output-end","data":{"turn_id":"old-turn","request_id":"old-request","status":"completed","finish_reason":"end_turn"}}],"through":10,"nextAfter":10,"done":true}));
-        // attach progress snapshots may predate the history response.
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"old-request","textOffset":0,"text":"old output","thinking":"","thinkingOffset":0}));
         let idle = wire.read("session.idle"); wire.reply(&idle,json!({"sequence":10}));
         let submit = wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
@@ -1188,7 +1179,6 @@ fn piped_prompt_runs_once_and_model_failure_has_a_distinct_exit_code() {
         let home = Home::new();
         let daemon = home.daemon(|wire| {
             wire.start(false);
-            // Rejection leaves the connection usable for ordinary cleanup.
             wire.detach();
         });
         let mut command = home.command();
@@ -1240,9 +1230,6 @@ impl Terminal {
         Self::launch_tui(command)
     }
     fn launch_tui(mut command: Command) -> Self {
-        // Both ends are close-on-exec, so children of this and concurrent flows
-        // receive only the slave given as their stdio, and closing this master
-        // hangs that terminal up.
         let master = unsafe {
             libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
         };
@@ -1269,10 +1256,6 @@ impl Terminal {
             .stdin(slave.try_clone().unwrap())
             .stdout(slave.try_clone().unwrap())
             .stderr(slave);
-        // As under a terminal emulator, the child leads its own session and
-        // process group with the slave as its controlling terminal: closing the
-        // master sends it SIGHUP whether or not it is reading input, and the
-        // test runner's terminal and process group no longer include it.
         unsafe {
             std::os::unix::process::CommandExt::pre_exec(&mut command, || {
                 if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
@@ -1295,7 +1278,6 @@ impl Terminal {
         let deadline = Instant::now() + PATIENCE;
         loop {
             assert!(Instant::now() < deadline, "CLI did not settle");
-            // The CLI can still be flushing output while it exits.
             let mut bytes = [0u8; 4096];
             match self.master.as_mut().unwrap().read(&mut bytes) {
                 Ok(size) if size > 0 => {
@@ -1305,7 +1287,6 @@ impl Terminal {
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                // Linux PTYs report EIO after the slave closes.
                 Err(error)
                     if cfg!(target_os = "linux") && error.raw_os_error() == Some(libc::EIO) => {}
                 Err(error) => panic!("{error}"),
@@ -1351,7 +1332,6 @@ impl Terminal {
         }
     }
     fn write(&mut self, bytes: &[u8]) {
-        // A terminal Enter sends CR; raw paste and Ctrl+J retain their own bytes.
         self.raw(
             &bytes
                 .iter()
@@ -1367,7 +1347,6 @@ impl Terminal {
                 Ok(0) => panic!("Terminal input closed"),
                 Ok(size) => bytes = &bytes[size..],
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Drain output so a full-duplex terminal cannot deadlock on echo.
                     let mut output = [0u8; 4096];
                     match self.master.as_mut().unwrap().read(&mut output) {
                         Ok(0) => panic!("Terminal output closed while writing"),
@@ -1396,11 +1375,8 @@ impl Terminal {
 }
 impl Drop for Terminal {
     fn drop(&mut self) {
-        // An unreaped leader keeps its id as the group id, so the kill cannot
-        // reach an unrelated group.
         if let Ok(None) = self.child.try_wait() {
             unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
-            // Release the PTY before reaping: slave close can wait for its master.
             drop(self.master.take());
             let _ = self.child.wait();
         }
@@ -1419,7 +1395,6 @@ fn a_failed_terminal_flow_leaves_no_cli_running() {
             let _idle = wire.read("session.idle");
             wire.event(12, "text", json!({"turn_id":"turn","request_id":"request","delta":format!("pending output {}", "x".repeat(512 * 1024))}));
         }
-        // The connection reaches EOF only once no process holds the CLI's end.
         let mut rest = Vec::new();
         wire.0.read_to_end(&mut rest).unwrap();
     });
@@ -1783,6 +1758,9 @@ fn interactive_file_completion_navigates_selects_and_dismisses_without_submittin
     assert!(!terminal.transcript.contains("\u{1b}[31m"));
 }
 
+/// The line composer edits graphemes atomically: inserting a combining
+/// character can merge both adjacent graphemes, so the cursor snaps to a
+/// grapheme boundary and the next delete or backspace removes the cluster.
 #[test]
 fn interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers() {
     let home = Home::new();
@@ -1906,7 +1884,6 @@ fn interactive_output_survives_terminal_backpressure() {
             terminal.until("Ctrl+J: newline");
             terminal.write(b"continue\n");
         }
-        // A slow terminal reader must not turn output backpressure into a CLI failure.
         thread::sleep(Duration::from_millis(150));
         if interactive {
             terminal.until("output complete");
@@ -1923,9 +1900,6 @@ fn interactive_output_survives_terminal_backpressure() {
 #[test]
 #[cfg(target_os = "macos")]
 fn interactive_input_names_its_terminal_without_listing_dev_while_terminals_close() {
-    // A `/dev` scan (`ttyname_r`) misses the CLI's entry when another terminal
-    // closes mid-scan. Denying the listing makes every scan miss, so the CLI
-    // must name its terminal from the descriptor.
     const SANDBOX: &str = "/usr/bin/sandbox-exec";
     const PROFILE: &str = r#"(version 1)(allow default)(deny file-read-data (literal "/dev"))"#;
     let listing = Command::new(SANDBOX)
@@ -1973,8 +1947,6 @@ fn interactive_input_names_its_terminal_without_listing_dev_while_terminals_clos
     });
     started.recv().unwrap();
     let mut command = Command::new(SANDBOX);
-    // Through the sandbox the launcher does not see the dimcode program, so
-    // the line client is asked for here.
     command
         .args([
             "-p",
@@ -2138,7 +2110,6 @@ fn interactive_paste_encoding_rejection_keeps_confirmed_items_editable() {
         for _ in 0..2 {
             let put = wire.read("attachment.put");
             assert_eq!(put["params"]["text"], "x".repeat(16 * 1024 + 1));
-            // Large but valid wire strings force the final encoded frame over its limit.
             wire.reply(
                 &put,
                 json!({"attachmentId":"stored","path":expected,"bytes":16*1024+1}),
@@ -2271,7 +2242,6 @@ fn interactive_shell_prefixes_use_session_methods_and_keep_failures_out_of_model
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.start(false);
-        // Bare prefixes print usage; they never become model input.
         for _ in 0..2 { let idle = wire.read("session.idle"); wire.reply(&idle, json!({"sequence":8})); }
         let mut identities = std::collections::HashSet::new();
         for (mode, command) in [("record", " printf 'recorded' "), ("private", "printf private"), ("record", "broken"), ("record", "busy"), ("record", "unknown"), ("record", "opaque"), ("private", "!nested")] {
@@ -2368,7 +2338,6 @@ fn interactive_shell_runs_during_a_turn_preserve_approval_focus_and_two_stage_in
         wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":" out\u{202e}put"}}));
         wire.notice("management.progress", json!({"id":99999,"method":"shell.run","data":{"text":"foreign progress"}}));
         wire.notice("approval.request",json!({"sessionId":"session","branchId":"main","requestId":"approval","call":{"name":"exec","input":{"command":"inspect"}},"reason":"review"}));
-        // Completion must not print into the approval answer prompt.
         wire.reply(&run, json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":"authoritative output","truncated":false,"durationMs":1,"recorded":{"sequence":12}}));
         wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":"late progress must be ignored"}}));
         let answer = wire.read("approval.respond");
@@ -2385,7 +2354,6 @@ fn interactive_shell_runs_during_a_turn_preserve_approval_focus_and_two_stage_in
         wire.end(json!({"turn_id":"turn","status":"cancelled","reason":"interrupted"}));
         wire.reply(&stop, json!({"sequence":40}));
         wire.reply(&idle, json!({"sequence":40}));
-        // The CLI must consume the late shell-stop response before another input.
         wire.reply(&shell_stop, json!({"stopped":false}));
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["text"], "next");
@@ -2488,7 +2456,6 @@ fn interactive_default_deny_discards_typeahead_and_ctrl_c_settles_before_next_in
         wire.0.get_mut().write_all(&ended.as_bytes()[..10]).unwrap();
         wire.0.get_mut().flush().unwrap();
         let stop = wire.read("session.stop");
-        // A cancelled next-frame wait must retain an already consumed prefix.
         writeln!(wire.0.get_mut(),"{}",&ended[10..]).unwrap();
         wire.reply(&stop,json!({"sequence":40}));
         thread::sleep(Duration::from_millis(100));
@@ -2646,7 +2613,6 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
         let mut command = home.command();
         command.args(["--provider", "fixture", "--model", "fixture-model"]);
         if tui {
-            // A pty without --no-tui selects the TUI session host.
             let mut terminal = Terminal::launch_tui(command);
             terminal.until("fixture stops here");
             assert!(!terminal.wait().success());
@@ -2666,8 +2632,6 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
 #[test]
 fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
     let home = Home::new();
-    // The pty never answers the startup probe, so the first frame waits for
-    // its timeout while this daemon attaches the session at once.
     let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
@@ -2677,7 +2641,6 @@ fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        // Hold the connection until the client goes away.
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -2711,7 +2674,6 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        // The interface asks for the account's state at start; no plugin here.
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let run = wire.read("shell.run");
@@ -2721,7 +2683,6 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         let run_id = params["runId"].clone();
         wire.notice("management.progress", json!({"id":run["id"],"method":"shell.run","data":{"text":"live-out\u{1b}]52;c;blocked-clipboard\u{7}"}}));
         wait_release.recv_timeout(PATIENCE).unwrap();
-        // The recorded run is the session's own event, written before the reply.
         let marker = "<dim-shell-input kind=\"command\" status=\"completed\" exit=\"0\" truncated=\"false\">\n$ echo recorded\nrecorded-out\u{1b}]0;blocked-title\u{7}\u{1b}]8;;file:///tmp/blocked-link\u{7}hidden\u{1b}]8;;\u{7}\n\n</dim-shell-input>";
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"shell","sequence":9,"create_at":1,"type":"input","name":"message","data":{"blocks":[{"type":"raw","text":marker}],"mode":"append"}}}));
         wire.reply(&run, json!({"runId":run_id,"status":"completed","exitCode":0,"output":"recorded-out\n","truncated":false,"durationMs":1,"recorded":{"sequence":9}}));
@@ -2731,7 +2692,6 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
         assert_eq!(stop["params"]["runId"], run["params"]["runId"]);
         wire.reply(&stop, json!({"stopped":true}));
         wire.reply(&run, json!({"runId":run["params"]["runId"],"status":"stopped","output":"private-out\u{1b}]52;c;blocked-private-clipboard\u{7}\n","truncated":false,"durationMs":1}));
-        // Hold the connection until the client goes away.
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -2785,7 +2745,6 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        // The interface asks for the account's state at start; no plugin here.
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         wire.notice("session.mcp.state", json!({"sessionId":"session","servers":[{"id":"docs","state":"auth_required"}]}));
@@ -2854,7 +2813,6 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        // The interface asks for the account's state at start; no plugin here.
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let put = wire.read("attachment.put");
@@ -2894,7 +2852,6 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("notes.txt"), "").unwrap();
     fs::write(project.join("src/main.rs"), "").unwrap();
-    // The CLI resolves `--cwd`; mentions link under that resolved path.
     let resolved = project.canonicalize().unwrap();
     let expected = format!(
         "read [@notes.txt]({}) [@src/main.rs]({})",
@@ -2910,7 +2867,6 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        // The interface asks for the account's state at start; no plugin here.
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let submit = wire.read("session.submit");
@@ -2929,7 +2885,6 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
     terminal.until("Files");
     terminal.until("@notes.txt");
     terminal.write(b"\r");
-    // A directory opens; the file inside it is picked with Tab.
     terminal.write(b"@sr");
     terminal.until("@src/");
     terminal.write(b"\t");
@@ -2967,10 +2922,8 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
         assert_eq!(catalog["params"], json!({"providerId":"test"}));
         let capabilities = json!({"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":true,"vision":false,"audio":false,"reasoning":false,"contextWindow":128000,"maxOutputTokens":16384});
         wire.reply(&catalog, json!({"catalog":{"models":[{"id":"model","capabilities":capabilities}]}}));
-        // The interface asks for the account's state at start; no plugin here.
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        // A model without image input gets the image as a link to its path.
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["text"], expected);
         assert!(submit["params"].get("user").is_none());
@@ -2983,7 +2936,6 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"look ");
-    // A drag arrives as a paste of shell-escaped paths.
     let dragged = format!(
         "{} {}",
         image.display(),
@@ -3196,7 +3148,6 @@ fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
     .unwrap();
     let project = home.0.join("work");
     fs::create_dir(&project).unwrap();
-    // The project file asks to be enabled; only the user can enable it.
     fs::write(project.join(".mcp.json"), json!({"mcpServers":{"docs":{"command":"missing-mcp-program","args":["original"],"env":{"SECRET":"must-not-print"},"enabled":true}}}).to_string()).unwrap();
     let run = |args: &[&str]| {
         home.command()
@@ -3235,7 +3186,6 @@ fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
     );
     assert!(String::from_utf8_lossy(&enabled.stderr).contains(".mcp.json"));
     assert_eq!(list(), "\"docs\"\tproject\tstdio\tenabled\t—\n");
-    // The choice belongs to this user and home, not the shared project file.
     assert_eq!(fs::read(project.join(".mcp.json")).unwrap(), written);
     assert!(run(&["daemon", "stop"]).status.success());
     assert_eq!(
@@ -3245,7 +3195,6 @@ fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
     );
     assert!(run(&["mcp", "disable", "docs"]).status.success());
     assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\t—\n");
-    // An entry that leaves the file can still be disabled, and comes back off.
     assert!(run(&["mcp", "enable", "docs"]).status.success());
     fs::write(
         project.join(".mcp.json"),
@@ -3257,7 +3206,6 @@ fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
     assert!(String::from_utf8_lossy(&unlisted.stderr).contains("\"docs\" is not in mcp list"));
     fs::write(project.join(".mcp.json"), &written).unwrap();
     assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\t—\n");
-    // Disabling does not need a readable .mcp.json.
     assert!(run(&["mcp", "enable", "docs"]).status.success());
     fs::write(project.join(".mcp.json"), "{broken").unwrap();
     assert!(!run(&["mcp", "list"]).status.success());
@@ -3274,7 +3222,6 @@ fn project_mcp_entries_start_disabled_and_the_user_enables_them() {
     assert!(String::from_utf8_lossy(&unreadable.stderr).contains("could not be read"));
     fs::write(project.join(".mcp.json"), &written).unwrap();
     assert_eq!(list(), "\"docs\"\tproject\tstdio\tdisabled\t—\n");
-    // A configuration the daemon cannot apply is reported on stderr.
     fs::write(
         project.join(".mcp.json"),
         json!({"mcpServers":{"remote":{"type":"http","url":"not a url"}}}).to_string(),
@@ -4010,7 +3957,6 @@ fn loopback_port() -> u16 {
 fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidden_input() {
     for mode in ["ipv4", "ipv6", "busy", "paste", "noise", "cancel", "expiry"] {
         let home = Home::new();
-        // The busy mode holds the port, so the CLI falls back to hidden input.
         let _reserve = (mode == "busy")
             .then(|| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap());
         let port = _reserve.as_ref().map_or_else(loopback_port, |listener| {
@@ -4088,8 +4034,6 @@ fn mcp_loopback_capture_supports_both_families_and_busy_ports_fall_back_to_hidde
                 assert!(response.contains("404 Not Found"));
                 let mut oversized =
                     std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).unwrap();
-                // Read until the server closes it or this short bound ends;
-                // either is fine, so this is not a step that must succeed.
                 oversized
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -4402,8 +4346,6 @@ fn web_prints_the_entry_and_holds_it_until_interrupted() {
         let open = wire.read("web.open");
         assert_eq!(open["params"], json!({"port": 4567}));
         wire.reply(&open, json!({"url":"http://127.0.0.1:4567/#token=fixture-token","address":"127.0.0.1:4567"}));
-        // The entry lives as long as the connection: hold it until the
-        // client goes away.
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -4464,8 +4406,6 @@ fn web_off_clears_the_daemon_switch() {
 
 #[test]
 fn web_without_the_web_workspace_says_how_to_get_it() {
-    // Not installed at all, then installed elsewhere after this daemon
-    // started: the command says what to do and exits 1, without an error.
     for installed in [false, true] {
         let home = Home::new();
         let daemon = home.daemon(|wire| {
@@ -4483,8 +4423,6 @@ fn web_without_the_web_workspace_says_how_to_get_it() {
             .args(["web", "--no-open"])
             .env_remove("DIMCODE_WEB_ASSETS");
         if installed {
-            // A source the daemon was not started with, such as the npm
-            // package installed afterwards.
             let assets = home.0.join("npm-web");
             fs::create_dir_all(&assets).unwrap();
             fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
@@ -4547,7 +4485,6 @@ fn web_install_puts_this_versions_frontend_in_the_home() {
     use base64::Engine;
     use sha2::Digest;
     let home = Home::new();
-    // The npm package as `scripts/stage-web.mjs` packs it.
     let package = home.0.join("pack/package");
     fs::create_dir_all(package.join("web/assets")).unwrap();
     fs::write(package.join("package.json"), "{}").unwrap();
@@ -4570,7 +4507,6 @@ fn web_install_puts_this_versions_frontend_in_the_home() {
         "sha512-{}",
         base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&tarball))
     );
-    // A previous frontend is replaced as a whole.
     fs::create_dir_all(home.0.join("web")).unwrap();
     fs::write(home.0.join("web/stale.js"), "").unwrap();
 
@@ -4607,7 +4543,6 @@ fn web_install_puts_this_versions_frontend_in_the_home() {
     assert!(!home.0.join("web/package.json").exists());
     assert!(!home.0.join("web.partial").exists());
 
-    // A download that does not match the registry's integrity changes nothing.
     let output = home
         .command()
         .args(["web", "install"])
@@ -4627,8 +4562,6 @@ fn web_install_puts_this_versions_frontend_in_the_home() {
     );
     assert!(home.0.join("web/assets/app-1.js").is_file());
 
-    // A frontend in a source that comes first is named, since it, not this
-    // install, is what the daemon serves.
     let first = home.0.join("npm-web");
     fs::create_dir_all(&first).unwrap();
     fs::write(first.join("index.html"), "<!doctype html>").unwrap();
@@ -4690,10 +4623,8 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
     terminal.until("test / model");
     terminal.write(b"/web\r");
     terminal.until("Web interface on: http://127.0.0.1:4567/chat/session#token=fixture-token");
-    // The interface is still the same terminal client.
     terminal.write(b"/web\r");
     terminal.until("Web interface off");
-    // A daemon without the frontend gets a hint, not an RPC error.
     terminal.write(b"/web\r");
     terminal.until("The Web workspace is not installed. Install it with `dimcode web install`.");
     assert!(!terminal.transcript.contains("RPC"));
@@ -4719,7 +4650,6 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         wait_release.recv_timeout(PATIENCE).unwrap();
-        // The daemon goes away: the connection closes under the interface.
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
@@ -4727,8 +4657,6 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     terminal.until("keep this draft");
     release.send(()).unwrap();
     daemon.join().unwrap();
-    // The interface reports the lost connection and keeps the terminal: a
-    // dropped connection unloads nothing.
     terminal.until("Error: App Server connection closed");
     let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
     assert_eq!(
@@ -4746,7 +4674,6 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     terminal.until("Disconnected; draft kept");
     assert!(!home.0.join("input-history.json").exists());
     terminal.write(b"\x04");
-    // Read like a terminal does, so the goodbye is not held back by a full pty.
     terminal.until("Bye!");
     terminal.until("\x1b[?2004l");
     let status = terminal.wait();
@@ -4975,7 +4902,6 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("disabled");
     terminal.write(b"Provider flow\r");
     terminal.until("Connect ");
-    // Another client commits after the form opens. The retry must retain its key.
     assert!(
         rpc(
             &mut wire,
@@ -5028,7 +4954,6 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         "Bearer second-key"
     );
     let mut wire = connect(&home);
-    // A changed descriptor invalidates the user choice without deleting it.
     assert!(
         rpc(
             &mut wire,
@@ -5148,7 +5073,6 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         .get("result")
         .is_some()
     );
-    // This builtin cannot probe/list models, but its connection still saves.
     let before = rpc(
         &mut wire,
         "provider.management",
@@ -5237,8 +5161,6 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
         );
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        // Switching Session detaches from the old one before attaching and
-        // registering on the new one.
         let create = wire.read("session.create");
         wire.reply(&create, json!({"sessionId":"next","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
         let detach = wire.read("session.detach");
@@ -5255,13 +5177,11 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
-        // The old registration, and any other interface's, is not this one.
         wire.notice("ui.shutdown", json!({"uiId":"ui-1","reason":"not you"}));
         wire.notice(
             "ui.shutdown",
             json!({"uiId":"ui-2","reason":"another terminal took over"}),
         );
-        // The interface leaves; its connection ends with it.
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -5271,7 +5191,6 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     terminal.until("test / model");
     terminal.write(b"/new\r");
     terminal.until("The App Server closed this interface: another terminal took over");
-    // Read like a terminal does, so the restore is not held back by a full pty.
     terminal.until("Bye!");
     terminal.until("\x1b[?2004l");
     assert!(terminal.wait().success());
@@ -5297,14 +5216,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        // The first message drives a turn: applied at once, then running.
         let first = wire.read("session.submit");
         assert_eq!(first["params"]["text"], "first");
         wire.reply(&first, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"first"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
         wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
-        // A child finishing must not make main idle or leak its model progress.
         wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":true}));
         wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":false}));
         wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"child","requestId":"child-request","textOffset":0,"text":"child-only answer","thinkingOffset":0,"thinking":"child-only reasoning"}));
@@ -5312,16 +5229,12 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         assert_eq!(child_history["params"]["sessionId"], "session");
         assert_eq!(child_history["params"]["branchId"], "child");
         wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
-        // A notice the server appends for the model is applied at once: it
-        // never shows as a queued message.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"note-1","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"background task finished"}]},"mode":"append"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-note","sequence":12,"create_at":1,"type":"input","name":"applied","data":{"input_id":"note-1","mode":"append"}}}));
-        // The second is held by InputQueue while the turn runs.
         let second = wire.read("session.submit");
         assert_eq!(second["params"]["text"], "second");
         wire.reply(&second, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-2","sequence":13,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"queue"}}}));
-        // Ctrl+S: withdrawn and re-submitted as Steer in one batch.
         let steer = wire.read("session.input.withdraw");
         assert_eq!(steer["params"]["sessionId"], "session");
         assert_eq!(steer["params"]["branchId"], "main");
@@ -5331,7 +5244,6 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-2","sequence":14,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"in-2"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-3","sequence":15,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"second"}]},"mode":"steer"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-3","sequence":16,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-3","mode":"steer"}}}));
-        // The third is held too; ↑ takes it back without a steer.
         let third = wire.read("session.submit");
         assert_eq!(third["params"]["text"], "third");
         wire.reply(&third, json!({"event":{}}));
@@ -5352,8 +5264,6 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     terminal.until("first");
     terminal.until("background task finished");
     terminal.write(b"second\r");
-    // Held: in the queue strip, not in the transcript yet. The appended
-    // notice went straight to the transcript, so the strip starts at one row.
     terminal.until("Queue (1)");
     assert!(
         !terminal.transcript.contains("Queue (0)"),
@@ -5368,18 +5278,13 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         terminal.transcript
     );
     terminal.write(b"\x13");
-    // Applied as Steer: the strip empties (it keeps its height while the
-    // turn runs) once the message entered the transcript.
     terminal.until("Queue (0)");
     terminal.write(b"third\r");
     terminal.until("Queue (1)");
     terminal.until("› third");
     terminal.write(b"\x1b[A");
-    // Gone from the queue and back in the composer, drawn below the strip.
     terminal.until("Queue (0)");
     terminal.until("third");
-    // The transcript holds the applied messages in the model's order and
-    // never the withdrawn one; styling is stripped for the check.
     let plain = {
         let mut out = String::new();
         let mut rest = terminal.transcript.as_str();
@@ -5392,7 +5297,6 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
                     .skip(1)
                     .find(|(_, c)| c.is_ascii_alphabetic())
                     .map_or(tail.len(), |(i, c)| i + c.len_utf8()),
-                // An OSC ends with BEL or ST (`ESC \\`).
                 Some(']') => [("\u{7}", 1), ("\u{1b}\\", 2)]
                     .iter()
                     .filter_map(|(end, len)| tail.find(end).map(|i| i + len))
@@ -5441,7 +5345,6 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         wire.reply(&providers, json!([]));
         let submit = wire.read("session.submit");
         wire.reply(&submit, json!({"event":{}}));
-        // A child branch's lower sequence must not be discarded by main's cursor.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-adopted","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"output-input"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-start","sequence":1,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"child-call","task_id":"child-task","description":"cargo cx build","output_path":"/daemon/private/output"}}}));
@@ -5456,7 +5359,6 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         assert_eq!(refreshed["params"], expected);
         wire.reply(&refreshed, json!({"text":"first \u{1b}]52;c;must-not-copy\u{7}live preview"}));
         let held = wire.read("session.exec.output");
-        // Longer than the refresh interval: the admitted read must be the only one.
         wire.quiet(Duration::from_millis(1200));
         ready.send(()).unwrap();
         control.recv_timeout(PATIENCE).unwrap();
@@ -5534,7 +5436,6 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
     terminal.until("final child result");
     terminal.write(b"\x1b[27u");
     terminal.until("Background tasks");
-    // Clear the retained filter, then close; the narrow status may omit the model.
     terminal.write(b"\x1b[27u\x1b[27ucontinue after output\r");
     terminal.until("main remains usable");
     assert!(!terminal.transcript.contains("must-not-copy"));
@@ -5613,29 +5514,22 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         wire.reply(&submit, json!({"event":{}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
         wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
-        // A command the exec tool moved to the background.
         wire.event(10, "tool-use", json!({"turn_id":"t","request_id":"r","call":{"id":"call-1","name":"exec","input":{"command":"sleep 100","runInBackground":true}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-1","sequence":11,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"call-1","task_id":"task-1","description":"sleep 100","output_path":"/tmp/out"}}}));
         wire.event(12, "tool-result", json!({"turn_id":"t","request_id":"r","results":[{"call_id":"call-1","result":{"content":"Command moved to the background (task task-1)."}}]}));
-        // A task delegated to a member agent.
         wire.event(13, "tool-use", json!({"turn_id":"t","request_id":"r2","call":{"id":"call-2","name":"agent","input":{"action":"request","prompt":"Survey the crates\nand report","agentId":"reviewer"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-1","sequence":14,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r2","call_id":"call-2","target":{"kind":"agent","agent_id":"reviewer"},"prompt":"Survey the crates\nand report"}}}));
         wire.event(15, "tool-result", json!({"turn_id":"t","request_id":"r2","results":[{"call_id":"call-2","result":{"content":"{\"status\":\"accepted\"}"}}]}));
-        // x on the command row stops it; Enter opens output.
         let stop = wire.read("session.exec.stop");
         assert_eq!(stop["params"], json!({"sessionId":"session","branchId":"main","taskId":"task-1"}));
         wire.reply(&stop, json!({}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ex-2","sequence":16,"create_at":1,"type":"exec","name":"ended","data":{"task_id":"task-1","status":"cancelled","result":{"content":"stopped by the user"}}}}));
-        // The UI cannot stop a request before its actual member is known.
         delivery.recv_timeout(PATIENCE).unwrap();
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-1","sequence":17,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-1","status":"ok","agent_id":"reviewer","session_id":"member","input_event_id":"member-input"}}}));
-        // A rejected request must not leave an uninterruptible placeholder.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-failed","sequence":18,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r3","call_id":"call-3","target":{"kind":"agent","agent_id":"missing"},"prompt":"Unavailable delegate"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-failed","sequence":19,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-failed","status":"error","error":"agent_not_found"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-other","sequence":20,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r4","call_id":"call-4","target":{"kind":"agent","agent_id":"writer"},"prompt":"Check the docs"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-other","sequence":21,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-other","status":"ok","agent_id":"writer","session_id":"other-member","input_event_id":"other-input"}}}));
-        // The delivered members' cards observe them; those attaches stay
-        // unanswered, and stopping does not depend on them.
         let past_observations = |wire: &mut Wire, method: &str| loop {
             let request = wire.read_any();
             if request["method"] != "session.attach" {
@@ -5647,7 +5541,6 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"stopped by the user"}));
         wire.reply(&stop, json!({}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-1","sequence":22,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-1","agent_id":"reviewer","session_id":"member","text":"","status":"cancelled","reason":"stopped by the user"}}}));
-        // The leader remains selected, and the other member completes normally.
         let submit = past_observations(wire, "session.submit");
         assert_eq!(submit["params"]["sessionId"], "session");
         wire.reply(&submit, json!({"event":{}}));
@@ -5660,7 +5553,6 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"go\r");
-    // The delegation's card names its Agent and the leader's words.
     terminal.until("Agent: reviewer");
     terminal.write(b"/tasks\r");
     terminal.until("Background tasks");
@@ -5676,7 +5568,6 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("Check the docs");
     terminal.write(b"x");
     terminal.until("agent cancelled: stopped by the user");
-    // An explicit Escape report cannot combine with the text as an Alt key.
     terminal.write(b"\x1b[27ucontinue the leader\r");
     terminal.until("agent result: Other agent completed normally.");
     terminal.write(b"/tasks\r");
@@ -5686,6 +5577,8 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     daemon.join().unwrap();
 }
 
+/// Switching to full access changes the preset before it allows the calls
+/// already waiting, so none of them keeps asking under the old preset.
 #[test]
 fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     let home = Home::new();
@@ -5701,20 +5594,17 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-        // The interface reads main's preset as it enters the session.
         let read = wire.read("session.permission.get");
         assert_eq!(read["params"], json!({"sessionId":"session","branchId":"main"}));
         wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        // /approvals → Full access, confirmed: read, then a versioned update.
         let read = wire.read("session.permission.get");
         wire.reply(&read, json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}));
         let update = wire.read("session.permission.update");
         assert_eq!(update["params"], json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}));
         wire.reply(&update, json!({"version":2}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}}}));
-        // A command asks; "always" saves the exact allow rule, then allows.
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"review","requestId":"req-1","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm test"}},"reason":"shell command"}));
         let rules = wire.read("permission.rules");
         wire.reply(&rules, json!({"revision":"r1","commandRules":[]}));
@@ -5724,8 +5614,6 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
         let respond = wire.read("approval.respond");
         assert_eq!(respond["params"], json!({"sessionId":"session","branchId":"review","requestId":"req-1","decision":"allow"}));
         wire.reply(&respond, json!({}));
-        // Two calls ask at once; "Full access" on the first, confirmed, keeps
-        // the preset (already full access) and allows both.
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-2","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"npm run lint"}},"reason":"shell command"}));
         wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"req-3","source":{"kind":"model"},"call":{"name":"write","input":{"path":"notes.md"}},"reason":"file write"}));
         let read = wire.read("session.permission.get");
@@ -5748,7 +5636,6 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     terminal.until("test / model");
     terminal.write(b"/approvals\r");
     terminal.until("Workspace write");
-    // Up to Full access, Enter, then confirm with y.
     terminal.write(b"\x1b[A");
     terminal.write(b"\r");
     terminal.until("Confirm Full Access");
@@ -5759,7 +5646,6 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     terminal.write(b"a");
     terminal.until("Rule saved: allow exact `npm test`");
     terminal.until("npm run lint");
-    // Allow once · Allow always · Reject · Full access, then confirm with y.
     terminal.write(b"\x1b[C\x1b[C\x1b[C\r");
     terminal.until("Confirm Full Access");
     terminal.write(b"y");
@@ -5768,7 +5654,6 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     terminal.signal(libc::SIGKILL);
     terminal.wait();
     daemon.join().unwrap();
-    // The choice is remembered: the next session is created with it.
     let config: Value =
         serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
     assert_eq!(config["permissionPreset"], "full-access");
@@ -5824,14 +5709,11 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"inspect"}]},"mode":"queue"}}}));
             wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
             wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
-            // The request comes once the terminal was told the run works.
             wait_shown.recv_timeout(PATIENCE).unwrap();
             wire.notice("approval.request", json!({"sessionId":"session","branchId":"main","requestId":"approval","source":{"kind":"model"},"call":{"name":"exec","input":{"command":"ls"}},"reason":"shell command"}));
             let respond = wire.read("approval.respond");
             assert_eq!(respond["params"]["decision"], "allow");
             wire.reply(&respond, json!({}));
-            // The model asks the user, which holds the run up again until
-            // the call's result arrives.
             wire.event(11, "tool-call", json!({"turn_id":"turn","request_id":"ask","calls":[{"id":"c1","name":"ask_user","input":{"questions":[{"question":"Where to deploy?","options":[{"label":"production"},{"label":"staging"}]}]}}]}));
             let answer = wire.read("session.question.respond");
             assert_eq!(answer["params"], json!({"sessionId":"session","branchId":"main","requestId":"ask","callId":"c1","answers":[{"questionId":"1","selected":["production"]}]}));
@@ -5850,10 +5732,8 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
         } else {
             "--scrollback"
         });
-        // Whatever terminal runs the test: the bar's switch decides.
         command.env("DIM_TERMINAL_PROGRESS", if drawn { "on" } else { "off" });
         let mut terminal = Terminal::launch_tui(command);
-        // The first report is written although it says idle.
         terminal.until(&report("state=idle:app=dim"));
         terminal.until("test / model");
         terminal.write(b"inspect\r");
@@ -5862,7 +5742,6 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             terminal.until(busy);
         }
         shown.send(()).unwrap();
-        // msg: "Permission needed: exec"
         terminal.until(&report(
             "state=blocked:kind=permission:app=dim:msg=UGVybWlzc2lvbiBuZWVkZWQ6IGV4ZWM=",
         ));
@@ -5871,7 +5750,6 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
         }
         terminal.until("Permission required");
         if drawn {
-            // The waiting bar is drawn again, so the terminal keeps it.
             terminal.until(paused);
         }
         terminal.write(b"y");
@@ -5890,7 +5768,6 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
         terminal.until(&report("state=clear"));
         assert!(terminal.wait().success());
         daemon.join().unwrap();
-        // Each status is told once, and the clear is the last word.
         let transcript = &terminal.transcript;
         assert_eq!(transcript.contains("\x1b[?1049h"), fullscreen);
         for pairs in ["state=idle:app=dim", "state=done:app=dim", "state=clear"] {
@@ -5905,8 +5782,6 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
             transcript.rfind(&report("state=clear")),
             "{fullscreen}: {transcript}"
         );
-        // The bar is removed when the run ends and on the way out, and
-        // nothing draws it after that; switched off, there is none.
         if drawn {
             assert_eq!(
                 transcript.matches(removed).count(),
@@ -5923,7 +5798,6 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
         }
     }
 
-    // Switched off, nothing is reported, so nothing is cleared.
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
@@ -5956,7 +5830,6 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
         terminal.transcript
     );
 
-    // A fatal signal takes the restore path, which clears the record too.
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
@@ -6001,7 +5874,6 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
             .output()
             .unwrap()
     };
-    // The offline profile fails the turn after the Session is stored.
     let config = home.0.join("model.json");
     fs::write(
         &config,
@@ -6029,7 +5901,6 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
             .collect()
     };
 
-    // Live: stdout, then a private file holding the same lines.
     let live = run(&["export", &session]);
     assert!(
         live.status.success(),
@@ -6052,7 +5923,6 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
         fs::metadata(&output).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    // An existing path is never overwritten; a failed export leaves no file.
     let refused = run(&["export", &session, "--output", "timeline.jsonl"]);
     assert_eq!(refused.status.code(), Some(1));
     assert_eq!(fs::read(&output).unwrap(), live.stdout);
@@ -6061,8 +5931,6 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
     assert!(String::from_utf8_lossy(&failed.stderr).contains("Session missing-session is not in"));
     assert!(!home.0.join("failed.jsonl").exists());
 
-    // After stop, the export starts no daemon; `--database` is relative to
-    // the CLI's current directory.
     assert!(run(&["daemon", "stop"]).status.success());
     assert!(!socket.exists());
     let stopped = run(&["export", &session, "--database", "rust/dimcode.sqlite"]);
@@ -6076,7 +5944,6 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
             .cloned()
             .collect()
     };
-    // Stopping may settle the branch with more facts; nothing earlier changes.
     let (before, after) = (events(&exported), events(&stopped));
     assert!(!before.is_empty());
     assert_eq!(after[..before.len()], before[..]);
@@ -6179,7 +6046,6 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
                 "account.providers" => json!([]),
                 "collaboration.model_policy" => json!({"revision":revision.to_string(),"policy":policy}),
                 "collaboration.set_model_policy" => {
-                    // Another client writes first, once.
                     if !conflicted {
                         conflicted = true;
                         revision += 1;
@@ -6205,16 +6071,13 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     terminal.write(b"Subagent\r");
     terminal.until("Inherit requesting branch");
     terminal.until("Existing members keep their models.");
-    // Down to Inherit; the first save loses to another client.
     terminal.raw(b"\x1b[B\r");
     terminal.until("Subagent model policy changed elsewhere");
-    // The choice stays: the next Enter rereads, the one after saves.
     terminal.write(b"\r");
     thread::sleep(Duration::from_millis(300));
     terminal.write(b"\r");
     terminal.until("Subagent models: Inherit requesting branch");
     terminal.until("Subagent model policy saved");
-    // Fixed reuses the model list; Esc on the policy list writes nothing.
     terminal.write(b"\r");
     terminal.until("Fixed model");
     terminal.raw(b"\x1b");
