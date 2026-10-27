@@ -10,7 +10,7 @@ const [binaryDirectory, destination, version, sourceCommit, ...rest] = process.a
 const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT [--account]';
 assert(binaryDirectory && destination && version && sourceCommit, usage);
 assert(rest.length === 0 || (rest.length === 1 && rest[0] === '--account'), usage);
-// Whether the executable is the account build (dim-oauth-plugin-rust).
+// Whether the executable is the account build (compiled with the client IDs).
 const account = rest.length === 1;
 assert(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/.test(version), 'Invalid version');
 assert(/^[a-f0-9]{40}$/.test(sourceCommit), 'Invalid source commit');

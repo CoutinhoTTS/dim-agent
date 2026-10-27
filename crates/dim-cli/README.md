@@ -929,10 +929,10 @@ cannot be stored, nothing is sent and the notice names the paste; the cleared dr
 
 ## Accounts
 
-The Dim account is a [managed provider plugin](../dim-app-server/README.md#managed-provider-plugins) compiled into the account build of `dimcode`, built from the private `dim-oauth-plugin-rust` repository; no Node runtime, plugin package or extraction is involved. The public build supports API-key providers only.
+The Dim account is a [managed provider plugin](../dim-app-server/README.md#managed-provider-plugins) compiled into the account build of `dimcode` (built with `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` set); no Node runtime, plugin package or extraction is involved. The public build supports API-key providers only.
 
 ```bash
-../dim-oauth-plugin-rust/target/debug/dimcode --home /path/to/development-home \
+target/debug/dimcode --home /path/to/development-home \
   login dimcode-api-oauth --directory https://account-directory.example
 ```
 
