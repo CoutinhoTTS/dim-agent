@@ -26,7 +26,7 @@ in loader rows, events, diagnostics, Sessions or Timelines.
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
 | `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 20)`; exactly one row |
-| `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills` or `user/mcp-projects`; workspace files are not mirrored |
+| `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
 | `settings_documents.imported_revision` | `TEXT` | No | — | Original file SHA-256 or `missing`; import provenance, not a CAS token |
@@ -96,6 +96,11 @@ file is `mcp-projects.json`, which only the standalone file backend writes; a
 native home normally has none, so the first read imports `missing` and an empty
 record. The row is an additive source within
 v13: the schema and format version are unchanged, and older binaries ignore it.
+`user/mcp-plugins` holds the MCP documents plugins registered with Mcp
+(`{"plugins":{"<plugin id>":{"dir":"<plugin directory>","mcpServers":{…}}}}`,
+[PluginManager §3.7](../plugins/PluginManager.md#37-content-registration)), and
+`user/skills` may carry `pluginSkills` (`{"<plugin id>":"<skills root>"}`); both
+are additive in the same way.
 Generic Settings persistence retains these exact payload shapes, not loader
 patches or UUID snapshots. Business interpretation and validation belong to the namespace owner.
 Unknown extension fields and disabled Skill IDs are preserved.

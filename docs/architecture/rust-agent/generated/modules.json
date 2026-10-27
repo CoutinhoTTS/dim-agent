@@ -1694,6 +1694,7 @@
       "parent": "dim_app_server::mcp",
       "file": "crates/dim-app-server/src/mcp/config.rs",
       "unexpandedMacros": [
+        "format",
         "matches"
       ]
     },
@@ -8858,6 +8859,7 @@
       "to": "dim_agent_capabilities::skills::discovery",
       "references": [
         "path RootKind",
+        "path RootKind::Plugin",
         "path RootKind::Project",
         "path RootKind::User",
         "path RootSnapshot",
@@ -12715,6 +12717,7 @@
       "references": [
         "mod plugin_manager",
         "path plugin_manager::LAYER",
+        "path plugin_manager::Owners::new",
         "path plugin_manager::PluginManagerPlugin::new",
         "path plugin_manager::State::read"
       ]
@@ -15372,6 +15375,8 @@
       "to": "dim_app_server::mcp::config",
       "references": [
         "mod config",
+        "path McpPluginDocument",
+        "path McpPluginServers",
         "path McpProjectEnablement",
         "path McpProjectEnablement::default",
         "path McpServerSettings",
@@ -15380,6 +15385,8 @@
         "path McpSettings",
         "path config::effective",
         "path config::workspace",
+        "use config::McpPluginDocument",
+        "use config::McpPluginServers",
         "use config::McpProjectEnablement",
         "use config::McpServerSettings",
         "use config::McpSettings"
@@ -15456,7 +15463,9 @@
       "references": [
         "path SettingsError",
         "path SettingsError::Conflict",
+        "path SettingsError::Invalid",
         "path SettingsService",
+        "use crate::settings::BusinessDocument",
         "use crate::settings::SettingsError",
         "use crate::settings::SettingsService"
       ]
@@ -15629,6 +15638,7 @@
       "references": [
         "path BusinessDocument",
         "path Result",
+        "path SettingsError",
         "path SettingsError::Invalid",
         "path SettingsService",
         "path crate::settings::ProjectAuthorized",
@@ -15663,8 +15673,6 @@
       "to": "dim_agent_capabilities::settings",
       "references": [
         "path SettingsScope",
-        "path SettingsScope::Project",
-        "path SettingsScope::User",
         "use crate::settings::SettingsScope"
       ]
     },
@@ -15685,10 +15693,15 @@
         "path McpError::UnknownServer",
         "path McpError::Worker",
         "path McpService",
+        "path McpSource",
+        "path McpSource::Plugins",
+        "path McpSource::Project",
+        "path McpSource::User",
         "path super::McpServerEntry",
         "use super::McpChange",
         "use super::McpError",
-        "use super::McpService"
+        "use super::McpService",
+        "use super::McpSource"
       ]
     },
     {
@@ -15767,7 +15780,6 @@
       "from": "dim_app_server::mcp::publication",
       "to": "dim_agent_capabilities::settings",
       "references": [
-        "path SettingsScope",
         "path SettingsScope::Project",
         "path SettingsScope::User",
         "use crate::settings::SettingsScope"
@@ -15835,9 +15847,14 @@
         "path McpError::Disabled",
         "path McpError::Unavailable",
         "path McpError::UnknownServer",
+        "path McpSource",
+        "path McpSource::Plugins",
+        "path McpSource::Project",
+        "path McpSource::User",
         "path Result",
         "use super::McpConnection",
         "use super::McpError",
+        "use super::McpSource",
         "use super::Result"
       ]
     },
@@ -15853,6 +15870,7 @@
       "from": "dim_app_server::mcp::publication",
       "to": "dim_app_server::mcp::config",
       "references": [
+        "path McpPluginServers",
         "path McpProjectEnablement",
         "path McpProjectEnablement::default",
         "path McpServerSettings",
@@ -15864,6 +15882,7 @@
         "path config::settings_changes",
         "path config::workspace",
         "use super::config",
+        "use super::config::McpPluginServers",
         "use super::config::McpProjectEnablement",
         "use super::config::McpServerSettings",
         "use super::config::McpSettings"
@@ -16142,13 +16161,6 @@
     },
     {
       "from": "dim_app_server::mcp::session",
-      "to": "dim_agent_capabilities::settings",
-      "references": [
-        "path crate::settings::SettingsScope"
-      ]
-    },
-    {
-      "from": "dim_app_server::mcp::session",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
         "path ToolContribution",
@@ -16257,6 +16269,7 @@
         "path McpServerEntry",
         "path McpServerEntry::enabled",
         "path McpService",
+        "path super::McpSource",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpServerEntry",
@@ -16707,6 +16720,26 @@
     },
     {
       "from": "dim_app_server::plugin_manager",
+      "to": "dim_agent_capabilities::skills",
+      "references": [
+        "path SkillIssue",
+        "path SkillIssue::InvalidManifest",
+        "path SkillIssue::RootUnreadable",
+        "path SkillIssue::ScanLimitReached",
+        "path SkillIssue::Unreadable",
+        "use dim_agent_capabilities::skills::SkillIssue"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager",
+      "to": "dim_agent_capabilities::skills::catalog",
+      "references": [
+        "path SkillsCatalog",
+        "use dim_agent_capabilities::skills::SkillsCatalog"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager",
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
@@ -16721,6 +16754,14 @@
         "path PartScope::Session",
         "use dim_agent_runtime::PartRegistry",
         "use dim_agent_runtime::PartScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager",
+      "to": "dim_app_server::mcp",
+      "references": [
+        "path McpService",
+        "use crate::mcp::McpService"
       ]
     },
     {
@@ -16757,7 +16798,8 @@
         "path Defaults::read",
         "path Installed",
         "path Kind",
-        "path Kind::Code",
+        "path Kind::Mcp",
+        "path Kind::Skills",
         "path Manifest",
         "path Manifest::read",
         "path Record",

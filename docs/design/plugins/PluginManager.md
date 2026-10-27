@@ -188,7 +188,7 @@ Content follows the same switch: when name N stops using P, PluginManager withdr
 2. The App Server reconciles `[assembly, plugins]`. A built-in that is off never starts.
 3. PluginManager's row applies, registers `plugin` with `managementMethods` and `PluginTools` with `partRegistry`, then, after activation, deletes leftover staging directories and Git clones no installed entry refers to.
 
-A default or installed plugin whose row fails does not fail startup; `plugin.list` shows it as failed with rutis' error. Content is not registered again at startup: owners keep their own state (§9 R2).
+A default or installed plugin whose row fails does not fail startup; `plugin.list` shows it as failed with rutis' error. Once the process rows are up, before clients are admitted, the App Server calls PluginManager's content startup, which brings every present owner to the record (§3.7).
 
 ### 3.2 Install
 
@@ -230,7 +230,9 @@ A name using a built-in Rust plugin cannot be reloaded (`not_reloadable`): it ne
 
 ### 3.7 Content registration
 
-For each kind P carries and each owner present, PluginManager calls the owner's `register({plugin, dir, document})` and, to withdraw, `withdraw({plugin})`, where `plugin` is the plugin's name. The owner keeps what was registered as its own state, persists it, and restores it after its own reload. PluginManager does not watch owners and registers nothing again on their behalf. An owner that is absent when PluginManager would call it is skipped; the reply names the skipped kinds. When PluginManager turns that owner's name on, it registers all content of that kind.
+For each kind P carries and each owner present, PluginManager calls the owner's `register({plugin, dir, document})` and, to withdraw, `withdraw({plugin})`, where `plugin` is the plugin's id: its installed id, or a default plugin's name (§7), so it is safe in server ids and file names. When a name switches from one plugin to another, the old plugin's content is withdrawn; a kind the plugin no longer carries is withdrawn. The owner keeps what was registered as its own state, persists it, and restores it after its own reload. PluginManager does not watch owners and registers nothing again on their behalf. An owner that is absent when PluginManager would call it is skipped; the reply names the skipped kinds. An owner reports the plugin ids it holds. At startup, and when PluginManager turns an owner's name on, PluginManager registers that kind of content of every plugin in use and withdraws it for every other id the owner holds; owners never look for plugins. So content restored by an owner for a plugin removed while the owner was off, or left by a process that stopped between writing `plugins.json` and commanding the owner, does not run again, and a refusal is reported again after a restart.
+
+An owner validates what it is given. Content it refuses (an MCP document that fails Mcp's validation, a Skill whose `SKILL.md` does not parse) does not stop the plugin's other content or code: the reply names it under `refused`, and `plugin.list` shows what the owners report for the plugin at the time of the call.
 
 ## 4. Timing and conflicts
 
@@ -303,7 +305,7 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | --- | --- |
 | Blocked by | Owners read only user and project sources; there is no way to hand them a plugin's content. |
 | Existing mechanisms considered | A `pluginContents` service owners read (owners would look for plugins; rejected); content as loader rows (Dim product state in rutis; rejected). |
-| Generic capability | A process operation `register({plugin, dir, document})` that adds or replaces the content of `plugin`, and `withdraw({plugin})`. The owner keeps registered content as its own state, persists it in its own storage, and restores it after its own reload. Mcp prefixes server ids with `plugin`; Hooks names the source `plugin:<plugin>` and gives commands `DIM_PLUGIN_ROOT = dir`; SkillsCatalog reads Skills under `dir`. |
+| Generic capability | A process operation `register({plugin, dir, document})` that adds or replaces the content of `plugin` (a plugin id, §3.7), and `withdraw({plugin})`, plus a read of what the owner refused for `plugin`. The owner keeps registered content as its own state, persists it in its own storage, and restores it after its own reload. Mcp prefixes server ids with `plugin` (`<plugin>:<server>`); Hooks names the source `plugin:<plugin>` and gives commands `DIM_PLUGIN_ROOT = dir`; SkillsCatalog reads Skills under `dir`. |
 | Effect on sequence, batch, interrupt, reload | As each owner's existing sources: a change is a data update the owner announces its own way. |
 | Owner and issue | SkillsCatalog, Mcp, Hooks ([Hooks](Hooks.md)). |
 
@@ -313,12 +315,12 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 
 | Method | Params | Result |
 | --- | --- | --- |
-| `plugin.list` | `{}` | `[{name, use, off, locked, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?}]` |
-| `plugin.install` | `{source: {path} \| {git, ref?}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], restartRequired?}` |
-| `plugin.enable` | `{name, use?}` | `{status?, skipped?, restartRequired?}` |
+| `plugin.list` | `{}` | `[{name, use, off, locked, candidates: [{id \| "builtin" \| "default", source?, kinds}], status?, error?, waitingFor?, refused?}]` |
+| `plugin.install` | `{source: {path} \| {git, ref?}, id?, enable?}` | `{id, name, enabled, status?, skipped?: [kind], refused?: [{kind, error}], restartRequired?}` |
+| `plugin.enable` | `{name, use?}` | `{status?, skipped?, refused?, restartRequired?}` |
 | `plugin.disable` | `{name}` | `{}` |
-| `plugin.reload` | `{name}` | `{status?, skipped?, restartRequired?}` |
-| `plugin.update` | `{id, ref?}` | `{commit, status?, restartRequired?}` |
+| `plugin.reload` | `{name}` | `{status?, skipped?, refused?, restartRequired?}` |
+| `plugin.update` | `{id, ref?}` | `{commit, status?, skipped?, refused?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
 
 `status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor` from `Loader::waiting_for`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
@@ -337,9 +339,10 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | Reload while a Session uses the plugin's tools | Old generation unloads, calls cancelled, new parts mounted | rutis, the instance's mounters |
 | Content owner absent at install | That kind is skipped and reported; registered when PluginManager turns the owner on | PluginManager, owner |
 | Content owner reloads | It restores its own registered content | owner |
+| Plugin removed while its owner is off | Its content is withdrawn when the owner is turned on or at the next start | PluginManager |
 | `instanceNames` not in the running catalog | Configuration recorded, `restart_required`; row created at next start | PluginManager |
 | Process stops during a Git install | Staging directory deleted at next start; `plugins.json` was not written | PluginManager |
-| Process stops after `plugins.json` was written, before the loader command | Next start builds rows from `plugins.json` | PluginManager startup |
+| Process stops after `plugins.json` was written, before the loader or owner command | Next start builds rows from `plugins.json` and brings the owners to it | PluginManager startup |
 
 ## Appendix C. Acceptance (M1)
 
