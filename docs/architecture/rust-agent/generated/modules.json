@@ -2331,6 +2331,7 @@
       "file": "crates/dim-cli/src/args.rs",
       "unexpandedMacros": [
         "cfg",
+        "env",
         "format",
         "matches"
       ]
@@ -4019,6 +4020,7 @@
       "file": "crates/dim-cli/src/update.rs",
       "unexpandedMacros": [
         "cfg",
+        "env",
         "format",
         "vec"
       ]
@@ -19667,6 +19669,13 @@
       ]
     },
     {
+      "from": "dim_cli::args",
+      "to": "dim_cli::update",
+      "references": [
+        "path crate::update::channel"
+      ]
+    },
+    {
       "from": "dim_cli::attachments",
       "to": "dim_cli::attachments::tests",
       "references": [
@@ -26606,6 +26615,7 @@
       "from": "dim_cli::update::tests",
       "to": "dim_cli::update",
       "references": [
+        "path ALPHA_PACKAGE",
         "path installer"
       ]
     },
