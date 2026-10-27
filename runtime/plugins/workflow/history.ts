@@ -63,7 +63,6 @@ export class StageHistory {
       if (!page.value.events.length || this.after >= this.through) {
         this.after = this.through
         this.through = undefined
-        // Do not decide from a partially read prefix or issue another stop for it.
         if (!this.consumed && (this.deleted || (this.applied && this.interrupted))) this.outcome = { state: 'stopped' }
         return true
       }

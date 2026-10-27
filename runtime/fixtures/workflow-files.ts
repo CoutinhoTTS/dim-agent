@@ -11,7 +11,6 @@ export function fixture(namespace: string) {
       const applied = ++generation
       const files = ctx.use<WorkflowFiles>('workflowFiles')
       const settings = ctx.use<Settings>('settings')
-      // The sources this row owns, from its config.
       for (const declaration of config.settings ?? []) await settings.register(declaration)
       await ctx.use<ManagementMethods>('managementMethods').register(
         namespace,
@@ -19,7 +18,6 @@ export function fixture(namespace: string) {
           name: `${namespace}.${name}`, mutating: ['replace', 'create_directory', 'settings_update'].includes(name), interruption: 'drain', progress: false,
         })),
         async (call): Promise<MethodReply> => {
-          // The fixture deliberately sends caller-supplied selectors to the native decoder.
           const request = call.params as unknown as { root: WorkflowRoot; path: string; bytes: number[] }
           try {
             switch (call.method.slice(namespace.length + 1)) {

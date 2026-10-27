@@ -246,7 +246,6 @@ impl State {
             else {
                 continue;
             };
-            // A plugin whose manifest no longer reads has no row.
             match Manifest::read(&dir) {
                 Ok(Manifest {
                     code: Some(code), ..
@@ -598,8 +597,6 @@ impl Manager {
             self.refuse_installed(id)?;
         }
         phase("fetch");
-        // A clone placed under `<home>/plugins`, deleted if the install
-        // does not complete.
         let mut placed: Option<PathBuf> = None;
         let result = async {
             let (id, manifest, source, dir) = match params.source {
@@ -622,7 +619,6 @@ impl Manager {
                     let target = self.state.dirs.clone_dir(&id, &commit)?;
                     let dir = staging.place(&self.state.dirs, &target)?;
                     placed = Some(dir.clone());
-                    // Paths are resolved again where the clone now is.
                     let manifest = Manifest::read(&dir)?;
                     let source = Source::Git {
                         git,
@@ -924,7 +920,6 @@ impl Manager {
                         tracing::warn!(%row, %error, "plugin reload refused");
                     }
                 } else {
-                    // Other row fields: the derived layer replaces the row.
                     self.apply().await;
                 }
             }
@@ -964,7 +959,6 @@ impl Manager {
         let staging = self.state.dirs.stage()?;
         let commit = acquire::clone(git, reference.as_deref(), &staging).await?;
         if &commit == old {
-            // Nothing to load; a newly given ref is still recorded.
             if &reference != recorded {
                 self.commit(
                     |_, ()| entry.name.clone(),
@@ -1030,7 +1024,6 @@ impl Manager {
         phase("load");
         let mut reply = Map::new();
         if after == Some(Use::Installed(id.clone())) {
-            // The entry path changed: the derived layer replaces the row.
             reply = self.switch(&entry.name, after.as_ref()).await.into_map();
         }
         let _ = self.state.dirs.delete(&entry.dir);
@@ -1154,7 +1147,6 @@ impl Manager {
                             Some(Ok(Manifest { code: Some(_), .. })) => {
                                 fields.extend(object(self.status(&row_id(&name))));
                             }
-                            // Its row was not derived: say why.
                             Some(Err(error)) => {
                                 fields.insert("status".into(), json!("failed"));
                                 fields.insert("error".into(), json!(error.to_string()));
@@ -1243,8 +1235,6 @@ impl DynPlugin for PluginManagerPlugin {
                 state: self.state.clone(),
                 loader: ctx.require_at(&self.loader)?,
             };
-            // Leftover staging directories and clones no entry refers to,
-            // before any operation can start one.
             let keep: Vec<PathBuf> = manager
                 .state
                 .record

@@ -123,7 +123,6 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     assert_eq!(manager["use"], "builtin");
     assert_eq!(manager["status"], "running");
     assert_eq!(item(&list, "PermissionRules")["status"], "running");
-    // The Agents group row is the instance tree, not a plugin.
     let listed = list["result"].as_array().unwrap();
     assert!(listed.iter().all(|item| item["name"] != "agent"), "{list}");
 
@@ -136,7 +135,7 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     .await;
     assert_eq!(app_error(&refused), "plugin_locked", "{refused}");
 
-    // Acceptance 8: refused before anything is created.
+    // Acceptance 8.
     let refused = call(
         &mut client,
         "plugin.install",
@@ -166,7 +165,6 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     );
     assert!(!home.join("plugins.json").exists());
 
-    // A local plugin is used in place and turned on.
     let installed = call(
         &mut client,
         "plugin.install",
@@ -184,7 +182,7 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     .await;
     assert_eq!(app_error(&again), "plugin_exists", "{again}");
 
-    // Acceptance 6: a plugin named like a built-in replaces it.
+    // Acceptance 6.
     let replacement = plugin_dir(&home.join("src"), "PermissionRules");
     let installed = call(
         &mut client,
@@ -210,7 +208,7 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     assert_eq!(back["result"]["status"], "running", "{back}");
     assert_ok(&call(&mut client, "permission.rules", json!({})).await);
 
-    // Acceptance 9: Git over ssh (a stand-in that runs Git locally).
+    // Acceptance 9.
     let repo = home.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
@@ -244,7 +242,6 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     assert!(!first_dir.exists());
     let local = call(&mut client, "plugin.update", json!({"id":"notes"})).await;
     assert_eq!(app_error(&local), "not_updatable", "{local}");
-    // A ref given for the commit already in place is still recorded.
     let pinned = call(
         &mut client,
         "plugin.update",
@@ -261,8 +258,6 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
         .find(|e| e["id"] == "git-notes");
     assert_eq!(entry.unwrap()["source"]["ref"], "main", "{record}");
 
-    // A local plugin kept under `<home>/plugins` is the user's: startup
-    // cleanup leaves it, including a clone-shaped directory inside it.
     let kept = plugin_dir(&home.join("plugins"), "kept");
     std::fs::create_dir_all(kept.join("abcdef1234")).unwrap();
     assert_ok(
@@ -274,7 +269,7 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
         .await,
     );
 
-    // Acceptance 5: the state survives a restart.
+    // Acceptance 5.
     assert_ok(
         &call(
             &mut client,
@@ -314,7 +309,6 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
         .await,
     );
 
-    // A used plugin whose manifest no longer reads is listed as failed.
     std::fs::write(source.join("dim-plugin.json"), "{").unwrap();
     let list = call(&mut client, "plugin.list", json!({})).await;
     let notes = item(&list, "notes");
@@ -328,7 +322,6 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     );
     assert_ok(&call(&mut client, "permission.rules", json!({})).await);
 
-    // Removing a Git plugin deletes its clones; a local one stays.
     assert_ok(&call(&mut client, "plugin.remove", json!({"id":"git-notes"})).await);
     assert!(!home.join("plugins/git-notes").exists());
     assert_ok(&call(&mut client, "plugin.remove", json!({"id":"notes"})).await);
@@ -457,7 +450,6 @@ async fn last_tool_text(server: &RunningServer, session: &str) -> String {
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_plugin_manager_installs_reloads_and_replaces_typescript_plugins() {
     let home = home();
-    // The development model profile: Sessions run without a provider.
     let mut config = config(&home);
     config.product_home = None;
     let mut parts = fixture();
@@ -484,7 +476,7 @@ async fn node_plugin_manager_installs_reloads_and_replaces_typescript_plugins() 
     assert!(requests.recv().await.unwrap().contains(&"my_echo".into()));
     assert_eq!(last_tool_text(&server, &session).await, "version one");
 
-    // Acceptance 3: the edit takes effect in the open Session.
+    // Acceptance 3.
     write_tool_plugin(&source, "my-tool", "my_echo", "the second version");
     let reloaded = call(&mut client, "plugin.reload", json!({"name":"my-tool"})).await;
     assert_eq!(reloaded["result"]["status"], "running", "{reloaded}");
@@ -495,7 +487,7 @@ async fn node_plugin_manager_installs_reloads_and_replaces_typescript_plugins() 
         "the second version"
     );
 
-    // Acceptance 5: turned off, its tool is gone from the next turn.
+    // Acceptance 5.
     assert_ok(&call(&mut client, "plugin.disable", json!({"name":"my-tool"})).await);
     submit(&mut client, &session, "plain").await;
     let tools = requests.recv().await.unwrap();
@@ -506,8 +498,7 @@ async fn node_plugin_manager_installs_reloads_and_replaces_typescript_plugins() 
     let list = call(&mut client, "plugin.list", json!({})).await;
     assert_eq!(item(&list, "my-tool")["status"], "running", "{list}");
 
-    // Acceptance 4: the agent installs and reloads a plugin through its
-    // tools; Permission admits each call (here by the allowed list).
+    // Acceptance 4.
     let agent_source = home.join("src/agent-tool");
     write_tool_plugin(&agent_source, "agent-tool", "agent_echo", "first");
     let tools = json!([
@@ -545,8 +536,7 @@ async fn node_plugin_manager_installs_reloads_and_replaces_typescript_plugins() 
     server.shutdown();
     server.join().await.unwrap();
 
-    // Acceptance 6: a TypeScript plugin replaces a built-in and back. The
-    // product profile has PermissionRules, which nothing depends on.
+    // Acceptance 6.
     let mut config = self::config(&home);
     let mut parts = fixture();
     parts.rows.clear();
@@ -562,14 +552,11 @@ async fn node_plugin_manager_installs_reloads_and_replaces_typescript_plugins() 
     )
     .await;
     assert_eq!(installed["result"]["status"], "running", "{installed}");
-    // Its data directory under the pluginFiles root (the product home).
     let data = home.join("rules-ts");
     assert!(std::fs::symlink_metadata(&data).unwrap().is_dir());
     let reply = client.rpc("permission.rules", json!({})).await;
     assert!(reply.get("error").is_some(), "{reply}");
 
-    // A data directory that already is a symbolic link out of the root is
-    // not followed: the plugin still runs, nothing is created outside.
     let outside = home.join("../").join(format!(
         "{}-outside",
         home.file_name().unwrap().to_string_lossy()
@@ -721,7 +708,6 @@ async def apply(ctx, config):
 async fn node_python_plugin_installs_and_reloads_through_its_link() {
     let home = home();
     let mut config = config(&home);
-    // Without a product home, PluginManager's home is the target home.
     config.product_home = None;
     let python = home.join("rust/plugins/.python");
     std::fs::create_dir_all(&python).unwrap();

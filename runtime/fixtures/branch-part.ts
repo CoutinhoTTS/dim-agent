@@ -2,13 +2,6 @@ import { definePlugin } from '@arcships/rutis'
 import { partRow } from './part-row.ts'
 import type { BranchEvent, Services } from '../../npm/plugin.js'
 
-// A branch part on the exported branch services (branch-typescript.md): it
-// rebuilds from committed history, follows live events in order and, after
-// the first turn ends, writes one marked input to its own branch with the
-// events it has seen. A generation that rebuilt from history reports that
-// once, on its first live turn end. It keeps the hand-written form of
-// ordered consumption (`listen`, `committed`, `local`), which stays valid
-// beside `consume`.
 export const part = definePlugin({
   name: 'BranchPartFixture',
   provides: {},
@@ -24,7 +17,6 @@ export const part = definePlugin({
     let cutoff = 0n
     let rebuilt!: () => void
     const ready = new Promise<void>(resolve => { rebuilt = resolve })
-    // Rebuilding folds only; side effects come from live events.
     const step = (event: BranchEvent, live: boolean) => {
       const key = `${event.type}/${event.name}`
       seen.push(key)
@@ -44,8 +36,6 @@ export const part = definePlugin({
         })
       }
     }
-    // Subscribe first, then rebuild through the committed cutoff; live
-    // events at or below it are already folded.
     await dispatcher.listen('branch-part-fixture', ['input/message', 'turn/start', 'turn/end'], async event => {
       await ready
       if (BigInt(event.sequence) > cutoff) step(event, true)

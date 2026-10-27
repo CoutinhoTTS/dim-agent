@@ -32,16 +32,10 @@ pub struct ProductEvent(Arc<AgentEvent>);
 impl ProductEvent {
     /// `version` is the connection's protocol version (2 or 3).
     pub fn new(event: Arc<AgentEvent>, version: u32) -> Option<Self> {
-        // Deliberately exclude model requests, diagnostic budgets, configuration
-        // commands and approval controls. None is a client business feed.
         let visible = match &event.kind {
-            // Started calls and results closing undispatched calls are v3 facts (ADR agent-029).
             EventKind::ToolUseStart(_) => version >= 3,
             EventKind::ToolResult(data) => version >= 3 || data.call_event_id.is_some(),
-            // Withdrawal is new in v3: the command carries the reason clients
-            // show, the result says the input is never applied.
             EventKind::InputWithdraw(_) | EventKind::InputDeleted(_) => version >= 3,
-            // Compaction state is read from these facts (pending, running, done).
             EventKind::ContextCompact(_)
             | EventKind::ContextCompactionStart(_)
             | EventKind::ContextCompaction(_) => version >= 3,
@@ -84,9 +78,7 @@ impl ProductEvent {
             | EventKind::ContextPrepare(_)
             | EventKind::ContextBudget(_)
             | EventKind::ModelCall(_)
-            // Reloading a stored branch is not a client business fact.
             | EventKind::BranchResume(_)
-            // The fork's reply already reports it to the client.
             | EventKind::SessionForked(_)
             // v2/v3 keep their allowlists; extension events reach only a
             // dynamic protocol after host visibility filtering (ADR 001).
@@ -98,8 +90,6 @@ impl ProductEvent {
 impl Serialize for ProductEvent {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if let EventKind::ContextConfigured(data) = &self.0.kind {
-            // Configuration adoption is public; full provider settings and
-            // composed system prompts remain inside the runtime.
             serde_json::json!({
                 "id": self.0.id, "sequence": self.0.sequence, "create_at": self.0.create_at,
                 "type": "context", "name": "configured",

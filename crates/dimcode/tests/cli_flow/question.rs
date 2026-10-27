@@ -184,7 +184,6 @@ fn interactive_questions_take_choices_custom_text_and_a_decline() {
         let gone = wire.read("session.history");
         assert_eq!(gone["params"]["branchId"], "gone");
         fail(wire, &gone, -32000, "branch_missing");
-        // Printed after the call above was read, while the approval waits.
         fail(wire, &child, -32000, "internal_error");
         let approval = wire.read("approval.respond");
         assert_eq!(approval["params"]["requestId"], "approval2");
@@ -275,7 +274,6 @@ fn questions_of_every_branch_are_answered_and_close_on_their_results() {
         let idle = wire.read("session.idle");
         let history = child_state(wire);
         child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
-        // The same call again, live: still one prompt.
         step(wire, "child", 3, "tool-call", asked("rk", "k1", json!([deploy()])));
         let respond = wire.read("session.question.respond");
         assert_eq!(
@@ -299,12 +297,10 @@ fn questions_of_every_branch_are_answered_and_close_on_their_results() {
         step(wire, "main", 12, "tool-call", asked("rm2", "m2", json!([today()])));
         prompt_shown.recv().unwrap();
         step(wire, "main", 13, "tool-result", answered("main-12", "rm2", "m2", true));
-        // Another client's answer wins while this one is in flight.
         step(wire, "main", 14, "tool-call", asked("rm3", "m3", json!([today()])));
         let respond = wire.read("session.question.respond");
         step(wire, "main", 15, "tool-result", answered("main-14", "rm3", "m3", false));
         fail(wire, &respond, -32000, "question_not_pending");
-        // Any failure after the result closes the prompt the same way.
         step(wire, "main", 16, "tool-call", asked("rm4", "m4", json!([today()])));
         let respond = wire.read("session.question.respond");
         step(wire, "main", 17, "tool-result", answered("main-16", "rm4", "m4", true));
@@ -373,7 +369,6 @@ fn a_reused_call_id_is_answered_with_its_own_request() {
                 event("child", 4, "tool-result", answered("child-3", "r1", "k1", false))],
                 "through":5,"nextAfter":4,"done":false}),
         );
-        // The next page is read once the first one was applied.
         let next = wire.read("session.history");
         read.send(()).unwrap();
         wire.reply(
@@ -544,7 +539,6 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
                         stop["params"],
                         json!({"sessionId":"session","branchId":"main","reason":"Interactive answer required"})
                     );
-                    // A question read after `main` settled is given up too.
                     let history = child_state(wire);
                     end(wire, 11, "cancelled");
                     wire.reply(&stop, json!({"sequence":11}));
@@ -816,7 +810,6 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
         wire.reply(&history,json!({"events":[
             {"id":"request","sequence":1,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r","call_id":"agent","target":{"kind":"agent","agent_id":"reviewer"},"prompt":"Inspect readonly member question"}},
             {"id":"delivery","sequence":2,"create_at":2,"type":"collaboration","name":"delivered","data":{"op_event_id":"request","status":"ok","agent_id":"reviewer","session_id":"member"}},
-            // Ended: only the opened detail observes the member.
             {"id":"result","sequence":3,"create_at":3,"type":"collaboration","name":"result","data":{"request_event_id":"request","agent_id":"reviewer","session_id":"member","status":"completed","text":"done"}},
         ],"through":3,"nextAfter":3,"done":true}));
         let providers = wire.read("account.providers");

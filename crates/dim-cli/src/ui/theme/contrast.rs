@@ -121,7 +121,6 @@ pub fn lift_to_contrast(color: Rgb, background: Rgb, floor: Floor) -> Rgb {
         } else {
             blend(color, target, step as f64 / 100.0)
         };
-        // Quantize like the hex round trip the TS version goes through.
         let candidate = parse_hex(&to_hex(candidate)).unwrap_or(candidate);
         if contrast_ratio(candidate, background) >= floor.ratio
             && apca_lightness_contrast(candidate, background) >= floor.lc
@@ -180,7 +179,6 @@ mod tests {
 
     #[test]
     fn a_weak_colour_is_lifted_toward_the_foreground_side() {
-        // Dim green on white fails; it moves toward black until it passes.
         let lifted = lift_to_contrast(rgb("#a9dc76"), rgb("#ffffff"), COLORED_TEXT);
         assert!(contrast_ratio(lifted, rgb("#ffffff")) >= 4.5);
         assert!(lifted[0] < rgb("#a9dc76")[0]);

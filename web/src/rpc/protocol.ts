@@ -68,7 +68,6 @@ export type ProviderCatalog = {
 
 export type ApprovalDecision = "allow" | "deny"
 
-// ---------------------------------------------------------------- events
 
 export type ToolResult = {
   /** Text the model read; image blocks are dropped at the boundary. */
@@ -99,7 +98,6 @@ export type SessionEvent = {
   content: EventContent
 }
 
-// --------------------------------------------------------- notifications
 
 /** Model output of a request not written to the Timeline yet; each notice replaces the last. */
 export type ModelProgress = {

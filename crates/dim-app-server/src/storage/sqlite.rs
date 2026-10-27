@@ -101,7 +101,6 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
 const UPGRADES: [(u32, &[&str]); 5] = [
-    // S5a: Session files.
     (
         13,
         &[
@@ -110,7 +109,6 @@ const UPGRADES: [(u32, &[&str]); 5] = [
             "session_file_owners_by_file",
         ],
     ),
-    // S5b: title metadata.
     (15, &["session_metadata"]),
     // #193: request messages as lists of `node` content rows; the marker
     // only.
@@ -203,9 +201,6 @@ struct Admission {
     running: usize,
     lease: Option<DatabaseLease>,
 }
-// Closing a descriptor alone may leave a flock held by a concurrently spawned
-// child until exec. Release ownership explicitly, including failed opens and
-// shutdown. The connection must always be dropped before this lease.
 struct DatabaseLease(File);
 impl Drop for DatabaseLease {
     fn drop(&mut self) {
@@ -258,8 +253,6 @@ impl SqliteStorage {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(storage)?;
-        // Admission precedes any migration or writable PRAGMA. This native
-        // database never opens or migrates the legacy TypeScript store.
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage)?;
@@ -282,9 +275,6 @@ impl SqliteStorage {
                 return Err(unsupported_version());
             }
             if version != FORMAT {
-                // Replace the marker, then add what each step from `version`
-                // on adds. No business row is read or rewritten; a failure
-                // rolls back to the untouched store.
                 tx.execute_batch("DROP TABLE agent_store_format")
                     .map_err(storage)?;
                 tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
@@ -356,8 +346,6 @@ impl SqliteStorage {
                 path.display()
             ))
         };
-        // Upgrades only add tables and replace the marker, so the reader
-        // reads a format it upgrades from as it is.
         let format = known_format(&schema(&connection)?).ok_or_else(unsupported)?;
         if markers(&connection)? != [i64::from(format)] {
             return Err(unsupported());
@@ -407,7 +395,6 @@ impl SqliteStorage {
     pub async fn close(self: &Arc<Self>) -> Result<()> {
         self.admission.lock().unwrap().closed = true;
         let db = self.clone();
-        // Closing must finish even when its caller stops waiting.
         tokio::spawn(async move {
             loop {
                 let idle = db.idle.notified();
@@ -426,8 +413,6 @@ impl SqliteStorage {
                     *guard = Some(connection);
                     return Err(storage(failure));
                 }
-                // Retain the lease on unlock failure so another close can retry,
-                // even when the SQLite connection has already closed.
                 let mut admission = db.admission.lock().unwrap();
                 if let Some(lease) = &admission.lease {
                     lease.0.unlock().map_err(storage)?;
@@ -461,9 +446,6 @@ impl Plugin for SqliteStoragePlugin {
         let storage = tokio::task::spawn_blocking(move || SqliteStorage::open(path))
             .await
             .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))??;
-        // Direct to stderr: the daemon's default log filter keeps only
-        // errors, and a user who rolls back finds this line next to the
-        // old daemon's refusal.
         if let Some(from) = storage.upgraded_from() {
             eprintln!(
                 "Upgraded native store {} from format v{from} to v{FORMAT}; earlier dimcode versions cannot open it.",

@@ -228,7 +228,6 @@ pub(crate) fn parse_rfc3339_ms(text: &str) -> Option<u64> {
         }
         _ => return None,
     };
-    // Days from civil (Howard Hinnant).
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);
     let yoe = y - era * 400;

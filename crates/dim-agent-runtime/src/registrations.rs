@@ -83,7 +83,6 @@ impl<T: Send + Sync + 'static> Registrations<T> {
                 Ok(registration)
             }
             Err(error) => {
-                // The caller is already unloading: nothing of it may stay.
                 self.withdraw(&registration.name, registration.id);
                 Err(error)
             }

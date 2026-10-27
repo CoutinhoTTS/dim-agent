@@ -399,8 +399,6 @@ impl SettingsService {
                 let revision = revision(Some(&bytes));
                 match lease.replace(bytes, private_permissions(), &cancel).await {
                     Ok(()) => {}
-                    // The new content is what readers now see: consumers follow
-                    // it, and the caller learns it may not survive a crash.
                     Err(FileStorageError::Unsynced(error)) => {
                         owner.publish(format.source(), scope, &revision);
                         return Err(FileStorageError::Unsynced(error).into());

@@ -16,7 +16,6 @@ pub struct ServerControl {
     shutdown: CancellationToken,
     force: AtomicBool,
     fault: Mutex<Option<ServerError>>,
-    // Only detached reply I/O, never graph-owned connections or RPC tasks.
     shutdown_replies: Mutex<Vec<ShutdownReply>>,
 }
 impl ServerControl {

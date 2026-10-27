@@ -113,7 +113,6 @@ async fn a_client_answers_a_waiting_question_through_rpc() {
     let call_sequence = asked["event"]["sequence"].as_u64().unwrap();
     waiting(&mut client, &sid, &request_id, &call_id).await;
 
-    // A fork cuts only at a rest point, so never at a pending question.
     let fork = client
         .rpc("session.fork", json!({"sessionId":sid,"at":call_sequence}))
         .await;
@@ -132,7 +131,6 @@ async fn a_client_answers_a_waiting_question_through_rpc() {
             json!({"sessionId":sid,"branchId":"main","requestId":request_id,"callId":call_id}),
             "invalid_params",
         ),
-        // The request is part of the call's name.
         (
             json!({"sessionId":sid,"branchId":"main","callId":call_id,"answers":sqlite}),
             "invalid_params",
@@ -334,7 +332,6 @@ async fn a_late_answer_from_another_client_never_reaches_a_reused_call_id() {
     let r2 = request(&second);
     assert_ne!(r1, r2, "each model request has its own id");
     waiting(&mut a, &sid, &r2, "c1").await;
-    // Client B still holds turn 1's call and answers or declines it late.
     for late in [
         respond(&sid, &r1, "c1", choose("Yes")),
         json!({"sessionId":sid,"branchId":"main","requestId":r1,"callId":"c1","declined":true}),
@@ -361,7 +358,6 @@ async fn a_late_answer_from_another_client_never_reaches_a_reused_call_id() {
         expected
     );
     assert_ok(&a.rpc("session.idle", idle).await);
-    // The model reads it as turn 2's `c1` result, after turn 1's.
     let request = model.0.lock().unwrap().last().unwrap().clone();
     let read: Vec<_> = request
         .messages

@@ -1,0 +1,29 @@
+[package]
+name = "dim-oauth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The Dim account provider (dimcode-api-oauth) as a managed provider plugin"
+
+[dependencies]
+dim-app-server.workspace = true
+dim-agent-capabilities.workspace = true
+dim-agent-runtime.workspace = true
+rutis.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2"
+regex = "1"
+sha2 = "0.10.9"
+base64 = "0.22"
+serde_jcs = "0.2"
+getrandom = "0.3"
+
+[dev-dependencies]
+rutis-loader.workspace = true
+axum = { workspace = true, features = ["json"] }

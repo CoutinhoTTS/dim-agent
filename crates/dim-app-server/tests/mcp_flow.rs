@@ -96,14 +96,12 @@ impl Fixture {
         let catalog = dim_app_server::catalog();
         let build = Build::default();
         let names = Names::copy(&catalog, &build);
-        // The management table the process providers register with.
         root.plugin(
             dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
                 .unwrap(),
         );
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
-        // Where Mcp registers its Session part; no Agent mounts it here.
         root.provide_as::<dim_agent_runtime::PartRegistry>(Arc::new(
             dim_agent_runtime::PartRegistry::default(),
         ))
@@ -209,9 +207,6 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
         );
     }
 
-    // Saving a project source never enables it, even with a valid-looking
-    // transport; enabling records only the user's choice, and an invalid
-    // transport still cannot run.
     let revision = fixture
         .mcp
         .update(
@@ -266,8 +261,6 @@ async fn loader_publication_is_scoped_secret_free_and_restart_stable() {
     );
     assert_eq!(user.state(), McpServerState::Disconnected);
 
-    // Restart with different FileStorage indices. Templates stay immutable;
-    // enablement still belongs to the canonical workspace.
     fixture.publication.close().await;
     fixture.root.shutdown().await.unwrap();
     assert_eq!(user.state(), McpServerState::Closed);
@@ -316,8 +309,6 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
         .unwrap()
     };
     write(&config);
-    // The file's own `enabled` cannot enable it, and a grant from the removed
-    // approval store is ignored rather than migrated.
     let grants = r#"{"version":1,"approved":{}}"#;
     fs::write(fixture.home.join("mcp-approvals.json"), grants).unwrap();
     let catalog = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
@@ -361,8 +352,6 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
         .server(Some(1), "shared".into(), &cancel)
         .await
         .unwrap();
-    // Shared project files never carry the choice; the user's record has only
-    // the workspace and id, no configuration.
     assert_eq!(fs::read(&project_file).unwrap(), written);
     let record = fs::read_to_string(fixture.home.join("mcp-projects.json")).unwrap();
     let workspace = fixture.home.join("project");
@@ -375,7 +364,6 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
         grants
     );
 
-    // Enablement is keyed by workspace: the same id elsewhere stays disabled.
     let other = fixture.home.join("other");
     fs::create_dir(&other).unwrap();
     fs::write(
@@ -410,8 +398,6 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
     assert_eq!(first.state(), McpServerState::Disconnected);
     drop((first, second));
 
-    // An unreadable record disables every project entry; user entries, even
-    // looked up from the workspace, are unaffected.
     let record_path = fixture.home.join("mcp-projects.json");
     fs::write(&record_path, b"{invalid").unwrap();
     let degraded = fixture.mcp.catalog(Some(1), &cancel).await.unwrap();
@@ -444,8 +430,6 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
         let cancel = cancel.clone();
         async move { set_project(&mcp, 0, enabled, &cancel).await }
     };
-    // Disabling stops the running server in every Session before it returns,
-    // even while bound.
     let connection = mcp.server(Some(0), "shared".into(), &cancel).await.unwrap();
     set(false).await.unwrap();
     assert_eq!(connection.state(), McpServerState::Closed);
@@ -458,8 +442,6 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
         "{\n  \"enabled\": {}\n}\n"
     );
 
-    // Removing an entry withdraws its enablement: re-adding the id, by an edit
-    // or a checkout, starts it disabled again.
     set(true).await.unwrap();
     let revision = mcp
         .catalog(Some(0), &cancel)
@@ -488,8 +470,6 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
     .unwrap();
     assert!(!mcp.catalog(Some(0), &cancel).await.unwrap().servers["shared"].enabled());
 
-    // Disabling never depends on the project file being readable: a retained
-    // connection closes while the publisher still cannot read the file.
     set(true).await.unwrap();
     let retained = mcp.server(Some(0), "shared".into(), &cancel).await.unwrap();
     let written = fs::read(&project_file).unwrap();
@@ -520,7 +500,6 @@ async fn project_entries_start_disabled_and_only_the_users_record_enables_them()
     fs::write(&project_file, &written).unwrap();
     assert!(!mcp.catalog(Some(0), &cancel).await.unwrap().servers["shared"].enabled());
 
-    // With both the file and the record unreadable, it is withdrawn too.
     set(true).await.unwrap();
     let retained = mcp.server(Some(0), "shared".into(), &cancel).await.unwrap();
     broken().await;
@@ -593,7 +572,6 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     )
     .await
     .unwrap();
-    // Enabling a project entry edits neither the project nor the user MCP file.
     let enabled = mcp.catalog(Some(1), &cancel).await.unwrap();
     assert!(enabled.servers["shared"].enabled());
     assert_eq!(enabled.project_revision, Some(project_revision.clone()));
@@ -606,7 +584,6 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
         original_user
     );
 
-    // Removing only the project override reveals, rather than deletes, user config.
     mcp.update(
         SettingsScope::Project(1),
         project_revision,
@@ -623,7 +600,6 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
     assert_eq!(revealed.servers["shared"].source, SettingsScope::User);
     assert!(revealed.servers["shared"].enabled());
 
-    // Different edits using one source revision must not both succeed.
     let new_server =
         serde_json::from_value(json!({"command":"other", "args":["--read-only"]})).unwrap();
     let (a, b) = tokio::join!(
@@ -662,7 +638,6 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
         json!({"keep":true})
     );
 
-    // Put replaces an existing entry, rather than merging old transport fields.
     let replacement = serde_json::from_value(json!({
         "type":"http", "url":"https://replacement.test/mcp"
     }))
@@ -733,7 +708,6 @@ async fn directory_preserves_scope_and_cas_through_plugin_management() {
         Err(McpError::InvalidId)
     ));
 
-    // External corruption is reported, not silently replaced with an empty source.
     fs::write(fixture.home.join("project/.mcp.json"), b"{").unwrap();
     assert!(matches!(
         mcp.catalog(Some(1), &cancel).await,
@@ -799,7 +773,6 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
     let path = fixture.files.path(0, "mcp.json").unwrap();
     let snapshot = fixture.mcp.catalog(None, &cancel).await.unwrap();
     let changed = Arc::new(tokio::sync::Notify::new());
-    // Wakes the test once Settings announces a write.
     let ping = changed.clone();
     fixture
         .root
@@ -811,8 +784,6 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
         })
         .unwrap();
     let lease = fixture.files.lock(&path, &cancel).await.unwrap();
-    // Poll the operation into admission, then drop only its caller while the
-    // file lease guarantees no commit has happened yet.
     assert!(
         tokio::time::timeout(
             Duration::from_millis(50),
@@ -835,7 +806,6 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
     assert!(!snapshot.servers["shared"].enabled());
     let bytes = fs::read(fixture.home.join("mcp.json")).unwrap();
 
-    // A caller cancellation before the file commit must not change the file.
     let lease = fixture.files.lock(&path, &cancel).await.unwrap();
     let cancelled = CancellationToken::new();
     let pending = fixture.mcp.update(
@@ -861,8 +831,6 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
     drop(lease);
     assert_eq!(fs::read(fixture.home.join("mcp.json")).unwrap(), bytes);
 
-    // Unload just Mcp while its Settings dependency remains active. Shutdown
-    // drains the lock wait and an old service handle cannot start more work.
     let lease = fixture.files.lock(&path, &cancel).await.unwrap();
     let pending = fixture.mcp.update(
         SettingsScope::User,
@@ -903,7 +871,6 @@ async fn admitted_writes_survive_dropped_waiters_and_stop_with_the_plugin() {
         Err(McpError::Closed)
     ));
     drop(lease);
-    // Settings stays; Mcp's sources went with it, and the document stays.
     assert!(matches!(
         fixture
             .settings

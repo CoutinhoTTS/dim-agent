@@ -4,7 +4,6 @@
 //! (`packages/agent/src/tool/builtin/` and `packages/plugin/src/builtin/grep-glob/`).
 //! Workspace I/O runs on blocking threads with `std::fs`.
 
-// Rejections are complete tool results returned early, as in TS.
 #![allow(clippy::result_large_err)]
 
 mod codec;
@@ -39,6 +38,8 @@ pub struct FileTools {
     output_dir: PathBuf,
     locks: Arc<FileWriteCoordinator>,
     #[cfg(test)]
+    /// Runs after a complete sibling is synced and before commit verification;
+    /// no sleeps, production hooks or global test locks.
     before_commit: Option<CommitHook>,
 }
 
@@ -389,8 +390,6 @@ mod mutation_tests {
             .await
     }
 
-    // The instance-owned hook runs after a complete sibling is synced, before
-    // commit verification. No sleeps, production hooks, or global test locks.
     #[tokio::test]
     async fn staged_mutations_fail_closed() {
         for name in ["write", "edit"] {

@@ -191,7 +191,6 @@ pub(super) fn apply(
                 ));
             }
             if *kind == ProviderKind::XaiResponses {
-                // The native adapter adds the encrypted-content include for store:false.
                 fields.insert("store".into(), json!(false));
             }
         }

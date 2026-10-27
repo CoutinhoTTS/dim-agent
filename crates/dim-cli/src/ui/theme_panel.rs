@@ -110,7 +110,6 @@ mod tests {
         assert!(!dark.iter().any(|(id, _)| *id == "dim-light"));
         let light = entries(ColorMode::Ansi256, Appearance::Light);
         assert!(light.iter().any(|(id, _)| *id == "dim-light"));
-        // 16 colours: only `system`.
         assert_eq!(entries(ColorMode::Ansi16, Appearance::Dark).len(), 1);
     }
 

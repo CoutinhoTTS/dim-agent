@@ -1,4 +1,4 @@
-//! The rows of the palette and the list panels as Amp lays them out:
+//! The rows of the palette and the list panels:
 //! category, label, detail and key in columns shared by every row, under a
 //! panel title. Panels and the palette draw through these.
 
@@ -22,7 +22,7 @@ pub enum Kind {
     Skill(String),
 }
 
-/// One palette row as Amp lays it out: category, label (bold), detail,
+/// One palette row: category, label (bold), detail,
 /// and the key that runs it at the right edge.
 #[derive(Debug, Clone)]
 pub struct Row {
@@ -94,8 +94,6 @@ impl Columns {
                 .unwrap_or(0)
         };
         let category = widest(&|r| Some(display_width(&r.category)));
-        // Only labels with a detail after them set the detail column: an
-        // action named by its description runs on into the free space.
         let label = widest(&|r| (!r.detail.is_empty()).then(|| display_width(&r.label)));
         let room = inner.saturating_sub(ROW_INDENT + category + DETAIL_GAP);
         Self {
@@ -107,12 +105,11 @@ impl Columns {
 
 const UNAVAILABLE: &str = " (unavailable)";
 
-/// One row in Amp's columns: category (faint, right-aligned), label (bold),
+/// One row in the shared columns: category (faint, right-aligned), label (bold),
 /// detail (faint), key (keybind colour, at the right edge). An unavailable
 /// row is faint throughout; the selected row sits on an accent bar.
 pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &Palette) -> String {
     if !row.selectable() {
-        // A group header sits left of the rows it introduces.
         return paint(
             &truncate_cells(&row.label, inner),
             Paint {

@@ -1,6 +1,5 @@
 import type { SourceDeclaration } from '../../../npm/plugin.js'
 
-// SessionTitle's Settings source, registered by the plugin's row when it starts.
 export const settings: SourceDeclaration = {
   "source": "session-title",
   "userFile": "session-title.json",

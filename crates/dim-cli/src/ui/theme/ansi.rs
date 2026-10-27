@@ -4,7 +4,7 @@
 //! - `#rrggbb`: that exact colour (truecolor escape; the palettes are
 //!   already snapped to what a lower-depth terminal shows),
 //! - `ansi:N`: slot `N` of the terminal's own palette, so the role follows
-//!   the user's colour scheme (as Amp's default theme does),
+//!   the user's colour scheme (as the default theme does),
 //! - `default`: the terminal's default foreground,
 //! - `dim`: the default foreground with the faint attribute (foreground only).
 

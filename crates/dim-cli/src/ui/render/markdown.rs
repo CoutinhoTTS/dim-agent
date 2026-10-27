@@ -39,7 +39,7 @@ fn fg(color: &str) -> Style {
     }
 }
 
-/// The role mapping onto the renderer's styles, as Amp draws Markdown: a
+/// The role mapping onto the renderer's styles: a
 /// blue (keybinding hue) first-level heading, highlighted second-level ones,
 /// bold accent inline code, plain bullets, faint table rules with a divider
 /// under every row, accent underlined links.
@@ -48,7 +48,6 @@ fn markdown_style(p: &Palette) -> MarkdownStyle {
     let heading_accent = fg(&p.highlight).bold();
     let heading_plain = fg(&p.text).bold();
     let hidden = Style::new().dimmed().hidden();
-    // Levels 1-2 drop their `#` markers; deeper levels show them muted.
     let marker = fg(&p.muted);
     MarkdownStyle {
         heading_inner: [
@@ -66,8 +65,6 @@ fn markdown_style(p: &Palette) -> MarkdownStyle {
         emphasis_outer: hidden,
         strikethrough_inner: Style::new().strikethrough(),
         strikethrough_outer: hidden,
-        // Foreground only: a background block on every identifier makes dense
-        // prose read as a wall of highlights.
         inline_code_inner: fg(&p.accent).bold(),
         inline_code_outer: hidden,
         blockquote_outer: fg(&p.muted),
@@ -79,7 +76,6 @@ fn markdown_style(p: &Palette) -> MarkdownStyle {
         link_text: fg(&p.accent).underline(),
         link_url: fg(&p.muted),
         link_title: fg(&p.muted),
-        // The fence lines are dropped in `render`.
         code_outer: fg(&p.muted),
         code_language: fg(&p.faint),
         code_untagged: fg(&p.text_soft),
@@ -152,8 +148,6 @@ fn tm_theme(code: &CodePalette, text: &str) -> String {
 impl MarkdownRenderer {
     pub fn new(theme: &Theme) -> Self {
         let color = |spec: &str| tui_color(spec).unwrap_or(TuiColor::Reset);
-        // Syntax colours given as palette slots follow the terminal's scheme:
-        // the highlighter maps them onto its base colours.
         xai_grok_markdown::set_polarity_safe_syntax(theme.code.keyword.starts_with("ansi:"));
         Self {
             style: markdown_style(&theme.palette),
@@ -168,8 +162,6 @@ impl MarkdownRenderer {
     /// dropped (a committed chunk brings its own spacing).
     pub fn render(&self, source: &str, content_width: usize, gutter: usize) -> Vec<String> {
         let width = content_width.max(1);
-        // Tabs become spaces to CommonMark's tab stops, which keeps both the
-        // block structure and a code block's indentation.
         let source = crate::ui::text::expand_tabs(source);
         let text = source.trim_end_matches('\n');
         let mut buffers = MarkdownBuffers::new();
@@ -190,8 +182,6 @@ impl MarkdownRenderer {
         let mut urls: Vec<String> = Vec::new();
         let pad = " ".repeat(gutter);
         let mut rows: Vec<String> = Vec::new();
-        // Indent of the open fence: fenced code is drawn as Amp draws it,
-        // without its fence lines, four columns in.
         let mut fence: Option<usize> = None;
         for (index, line) in output.lines.iter().enumerate() {
             let code = in_code(index);
@@ -208,8 +198,6 @@ impl MarkdownRenderer {
                 };
                 continue;
             }
-            // A table row starts with a box character; a lone leading `│` is also
-            // a quote bar, so a row needs a second vertical rule to count.
             let trimmed = text_of.trim_start();
             let table = trimmed.starts_with(['┌', '├', '└'])
                 || (trimmed.starts_with('│') && trimmed.matches('│').count() >= 2);
@@ -219,7 +207,6 @@ impl MarkdownRenderer {
                 && text_of.trim().chars().all(|c| c == '─');
 
             if is_rule {
-                // A rule spans the content width, whatever the renderer drew.
                 let rule: Vec<Cell> = (0..width)
                     .map(|_| ("─".to_owned(), TuiStyle::default().fg(self.rule), 1, None))
                     .collect();
@@ -228,11 +215,7 @@ impl MarkdownRenderer {
             }
 
             let mut cells = cells_of(line);
-            // Links: attach the destination to the cells of the link text and
-            // drop the ` (url)` suffix the pretty renderer writes after it.
             attach_links(&mut cells, index, &output.hyperlinks, &mut urls);
-            // Body text carries the base colour (code and table rows draw
-            // theirs uncoloured).
             if code || table {
                 for cell in &mut cells {
                     if cell.1.fg == Some(self.text_soft) || cell.1.fg == Some(TuiColor::Reset) {
@@ -265,7 +248,6 @@ impl MarkdownRenderer {
                 continue;
             }
             if table {
-                // Amp's tables have round corners.
                 for cell in &mut cells {
                     if let Some(round) = match cell.0.as_str() {
                         "┌" => Some("╭"),
@@ -281,7 +263,6 @@ impl MarkdownRenderer {
                 && cells[marker].0 == "•"
                 && cells.get(marker + 1).is_some_and(|cell| cell.0 == " ")
             {
-                // The renderer's bullet goes back to the `-` Amp keeps.
                 cells[marker].0 = "-".to_owned();
             }
             for wrapped in wrap_cells_row(&cells, width, false) {
@@ -324,15 +305,13 @@ fn attach_links(
     targets: &[xai_grok_markdown::HyperlinkTarget],
     urls: &mut Vec<String>,
 ) {
-    // Targets are positioned in the line as rendered, so every range is
-    // resolved against the untouched columns before anything is removed.
     let mut starts: Vec<usize> = Vec::new();
     let mut column = 0;
     for cell in cells.iter() {
         starts.push(column);
         column += cell.2;
     }
-    let mut linked: Vec<(usize, usize)> = Vec::new(); // (url slot, last cell + 1)
+    let mut linked: Vec<(usize, usize)> = Vec::new();
     for target in targets.iter().filter(|t| t.line_index == line_index) {
         if !linkable(&target.url) {
             continue;
@@ -355,8 +334,6 @@ fn attach_links(
             linked.push((slot, end));
         }
     }
-    // The ` (url)` the pretty renderer writes after link text is replaced by
-    // the hyperlink itself; remove it, last link first so offsets stay valid.
     linked.sort_by_key(|(_, end)| std::cmp::Reverse(*end));
     for (slot, end) in linked {
         let suffix = format!(" ({})", urls[slot]);
@@ -383,7 +360,7 @@ fn merge_neutral_gaps(cells: &mut [Cell]) {
 }
 
 /// Hanging indent of a wrapped row: under a numbered list marker or a quote
-/// bar. A `-` item continues at its margin, as Amp wraps it.
+/// bar. A `-` item continues at its margin.
 fn hanging_indent(cells: &[Cell]) -> usize {
     let text: String = cells.iter().map(|c| c.0.as_str()).collect();
     let leading = text.len() - text.trim_start_matches(' ').len();
@@ -407,7 +384,6 @@ fn wrap_cells_row(cells: &[Cell], width: usize, code: bool) -> Vec<Vec<Cell>> {
     if total <= width {
         return vec![cells.to_vec()];
     }
-    // Wrapped code continues flush under the bracket's gutter.
     let hang = if code { 0 } else { hanging_indent(cells) };
     let hang = hang.min(width.saturating_sub(1));
     let first_width = width.max(1);
@@ -447,7 +423,6 @@ fn wrap_cells_row(cells: &[Cell], width: usize, code: bool) -> Vec<Vec<Cell>> {
                     row.append(&mut gap);
                 }
                 gap.clear();
-                // Still too wide on a fresh row: cut the word itself.
                 while word_width > budget!() {
                     let room = budget!().saturating_sub(row_width);
                     let mut used = 0;
@@ -470,7 +445,6 @@ fn wrap_cells_row(cells: &[Cell], width: usize, code: bool) -> Vec<Vec<Cell>> {
         }};
     }
 
-    // `None` marks the end of the row and flushes the last word.
     for cell in cells.iter().map(Some).chain([None]) {
         match cell {
             Some(cell) if cell.0 != " " => {
@@ -485,7 +459,6 @@ fn wrap_cells_row(cells: &[Cell], width: usize, code: bool) -> Vec<Vec<Cell>> {
     }
     rows.push(row);
 
-    // Rows after the first carry the hanging indent.
     for (index, row) in rows.iter_mut().enumerate() {
         if index == 0 || hang == 0 {
             continue;
@@ -689,7 +662,6 @@ mod tests {
     fn quoted_text_keeps_the_body_colour_and_is_not_mistaken_for_a_table() {
         let rows = renderer().render("> quoted line\n> more", 40, 0);
         assert!(rows[0].contains("quoted line"));
-        // The default theme's body text is the terminal's own foreground.
         assert!(rows[0].contains(" quoted line"), "{:?}", rows[0]);
         assert!(!rows[0].contains("\x1b[2mquoted"), "{:?}", rows[0]);
     }
@@ -728,7 +700,6 @@ mod tests {
         let rows = renderer().render("a **bold** word", 40, 0);
         assert!(rows[0].contains("\x1b[1m"), "{:?}", rows[0]);
         assert!(rows[0].matches("\x1b[0m").count() >= 1);
-        // Nothing styled runs on past the last reset.
         let tail = rows[0].rsplit("\x1b[0m").next().unwrap();
         assert!(!tail.contains('\x1b'), "{:?}", rows[0]);
     }
@@ -739,13 +710,9 @@ mod tests {
         let r = MarkdownRenderer::new(&theme);
         let h2 = r.render("## Two", 40, 0);
         assert_eq!(plain(&h2), vec!["Two"]);
-        // Amp's headings: the terminal's cyan, bold.
         assert!(h2[0].contains("\x1b[1;36m"), "{:?}", h2[0]);
         assert_eq!(plain(&r.render("### Three", 40, 0)), vec!["### Three"]);
     }
-
-    // The elements as Amp draws them: these tests pin them, so a change to
-    // the shared renderer shows up here.
 
     #[test]
     fn tables_have_round_corners_and_a_divider_under_every_row() {
@@ -776,6 +743,9 @@ mod tests {
         assert_eq!(rows, vec!["use code here"]);
     }
 
+    /// Link targets are positioned in the rendered line before the visible
+    /// ` (url)` suffixes are removed, so two links with leading text keep
+    /// their own OSC 8 spans.
     #[test]
     fn links_show_their_text_and_carry_the_url_as_an_osc8_link() {
         let raw = renderer().render("[site](https://example.com)", 40, 0);
@@ -785,6 +755,20 @@ mod tests {
             "{:?}",
             raw[0]
         );
+        let raw = renderer().render(
+            "see [a](https://a.example) and [b](https://b.example)",
+            80,
+            0,
+        );
+        assert_eq!(plain(&raw), vec!["see a and b"]);
+        let linked_text = |url: &str| {
+            let open = format!("\x1b]8;;{url}\x1b\\");
+            let rest = &raw[0][raw[0].find(&open).expect(url) + open.len()..];
+            let close = rest.find("\x1b]8;;\x1b\\").expect("link close");
+            crate::ui::render::panel::strip_escapes(&rest[..close])
+        };
+        assert_eq!(linked_text("https://a.example"), "a");
+        assert_eq!(linked_text("https://b.example"), "b");
     }
 
     #[test]

@@ -118,8 +118,6 @@ impl DynPlugin for PluginTools {
             for (method, description, schema) in tools() {
                 let mut definition = definition(&method.replace('.', "_"), description, schema);
                 definition.source = ToolSource::Extension;
-                // Listing reads configuration; every other call changes
-                // what code runs, so Permission asks under the default preset.
                 definition.risk = Some(
                     if method == "plugin.list" {
                         "read_filesystem"

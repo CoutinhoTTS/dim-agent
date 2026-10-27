@@ -93,7 +93,6 @@ impl Display {
             return Ok(());
         }
         let position = self.requests.entry(request).or_default();
-        // Progress is a replaceable suffix; durable events fill any prefix gap.
         if progress.text_offset > position.printed {
             return Ok(());
         }

@@ -134,8 +134,6 @@ impl McpConnection {
 }
 impl Drop for McpConnection {
     fn drop(&mut self) {
-        // Release only a binding. The host publishes retirement eligibility;
-        // only the loader can remove a configured generation's plugin.
         if let Some(released) = &self.released {
             released.send_replace(());
         }
@@ -194,8 +192,6 @@ impl McpService {
         project: Option<usize>,
         cancel: &CancellationToken,
     ) -> Result<McpCatalog> {
-        // Explicit reads also request convergence of externally edited workspace
-        // files. This is coalesced and is not an application acknowledgement.
         self.publication.refresh();
         self.run(cancel, move |settings, cancel| async move {
             let mut catalog = McpCatalog {
@@ -203,8 +199,6 @@ impl McpService {
                 project_revision: None,
                 servers: BTreeMap::new(),
             };
-            // An unreadable record lists project entries as disabled; the
-            // project application reports it. User entries are unaffected.
             let enablement = match project {
                 Some(_) => settings
                     .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
@@ -309,8 +303,6 @@ impl McpService {
             })
             .await?;
         if withdraws {
-            // The write is committed. A closed publisher has retired every
-            // generation, and an interrupted caller reads the outcome.
             let _ = self
                 .run(cancel, move |_, cancel| async move {
                     publication.settle(&cancel).await
@@ -320,8 +312,6 @@ impl McpService {
         Ok(revision)
     }
 
-    // Admission and draining belong to this Plugin. Settings still owns the
-    // file commit: cancellation cannot discard an already admitted commit.
     async fn run<T, F, Fut>(&self, cancel: &CancellationToken, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -496,17 +486,14 @@ impl DynPlugin for McpPlugin {
                 tasks: TaskTracker::new(),
             });
             let (owner, closing) = (service.clone(), auth.clone());
-            ctx.effect(move || {
-                async move {
-                    {
-                        let _guard = owner.gate.lock().unwrap();
-                        owner.tasks.close();
-                    }
-                    owner.tasks.wait().await;
-                    // Token requests already sent are settled first.
-                    closing.close().await;
-                    Ok(())
+            ctx.effect(move || async move {
+                {
+                    let _guard = owner.gate.lock().unwrap();
+                    owner.tasks.close();
                 }
+                owner.tasks.wait().await;
+                closing.close().await;
+                Ok(())
             })?;
             management::provide(
                 ctx,

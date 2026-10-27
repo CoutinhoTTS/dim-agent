@@ -602,6 +602,10 @@ None to rutis. To the event format: the event kind `session/forked` (§13, rule 
 | [#32](https://github.com/arcships/dim/issues/32) | When `submission_id` leaves `input/message`, the fork copies the idempotency records of inputs at or before the cut in its transaction, so `session.input_lookup` on a fork keeps answering for copied inputs | Not needed: #32 keeps the field in `input/message` ([sessions service §6.3](sessions-service.md#where-the-submission-identity-lives)), so the fork copies it with the event |
 | F6 ([#77](https://github.com/arcships/dim/issues/77)) | `dimcode session delete` and cleanup by age or count with a preview, composed from `session.summaries` and `session.delete` (§5.1) | F6's design |
 
+Collaboration's branch unload does not await a member's settlement: it interrupts the member, commits the request's
+failed result and releases the request, because the member's Loop may be reloading in the same cascade. Awaiting the
+stop would deadlock that reload, and delaying release would let a later member input land after the interrupt.
+
 ## 15. Acceptance (flow tests)
 
 1. Delete a loaded Session with a running turn while a client is attached: the client gets `session.closed`, the reply

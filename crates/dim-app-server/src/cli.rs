@@ -33,7 +33,6 @@ pub fn run_with(
     managed_provider: Option<crate::managed_provider::ManagedProviderRow>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let argv: Vec<String> = args.into_iter().collect();
-    // The client transport does not acquire daemon locks or load product state.
     if argv.first().map(String::as_str) == Some("--connect-pipe") {
         let mut args = argv.iter().skip(1);
         let name = args.next().ok_or("--connect-pipe requires a name")?;
@@ -48,8 +47,6 @@ pub fn run_with(
             return Err("--connect-pipe requires Windows".into());
         }
     }
-    // The Timeline export reads one database read-only and loads no product
-    // state; `dimcode export` runs it.
     if argv.first().map(String::as_str) == Some("--export-timeline") {
         let [session, flag, database] = &argv[1..] else {
             return Err("Use --export-timeline SESSION_ID --database PATH".into());
@@ -68,7 +65,6 @@ pub fn run_with(
         ))?;
         return Ok(());
     }
-    // Closing an operation's span logs its duration (time.busy + time.idle).
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
@@ -157,9 +153,6 @@ pub fn run_with(
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
     }
-    // Plugin runtimes run the Session rows, or else the plugins
-    // PluginManager loads; packages then resolve from the default
-    // configuration file's location.
     let anchor = session_rows
         .clone()
         .or_else(|| config.plugin_defaults.clone());
@@ -169,9 +162,6 @@ pub fn run_with(
     if config.product_home.is_some() {
         config.managed_provider = managed_provider;
     }
-    // Without `--web-assets`, the product home's `web/`, where `dimcode web
-    // install` puts the frontend; the entry looks at it on each open
-    // (web-workspace.md §2.4).
     if config.web_assets.is_none() {
         config.web_assets = config.product_home.as_ref().map(|home| home.join("web"));
     }
@@ -179,7 +169,6 @@ pub fn run_with(
         return Err("--session-rows requires --node and --js-runtime".into());
     }
     if let (Some(path), Some(node), Some(js_runtime)) = (anchor, node, js_runtime) {
-        // Package names in the rows resolve from the file's own location.
         let unreadable =
             |error: std::io::Error| format!("Cannot read Session rows {}: {error}", path.display());
         let anchor = std::fs::canonicalize(&path).map_err(unreadable)?;
@@ -196,7 +185,6 @@ pub fn run_with(
         } else {
             vec![]
         };
-        // `py:` modules are imported from the file's directory.
         let python = python.map(|interpreter| PythonConfig {
             interpreter,
             project: anchor.parent().expect("a file has a directory").to_owned(),
@@ -222,12 +210,10 @@ pub fn run_with(
         return Err("Product home is required; use --product-home PATH, --model-config PATH or --mock-model".into());
     }
     if config.product_home.is_some() || model_config.is_some() {
-        // Product Sessions declare every tool the process provides.
         config.session_defaults.tools = None;
         config.session_defaults.permission_policy.preset =
             dim_agent_types::PermissionPreset::WorkspaceWrite;
     } else {
-        // These permissions belong to the development host.
         config.session_defaults.permission_policy.allowed_tools =
             vec!["echo".into(), "wait".into()];
     }
@@ -303,7 +289,6 @@ pub fn run_with(
                 .session_value(Arc::new(HistoryRenderer::default()))
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));
             if models.is_some() {
-                // A --models file adopts no capability snapshot: no compaction.
                 builder
                     .session_value(Arc::new(ContextModelHost(None)))
                     .session_value(Arc::new(CompactionStrategyHost(None)));

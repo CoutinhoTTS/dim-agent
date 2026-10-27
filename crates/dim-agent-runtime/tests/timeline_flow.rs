@@ -148,8 +148,6 @@ async fn history_has_no_byte_quota_and_atomic_cuts_stay_fixed() {
         Err(AgentError::Closed(_))
     ));
 }
-// Dispatcher behavior is exercised through installed capabilities in integration
-// tests; subscription ownership is released by the owning fiber on unload.
 #[tokio::test]
 async fn before_can_read_history_and_rejects_nested_append() {
     let store = Arc::new(MemoryTimelineStore::default());
@@ -213,7 +211,6 @@ async fn failed_registration_commits_nothing() {
     assert!(matches!(error, AgentError::InvalidInput(_)));
     assert_eq!(registered.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(timeline.sequence(), 1);
-    // The next append reuses the sequence the rejected attempt never published.
     let event = timeline
         .append_registered(input("accepted"), |_| Ok(()))
         .unwrap();

@@ -79,7 +79,6 @@ async fn create(client: &mut Client, home: &std::path::Path, interactive: bool) 
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
     assert_ok(&client.rpc("session.attach", json!({"sessionId":id})).await);
-    // Observe the optional row through its own method without mutating metadata.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let reply = client
@@ -149,7 +148,6 @@ async fn node_session_title_generation_rename_settings_restore_fork_and_close() 
         .with_state(sent);
     let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    // Adopt the fixture model through Prompt, as the product profile does.
     defaults::install_with_prompt(
         &mut builder,
         Arc::new(dim_agent_capabilities::host::EmptyPromptHost),

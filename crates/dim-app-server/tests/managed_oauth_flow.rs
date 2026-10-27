@@ -258,7 +258,6 @@ async fn codex(
     let catalog = dim_app_server::catalog();
     let build = rutis_loader::resolve::Build::default();
     let names = Names::copy(&catalog, &build);
-    // The management table the process providers register with.
     root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
     let files = root.plugin(FileStoragePlugin::new(vec![home.to_owned()]));
     let plugin =
@@ -306,6 +305,8 @@ fn write(home: &Path, value: &Value) {
     .unwrap();
 }
 
+/// Login and refresh preserve the existing TS contract; a token response that omits `expires_in`
+/// defaults to 3600 seconds.
 #[tokio::test]
 async fn codex_login_refresh_logout_and_restart_preserve_account_boundaries() {
     let (f, server, home) = fixture().await;
@@ -318,8 +319,6 @@ async fn codex_login_refresh_logout_and_restart_preserve_account_boundaries() {
     let cancel = CancellationToken::new();
     assert!(!a.status(&cancel).await.unwrap().authenticated);
 
-    // Different owners, not a single attempt table: absent -> login -> logout
-    // must not admit a login that started before that sequence.
     let stale = a.begin_browser(&cancel).await.unwrap();
     login(&b, "account-first").await;
     b.logout(&cancel).await.unwrap();
@@ -363,7 +362,6 @@ async fn codex_login_refresh_logout_and_restart_preserve_account_boundaries() {
         "late rejection deleted rotated grant"
     );
 
-    // Credential rotation does not invalidate an in-progress account switch.
     a.complete_browser(
         switching.attempt_id,
         callback(&switching, "account-second"),
@@ -629,7 +627,6 @@ async fn minimal_ts_legacy_records_recover_only_from_fixed_plugin_config() {
         let catalog = dim_app_server::catalog();
         let build = rutis_loader::resolve::Build::default();
         let names = Names::copy(&catalog, &build);
-        // The management table the process providers register with.
         root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
         let files = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
         let plugin = if codex_owner {
@@ -701,7 +698,10 @@ async fn minimal_ts_legacy_records_recover_only_from_fixed_plugin_config() {
                 .recover(&cancel)
                 .await
         };
-        assert!(matches!(result, Err(OAuthError::InvalidStore(_))));
+        assert!(
+            matches!(result, Err(OAuthError::InvalidStore(_))),
+            "a production issuer must not be combined with a local or attacker-controlled token endpoint"
+        );
         assert_eq!(read(&home), untrusted);
 
         let mut explicit_null = minimal.clone();
@@ -809,7 +809,6 @@ async fn grok_device_flow_observes_slowdown_expiry_cancellation_and_uri_trust() 
     let catalog = dim_app_server::catalog();
     let build = rutis_loader::resolve::Build::default();
     let names = Names::copy(&catalog, &build);
-    // The management table the process providers register with.
     root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
     let files = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     let plugin =
@@ -1215,8 +1214,6 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         );
     }
 
-    // An auxiliary call settles a credential rejected again after recovery,
-    // as a Session request does: the Grok account is signed out.
     f.polls.store(2, Ordering::SeqCst);
     let begin = grok.begin_device(&cancel).await.unwrap();
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -1339,7 +1336,6 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         .await
         .unwrap();
     assert_eq!(selected.provider_id, "openai-codex");
-    // The unavailable Grok global choice remains persisted, but is skipped.
     assert_eq!(
         provider
             .selection(None, &cancel)

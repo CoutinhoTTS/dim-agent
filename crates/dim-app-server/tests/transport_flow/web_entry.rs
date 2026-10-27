@@ -107,7 +107,6 @@ async fn web_entry_serves_the_frontend_to_local_callers_only() {
         "unknown_method"
     );
 
-    // The frontend directory: files as built, the SPA fallback for routes.
     let opened = local.rpc("web.open", json!({})).await;
     let address = opened["result"]["address"].as_str().unwrap().to_owned();
     let (status, head, body) = http(&address, get(&address, "/assets/app-1.js")).await;
@@ -119,8 +118,6 @@ async fn web_entry_serves_the_frontend_to_local_callers_only() {
     assert!(!head.to_ascii_lowercase().contains("content-encoding"));
     assert!(body.starts_with("<!doctype html>"), "{body}");
 
-    // The entry stays open while any local connection that opened it is
-    // connected, and closes with the last one.
     let mut second = Client::new_version(&server, false, 3).await;
     assert_eq!(second.rpc("web.open", json!({})).await, opened);
     drop(local);
@@ -203,8 +200,6 @@ async fn a_web_assets_directory_without_a_build_is_reported() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_frontend_installed_while_the_daemon_runs_is_served_without_a_restart() {
-    // `dimcode web install` writes `<product home>/web`, the daemon's
-    // directory when it was started without `--web-assets`.
     let home = std::env::temp_dir().join(format!("dim-web-home-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&home).unwrap();
     let server = launch(
@@ -249,7 +244,6 @@ async fn a_web_assets_directory_built_for_another_protocol_is_refused() {
         local.rpc("web.open", json!({})).await["error"]["data"]["appError"],
         "web_assets_incompatible"
     );
-    // The matching record is accepted like a directory without one.
     std::fs::write(
         assets.join("dimcode-web.json"),
         r#"{"version":"0.0.1","protocolVersion":3,"sourceCommit":"x"}"#,
@@ -324,11 +318,9 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
         format!("http://{address}")
     );
     let bootstrap = url.split_once("#bootstrap=").unwrap().1.to_owned();
-    // Opening again reuses the running entry and its link.
     assert_eq!(local.rpc("web.open", json!({})).await["result"], opened);
     let origin = format!("http://{address}");
 
-    // Static assets: immutable bundles, SPA fallback, confinement, headers.
     let (status, head, body) = http(&address, get(&address, "/chat/abc")).await;
     assert_eq!(
         (status, body.as_str()),
@@ -349,11 +341,9 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     let (_, _, body) = http(&address, get(&address, "/../secret.txt")).await;
     assert!(!body.contains("private"));
     assert_eq!(http(&address, get(&address, "/api/unknown")).await.0, 404);
-    // A rebinding host name never reaches the entry.
     let rebound = get(&address, "/").replace(&format!("Host: {address}"), "Host: evil.test");
     assert_eq!(http(&address, rebound).await.0, 421);
 
-    // Sign-in: same origin and the bootstrap token only.
     let exchange = |origin: &str, token: &str| {
         post(
             &address,
@@ -392,7 +382,6 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     assert_eq!(http(&address, check(&cookie)).await.0, 204);
     assert_eq!(http(&address, check("dim_web=forged")).await.0, 401);
 
-    // The browser speaks protocol v3 only.
     let mut stream = web_socket(&address, Some(&cookie)).await.unwrap();
     stream
         .send(Message::Text(
@@ -406,7 +395,6 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     let reply: Value = serde_json::from_str(&reply).unwrap();
     assert_eq!(reply["error"]["data"]["appError"], "protocol_version");
 
-    // Session methods, including execution Session methods, and catalog reads.
     let mut web = web_client(&address, &cookie).await;
     let features = web.features.as_array().unwrap();
     for method in [
@@ -434,7 +422,6 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
         )
         .await,
     );
-    // Catalog reads serve the model picker and carry no credential.
     for (method, params) in [
         ("provider.list", json!({})),
         (
@@ -467,7 +454,6 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
         1
     );
 
-    // The holder's exit revokes every token and detaches web connections.
     let mut observer = Client::new_version(&server, false, 3).await;
     drop(local);
     let closed = tokio::time::timeout(Duration::from_secs(5), async {

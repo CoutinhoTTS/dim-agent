@@ -65,7 +65,6 @@ impl rutis::host::DynPlugin for AppliedInputGate {
                 Box::pin(async move {
                     let scheduled = matches!(&event.kind, EventKind::InputMessage(data) if data.blocks.iter().any(|block|
                         matches!(block, dim_agent_types::InputBlock::Raw { text, .. } if text.starts_with("<dim-scheduler kind=\"scheduled-run\""))));
-                    // Hold delivery after InputQueue appends applied, before Loop can consume it.
                     if scheduled && !held.swap(true, Ordering::SeqCst) {
                         entered.send((session, event.id.clone())).unwrap();
                         release.notified().await;
@@ -761,7 +760,6 @@ async fn node_scheduler_reports_preserve_the_first_adopted_operator_title() {
             )
             .await,
     );
-    // Keep the leader untitled until its scheduled report has been adopted.
     let mut settings = json!({"enabled":false,"maxLength":80,
         "model":{"providerId":provider_id,"modelId":"title"}});
     session_title::configure(&mut client, settings.clone()).await;
@@ -2345,8 +2343,6 @@ async fn node_scheduler_report_lands_once_across_row_or_runtime_cleanup() {
                     .success()
             );
         }
-        // Scheduler's cleanup joins its own report call, so SQLite commits
-        // while the row restarts; the admitted report lands once.
         let (restarted, ()) = tokio::join!(
             loader.restart(if kill_runtime {
                 "SessionNodeRuntime"
@@ -3420,7 +3416,6 @@ async fn node_scheduler_native_clock_preserves_anchors_collapses_gaps_and_handle
         window(&mut client, once, "2026-03-09T06:31:00.000Z").await["state"],
         "completed"
     );
-    // The timer settles one-off jobs separately from their completed runs.
     let job = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let listed = client.rpc("schedule.list", json!({})).await;

@@ -476,8 +476,6 @@ impl ContentCache {
         self.entries.get(reference).cloned()
     }
     fn load(&mut self, connection: &Connection, session: &str, reference: &str) -> Result<Content> {
-        // One lookup per reference: this runs for every message of every
-        // v16 request read.
         if let Some(content) = self.entries.get(reference) {
             return Ok(content.clone());
         }

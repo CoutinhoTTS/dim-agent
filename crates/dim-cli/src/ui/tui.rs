@@ -157,7 +157,6 @@ pub fn print_web_panel(opened: &WebOpened) {
     let palette = Theme::detect(&detect::env_from_process(), true, None).palette;
     let cols = crate::ui::terminal::window_size().map_or(80, |(cols, _)| usize::from(cols));
     print!("{}", web_panel(cols, &palette, opened));
-    // Unwrapped below the box, so the terminal keeps it one clickable link.
     if let Some(url) = opened.sign_in {
         println!("\n {}\n {url}\n", t("Sign-in link:"));
     }
@@ -184,8 +183,6 @@ fn run_terminal(
     let notify_terminal = crate::ui::notify::Terminal::from_env();
     let mut status = Reporter::from_env();
     let mut screen = Screen::new(terminal.size(), synchronized);
-    // The fullscreen interface, while it is the one on screen; the
-    // scrollback `screen` waits underneath and is rewritten on the way back.
     let mut full = None;
     if surroundings.fullscreen {
         if terminal.set_fullscreen(true).is_err() {
@@ -195,8 +192,6 @@ fn run_terminal(
     } else if let Some((row, column)) = terminal.cursor_position() {
         screen.set_origin(if column == 0 { row } else { row + 1 });
     }
-    // Capability and background are decided once, before the first line is
-    // written: committed scrollback cannot be repainted.
     let background = terminal
         .background_report()
         .and_then(detect::parse_background_report);
@@ -222,7 +217,6 @@ fn run_terminal(
         cwd_key,
     );
     app.fullscreen = full.is_some();
-    // The palette describes `/login` by the account's state.
     app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
     app.theme_context = Some(ThemeContext {
         mode: detected.mode,
@@ -238,11 +232,9 @@ fn run_terminal(
             app.apply(update);
             dirty = true;
         }
-        // A requested shutdown leaves once its reason is on screen.
         if app.shutdown.is_some() && !dirty {
             break 0;
         }
-        // Text still being revealed draws a frame each interval.
         if app.revealing() {
             dirty = true;
         }
@@ -256,7 +248,6 @@ fn run_terminal(
                 return code;
             }
         }
-        // Between frames, as the notifications: never inside one.
         let program_status = app.program_status();
         if let Some(report) = status.report(program_status.clone())
             && terminal.report_status(report).is_err()
@@ -265,7 +256,6 @@ fn run_terminal(
             app.host.shutdown();
             return code;
         }
-        // The progress bar follows the same status, after the record.
         if let Some(bar) = progress.report(&program_status, Instant::now())
             && terminal.report_progress(bar).is_err()
         {
@@ -273,7 +263,6 @@ fn run_terminal(
             app.host.shutdown();
             return code;
         }
-        // The `/settings` mouse switch applies to the screen at once.
         if full.is_some() && terminal.mouse() != app.mouse && terminal.set_mouse(app.mouse).is_err()
         {
             let code = terminal.lost();
@@ -281,11 +270,8 @@ fn run_terminal(
             return code;
         }
         let now = Instant::now();
-        // A resize is acted on once it settles (design §6.4).
         let current = terminal.size();
         let laid_out = match &full {
-            // Fullscreen lays the transcript out by width; a new height
-            // only repaints, at once.
             Some(full) => {
                 if full.size() != current {
                     dirty = true;
@@ -320,8 +306,6 @@ fn run_terminal(
         if let Some(full) = &mut full
             && (settled || reflow)
         {
-            // The alternate screen keeps no history to clean up: the
-            // transcript is measured again for the new width or palette.
             resize = None;
             let size = terminal.size();
             full.relayout(size.0);
@@ -337,17 +321,16 @@ fn run_terminal(
         } else if settled || reflow {
             resize = None;
             let size = terminal.size();
-            // Termux resizes the height with every on-screen keyboard toggle;
-            // the ordinary frame path keeps the region valid without wiping
-            // the history each time.
-            let keyboard =
-                size.0 == screen.size().0 && std::env::var_os("TERMUX_VERSION").is_some();
+            let keyboard = termux_height_only(
+                screen.size().0,
+                size,
+                std::env::var_os("TERMUX_VERSION").is_some(),
+            );
             if reflow || !keyboard {
                 let rows = app.reflow_history(size.0 as usize);
                 let frame = app.frame(size);
                 let wanted = screen.wanted_for(size, frame.live.len());
                 let mut bytes = screen.rewrite(size, &rows, wanted);
-                // The frame's own commits and live rows go out right behind.
                 bytes.extend(screen.render(&frame, size));
                 if terminal.write(&bytes).is_err() || terminal.write_failed() {
                     let code = terminal.lost();
@@ -360,9 +343,6 @@ fn run_terminal(
                 dirty = true;
             }
         }
-        // A frame waits while the last one is still being written, as
-        // grok-build's presenter does: a slow terminal gets fewer, current
-        // frames instead of a queue of stale ones.
         let due = last_frame.is_none_or(|at| now.duration_since(at) >= FRAME_INTERVAL)
             && !terminal.writing();
         if dirty && due {
@@ -380,8 +360,6 @@ fn run_terminal(
             dirty = false;
             last_frame = Some(Instant::now());
         }
-        // A run publishes every frame interval: look as often, so the
-        // stream reaches the screen as evenly as it is published.
         let wait = match (dirty, last_frame) {
             (true, Some(at)) => FRAME_INTERVAL.saturating_sub(now.duration_since(at)),
             _ if app.running() => FRAME_INTERVAL,
@@ -432,23 +410,17 @@ fn run_terminal(
                         block: Some(block),
                         row,
                     } if full.card_at(&app, block, row).is_some() => {
-                        // A delegation card opens its member, by the card's
-                        // own identity rather than the row it was drawn on.
                         let card = full.card_at(&app, block, row).expect("clicked card");
                         app.open_card(&card);
                         dirty = true;
                     }
                     MouseOutcome::Click { block, row } => {
-                        // A committed group opens in place: the view holds
-                        // still rather than following the bottom. The press
-                        // drew a selection; the frame clears it.
                         if app.click(block, row) && block.is_some() {
                             full.hold();
                         }
                         dirty = true;
                     }
                     MouseOutcome::Open(url) => {
-                        // Over SSH the opener would run on the remote host.
                         let local = std::env::var_os("SSH_CONNECTION").is_none()
                             && std::env::var_os("SSH_TTY").is_none();
                         let opened = local && crate::browser::open(&url);
@@ -461,11 +433,6 @@ fn run_terminal(
                     }
                 }
             }
-            // Amp's message navigation: Tab (or Up while a message is
-            // picked) goes to older user messages, Shift+Tab or Down to newer
-            // ones and back to the composer past the newest; Esc ends it,
-            // `e` takes the message into the composer and `q` quotes it
-            // at the end of the draft.
             Wait::Event(InputEvent::Key(key))
                 if full.is_some()
                     && app.keyboard_free()
@@ -479,8 +446,6 @@ fn run_terminal(
                     KeyCode::BackTab | KeyCode::Down => full.focus_newer(&app),
                     KeyCode::Tab => full.focus_newer(&app),
                     KeyCode::Esc => full.clear_focus(),
-                    // A picked card opens its member; the pick stays for Esc
-                    // to come back to.
                     KeyCode::Enter if key.mods.0 == 0 && full.focused_card().is_some() => {
                         let card = full.focused_card().expect("picked card").to_owned();
                         app.open_card(&card);
@@ -503,8 +468,6 @@ fn run_terminal(
                         full.follow();
                     }
                     _ => {
-                        // Anything else is typing: the pick ends and the key
-                        // goes to the composer.
                         full.clear_focus();
                         match app.handle(InputEvent::Key(key)) {
                             Outcome::Exit(code) => break code,
@@ -525,7 +488,6 @@ fn run_terminal(
                         || (matches!(key.code, KeyCode::Home | KeyCode::End)
                             && app.composer.is_empty())) =>
             {
-                // Home and End scroll while there is no draft to move in.
                 if let Some(full) = &mut full {
                     match key.code {
                         KeyCode::Home => full.scroll_to_top(),
@@ -548,9 +510,6 @@ fn run_terminal(
                     dirty = true;
                 }
                 Outcome::SwitchMode => {
-                    // Both ways the history is laid out again by the reflow
-                    // above: the alternate screen starts empty, and the
-                    // shell's screen is rewritten whole.
                     let leaving = full.take();
                     let entering = leaving.is_none();
                     if let Some(mut leaving) = leaving {
@@ -578,11 +537,7 @@ fn run_terminal(
                         app.host.shutdown();
                         return code;
                     }
-                    // The shell may have written over the screen while the
-                    // job was stopped: lay the whole transcript out again.
                     app.request_reflow();
-                    // Handing the terminal over cleared the status record
-                    // and removed the progress bar.
                     status.forget();
                     progress.forget();
                     dirty = true;
@@ -595,7 +550,6 @@ fn run_terminal(
                 Outcome::Restart(relaunch) => {
                     *restart = Some(Restart {
                         relaunch,
-                        // Only a session with a message is stored to come back to.
                         session_id: app.session_active().then(|| app.session_id.clone()),
                         fullscreen: app.fullscreen,
                     });
@@ -604,10 +558,6 @@ fn run_terminal(
             },
         }
     };
-    // A plain exit says how to come back, once the session has a message to
-    // come back to: an empty one is not worth resuming. The fullscreen
-    // interface hands the shell's screen back first, so the panel lands
-    // under what was there before.
     let mut bytes = match &mut full {
         Some(full) => {
             let _ = terminal.write(&full.leave());
@@ -616,7 +566,6 @@ fn run_terminal(
         }
         None => screen.leave(),
     };
-    // A restart carries straight on without the goodbye panel.
     if restart.is_none() {
         let resume =
             (app.session_active() && !app.session_id.is_empty()).then_some(app.session_id.as_str());
@@ -789,7 +738,7 @@ struct App {
     upgrade: Option<UpgradeDialog>,
 }
 
-/// Widest the fullscreen command palette is drawn (Amp's).
+/// Widest the fullscreen command palette is drawn.
 const OVERLAY_PALETTE_WIDTH: usize = 80;
 /// Widest a fullscreen picker is drawn.
 const OVERLAY_LIST_WIDTH: usize = 100;
@@ -1020,7 +969,6 @@ impl App {
             | Some(Prompt::Language(_))
             | Some(Prompt::Settings(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
-            // An approval or a question goes first; the dialog waits.
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Permission(p))
                 if approval.is_some_and(|a| a.request_id == p.request_id) => {}
@@ -1074,7 +1022,6 @@ impl App {
         if self.exit_armed_until.is_some_and(|until| now >= until) {
             self.exit_armed_until = None;
         }
-        // A running command's elapsed time ticks, and a running card's.
         if self.failure.is_none() && self.shell.is_some() {
             changed = true;
         }
@@ -1248,7 +1195,6 @@ impl App {
                             .iter()
                             .find(|(m, ..)| *m == mode)
                             .map_or("", |(_, title, ..)| t(title));
-                        // The choice stands for the sessions to come as well.
                         match crate::ui::config::save_permission(&self.home, &mode) {
                             Some(error) => self.set_notice(error),
                             None => self.set_notice(tf(
@@ -1334,7 +1280,6 @@ impl App {
                     (Some(Prompt::Upgrade(dialog)), _) | (_, Some(dialog)) => {
                         dialog.installed(result)
                     }
-                    // Closed while installing: the outcome is a notice.
                     _ => self.notices.push(UpgradeDialog::outcome(&version, &result)),
                 }
             }
@@ -1354,8 +1299,6 @@ impl App {
 
     fn handle(&mut self, event: InputEvent) -> Outcome {
         let outcome = self.handle_input(event);
-        // A palette opened over a draft gives the draft back when it closes
-        // without leaving text of its own (closed, or a command ran).
         if !self.composer.palette_open()
             && let Some(draft) = self.palette_stash.take()
             && self.composer.is_empty()
@@ -1368,8 +1311,6 @@ impl App {
     fn handle_input(&mut self, event: InputEvent) -> Outcome {
         let key = match event {
             InputEvent::Paste(text) => {
-                // A prompt owns the keyboard: a paste reaches the composer,
-                // or the `/connect` form's focused field.
                 match &mut self.prompt {
                     None => self.paste(text),
                     Some(Prompt::Providers(panel)) => panel.paste(&text),
@@ -1386,7 +1327,6 @@ impl App {
                 return Outcome::Continue;
             }
             InputEvent::Key(key) => key,
-            // Only the fullscreen surface reads the mouse.
             InputEvent::Mouse(_) => return Outcome::Continue,
         };
         let ctrl = key.mods.contains(Modifiers::CTRL);
@@ -1408,14 +1348,12 @@ impl App {
         if ctrl && key.code == KeyCode::Char('c') {
             return self.ctrl_c();
         }
-        // Priority: exit confirm, runtime prompt, composer.
         if let Some(prompt) = &mut self.prompt {
             let effect = match prompt {
                 Prompt::Sessions(p) => p.handle_key(key),
                 Prompt::Tasks(p) => p.handle_key(key),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
-                // Esc leaves the panel; a pending sign-in is abandoned.
                 Prompt::Login(p) => match p.handle_key(key) {
                     Effect::OauthBack => Effect::Close,
                     Effect::OauthCancel => {
@@ -1438,8 +1376,6 @@ impl App {
             return outcome;
         }
         match key.code {
-            // The command palette, also over a draft (Amp's Ctrl+O; the
-            // banner's Ctrl+P).
             KeyCode::Char('o' | 'p') if ctrl && !self.composer.palette_open() => {
                 if !self.composer.is_empty() {
                     self.palette_stash = Some(self.composer.text().to_owned());
@@ -1486,7 +1422,6 @@ impl App {
             KeyCode::Up
                 if key.mods.0 == 0 && self.composer.is_empty() && !self.queued().is_empty() =>
             {
-                // Take the newest queued message back for editing.
                 if let Some((id, text)) = self.queued().pop() {
                     self.host.send(Command::InputControl {
                         input_id: id,
@@ -1642,7 +1577,6 @@ impl App {
     /// session in fullscreen (where Esc interrupts), clears the draft, then
     /// warns, then exits — through the confirmation while busy.
     fn ctrl_c(&mut self) -> Outcome {
-        // An open question is interrupted before a separate shell run.
         if self.shell.is_some() && !matches!(self.prompt, Some(Prompt::Ask(_))) {
             self.stop_shell();
             return Outcome::Continue;
@@ -1712,8 +1646,6 @@ impl App {
             }
             Effect::Exit => return Outcome::Exit(130),
             Effect::Restart { confirmed } => {
-                // A turn or a pending request asks first, as exiting does;
-                // the dialog waits behind the confirmation.
                 if let Some(Prompt::Upgrade(dialog)) = self.prompt.take() {
                     self.upgrade = Some(dialog);
                 }
@@ -1788,10 +1720,6 @@ impl App {
                 request_id,
                 branch_id,
             } => {
-                // The preset switches first, then every call already waiting
-                // is allowed, this one included: they were asked under the
-                // old preset, and full access means none of them asks. The
-                // worker runs the commands in that order.
                 self.approvals_toast = true;
                 self.host.send(Command::SetApprovals("full-access".into()));
                 let mut pending = vec![(request_id, branch_id)];
@@ -1950,7 +1878,6 @@ impl App {
                 policy,
             }),
         }
-        // A picker opened from `/settings` goes back to its row once closed.
         if self.prompt.is_none()
             && let Some(setting) = self.settings_return.take()
         {
@@ -2125,7 +2052,6 @@ impl App {
     fn toggle_tool_details(&mut self) {
         let detail = self.tool_detail.flipped();
         self.tool_detail = detail;
-        // Every group follows, as Amp's toggle redraws the transcript.
         self.group_details.clear();
         for block in &mut self.history {
             match block {
@@ -2135,8 +2061,6 @@ impl App {
             }
         }
         self.request_reflow();
-        // The redrawn transcript says what changed; only a failed save
-        // needs a word.
         if let Some(error) = crate::ui::config::write(
             &self.home,
             TOOL_DETAILS_KEY,
@@ -2147,7 +2071,6 @@ impl App {
     }
 
     fn run_command(&mut self, name: &str, args: &str) -> Outcome {
-        // An action that cannot run now says why instead of failing quietly.
         if let Some(command) = COMMANDS.iter().find(|c| c.name == name)
             && !command.available(self.context())
         {
@@ -2198,8 +2121,6 @@ impl App {
                     .send(Command::Configure(text.trim_end().to_owned()));
                 Outcome::Continue
             }
-            // Ctrl+Z is undo in the composer, so the shell hand-off is a
-            // command.
             "suspend" => Outcome::Suspend,
             "exit" => Outcome::Exit(0),
             "tui" => Outcome::SwitchMode,
@@ -2334,7 +2255,6 @@ impl App {
             }
             next.insert(row.row_id.clone(), (pace, end));
         }
-        // Answers that settled leave: the stream planner has their text.
         self.revealed = next;
     }
 
@@ -2445,9 +2365,6 @@ impl App {
             )]));
         }
 
-        // The live tail stays while a prompt is open: the tool group it asks
-        // about is live until every call has its result, and a tail that
-        // vanished would shrink the region and move the prompt up.
         let mut live = tail;
         if let Some(running) = self.shell.as_ref().filter(|_| self.prompt.is_none()) {
             let (output, total) = running.tail(SHELL_PREVIEW_LINES);
@@ -2488,12 +2405,7 @@ impl App {
                 live.extend(queue_strip(&queued, self.queue_rows, cols, &self.palette));
             }
         }
-        // The composer (or the prompt in its place) never moves up: the queue
-        // above it gives back its rows above it.
         frame.anchor = live.len();
-        // One blank row above the composer, always: the run status lives in
-        // the composer's top border rather than on a row of its own, so the
-        // composer does not hop when a run starts or ends.
         live.push(String::new());
         let status = (self.prompt.is_none() && self.running()).then(|| {
             const FRAMES: [&str; 4] = ["·", "•", "●", "•"];
@@ -2518,7 +2430,6 @@ impl App {
         });
         let inner = cols.saturating_sub(2 * MARGIN + 4).max(1);
         let shell = self.composer.shell();
-        // Fullscreen's input is Amp's: no prompt mark, no placeholder.
         let prompt = match shell {
             Some(shell) => format!("{} ", shell.prefix()),
             None if self.fullscreen => String::new(),
@@ -2530,7 +2441,6 @@ impl App {
         let p = &self.palette;
         self.composer.set_context(self.context());
         let mut rows: Vec<String> = Vec::new();
-        // While a panel or prompt owns the keyboard the composer's mark dims.
         let shell_color = match shell {
             Some(Shell::Private) => &p.muted,
             _ => &p.warning,
@@ -2542,8 +2452,6 @@ impl App {
         } else {
             &p.accent
         };
-        // Fullscreen draws the palette as Amp does: a box of its own over
-        // the transcript, with the query in it and the composer empty below.
         let palette_overlay =
             self.fullscreen && self.prompt.is_none() && self.composer.palette_open();
         let (cursor_row, cursor_col) = if self.composer.is_empty() || palette_overlay {
@@ -2570,21 +2478,16 @@ impl App {
             }
             (cursor.1 as usize, prompt_width + cursor.0 as usize)
         };
-        // Fullscreen keeps room for a second line, as Amp's input does.
         if self.fullscreen && rows.len() < FULLSCREEN_COMPOSER_ROWS {
             rows.resize(FULLSCREEN_COMPOSER_ROWS, String::new());
         }
         let box_top = live.len();
         let muted = |label: &str| fg(label, &p.muted);
-        // Shell mode colours the box and names itself in the top border
-        // while no run status is there.
         let shell_title = shell.map(|shell| match shell {
             Shell::Recorded => t("! shell mode"),
             Shell::Private => t("!! shell mode · not sent to the model"),
         });
         let tinted = |label: &str| fg(label, shell_color);
-        // Fullscreen keeps the run status in the bottom border, as Amp
-        // does; scrollback shows it in the top one.
         let top_status = status.as_deref().filter(|_| !self.fullscreen);
         let title = match (top_status, shell_title) {
             (Some(text), _) => Some((text, &muted as &dyn Fn(&str) -> String)),
@@ -2599,9 +2502,6 @@ impl App {
         let edge = |edge: &str| fg(edge, border);
         let mut composer_box = boxed(&rows, cols, &edge, &|_, body| body.to_owned(), title);
         if self.fullscreen {
-            // Amp's prompt box: the model at the top right, the status at
-            // the bottom left and the workspace at the bottom right; there
-            // is no status row under it.
             let outer = cols.saturating_sub(2 + MARGIN).max(4);
             let margin = " ".repeat(MARGIN);
             let title = title.map(|(text, label)| label(text));
@@ -2623,9 +2523,6 @@ impl App {
                 )
             );
         }
-        // A prompt that must be answered first (an approval, a question, the
-        // exit confirmation) takes the composer's place, as Amp's do: there
-        // is nothing to type into meanwhile.
         let replaced = matches!(
             self.prompt,
             Some(Prompt::Permission(_) | Prompt::Ask(_) | Prompt::Exit(_) | Prompt::Upgrade(_))
@@ -2633,18 +2530,12 @@ impl App {
         if !replaced {
             live.extend(composer_box);
         }
-        // Panels sit under the composer: a runtime prompt, or the command
-        // palette while a command is being typed.
         let outer = cols.saturating_sub(2 + MARGIN).max(4);
         let margin = " ".repeat(MARGIN);
         let composer_rows = if replaced { 0 } else { rows.len() + 2 };
         let panel_rows = (size.1 as usize)
             .saturating_sub(composer_rows + 1 + 4 + 1)
             .min(18);
-        // Fullscreen centres the palette and the pickers over the
-        // transcript, as tall as the viewport allows.
-        // An open panel owns the cursor: its filter's caret, or none when it
-        // has no input or draws its own. Without a panel the composer has it.
         let panel_cursor = |width: usize| match &self.prompt {
             Some(Prompt::Sessions(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Tasks(prompt)) => Some(prompt.cursor(width)),
@@ -2729,8 +2620,6 @@ impl App {
         );
         frame.cursor = match panel_cursor(outer) {
             None => (!replaced).then_some(composer_cursor),
-            // A fullscreen overlay places its own caret; a question stays
-            // a panel under the transcript there too.
             Some(_) if self.fullscreen && !matches!(self.prompt, Some(Prompt::Ask(_))) => None,
             Some(caret) => caret.map(|(row, column)| {
                 (
@@ -2757,8 +2646,6 @@ impl App {
             if !snapshot.main_history_complete {
                 return (Vec::new(), Vec::new(), Vec::new());
             }
-            // The initial main history is complete: only the newest messages
-            // are drawn, the rest wait for `/history`.
             self.awaiting_window = false;
             let messages: Vec<usize> = snapshot
                 .rows
@@ -2783,9 +2670,6 @@ impl App {
         let mut live_items: Vec<LiveItem> = Vec::new();
         let mut settled_assistant: Vec<TextBlock> = Vec::new();
         let mut settled_ids: Vec<String> = Vec::new();
-        // An answer that settled before the reveal reached its end keeps
-        // streaming until it does; rows after it wait, so the history keeps
-        // its order.
         let mut held = false;
         for (index, row) in snapshot.rows.iter().enumerate() {
             if index < floor || held {
@@ -2793,10 +2677,7 @@ impl App {
             }
             let text = row.text.as_str();
             match row.kind {
-                // The projection flips the same row to `assistant_message` when
-                // the model output ends.
                 RowKind::StreamingAssistant => {
-                    // Only what the reveal reached: the rest follows evenly.
                     let shown = self.shown(&row.row_id);
                     live_text.push(TextBlock {
                         id: &row.row_id,
@@ -2804,16 +2685,10 @@ impl App {
                     });
                     live_items.push(LiveItem::Text(row.row_id.clone()));
                 }
-                // Reasoning shows its newest rows while it runs and commits as
-                // one block when it ends.
-                // A thought with no text yet (or only whitespace) draws nothing.
                 RowKind::Thinking if row.text.trim().is_empty() => {}
                 RowKind::Thinking if row.streaming => {
                     live_items.push(LiveItem::Thinking(row.text.clone()));
                 }
-                // The calls of one request are one group: it stays live until
-                // every call has its result (a call waiting on an approval
-                // included), then commits whole under its first call's id.
                 RowKind::ToolCall if !opens_group(&snapshot.rows, index) => {}
                 RowKind::ToolCall
                     if group_rows(&snapshot.rows, index)
@@ -2839,14 +2714,12 @@ impl App {
                         settled_ids.push(row.row_id.clone());
                     }
                 },
-                // The interrupt note is written when the key is pressed.
                 RowKind::Status if text == INTERRUPT_REASON => {}
                 _ => settled_ids.push(row.row_id.clone()),
             }
         }
 
         let markdown = &self.markdown;
-        // Answers start at the margin, unmarked, as Amp prints them.
         let render = |source: &str, width: usize| markdown.render(source, width, 0);
         let fresh = self.commits.plan(&settled_ids).fresh;
         // A parked stream pairs only with an answer that has not gone out:
@@ -2868,8 +2741,6 @@ impl App {
                 .copied()
                 .unwrap_or(global)
         };
-        // A streamed batch: a block of its own, or more rows of the open
-        // block it began (no blank row between them).
         let streamed = |batch: crate::ui::transcript::stream::Batch| {
             let placement = if batch.continues {
                 Placement::Continue
@@ -2888,7 +2759,6 @@ impl App {
                     finalized: Option<crate::ui::transcript::stream::Batch>|
          -> (String, Option<(Block, Placement)>) {
             match (snapshot.rows[index].kind, finalized) {
-                // The planner has laid out this answer already.
                 (RowKind::AssistantMessage, Some(batch)) if batch.lines.is_empty() => {
                     (String::new(), None)
                 }
@@ -2904,7 +2774,6 @@ impl App {
             }
         };
         if let Some((start, end)) = self.history_request.take() {
-            // An earlier page goes out first, under its own header.
             let len = snapshot.rows.len();
             let (start, end) = (start.min(len), end.min(len));
             let count = snapshot.rows[start..end]
@@ -2936,7 +2805,6 @@ impl App {
             let Some(index) = snapshot.rows.iter().position(|r| r.row_id == id) else {
                 continue;
             };
-            // A batch with lines always has its source.
             if let (text, Some(source)) = draw(index, plan.finalized.remove(&id)) {
                 commits.push(text);
                 sources.push(source);
@@ -2949,18 +2817,13 @@ impl App {
             }
         }
 
-        // Live rows, laid out exactly as they will commit.
         let pad = " ".repeat(MARGIN);
         let mut tail: Vec<String> = Vec::new();
         let mut tail_groups = Vec::new();
         for item in &live_items {
             let rows: Vec<String> = match item {
                 LiveItem::Text(id) => match self.planner.pending(id) {
-                    // An open diagram is drawn once its source is whole; the
-                    // live region holds two rows for it meanwhile, so it
-                    // neither grows nor shows half a diagram.
                     Some(pending) if pending.diagram => {
-                        // Where its code block will be drawn.
                         let lines = pending.text.lines().count().saturating_sub(1);
                         let lead = "    ";
                         vec![
@@ -2983,8 +2846,6 @@ impl App {
                             render(text, width)
                         });
                         if written > 0 {
-                            // The block's first rows are committed already:
-                            // the rest follows them without a blank row.
                             tail.extend(
                                 rows.into_iter().skip(written).map(|r| format!("{pad}{r}")),
                             );
@@ -2998,7 +2859,6 @@ impl App {
                     live_thinking(text, self.tool_detail == Detail::Expanded, width, p)
                 }
                 LiveItem::Tool(index) => {
-                    // Under the blank row that opens it.
                     tail_groups.push((tail.len() + 1, snapshot.rows[*index].row_id.clone()));
                     render_group(
                         &project_group(&group_rows(&snapshot.rows, *index), detail_of(*index)),
@@ -3019,8 +2879,6 @@ impl App {
     }
 
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
-        // The session the process starts in needs no "new session" line
-        // under the banner; only a later `/new` marks the switch.
         let first = self.session_id.is_empty();
         self.session_id = session_id;
         self.planner.reset();
@@ -3039,10 +2897,6 @@ impl App {
             kind => Some(kind),
         };
         self.composer.clear();
-        // Fullscreen holds the transcript itself: another session starts on
-        // a clean view under the banner, which the next frame commits (the
-        // session may attach before the first frame). Scrollback keeps what
-        // the terminal already shows.
         self.card_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
@@ -3106,8 +2960,6 @@ impl App {
             }
             return false;
         };
-        // The header is the row under the blank row that opens the block:
-        // a tool group's, or a settled thought's title.
         if row != 1 {
             return false;
         }
@@ -3272,7 +3124,7 @@ impl App {
         }
     }
 
-    /// Fullscreen's bottom border label, Amp's status corner: the run
+    /// Fullscreen's bottom border label, the status corner: the run
     /// status, the slot (a notice in the highlight colour) and the approvals
     /// mode when it is not the default one.
     fn dock_status(&self, run: Option<&str>) -> Option<String> {
@@ -3289,7 +3141,6 @@ impl App {
             };
             parts.push(fg(&slot, color));
         }
-        // The default preset says nothing; any other is worth the corner.
         if self.approvals != "workspace-write" {
             let mode = status_label(&self.approvals);
             parts.push(fg(&format!("\u{23f5}\u{23f5} {mode}"), &p.muted));
@@ -3298,7 +3149,6 @@ impl App {
     }
 
     fn status_line(&self, cols: usize) -> String {
-        // mode, approvals mode, then the one status slot.
         let slot = self.slot();
         let mut left = format!(
             "{}AGENT  \u{23f5}\u{23f5} {}",
@@ -3310,7 +3160,6 @@ impl App {
             left.push_str(&slot);
         }
         let total = cols.saturating_sub(2);
-        // The model label goes first when the row is too narrow for both.
         let line = match &self.label {
             Some(label) if width_of(&left) + 2 + width_of(label) <= total => {
                 let gap = total - width_of(&left) - width_of(label);
@@ -3318,8 +3167,6 @@ impl App {
             }
             _ => clip(&left, total).0,
         };
-        // The transient notice is the one thing on the row that just
-        // happened: it takes the highlight colour, the rest stays muted.
         if let Some((text, _)) = &self.notice
             && let Some(at) = line.find(text.as_str())
         {
@@ -3356,7 +3203,6 @@ impl Document for App {
             return None;
         };
         let width = cols.saturating_sub(2 + MARGIN).max(1);
-        // Under the blank row that opens the block.
         let (start, end) = card_rows(group, width, &self.palette, card)?;
         Some((start + 1, end + 1))
     }
@@ -3383,8 +3229,6 @@ impl Document for App {
 
     fn estimate(&self, index: usize, cols: usize) -> usize {
         match &self.history[index] {
-            // Markdown is the costly layout: count the wrapped source lines
-            // under the blank row that opens the chunk.
             Block::Assistant(text) => {
                 let width = cols.saturating_sub(2 + MARGIN).max(1);
                 1 + text
@@ -3490,8 +3334,6 @@ fn banner(cols: usize, p: &Palette, branch: &str) -> String {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| t("Not available").into());
     let branch = branch.to_owned();
-    // Port of `buildStartupPanel`: the logo beside the greeting when the box
-    // is wide enough, the greeting wrapped under it otherwise.
     let body_width = cols.saturating_sub(2 + MARGIN).max(4) - 4;
     let greeting = [
         tf("Welcome to DIM {version}!", &[("version", version)]),
@@ -3603,8 +3445,8 @@ fn labeled_rows(pairs: &[(&str, &str)], body_width: usize) -> Vec<String> {
     rows
 }
 
-/// The working directory, `~` for the home, and the git branch: what Amp
-/// writes in its prompt box's bottom border.
+/// The working directory, `~` for the home, and the git branch: what the
+/// prompt box writes in its bottom border.
 fn workspace_label(branch: &str) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -3671,7 +3513,7 @@ type Painter<'a> = &'a dyn Fn(&str) -> String;
 /// Rounded box drawing around `rows`, sized to `cols` with the common
 /// margin. Rows that are too long are cut to the inner width. `edge` paints
 /// the border characters. `status`, plain text painted by `label`, is set
-/// into the top border (`╭─ status ───╮`), Amp-style.
+/// into the top border (`╭─ status ───╮`).
 fn boxed(
     rows: &[String],
     cols: usize,
@@ -3679,7 +3521,6 @@ fn boxed(
     interior: &dyn Fn(usize, &str) -> String,
     status: Option<(&str, Painter)>,
 ) -> Vec<String> {
-    // L's boxes end two columns short of the right edge, margin included.
     let outer = cols.saturating_sub(2 + MARGIN).max(4);
     let inner = outer - 4;
     let margin = " ".repeat(MARGIN);
@@ -3707,7 +3548,7 @@ fn boxed(
 }
 
 /// One border row `outer` columns wide between `corners`: a styled label
-/// after `─ ` on the left, another before ` ─` on the right, as Amp's prompt
+/// after `─ ` on the left, another before ` ─` on the right, as the prompt
 /// box carries them. A label that does not fit is left out, the right one
 /// first.
 fn border_line(
@@ -3809,9 +3650,22 @@ fn saved_tool_detail(home: &std::path::Path) -> Detail {
     }
 }
 
+/// A Termux resize that changes only the height comes from the on-screen
+/// keyboard; it uses the ordinary frame path instead of rewriting scrollback.
+fn termux_height_only(previous_columns: u16, size: (u16, u16), termux: bool) -> bool {
+    termux && size.0 == previous_columns
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_termux_keyboard_toggle_uses_the_frame_path() {
+        assert!(termux_height_only(80, (80, 20), true));
+        assert!(!termux_height_only(80, (100, 20), true));
+        assert!(!termux_height_only(80, (80, 20), false));
+    }
 
     #[test]
     fn tool_details_start_expanded_until_collapsed_is_saved() {
@@ -3847,8 +3701,6 @@ mod tests {
             .join("\n\n");
         assert_eq!(live_thinking(short, true, 60, p).len(), 3);
         assert_eq!(settled_thinking(short, Some(1000), true, 60, p).len(), 3);
-        // Every prefix of the stream is no taller than what follows it:
-        // the block never shrinks while it runs, in any script.
         let cjk = "先看**结构**：模块、尺寸，以及集成测试。\n\n再看生成的架构图（crates.mmd），确认依赖方向是否正确……然后读功能清单。";
         for text in [long.as_str(), cjk] {
             let mut last = 0;
@@ -3869,7 +3721,6 @@ mod tests {
             assert_eq!(live.len(), 1, "{text:?}");
             assert_eq!(settled.len(), 1, "{text:?}");
         }
-        // Collapsed, the running row shows the newest words.
         let row = live_thinking(&long, false, 40, p).remove(0);
         assert!(row.contains("thought."), "{row:?}");
         assert!(!row.contains("Paragraph 1 "), "{row:?}");
@@ -4008,7 +3859,6 @@ mod tests {
             let round = |drawn: &mut Drawn| {
                 let scrolled = drawn.scrolled();
                 let mut last = drawn.anchor();
-                // Only a region that runs to the bottom row may lift it.
                 let mut check = |drawn: &Drawn, what: &str| {
                     let at = drawn.anchor();
                     let bottom = !drawn.emu.row(drawn.size.1 as usize - 1).is_empty();
@@ -4108,7 +3958,6 @@ mod tests {
         for row in goodbye_panel(Some("session")) {
             assert_eq!(edge(&row), edge(&welcome[0]), "{row:?}");
         }
-        // Their text starts in one column too.
         let text = |row: &str| row.find(|c: char| c.is_alphanumeric());
         assert_eq!(
             text(&goodbye_panel(None)[1]),
@@ -4171,8 +4020,6 @@ mod tests {
 
     #[test]
     fn emoji_sequences_count_as_one_wide_cluster() {
-        // A ZWJ family, a VS16 heart and a flag are two columns each, as
-        // Bun's `stringWidth` (the reference) counts them.
         assert_eq!(width_of("👨‍👩‍👧"), 2);
         assert_eq!(width_of("❤️"), 2);
         assert_eq!(width_of("🇨🇳"), 2);

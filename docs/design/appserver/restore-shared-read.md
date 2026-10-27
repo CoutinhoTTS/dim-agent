@@ -398,8 +398,9 @@ the same `restore_cost` harness: `main` at 2946f25d (format v16 with #213), #224
 prototype of this design (uncommitted). The harness adds to #224's version a counting allocator, the store calls of a
 restore with their ranges, an optional child branch and an optional pause before the create; v16 Sessions were grown with the `main` build and v17
 Sessions with the #224 build, which the prototype restores too. Two rounds per mix, in the orders main, v17,
-prototype and prototype, v17, main; seven restores per size in each; the tables show the mean of the two medians.
-Round medians agreed within 3% at 10k. Nothing here is asserted in tests. The prototype measured here kept events
+prototype and prototype, v17, main; seven restores per size in each; within a round the sizes are rotated across
+repetitions so no size is always measured first or last, avoiding order-dependent cache bias. The tables show the mean
+of the two medians. Round medians agreed within 3% at 10k. Nothing here is asserted in tests. The prototype measured here kept events
 only; the batch ends added after review (§4.2) were measured separately on one plain Session at 10k (§5), where a
 restore with first idle took 131 and 134 ms without them and 140 and 132 ms with them, in interleaved runs.
 

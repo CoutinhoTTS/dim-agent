@@ -12,6 +12,9 @@ pub struct ModelConfigFile {
     pub providers: Vec<ProviderConfig>,
 }
 impl ModelConfigFile {
+    /// Loads a model configuration. A deserialization error reports only its
+    /// line and column, never field values, so credentials in
+    /// `providers[].headers` stay out of diagnostics.
     pub fn load(path: &Path) -> Result<Self, HostError> {
         let bytes = std::fs::read(path).map_err(|error| {
             HostError::failed(format!(
@@ -19,7 +22,6 @@ impl ModelConfigFile {
                 path.display()
             ))
         })?;
-        // Serde errors can include field values; keep credentials out of diagnostics.
         serde_json::from_slice(&bytes).map_err(|error| {
             HostError::failed(format!(
                 "Invalid model configuration {} at line {}, column {}",

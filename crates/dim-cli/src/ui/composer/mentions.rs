@@ -437,7 +437,6 @@ impl Mentions {
             if rest.is_empty() {
                 continue;
             }
-            // Hidden entries only for a query that names one.
             if !hidden && (rest.starts_with('.') || rest.contains("/.")) {
                 continue;
             }
@@ -681,7 +680,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("first.txt"), "").unwrap();
         let mut mentions = Mentions::new(dir.path().to_owned());
-        // Expire only after mutations, not while checking the previous refresh.
         mentions.ttl = Duration::MAX;
         mentions.candidates("");
         wait(&mut mentions);
@@ -691,16 +689,12 @@ mod tests {
             m.candidates("").into_iter().map(|c| c.text).collect()
         };
         assert_eq!(texts(&mut mentions), ["first.txt"]);
-        // The stale index starts a refresh; until it lands the old
-        // results stay, and nothing reads as searching.
         std::fs::write(dir.path().join("second.txt"), "").unwrap();
         mentions.ttl = Duration::ZERO;
         assert_eq!(texts(&mut mentions), ["first.txt"]);
         mentions.ttl = Duration::MAX;
         assert!(!mentions.searching());
         wait(&mut mentions);
-        // The refresh is new even when it finds the same number of
-        // entries, so the picker is drawn again.
         assert!(mentions.changed());
         assert_eq!(texts(&mut mentions), ["first.txt", "second.txt"]);
         std::fs::remove_file(dir.path().join("second.txt")).unwrap();
@@ -737,10 +731,8 @@ mod tests {
             .collect();
         assert_eq!(found, ["src/deep/er/main.rs"]);
         assert!(mentions.candidates("run").is_empty());
-        // Hidden entries only when the query names one.
         assert!(!mentions.candidates("").iter().any(|c| c.text == ".env"));
         assert_eq!(mentions.candidates(".en")[0].text, ".env");
-        // A directory prefix narrows to its subtree; directories end in `/`.
         let under: Vec<String> = mentions
             .candidates("src/")
             .into_iter()

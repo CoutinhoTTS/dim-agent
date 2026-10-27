@@ -93,7 +93,6 @@ impl PluginsDir {
             match std::fs::symlink_metadata(&path) {
                 Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
                 Ok(_) => return Err(outside(&path)),
-                // Nothing below a missing component exists.
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                 Err(error) => return Err(acquire_failed(error)),
             }
@@ -206,7 +205,6 @@ impl PluginsDir {
         };
         for id in ids.flatten() {
             let id_dir = id.path();
-            // `.staging` and `.python` are not ids: an id has no dot.
             if id.file_name().to_string_lossy().starts_with('.') || self.check(&id_dir).is_err() {
                 continue;
             }
@@ -252,7 +250,6 @@ impl Drop for Staging {
     fn drop(&mut self) {
         if let Some(dir) = self.0.take() {
             let _ = std::fs::remove_dir_all(&dir);
-            // `.staging` itself goes once no other staging is in it.
             if let Some(parent) = dir.parent() {
                 let _ = std::fs::remove_dir(parent);
             }

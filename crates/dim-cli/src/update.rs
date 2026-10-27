@@ -119,7 +119,9 @@ fn manual(package: &str, current: &str) -> String {
 
 /// How the package manager that installed `exe` installs `version`, told
 /// by where it keeps its global packages; `None` for any other source, such
-/// as a build from this repository.
+/// as a build from this repository. npm uses the command in the prefix that
+/// holds this copy and passes `--prefix`, so the install lands there even
+/// when another Node comes first on `PATH`.
 fn installer(exe: &Path, package: &str, version: &str) -> Option<Install> {
     let path = exe.to_string_lossy().replace('\\', "/");
     let spec = format!("{package}@{version}");
@@ -132,10 +134,6 @@ fn installer(exe: &Path, package: &str, version: &str) -> Option<Install> {
     } else if path.contains("/yarn/global/") {
         ("yarn".into(), vec!["global", "add"])
     } else {
-        // npm keeps global packages in `<prefix>/lib/node_modules`, or
-        // `<prefix>/node_modules` on Windows, with its own command in that
-        // prefix: the install lands where this copy is even when another
-        // Node comes first on `PATH`.
         let marker = if cfg!(windows) {
             "/node_modules/"
         } else {
@@ -261,7 +259,6 @@ mod tests {
         assert!(newer("0.1.0-alpha.9", "0.2.0-alpha.0"));
         assert!(!newer("0.1.0-alpha.1", "0.1.0-alpha.1"));
         assert!(!newer("0.1.0-alpha.1", "0.1.0-alpha.0"));
-        // Another identifier or a release of the same core is not an upgrade.
         assert!(!newer("0.1.0-alpha.1", "0.1.0-beta.0"));
         assert!(!newer("0.1.0-alpha.1", "0.1.0"));
         assert!(newer("0.5.20", "0.5.21"));
@@ -285,6 +282,16 @@ mod tests {
             "npm install -g --prefer-online --prefix /u/.nvm/versions/node/v24 dimcode@0.1.0-alpha.2"
         );
         assert!(npm.relaunch.ends_with("bin/dimcode"));
+        let prefix = tempfile::tempdir().unwrap();
+        std::fs::create_dir(prefix.path().join("bin")).unwrap();
+        std::fs::write(prefix.path().join("bin/npm"), "").unwrap();
+        let copied = prefix.path().join("lib/node_modules/dimcode/bin/dimcode");
+        let np = installer(&copied, "dimcode", spec).unwrap();
+        assert_eq!(np.program, prefix.path().join("bin/npm"));
+        assert_eq!(
+            np.args.last().map(String::as_str),
+            Some("dimcode@0.1.0-alpha.2")
+        );
         let bun = installer(
             Path::new("/u/.bun/install/global/node_modules/dimcode-darwin-arm64/bin/dimcode"),
             "dimcode",
@@ -300,7 +307,6 @@ mod tests {
         .unwrap();
         assert_eq!(pnpm.command_line(), "pnpm add -g dimcode@0.1.0-alpha.2");
         assert_eq!(pnpm.relaunch, PathBuf::from("dimcode"));
-        // A build from the repository has nothing to update in place.
         assert!(installer(Path::new("/u/dim/target/debug/dimcode"), "dimcode", spec).is_none());
     }
 }

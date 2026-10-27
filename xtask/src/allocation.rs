@@ -7,8 +7,6 @@ fn add(size: usize) {
     let live = LIVE.fetch_add(size, Ordering::Relaxed) + size;
     PEAK.fetch_max(live, Ordering::Relaxed);
 }
-// Instrumentation is confined to this development executable. The system
-// allocator's layouts and pointers are passed through without modification.
 unsafe impl GlobalAlloc for MeasuredAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = unsafe { System.alloc(layout) };

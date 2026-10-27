@@ -33,7 +33,6 @@ function element(): HTMLDivElement {
   tooltip.className = "ui-tooltip"
   tooltip.setAttribute("role", "tooltip")
   tooltip.popover = "manual"
-  // Reset the UA popover box; .ui-tooltip draws the rest.
   Object.assign(tooltip.style, { position: "fixed", inset: "auto", margin: "0", border: "0", overflow: "visible" })
   document.body.append(tooltip)
   return tooltip
@@ -47,7 +46,6 @@ function show(target: Target): void {
   node.textContent = text
   if (!node.matches(":popover-open")) node.showPopover()
   active = target
-  // aria-label already names icon buttons; describe only when the tooltip adds text.
   if (target.getAttribute("aria-label") !== text) target.setAttribute("aria-describedby", TOOLTIP_ID)
   place(target, node)
 }
@@ -88,8 +86,6 @@ function onLeave(): void {
 
 function onFocus(event: FocusEvent): void {
   const target = event.currentTarget as Target
-  // Coming back to the window refocuses the last element, still :focus-visible after any
-  // keypress; showing there would leave a tooltip no pointer movement can dismiss.
   if (target === focusedAtWindowBlur) {
     focusedAtWindowBlur = null
     return

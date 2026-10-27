@@ -10,7 +10,6 @@ export async function copyText(text: string): Promise<void> {
   const field = document.createElement("textarea")
   field.value = text
   field.setAttribute("readonly", "")
-  // 16px keeps iOS Safari from zooming in on focus; off-screen keeps it invisible.
   field.style.cssText = "position:fixed;top:0;left:-9999px;font-size:16px;opacity:0"
   document.body.append(field)
   field.select()

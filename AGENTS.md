@@ -11,7 +11,7 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 - After each design or implementation, do an ablation review: check whether every change is necessary and prefer removing abstractions, wrappers, intermediate state and extra branches that do not serve the requirement. Where a simplification is plausible, try it and confirm the result still satisfies the requirement and interface contracts within the affected scope. For structure that is required, state its purpose; do not deliberately revert fixes or manufacture test failures to prove necessity. If nothing can be removed, say so instead of inventing experiments.
 - Process serves delivery; keep effort proportional to the complexity and risk of the change. Handle ordinary changes directly and only delegate complex work that can progress independently. Tracking issues individually does not mean a separate agent, report or full verification run per issue.
 - Development and tests use an isolated `--home` (or `DIMCODE_HOME`); never touch the product home `~/.dimcode`.
-- This is a public repository. The private account plugin (`dim-oauth-plugin-rust`), its account realm and token flows, and any credentials stay out of it; see the [managed provider boundary](docs/architecture/development.md#managed-provider-boundary).
+- This is a public repository. The Dim account plugin (`crates/dim-oauth`) lives here, but its OAuth client IDs and any credentials stay out of it: they are build-time secrets; see the [managed provider boundary](docs/architecture/development.md#managed-provider-boundary).
 - Review correctness, security, compatibility and unnecessary abstraction before committing. Commit complete, reviewable units on their declared parent, with their documentation and observable-behavior tests. Never commit secrets or scratch experiments.
 
 ## Data and interface conventions
@@ -23,6 +23,13 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 - Missing values and recovery behavior must have a clear business meaning; do not introduce them because of uncertainty about what upstream returns.
 - `ToolResult.content` is the only text the model can read. Handles, cursors and state the model needs later must be written into `content`; `structuredContent` is only for persistence, UI and internal logic.
 - Incompatible persistence changes require an explicit format decision; do not silently reuse a version for incompatible committed formats. Validate against disposable databases, never a user's existing store.
+
+## Comments
+
+- Prefer code that needs no comment. A comment is only for what code cannot carry: a stable external reference (`#169`, `ADR 006 D3`), a tool or compiler directive, a `// SAFETY:` precondition, a generated-file marker, or a license header.
+- Pin behavior with names, types, tests and assertion messages; put design rationale in commit messages and design documents, and external context in issues and specifications.
+- Do not narrate code or tests, label sections, restate what a test asserts, or leave a TODO without an issue. Update or remove a comment when the fact it carries changes.
+- `///` and `//!` document caller-visible contracts: behavior, preconditions, errors, panics, and examples where useful, not internal implementation.
 
 ## Documentation
 

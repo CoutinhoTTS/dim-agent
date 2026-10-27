@@ -103,7 +103,6 @@ impl ModelProvider {
         state: &mut ModelState,
         events: &[Arc<AgentEvent>],
     ) -> dim_agent_runtime::Result<()> {
-        // Open calls with the calls their output started.
         let mut open: Vec<(ModelCallData, Vec<StartedCall>)> = Vec::new();
         for event in events {
             state.steer.apply(event);
@@ -179,7 +178,6 @@ impl ModelProvider {
                     .validate(call.request.clone(), cancel.clone())
                     .await?;
                 crate::context_policy::check_cancel(&cancel)?;
-                // The committed request keeps its images; only what is sent changes.
                 let request = images::adapt(&call.request);
                 let resolved = match &self.resolver {
                     Some(resolver) => resolver.0.resolve(request.clone(), cancel.clone()).await?,
@@ -221,15 +219,10 @@ impl ModelProvider {
         let (outcome, submitted) = {
             let mut state = self.state.lock().unwrap();
             let result = match result {
-                // This generation's token is cancelled only when it unloads.
                 Err(HostError::Cancelled(_)) if generation.is_cancelled() => {
                     Err(HostError::Cancelled(CAPABILITY_RELOADING.into()))
                 }
-                // Replaced before any output: whatever the host returned
-                // after that, the request ends as replaced.
                 _ if gate.replaced() => Err(HostError::Cancelled(REPLACED_BY_STEER.into())),
-                // A cancelled task reports the interrupt this owner consumed,
-                // not the host's or backoff wait's generic cancellation text.
                 Err(HostError::Cancelled(reason)) => Err(HostError::Cancelled(
                     state.stop_reason.clone().unwrap_or(reason),
                 )),
@@ -390,9 +383,6 @@ impl DynPlugin for ModelProviderPlugin {
                             ) {
                                 let mut state = owner.state.lock().unwrap();
                                 state.steer.apply(&event);
-                                // A steer of the running request replaces it unless
-                                // it already received output; an interrupt
-                                // already ended it.
                                 if let Some(current) = state.current.as_ref().filter(|current| {
                                     state.interrupted.is_none()
                                         && state.steer.steered(&current.request_id)

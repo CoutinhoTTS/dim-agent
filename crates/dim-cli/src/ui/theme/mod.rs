@@ -1,5 +1,4 @@
-//! Colour roles of the terminal interface: the default theme (Amp's,
-//! following the terminal's own colours), the named themes with contrast
+//! Colour roles of the terminal interface: the default theme (following the terminal's own colours), the named themes with contrast
 //! floors against the real background, detection.
 
 pub mod ansi;
@@ -28,7 +27,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// The `system` theme: Amp's default, in the terminal's own colours.
+    /// The `system` theme: the default, in the terminal's own colours.
     /// A dark terminal needs no contrast floors: its scheme already pairs
     /// its palette with its background. A light terminal's hex ramp is held
     /// to the floors against the reported background (an off-white when the
@@ -62,8 +61,6 @@ impl Theme {
         let Some(entry) = themes::THEMES.iter().find(|t| t.id == id) else {
             return Self::system(mode, appearance, background);
         };
-        // A dark theme on a light terminal (or the reverse) would be
-        // unreadable, and 16/8-colour terminals only get `system`.
         let usable = matches!(mode, ColorMode::TrueColor | ColorMode::Ansi256)
             && entry.dark == matches!(appearance, Appearance::Dark);
         if !usable {
@@ -71,9 +68,6 @@ impl Theme {
         }
         let background = background.unwrap_or(entry.background);
         let own = |h: &str| h.to_owned();
-        // The roles Amp's structure adds come from the theme's own: users
-        // speak in its accent, keys take its function colour, and the
-        // accent bar carries its background.
         let mut palette = Palette {
             accent: own(entry.accent),
             on_accent: own(entry.background),
@@ -204,8 +198,6 @@ mod tests {
 
     #[test]
     fn a_light_terminal_takes_the_hex_ramp_for_its_colours() {
-        // Terminal.app's white profile: ochre yellow and cyan are not read
-        // on white; the ramp's hues are, and they clear the floors.
         let theme = Theme::system(ColorMode::TrueColor, Appearance::Light, Some("#ffffff"));
         let white = parse_hex("#ffffff").unwrap();
         for role in [
@@ -217,12 +209,9 @@ mod tests {
             let color = parse_hex(role).expect("hex role on a light terminal");
             assert!(contrast::contrast_ratio(color, white) >= 4.5, "{role}");
         }
-        // Text stays the terminal's own; muted is a readable grey, not the
-        // faint attribute.
         assert_eq!(theme.palette.text, "default");
         assert!(contrast::contrast_ratio(parse_hex(&theme.palette.muted).unwrap(), white) >= 4.5);
         assert_eq!(theme.palette.on_accent, "#ffffff");
-        // 16 colours have no other yellow to offer.
         let few = Theme::system(ColorMode::Ansi16, Appearance::Light, None);
         assert_eq!(few.palette.accent, "ansi:3");
     }

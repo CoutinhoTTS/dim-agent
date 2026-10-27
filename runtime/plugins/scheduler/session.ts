@@ -5,7 +5,6 @@ import { patchSchema } from './data.ts'
 import { bounded, toolRequest, unloadingBeforeCall, unloadingAfterCall, type JobReply, type ScheduleJobs } from './requests.ts'
 
 const jobSchema = z.toJSONSchema(patchSchema) as JsonSchema
-// Native tool schemas require a root type even when an object union uses anyOf.
 jobSchema.properties!.schedule.type = 'object'
 
 export default definePlugin({

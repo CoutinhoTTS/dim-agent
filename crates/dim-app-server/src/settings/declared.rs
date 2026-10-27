@@ -275,7 +275,6 @@ impl HostDispatch for Dispatch {
     }
     fn invoke(&self, method: &str, args: RpcValue) -> Reply {
         let service = self.0.clone();
-        // Dropping the call cancels it; a committed write stays committed.
         let cancel = CancellationToken::new();
         match method {
             "register" => {
@@ -287,8 +286,6 @@ impl HostDispatch for Dispatch {
                                 .into(),
                         )
                     })?;
-                // Registered now, while the calling row is known; a refused
-                // registration rejects, failing the caller's apply.
                 let registered = request(args).and_then(|declaration| {
                     service
                         .register_declared(&caller, declaration)

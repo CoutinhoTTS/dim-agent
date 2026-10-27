@@ -167,7 +167,6 @@ mod tests {
             panel
                 .render(60, 10, &p)
                 .iter()
-                // The selected row sits on the accent bar: mark it `›`.
                 .map(|r| {
                     let plain = crate::ui::render::panel::strip_escapes(r);
                     if r.contains("\x1b[30;43m") {
@@ -179,7 +178,6 @@ mod tests {
                 .filter(|r| r.contains("session "))
                 .collect()
         };
-        // Page of 5 rows: going down past it scrolls the list...
         shown(&panel);
         for _ in 0..7 {
             panel.handle_key(key(KeyCode::Down));
@@ -189,7 +187,6 @@ mod tests {
             rows[0].contains("session 03") && rows[4].contains("› session 07"),
             "{rows:?}"
         );
-        // ...going back up stays in that window until its top is passed.
         panel.handle_key(key(KeyCode::Up));
         panel.handle_key(key(KeyCode::Up));
         let rows = shown(&panel);

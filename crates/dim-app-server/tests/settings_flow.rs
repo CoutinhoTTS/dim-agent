@@ -178,7 +178,6 @@ async fn server_reload_preserves_project_root_identity_and_settings() {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
-        // The process loader is a handle the loader provides, not a name.
         builder.require_feature(
             Feature::new("test.process-settings").session("test.process-settings", move |names| {
                 Ok(Box::new(ProcessSettings::new(names, capture.clone())?))
@@ -289,8 +288,6 @@ async fn late_workspace_authorization_and_settings_survive_dependency_reload() {
     );
     let project_root = first.unwrap();
     assert_eq!(project_root, same.unwrap());
-    // Authorizing the same directory twice announces it once. Events of one
-    // channel arrive in emit order, so a later authorization is a barrier.
     let barrier = home.join("barrier");
     fs::create_dir(&barrier).unwrap();
     settings
@@ -422,7 +419,6 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
             );
             assert_eq!(imported.len(), 64);
             assert_eq!(fs::read(home.join("example.json")).unwrap(), original);
-            // A corrupt optional source does not block plugin assembly or another namespace.
             assert!(matches!(
                 settings.read::<Other>(SettingsScope::User, &cancel).await,
                 Err(SettingsError::Invalid(_))
@@ -493,7 +489,6 @@ async fn native_import_plain_v13_cas_failure_and_restart() {
             assert_eq!(winner.revision, "native:user/example:2");
             saved = Some(winner);
             fs::write(home.join("example.json"), b"ignored malformed legacy data").unwrap();
-            // Explicitly seed the historical v13 payload-only contract and token.
             db.execute("INSERT INTO settings_documents(source,version,document,imported_revision) VALUES ('user/mcp',7,'{\"mcpServers\":{},\"extension\":\"v13\"}','missing')", []).unwrap();
             let compat = settings
                 .read::<dim_app_server::mcp::config::McpSettings>(SettingsScope::User, &cancel)
@@ -594,7 +589,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         .read::<Document>(SettingsScope::Project(2), &cancel)
         .await
         .unwrap();
-    // The user write above; counted below, behind a barrier.
     let before = 1;
     let project_saved = settings
         .update(
@@ -605,7 +599,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         )
         .await
         .unwrap();
-    // Each write is announced once, with its own scope and revision.
     saw(
         &mut changes,
         change(SettingsScope::Project(1), &project_saved.revision),
@@ -634,8 +627,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         change(SettingsScope::Project(2), &other_saved.revision),
     )
     .await;
-    // One source's events arrive in emit order, so the last write is a
-    // barrier: one event per write, none from the conflicting writer.
     assert_eq!(changes.borrow().len(), before + 2);
     assert_eq!(
         settings
@@ -693,7 +684,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
     stopped.cancel();
     assert!(matches!(update.await, Err(SettingsError::Cancelled)));
     assert!(!changes.has_changed().unwrap());
-    // Dropping the caller does not discard admitted work or its commit notification.
     {
         let update = settings.update(
             SettingsScope::User,
@@ -704,7 +694,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
         tokio::pin!(update);
         tokio::select! { result = &mut update => panic!("unexpected {result:?}"), _ = tokio::time::sleep(Duration::from_millis(50)) => {} }
     }
-    // Nothing can commit while the test holds the lease.
     let before = changes.borrow().len();
     drop(lock);
     tokio::time::timeout(
@@ -735,8 +724,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
             0o600
         );
     }
-    // Unload cancels lease waiters and drains them before releasing ownership.
-    // The event is published under the writer's lease, so it may still be held.
     let lock = lock_when_free(&files, &path, &cancel).await;
     {
         let update = settings.update(
@@ -762,7 +749,6 @@ async fn file_cas_project_isolation_notifications_and_accepted_work_ownership() 
             .await,
         Err(SettingsError::Closed)
     ));
-    // The owner registers again with the new Settings.
     let view = root.plugin(settings_part(0, vec![1, 2]));
     wait_active(
         &root,
@@ -800,7 +786,6 @@ async fn sources_appear_while_registered_and_names_are_exclusive() {
     let dispatch = root
         .get_at::<dyn HostDispatch>(&host_key("settings"))
         .unwrap();
-    // Nothing is served before its owner registers it.
     assert!(matches!(
         settings
             .read::<Document>(SettingsScope::User, &cancel)
@@ -843,7 +828,6 @@ async fn sources_appear_while_registered_and_names_are_exclusive() {
         owner_call(&dispatch, "read", read.clone()).await["ok"],
         true
     );
-    // A name or file registered already, or an escaping file, is refused.
     #[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
     struct BadPath;
     impl BusinessDocument for BadPath {
@@ -886,7 +870,6 @@ async fn sources_appear_while_registered_and_names_are_exclusive() {
             .await
             .is_err()
     );
-    // Turning the owner off withdraws its sources; the document stays.
     source.dispose().await.unwrap();
     assert!(matches!(
         settings
@@ -899,7 +882,6 @@ async fn sources_appear_while_registered_and_names_are_exclusive() {
         "unknown_source"
     );
     assert!(home.join("example.json").exists());
-    // Another owner may now take the name and finds the stored document.
     settings.register::<Document>(&root).unwrap();
     assert_eq!(
         settings
@@ -981,7 +963,6 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         let mut changes = listen::<SettingsChanged>(&root, &settings_changes("example"));
         let user = json!({"source": "example", "scope": "user"});
 
-        // The first read is the default document.
         let first = owner_call(&owner, "read", user.clone()).await;
         assert_eq!(first["ok"], true);
         assert_eq!(first["value"]["document"], json!({"maxResults": 5}));
@@ -997,7 +978,6 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         assert_eq!(saved["value"]["document"], json!({"maxResults": 7}));
         let second = saved["value"]["revision"].as_str().unwrap().to_owned();
         assert_ne!(second, first);
-        // Rejected writes change nothing and announce nothing.
         for (document, code) in [
             (json!({"maxResults": 8}), "conflict"),
             (json!({"maxResults": 0}), "invalid_document"),
@@ -1013,8 +993,6 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
             owner_call(&owner, "read", user.clone()).await["value"]["revision"],
             second.as_str()
         );
-        // A client write may change the user-only member; the owner may then
-        // keep it, but not change it.
         let service = json!({"kind": "web", "apiKey": "web-search"});
         let third = settings
             .update_declared(
@@ -1044,7 +1022,6 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         let stored = json!({"maxResults": 5, "searchService": service});
         assert_eq!(kept["value"]["document"], stored);
         let fourth = kept["value"]["revision"].as_str().unwrap().to_owned();
-        // One event per committed write, in commit order, on both paths.
         saw(&mut changes, change(SettingsScope::User, &fourth)).await;
         let announced: Vec<_> = changes
             .borrow()
@@ -1073,7 +1050,6 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
             assert_eq!(serde_json::from_slice::<Json>(&file).unwrap(), stored);
         }
 
-        // Project scope needs an authorized root; `projects` lists them.
         let unauthorized = owner_call(
             &owner,
             "read",
@@ -1110,7 +1086,6 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
             json!({"revision": "missing", "document": {"maxResults": 5}})
         );
 
-        // Only registered sources are served.
         let mcp = owner_call(&owner, "read", json!({"source": "mcp", "scope": "user"})).await;
         assert_eq!(mcp["error"]["code"], "unknown_source");
         root.shutdown().await.unwrap();
@@ -1144,7 +1119,6 @@ async fn invalid_or_conflicting_registrations_fail_the_owner() {
             root.plugin(FileStoragePlugin::new(vec![home.clone()])),
             root.plugin(settings_part(0, vec![])),
             root.plugin(owner("test.declared", move |settings, ctx| {
-                // The first case collides with a Rust source of the same name.
                 if index == 0 {
                     settings.register::<dim_app_server::mcp::config::McpSettings>(ctx)?;
                 }

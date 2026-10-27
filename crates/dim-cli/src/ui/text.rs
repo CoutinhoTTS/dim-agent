@@ -143,7 +143,6 @@ mod tests {
     fn tabs_expand_to_the_next_stop_of_their_line() {
         assert_eq!(expand_tabs("\tx"), "    x");
         assert_eq!(expand_tabs("ab\tc\n\td"), "ab  c\n    d");
-        // Wide characters count their cells.
         assert_eq!(expand_tabs("中\tx"), "中  x");
         assert!(matches!(
             expand_tabs("plain"),
@@ -155,9 +154,7 @@ mod tests {
     fn wrap_breaks_on_cells_not_chars() {
         assert_eq!(wrap_cells("中文中文", 4), vec!["中文", "中文"]);
         assert_eq!(wrap_cells("ab\n\ncd", 5), vec!["ab", "", "cd"]);
-        // A wide cluster larger than the row stays whole.
         assert_eq!(wrap_cells("中", 1), vec!["中"]);
-        // ZWJ emoji stays one cluster.
         let family = "👨\u{200d}👩\u{200d}👧";
         assert_eq!(wrap_cells(&format!("a{family}"), 2), vec!["a", family]);
     }

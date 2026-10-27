@@ -1,6 +1,5 @@
 import type { SourceDeclaration } from '../../../npm/plugin.js'
 
-// Web's Settings source, registered by the plugin's row when it starts.
 export const settings: SourceDeclaration = {
   "source": "web",
   "userFile": "web.json",

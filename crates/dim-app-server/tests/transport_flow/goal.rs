@@ -239,7 +239,6 @@ async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
     );
     wait_for(&session, "main", r#"op="completed""#).await;
     idle(&mut client, &id, "main").await;
-    // The summary is encoded in the block and decodes to the model's text.
     let completed_block = goal_block(&session, "main", r#"op="completed""#).await;
     assert!(!completed_block.contains("<it>"), "{completed_block}");
     assert_eq!(block_value(&completed_block, "Result:"), SPECIAL);
@@ -272,7 +271,6 @@ async fn node_goal_continues_to_the_limit_and_stops_on_completion() {
         "{results:#?}"
     );
 
-    // The methods validate only their own parameters and write by branch id.
     for (params, error) in [
         (json!({"sessionId":id,"objective":""}), "invalid_params"),
         (
@@ -368,8 +366,6 @@ async fn node_goal_restore_refolds_without_repeating_decisions() {
     set_limit(&mut client, 1).await;
     let id = new_session(&mut client).await;
     let session = agent.get_session(&id).unwrap();
-    // An objective with `<`, `&`, quotes and a blank line: the fold still
-    // finds a live goal (it continues), and the block decodes to it.
     assert_ok(
         &goal(
             &mut client,
@@ -404,8 +400,6 @@ async fn node_goal_restore_refolds_without_repeating_decisions() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // Restored, the branch part refolds: the goal stays paused, so an
-    // operator turn ends without a continuation, and no decision repeats.
     let (server, agent) = launch_goal(&home, AgentBuilder::new(AgentConfig::default())).await;
     let mut client = Client::new_version(&server, false, 3).await;
     assert_ok(
@@ -426,7 +420,6 @@ async fn node_goal_restore_refolds_without_repeating_decisions() {
         ),
         edited
     );
-    // The restored fold sees the edited objective live: a resume continues it.
     assert_ok(&goal(&mut client, "resume", json!({"sessionId":id})).await);
     wait_for(&session, "main", r#"kind="continuation" count="1""#).await;
     server.shutdown();
@@ -674,7 +667,6 @@ async fn node_goal_settings_resume_unload_and_fork() {
         own[0].contains(&format!(r#"reason="new_branch" after="{opening}""#)),
         "{own:#?}"
     );
-    // The source keeps its own goal.
     assert!(
         goal_writes(&session, "main")
             .await
@@ -853,8 +845,6 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
     set_limit(&mut client, 5).await;
     let id = new_session(&mut client).await;
     let session = agent.get_session(&id).unwrap();
-    // Pursuit 1: the worker's completion is a request; that turn's end creates
-    // one evaluator at N and writes no continuation.
     assert_ok(
         &goal(
             &mut client,
@@ -899,8 +889,6 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
             .all(|(_, line)| !line.contains("continuation")),
         "{writes:#?}"
     );
-    // The evaluator is an ordinary child: its first input is the prompt, with
-    // the working branch, the evaluation and what the worker reported.
     let child = &creation.branch;
     let prompt = first_user_text(&session, child).await;
     let marker = format!(r#"<dim-goal kind="evaluate" branch="main" evaluation="{evaluation}">"#);
@@ -913,7 +901,6 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
         prompt.contains("Reported result:\nall tests pass"),
         "{prompt}"
     );
-    // Its DONE completes the goal, by the evaluator.
     wait_for(&session, "main", r#"by="evaluator""#).await;
     idle(&mut client, &id, "main").await;
     let done = goal_block(&session, "main", r#"by="evaluator""#).await;
@@ -993,7 +980,6 @@ async fn node_goal_evaluator_restart_writes_no_second_result() {
     .await;
     let creates = branch_creates(&session, "main").await;
     let child = creates[0].1.branch.clone();
-    // The evaluator's turn is in flight when the process stops.
     wait_event(&session, &child, |kind| {
         matches!(kind, EventKind::ToolCall(_))
     })
@@ -1002,9 +988,6 @@ async fn node_goal_evaluator_restart_writes_no_second_result() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // Restored, the evaluator's part folds the failed end the restart recorded
-    // for the cut turn and reports nothing (Pursuit 6): the goal stays active
-    // with no second evaluator.
     let (server, agent) = launch_goal_with(
         &home,
         AgentBuilder::new(AgentConfig::default()),
@@ -1029,7 +1012,6 @@ async fn node_goal_evaluator_restart_writes_no_second_result() {
             .all(|(_, line)| !line.contains(r#"reason="evaluation_failed""#)),
         "{writes:#?}"
     );
-    // The restored evaluator reports its next live turn end.
     assert_ok(
         &client
             .rpc(

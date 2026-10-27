@@ -6,12 +6,6 @@ import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, re
 import os from 'node:os';
 import path from 'node:path';
 
-// The Web workspace is one platform-independent artifact per release
-// (docs/design/web-workspace.md §2.4): this builds `web/` once, records the
-// protocol it speaks beside the build, and packs the same tree as the native
-// archive dimcode-web-VERSION.tar.gz and the npm package dimcode-web, which the
-// dimcode wrapper lists as an optional dependency. `--dist DIR` takes an
-// already built tree instead of running npm (tests, a prebuilt frontend).
 const [destination, version, sourceCommit, ...rest] = process.argv.slice(2);
 const usage = 'Usage: node scripts/stage-web.mjs DESTINATION VERSION SOURCE_COMMIT [--dist DIR]';
 assert(destination && version && sourceCommit, usage);
@@ -22,8 +16,6 @@ const repo = path.resolve(import.meta.dirname, '..');
 const productVersion = readFileSync(path.join(repo, 'Cargo.toml'), 'utf8').match(/\[workspace.package\]\s+version = "([^"]+)"/)[1];
 assert.equal(version, productVersion, 'Version must match Cargo workspace');
 assert.equal(version, JSON.parse(readFileSync(path.join(repo, 'npm/package.json'))).version, 'Version must match npm wrapper');
-// The protocol the frontend's transport speaks; the App Server refuses a
-// frontend recorded for another one.
 const protocolVersion = Number(readFileSync(path.join(repo, 'crates/dim-app-server/src/protocol.rs'), 'utf8')
   .match(/pub const PROTOCOL_VERSION: u32 = (\d+);/)[1]);
 const output = path.resolve(destination);
@@ -31,7 +23,6 @@ assert(!existsSync(output), 'Destination already exists');
 const digest = (data) => createHash('sha256').update(data).digest('hex');
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'dimcode-web-'));
 const runTar = (args) => {
-  // macOS tar would otherwise add AppleDouble `._*` entries for extended attributes.
   const result = spawnSync('tar', args, { encoding: 'utf8', env: { ...process.env, COPYFILE_DISABLE: '1' } });
   assert.ifError(result.error);
   assert.equal(result.status, 0, 'Archive creation failed');
@@ -52,7 +43,6 @@ try {
     npm(['run', 'build', '--', '--outDir', dist, '--emptyOutDir']);
   }
   assert(lstatSync(path.join(dist, 'index.html')).isFile(), 'The frontend build has no index.html');
-  // The staged tree: web/ as the App Server serves it, the license, the record.
   const name = `dimcode-web`;
   const stage = path.join(scratch, name);
   cpSync(dist, path.join(stage, 'web'), { recursive: true });

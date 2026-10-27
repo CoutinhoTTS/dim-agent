@@ -130,8 +130,6 @@ async fn session_methods_does_not_list_a_name_management_holds() {
     let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (server, _) = launch_with(
         Arc::new(MockTools),
-        // A product home installs the process plugins that own the `skills`
-        // management namespace; a configured provider lets Sessions start.
         ServerConfig {
             product_home: Some(home.clone()),
             target_home: Some(home.join("rust")),
@@ -201,8 +199,6 @@ async fn session_methods_does_not_list_a_name_management_holds() {
         .map(|decl| decl["name"].as_str().unwrap())
         .collect();
     assert!(!names.contains(&"skills.echo"), "{listed}");
-    // The same name through the Session still routes to management, which
-    // declares no `skills.echo`.
     let reply = client.rpc("skills.echo", json!({"sessionId":sid})).await;
     assert_eq!(
         reply["error"]["data"]["appError"], "unknown_method",
@@ -334,16 +330,13 @@ impl Plugin for NotesProvider {
                 let state = state.clone();
                 Box::pin(async move {
                     match method.as_str() {
-                        // Undeclared progress never reaches the caller.
                         "notes.echo" => progress.send(json!("undeclared")),
                         "notes.wait" => {
                             state.entered.notify_one();
                             cancel.cancelled().await;
-                            // After the interrupted reply: dropped.
                             progress.send(json!("after the reply"));
                             state.settled.notify_one();
                         }
-                        // `count` notices of `bytes` bytes each, at once.
                         "notes.flood" => {
                             let text = "x".repeat(params["bytes"].as_u64().unwrap() as usize);
                             for step in 0..params["count"].as_u64().unwrap() {
@@ -390,14 +383,12 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
     let mut client = Client::new_version(&server, false, 3).await;
     let created = client.rpc("session.create", create(json!([]))).await;
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    // The provider receives the params as sent, `sessionId` included.
     let params = json!({"sessionId": sid, "branchId": "main", "text": "hi"});
     let reply = client.rpc("notes.echo", params.clone()).await;
     assert_eq!(
         reply["result"],
         json!({"method": "notes.echo", "params": params})
     );
-    // `session.methods` lists a Session's methods; `hello` announces it.
     assert!(
         client
             .features
@@ -418,12 +409,9 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
             {"name": "session.input.withdraw", "mutating": true},
         ]})
     );
-    // This profile serves Session methods to every transport, as built-ins.
     let mut remote = Client::new_version(&server, true, 3).await;
     assert_ok(&remote.rpc("notes.echo", json!({"sessionId": sid})).await);
 
-    // Outside every namespace the Session registered, outside the grammar,
-    // or without a Session to answer it, a name is unknown.
     for (method, params) in [
         ("other.echo", json!({"sessionId": sid})),
         ("other.echo", json!([1])),
@@ -436,10 +424,8 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
         assert_eq!(reply["error"]["code"], -32601, "{method}: {reply}");
         assert_eq!(app_error(&reply), "unknown_method", "{method}");
     }
-    // A Session is named by its id.
     let reply = client.rpc("notes.echo", json!({"sessionId": 7})).await;
     assert_eq!(reply["error"]["code"], -32602, "{reply}");
-    // A listed namespace whose provider does not declare the name.
     for method in ["notes", "notes.missing"] {
         let reply = client.rpc(method, json!({"sessionId": sid})).await;
         assert_eq!(app_error(&reply), "unknown_method", "{method}");
@@ -451,8 +437,6 @@ async fn contributed_session_methods_dispatch_through_the_session_they_name() {
         )
         .await;
     assert_eq!(app_error(&unknown), "session_closed");
-    // Session methods are protocol v3, and a Session belongs to the version
-    // that created it.
     let mut v2 = Client::new_version(&server, false, 2).await;
     for method in ["notes.echo", "session.methods"] {
         let reply = v2.rpc(method, json!({"sessionId": sid})).await;
@@ -497,8 +481,6 @@ async fn a_reloading_or_closed_session_namespace_answers_as_specified() {
     let reloading = client.rpc("notes.echo", json!({"sessionId": sid})).await;
     assert_eq!(reloading["error"]["code"], -32000);
     assert_eq!(app_error(&reloading), "service_reloading");
-    // Rpc and the Session's built-ins are unaffected; the listing omits the
-    // namespace until its provider is active again.
     assert_ok(&client.rpc("daemon.ping", json!({})).await);
     assert_eq!(
         client
@@ -522,7 +504,6 @@ async fn a_reloading_or_closed_session_namespace_answers_as_specified() {
         let closed = client.rpc(method, json!({"sessionId": sid})).await;
         assert_eq!(app_error(&closed), "session_closed", "{method}");
     }
-    // Progress sent after an interrupted reply never followed it.
     assert!(
         !client
             .notices
@@ -602,7 +583,6 @@ async fn call_progress_reaches_only_the_caller_before_its_reply() {
     let mut caller = Client::new_version(&server, false, 3).await;
     let created = caller.rpc("session.create", create(json!([]))).await;
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    // Another client of the same Session, subscribed to its notices.
     let mut watcher = Client::new_version(&server, true, 3).await;
     assert_ok(
         &watcher
@@ -624,8 +604,6 @@ async fn call_progress_reaches_only_the_caller_before_its_reply() {
     assert_ok(&reply);
     assert!(progress.is_empty(), "{progress:?}");
 
-    // The caller disconnects mid-call: the call continues, and its later
-    // progress and reply are dropped.
     let (streamed, cancelled) = tokio::sync::oneshot::channel();
     *notes.0.streamed.lock().await = Some(streamed);
     let mut leaving = Client::new_version(&server, false, 3).await;
@@ -646,7 +624,6 @@ async fn call_progress_reaches_only_the_caller_before_its_reply() {
     .expect("the caller's connection closed");
     notes.0.release.notify_one();
     assert!(!cancelled.await.unwrap(), "a disconnect cancels nothing");
-    // No other connection received any of it.
     assert_ok(&watcher.rpc("daemon.ping", json!({})).await);
     for client in [&caller, &watcher] {
         assert!(
@@ -676,9 +653,6 @@ async fn progress_a_caller_cannot_take_is_dropped_and_its_reply_arrives() {
     let mut caller = Client::new_version(&server, false, 3).await;
     let created = caller.rpc("session.create", create(json!([]))).await;
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    // 32 MiB of progress, far more than the connection queues for progress
-    // plus what its socket buffers. The caller reads only once all of it has
-    // been sent.
     let count = 2048;
     let id = caller
         .send(
@@ -700,8 +674,6 @@ async fn progress_a_caller_cannot_take_is_dropped_and_its_reply_arrives() {
     );
     assert!(steps.windows(2).all(|pair| pair[0] < pair[1]), "{steps:?}");
 
-    // One notice over the 16 MiB frame limit is dropped alone; the connection
-    // keeps serving calls and their progress.
     let id = caller
         .send(
             "notes.flood",

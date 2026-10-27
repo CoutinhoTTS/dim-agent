@@ -308,7 +308,6 @@ impl FullScreen {
     fn invalidate(&mut self) {
         self.painted.clear();
         self.cursor_at = None;
-        // The alternate screen may have been entered with the cursor shown.
         self.cursor_visible = true;
     }
 
@@ -378,7 +377,7 @@ impl FullScreen {
     }
 
     /// Picks the message or card before the picked one (the newest when
-    /// none is), Amp's Tab. Stays on the oldest.
+    /// none is), on Tab. Stays on the oldest.
     pub fn focus_older(&mut self, doc: &dyn Document) {
         let from = match self.focus {
             Some(id) => {
@@ -410,7 +409,7 @@ impl FullScreen {
     }
 
     /// Picks the message or card after the picked one; past the newest the
-    /// pick ends and the view follows the bottom again (Amp's Shift+Tab).
+    /// pick ends and the view follows the bottom again (Shift+Tab).
     pub fn focus_newer(&mut self, doc: &dyn Document) {
         let Some(id) = self.focus else { return };
         let index = id.saturating_sub(doc.dropped());
@@ -495,8 +494,6 @@ impl FullScreen {
 
     /// Wheel scrolling and drag selection inside the transcript viewport.
     pub fn mouse(&mut self, event: MouseEvent, doc: &dyn Document) -> MouseOutcome {
-        // Blocks may have been dropped or added since the last frame; the
-        // row a report lands on is looked up in the document as it is now.
         self.sync(doc);
         let row = event.row as usize;
         let column = event.column as usize;
@@ -541,7 +538,6 @@ impl FullScreen {
                 if self.selection.is_none() {
                     return MouseOutcome::Ignored;
                 }
-                // Dragging past an edge scrolls the transcript with it.
                 if row == 0 {
                     self.scroll(-1);
                 } else if row + 1 >= self.view_rows {
@@ -561,8 +557,6 @@ impl FullScreen {
                 Some(selection) if selection.anchor != selection.head => {
                     MouseOutcome::Copy(self.selected_text(&selection, doc))
                 }
-                // A click: the terminal cannot open links while it reports
-                // the mouse, so a click on one opens it here.
                 Some(Selection {
                     anchor: (row, column),
                     ..
@@ -757,7 +751,6 @@ impl FullScreen {
             self.measured.truncate(doc.len());
             changed = true;
         }
-        // Blocks rewritten in place are measured again.
         let (rewrites, ids) = doc.rewritten(self.rewrites);
         if rewrites != self.rewrites {
             self.rewrites = rewrites;
@@ -857,7 +850,7 @@ impl FullScreen {
 
     /// The transcript row shown on viewport row `y`, none past its ends. A
     /// transcript shorter than the viewport sits at its bottom, against the
-    /// composer, as Amp grows its thread upwards.
+    /// composer, so the thread grows upwards.
     fn at(&self, y: usize) -> Option<usize> {
         let top = self.top();
         let pad = match top {
@@ -870,7 +863,6 @@ impl FullScreen {
     fn top(&self) -> usize {
         let max_top = self.max_top();
         let Some(anchor) = self.pinned else {
-            // The floor keeps at least the last row on screen.
             return max_top.max(self.floor.min(self.content_rows().saturating_sub(1)));
         };
         let start = anchor
@@ -941,7 +933,6 @@ impl FullScreen {
         for index in r0..=r1 {
             let row = match self.row(index) {
                 Some(row) => row.to_owned(),
-                // Selections can reach blocks scrolled out of the cache.
                 None => {
                     let block = self.starts.partition_point(|&s| s <= index) - 1;
                     rendered
@@ -1037,7 +1028,6 @@ fn wrap_row(row: &str, width: usize) -> Vec<String> {
             return out;
         }
         if piece.is_empty() {
-            // A cluster wider than the row: give it a row of its own.
             let next = rest.chars().next().map_or(rest.len(), char::len_utf8);
             out.push(rest[..next].to_owned());
             rest = &rest[next..];
@@ -1144,7 +1134,7 @@ fn stops(doc: &dyn Document, index: usize) -> Vec<Option<String>> {
 /// Where an overlay's top-left cell goes: centred across the screen, and
 /// in the transcript viewport when it fits there.
 /// `row` with the faint attribute held through every SGR it sets: behind an
-/// overlay the transcript keeps its colours, darkened, as Amp's does.
+/// overlay the transcript keeps its colours, darkened.
 fn faint(row: &str) -> String {
     let mut out = String::from("\x1b[2m");
     let mut rest = row;
@@ -1262,11 +1252,8 @@ pub(crate) fn scrollbar(
                 } else if covered == 8 {
                     cell(EIGHTHS[8], thumb, track)
                 } else if start > lo {
-                    // The thumb starts inside this cell: its lower part.
                     cell(EIGHTHS[covered], thumb, track)
                 } else {
-                    // The thumb ends inside this cell: the track fills the
-                    // lower part.
                     cell(EIGHTHS[8 - covered], track, thumb)
                 }
             })
@@ -1387,13 +1374,9 @@ mod tests {
         assert_eq!(&rows[..6], &["", "", "", "a", "b", "tail"]);
         assert_eq!(&rows[6..], &DOCK);
         assert_eq!((emu.cy, emu.cx), (6, 2));
-        // Nothing changed: nothing is written.
         assert!(draw(&mut screen, &mut emu, &frame(&["tail"], &DOCK), &doc).is_empty());
 
-        // Past the viewport, a tail that folds (a thought settling) leaves
-        // the rows above in place; new output fills the blank rows below.
         doc.say(&["c", "d"]);
-        // The transcript rows, without the scrollbar column.
         let view = |emu: &Emu| -> Vec<String> {
             (0..6)
                 .map(|y| {
@@ -1411,7 +1394,6 @@ mod tests {
         assert_eq!(view(&emu), ["c", "d", "t1", "t2", "t3", "t4"]);
         draw(&mut screen, &mut emu, &frame(&["t1"], &DOCK), &doc);
         assert_eq!(view(&emu), ["c", "d", "t1", "", "", ""]);
-        // Following the end again shows the bottom.
         screen.follow();
         draw(&mut screen, &mut emu, &frame(&["t1"], &DOCK), &doc);
         assert_eq!(view(&emu)[5], "t1");
@@ -1426,16 +1408,13 @@ mod tests {
         }
         draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
         assert!(emu.row(5).starts_with("row 9"));
-        // The scrollbar's thumb sits at the bottom of the last column.
         assert!(emu.row(5).ends_with('█'));
         screen.page(false);
         draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
         assert!(emu.row(5).starts_with("row 7"));
-        // New output does not move a scrolled view...
         doc.say(&["more"]);
         draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
         assert!(emu.row(5).starts_with("row 7"));
-        // ...until the reader follows again.
         screen.follow();
         draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
         assert!(emu.row(5).starts_with("more "));
@@ -1451,13 +1430,10 @@ mod tests {
         }
         draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
         assert!(screen.cache.len() <= 12, "{}", screen.cache.len());
-        // Scrolling to the top renders what is shown there, and lets the
-        // bottom go.
         screen.scroll(-100_000);
         draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
         assert!(emu.row(1).starts_with("row 0"));
         assert!(screen.cache.len() <= 12, "{}", screen.cache.len());
-        // Blocks the App forgets leave without moving the view.
         screen.scroll(40);
         draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
         assert!(emu.row(1).starts_with("row 20"), "{:?}", emu.rows_text());
@@ -1471,7 +1447,6 @@ mod tests {
     fn a_long_transcript_is_laid_out_near_the_view_only_and_keeps_its_place() {
         let (mut screen, mut emu) = setup();
         let mut doc = Doc::new();
-        // Three rows each, estimated at two.
         for i in 0..2_000 {
             doc.say(&[&format!("row {i}"), "detail"]);
         }
@@ -1482,15 +1457,11 @@ mod tests {
         screen.scroll(-100_000);
         draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
         assert!(emu.row(1).starts_with("row 0"), "{:?}", emu.rows_text());
-        // Wheel steps stay inside the screen measured exactly beyond the
-        // view, so every block lands where its rows say.
         for _ in 0..10 {
             screen.scroll(WHEEL_ROWS);
             draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
         }
         assert!(emu.row(1).starts_with("row 10"), "{:?}", emu.rows_text());
-        // A relayout keeps the view on its block and lays out its
-        // neighbourhood only.
         doc.laid.set(0);
         screen.relayout(SIZE.0);
         draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
@@ -1531,7 +1502,6 @@ mod tests {
         screen.focus_older(&doc);
         draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
         let rows = emu.rows_text();
-        // The box takes the blank rows around the message: nothing moves.
         assert_eq!(rows[1], before[1]);
         assert!(rows[2].starts_with(" ┏━"), "{rows:?}");
         assert!(rows[3].starts_with(" ┃ second"), "{rows:?}");
@@ -1540,8 +1510,6 @@ mod tests {
         assert_eq!(screen.focused_text(&doc).as_deref(), Some("second"));
         screen.focus_older(&doc);
         assert_eq!(screen.focused_text(&doc).as_deref(), Some("first"));
-        // The oldest stays picked; newer goes back down and past the newest
-        // the pick ends.
         screen.focus_older(&doc);
         assert_eq!(screen.focused_text(&doc).as_deref(), Some("first"));
         screen.focus_newer(&doc);
@@ -1587,20 +1555,26 @@ mod tests {
         let mut wheel = Wheel::default();
         let t = Instant::now();
         let at = |ms: u64| t + Duration::from_millis(ms);
-        // Slow notches stay at the base, two delivered together by a busy
-        // frame included.
         assert_eq!(wheel.rows(at(0)), WHEEL_ROWS);
         assert_eq!(wheel.rows(at(1)), WHEEL_ROWS);
         assert_eq!(wheel.rows(at(200)), WHEEL_ROWS);
-        // A fast spin speeds up to three times the base, no further.
         let spin: Vec<isize> = (1..=4).map(|i| wheel.rows(at(200 + 20 * i))).collect();
         assert_eq!(spin, [9, 9, 9, 9]);
-        // A pause starts over.
         assert_eq!(wheel.rows(at(1_000)), WHEEL_ROWS);
-        // A trackpad burst: a row per report from then on.
         let rows: Vec<isize> = (0..6).map(|i| wheel.rows(at(2_000 + 2 * i))).collect();
         assert_eq!(rows, [3, 3, 3, 3, 1, 1]);
         assert_eq!(wheel.rows(at(3_000)), 1);
+    }
+
+    /// A repaint must assume the cursor is visible: the alternate screen may
+    /// have been entered with it shown, so a frame with `cursor: None` alone
+    /// cannot prove it is hidden.
+    #[test]
+    fn invalidate_shows_the_cursor_again() {
+        let (mut screen, _) = setup();
+        screen.cursor_visible = false;
+        screen.invalidate();
+        assert!(screen.cursor_visible);
     }
 
     /// Tool details collapsed: the transcript gets much shorter and the
@@ -1615,7 +1589,6 @@ mod tests {
             let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
             doc.say(&rows);
         }
-        // The text of a view row, without the scrollbar in the last column.
         let text = |rows: &[String]| -> Vec<String> {
             rows[..6]
                 .iter()
@@ -1662,7 +1635,6 @@ mod tests {
                 row: 0
             }
         );
-        // New output takes the row between the press and the release.
         screen.mouse(at(MouseKind::Press), &doc);
         draw(
             &mut screen,
@@ -1688,7 +1660,6 @@ mod tests {
             screen.mouse(at(MouseKind::Press), &doc);
             screen.mouse(at(MouseKind::Release), &doc)
         };
-        // Rows 4 and 5 hold the block under its blank row.
         assert_eq!(
             click(5, 4),
             MouseOutcome::Open("https://a.example/x".into())
@@ -1711,11 +1682,8 @@ mod tests {
         let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
         let plain = |bar: Vec<String>| -> String { bar.iter().map(|c| strip_escapes(c)).collect() };
         assert!(scrollbar(4, 4, 0, &palette).is_none());
-        // Half the content visible: a two-row thumb at the top...
         assert_eq!(plain(scrollbar(4, 8, 0, &palette).unwrap()), "██  ");
-        // ...at the bottom when scrolled down...
         assert_eq!(plain(scrollbar(4, 8, 4, &palette).unwrap()), "  ██");
-        // ...and straddling cells in between.
         assert_eq!(plain(scrollbar(4, 8, 1, &palette).unwrap()), "▄█▄ ");
     }
 
@@ -1745,7 +1713,6 @@ mod tests {
     #[test]
     fn random_documents_frames_and_input_at_any_size_never_panic() {
         let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
-        // DIM_STRESS_SEEDS widens the sweep for a deeper local run.
         let seeds: u64 = std::env::var("DIM_STRESS_SEEDS")
             .ok()
             .and_then(|n| n.parse().ok())

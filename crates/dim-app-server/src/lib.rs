@@ -190,7 +190,6 @@ impl RunningServer {
             Err(error) => return Err(ServerError::Runtime(AgentError::Build(error.to_string()))),
             Ok(()) => {}
         }
-        // Dependents were evicted during the unload; settle their queued reloads.
         self.processes
             .wait_active(&self.root, self.config.startup_timeout)
             .await?;
@@ -258,9 +257,6 @@ impl Processes {
     async fn wait_active(&self, root: &Ctx, timeout: Duration) -> dim_agent_runtime::Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            // RuntimeRows refreshes offline JS declarations after Node starts.
-            // New injections replace the row's fiber; a saved view can become
-            // Disposed even though the current row is loading successfully.
             let views = self.views();
             let mut ready = true;
             for view in &views {
@@ -275,7 +271,6 @@ impl Processes {
                     _ => ready = false,
                 }
             }
-            // RuntimeRows publishes its catalog after the process plugin's apply returns.
             let unpublished = self
                 .runtime_rows
                 .iter()
@@ -312,7 +307,6 @@ impl Drop for Startup {
     fn drop(&mut self) {
         if self.armed {
             self.control.shutdown().cancel();
-            // rutis owns the shutdown once requested; the task only reports it.
             let shutdown = self.root.shutdown();
             self.root.handle().spawn(async move {
                 if let Err(error) = shutdown.await {
@@ -347,7 +341,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     if config.product_home.is_some() {
         config.daemon_profile = protocol::DaemonProfile::Product;
     }
-    // Agents registers it.
     builder.require_part("AgentsSession");
     #[cfg(not(unix))]
     if config.unix_path.is_some() {
@@ -480,18 +473,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         control: handle.clone(),
         armed: true,
     };
-    // Process plugins are rows of one loader, the only plugin on the root.
-    // Each load builds a new plugin; state that outlives a generation is
-    // shared through the plugin the factory clones.
     let mut builtins = Modules::new();
-    // The assembly's one catalog: the builder's names, the names shared
-    // across languages and, below, those the TypeScript rows provide. The
-    // process parts below are the capabilities crate's, whatever the caller
-    // installed, so their names are registered here.
     dim_agent_capabilities::register_names(&mut builder);
     register_names(builder.catalog_mut());
-    // Session namespaces keep clear of the protocol's roots and built-ins:
-    // naming the value makes each Session's method table wait for it.
     dim_agent_runtime::names::register::<dim_agent_capabilities::methods::ReservedMethods>(
         builder.catalog_mut(),
         None,
@@ -504,7 +488,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         builder.catalog(),
         move |_| Ok(Box::new(control.clone())),
     )?];
-    // Account-only hosts do not consume user execution configuration.
     let native_home = execution_root.filter(|_| config.database_path.is_some());
     let files =
         dim_agent_capabilities::file_storage::FileStoragePlugin::new(config.file_roots.clone());
@@ -548,7 +531,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             },
         )?);
     }
-    // Process plugins register their management namespaces here.
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         Ok(Box::new(methods::ManagementMethodsPlugin::new(names)?))
     })?);
@@ -598,8 +580,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         })?);
     }
     if let Some(home_root) = execution_root.or(product_root) {
-        // One template, cloned for each load: its copies share the authorized
-        // projects. Its dependencies are process names, the same for every copy.
         let build = rutis_loader::resolve::Build::default();
         let names = dim_agent_runtime::Names::copy(builder.catalog(), &build);
         let settings = if native_home.is_some() {
@@ -621,8 +601,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     if let Some(home_root) = execution_root {
         mcp::install(&mut builder);
-        // Session files need SessionStore (native storage); `read` needs
-        // local execution.
         if native_home.is_some() {
             dim_agent_attachments::install(&mut builder);
         }
@@ -666,9 +644,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             ))
         })?);
     }
-    // PluginManager keeps the plugin configuration of the host's home. It
-    // reads it before the runtimes take the catalog: the plugins it uses
-    // name their `instanceNames` there (PluginManager §3.1).
     let plugin_home = config
         .product_home
         .clone()
@@ -677,7 +652,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         Some(home) => Some(
             plugin_manager::State::read(
                 home,
-                // pluginFiles serves the product home.
                 product_root.and(config.product_home.as_deref()),
                 config.plugin_defaults.as_deref(),
                 builder.catalog_mut(),
@@ -800,9 +774,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             move |names| Ok(Box::new(TransportPlugin::new(names, config.clone())?)),
         )?);
     }
-    // The builder's plugins are host rows too: each registers its Session
-    // and branch parts with the builder's registry, provided to them as
-    // `partRegistry`.
     match builder.plugin_rows(&mut builtins).await {
         Ok(plugins) => rows.extend(
             plugins
@@ -819,8 +790,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             .into());
         }
     }
-    // Register every host module before allocating scoped module names.
-    // Agents, Sessions and branches are instances of this same loader.
     let reserved_names = session_parts
         .iter()
         .flat_map(|parts| &parts.rows)
@@ -865,10 +834,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .flat_map(|parts| parts.runtimes())
         .map(|foreign| Key::dynamic(foreign.rows.runtime_name().to_owned()))
         .collect();
-    // The `plugins` layer, derived from PluginManager's record, holds its
-    // rows and the built-in rows it turns off; a built-in that is off never
-    // starts. The built-in plugins are the host rows; the Agents group row
-    // is the instance tree, not a plugin.
     let plugin_layer = match &plugins {
         Some(state) => {
             let builtins = rows
@@ -919,8 +884,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             ..Default::default()
         }],
     );
-    // One deadline covers the loader, the reconcile and the rows: reconcile
-    // waits while a row is Loading, so a hung `apply` must not outlive it.
     let deadline = tokio::time::Instant::now() + config.startup_timeout;
     let remaining = || deadline.saturating_duration_since(tokio::time::Instant::now());
     let started = tokio::time::timeout_at(deadline, async {
@@ -937,7 +900,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         let reconcile = processes.loader.reconcile(layers, None);
         let report = match tokio::time::timeout_at(deadline, reconcile).await {
             Ok(report) => report.map_err(|error| AgentError::Build(error.to_string()))?,
-            // The deadline has passed: this names the rows not yet Active.
             Err(_) => {
                 wait_active(
                     &root,
@@ -949,8 +911,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 return Err(AgentError::Build("process assembly timed out".into()));
             }
         };
-        // A skipped row (a duplicate module name) would only show as a
-        // startup timeout.
         let failures: Vec<_> = report
             .failures
             .iter()
@@ -962,7 +922,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 failures, report.issues
             )));
         }
-        // The report omits rows still Pending; the deadline names them.
         processes.wait_active(&root, remaining()).await
     })
     .await;
@@ -1102,9 +1061,6 @@ impl DynPlugin for NodeRows {
 async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownReason> {
     control.shutdown().cancelled().await;
     let hub = root.get::<ConnectionHub>();
-    // Taking RPC admission fences the shutdown-request tracker. Every accepted
-    // graceful request installs its reply ID, and every force acknowledgement
-    // settles, before we choose a mode or close the connection writers.
     let rpc = hub.as_ref().and_then(|hub| hub.take_rpc());
     if let Some(hub) = &hub {
         hub.shutdown_requests.close();

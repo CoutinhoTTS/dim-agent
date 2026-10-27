@@ -331,8 +331,6 @@ pub(super) fn provide(
                         let p: StartMcpAuth = params(value)?;
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
                         let entry = target(&directory, source, p.id.clone(), &stopping).await?;
-                        // Only a remote entry without static credentials, at
-                        // HTTPS or loopback HTTP, uses OAuth.
                         let (key, server) = credential_key(&p.id, &entry.configuration)
                             .ok_or_else(|| error(McpAuthError::Unsupported.into()))?;
                         // Sign-in contacts the server: only for an entry the
@@ -371,8 +369,6 @@ pub(super) fn provide(
                         let p: McpTarget = params(value)?;
                         let source = source(p.source, project(&settings, p.cwd, &stopping).await?)?;
                         let entry = target(&directory, source, p.id.clone(), &stopping).await?;
-                        // Also once the entry no longer uses OAuth: its stored
-                        // credential can still be revoked.
                         let key = stored_key(&p.id, &entry.configuration)
                             .ok_or_else(|| error(McpAuthError::Unsupported.into()))?;
                         let revoked = auth

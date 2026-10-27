@@ -184,7 +184,6 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
     })
 }
 
-// Parsing and loss checks live only at this legacy external-data boundary.
 fn field<T: DeserializeOwned>(fields: &Map<String, Value>, name: &str) -> Result<T, String> {
     serde_json::from_value(fields[name].clone()).map_err(|_| format!("Invalid {name}"))
 }
@@ -269,7 +268,6 @@ fn convert_provider(
             return Err(format!("Unsupported legacy field: {name}"));
         }
     }
-    // A per-Provider last-model hint has no scoped selection authority.
     let _: Option<String> = field(fields, "activeModelId")?;
     let source_kind: String = field(fields, "source")?;
     let kind = match source_kind.as_str() {

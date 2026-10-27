@@ -154,7 +154,6 @@ pub async fn command(
                     display.record(&format!("Rule added: {described}"))?;
                     retain(display, listing, rules)
                 }
-                // Nothing was written: the listing printed last stays.
                 Added::Present => display.record(&format!("Rule already present: {described}")),
             }
         }
@@ -209,7 +208,6 @@ async fn switch(
     if preset == PermissionPreset::FullAccess {
         display.record("Full access runs every tool call, including commands, without asking.")?;
         input.prompt("Switch the main branch to full-access? [y/N] ")?;
-        // Only y/yes confirms; Ctrl+C and EOF decline.
         let line = tokio::select! {
             biased;
             _ = interrupts.recv() => {
@@ -230,7 +228,6 @@ async fn switch(
     match settle(interrupts, permission::switch(client, session_id, &seen, preset)).await? {
         Switch::Unchanged => display.record(&format!("Preset (main branch) is already {name}")),
         Switch::Switched(version) => {
-            // The live `permission/changed` for this write is already reported.
             display.permission_seen = display.permission_seen.max(version);
             display.record(&format!(
                 "Preset (main branch): {name}. Child branches created later inherit it; agent members keep the Session's starting preset."

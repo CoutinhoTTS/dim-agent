@@ -35,9 +35,6 @@ export const part = definePlugin({
   },
 })
 
-// The plugin's one row registers its sources (`config.settings`, by default
-// source `example`) and the Session part, as the plugins under
-// runtime/plugins do.
 export default definePlugin<{ settings?: SourceDeclaration[] }>({
   name: 'SettingsOwner',
   inject: ['settings', 'partRegistry'],

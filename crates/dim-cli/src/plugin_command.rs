@@ -34,8 +34,6 @@ pub fn parse(
                 }
             }
             let source = source.ok_or(USAGE)?;
-            // Anything with a scheme is a Git URL; PluginManager decides
-            // which schemes it accepts.
             let source = if source.contains("://") {
                 json!({"git": source, "ref": reference})
             } else if reference.is_some() {

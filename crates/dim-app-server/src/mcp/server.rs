@@ -128,11 +128,6 @@ impl Authorization {
     }
 }
 
-// rmcp's bootstrap POSTs are inline awaits which do not observe the worker
-// cancellation token. Cancel their HTTP futures (including an initial SSE
-// response) explicitly. After initialization this token remains uncancelled;
-// normal close uses rmcp's graceful request draining and session DELETE.
-// An OAuth connection attaches a bearer to every request (design §5.6).
 #[derive(Clone)]
 struct InitializingClient {
     client: Client,
@@ -165,7 +160,6 @@ impl InitializingClient {
                 {
                     Some(None)
                 }
-                // rmcp reports a POST `401` without `WWW-Authenticate` as text.
                 Err(HttpError::UnexpectedServerResponse(message))
                     if message.starts_with("HTTP 401 ") =>
                 {
@@ -303,9 +297,6 @@ impl StreamableHttpClient for InitializingClient {
     }
 }
 
-// rmcp consumes its transport during initialization. On handshake failure it
-// drops it without awaiting close. Retain an explicit completion signal so
-// the owning Plugin can also drain that path, including session DELETE.
 struct OwnedTransport<T: Transport<RoleClient> + 'static> {
     inner: Option<T>,
     closed: Option<oneshot::Sender<Result<()>>>,
@@ -487,8 +478,6 @@ impl McpServer {
                     },
                 });
             }
-            // structuredContent is not model-readable. Preserve its handles in
-            // content as well, including structured-only MCP responses.
             if let Some(value) = &result.structured_content {
                 content.push(ContentBlock::Text {
                     text: value.to_string(),
@@ -512,7 +501,6 @@ impl McpServer {
             _ = cancel.cancelled() => return Err(McpServerError::Cancelled),
             guard = self.connection.lock() => guard,
         };
-        // Refused for lack of a credential: start over with a new connection.
         if matches!(self.state.get(), McpServerState::AuthRequired { .. })
             && let Some(refused) = connection.take()
         {
@@ -525,7 +513,6 @@ impl McpServer {
             }
             return Ok(connection.running.peer().clone());
         }
-        // Failed connections require an explicit directory disconnect/reopen.
         if self.state.get() == McpServerState::Failed {
             return Err(McpServerError::RequestFailed);
         }
@@ -602,10 +589,6 @@ impl McpServer {
         let initialize =
             Notifications(self.tool_changes.clone()).serve_with_ct(transport, lifetime.clone());
         tokio::pin!(initialize);
-        // Poll the handshake before honoring cancellation: rmcp's HTTP worker
-        // waits for its first message without observing its cancellation
-        // token, so a transport closed before sending one never finishes
-        // closing.
         let failure = tokio::select! {
             biased;
             result = &mut initialize => {
@@ -642,8 +625,6 @@ impl McpServer {
         if cancel.is_cancelled() {
             return Err(McpServerError::Cancelled);
         }
-        // Do not drop request admission: once accepted, retain its request id
-        // so cancellation can be sent to the peer, even if the caller leaves.
         let mut handle = peer
             .send_cancellable_request(request, PeerRequestOptions::no_options())
             .await
@@ -818,8 +799,6 @@ impl McpServerPlugin {
     }
 }
 impl Plugin for McpServerPlugin {
-    // Also orders this server inside the directory's lifetime. McpAuth is a
-    // process name, whose key is its type's.
     type Deps = Arc<McpAuth>;
     fn name(&self) -> &str {
         "McpServer"

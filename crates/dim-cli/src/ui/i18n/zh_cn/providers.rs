@@ -1,6 +1,5 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
-        // providers_panel.rs
         "Providers" => "模型服务",
         "Enter open · Esc clear/close" => "Enter 打开 · Esc 清除/关闭",
         "↑↓/Tab move · Enter activate · Esc back" => "↑↓/Tab 移动 · Enter 执行 · Esc 返回",
@@ -24,7 +23,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "error" => "错误",
         "not connected" => "未连接",
         "Add custom provider" => "添加自定义模型服务",
-        // oauth_view.rs
         "Checking account…" => "正在查询账号…",
         "Not signed in" => "未登录",
         "Signed in as {account}" => "已登录：{account}",

@@ -55,7 +55,6 @@ fn prompt_and_context_contract_uses_the_shared_wire_shape() {
         &input.blocks[1],
         InputBlock::Raw { retire: true, .. }
     ));
-    // Business-typed blocks and the separate state field are gone.
     for retired in [
         json!({"state": [{"op":"set","source":"s","key":"k","content":"c"}]}),
         json!({"blocks": [{"type":"notification","source":"exec"}]}),

@@ -59,10 +59,8 @@ async function host(t, initial = {}) {
   }
   const services = {
     managementMethods: { async register(namespace, declarations, call) { h.methods = call } },
-    // The row registers its Session part; the test mounts that copy.
     partRegistry: { async registerDefinition(scope, name, definition) { h.part = { scope, name, definition } } },
     settings: {
-      // The row registers its own source when it starts.
       async register(declaration) { assert.equal(declaration.source, 'schedule') },
       async read() {
         h.settingsReads++
@@ -313,6 +311,8 @@ test('tool scope and schema are enforced before the process owner sees a save', 
   const h = await host(t)
   const declaration = h.contribution.declaration
   assert.equal(declaration.risk, 'persistent_configuration')
+  assert.equal(declaration.inputSchema.properties.job.properties.schedule.type, 'object',
+    'schedule is an anyOf union; the native tool schema requires its object root type')
   for (const config of [{ interactive: false }, { collaborationRole: 'member' }]) {
     const reply = await h.tool({ action: 'create', job: seed }, 'a', config)
     assert.equal(reply.isError, true)

@@ -313,7 +313,6 @@ pub(crate) fn effective(
             &mut config;
         *enabled = Some(enablement.contains(&workspace, id));
         if let McpServerSettings::Stdio { cwd, .. } = &mut config {
-            // Resolve relative directories against the workspace, not the daemon.
             let workspace = PathBuf::from(&workspace);
             let path = cwd
                 .as_ref()

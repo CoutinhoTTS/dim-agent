@@ -448,8 +448,6 @@ async fn launch_caps_the_policy_by_the_starters_current_policy_or_the_host_defau
         ..
     } = serve_sessions(None).await;
     let cwd = std::env::temp_dir();
-    // Created with full access, then narrowed: the bound is the dispatched
-    // policy, not the creation-time config.
     let starter = client_session(&mut client, &agent, json!({"preset":"full-access"})).await;
     let narrowed = json!({"preset":"workspace-write","allowedTools":["confirm","echo"],"disallowedTools":["wait"]});
     starter
@@ -473,10 +471,8 @@ async fn launch_caps_the_policy_by_the_starters_current_policy_or_the_host_defau
         json!({"preset":"workspace-write","allowedTools":["confirm","echo"],"disallowedTools":["x","wait"]}),
     )
     .await;
-    // No requested policy: the starter's own.
     let reply = sessions.ok("launch", json!({"cwd":cwd,"starter":at})).await;
     assert_launched(&mut client, &agent, &reply, narrowed).await;
-    // No starter: capped by the host defaults; no policy means read-only.
     let reply = sessions
         .ok(
             "launch",
@@ -527,7 +523,6 @@ async fn launch_caps_the_policy_by_the_starters_current_policy_or_the_host_defau
             .await,
         "session_closed"
     );
-    // Shape errors are data too.
     for (method, args) in [
         ("launch", json!([])),
         ("launch", json!([{"cwd":cwd}, {}])),
@@ -603,7 +598,6 @@ async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs()
     ]);
     let receipt = sessions.ok("input", request).await;
     let sequence = receipt["sequence"].as_u64().unwrap();
-    // Replied after publication: readers see it at once.
     assert!(session.sequence("main").unwrap() >= sequence);
     let event = session
         .local("main", sequence..=sequence)
@@ -653,8 +647,6 @@ async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs()
         sessions.ok("lookup", at("test:other")).await,
         json!({"status":"unknown"})
     );
-    // The branch accepts each submissionId once: a resubmission writes
-    // nothing and replies the first receipt; another id is independent.
     let first = sessions
         .ok("input", input(&session, "test:twice", json!([])))
         .await;
@@ -707,8 +699,6 @@ async fn input_replies_after_publication_and_lookup_waits_for_committed_inputs()
         "rejected inputs write nothing"
     );
 
-    // Hold publication: the input commits, its reply waits, and a lookup
-    // that starts after the commit waits too instead of reading `unknown`.
     session.idle("main").await.unwrap();
     let publication = session.publication("main").unwrap();
     let lock = rusqlite::Connection::open(store.database()).unwrap();
@@ -814,7 +804,6 @@ async fn idle_covers_written_turns_and_waits_on_a_pending_approval_until_stop() 
             .any(|event| matches!(event.kind, EventKind::TurnEnd(_))),
         "its turn ended by the cutoff"
     );
-    // An idle branch answers at once with the same cutoff.
     assert_eq!(sessions.ok("idle", at.clone()).await["sequence"], cutoff);
 
     let session = awaiting_approval(&sessions, &agent).await;
@@ -886,7 +875,6 @@ async fn launch_admitted_before_an_index_reload_replies_the_created_session() {
     } = serve_sessions(Some(store.database())).await;
     client_session(&mut client, &agent, host_policy()).await;
     let before = agent.sessions().len();
-    // Hold the writer so creation waits after admission, on its rows.
     let lock = rusqlite::Connection::open(store.database()).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     let launch = tokio::spawn({
@@ -912,6 +900,8 @@ async fn launch_admitted_before_an_index_reload_replies_the_created_session() {
     server.join().await.unwrap();
 }
 
+/// A cancelled idle or stop wait re-checks `reached >= token`, because `session.close` can
+/// acknowledge and retire the subscription in the same scheduling turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn idle_ends_reloading_on_an_index_reload_and_session_closed_on_close() {
     let Served {
@@ -938,13 +928,11 @@ async fn idle_ends_reloading_on_an_index_reload_and_session_closed_on_close() {
     let ended = idle.await.unwrap();
     assert_eq!(ended["error"]["code"], "reloading", "{ended}");
     assert_eq!(ended["error"]["retryable"], true);
-    // The consumer stayed loaded, and its next call reaches the new index.
     assert_eq!(sessions.applied.load(Ordering::SeqCst), applied);
     let idle = waiting();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!idle.is_finished(), "the approval is still pending");
 
-    // A close settles the turn; the wait must not report that as idle.
     session.close().await.unwrap();
     let ended = idle.await.unwrap();
     assert_eq!(ended["error"]["code"], "session_closed", "{ended}");
@@ -965,7 +953,6 @@ async fn a_consumer_launches_writes_waits_and_withdraws_by_input_id() {
         calls,
     } = serve_sessions(None).await;
     client_session(&mut client, &agent, host_policy()).await;
-    // The first input's approval keeps its turn open, so the second is held.
     let session = awaiting_approval(&sessions, &agent).await;
     let at = json!({"sessionId":session.id(),"branchId":"main"});
     let first = sessions
@@ -997,9 +984,7 @@ async fn a_consumer_launches_writes_waits_and_withdraws_by_input_id() {
         .await;
     assert_eq!(deleted["status"], "deleted", "{deleted}");
     let sequence = deleted["sequence"].as_u64().unwrap();
-    // Replied after publication.
     assert!(session.sequence("main").unwrap() >= sequence);
-    // Already deleted, applied or unknown: nothing is written.
     for request in [
         withdraw(&held, None),
         withdraw(&first, None),
@@ -1075,7 +1060,6 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
             ),
         )
         .await;
-    // Readable right after the reply (fixed-prefix read).
     let page = sessions
         .ok("history", at(json!({"atLeast":receipt["sequence"]})))
         .await;
@@ -1083,7 +1067,6 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
     let first = sessions.ok("idle", at(json!({}))).await["sequence"]
         .as_u64()
         .unwrap();
-    // A two-event batch: a withdrawal and its Steer replacement.
     let batch = client
         .rpc(
             "session.input.withdraw",
@@ -1097,8 +1080,6 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
         .as_u64()
         .unwrap();
 
-    // Pages of the whole branch through a fixed head, each on a batch
-    // boundary; one may run past `limit` to finish its batch.
     let mut after = 0;
     let mut events = vec![];
     let mut through = None;
@@ -1119,7 +1100,6 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
         Value::Array(events),
         serde_json::to_value(session.local("main", ..=head).await.unwrap()).unwrap()
     );
-    // An earlier fixed sequence bounds the page.
     let page = sessions.ok("history", at(json!({"through":first}))).await;
     assert_eq!(page["through"], first);
     assert_eq!(
@@ -1181,7 +1161,6 @@ async fn a_consumer_deletes_its_launched_session_and_retries_a_failed_delete() {
     };
     let delete = |id: &str| json!({"sessionId":id});
 
-    // A loaded run whose turn waits on an approval.
     let session = awaiting_approval(&sessions, &agent).await;
     let id = session.id().to_owned();
     let at = json!({"sessionId":id,"branchId":"main"});
@@ -1211,7 +1190,6 @@ async fn a_consumer_deletes_its_launched_session_and_retries_a_failed_delete() {
             "{method}"
         );
     }
-    // Already deleted, or never created.
     for absent in [id.clone(), uuid::Uuid::new_v4().to_string()] {
         assert_eq!(sessions.ok("delete", delete(&absent)).await, json!({}));
     }
@@ -1228,8 +1206,6 @@ async fn a_consumer_deletes_its_launched_session_and_retries_a_failed_delete() {
         );
     }
 
-    // The writer is held, so the delete waits in its close while Agents
-    // reloads; it then replies its own outcome, not `reloading`.
     let id = launched(&sessions, &agent, json!({})).await.id().to_owned();
     let lock = rusqlite::Connection::open(store.database()).unwrap();
     lock.execute_batch("BEGIN IMMEDIATE").unwrap();
@@ -1248,7 +1224,6 @@ async fn a_consumer_deletes_its_launched_session_and_retries_a_failed_delete() {
     assert_eq!(deleting.await.unwrap(), json!({"ok": true, "value": {}}));
     assert!(!stored(&id));
 
-    // An entry of the run's command output the daemon cannot remove.
     let id = launched(&sessions, &agent, json!({})).await.id().to_owned();
     let locked = store.0.join("command-output").join(&id).join("locked");
     std::fs::create_dir_all(&locked).unwrap();
@@ -1386,7 +1361,6 @@ async fn a_launch_resolves_its_model_through_the_model_selection_host() {
             (selected.provider_id.as_str(), selected.model_id.as_str()),
             ("local", expected)
         );
-        // Resolved by the host: it carries the catalog's model defaults.
         assert_eq!(
             selected
                 .config
@@ -1442,8 +1416,6 @@ async fn a_dropped_launch_still_registers_its_session() {
     launch.abort();
     assert!(launch.await.unwrap_err().is_cancelled());
     lock.execute_batch("COMMIT").unwrap();
-    // Rpc refuses a loaded Session whose protocol version is not registered
-    // (`session_protocol_version`), so an attach that succeeds shows both.
     let launched = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let created = agent
@@ -1485,7 +1457,6 @@ async fn input_and_withdraw_reply_publication_unknown_when_the_store_fails_the_w
         ..
     } = serve_sessions(Some(store.database())).await;
     client_session(&mut client, &agent, host_policy()).await;
-    // The native store fails the next write of `kind` for `session`.
     let fail = |session: &Session, kind: &str| {
         rusqlite::Connection::open(store.database())
             .unwrap()
@@ -1507,7 +1478,6 @@ async fn input_and_withdraw_reply_publication_unknown_when_the_store_fails_the_w
     );
     assert_eq!(sessions.error("input", lost).await, "publication_unknown");
 
-    // The first input's approval keeps its turn open, so the second is held.
     let session = awaiting_approval(&sessions, &agent).await;
     let held = sessions
         .ok(
@@ -1530,7 +1500,6 @@ async fn input_and_withdraw_reply_publication_unknown_when_the_store_fails_the_w
         "publication_unknown"
     );
     server.shutdown();
-    // The faulted Sessions report the injected failure as cleanup errors.
     let _ = server.join().await;
 }
 
@@ -1644,7 +1613,6 @@ async fn node_session_permissions_reads_live_policy_and_survives_index_reload() 
     let (restarted, ()) = tokio::join!(server.restart("Agents"), async {
         rules.held.notified().await;
         assert!(starter.get::<PermissionState>("main").unwrap().is_none());
-        // Rpc also reloads with the index; call the unchanged process owner directly.
         let owner = sessions
             .context
             .get()
@@ -1797,9 +1765,6 @@ async fn node_input_settlement_outlives_reloads_and_a_resubmission_gets_its_rece
         .unwrap()
         .unwrap();
     assert_eq!(waiting.submission_id, "settlement:row:append");
-    // While the calling row reloads (its own C1 call keeps it Unloading
-    // until the input settles), a resubmission waits for the first write
-    // and replies its receipt.
     let owner = loader.get("settlement-owner").unwrap().view.unwrap();
     let (restarted, resubmitted) = tokio::join!(loader.restart("settlement-owner"), async {
         let mut changed = owner.watch();
@@ -1826,7 +1791,6 @@ async fn node_input_settlement_outlives_reloads_and_a_resubmission_gets_its_rece
     assert_eq!(receipt["value"], resubmitted);
     assert_eq!(receipt["value"]["sequence"], waiting.sequence);
     let after = settlement_status(&mut client).await;
-    // The new generation's resubmission after publication: the same receipt.
     let reply = client
         .rpc("settlement.input", write("settlement:row:append"))
         .await;
@@ -1875,7 +1839,6 @@ async fn rust_named_input_keeps_its_outcome_across_reload_and_a_dropped_result()
         .await
         .unwrap()
         .unwrap();
-    // No C1 call holds Rpc's drain here; wait for the complete index reload.
     tokio::time::timeout(Duration::from_secs(5), server.restart("Agents"))
         .await
         .expect("index reload must finish while the admitted writer awaits publication")
@@ -1942,7 +1905,6 @@ async fn submission_ids_survive_restart_and_legacy_duplicates_stay_ambiguous() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // A legacy history: two inputs with one id, appended outside the branch.
     let key = TimelineKey {
         session_id: target.id().into(),
         branch_id: "main".into(),
@@ -1986,7 +1948,6 @@ async fn submission_ids_survive_restart_and_legacy_duplicates_stay_ambiguous() {
         .unwrap();
     }
 
-    // The restored branch indexes its stored inputs before it accepts input.
     let Served {
         server,
         agent,
@@ -1994,7 +1955,6 @@ async fn submission_ids_survive_restart_and_legacy_duplicates_stay_ambiguous() {
         mut client,
         ..
     } = serve_with(setup()).await;
-    // Another Session's consumer part injects `sessions`.
     client_session(&mut client, &agent, host_policy()).await;
     assert_eq!(sessions.ok("input", write("test:durable")).await, first);
     let at = json!({"sessionId":target.id(),"branchId":"main","submissionId":"test:legacy"});

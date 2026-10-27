@@ -154,7 +154,6 @@ impl PartRegistry {
             Ok(())
         });
         if registered.is_err() {
-            // The caller is already unloading: nothing of it may stay.
             let shared = self.shared.clone();
             tokio::spawn(async move { shared.withdraw(id).await });
         }
@@ -423,7 +422,6 @@ fn mount(ctx: &Ctx, part: Box<dyn DynPlugin>, copies: &Copies) -> Result<FiberVi
         }
     });
     if let Err(error) = registered {
-        // The mounter is unloading: the copy must not outlive it.
         let late = view.clone();
         tokio::spawn(async move {
             let _ = late.dispose().await;
@@ -451,11 +449,6 @@ impl DynPlugin for PartMounter {
             changes.mark_unchanged();
             let mut seen = HashMap::new();
             let cancel = ctx.cancellation_token();
-            // A required part nothing has registered yet holds the instance
-            // as a required row does. The required mounter mounts once every
-            // required part is registered, from the snapshot it checked, so
-            // a registration between the check and the mounting cannot be
-            // left out of what the instance waits for.
             let snapshot = loop {
                 let snapshot = site.registry.shared.snapshot();
                 let missing = if self.required {
@@ -489,7 +482,6 @@ impl DynPlugin for PartMounter {
                             changed = changes.changed() => if changed.is_err() { return },
                             _ = cancel.cancelled() => return,
                         }
-                        // After publication a late part never fails the instance.
                         let snapshot = this.site.registry.shared.snapshot();
                         if let Err(error) = this.reconcile(&ctx, id, &mut seen, &snapshot) {
                             tracing::warn!(%error, "a registered part failed to build");
@@ -504,8 +496,6 @@ impl DynPlugin for PartMounter {
                 registry.shared.detach(id);
                 Ok(())
             })?;
-            // Not awaited here: the loader waits for a Loading row, so the
-            // instance's creation waits for these instead.
             let mut opened = site.mounted.lock().unwrap();
             if self.required {
                 opened.required.extend(waiting);

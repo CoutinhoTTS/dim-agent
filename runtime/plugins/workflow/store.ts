@@ -102,7 +102,6 @@ export class RunStore {
           if (!reply.ok) throw new WorkflowError(reply.error)
         }
       } catch (error) {
-        // Keep domain errors local rather than serializing Error over the file callback.
         problem = error
       }
       return null
