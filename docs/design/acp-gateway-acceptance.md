@@ -80,6 +80,30 @@ EOF -> local cleanup and native detach
 
 本构建的真实 MCP 调用证据来自公开 stdio → production daemon → 官方 SDK MCP fixture → model 流程；HTTP 及列表变更来自公开 Session 流程。new/load/resume/fork 在支持接口的 daemon 上使用临时绑定，旧 daemon 缺接口时才接受并忽略列表。客户端配置不写入共享 home，非空 additionalDirectories 仍拒绝。
 
+## Registry compatibility
+
+2026-10-27，macOS arm64，使用上游 [ACP Registry `49f768659a8089f07874f56a0d474312695ad861`](https://github.com/agentclientprotocol/registry/tree/49f768659a8089f07874f56a0d474312695ad861) 的原始脚本，Python 3.14，由 uv 启动。所有子进程使用隔离 home，无真实账户或 API key。本地源码为 `7205184e362b4b1b215593aa005ba623d36a55fd`；其后的文档提交不改变被测实现。
+
+| 检查 | 已登记的 `dimcode@0.5.21` | 本地公共版 `dimcode 0.1.0-alpha.6` |
+| --- | --- | --- |
+| `verify_agents.py --auth-check --agent dimcode` | 通过，`dimcode.terminal(terminal)` | 失败，`No authMethods in response` |
+| `protocol_matrix.py --agent dimcode --table-mode capabilities` | initialize、session/list 成功；session/new 为 `-32000`，要求认证 | initialize、session/list 成功；session/new 为 `-32001 No available model` |
+| fork/resume 探测 | 要求认证 | 对不存在的测试 Session 返回 `-32002 Resource not found` |
+| stop / set_model 探测 | stop 未实现；set_model 对不存在的 Session 返回 `-32002` | 均返回 `-32601 Method not found`，与未声明这些能力一致 |
+
+发布包使用上游未修改的 `dimcode/agent.json`，通过 npx 启动。本地检查仅在临时 registry checkout 中把 distribution 替换为指向本机 executable 的 binary entry，并传入 `acp --home <isolated-home>`；验证脚本没有修改。这验证原生程序的协议行为，不等于 Linux runner 或最终 npm 发布产物验收。矩阵只记录未登录状态下的能力和方法结果；脚本退出成功不代表表中每项通过，也不执行模型对话。
+
+认证门槛要求至少一种 Agent Auth 或 Terminal Auth，不能用 API key 配置代替。本地公共版 App Server 未注册 `account.providers`，Gateway 按现有合同返回空 `authMethods`，因此本次构建不满足该门槛。空白模型配置也解释了 `No available model`。带 Rust OAuth 插件的实际发布组合尚未核验，不能由公共版结果推断其通过或失败；私有插件实现和凭据不进入本仓库。
+
+另有两项 Terminal Auth 兼容缺口，保持待处理状态：
+
+- registry 的 validator 发送 `clientCapabilities._meta["terminal-auth"]: true`；当前 Gateway 只读取 `clientCapabilities.auth.terminal`。仅发送旧字段时，不会公布 terminal 方法；浏览器 Agent Auth 是否可用仍取决于公开账户能力发现。此项来自协议与代码核对，未用账户版二进制复现。
+- [registry 认证合同](https://github.com/agentclientprotocol/registry/blob/49f768659a8089f07874f56a0d474312695ad861/AUTHENTICATION.md)规定 Terminal Auth 的 args 替换默认启动参数。当前返回 `["--auth-setup", methodId]`，缺少 `acp`；实际按该规则调用原生 CLI 得到 `--auth-setup requires acp`。既有 helper 流程使用 `acp --auth-setup ...`，不能作为此启动方式已兼容的证据。registry 的 auth checker 只检查握手声明，不执行 setup，因此单独通过它也不能证明交互登录可用。
+
+上游 `build_registry.py --agents dimcode` 对已登记元数据的检查停在 distribution URL 校验：本机 DNS 将 `registry.npmjs.org` 解析为 `198.18.0.35`，被脚本的非公网地址检查拒绝，显示 `npm package not found: dimcode`；同机 HTTPS 请求返回 200。这是本机网络环境限制，不能认定 npm 包不存在，也没有绕过上游 URL 安全检查。完整 registry build 尚未通过。注册版本还需满足其 schema：stable 为 `X.Y.Z`，preview 为 `X.Y.Z-preview.N` 或 `X.Y.Z`；当前 alpha 版本不能直接填入这些字段。
+
+**Registry 检查未接入或启用 CI。** 认证构建组合、Terminal Auth 兼容缺口及网络验证条件明确后，再决定检查范围；当前不修改认证或 Session 运行逻辑。
+
 ## Limits and unverified environments
 
 - 私有 OAuth 插件的真实账户、浏览器授权与令牌交换未实机验收；公开 managed-provider RPC、callback 和取消路径已有测试。私有 realm/token 实现不进入本仓库。
