@@ -1,4 +1,14 @@
-use dim_agent_capabilities::{defaults, timeline_tree::TreeCommands};
+use dim_agent_capabilities::{
+    defaults,
+    adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
+    history::HistoryRenderer,
+    host::{
+        CompactionInput, CompactionStrategy, CompactionStrategyHost, ContextModel,
+        ContextModelHost, HostFuture, IdentityContext, ModelHost, PrepareContextHost,
+        ResolveContextModel, StrategyDiagnostics, StrategyOutcome, ToolHost,
+    },
+    timeline_tree::TreeCommands,
+};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
@@ -11,6 +21,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 mod support;
 use support::{Broadcast, Committed};
 
@@ -1279,7 +1290,7 @@ async fn model_output_cannot_be_inherited_as_an_asymmetric_prefix() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_initial_child_input_can_immediately_create_a_grandchild() {
+async fn a_tool_call_on_main_opens_a_line_before_its_own_request() {
     let probe = Arc::new(Probe::default());
     let root = support::root();
     let agent = builder(&probe).build_in(&root);
@@ -1287,29 +1298,33 @@ async fn the_initial_child_input_can_immediately_create_a_grandchild() {
         .await
         .unwrap();
     let broadcast = Broadcast::listen(&root, session.id());
-    let child = soon(session.branch(
-        "main".into(),
-        0,
-        options(r#"tool:branch {"prompt":"grandchild"}"#),
-    ))
-    .await
-    .unwrap();
-    soon(session.idle(&child)).await.unwrap();
+    session
+        .submit(
+            r#"tool:branch {"action":"create","prompt":"child"}"#.into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
     let branches = session.branches();
-    let grandchild = branches
+    let child = branches
         .iter()
-        .find(|info| info.parent.as_deref() == Some(&child))
-        .expect("the child's tree commands can find their own timeline");
-    soon(session.idle(&grandchild.id)).await.unwrap();
-    let child_events = session.local(&child, ..).await.unwrap();
-    assert!(child_events.iter().any(|event| matches!(&event.kind, EventKind::ToolResult(data) if data.results[0].result.is_error != Some(true))));
-    let model_start = child_events
+        .find(|info| info.parent.as_deref() == Some("main"))
+        .expect("the tool call opened a line");
+    soon(session.idle(&child.id)).await.unwrap();
+    let main_events = session.local("main", ..).await.unwrap();
+    let model_start = main_events
         .iter()
         .find(|event| matches!(event.kind, EventKind::ModelStart(_)))
         .unwrap();
-    assert_eq!(grandchild.branch_point, Some(model_start.sequence - 1));
-    let anchor = create_event(&child_events);
-    assert_eq!(grandchild.create_anchor, Some(anchor.sequence));
+    assert_eq!(child.branch_point, Some(model_start.sequence - 1));
+    let anchor = create_event(&main_events);
+    assert_eq!(child.create_anchor, Some(anchor.sequence));
+    assert!(main_events.iter().any(|event| matches!(&event.kind, EventKind::ToolResult(data)
+        if data.results[0].result.is_error != Some(true)
+            && matches!(&data.results[0].result.content,
+                ToolContent::Text(text) if text == &format!("Line created: {}", child.id)))));
     soon(agent.close()).await.unwrap();
     let records = soon(broadcast.ended()).await;
     let (end, events) = records.split_last().unwrap();
@@ -1334,6 +1349,192 @@ async fn the_initial_child_input_can_immediately_create_a_grandchild() {
     }
 }
 
+async fn tool_call(session: &Session, branch: &str, arguments: &str) -> ToolResult {
+    session
+        .submit(format!("tool:branch {arguments}"), InputMode::Queue, branch)
+        .await
+        .unwrap();
+    soon(session.idle(branch)).await.unwrap();
+    let events = session.local(branch, ..).await.unwrap();
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => Some(data.results[0].result.clone()),
+            _ => None,
+        })
+        .expect("the call returned a result")
+}
+async fn call(session: &Session, branch: &str, arguments: &str) -> (String, String) {
+    let result = tool_call(session, branch, arguments).await;
+    assert_eq!(result.is_error, Some(true), "{:?}", result.content);
+    let structured = result.structured_content.clone().unwrap_or_default();
+    (
+        structured
+            .get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        structured
+            .get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+async fn local_events(session: &Session, branch: &str) -> Vec<Arc<AgentEvent>> {
+    let head = session.sequence(branch).unwrap();
+    session.local_page(branch, 0, 10_000, head).await.unwrap()
+}
+async fn until_events(
+    session: &Session,
+    branch: &str,
+    done: impl Fn(&[Arc<AgentEvent>]) -> bool,
+) -> Vec<Arc<AgentEvent>> {
+    for _ in 0..600 {
+        if let Ok(head) = session.sequence(branch)
+            && let Ok(events) = session.local_page(branch, 0, 10_000, head).await
+            && done(&events)
+        {
+            return events;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for line {branch}");
+}
+fn line_block(events: &[Arc<AgentEvent>]) -> Option<(String, bool)> {
+    events.iter().rev().find_map(|event| match &event.kind {
+        EventKind::InputMessage(data) => data.blocks.iter().rev().find_map(|block| match block {
+            InputBlock::Raw {
+                text,
+                key: Some(key),
+                retire,
+            } if key == "branch:line" => Some((text.clone(), *retire)),
+            _ => None,
+        }),
+        _ => None,
+    })
+}
+fn blocks_with(events: &[Arc<AgentEvent>], marker: &str) -> Vec<String> {
+    events
+        .iter()
+        .flat_map(|event| match &event.kind {
+            EventKind::InputMessage(data) => data
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    InputBlock::Raw { text, .. } if text.starts_with(marker) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_branch_call_writes_nothing() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let host = soon(session.branch("main".into(), 0, options("host line")))
+        .await
+        .unwrap();
+    soon(session.idle(&host)).await.unwrap();
+    session
+        .submit(
+            r#"tool:branch {"action":"create","prompt":"tool line"}"#.into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let tool_line = session
+        .branches()
+        .iter()
+        .find(|info| info.parent.as_deref() == Some("main"))
+        .expect("main opened a tool line")
+        .id
+        .clone();
+    soon(session.idle(&tool_line)).await.unwrap();
+    assert_eq!(
+        call(&session, &tool_line, r#"{"action":"create","prompt":"grandchild"}"#).await,
+        (
+            "branch_not_main".into(),
+            "Only main opens lines. Tell main if more parallel work is needed.".into()
+        )
+    );
+    assert!(
+        !session
+            .branches()
+            .iter()
+            .any(|info| info.parent.as_deref() == Some(tool_line.as_str()))
+    );
+    let before = session.local(&host, ..).await.unwrap().len();
+    assert_eq!(
+        call(&session, "main", &format!(
+            r#"{{"action":"message","to":"{host}","content":"hello"}}"#
+        ))
+        .await,
+        (
+            "branch_not_tool_line".into(),
+            format!("Line {host} was not opened with this tool; it follows its own protocol.")
+        )
+    );
+    assert_eq!(
+        call(&session, "main", &format!(r#"{{"action":"read","branch":"{host}"}}"#)).await,
+        (
+            "branch_not_tool_line".into(),
+            format!("Line {host} was not opened with this tool; it follows its own protocol.")
+        )
+    );
+    assert_eq!(session.local(&host, ..).await.unwrap().len(), before);
+    assert_eq!(
+        call(&session, &tool_line, &format!(
+            r#"{{"action":"message","to":"{host}","content":"hello"}}"#
+        ))
+        .await,
+        (
+            "branch_not_kin".into(),
+            "You can message only the lines you opened and the line that opened you.".into()
+        )
+    );
+    assert_eq!(
+        call(&session, "main", r#"{"action":"end","content":"done"}"#).await,
+        (
+            "branch_cannot_end".into(),
+            "Only a line opened with create can end itself.".into()
+        )
+    );
+    assert_eq!(
+        call(&session, &host, r#"{"action":"end","content":"done"}"#).await,
+        (
+            "branch_cannot_end".into(),
+            "Only a line opened with create can end itself.".into()
+        )
+    );
+    assert!(
+        !session
+            .local(&host, ..)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BranchEnd(_)))
+    );
+    assert!(
+        !session
+            .local("main", ..)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BranchEnd(_)))
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_close_cancels_an_active_build_and_waits_for_rollback() {
     let probe = Arc::new(Probe::default());
@@ -1351,6 +1552,456 @@ async fn session_close_cancels_an_active_build_and_waits_for_rollback() {
     assert!(soon(waiting).await.unwrap().is_err());
     assert_eq!(probe.child_cleanups.load(Ordering::SeqCst), 1);
     assert_eq!(session.branches().len(), 1);
+    soon(agent.close()).await.unwrap();
+}
+
+async fn open_line(session: &Session, purpose: &str) -> String {
+    let before: std::collections::BTreeSet<String> =
+        session.branches().iter().map(|info| info.id.clone()).collect();
+    let call = serde_json::json!({"action": "create", "prompt": purpose}).to_string();
+    let result = tool_call(session, "main", &call).await;
+    assert_eq!(result.is_error, None, "{:?}", result.content);
+    let child = soon(async {
+        loop {
+            let opened = session
+                .branches()
+                .into_iter()
+                .map(|info| info.id)
+                .find(|id| !before.contains(id));
+            if let Some(id) = opened {
+                return id;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    soon(session.idle(&child)).await.unwrap();
+    child
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn main_lists_its_open_tool_lines_under_one_key() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let first = open_line(&session, "first purpose").await;
+    let second = open_line(&session, "second purpose\nmore detail").await;
+    let events = until_events(&session, "main", |events| {
+        line_block(events).is_some_and(|(text, retired)| !retired && text.contains(&second))
+    })
+    .await;
+    let (text, retired) = line_block(&events).unwrap();
+    assert!(!retired);
+    assert!(text.starts_with("<dim-branch-lines branch=\"main\">\n"));
+    assert!(text.contains(&format!("\n- {first}: first purpose\n")));
+    assert!(text.contains(&format!("\n- {second}: second purpose\n")));
+    assert!(!text.contains("more detail"));
+    assert!(text.ends_with("</dim-branch-lines>"));
+    let history = session.history(&first, None).await.unwrap();
+    let (identity, retired) = line_block(&history).unwrap();
+    assert!(!retired);
+    assert!(identity.starts_with(&format!(
+        "<dim-branch-line branch=\"{first}\" parent=\"main\" source=\"tool\">"
+    )));
+    assert!(identity.ends_with("</dim-branch-line>"));
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    soon(session.idle("main")).await.unwrap();
+    let result = tool_call(
+        &session,
+        "main",
+        &format!(r#"{{"action":"message","to":"{child}","content":"tests are green"}}"#),
+    )
+    .await;
+    assert_eq!(result.content, ToolContent::Text(format!("Sent to {child}.")));
+    let events = until_events(&session, &child, |events| {
+        !blocks_with(events, "<dim-branch-message").is_empty()
+    })
+    .await;
+    let (sequence, mode) = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data)
+                if data
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, InputBlock::Raw { text, .. }
+                        if text.starts_with("<dim-branch-message"))) =>
+            {
+                Some((event.sequence, data.effective_mode()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(mode, InputMode::Append);
+    assert!(blocks_with(&events, "<dim-branch-message").last().unwrap().starts_with(
+        &format!("<dim-branch-message from=\"main\" to=\"{child}\">\ntests are green\n</dim-branch-message>")
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::TurnStart(_)) && event.sequence > sequence),
+        "an append starts no turn"
+    );
+    tool_call(
+        &session,
+        "main",
+        &format!(r#"{{"action":"message","to":"{child}","content":"act now","mode":"steer"}}"#),
+    )
+    .await;
+    let events = until_events(&session, &child, |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::TurnStart(_)))
+    })
+    .await;
+    assert!(blocks_with(&events, "<dim-branch-message").last().unwrap().contains("act now"));
+    soon(session.idle(&child)).await.unwrap();
+    tool_call(
+        &session,
+        &child,
+        r#"{"action":"message","to":"main","content":"found the leak"}"#,
+    )
+    .await;
+    let events = until_events(&session, "main", |events| {
+        events.iter().any(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            && blocks_with(events, "<dim-branch-message").iter().any(|text| text.contains("found the leak"))
+    })
+    .await;
+    assert!(blocks_with(&events, "<dim-branch-message")
+        .iter()
+        .any(|text| text.starts_with(&format!("<dim-branch-message from=\"{child}\" to=\"main\">"))));
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_line_tells_main_once_when_its_turn_ends_without_a_word() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    soon(session.idle("main")).await.unwrap();
+    let events = until_events(&session, "main", |events| {
+        !blocks_with(events, "<dim-branch-idle").is_empty()
+    })
+    .await;
+    let notices = blocks_with(&events, "<dim-branch-idle");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].starts_with(&format!(
+        "<dim-branch-idle branch=\"{child}\" status=\"completed\">"
+    )));
+    assert!(notices[0].contains(&format!(
+        "Line {child}'s turn ended (completed) without a message to you, and {child} is waiting."
+    )));
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data)
+        if data.effective_mode() == InputMode::Steer
+            && data.blocks.iter().any(|block| matches!(block, InputBlock::Raw { text, .. }
+                if text.starts_with("<dim-branch-idle"))))));
+    soon(session.idle("main")).await.unwrap();
+    session
+        .submit(r#"tool:wait {"millis":600}"#.into(), InputMode::Queue, &child)
+        .await
+        .unwrap();
+    session
+        .submit("behind the wait".into(), InputMode::Queue, &child)
+        .await
+        .unwrap();
+    until_events(&session, "main", |events| {
+        blocks_with(events, "<dim-branch-idle").len() >= 2
+    })
+    .await;
+    soon(session.idle("main")).await.unwrap();
+    assert_eq!(
+        blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len(),
+        2
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_line_ends_itself_and_main_learns_it_from_the_roster() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    soon(session.idle("main")).await.unwrap();
+    let result = tool_call(
+        &session,
+        &child,
+        r#"{"action":"end","content":"done: the leak is fixed"}"#,
+    )
+    .await;
+    assert_eq!(
+        result.content,
+        ToolContent::Text(format!(
+            "Line {child} is ending; your final message was sent to main."
+        ))
+    );
+    let events = until_events(&session, "main", |events| {
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::BranchEnded(data) if data.branch == child))
+    })
+    .await;
+    assert!(events.iter().any(|event| matches!(&event.kind, EventKind::BranchEnded(data)
+        if data.branch == child
+            && matches!(data.source, BranchSource::Tool { .. })
+            && data.ancestor.is_none())));
+    let finals = blocks_with(&events, &format!(
+        "<dim-branch-message from=\"{child}\" to=\"main\" final=\"true\">"
+    ));
+    assert_eq!(finals.len(), 1, "{finals:?}");
+    assert!(finals[0].contains("done: the leak is fixed"));
+    assert!(finals[0].ends_with(&format!(
+        "\n\nLine {child} ends with this message.\n</dim-branch-message>"
+    )));
+    assert!(blocks_with(&events, "<dim-branch-ended").is_empty());
+    let retired =
+        "<dim-branch-lines branch=\"main\">\nAll lines you opened have ended.\n</dim-branch-lines>"
+            .to_string();
+    until_events(&session, "main", |events| {
+        line_block(events) == Some((retired.clone(), true))
+    })
+    .await;
+    let child_events = local_events(&session, &child).await;
+    assert!(child_events.iter().any(|event| matches!(&event.kind, EventKind::BranchEnd(data)
+        if matches!(data.source, BranchSource::Tool { .. }) && data.ancestor.is_none())));
+    assert!(session.local(&child, ..).await.is_err());
+    assert_eq!(
+        call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"message","to":"{child}","content":"still there?"}}"#)
+        )
+        .await,
+        (
+            "branch_ended".into(),
+            format!("Line {child} has ended. Read it to see what it did.")
+        )
+    );
+    let page = tool_call(
+        &session,
+        "main",
+        &format!(r#"{{"action":"read","branch":"{child}"}}"#),
+    )
+    .await;
+    assert_eq!(page.is_error, None, "{:?}", page.content);
+    let page = page.structured_content.unwrap();
+    assert_eq!(page["done"], serde_json::json!(true));
+    assert!(page["items"].as_array().is_some_and(|items| items
+        .iter()
+        .any(|item| item["type"] == serde_json::json!("turn_end"))));
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_lines_end_says_nothing_to_main() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let host = soon(session.branch("main".into(), 0, options("host line")))
+        .await
+        .unwrap();
+    soon(session.idle(&host)).await.unwrap();
+    assert!(line_block(&local_events(&session, "main").await).is_none());
+    soon(session.end_branch(
+        &host,
+        BranchSource::Host {
+            operation_id: "test-end".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let events = until_events(&session, "main", |events| {
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::BranchEnded(data) if data.branch == host))
+    })
+    .await;
+    assert!(blocks_with(&events, "<dim-branch-ended").is_empty());
+    assert!(line_block(&events).is_none());
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_end_from_outside_a_tool_line_wakes_main_with_a_notice() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    soon(session.idle("main")).await.unwrap();
+    let source = BranchSource::Host {
+        operation_id: "test-end".into(),
+    };
+    soon(session.end_branch(&child, source.clone())).await.unwrap();
+    let events = until_events(&session, "main", |events| {
+        !blocks_with(events, "<dim-branch-ended").is_empty()
+    })
+    .await;
+    let notices = blocks_with(&events, "<dim-branch-ended");
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].starts_with(&format!("<dim-branch-ended branch=\"{child}\">")));
+    assert!(notices[0].contains("It no longer receives messages; read it if you need what it did."));
+    let input = events
+        .iter()
+        .find(|event| matches!(&event.kind, EventKind::InputMessage(data)
+            if data.blocks.iter().any(|block| matches!(block, InputBlock::Raw { text, .. }
+                if text.starts_with("<dim-branch-ended")))))
+        .unwrap();
+    let EventKind::InputMessage(data) = &input.kind else {
+        unreachable!()
+    };
+    assert_eq!(data.effective_mode(), InputMode::Steer);
+    assert!(data.blocks.iter().any(|block| matches!(block,
+        InputBlock::Raw { key: Some(key), retire: true, .. } if key == "branch:line")));
+    let child_events = local_events(&session, &child).await;
+    assert!(child_events.iter().any(|event| matches!(&event.kind, EventKind::BranchEnd(data)
+        if data.source == source && data.ancestor.is_none())));
+    soon(agent.close()).await.unwrap();
+}
+
+#[derive(Clone, Copy)]
+struct Compact;
+impl ResolveContextModel for Compact {
+    fn resolve(
+        &self,
+        _: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, Arc<dyn ContextModel>> {
+        Box::pin(async { Ok(Arc::new(Compact) as Arc<dyn ContextModel>) })
+    }
+}
+impl ContextModel for Compact {
+    fn context_window(&self) -> f64 {
+        4096.
+    }
+    fn output_tokens(&self) -> f64 {
+        64.
+    }
+    fn threshold_tokens(&self) -> f64 {
+        2000.
+    }
+    fn count_tokens(&self, request: &ModelRequest) -> f64 {
+        serde_json::to_vec(&request.messages).unwrap().len() as f64
+    }
+}
+fn diagnostics() -> StrategyDiagnostics {
+    StrategyDiagnostics {
+        model_call_count: 1,
+        record: CompactionStrategyRecord {
+            kind: "test".into(),
+            details: JsonObject::new(),
+        },
+    }
+}
+impl CompactionStrategy for Compact {
+    fn name(&self) -> &str {
+        "test"
+    }
+    fn compact(
+        &self,
+        input: CompactionInput,
+        _: CancellationToken,
+    ) -> HostFuture<'_, StrategyOutcome> {
+        Box::pin(async move {
+            match input.cut() {
+                Some(cut) => Ok(StrategyOutcome::Completed {
+                    retain_from: cut.retain_from.clone(),
+                    replacement: vec![dim_agent_capabilities::history::summary_message("short")],
+                    diagnostics: diagnostics(),
+                }),
+                None => Ok(StrategyOutcome::Skipped {
+                    reason: "nothing_to_compact".into(),
+                    diagnostics: diagnostics(),
+                }),
+            }
+        })
+    }
+}
+fn baseline_message(events: &[Arc<AgentEvent>], key: &str) -> Option<Message> {
+    let baseline = events.iter().rev().find_map(|event| match &event.kind {
+        EventKind::ContextCompaction(ContextCompactionData {
+            outcome: ContextCompactionResult::Completed { context_baseline, .. },
+            ..
+        }) => Some(context_baseline.clone()),
+        _ => None,
+    })?;
+    baseline
+        .into_iter()
+        .find(|entry| entry.key == key)
+        .map(|entry| entry.message)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_roster_and_the_identity_replay_after_a_compaction() {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .timeline_store(Arc::new(MemoryTimelineStore::default()))
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(Compact)))))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    defaults::install(&mut builder);
+    let agent = builder.build();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "compact my line").await;
+    for text in ["x".repeat(1500), "y".repeat(1500)] {
+        session.submit(text, InputMode::Queue, "main").await.unwrap();
+        soon(session.idle("main")).await.unwrap();
+    }
+    let message = baseline_message(&session.history("main", None).await.unwrap(), "branch:line")
+        .expect("main compacted and the roster replayed");
+    let MessageContent::Text(text) = &message.content else {
+        panic!("the roster is text: {message:?}");
+    };
+    assert!(text.starts_with("<dim-branch-lines branch=\"main\">"), "{text}");
+    assert!(text.contains(&format!("- {child}: compact my line")));
+    for text in ["x".repeat(1500), "y".repeat(1500)] {
+        session
+            .submit(text, InputMode::Queue, &child)
+            .await
+            .unwrap();
+        soon(session.idle(&child)).await.unwrap();
+    }
+    let message = baseline_message(&session.history(&child, None).await.unwrap(), "branch:line")
+        .expect("the child compacted and its identity replayed");
+    let MessageContent::Text(text) = &message.content else {
+        panic!("the identity is text: {message:?}");
+    };
+    assert!(
+        text.starts_with(&format!(
+            "<dim-branch-line branch=\"{child}\" parent=\"main\" source=\"tool\">"
+        )),
+        "{text}"
+    );
     soon(agent.close()).await.unwrap();
 }
 
@@ -1459,7 +2110,7 @@ async fn a_stop_settles_the_branch_tool_while_the_tree_still_builds_the_child() 
     probe.delay_child.store(true, Ordering::SeqCst);
     session
         .submit(
-            r#"tool:branch {"prompt":"child"}"#.into(),
+            r#"tool:branch {"action":"create","prompt":"child"}"#.into(),
             InputMode::Queue,
             "main",
         )

@@ -814,6 +814,18 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::timeline_tree::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::timeline_tree",
+      "file": "crates/dim-agent-capabilities/src/timeline_tree.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "format",
+        "json",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::tool_binding",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -5588,6 +5600,7 @@
       "to": "dim_agent_capabilities::timeline_tree",
       "references": [
         "mod timeline_tree",
+        "path timeline_tree::BranchLine",
         "path timeline_tree::TimelineTree",
         "path timeline_tree::TreeCommands"
       ]
@@ -6585,6 +6598,7 @@
         "path EmptyPromptHost",
         "path IdentityContext",
         "path LoadPrompt",
+        "path ModelDriver",
         "path ModelHost",
         "path PrepareContextHost",
         "path PromptHost",
@@ -6691,6 +6705,7 @@
       "references": [
         "path TimelineTreePlugin::new",
         "path TreeTimelinePlugin::new",
+        "path crate::timeline_tree::BranchLinePlugin::new",
         "path crate::timeline_tree::BranchToolPlugin::new",
         "use crate::timeline_tree::TimelineTreePlugin",
         "use crate::timeline_tree::TreeTimelinePlugin"
@@ -9137,6 +9152,7 @@
       "references": [
         "path crate::context_block::element",
         "path crate::context_block::raw",
+        "path crate::context_block::retire",
         "path crate::context_block::text"
       ]
     },
@@ -9159,6 +9175,7 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path HostError",
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
@@ -9166,6 +9183,13 @@
         "use crate::host::HostError",
         "use crate::host::HostFuture",
         "use crate::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_capabilities::timeline_tree::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -9201,9 +9225,13 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_runtime::config",
       "references": [
+        "path BranchLifecycle",
         "path SessionIdentity",
+        "path TimelineIdentity",
         "path dim_agent_runtime::TimelineIdentity",
-        "use dim_agent_runtime::SessionIdentity"
+        "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::SessionIdentity",
+        "use dim_agent_runtime::TimelineIdentity"
       ]
     },
     {
@@ -9222,7 +9250,10 @@
       "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_runtime::core::dispatcher",
       "references": [
+        "path Delivery::Live",
+        "path Delivery::Replay",
         "path Dispatcher",
+        "use dim_agent_runtime::Delivery",
         "use dim_agent_runtime::Dispatcher"
       ]
     },
@@ -9284,6 +9315,13 @@
     },
     {
       "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path content"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -9306,13 +9344,29 @@
         "path EventKind::BranchEnded",
         "path EventKind::BranchResume",
         "path EventKind::BranchStart",
+        "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::ModelStart",
+        "path EventKind::StopInterrupt",
+        "path EventKind::Text",
+        "path EventKind::ToolCall",
+        "path EventKind::ToolResult",
+        "path EventKind::ToolUse",
+        "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path InputBlock",
+        "path InputBlock::Raw",
         "path InputMessageData",
         "path InputMessageData::default",
+        "path InputMode",
+        "path InputMode::Append",
         "path InputMode::Queue",
+        "path InputMode::Steer",
+        "path TurnOutcome::Cancelled",
+        "path TurnOutcome::Completed",
+        "path TurnOutcome::Failed",
         "path UserInput",
         "path events"
       ]
@@ -9331,7 +9385,37 @@
         "path ToolCall",
         "path ToolDefinition",
         "path ToolResult",
+        "path ToolResult::error",
         "path ToolResult::text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree::tests",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path BranchLine::fold",
+        "path LineRole::Tool",
+        "path LineView",
+        "path LineView::default"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path EventKind",
+        "path EventKind::ToolResult",
+        "path EventKind::ToolUse",
+        "path ToolResultData",
+        "path ToolUseData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree::tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall"
       ]
     },
     {

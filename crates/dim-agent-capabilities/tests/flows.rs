@@ -119,7 +119,7 @@ async fn branch_tool_reuses_capabilities_without_replaying_ancestor_inputs() {
         let prefix = session.history("main", None).await.unwrap();
         session
             .submit(
-                "tool:branch {\"prompt\":\"child\"}".into(),
+                "tool:branch {\"action\":\"create\",\"prompt\":\"child\"}".into(),
                 InputMode::Queue,
                 "main",
             )

@@ -3,9 +3,9 @@ use crate::{
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
-    AgentError, Branch, BranchOptions, Dispatcher, Names, Result, SessionIdentity, StoredBranch,
-    Timeline, TimelineContext, TimelineFactory, TimelineInfo, TimelineKey, TimelineStore,
-    TimelineTreeControl,
+    AgentError, Branch, BranchLifecycle, BranchOptions, Delivery, Dispatcher, Names, Result,
+    SessionIdentity, StoredBranch, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
+    TimelineInfo, TimelineKey, TimelineStore, TimelineTreeControl,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -69,6 +69,10 @@ struct Node {
     ready: watch::Sender<Option<Result<Branch>>>,
     started: bool,
 }
+struct EndedLine {
+    head: u64,
+    info: TimelineInfo,
+}
 /// A line whose `branch/end` is committed and whose close has not completed.
 struct PendingEnd {
     /// The sequence of `branch/end` on the line: the result's `endEvent`.
@@ -77,7 +81,7 @@ struct PendingEnd {
 }
 struct TreeState {
     nodes: BTreeMap<String, Node>,
-    ended: BTreeMap<String, u64>,
+    ended: BTreeMap<String, EndedLine>,
     /// Lines waiting for the turn end that a tool-sourced end belongs to.
     pending: BTreeMap<String, PendingEnd>,
     closing: bool,
@@ -141,9 +145,14 @@ impl TreeCommands {
     // is defined (arcships/rutis#463).
     /// The directory record of branch `id`.
     pub fn info(&self, id: String) -> std::result::Result<TimelineInfo, AgentError> {
-        self.list()
+        let tree = self
+            .tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
+        tree.list()
             .into_iter()
             .find(|info| info.id == id)
+            .or_else(|| tree.ended_info(&id))
             .ok_or(AgentError::UnknownBranch(id))
     }
     /// Commits `input` to branch `id` through its validating `Branch::input`
@@ -181,6 +190,12 @@ impl TreeCommands {
             .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
             .page(&id, after, limit)
             .await
+    }
+    /// The head a read of `id` ends at: fixed once ended, published while
+    /// open.
+    #[service(skip)]
+    fn head(&self, id: &str) -> Option<u64> {
+        self.tree.upgrade()?.head(id)
     }
     /// Creates a child of `parent` cut at `at` and returns its id.
     /// `cancelled` is the caller's cancellation as an explicit argument, the
@@ -549,15 +564,9 @@ impl TimelineTree {
         });
     }
     async fn page(&self, id: &str, after: u64, limit: usize) -> Result<Vec<Arc<AgentEvent>>> {
-        let ended = self.state.lock().unwrap().ended.get(id).copied();
-        let through = match ended {
-            Some(head) => head,
-            None => self
-                .owned_context(id)
-                .ok_or_else(|| AgentError::UnknownBranch(id.into()))?
-                .timeline()
-                .sequence(),
-        };
+        let through = self
+            .head(id)
+            .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
         if through <= after {
             return Ok(Vec::new());
         }
@@ -572,6 +581,13 @@ impl TimelineTree {
             .into_iter()
             .map(|record| record.event)
             .collect())
+    }
+    fn head(&self, id: &str) -> Option<u64> {
+        if let Some(ended) = self.state.lock().unwrap().ended.get(id) {
+            return Some(ended.head);
+        }
+        self.owned_context(id)
+            .map(|context| context.timeline().sequence())
     }
     async fn own_end(&self, branch: &str, head: u64) -> Result<Option<(u64, BranchEndData)>> {
         if head == 0 {
@@ -623,7 +639,20 @@ impl TimelineTree {
     }
     /// The stored head of an ended line, `None` for an open or unknown one.
     fn ended_head(&self, id: &str) -> Option<u64> {
-        self.state.lock().unwrap().ended.get(id).copied()
+        self.state
+            .lock()
+            .unwrap()
+            .ended
+            .get(id)
+            .map(|ended| ended.head)
+    }
+    fn ended_info(&self, id: &str) -> Option<TimelineInfo> {
+        self.state
+            .lock()
+            .unwrap()
+            .ended
+            .get(id)
+            .map(|ended| ended.info.clone())
     }
     async fn end(&self, id: &str, source: BranchSource) -> Result<()> {
         let context = {
@@ -844,7 +873,7 @@ impl TimelineTree {
         }
     }
     async fn close_and_record(&self, id: &str, end_event: u64, data: BranchEndData) -> Result<()> {
-        let (context, parent) = {
+        let (context, info) = {
             let state = self.state.lock().unwrap();
             let node = state
                 .nodes
@@ -854,14 +883,27 @@ impl TimelineTree {
                 node.context
                     .clone()
                     .ok_or_else(|| AgentError::UnknownBranch(id.into()))?,
-                node.info.parent.clone(),
+                node.info.clone(),
             )
         };
+        let parent = info.parent.clone();
         let mut errors = Vec::new();
         if let Err(error) = context.branch().close().await {
             errors.push(error);
         }
         let head = context.timeline().sequence();
+        {
+            let mut state = self.state.lock().unwrap();
+            state.pending.remove(id);
+            state.nodes.remove(id);
+            state.ended.insert(
+                id.into(),
+                EndedLine {
+                    head,
+                    info: info.clone(),
+                },
+            );
+        }
         if let Some(parent) = parent {
             let recorded = self
                 .owned_context(&parent)
@@ -885,12 +927,6 @@ impl TimelineTree {
                     "ending line {id}: its result could not be recorded: {error}"
                 )));
             }
-        }
-        {
-            let mut state = self.state.lock().unwrap();
-            state.pending.remove(id);
-            state.nodes.remove(id);
-            state.ended.insert(id.into(), head);
         }
         AgentError::aggregate(errors)
     }
@@ -1074,11 +1110,13 @@ impl TimelineTreeControl for TimelineTree {
                 let mut next: TimelineInfo = stored.info.into();
                 next.source = sources.get(&next.id).cloned();
                 if recorded_ends.contains(&next.id) {
-                    self.state
-                        .lock()
-                        .unwrap()
-                        .ended
-                        .insert(next.id.clone(), stored.sequence);
+                    self.state.lock().unwrap().ended.insert(
+                        next.id.clone(),
+                        EndedLine {
+                            head: stored.sequence,
+                            info: next.clone(),
+                        },
+                    );
                     remaining.remove(&next.id);
                     inactive.insert(next.id);
                     continue;
@@ -1102,11 +1140,13 @@ impl TimelineTreeControl for TimelineTree {
                         {
                             next.source = self.creation_source(parent, &next.id, anchor).await?;
                         }
-                        self.state
-                            .lock()
-                            .unwrap()
-                            .ended
-                            .insert(next.id.clone(), stored.sequence);
+                        self.state.lock().unwrap().ended.insert(
+                            next.id.clone(),
+                            EndedLine {
+                                head: stored.sequence,
+                                info: next.clone(),
+                            },
+                        );
                     }
                     remaining.remove(&next.id);
                     inactive.insert(next.id);
@@ -1119,11 +1159,13 @@ impl TimelineTreeControl for TimelineTree {
                 };
                 if let Some((end_event, data)) = own_end {
                     self.complete_end(&next, end_event, data)?;
-                    self.state
-                        .lock()
-                        .unwrap()
-                        .ended
-                        .insert(next.id.clone(), stored.sequence);
+                    self.state.lock().unwrap().ended.insert(
+                        next.id.clone(),
+                        EndedLine {
+                            head: stored.sequence,
+                            info: next.clone(),
+                        },
+                    );
                     remaining.remove(&next.id);
                     inactive.insert(next.id);
                     continue;
@@ -1177,9 +1219,9 @@ impl TimelineTreeControl for TimelineTree {
                 };
                 Self::await_branch(ready).await?;
                 if let Some(reported) = reported {
-                    let facts = reported.await.expect(
-                        "a resumed branch reports its own lines before it is published",
-                    );
+                    let facts = reported
+                        .await
+                        .expect("a resumed branch reports its own lines before it is published");
                     failed_creates.extend(
                         facts
                             .failed_creates
@@ -1267,11 +1309,7 @@ impl TimelineTreeControl for TimelineTree {
                             .nodes
                             .get(&id)
                             .ok_or_else(|| AgentError::UnknownBranch(id.clone()))?;
-                        if node
-                            .context
-                            .as_ref()
-                            .is_some_and(|context| context.ended())
-                        {
+                        if node.context.as_ref().is_some_and(|context| context.ended()) {
                             return Err(AgentError::BranchEnded(id));
                         }
                         above = node.info.parent.clone();
@@ -1505,14 +1543,895 @@ impl DynPlugin for BranchToolPlugin {
         })
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineRole {
+    Main,
+    Tool,
+    Host,
+}
+/// One line its parent opened, as the parent's own facts recorded it.
+struct Child {
+    source: BranchSource,
+    purpose: String,
+    opened: u64,
+    failed: bool,
+    ended: bool,
+}
+enum Decision {
+    Roster,
+    Ended(String),
+    Idle { turn: String, status: &'static str },
+}
+/// BranchLine's fold of its own line's facts.
+#[derive(Default)]
+struct LineView {
+    role: Option<LineRole>,
+    parent: Option<String>,
+    /// The lines this line opened, open or not, by the order it opened them.
+    children: BTreeMap<String, Child>,
+    roster: Option<(String, bool)>,
+    /// The turn that steered the parent, when one did.
+    steered: Option<String>,
+    steering: Option<(String, String)>,
+    /// Inputs committed and not consumed, with their modes.
+    held: BTreeMap<String, InputMode>,
+    /// The sequence of each input's `input/applied`.
+    applied: BTreeMap<String, u64>,
+    /// The line committed its own `branch/end`: it is ending.
+    ending: bool,
+}
+pub struct BranchLinePlugin {
+    line: Key<BranchLine>,
+    dispatcher: Key<Dispatcher>,
+    identity: Key<TimelineIdentity>,
+    lifecycle: Key<BranchLifecycle>,
+    tree: Key<TreeCommands>,
+}
+impl BranchLinePlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            line: names.key()?,
+            dispatcher: names.key()?,
+            identity: names.key()?,
+            lifecycle: names.key()?,
+            tree: names.key()?,
+        })
+    }
+}
+impl DynPlugin for BranchLinePlugin {
+    fn name(&self) -> &str {
+        "BranchLine"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![
+            self.dispatcher.erase(),
+            self.identity.erase(),
+            self.lifecycle.erase(),
+            self.tree.erase(),
+        ]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let identity = ctx.require_at(&self.identity)?;
+            let lifecycle = ctx.require_at(&self.lifecycle)?;
+            let tree = ctx.require_at(&self.tree)?;
+            let line = Arc::new(BranchLine {
+                own: identity.branch_id.clone(),
+                tree,
+                view: Mutex::new(LineView::default()),
+                wanted: Mutex::new(std::collections::VecDeque::new()),
+                changed: tokio::sync::Notify::new(),
+                stop: CancellationToken::new(),
+            });
+            let consumer = line.clone();
+            dispatcher
+                .follow(
+                    ctx,
+                    "BranchLine",
+                    &[
+                        "branch/create",
+                        "branch/create-failed",
+                        "branch/ended",
+                        "branch/end",
+                        "input/message",
+                        "input/applied",
+                        "input/consumed",
+                        "input/deleted",
+                        "stop/interrupt",
+                        "turn/end",
+                        "tool/use",
+                        "tool/result",
+                    ],
+                    move |delivery| {
+                        let consumer = consumer.clone();
+                        Box::pin(async move {
+                            match delivery {
+                                Delivery::Replay(events) => consumer.rebuild(&events),
+                                Delivery::Live(event) => consumer.consume(&event),
+                            }
+                            Ok(())
+                        })
+                    },
+                )
+                .await?;
+            line.want(Decision::Roster);
+            let writer = line.clone();
+            let phase = lifecycle.clone();
+            let tasks = TaskTracker::new();
+            tasks.spawn(async move {
+                tokio::select! {
+                    _ = writer.stop.cancelled() => return,
+                    active = phase.activated() => if !active { return },
+                }
+                writer.run().await;
+            });
+            let stop = line.stop.clone();
+            ctx.effect(move || async move {
+                stop.cancel();
+                tasks.close();
+                tasks.wait().await;
+                Ok(())
+            })?;
+            ctx.provide_at(self.line.clone(), line)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+pub struct BranchLine {
+    own: String,
+    tree: Arc<TreeCommands>,
+    view: Mutex<LineView>,
+    wanted: Mutex<std::collections::VecDeque<Decision>>,
+    changed: tokio::sync::Notify,
+    stop: CancellationToken,
+}
+impl BranchLine {
+    /// Rebuilds the fold from the line's own history, without writing.
+    fn rebuild(&self, events: &[Arc<AgentEvent>]) {
+        let mut view = self.view.lock().unwrap();
+        for event in events {
+            Self::fold(&mut view, event);
+        }
+    }
+    /// Folds one live committed event and queues its decision.
+    fn consume(&self, event: &AgentEvent) {
+        let _ = self.resolved();
+        let mut view = self.view.lock().unwrap();
+        if let Some(decision) = Self::fold(&mut view, event) {
+            drop(view);
+            self.want(decision);
+        }
+    }
+    fn fold(view: &mut LineView, event: &AgentEvent) -> Option<Decision> {
+        match &event.kind {
+            EventKind::BranchCreate(data) => {
+                view.children.insert(
+                    data.branch.clone(),
+                    Child {
+                        source: data.source.clone(),
+                        purpose: data.prompt.clone(),
+                        opened: event.sequence,
+                        failed: false,
+                        ended: false,
+                    },
+                );
+                Some(Decision::Roster)
+            }
+            EventKind::BranchCreateFailed(data) => {
+                let branch = match data {
+                    BranchCreateFailedData::Failed { branch, .. }
+                    | BranchCreateFailedData::Cancelled { branch, .. } => branch,
+                };
+                if let Some(child) = view.children.get_mut(branch) {
+                    child.failed = true;
+                }
+                Some(Decision::Roster)
+            }
+            EventKind::BranchEnded(data) => {
+                let child = view.children.get_mut(&data.branch)?;
+                child.ended = true;
+                let itself =
+                    matches!(data.source, BranchSource::Tool { .. }) && data.ancestor.is_none();
+                Some(
+                    if !matches!(child.source, BranchSource::Tool { .. }) || itself {
+                        Decision::Roster
+                    } else {
+                        Decision::Ended(data.branch.clone())
+                    },
+                )
+            }
+            EventKind::BranchEnd(_) => {
+                view.ending = true;
+                None
+            }
+            EventKind::InputMessage(data) => {
+                view.held.insert(event.id.clone(), data.effective_mode());
+                for block in &data.blocks {
+                    if let InputBlock::Raw {
+                        text,
+                        key: Some(key),
+                        retire,
+                    } = block
+                        && key == &line_key()
+                    {
+                        view.roster = Some((text.clone(), *retire));
+                    }
+                }
+                None
+            }
+            EventKind::InputApplied(data) => {
+                view.applied.insert(data.input_id.clone(), event.sequence);
+                None
+            }
+            EventKind::StopInterrupt(_) => {
+                let applied = &view.applied;
+                view.held
+                    .retain(|id, _| applied.get(id).is_none_or(|at| *at > event.sequence));
+                None
+            }
+            EventKind::InputConsumed(data) => {
+                view.held.remove(&data.input_id);
+                view.applied.remove(&data.input_id);
+                None
+            }
+            EventKind::InputDeleted(data) => {
+                view.held.remove(&data.input_id);
+                view.applied.remove(&data.input_id);
+                None
+            }
+            EventKind::ToolUse(data) => {
+                if let Some(parent) = view.parent.clone()
+                    && steered_parent(&data.call, &parent)
+                {
+                    view.steering = Some((data.turn_id.clone(), data.call.id.clone()));
+                }
+                None
+            }
+            EventKind::ToolResult(data) => {
+                if let Some((turn, call)) = view.steering.clone()
+                    && let Some(result) = data.results.iter().find(|at| at.call_id == call)
+                {
+                    if result.result.is_error != Some(true) {
+                        view.steered = Some(turn);
+                    }
+                    view.steering = None;
+                }
+                None
+            }
+            EventKind::TurnEnd(data) => {
+                if view.held.values().any(|mode| *mode != InputMode::Append) {
+                    return None;
+                }
+                let status = match &data.outcome {
+                    TurnOutcome::Completed { .. } => "completed",
+                    TurnOutcome::Failed { .. } => "failed",
+                    TurnOutcome::Cancelled { .. } => "cancelled",
+                };
+                Some(Decision::Idle {
+                    turn: data.turn_id.clone(),
+                    status,
+                })
+            }
+            _ => None,
+        }
+    }
+    /// The line committed its own `branch/end`.
+    fn ending(&self) -> bool {
+        self.view.lock().unwrap().ending
+    }
+    /// The line's role and parent, from its directory record.
+    fn resolved(&self) -> Option<(LineRole, Option<String>)> {
+        {
+            let view = self.view.lock().unwrap();
+            if let Some(role) = view.role {
+                return Some((role, view.parent.clone()));
+            }
+        }
+        let info = self.tree.info(self.own.clone()).ok()?;
+        let role = match info.source {
+            None => LineRole::Main,
+            Some(BranchSource::Tool { .. }) => LineRole::Tool,
+            Some(BranchSource::Host { .. }) => LineRole::Host,
+        };
+        let mut view = self.view.lock().unwrap();
+        view.role = Some(role);
+        view.parent = info.parent.clone();
+        Some((role, info.parent))
+    }
+    fn want(&self, decision: Decision) {
+        self.wanted.lock().unwrap().push_back(decision);
+        self.changed.notify_one();
+    }
+    async fn run(self: Arc<Self>) {
+        loop {
+            let next = self.wanted.lock().unwrap().pop_front();
+            let Some(decision) = next else {
+                tokio::select! {
+                    _ = self.stop.cancelled() => return,
+                    _ = self.changed.notified() => continue,
+                }
+            };
+            if self.stop.is_cancelled() {
+                return;
+            }
+            let _ = self.write(decision).await;
+        }
+    }
+    async fn write(&self, decision: Decision) -> Result<()> {
+        let Some((role, parent)) = self.resolved() else {
+            return Ok(());
+        };
+        match decision {
+            Decision::Roster => {
+                if role != LineRole::Main {
+                    return Ok(());
+                }
+                let (text, retired) = self.roster();
+                let observed = self.view.lock().unwrap().roster.clone();
+                let settled = observed.as_ref() == Some(&(text.clone(), retired))
+                    || (retired && observed.as_ref().is_none_or(|(_, retired)| *retired));
+                if settled {
+                    return Ok(());
+                }
+                self.write_roster(text, retired, None).await
+            }
+            Decision::Ended(branch) => {
+                if role != LineRole::Main {
+                    return Ok(());
+                }
+                let (text, retired) = self.roster();
+                self.write_roster(text, retired, Some(branch)).await
+            }
+            Decision::Idle { turn, status } => {
+                let Some(parent) = parent.filter(|_| role == LineRole::Tool) else {
+                    return Ok(());
+                };
+                {
+                    let view = self.view.lock().unwrap();
+                    if view.ending || view.steered.as_deref() == Some(turn.as_str()) {
+                        return Ok(());
+                    }
+                }
+                let block = crate::context_block::raw(
+                    crate::context_block::element(
+                        "dim-branch-idle",
+                        &[("branch", &self.own), ("status", status)],
+                        &format!(
+                            "Line {}'s turn ended ({status}) without a message to you, and {} is waiting. Read it if you need its state; message it with mode \"steer\" to give it more work, or leave it.",
+                            self.own, self.own
+                        ),
+                    ),
+                    None,
+                );
+                let data = InputMessageData {
+                    blocks: vec![block],
+                    mode: Some(InputMode::Steer),
+                    ..InputMessageData::default()
+                };
+                self.tree.input(parent, data).await.map(|_| ())
+            }
+        }
+    }
+    /// The roster the fold calls for and whether it retires the key.
+    fn roster(&self) -> (String, bool) {
+        let view = self.view.lock().unwrap();
+        let mut open: Vec<(&String, &Child)> = view
+            .children
+            .iter()
+            .filter(|(_, child)| {
+                !child.failed && !child.ended && matches!(child.source, BranchSource::Tool { .. })
+            })
+            .collect();
+        open.sort_by_key(|(_, child)| child.opened);
+        if open.is_empty() {
+            return (
+                crate::context_block::element(
+                    "dim-branch-lines",
+                    &[("branch", &self.own)],
+                    "All lines you opened have ended.",
+                ),
+                true,
+            );
+        }
+        let listed = open
+            .iter()
+            .map(|(id, child)| {
+                format!(
+                    "- {id}: {}",
+                    crate::context_block::text(&first_line(&child.purpose))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        (
+            crate::context_block::element(
+                "dim-branch-lines",
+                &[("branch", &self.own)],
+                &format!(
+                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it does not see your work after that point unless you message it.\n{listed}\nThey message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them."
+                ),
+            ),
+            false,
+        )
+    }
+    async fn write_roster(
+        &self,
+        text: String,
+        retired: bool,
+        notice: Option<String>,
+    ) -> Result<()> {
+        let key = line_key();
+        let block = if retired {
+            crate::context_block::retire(text.clone(), key)
+        } else {
+            crate::context_block::raw(text.clone(), Some(key))
+        };
+        let mut blocks = vec![block];
+        if let Some(branch) = &notice {
+            blocks.push(crate::context_block::raw(
+                crate::context_block::element(
+                    "dim-branch-ended",
+                    &[("branch", branch)],
+                    &format!("Line {branch} was ended from outside its own line, by the user or a host operation. It no longer receives messages; read it if you need what it did."),
+                ),
+                None,
+            ));
+        }
+        let data = InputMessageData {
+            blocks,
+            mode: Some(if notice.is_some() {
+                InputMode::Steer
+            } else {
+                InputMode::Append
+            }),
+            ..InputMessageData::default()
+        };
+        self.tree.input(self.own.clone(), data).await?;
+        self.view.lock().unwrap().roster = Some((text, retired));
+        Ok(())
+    }
+}
+fn steered_parent(call: &ToolCall, parent: &str) -> bool {
+    call.name == "branch"
+        && call.input.get("action").and_then(|value| value.as_str()) == Some("message")
+        && call.input.get("mode").and_then(|value| value.as_str()) == Some("steer")
+        && call.input.get("to").and_then(|value| value.as_str()) == Some(parent)
+}
+/// The first line of a purpose, at most 120 characters (design §12.1).
+fn first_line(purpose: &str) -> String {
+    purpose
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(120)
+        .collect()
+}
+
 struct BranchTool {
     tree: Arc<TreeCommands>,
 }
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+/// Target events per `read` page; the final atomic batch may exceed it.
+const READ_PAGE_LIMIT: usize = 200;
+/// The `branch` tool's action-based input (design §11).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BranchInput {
-    prompt: String,
+    action: String,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
     at: Option<u64>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    mode: Option<InputMode>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    after: Option<u64>,
+    #[serde(default)]
+    limit: Option<u64>,
+}
+fn refusal(code: &str, text: String) -> ToolResult {
+    let mut output = ToolResult::error(text.clone());
+    output.structured_content = serde_json::json!({"error": code, "message": text})
+        .as_object()
+        .cloned();
+    output
+}
+fn invalid(reason: impl std::fmt::Display) -> HostError {
+    HostError::failed(format!("Invalid branch arguments: {reason}"))
+}
+impl BranchTool {
+    async fn run(
+        &self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> std::result::Result<ToolResult, HostError> {
+        let input: BranchInput =
+            serde_json::from_value(serde_json::Value::Object(call.input)).map_err(invalid)?;
+        for value in [input.at, input.after] {
+            if value.is_some_and(|value| value > MAX_SAFE_INTEGER) {
+                return Err(invalid("positions must be safe integers"));
+            }
+        }
+        let branch = self
+            .tree
+            .get(&context.branch_id)
+            .map_err(|error| HostError::failed(error.to_string()))?;
+        let line = branch
+            .service::<BranchLine>()
+            .map_err(|error| HostError::failed(error.to_string()))?;
+        let own = match line.resolved() {
+            Some((role, parent)) => OwnLine {
+                id: context.branch_id.clone(),
+                role,
+                parent,
+                ending: line.ending(),
+            },
+            None => {
+                return Err(HostError::failed(
+                    "the calling line has no directory record",
+                ));
+            }
+        };
+        crate::context_policy::check_cancel(&cancel)?;
+        match input.action.as_str() {
+            "create" => self.create(&own, input, &context, &call.id, cancel).await,
+            "message" => self.message(&own, input).await,
+            "read" => self.read(&own, input).await,
+            "end" => self.end(&own, input, &context, &call.id).await,
+            action => Err(invalid(format!("unknown action {action}"))),
+        }
+    }
+    /// Opens a tool line cut before this request's model start (design §11).
+    async fn create(
+        &self,
+        own: &OwnLine,
+        input: BranchInput,
+        context: &ToolExecutionContext,
+        call_id: &str,
+        cancel: CancellationToken,
+    ) -> std::result::Result<ToolResult, HostError> {
+        if own.role != LineRole::Main {
+            return Ok(refusal(
+                "branch_not_main",
+                "Only main opens lines. Tell main if more parallel work is needed.".into(),
+            ));
+        }
+        let prompt = input.prompt.unwrap_or_default();
+        if prompt.is_empty() {
+            return Err(invalid("create requires a nonempty prompt"));
+        }
+        let at = match input.at {
+            Some(at) => at,
+            None => {
+                let parent = self
+                    .tree
+                    .get(&context.branch_id)
+                    .map_err(|error| HostError::failed(error.to_string()))?;
+                let events = parent
+                    .local(..)
+                    .await
+                    .map_err(|error| HostError::failed(error.to_string()))?;
+                let first_use = events
+                    .iter()
+                    .position(|event| {
+                        matches!(&event.kind, EventKind::ToolUse(data)
+                            if data.turn_id == context.turn_id
+                                && data.request_id == context.request_id)
+                    })
+                    .ok_or_else(|| {
+                        HostError::failed("branch tool call is absent from its owning timeline")
+                    })?;
+                events[..first_use]
+                    .iter()
+                    .rev()
+                    .find_map(|event| match &event.kind {
+                        EventKind::ModelStart(data)
+                            if data.turn_id == context.turn_id
+                                && data.request_id == context.request_id =>
+                        {
+                            Some(event.sequence - 1)
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        HostError::failed("branch tool batch has no owning model start")
+                    })?
+            }
+        };
+        let branch = self
+            .tree
+            .branch(
+                context.branch_id.clone(),
+                at,
+                BranchOptions {
+                    prompt,
+                    source: BranchSource::Tool {
+                        turn_id: context.turn_id.clone(),
+                        request_id: context.request_id.clone(),
+                        call_id: call_id.into(),
+                    },
+                },
+                cancel,
+            )
+            .await
+            .map_err(|error| match error {
+                AgentError::Cancelled(reason) => HostError::Cancelled(reason),
+                error => HostError::failed(error.to_string()),
+            })?;
+        Ok(ToolResult::text(format!("Line created: {}", branch.id())))
+    }
+    /// Sends one message to a line of the calling line's pair (design §6).
+    async fn message(
+        &self,
+        own: &OwnLine,
+        input: BranchInput,
+    ) -> std::result::Result<ToolResult, HostError> {
+        let to = input
+            .to
+            .ok_or_else(|| invalid("message requires to"))?
+            .clone();
+        let content = input
+            .content
+            .ok_or_else(|| invalid("message requires content"))?;
+        let mode = match input.mode.unwrap_or(InputMode::Append) {
+            InputMode::Queue => return Err(invalid("Queue is not a branch message mode")),
+            mode => mode,
+        };
+        let target = self.line(&to);
+        let Some(target) = target else {
+            return Ok(self.not_kin());
+        };
+        if !kin(own, &target) {
+            return Ok(self.not_kin());
+        }
+        if matches!(target.source, Some(BranchSource::Host { .. })) {
+            return Ok(self.not_tool_line(&target.id));
+        }
+        let data = InputMessageData {
+            blocks: vec![message_block(&own.id, &target.id, &content, false)],
+            mode: Some(mode),
+            ..InputMessageData::default()
+        };
+        match self.tree.input(target.id.clone(), data).await {
+            Ok(_) => Ok(ToolResult::text(format!("Sent to {}.", target.id))),
+            Err(AgentError::BranchEnded(line)) => Ok(self.ended(&line)),
+            Err(error) => Err(HostError::failed(error.to_string())),
+        }
+    }
+    /// One page of a tool line's committed history, open or ended (design §6).
+    async fn read(
+        &self,
+        own: &OwnLine,
+        input: BranchInput,
+    ) -> std::result::Result<ToolResult, HostError> {
+        let id = input
+            .branch
+            .ok_or_else(|| invalid("read requires branch"))?
+            .clone();
+        let Some(target) = self.line(&id) else {
+            return Ok(self.not_kin());
+        };
+        if own.role != LineRole::Main || !kin(own, &target) {
+            return Ok(self.not_kin());
+        }
+        if matches!(target.source, Some(BranchSource::Host { .. })) {
+            return Ok(self.not_tool_line(&target.id));
+        }
+        let limit = match input.limit.unwrap_or(READ_PAGE_LIMIT as u64) {
+            limit if (1..=READ_PAGE_LIMIT as u64).contains(&limit) => limit as usize,
+            _ => {
+                return Err(invalid(format!(
+                    "limit must be between 1 and {READ_PAGE_LIMIT}"
+                )));
+            }
+        };
+        let after = input.after.unwrap_or(0);
+        let events = self
+            .tree
+            .page(target.id.clone(), after, limit)
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))?;
+        let head = self
+            .tree
+            .head(&target.id)
+            .ok_or_else(|| HostError::failed(format!("unknown line {}", target.id)))?;
+        let (items, next) = read_items(&events, after);
+        let done = next >= head;
+        let page = serde_json::json!({"items": items, "nextCursor": next, "done": done});
+        let mut output = ToolResult::text(page.to_string());
+        output.structured_content = page.as_object().cloned();
+        Ok(output)
+    }
+    async fn end(
+        &self,
+        own: &OwnLine,
+        input: BranchInput,
+        context: &ToolExecutionContext,
+        call_id: &str,
+    ) -> std::result::Result<ToolResult, HostError> {
+        if own.role != LineRole::Tool {
+            return Ok(refusal(
+                "branch_cannot_end",
+                "Only a line opened with create can end itself.".into(),
+            ));
+        }
+        if own.ending {
+            return Ok(self.ended(&own.id));
+        }
+        let content = input
+            .content
+            .ok_or_else(|| invalid("end requires content"))?;
+        let parent = own
+            .parent
+            .clone()
+            .ok_or_else(|| invalid("a tool line has a parent"))?;
+        let data = InputMessageData {
+            blocks: vec![message_block(&own.id, &parent, &content, true)],
+            mode: Some(InputMode::Steer),
+            ..InputMessageData::default()
+        };
+        if let Err(error) = self.tree.input(parent.clone(), data).await {
+            return Err(HostError::failed(error.to_string()));
+        }
+        let source = BranchSource::Tool {
+            turn_id: context.turn_id.clone(),
+            request_id: context.request_id.clone(),
+            call_id: call_id.into(),
+        };
+        match self.tree.end(own.id.clone(), source).await {
+            Ok(()) => Ok(ToolResult::text(format!(
+                "Line {} is ending; your final message was sent to {}.",
+                own.id, parent
+            ))),
+            Err(AgentError::BranchEnded(line)) => Ok(self.ended(&line)),
+            Err(error) => Err(HostError::failed(error.to_string())),
+        }
+    }
+    fn line(&self, id: &str) -> Option<TimelineInfo> {
+        self.tree.info(id.to_string()).ok()
+    }
+    fn not_kin(&self) -> ToolResult {
+        refusal(
+            "branch_not_kin",
+            "You can message only the lines you opened and the line that opened you.".into(),
+        )
+    }
+    fn not_tool_line(&self, id: &str) -> ToolResult {
+        refusal(
+            "branch_not_tool_line",
+            format!("Line {id} was not opened with this tool; it follows its own protocol."),
+        )
+    }
+    fn ended(&self, id: &str) -> ToolResult {
+        refusal(
+            "branch_ended",
+            format!("Line {id} has ended. Read it to see what it did."),
+        )
+    }
+}
+/// The calling line, as its own BranchLine sees it (design §5, §6).
+struct OwnLine {
+    id: String,
+    role: LineRole,
+    parent: Option<String>,
+    /// The line committed its own `branch/end`: it is ending.
+    ending: bool,
+}
+fn kin(own: &OwnLine, target: &TimelineInfo) -> bool {
+    match own.role {
+        LineRole::Tool => target.id == own.parent.clone().unwrap_or_default(),
+        LineRole::Main => target.parent.as_deref() == Some(own.id.as_str()),
+        LineRole::Host => false,
+    }
+}
+fn message_block(from: &str, to: &str, content: &str, final_message: bool) -> InputBlock {
+    let content = crate::context_block::text(content);
+    if final_message {
+        crate::context_block::raw(
+            crate::context_block::element(
+                "dim-branch-message",
+                &[("from", from), ("to", to), ("final", "true")],
+                &format!("{content}\n\nLine {from} ends with this message."),
+            ),
+            None,
+        )
+    } else {
+        crate::context_block::raw(
+            crate::context_block::element(
+                "dim-branch-message",
+                &[("from", from), ("to", to)],
+                &content,
+            ),
+            None,
+        )
+    }
+}
+fn read_items(events: &[Arc<AgentEvent>], after: u64) -> (Vec<serde_json::Value>, u64) {
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut next = after;
+    let mut text_request: Option<String> = None;
+    let mut names = BTreeMap::<(String, String), String>::new();
+    for event in events {
+        next = event.sequence;
+        let mut merged = None;
+        match &event.kind {
+            EventKind::InputMessage(data) => items.push(serde_json::json!({
+                "sequence": event.sequence, "type": "input",
+                "mode": data.effective_mode(), "user": data.user, "blocks": data.blocks})),
+            EventKind::Text(data) => {
+                if text_request.as_deref() == Some(data.request_id.as_str())
+                    && let Some(text) = items.last_mut().and_then(|item| item.get_mut("text"))
+                {
+                    *text =
+                        serde_json::json!(format!("{}{}", text.as_str().unwrap_or(""), data.delta));
+                } else {
+                    items.push(serde_json::json!({
+                        "sequence": event.sequence, "type": "text", "text": data.delta}));
+                }
+                merged = Some(data.request_id.clone());
+            }
+            EventKind::ToolUseStart(data) => {
+                names.insert(
+                    (data.request_id.clone(), data.call_id.clone()),
+                    data.name.clone(),
+                );
+            }
+            EventKind::ToolCall(data) => {
+                for call in &data.calls {
+                    names.insert(
+                        (data.request_id.clone(), call.id.clone()),
+                        call.name.clone(),
+                    );
+                    items.push(serde_json::json!({
+                        "sequence": event.sequence, "type": "tool_call",
+                        "callId": call.id, "name": call.name}));
+                }
+            }
+            EventKind::ToolResult(data) => {
+                for result in &data.results {
+                    let key = (data.request_id.clone(), result.call_id.clone());
+                    let name = names.get(&key);
+                    let mut item = serde_json::json!({
+                        "sequence": event.sequence, "type": "tool_result",
+                        "callId": result.call_id,
+                        "status": if result.result.is_error == Some(true) { "error" } else { "ok" }});
+                    if let Some(name) = name {
+                        item["name"] = serde_json::json!(name);
+                    }
+                    items.push(item);
+                }
+            }
+            EventKind::TurnEnd(data) => {
+                let mut item = serde_json::json!({"sequence": event.sequence, "type": "turn_end"});
+                match &data.outcome {
+                    TurnOutcome::Completed { .. } => {
+                        item["status"] = serde_json::json!("completed")
+                    }
+                    TurnOutcome::Failed { error } => {
+                        item["status"] = serde_json::json!("failed");
+                        item["reason"] = serde_json::json!(error);
+                    }
+                    TurnOutcome::Cancelled { reason } => {
+                        item["status"] = serde_json::json!("cancelled");
+                        item["reason"] = serde_json::json!(reason);
+                    }
+                }
+                items.push(item);
+            }
+            _ => {}
+        }
+        text_request = merged;
+    }
+    (items, next)
 }
 impl ToolHandler for BranchTool {
     fn execute(
@@ -1521,75 +2440,7 @@ impl ToolHandler for BranchTool {
         context: ToolExecutionContext,
         cancel: CancellationToken,
     ) -> HostFuture<'_, ToolResult> {
-        Box::pin(async move {
-            let input: BranchInput = serde_json::from_value(serde_json::Value::Object(call.input))
-                .map_err(|error| HostError::failed(format!("Invalid branch arguments: {error}")))?;
-            if input.prompt.is_empty() || input.at.is_some_and(|at| at > 9_007_199_254_740_991) {
-                return Err(HostError::failed(
-                    "branch requires a nonempty prompt and a safe integer position",
-                ));
-            }
-            crate::context_policy::check_cancel(&cancel)?;
-            let parent = self
-                .tree
-                .get(&context.branch_id)
-                .map_err(|e| HostError::failed(e.to_string()))?;
-            let at = match input.at {
-                Some(at) => at,
-                None => {
-                    let events = parent
-                        .local(..)
-                        .await
-                        .map_err(|e| HostError::failed(e.to_string()))?;
-                    let first_use = events
-                        .iter()
-                        .position(|event| {
-                            matches!(&event.kind, EventKind::ToolUse(data)
-                            if data.turn_id == context.turn_id
-                                && data.request_id == context.request_id)
-                        })
-                        .ok_or_else(|| {
-                            HostError::failed("branch tool call is absent from its owning timeline")
-                        })?;
-                    events[..first_use]
-                        .iter()
-                        .rev()
-                        .find_map(|event| match &event.kind {
-                            EventKind::ModelStart(data)
-                                if data.turn_id == context.turn_id
-                                    && data.request_id == context.request_id =>
-                            {
-                                Some(event.sequence - 1)
-                            }
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            HostError::failed("branch tool batch has no owning model start")
-                        })?
-                }
-            };
-            let branch = self
-                .tree
-                .branch(
-                    context.branch_id,
-                    at,
-                    BranchOptions {
-                        prompt: input.prompt,
-                        source: BranchSource::Tool {
-                            turn_id: context.turn_id,
-                            request_id: context.request_id,
-                            call_id: call.id,
-                        },
-                    },
-                    cancel,
-                )
-                .await
-                .map_err(|error| match error {
-                    AgentError::Cancelled(reason) => HostError::Cancelled(reason),
-                    error => HostError::failed(error.to_string()),
-                })?;
-            Ok(ToolResult::text(format!("Branch created: {}", branch.id())))
-        })
+        Box::pin(async move { self.run(call, context, cancel).await })
     }
 }
 fn line_key() -> String {
@@ -1650,7 +2501,9 @@ fn host_line_identity(line: &str, parent: &str) -> InputBlock {
         crate::context_block::element(
             "dim-branch-line",
             &[("branch", line), ("parent", parent), ("source", "host")],
-            &format!("You are line {line} of this session, opened from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You do not see {parent}'s work after this point. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one says what this line is for."),
+            &format!(
+                "You are line {line} of this session, opened from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You do not see {parent}'s work after this point. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one says what this line is for."
+            ),
         ),
         Some(line_key()),
     )
@@ -1661,8 +2514,91 @@ fn branch_definition() -> ToolDefinition {
         risk: Some("session".into()),
         ..crate::tool_registry::definition(
             "branch",
-            "Create an independent branch that continues from your timeline and works on prompt as a task you delegate. The result contains its branch ID.",
-            serde_json::json!({"type":"object","required":["prompt"],"additionalProperties":false,"properties":{"prompt":{"type":"string","description":"The task the branch works on"},"at":{"type":"number","minimum":0}}}),
+            "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed while you work.\n- create (main only): open a line to work on prompt in parallel. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Open a line only for work that can go on without you. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show the recent activity of a line you opened, also after it ended. Pass nextCursor as after to continue.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nLines talk only with the line that opened them and the lines they opened.",
+            serde_json::json!({"type":"object","required":["action"],"additionalProperties":false,"properties":{
+                "action":{"type":"string","enum":["create","message","read","end"],"description":"What the call does."},
+                "prompt":{"type":"string","description":"create: the purpose of the new line."},
+                "at":{"type":"number","minimum":0,"description":"create: the position to cut at; defaults to before this request."},
+                "to":{"type":"string","description":"message: the line to send to."},
+                "content":{"type":"string","description":"message: what to send. end: your final message."},
+                "mode":{"type":"string","enum":["append","steer"],"description":"message: append (default) or steer."},
+                "branch":{"type":"string","description":"read: the line to read."},
+                "after":{"type":"number","minimum":0,"description":"read: the cursor from nextCursor."},
+                "limit":{"type":"number","minimum":1,"maximum":200,"description":"read: target events per page."}
+            }}),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn event(sequence: u64, kind: EventKind) -> Arc<AgentEvent> {
+        Arc::new(AgentEvent {
+            id: format!("event-{sequence}"),
+            sequence,
+            create_at: 1_750_000_000_000 + sequence,
+            tags: None,
+            kind,
+        })
+    }
+    fn call(sequence: u64, id: &str, name: &str, input: serde_json::Value) -> Arc<AgentEvent> {
+        event(
+            sequence,
+            EventKind::ToolUse(ToolUseData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                call: ToolCall {
+                    id: id.into(),
+                    name: name.into(),
+                    input: input.as_object().cloned().unwrap_or_default(),
+                },
+            }),
+        )
+    }
+    fn result(sequence: u64, id: &str, is_error: bool) -> Arc<AgentEvent> {
+        event(
+            sequence,
+            EventKind::ToolResult(ToolResultData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                call_event_id: Some("call-event".into()),
+                results: vec![ToolCallResult {
+                    call_id: id.into(),
+                    result: if is_error {
+                        ToolResult::error("refused")
+                    } else {
+                        ToolResult::text("Sent to main.")
+                    },
+                }],
+            }),
+        )
+    }
+    /// A tool line's view, as its own history left it.
+    fn line() -> LineView {
+        LineView {
+            role: Some(LineRole::Tool),
+            parent: Some("main".into()),
+            ..LineView::default()
+        }
+    }
+
+    #[test]
+    fn only_a_delivered_steer_silences_the_turn_end() {
+        let steer = json!({"action":"message","to":"main","mode":"steer","content":"done"});
+        let mut refused = line();
+        BranchLine::fold(&mut refused, &call(1, "call", "branch", steer.clone()));
+        assert_eq!(refused.steering, Some(("turn".into(), "call".into())));
+        BranchLine::fold(&mut refused, &result(2, "call", true));
+        assert_eq!(
+            refused.steered, None,
+            "a refused call wrote nothing to the parent"
+        );
+        let mut delivered = line();
+        BranchLine::fold(&mut delivered, &call(1, "call", "branch", steer));
+        BranchLine::fold(&mut delivered, &result(2, "call", false));
+        assert_eq!(delivered.steered.as_deref(), Some("turn"));
     }
 }
