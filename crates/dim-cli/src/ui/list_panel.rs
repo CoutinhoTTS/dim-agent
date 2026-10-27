@@ -264,7 +264,7 @@ impl ListPanel {
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {
         let inner = width.saturating_sub(4).max(1);
         let shown = self.shown();
-        // A filterable list has Amp's `> query` row between blank rows.
+        // A filterable list has a `> query` row between blank rows.
         let query_rows = if self.filterable { 3 } else { 0 };
         let page = rows.saturating_sub(2 + query_rows).max(1);
         self.page.set(page);

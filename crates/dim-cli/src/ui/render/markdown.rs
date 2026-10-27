@@ -39,7 +39,7 @@ fn fg(color: &str) -> Style {
     }
 }
 
-/// The role mapping onto the renderer's styles, as Amp draws Markdown: a
+/// The role mapping onto the renderer's styles: a
 /// blue (keybinding hue) first-level heading, highlighted second-level ones,
 /// bold accent inline code, plain bullets, faint table rules with a divider
 /// under every row, accent underlined links.
@@ -190,7 +190,7 @@ impl MarkdownRenderer {
         let mut urls: Vec<String> = Vec::new();
         let pad = " ".repeat(gutter);
         let mut rows: Vec<String> = Vec::new();
-        // Indent of the open fence: fenced code is drawn as Amp draws it,
+        // Indent of the open fence: fenced code is drawn
         // without its fence lines, four columns in.
         let mut fence: Option<usize> = None;
         for (index, line) in output.lines.iter().enumerate() {
@@ -265,7 +265,7 @@ impl MarkdownRenderer {
                 continue;
             }
             if table {
-                // Amp's tables have round corners.
+                // Tables have round corners.
                 for cell in &mut cells {
                     if let Some(round) = match cell.0.as_str() {
                         "┌" => Some("╭"),
@@ -281,7 +281,7 @@ impl MarkdownRenderer {
                 && cells[marker].0 == "•"
                 && cells.get(marker + 1).is_some_and(|cell| cell.0 == " ")
             {
-                // The renderer's bullet goes back to the `-` Amp keeps.
+                // The renderer's bullet goes back to a plain `-`.
                 cells[marker].0 = "-".to_owned();
             }
             for wrapped in wrap_cells_row(&cells, width, false) {
@@ -383,7 +383,7 @@ fn merge_neutral_gaps(cells: &mut [Cell]) {
 }
 
 /// Hanging indent of a wrapped row: under a numbered list marker or a quote
-/// bar. A `-` item continues at its margin, as Amp wraps it.
+/// bar. A `-` item continues at its margin.
 fn hanging_indent(cells: &[Cell]) -> usize {
     let text: String = cells.iter().map(|c| c.0.as_str()).collect();
     let leading = text.len() - text.trim_start_matches(' ').len();
@@ -739,12 +739,12 @@ mod tests {
         let r = MarkdownRenderer::new(&theme);
         let h2 = r.render("## Two", 40, 0);
         assert_eq!(plain(&h2), vec!["Two"]);
-        // Amp's headings: the terminal's cyan, bold.
+        // Headings: the terminal's cyan, bold.
         assert!(h2[0].contains("\x1b[1;36m"), "{:?}", h2[0]);
         assert_eq!(plain(&r.render("### Three", 40, 0)), vec!["### Three"]);
     }
 
-    // The elements as Amp draws them: these tests pin them, so a change to
+    // The elements as drawn: these tests pin them, so a change to
     // the shared renderer shows up here.
 
     #[test]

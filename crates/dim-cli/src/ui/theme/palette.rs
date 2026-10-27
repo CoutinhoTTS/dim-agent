@@ -1,5 +1,5 @@
 //! Colour roles and the default theme. Every role is a colour spec (see
-//! [`super::ansi`]). The default is Amp's: the terminal's own foreground,
+//! [`super::ansi`]). The default is the terminal's own foreground,
 //! slots of its palette and the faint attribute, so it follows whatever
 //! colour scheme the terminal has, on dark and light backgrounds alike.
 
@@ -90,8 +90,8 @@ pub fn light_ramp_applies(mode: ColorMode, appearance: Appearance) -> bool {
     appearance == Appearance::Light && mode != ColorMode::Ansi16
 }
 
-/// Amp's default theme. The scrollbar takes fixed greys of the 256-colour
-/// cube, as Amp does, one step off the background of each appearance.
+/// The default theme. The scrollbar takes fixed greys of the 256-colour
+/// cube, one step off the background of each appearance.
 pub fn terminal_palette(mode: ColorMode, appearance: Appearance) -> Palette {
     let own = |spec: &str| spec.to_owned();
     let (thumb, track) = match appearance {
@@ -145,7 +145,7 @@ fn code(
     }
 }
 
-/// Syntax colours of the default theme, as palette slots: Amp's keywords
+/// Syntax colours of the default theme, as palette slots: keywords
 /// and types blue, calls cyan, numbers yellow, strings green, operators
 /// plain. A light terminal takes the same hues from the ramp.
 pub fn terminal_code_palette(mode: ColorMode, appearance: Appearance) -> CodePalette {

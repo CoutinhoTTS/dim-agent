@@ -16,7 +16,7 @@ const SHELL_COMMAND_LINES: usize = 3;
 const BOUNDARY_MAX_WIDTH: usize = 60;
 
 pub const ASSISTANT_MARK: &str = "\u{25c6}"; // ◆
-/// The bar in front of every row of a user message, as Amp draws it.
+/// The bar in front of every row of a user message.
 pub const USER_MARK: &str = "\u{2503}"; // ┃
 
 /// Gutter columns for a terminal of `width` (narrow terminals get one).
@@ -41,7 +41,7 @@ pub fn render_plain(source: &str, width: usize) -> Vec<String> {
 }
 
 /// How a user message is painted: its colour (bar and text) and the
-/// surface tint behind both (none in Amp's structure).
+/// surface tint behind both (none in the default structure).
 pub struct UserStyle<'a> {
     pub color: &'a str,
     pub surface: Option<&'a str>,
@@ -89,7 +89,7 @@ pub fn render_user(text: &str, width: usize, style: &UserStyle<'_>) -> Vec<Strin
 }
 
 /// Rows of running reasoning under its title and blank row: the newest
-/// text, with one `…` row standing for what scrolled away (as Grok draws it).
+/// text, with one `…` row standing for what scrolled away.
 pub(crate) const THINKING_ROWS: usize = 4;
 /// The bar in front of every row of a thought shown whole.
 const THINKING_BAR: &str = "\u{258e}"; // ▎
