@@ -7358,6 +7358,7 @@
       "references": [
         "path AgentError",
         "path AgentError::AmbiguousSubmission",
+        "path AgentError::BranchEnded",
         "path AgentError::Build",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
@@ -9132,6 +9133,15 @@
     },
     {
       "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_capabilities::context_block",
+      "references": [
+        "path crate::context_block::element",
+        "path crate::context_block::raw",
+        "path crate::context_block::text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_capabilities::context_policy",
       "references": [
         "path crate::context_policy::check_cancel"
@@ -9229,6 +9239,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::BranchEnded",
         "path AgentError::Build",
         "path AgentError::Cancelled",
         "path AgentError::Closed",
@@ -9282,6 +9293,8 @@
         "path BranchCreateFailedData",
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
+        "path BranchEndData",
+        "path BranchEndedData",
         "path BranchResumeData",
         "path BranchSource",
         "path BranchSource::Host",
@@ -9289,15 +9302,26 @@
         "path BranchStartData",
         "path EventKind::BranchCreate",
         "path EventKind::BranchCreateFailed",
+        "path EventKind::BranchEnd",
+        "path EventKind::BranchEnded",
         "path EventKind::BranchResume",
         "path EventKind::BranchStart",
         "path EventKind::InputMessage",
         "path EventKind::ModelStart",
+        "path EventKind::TurnEnd",
+        "path InputBlock",
         "path InputMessageData",
         "path InputMessageData::default",
-        "path InputMessageData::text",
         "path InputMode::Queue",
+        "path UserInput",
         "path events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_types::prompt",
+      "references": [
+        "path prompt"
       ]
     },
     {
@@ -10965,6 +10989,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::BranchEnded",
         "path AgentError::Cancelled",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
@@ -11015,10 +11040,12 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path BranchSource",
         "path InputMessageData",
         "path InputMessageData::text",
         "path InputMode",
         "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::BranchSource",
         "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InputMode"
       ]
@@ -11769,6 +11796,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::BranchEnded",
         "path AgentError::Build",
         "path AgentError::Closed",
         "path AgentError::Fault",
@@ -13077,6 +13105,7 @@
       "references": [
         "path AgentError",
         "path AgentError::AmbiguousSubmission",
+        "path AgentError::BranchEnded",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
         "path AgentError::Reloading",
@@ -13470,6 +13499,7 @@
       "from": "dim_app_server::approval",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::BranchEnded",
         "path AgentError::UnknownBranch",
         "use dim_agent_runtime::AgentError"
       ]

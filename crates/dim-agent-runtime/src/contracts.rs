@@ -140,6 +140,10 @@ pub trait TimelineTreeControl: Send + Sync + 'static {
         admission: tokio_util::sync::CancellationToken,
     ) -> BoxFuture<'_, Result<Branch>>;
     fn get(&self, id: &str) -> Option<Branch>;
+    /// Ends the line `id` with `source`; only the target is checked.
+    fn end(&self, id: String, source: dim_agent_types::BranchSource) -> BoxFuture<'_, Result<()>>;
+    /// The fixed head of an ended line, `None` for an open or unknown one.
+    fn ended_head(&self, id: &str) -> Option<u64>;
     fn list(&self) -> Vec<TimelineInfo>;
     fn close(&self) -> BoxFuture<'_, Result<()>>;
 }

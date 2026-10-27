@@ -508,6 +508,148 @@ async fn wait_create(session: &Session, after: u64) -> Arc<AgentEvent> {
 /// built. Its cancellation wait is call-owned and must release with the
 /// caller; the tree still settles the accepted creation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    soon(session.submit("ancestor".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let cut = session.sequence("main").unwrap();
+    let parent = soon(session.branch("main".into(), cut, options("parent")))
+        .await
+        .unwrap();
+    soon(session.idle(&parent)).await.unwrap();
+    let grandchild = soon(session.branch(parent.clone(), 0, options("grandchild")))
+        .await
+        .unwrap();
+    soon(session.idle(&grandchild)).await.unwrap();
+    let ends_before = (
+        session.sequence("main").unwrap(),
+        session.sequence(&parent).unwrap(),
+        session.sequence(&grandchild).unwrap(),
+    );
+
+    let source = BranchSource::Host {
+        operation_id: "op:end".into(),
+    };
+    assert!(matches!(
+        session.end_branch("main", source.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    assert!(matches!(
+        session.end_branch("missing", source.clone()).await,
+        Err(AgentError::UnknownBranch(_))
+    ));
+    assert_eq!(
+        (
+            session.sequence("main").unwrap(),
+            session.sequence(&parent).unwrap(),
+            session.sequence(&grandchild).unwrap(),
+        ),
+        ends_before,
+        "a refused end writes nothing"
+    );
+
+    soon(session.end_branch(&parent, source.clone())).await.unwrap();
+    assert!(matches!(
+        session.end_branch(&parent, source.clone()).await,
+        Err(AgentError::BranchEnded(_))
+    ));
+    assert!(matches!(
+        session.submit("late".into(), InputMode::Queue, &parent)
+            .await,
+        Err(AgentError::BranchEnded(_))
+    ));
+    assert!(!session.branches().iter().any(|line| line.id == parent));
+    assert!(!session.branches().iter().any(|line| line.id == grandchild));
+
+    let grandchild_head = session.sequence(&grandchild).unwrap();
+    let grandchild_events = session
+        .local_page(&grandchild, 0, 64, grandchild_head)
+        .await
+        .unwrap();
+    assert!(matches!(
+        grandchild_events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::BranchEnd(_)))
+            .map(|event| &event.kind),
+        Some(EventKind::BranchEnd(BranchEndData { source: end, ancestor }))
+            if *end == source && ancestor.as_deref() == Some(parent.as_str())
+    ));
+    let parent_head = session.sequence(&parent).unwrap();
+    let parent_events = session.local_page(&parent, 0, 64, parent_head).await.unwrap();
+    assert!(matches!(
+        parent_events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::BranchEnd(_)))
+            .map(|event| &event.kind),
+        Some(EventKind::BranchEnd(BranchEndData { source: end, ancestor }))
+            if *end == source && ancestor.is_none()
+    ));
+    let child_result = parent_events
+        .iter()
+        .position(|event| matches!(&event.kind, EventKind::BranchEnded(data)
+            if data.branch == grandchild && data.ancestor.as_deref() == Some(parent.as_str())
+                && data.source == source))
+        .expect("the child's result is recorded on its parent");
+    let closed = parent_events
+        .iter()
+        .position(|event| matches!(&event.kind, EventKind::StopInterrupt(data)
+            if data.scope == InterruptScope::Branch))
+        .expect("the close interrupts the line");
+    assert!(
+        child_result < closed,
+        "the child's result precedes the parent's close"
+    );
+    assert!(session.history("main", None).await.unwrap().iter().any(
+        |event| matches!(&event.kind, EventKind::BranchEnded(data)
+            if data.branch == parent && data.source == source && data.ancestor.is_none())
+    ));
+    assert_eq!(session.sequence(&parent).unwrap(), parent_head);
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_line_opens_with_its_identity_block_and_the_creator_prompt() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = soon(session.branch("main".into(), 0, options("what this line is for")))
+        .await
+        .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    let local = session.history(&child, None).await.unwrap();
+    let Some(EventKind::InputMessage(input)) = local
+        .iter()
+        .find(|event| matches!(event.kind, EventKind::InputMessage(_)))
+        .map(|event| &event.kind)
+    else {
+        panic!("the child's opening input is present");
+    };
+    let [InputBlock::Raw { text, key, retire }] = input.blocks.as_slice() else {
+        panic!("one identity block");
+    };
+    assert_eq!(key.as_deref(), Some("branch:line"));
+    assert!(!retire);
+    assert!(text.starts_with(&format!(
+        "<dim-branch-line branch=\"{child}\" parent=\"main\" source=\"host\">\n"
+    )));
+    assert!(text.ends_with("The message after this one says what this line is for.\n</dim-branch-line>"));
+    assert_eq!(input.effective_mode(), InputMode::Queue);
+    assert!(matches!(
+        input.user.as_ref().map(|user| user.content.as_slice()),
+        Some([ContentBlock::Text { text }]) if text == "what this line is for"
+    ));
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_line_reports_the_source_its_create_recorded_open_or_restored() {
     let store = Arc::new(MemoryTimelineStore::default());
     let probe = Arc::new(Probe::default());

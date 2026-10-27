@@ -70,6 +70,11 @@ export interface TreeCommands {
    */
   input(id: string, input: InputMessageData): Promise<import('./plugin.js').BranchEvent>
   /**
+   * Ends the line `id` with `source`; only the target is checked (§10).
+   * @throws {AgentErrorThrown}
+   */
+  end(id: string, source: BranchSource): Promise<void>
+  /**
    * Creates a child of `parent` cut at `at` and returns its id.
    * `cancelled` is the caller's cancellation as an explicit argument, the
    * form every cross-language contract uses for it (C4's `cancelled`): the
@@ -296,6 +301,7 @@ export type SessionsError =
   | { code: "agent_unknown"; message: string }
   | { code: "session_closed"; message: string }
   | { code: "branch_missing"; message: string }
+  | { code: "branch_ended"; message: string }
   | { code: "reloading"; message: string }
   | { code: "future_sequence"; message: string }
   | { code: "ambiguous"; message: string }
@@ -383,10 +389,10 @@ export interface WorkflowFiles {
 }
 
 /** What a method returning `Err(AgentError)` throws. */
-export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "Storage" | "Build" | "Cancelled" | "Reloading" | "AmbiguousSubmission" | "Fault" | "Framework" | "Multiple", undefined>
+export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "BranchEnded" | "Storage" | "Build" | "Cancelled" | "Reloading" | "AmbiguousSubmission" | "Fault" | "Framework" | "Multiple", undefined>
 
 /** What a method returning `Err(SessionsError)` throws. */
-export type SessionsErrorThrown = RustError<"SessionsError", "rejected" | "agent_unknown" | "session_closed" | "branch_missing" | "reloading" | "future_sequence" | "ambiguous" | "publication_unknown" | "failed", SessionsError>
+export type SessionsErrorThrown = RustError<"SessionsError", "rejected" | "agent_unknown" | "session_closed" | "branch_missing" | "branch_ended" | "reloading" | "future_sequence" | "ambiguous" | "publication_unknown" | "failed", SessionsError>
 
 /** What a method returning `Err(WorkflowFilesError)` throws. */
 export type WorkflowFilesErrorThrown = RustError<"WorkflowFilesError", "invalid_path" | "closed" | "cancelled" | "locked" | "unsupported" | "unsynced" | "io" | "not_found" | "invalid_data", WorkflowFilesError>

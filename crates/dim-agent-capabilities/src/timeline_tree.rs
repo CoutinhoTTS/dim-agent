@@ -56,6 +56,8 @@ struct LineFacts {
     failed_creates: BTreeSet<u64>,
     /// Each child it created, with the source that create recorded.
     sources: BTreeMap<String, BranchSource>,
+    /// The children whose end it recorded.
+    ended: BTreeSet<String>,
 }
 
 struct Node {
@@ -65,8 +67,17 @@ struct Node {
     ready: watch::Sender<Option<Result<Branch>>>,
     started: bool,
 }
+/// A line whose `branch/end` is committed and whose close has not completed.
+struct PendingEnd {
+    /// The sequence of `branch/end` on the line: the result's `endEvent`.
+    sequence: u64,
+    data: BranchEndData,
+}
 struct TreeState {
     nodes: BTreeMap<String, Node>,
+    ended: BTreeMap<String, u64>,
+    /// Lines waiting for the turn end that a tool-sourced end belongs to.
+    pending: BTreeMap<String, PendingEnd>,
     closing: bool,
     cleanup_errors: Vec<AgentError>,
 }
@@ -81,6 +92,8 @@ pub struct TimelineTree {
     close_result: watch::Sender<Option<Result<()>>>,
     close_task: Mutex<Option<JoinHandle<()>>>,
     close_started: AtomicBool,
+    /// Wakes the callers waiting for an end to complete or to wait for a turn.
+    end_notify: tokio::sync::Notify,
 }
 /// Shared with Timeline roots; never owns the tree or its child roots.
 pub struct TreeCommands {
@@ -90,10 +103,14 @@ pub struct TreeCommands {
 impl TreeCommands {
     #[service(skip)]
     pub fn get(&self, id: &str) -> Result<Branch> {
-        self.tree
+        let tree = self
+            .tree
             .upgrade()
-            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
-            .owned_context(id)
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
+        if tree.ended_head(id).is_some() {
+            return Err(AgentError::BranchEnded(id.into()));
+        }
+        tree.owned_context(id)
             .map(|context| context.branch())
             .ok_or_else(|| AgentError::UnknownBranch(id.into()))
     }
@@ -136,6 +153,18 @@ impl TreeCommands {
         input: InputMessageData,
     ) -> std::result::Result<Arc<AgentEvent>, AgentError> {
         self.get(&id)?.input(input).await
+    }
+    /// Ends the line `id` with `source`; only the target is checked (§10).
+    pub async fn end(
+        &self,
+        id: String,
+        source: BranchSource,
+    ) -> std::result::Result<(), AgentError> {
+        self.tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
+            .end(&id, source)
+            .await
     }
     /// Creates a child of `parent` cut at `at` and returns its id.
     /// `cancelled` is the caller's cancellation as an explicit argument, the
@@ -252,6 +281,8 @@ impl TimelineTree {
             weak: weak.clone(),
             state: Mutex::new(TreeState {
                 nodes: BTreeMap::new(),
+                ended: BTreeMap::new(),
+                pending: BTreeMap::new(),
                 closing: false,
                 cleanup_errors: Vec::new(),
             }),
@@ -263,6 +294,7 @@ impl TimelineTree {
             close_result: watch::channel(None).0,
             close_task: Mutex::new(None),
             close_started: AtomicBool::new(false),
+            end_notify: tokio::sync::Notify::new(),
         })
     }
     fn owned_context(&self, id: &str) -> Option<Arc<TimelineContext>> {
@@ -385,6 +417,9 @@ impl TimelineTree {
                                 EventKind::BranchCreate(data) => {
                                     facts.sources.insert(data.branch.clone(), data.source.clone());
                                 }
+                                EventKind::BranchEnded(data) => {
+                                    facts.ended.insert(data.branch.clone());
+                                }
                                 _ => {}
                             }
                         }
@@ -476,6 +511,279 @@ impl TimelineTree {
             state.nodes.remove(&id);
             ready.send_replace(Some(outcome));
         });
+    }
+    /// The stored head of an ended line, `None` for an open or unknown one.
+    fn ended_head(&self, id: &str) -> Option<u64> {
+        self.state.lock().unwrap().ended.get(id).copied()
+    }
+    async fn end(&self, id: &str, source: BranchSource) -> Result<()> {
+        let context = {
+            let state = self.state.lock().unwrap();
+            if state.closing {
+                return Err(AgentError::Closed("TimelineTree".into()));
+            }
+            if id == "main" {
+                return Err(AgentError::InvalidInput(
+                    "`main` cannot end; closing the Session is not an end".into(),
+                ));
+            }
+            if state.ended.contains_key(id) {
+                return Err(AgentError::BranchEnded(id.into()));
+            }
+            let node = state
+                .nodes
+                .get(id)
+                .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
+            if !matches!(&*node.ready.borrow(), Some(Ok(_))) {
+                return Err(AgentError::UnknownBranch(id.into()));
+            }
+            node.context
+                .clone()
+                .ok_or_else(|| AgentError::UnknownBranch(id.into()))?
+        };
+        let data = BranchEndData {
+            source,
+            ancestor: None,
+        };
+        context
+            .timeline()
+            .append_registered(EventKind::BranchEnd(data.clone()).into(), |_| {
+                if context.ended() {
+                    return Err(AgentError::BranchEnded(id.into()));
+                }
+                context.mark_ended();
+                Ok(())
+            })?;
+        loop {
+            let notified = self.end_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let state = self.state.lock().unwrap();
+                if state.ended.contains_key(id) || state.pending.contains_key(id) {
+                    return Ok(());
+                }
+                if state.closing {
+                    return Err(AgentError::Closed("TimelineTree".into()));
+                }
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = self.cancel.cancelled() => {
+                    return Err(AgentError::Closed("TimelineTree".into()));
+                }
+            }
+        }
+    }
+    fn on_end(self: &Arc<Self>, id: &str, sequence: u64, data: BranchEndData) {
+        if data.ancestor.is_some() {
+            return;
+        }
+        let context = self
+            .state
+            .lock()
+            .unwrap()
+            .nodes
+            .get(id)
+            .and_then(|node| node.context.clone());
+        let running = context
+            .and_then(|context| context.branch().state().ok())
+            .is_some_and(|status| status.running);
+        if running && matches!(data.source, BranchSource::Tool { .. }) {
+            self.state
+                .lock()
+                .unwrap()
+                .pending
+                .insert(id.into(), PendingEnd { sequence, data });
+            self.end_notify.notify_waiters();
+            return;
+        }
+        self.close_ended(id, sequence, data);
+    }
+    /// Closes a line whose end command is part of the turn that just ended.
+    fn on_turn_end(self: &Arc<Self>, id: &str) {
+        let pending = self.state.lock().unwrap().pending.remove(id);
+        if let Some(pending) = pending {
+            self.close_ended(id, pending.sequence, pending.data);
+        }
+    }
+    fn close_ended(self: &Arc<Self>, id: &str, sequence: u64, data: BranchEndData) {
+        let owner = self.clone();
+        let id = id.to_owned();
+        {
+            let state = self.state.lock().unwrap();
+            if state.closing || state.ended.contains_key(&id) {
+                return;
+            }
+            self.builds.spawn(async move {
+                if let Err(error) = owner.finish_end(&id, sequence, data).await {
+                    owner.state.lock().unwrap().cleanup_errors.push(error);
+                }
+                owner.end_notify.notify_waiters();
+            });
+        }
+    }
+    fn descendants(&self, id: &str) -> Vec<(String, String)> {
+        let state = self.state.lock().unwrap();
+        let mut found = Vec::new();
+        let mut pending = vec![(id.to_owned(), 0usize)];
+        while let Some((parent, depth)) = pending.pop() {
+            for node in state
+                .nodes
+                .values()
+                .filter(|node| node.info.parent.as_deref() == Some(parent.as_str()))
+            {
+                found.push((node.info.id.clone(), parent.clone(), depth + 1));
+                pending.push((node.info.id.clone(), depth + 1));
+            }
+        }
+        found.sort_by_key(|found| std::cmp::Reverse(found.2));
+        found
+            .into_iter()
+            .map(|(id, parent, _)| (id, parent))
+            .collect()
+    }
+    async fn finish_end(&self, id: &str, end_event: u64, data: BranchEndData) -> Result<()> {
+        let mut errors = Vec::new();
+        for (child, ancestor) in self.descendants(id) {
+            if let Err(error) = self.end_descendant(&child, &ancestor, &data.source).await {
+                errors.push(error);
+            }
+        }
+        if let Err(error) = self.close_and_record(id, end_event, data).await {
+            errors.push(error);
+        }
+        AgentError::aggregate(errors)
+    }
+    async fn end_descendant(&self, id: &str, ancestor: &str, source: &BranchSource) -> Result<()> {
+        let ready = {
+            let state = self.state.lock().unwrap();
+            if state.ended.contains_key(id) {
+                return Ok(());
+            }
+            let node = state
+                .nodes
+                .get(id)
+                .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
+            (!matches!(&*node.ready.borrow(), Some(Ok(_)))).then(|| node.ready.subscribe())
+        };
+        if let Some(ready) = ready {
+            tokio::select! {
+                result = Self::await_branch(ready) => {
+                    if result.is_err() {
+                        return Ok(());
+                    }
+                }
+                _ = self.cancel.cancelled() => {
+                    return Err(AgentError::Closed("TimelineTree".into()));
+                }
+            }
+        }
+        let context = {
+            let state = self.state.lock().unwrap();
+            if state.ended.contains_key(id) {
+                return Ok(());
+            }
+            state
+                .nodes
+                .get(id)
+                .and_then(|node| node.context.clone())
+                .ok_or_else(|| AgentError::UnknownBranch(id.into()))?
+        };
+        let data = BranchEndData {
+            source: source.clone(),
+            ancestor: Some(ancestor.into()),
+        };
+        let sequence =
+            context
+                .timeline()
+                .append_registered(EventKind::BranchEnd(data.clone()).into(), |_| {
+                    if context.ended() {
+                        return Err(AgentError::BranchEnded(id.into()));
+                    }
+                    context.mark_ended();
+                    Ok(())
+                });
+        let sequence = match sequence {
+            Ok(event) => event.sequence,
+            Err(AgentError::BranchEnded(_)) => return self.wait_ended(id).await,
+            Err(error) => return Err(error),
+        };
+        self.close_and_record(id, sequence, data).await
+    }
+    /// Waits until the line is recorded as ended.
+    async fn wait_ended(&self, id: &str) -> Result<()> {
+        loop {
+            let notified = self.end_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let state = self.state.lock().unwrap();
+                if state.ended.contains_key(id) {
+                    return Ok(());
+                }
+                if state.closing {
+                    return Err(AgentError::Closed("TimelineTree".into()));
+                }
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = self.cancel.cancelled() => {
+                    return Err(AgentError::Closed("TimelineTree".into()));
+                }
+            }
+        }
+    }
+    async fn close_and_record(&self, id: &str, end_event: u64, data: BranchEndData) -> Result<()> {
+        let (context, parent) = {
+            let state = self.state.lock().unwrap();
+            let node = state
+                .nodes
+                .get(id)
+                .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
+            (
+                node.context
+                    .clone()
+                    .ok_or_else(|| AgentError::UnknownBranch(id.into()))?,
+                node.info.parent.clone(),
+            )
+        };
+        let mut errors = Vec::new();
+        if let Err(error) = context.branch().close().await {
+            errors.push(error);
+        }
+        let head = context.timeline().sequence();
+        if let Some(parent) = parent {
+            let recorded = self
+                .owned_context(&parent)
+                .ok_or_else(|| AgentError::UnknownBranch(parent.clone()))
+                .and_then(|parent| {
+                    parent
+                        .timeline()
+                        .append(
+                            EventKind::BranchEnded(BranchEndedData {
+                                branch: id.into(),
+                                end_event,
+                                source: data.source,
+                                ancestor: data.ancestor,
+                            })
+                            .into(),
+                        )
+                        .map(|_| ())
+                });
+            if let Err(error) = recorded {
+                errors.push(AgentError::Storage(format!(
+                    "ending line {id}: its result could not be recorded: {error}"
+                )));
+            }
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            state.pending.remove(id);
+            state.nodes.remove(id);
+            state.ended.insert(id.into(), head);
+        }
+        AgentError::aggregate(errors)
     }
     fn on_create(&self, parent: &str, timeline: &Timeline, event: &AgentEvent) -> Result<()> {
         let EventKind::BranchCreate(data) = &event.kind else {
@@ -638,6 +946,7 @@ impl TimelineTreeControl for TimelineTree {
                 .collect();
             let mut failed_creates = BTreeSet::new();
             let mut sources = BTreeMap::new();
+            let mut recorded_ends = BTreeSet::new();
             let mut inactive = BTreeSet::new();
             while !remaining.is_empty() {
                 let stored = remaining
@@ -657,6 +966,7 @@ impl TimelineTreeControl for TimelineTree {
                 next.source = sources.get(&next.id).cloned();
                 if next.parent.as_ref().is_some_and(|parent| {
                     inactive.contains(parent)
+                        || recorded_ends.contains(&next.id)
                         || failed_creates.contains(&(
                             parent.clone(),
                             next.create_anchor.expect("validated creation anchor"),
@@ -725,6 +1035,7 @@ impl TimelineTreeControl for TimelineTree {
                             .map(|create| (next.id.clone(), create)),
                     );
                     sources.extend(facts.sources);
+                    recorded_ends.extend(facts.ended);
                 }
                 remaining.remove(&next.id);
             }
@@ -739,6 +1050,9 @@ impl TimelineTreeControl for TimelineTree {
         admission: CancellationToken,
     ) -> BoxFuture<'_, Result<Branch>> {
         Box::pin(async move {
+            if self.state.lock().unwrap().ended.contains_key(&parent) {
+                return Err(AgentError::BranchEnded(parent.clone()));
+            }
             let parent_context = self
                 .owned_context(&parent)
                 .ok_or_else(|| AgentError::UnknownBranch(parent.clone()))?;
@@ -785,11 +1099,33 @@ impl TimelineTreeControl for TimelineTree {
                     if parent_context.is_closing() {
                         return Err(AgentError::Closed(parent.clone()));
                     }
+                    if parent_context.ended() {
+                        return Err(AgentError::BranchEnded(parent.clone()));
+                    }
                     if admission.is_cancelled() {
                         return Err(AgentError::Cancelled("branch admission".into()));
                     }
+                    let mut state = self.state.lock().unwrap();
+                    let mut above = Some(parent.clone());
+                    while let Some(id) = above {
+                        if state.ended.contains_key(&id) {
+                            return Err(AgentError::BranchEnded(id));
+                        }
+                        let node = state
+                            .nodes
+                            .get(&id)
+                            .ok_or_else(|| AgentError::UnknownBranch(id.clone()))?;
+                        if node
+                            .context
+                            .as_ref()
+                            .is_some_and(|context| context.ended())
+                        {
+                            return Err(AgentError::BranchEnded(id));
+                        }
+                        above = node.info.parent.clone();
+                    }
                     ready = Some(self.reserve(
-                        &mut self.state.lock().unwrap(),
+                        &mut state,
                         TimelineInfo {
                             id: final_data.branch.clone(),
                             parent: Some(parent.clone()),
@@ -815,6 +1151,12 @@ impl TimelineTreeControl for TimelineTree {
                 .as_ref()
                 .and_then(|result| result.as_ref().ok().cloned())
         })
+    }
+    fn end(&self, id: String, source: BranchSource) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { TimelineTree::end(self, &id, source).await })
+    }
+    fn ended_head(&self, id: &str) -> Option<u64> {
+        TimelineTree::ended_head(self, id)
     }
     fn list(&self) -> Vec<TimelineInfo> {
         self.state
@@ -895,14 +1237,33 @@ impl DynPlugin for TreeTimelinePlugin {
                 }
                 Ok(())
             })?;
-            dispatcher.subscribe(ctx, "TreeTimeline", &["branch/create"], move |event| {
-                let result = commands
-                    .tree
-                    .upgrade()
-                    .ok_or_else(|| AgentError::Closed("TimelineTree".into()))
-                    .and_then(|tree| tree.on_create(&identity.branch_id, &timeline, &event));
-                Box::pin(async move { result })
-            })?;
+            dispatcher.subscribe(
+                ctx,
+                "TreeTimeline",
+                &["branch/create", "branch/end", "turn/end"],
+                move |event| {
+                    let branch = &identity.branch_id;
+                    let result = match &event.kind {
+                        EventKind::BranchCreate(_) => commands
+                            .tree
+                            .upgrade()
+                            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))
+                            .and_then(|tree| tree.on_create(branch, &timeline, &event)),
+                        EventKind::BranchEnd(data) => commands
+                            .tree
+                            .upgrade()
+                            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))
+                            .map(|tree| tree.on_end(branch, event.sequence, data.clone())),
+                        EventKind::TurnEnd(_) => commands
+                            .tree
+                            .upgrade()
+                            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))
+                            .map(|tree| tree.on_turn_end(branch)),
+                        _ => Ok(()),
+                    };
+                    Box::pin(async move { result })
+                },
+            )?;
             Ok(Effect::Done)
         })
     }
@@ -1079,30 +1440,68 @@ impl ToolHandler for BranchTool {
         })
     }
 }
-/// The child's first input. A branch the model created works on a task its
-/// parent delegated; a host-created branch starts with the operator's words.
+fn line_key() -> String {
+    "branch:line".into()
+}
+
 fn first_input(parent: &str, data: &BranchCreateData) -> InputMessageData {
-    match data.source {
-        BranchSource::Tool { .. } => InputMessageData {
-            blocks: vec![crate::context_block::raw(
-                crate::context_block::element(
-                    "dim-branch-task",
-                    &[("parent", parent)],
-                    &format!(
-                        "You are a branch forked from {} at this point of its history. That branch delegated this task to you:\n{}",
-                        crate::context_block::text(parent),
-                        crate::context_block::text(&data.prompt)
-                    ),
-                ),
-                None,
-            )],
-            mode: Some(InputMode::Queue),
-            ..InputMessageData::default()
-        },
-        BranchSource::Host { .. } => {
-            InputMessageData::text(data.prompt.clone(), Some(InputMode::Queue))
-        }
+    let (blocks, user) = match data.source {
+        BranchSource::Tool { .. } => (
+            vec![tool_line_identity(&data.branch, parent, &data.prompt)],
+            None,
+        ),
+        BranchSource::Host { .. } => (
+            vec![host_line_identity(&data.branch, parent)],
+            Some(UserInput {
+                content: vec![ContentBlock::Text {
+                    text: data.prompt.clone(),
+                }],
+            }),
+        ),
+    };
+    InputMessageData {
+        blocks,
+        user,
+        mode: Some(InputMode::Queue),
+        ..InputMessageData::default()
     }
+}
+
+fn tool_line_identity(line: &str, parent: &str, prompt: &str) -> InputBlock {
+    let prompt = crate::context_block::text(prompt);
+    let body = [
+        format!("You are line {line} of this session. Line {parent} opened you at this point of its history to work in parallel with it. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line. {parent} keeps working on its line; you do not see its work after this point, and it sees yours only through what you send it. Messages above that were addressed to {parent}, such as its list of open lines, are {parent}'s, not yours."),
+        String::new(),
+        format!("Your purpose, as {parent} wrote it:"),
+        prompt,
+        String::new(),
+        format!("How you work with {parent}:"),
+        format!("- Work on this purpose only. You cannot open lines; if more parallel work is needed, tell {parent}."),
+        format!("- Tell {parent} with the branch tool (message, to \"{parent}\"). Use mode \"steer\" for what {parent} must act on now: a finding that changes its work or another line's, a blocking question, a conflict. Use \"append\" for progress {parent} should see at its next step. Do not repeat what {parent} already knows."),
+        format!("- You share the workspace with {parent} and its other lines. Change only the files {parent} gave you; before changing any other file, tell {parent} which. If edit or write fails with file_modified_since_read, another line may have changed the file: read it again and tell {parent} before you continue."),
+        "- The user can talk to you directly. Answer the user, and ask with ask_user when only the user can decide.".to_string(),
+        format!("- When your purpose is done, or cannot be done, call the branch tool with action \"end\" and content saying what you found, did, changed and left undone. That is your last action; {parent} receives it."),
+    ]
+    .join("\n");
+    crate::context_block::raw(
+        crate::context_block::element(
+            "dim-branch-line",
+            &[("branch", line), ("parent", parent), ("source", "tool")],
+            &body,
+        ),
+        Some(line_key()),
+    )
+}
+
+fn host_line_identity(line: &str, parent: &str) -> InputBlock {
+    crate::context_block::raw(
+        crate::context_block::element(
+            "dim-branch-line",
+            &[("branch", line), ("parent", parent), ("source", "host")],
+            &format!("You are line {line} of this session, opened from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You do not see {parent}'s work after this point. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one says what this line is for."),
+        ),
+        Some(line_key()),
+    )
 }
 
 fn branch_definition() -> ToolDefinition {
