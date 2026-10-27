@@ -122,6 +122,7 @@ export default definePlugin({
             await tree.input(branchId, writes.pause(branchId, 'evaluation_failed', after))
           }
         }
+        settle()
         return
       }
       const read = await settings.read({ source: 'goal', scope: 'user' })
@@ -237,6 +238,10 @@ export default definePlugin({
       })
     const decided = (evaluation: string) =>
       fold.conclusions.has(evaluation) || !fold.isCurrent(evaluation)
+    // A settled evaluation ends its evaluator (Pursuit §13 E2). It runs at
+    // load, on a live goal change, on a live `branch/create` — a change that
+    // folded before the create arrived — and after a create returns, since a
+    // line still opening answers `unknown_branch`.
     const settle = () => {
       for (const [evaluation, evaluator] of fold.evaluations) {
         if (fold.ended.has(evaluator) || fold.failed.has(evaluator) || !decided(evaluation)) continue
@@ -265,6 +270,8 @@ export default definePlugin({
       if (event.type === 'branch' && event.name === 'create-failed') {
         const evaluation = fold.evaluationOf(event.data.branch)
         if (evaluation !== undefined) evaluationFailed(evaluation)
+      } else if (event.type === 'branch' && event.name === 'create') {
+        settle()
       } else if (event.type === 'branch' && event.name === 'ended') {
         const evaluation = fold.evaluationOf(event.data.branch)
         if (evaluation !== undefined && fold.isCurrent(evaluation) && !fold.conclusions.has(evaluation)) {

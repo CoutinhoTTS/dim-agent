@@ -131,6 +131,7 @@ async function loadGoalBranch(read, options = {}) {
       },
       info: async () => info,
       end: async (id, source) => {
+        if (options.end) return options.end(id, source)
         ends.push({ id, source })
         await emit('branch', 'ended', { branch: id, endEvent: Number(branch.sequence), source })
       },
@@ -730,6 +731,52 @@ test('Pursuit 13 E2: a superseded evaluation ends its evaluator', async t => {
   await flush()
   assert.equal(goal.ends.length, 1)
   assert.equal(goal.ends[0].id, evaluator)
+})
+
+test('Pursuit 13 E2: a create that arrives after the supersede still ends its line', async t => {
+  const goal = await loadGoalBranch(async () => settingsDocument(20), { create: async () => 'E' })
+  t.after(() => goal.unload())
+  const end = await completionRequested(goal)
+  await goal.emit('input', 'message', changes.pause(B))
+  await flush()
+  assert.equal(goal.ends.length, 0, 'no line is recorded yet')
+  await goal.emit('branch', 'create', {
+    at: { kind: 'sequence', sequence: Number(end.sequence) },
+    source: { kind: 'host', operation_id: `goal:evaluate:${end.sequence}` },
+    branch: 'E',
+    prompt: 'x',
+  })
+  await flush()
+  assert.deepEqual(goal.ends, [{ id: 'E', source: { kind: 'host', operation_id: `goal:evaluate:${end.sequence}` } }])
+})
+
+test('Pursuit 13 E2: an end refused while the line opens is retried once it is published', async t => {
+  const published = Promise.withResolvers()
+  const attempts = []
+  const ends = []
+  const goal = await loadGoalBranch(async () => settingsDocument(20), {
+    create: async (parent, at, createOptions, id, defaultCreate) => {
+      const branch = await defaultCreate(parent, at, createOptions, id)
+      await published.promise
+      return branch
+    },
+    end: async (id, source) => {
+      attempts.push(id)
+      if (attempts.length === 1) throw new Error('UnknownBranch')
+      ends.push({ id, source })
+    },
+  })
+  t.after(() => goal.unload())
+  const end = await completionRequested(goal)
+  const evaluator = goal.creates[0].branch
+  await goal.emit('input', 'message', changes.pause(B))
+  await flush()
+  assert.deepEqual(attempts, [evaluator], 'the end reached the line before it was published')
+  assert.equal(ends.length, 0)
+  published.resolve()
+  for (let i = 0; i < 5 && ends.length === 0; i++) await flush()
+  assert.deepEqual(attempts, [evaluator, evaluator], 'the published line takes the retry')
+  assert.deepEqual(ends, [{ id: evaluator, source: { kind: 'host', operation_id: `goal:evaluate:${end.sequence}` } }])
 })
 
 test('Pursuit 13 E2: a load ends a settled evaluator once, unless its end is recorded', async t => {
