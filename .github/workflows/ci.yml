@@ -103,7 +103,9 @@ jobs:
         run: cargo run --locked -p xtask -- check
       - name: Test development and release scripts
         if: needs.changes.outputs.scripts == 'true'
-        run: node --test scripts/*.test.mjs
+        run: |
+          node --check scripts/check-acp-registry.mjs
+          node --test scripts/*.test.mjs
       - name: Build the Web workspace
         if: needs.changes.outputs.web == 'true'
         shell: bash

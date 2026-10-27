@@ -414,6 +414,10 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
         },
         agent_id,
     );
+    let directory = options
+        .directory
+        .clone()
+        .unwrap_or_else(|| login::account_directory().into());
     let mut terminal_args = vec![
         "acp".into(),
         "--redirect-uri".into(),
@@ -434,14 +438,9 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
             ]);
         }
     }
-    if let Some(directory) = &options.directory {
-        terminal_args.extend(["--directory".into(), directory.clone()]);
-    }
+    terminal_args.extend(["--directory".into(), directory.clone()]);
     let gateway = gateway.login(dim_acp::auth::Login {
-        directory: options
-            .directory
-            .clone()
-            .unwrap_or_else(|| login::account_directory().into()),
+        directory,
         redirect_uri: options.redirect_uri.clone(),
         open_browser: if std::env::var("DIMCODE_OAUTH_MANUAL").is_ok_and(|value| value == "1") {
             None

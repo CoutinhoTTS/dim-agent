@@ -1076,101 +1076,108 @@ fn acp_stdio_discovers_managed_auth_without_starting_an_existing_login() {
 
 #[test]
 fn acp_terminal_auth_helper_rediscovers_the_method_and_uses_the_same_home() {
-    let home = Home::new();
-    let endpoint = home.0.join("rust/daemon.sock");
-    let listener = UnixListener::bind(&endpoint).unwrap();
-    fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)).unwrap();
-    let daemon = thread::spawn(move || {
-        let providers = |wire: &mut Wire| {
-            let request = wire.read("account.providers");
-            wire.reply(
+    for directory in [Some("https://fixture.invalid/directory"), None] {
+        let expected_directory = directory.unwrap_or("https://dimagent.com");
+        let home = Home::new();
+        let endpoint = home.0.join("rust/daemon.sock");
+        let listener = UnixListener::bind(&endpoint).unwrap();
+        fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)).unwrap();
+        let daemon = thread::spawn(move || {
+            let providers = |wire: &mut Wire| {
+                let request = wire.read("account.providers");
+                wire.reply(
                 &request,
                 json!([{"providerId":"fixture","displayName":"Fixture","loginMethods":["device"]}]),
             );
-        };
-        let mut wire = accept_native(&listener);
-        let mut methods = METHODS.to_vec();
-        methods.push("account.providers");
-        wire.hello(&methods);
-        providers(&mut wire);
-        let status = wire.read("account.status");
-        wire.reply(&status, json!({"account":null}));
-        detached_eof(&mut wire);
-        drop(wire);
-        let mut wire = accept_native(&listener);
-        wire.hello(&methods);
-        providers(&mut wire);
-        providers(&mut wire);
-        let begin = wire.read("account.login.begin");
-        assert_eq!(begin["params"]["providerId"], "fixture");
-        assert_eq!(
-            begin["params"]["directory"],
-            "https://fixture.invalid/directory"
-        );
-        wire.reply(&begin,json!({"attemptId":"terminal-attempt","verificationUri":"https://fixture.invalid/device","userCode":"FIXTURE-CODE"}));
-        let status = wire.read("account.login.status");
-        assert_eq!(status["params"]["attemptId"], "terminal-attempt");
-        wire.reply(&status, json!({"status":"completed"}));
-        detached_eof(&mut wire);
-    });
-    let mut child = home
-        .command()
-        .args([
+            };
+            let mut wire = accept_native(&listener);
+            let mut methods = METHODS.to_vec();
+            methods.push("account.providers");
+            wire.hello(&methods);
+            providers(&mut wire);
+            let status = wire.read("account.status");
+            wire.reply(&status, json!({"account":null}));
+            detached_eof(&mut wire);
+            drop(wire);
+            let mut wire = accept_native(&listener);
+            wire.hello(&methods);
+            providers(&mut wire);
+            providers(&mut wire);
+            let begin = wire.read("account.login.begin");
+            assert_eq!(begin["params"]["providerId"], "fixture");
+            assert_eq!(begin["params"]["directory"], expected_directory);
+            wire.reply(&begin,json!({"attemptId":"terminal-attempt","verificationUri":"https://fixture.invalid/device","userCode":"FIXTURE-CODE"}));
+            let status = wire.read("account.login.status");
+            assert_eq!(status["params"]["attemptId"], "terminal-attempt");
+            wire.reply(&status, json!({"status":"completed"}));
+            detached_eof(&mut wire);
+        });
+        let mut command = home.command();
+        command.env("DIMCODE_NPM_PACKAGE", "dimagent").args([
             "acp",
-            "--directory",
-            "https://fixture.invalid/directory",
             "--redirect-uri",
             "http://localhost:54322/auth/callback",
             "--server",
             env!("CARGO_BIN_EXE_dimcode"),
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut peer = Peer {
-        input: child.stdin.take().unwrap(),
-        output: BufReader::new(child.stdout.take().unwrap()),
-        child,
-        updates: Vec::new(),
-    };
-    peer.send(
-        1,
-        "initialize",
-        json!({"protocolVersion":1,"clientCapabilities":{"_meta":{"terminal-auth":true}}}),
-    );
-    let initialized = peer.response(1);
-    let method = initialized["result"]["authMethods"][0]["id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let args: Vec<String> =
-        serde_json::from_value(initialized["result"]["authMethods"][0]["args"].clone()).unwrap();
-    assert_eq!(&args[args.len() - 2..], ["--auth-setup", &method]);
-    assert!(
-        args.windows(2)
-            .any(|pair| pair == ["--redirect-uri", "http://localhost:54322/auth/callback"])
-    );
-    let server = fs::canonicalize(env!("CARGO_BIN_EXE_dimcode")).unwrap();
-    assert!(
-        args.windows(2)
-            .any(|pair| pair == ["--server", server.to_str().unwrap()])
-    );
-    peer.close();
-    let result = Command::new(env!("CARGO_BIN_EXE_dimcode"))
-        .env_remove("DIMCODE_HOME")
-        .current_dir(&home.0)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(String::from_utf8_lossy(&result.stdout).contains("Signed in."));
-    daemon.join().unwrap();
+        ]);
+        if let Some(directory) = directory {
+            command.args(["--directory", directory]);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut peer = Peer {
+            input: child.stdin.take().unwrap(),
+            output: BufReader::new(child.stdout.take().unwrap()),
+            child,
+            updates: Vec::new(),
+        };
+        peer.send(
+            1,
+            "initialize",
+            json!({"protocolVersion":1,"clientCapabilities":{"_meta":{"terminal-auth":true}}}),
+        );
+        let initialized = peer.response(1);
+        let method = initialized["result"]["authMethods"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let args: Vec<String> =
+            serde_json::from_value(initialized["result"]["authMethods"][0]["args"].clone())
+                .unwrap();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--directory", expected_directory])
+        );
+        assert_eq!(&args[args.len() - 2..], ["--auth-setup", &method]);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--redirect-uri", "http://localhost:54322/auth/callback"])
+        );
+        let server = fs::canonicalize(env!("CARGO_BIN_EXE_dimcode")).unwrap();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--server", server.to_str().unwrap()])
+        );
+        peer.close();
+        let result = Command::new(env!("CARGO_BIN_EXE_dimcode"))
+            .env_remove("DIMCODE_HOME")
+            .env("DIMCODE_NPM_PACKAGE", "dimcode")
+            .current_dir(&home.0)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("Signed in."));
+        daemon.join().unwrap();
+    }
 }
 
 #[test]
