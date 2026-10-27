@@ -6818,6 +6818,13 @@
     },
     {
       "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::recall",
+      "references": [
+        "path crate::recall::install"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
         "path SessionBroadcastEndPlugin::new",
