@@ -68,7 +68,7 @@ Settings owns source persistence, not approvals or business management methods.
 There is no `configuration.*` RPC namespace.
 
 The native store keeps the v13 settings data contract unchanged in the current
-format: `settings_documents` rows keyed `user/mcp`, `user/skills`, `user/mcp-projects` and `user/permission`,
+format: `settings_documents` rows keyed `user/mcp`, `user/skills`, `user/mcp-projects`, `user/mcp-plugins` and `user/permission`,
 plain payload JSON (not `{kind, document}`), source-local versions and opaque
 `native:<source>:<version>` revision tokens. Import provenance is preserved on
 edits. Successful writes notify consumers after persistence; failed persistence
@@ -127,9 +127,16 @@ After enabling, later edits to that entry's command or arguments take effect wit
 decision (ADR 003 D4). FullAccess, file-root authorization and Session restoration enable nothing.
 An old `mcp-approvals.json` is ignored, not migrated or removed.
 
+Plugins add entries through PluginManager, which registers each plugin's MCP document with Mcp
+under the plugin id ([PluginManager §3.7](../../docs/design/plugins/PluginManager.md#37-content-registration)).
+Mcp keeps them in `mcp-plugins` and lists them with `source: "plugin"` as `<plugin id>:<server>`;
+a stdio entry runs in the plugin directory unless its `cwd` names another directory inside it.
+They run while the plugin is on and change only through the plugin: `mcp.save`, `mcp.remove`
+and `mcp.set_enabled` refuse them, while `mcp.disconnect` and sign-in work as for other entries.
+
 Successful configuration mutations return `{}` after persistence, not after connection/tool
 adoption; disabling or removing an entry also waits until its running generations have closed in
-every Session. The catalog also returns `userApplication` and optional `projectApplication`, each with
+every Session. The catalog also returns `userApplication`, `pluginApplication` and optional `projectApplication`, each with
 `appliedRevision`, `error` and `cleanupError`. Application describes source eligibility
 and instance creation failures; it does not confirm a network connection or tool adoption.
 An application error leaves persisted intent intact. Cleanup errors remain visible for that

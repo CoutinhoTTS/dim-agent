@@ -1,14 +1,17 @@
 //! PluginManager (docs/design/plugins/PluginManager.md): the plugin
 //! configuration of a host, kept in `<home>/plugins.json`. It keeps no
 //! runtime state: rows are rutis-loader's, content is its owners'. It
-//! carries out a configuration change by giving the loader commands.
+//! carries out a configuration change by giving the loader and the content
+//! owners (SkillsCatalog, Mcp) commands.
 mod acquire;
 mod record;
 mod tools;
 
+use crate::mcp::McpService;
 use crate::methods::ManagementMethods;
 use acquire::PluginsDir;
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, Progress, RpcError};
+use dim_agent_capabilities::skills::{SkillIssue, SkillsCatalog};
 use dim_agent_runtime::{Names, PartRegistry, PartScope};
 use record::{Choice, Defaults, Installed, Kind, Manifest, Record, Source};
 use rutis::Ctx;
@@ -418,6 +421,8 @@ fn dir_of(record: &Record, defaults: &Defaults, name: &str, used: &Use) -> Optio
 struct Outcome {
     status: Option<Value>,
     skipped: Vec<Kind>,
+    /// Content an owner refused: `{kind, error}`.
+    refused: Vec<Value>,
     restart_required: bool,
 }
 impl Outcome {
@@ -429,6 +434,9 @@ impl Outcome {
         if !self.skipped.is_empty() {
             map.insert("skipped".into(), json!(self.skipped));
         }
+        if !self.refused.is_empty() {
+            map.insert("refused".into(), json!(self.refused));
+        }
         if self.restart_required {
             map.insert("restartRequired".into(), json!(true));
         }
@@ -436,11 +444,159 @@ impl Outcome {
     }
 }
 
+/// What a name used before and after a change of the record.
+struct Change {
+    before: Option<Use>,
+    after: Option<Use>,
+}
+
 /// The operations of one PluginManager generation.
 #[derive(Clone)]
 pub(crate) struct Manager {
     state: Arc<State>,
     loader: Arc<Loader>,
+    owners: Owners,
+}
+
+/// The content owners, read only if present (§1): an absent owner skips
+/// only its kind of content.
+#[derive(Clone)]
+struct Owners {
+    ctx: Ctx,
+    skills: Key<SkillsCatalog>,
+    mcp: Key<McpService>,
+}
+
+/// The row names of the content owners and the kind each takes.
+const OWNERS: [(&str, Kind); 2] = [("SkillsCatalog", Kind::Skills), ("Mcp", Kind::Mcp)];
+
+fn refused(kind: Kind, error: impl std::fmt::Display) -> Value {
+    json!({"kind": kind, "error": error.to_string()})
+}
+
+fn skill_issues(issues: Vec<SkillIssue>) -> Option<String> {
+    let issues: Vec<String> = issues
+        .into_iter()
+        .map(|issue| match issue {
+            SkillIssue::InvalidManifest { path, reason }
+            | SkillIssue::Unreadable { path, reason } => format!("{}: {reason}", path.display()),
+            SkillIssue::RootUnreadable { root, reason } => {
+                format!("{}: {reason}", root.display())
+            }
+            SkillIssue::ScanLimitReached { root } => {
+                format!("{}: Skill scan limit reached", root.display())
+            }
+        })
+        .collect();
+    (!issues.is_empty()).then(|| issues.join("; "))
+}
+
+impl Owners {
+    /// Registers each content kind `manifest` carries with its owner, and
+    /// withdraws the kinds it does not carry (§3.7). `kinds` limits the
+    /// owners called.
+    async fn register(
+        &self,
+        plugin: &str,
+        dir: &Path,
+        manifest: &Manifest,
+        kinds: &[Kind],
+        outcome: &mut Outcome,
+    ) {
+        let cancel = self.ctx.cancellation_token();
+        if kinds.contains(&Kind::Skills) {
+            match (self.ctx.get_at(&self.skills), &manifest.skills) {
+                (None, Some(_)) => outcome.skipped.push(Kind::Skills),
+                (None, None) => {}
+                (Some(catalog), Some(root)) => {
+                    match catalog.register_plugin(plugin, root.clone()).await {
+                        Ok(issues) => {
+                            if let Some(error) = skill_issues(issues) {
+                                outcome.refused.push(refused(Kind::Skills, error));
+                            }
+                        }
+                        Err(error) => outcome.refused.push(refused(Kind::Skills, error)),
+                    }
+                }
+                (Some(catalog), None) => {
+                    if let Err(error) = catalog.withdraw_plugin(plugin).await {
+                        tracing::warn!(%plugin, %error, "Skills withdrawal refused");
+                    }
+                }
+            }
+        }
+        if kinds.contains(&Kind::Mcp) {
+            match (self.ctx.get_at(&self.mcp), &manifest.mcp) {
+                (None, Some(_)) => outcome.skipped.push(Kind::Mcp),
+                (None, None) => {}
+                (Some(mcp), Some(path)) => {
+                    let document = std::fs::read(path)
+                        .map_err(|error| error.to_string())
+                        .and_then(|bytes| {
+                            serde_json::from_slice::<Value>(&bytes)
+                                .map_err(|error| error.to_string())
+                        });
+                    let result = match document {
+                        Ok(document) => mcp
+                            .register_plugin(plugin.into(), dir.into(), document, &cancel)
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => {
+                            let _ = mcp.withdraw_plugin(plugin.into(), &cancel).await;
+                            Err(format!("{}: {error}", path.display()))
+                        }
+                    };
+                    if let Err(error) = result {
+                        outcome.refused.push(refused(Kind::Mcp, error));
+                    }
+                }
+                (Some(mcp), None) => {
+                    if let Err(error) = mcp.withdraw_plugin(plugin.into(), &cancel).await {
+                        tracing::warn!(%plugin, %error, "MCP withdrawal refused");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Withdraws `plugin`'s content of `kinds` from each present owner.
+    async fn withdraw(&self, plugin: &str, kinds: &[Kind]) {
+        let cancel = self.ctx.cancellation_token();
+        if kinds.contains(&Kind::Skills)
+            && let Some(catalog) = self.ctx.get_at(&self.skills)
+            && let Err(error) = catalog.withdraw_plugin(plugin).await
+        {
+            tracing::warn!(%plugin, %error, "Skills withdrawal refused");
+        }
+        if kinds.contains(&Kind::Mcp)
+            && let Some(mcp) = self.ctx.get_at(&self.mcp)
+            && let Err(error) = mcp.withdraw_plugin(plugin.into(), &cancel).await
+        {
+            tracing::warn!(%plugin, %error, "MCP withdrawal refused");
+        }
+    }
+
+    /// What the present owners hold refused for `plugin` now.
+    async fn refused(&self, plugin: &str, manifest: &Manifest) -> Vec<Value> {
+        let mut found = Vec::new();
+        if manifest.skills.is_some()
+            && let Some(catalog) = self.ctx.get_at(&self.skills)
+        {
+            match catalog.plugin_issues(plugin).await {
+                Ok(issues) => found.extend(skill_issues(issues).map(|e| refused(Kind::Skills, e))),
+                Err(error) => found.push(refused(Kind::Skills, error)),
+            }
+        }
+        if manifest.mcp.is_some()
+            && let Some(error) = self
+                .ctx
+                .get_at(&self.mcp)
+                .and_then(|mcp| mcp.plugin_refusal(plugin))
+        {
+            found.push(refused(Kind::Mcp, error));
+        }
+        found
+    }
 }
 
 #[derive(Deserialize)]
@@ -521,23 +677,26 @@ impl Manager {
     }
 
     /// Changes the in-memory record with `change`, writes it, and returns
-    /// `change`'s value and what the name uses afterwards. A failed write
-    /// leaves the table as it was.
+    /// `change`'s value and what the name uses before and afterwards. A
+    /// failed write leaves the table as it was.
     fn commit<T>(
         &self,
         name: impl Fn(&Record, &T) -> String,
         change: impl FnOnce(&mut Record) -> Result<T, PluginError>,
-    ) -> Result<(T, Option<Use>), PluginError> {
+    ) -> Result<(T, Change), PluginError> {
         let mut record = self.state.record.lock().unwrap();
         let mut next = record.clone();
         let value = change(&mut next)?;
         let name = name(&next, &value);
-        let after = self.using(&next, &name);
+        let change = Change {
+            before: self.using(&record, &name),
+            after: self.using(&next, &name),
+        };
         next.write(&self.state.record_path).map_err(|error| {
             PluginError::new("acquire_failed", format!("plugins.json: {error}"))
         })?;
         *record = next;
-        Ok((value, after))
+        Ok((value, change))
     }
 
     pub async fn call(
@@ -554,7 +713,7 @@ impl Manager {
         match method {
             "plugin.list" => {
                 let Empty {} = decode(params)?;
-                Ok(self.list())
+                Ok(self.list().await)
             }
             "plugin.install" => self.install(decode(params)?, &phase).await,
             "plugin.enable" => self.enable(decode(params)?).await,
@@ -637,7 +796,7 @@ impl Manager {
             };
             let locked = self.locked(&manifest.name);
             let turn_on = enable && !locked;
-            let ((), after) = self.commit(
+            let ((), change) = self.commit(
                 |_, ()| manifest.name.clone(),
                 |record| {
                     if record.installed(&id).is_some() {
@@ -659,10 +818,10 @@ impl Manager {
                     Ok(())
                 },
             )?;
-            Ok::<_, PluginError>((id, manifest.name, locked, after))
+            Ok::<_, PluginError>((id, manifest.name, locked, change))
         }
         .await;
-        let (id, name, locked, after) = match result {
+        let (id, name, locked, change) = match result {
             Ok(done) => done,
             Err(error) => {
                 if let Some(dir) = placed {
@@ -677,8 +836,8 @@ impl Manager {
             }
         };
         phase("load");
-        let enabled = after == Some(Use::Installed(id.clone()));
-        let outcome = self.switch(&name, after.as_ref()).await;
+        let enabled = change.after == Some(Use::Installed(id.clone()));
+        let outcome = self.switch(&name, change).await;
         let mut reply = outcome.into_map();
         reply.insert("id".into(), json!(id));
         reply.insert("name".into(), json!(name));
@@ -732,7 +891,7 @@ impl Manager {
                     .into_map(),
             ));
         }
-        let ((), after) = self.commit(
+        let ((), change) = self.commit(
             |_, ()| name.clone(),
             |record| {
                 if !self.known(record, &name) {
@@ -765,9 +924,7 @@ impl Manager {
                 Ok(())
             },
         )?;
-        Ok(Value::Object(
-            self.switch(&name, after.as_ref()).await.into_map(),
-        ))
+        Ok(Value::Object(self.switch(&name, change).await.into_map()))
     }
 
     /// `plugin.disable` (§3.3).
@@ -778,7 +935,7 @@ impl Manager {
                 format!("{name} is locked"),
             ));
         }
-        let ((), after) = self.commit(
+        let ((), change) = self.commit(
             |_, ()| name.to_owned(),
             |record| {
                 if !self.known(record, name) {
@@ -788,7 +945,7 @@ impl Manager {
                 Ok(())
             },
         )?;
-        self.switch(name, after.as_ref()).await;
+        self.switch(name, change).await;
         Ok(json!({}))
     }
 
@@ -800,7 +957,7 @@ impl Manager {
                 "built-in and default plugins can be turned off, not removed",
             ));
         }
-        let (entry, after) = self.commit(
+        let (entry, change) = self.commit(
             |_, entry: &Installed| entry.name.clone(),
             |record| {
                 let index = record
@@ -820,7 +977,7 @@ impl Manager {
                 Ok(entry)
             },
         )?;
-        self.switch(&entry.name, after.as_ref()).await;
+        self.switch(&entry.name, change).await;
         self.state
             .dirs
             .remove_python_link(&python_package(&entry.id));
@@ -883,10 +1040,11 @@ impl Manager {
                 },
             )?;
         }
-        let mut outcome = Outcome {
-            skipped: content_kinds(&manifest),
-            ..Default::default()
-        };
+        let mut outcome = Outcome::default();
+        let plugin = own_id(name, used.as_ref().expect("in use")).expect("not a built-in");
+        self.owners
+            .register(plugin, &dir, &manifest, &CONTENT, &mut outcome)
+            .await;
         let row = row_id(name);
         match &manifest.code {
             None => self.apply().await,
@@ -1014,7 +1172,7 @@ impl Manager {
                 Ok(())
             },
         );
-        let ((), after) = match committed {
+        let ((), change) = match committed {
             Ok(done) => done,
             Err(error) => {
                 let _ = self.state.dirs.delete(&dir);
@@ -1023,8 +1181,8 @@ impl Manager {
         };
         phase("load");
         let mut reply = Map::new();
-        if after == Some(Use::Installed(id.clone())) {
-            reply = self.switch(&entry.name, after.as_ref()).await.into_map();
+        if change.after == Some(Use::Installed(id.clone())) {
+            reply = self.switch(&entry.name, change).await.into_map();
         }
         let _ = self.state.dirs.delete(&entry.dir);
         reply.insert("commit".into(), json!(commit));
@@ -1048,10 +1206,26 @@ impl Manager {
         }
     }
 
-    /// Applies the record and says what the name now using `used` came to:
-    /// its row's status, the content kinds skipped, `restartRequired`.
-    async fn switch(&self, name: &str, used: Option<&Use>) -> Outcome {
+    /// Applies the record, moves the name's content from the plugin it used
+    /// to the one it uses now (§3.7), and says what that came to: its row's
+    /// status, the content kinds skipped or refused, `restartRequired`. A
+    /// content owner's name turned on gets that kind of content of every
+    /// plugin.
+    async fn switch(&self, name: &str, change: Change) -> Outcome {
         self.apply().await;
+        let before = change.before.as_ref().and_then(|used| own_id(name, used));
+        let after = change.after.as_ref().and_then(|used| own_id(name, used));
+        if let Some(before) = before
+            && Some(before) != after
+        {
+            self.owners.withdraw(before, &CONTENT).await;
+        }
+        if change.after.is_some()
+            && let Some((_, kind)) = OWNERS.iter().find(|(owner, _)| *owner == name)
+        {
+            self.sync(*kind).await;
+        }
+        let used = change.after.as_ref();
         let Some(used @ (Use::Default | Use::Installed(_))) = used else {
             return self.status_of(name, used);
         };
@@ -1069,10 +1243,12 @@ impl Manager {
             }
             None => return Outcome::default(),
         };
-        let mut outcome = Outcome {
-            skipped: content_kinds(&manifest),
-            ..Default::default()
-        };
+        let mut outcome = Outcome::default();
+        let plugin = own_id(name, used).expect("not a built-in");
+        let dir = dir.expect("a used plugin has a directory");
+        self.owners
+            .register(plugin, &dir, &manifest, &CONTENT, &mut outcome)
+            .await;
         if let Some(code) = &manifest.code {
             if missing_instance_names(self.state.catalog.get().expect("set at startup"), code)
                 .is_empty()
@@ -1083,6 +1259,38 @@ impl Manager {
             }
         }
         outcome
+    }
+
+    /// Registers `kind` for every plugin in use and withdraws it for every
+    /// other plugin PluginManager knows: what a content owner turned on is
+    /// given (§3.7).
+    async fn sync(&self, kind: Kind) {
+        let record = self.state.record.lock().unwrap().clone();
+        for name in names(&record, &self.state.defaults, self.builtins()) {
+            let used = self.using(&record, &name);
+            let candidates = record
+                .installed
+                .iter()
+                .filter(|entry| entry.name == name)
+                .map(|entry| (Use::Installed(entry.id.clone()), entry.dir.clone()))
+                .chain(
+                    self.state
+                        .defaults
+                        .plugins
+                        .get(&name)
+                        .map(|dir| (Use::Default, dir.clone())),
+                );
+            for (candidate, dir) in candidates {
+                let plugin = own_id(&name, &candidate).expect("not a built-in");
+                if used.as_ref() != Some(&candidate) {
+                    self.owners.withdraw(plugin, &[kind]).await;
+                } else if let Ok(manifest) = Manifest::read(&dir) {
+                    self.owners
+                        .register(plugin, &dir, &manifest, &[kind], &mut Outcome::default())
+                        .await;
+                }
+            }
+        }
     }
 
     fn status_of(&self, name: &str, used: Option<&Use>) -> Outcome {
@@ -1106,11 +1314,11 @@ impl Manager {
     }
 
     /// `plugin.list` (§3.6).
-    fn list(&self) -> Value {
+    async fn list(&self) -> Value {
         let record = self.state.record.lock().unwrap().clone();
-        let items: Vec<Value> = names(&record, &self.state.defaults, self.builtins())
-            .into_iter()
-            .map(|name| {
+        let mut items = Vec::new();
+        for name in names(&record, &self.state.defaults, self.builtins()) {
+            items.push({
                 let choice = record.names.get(&name).cloned().unwrap_or_default();
                 let used = self.using(&record, &name);
                 let mut candidates = Vec::new();
@@ -1144,20 +1352,27 @@ impl Manager {
                         match dir_of(&record, &self.state.defaults, &name, used)
                             .map(|dir| Manifest::read(&dir))
                         {
-                            Some(Ok(Manifest { code: Some(_), .. })) => {
-                                fields.extend(object(self.status(&row_id(&name))));
+                            Some(Ok(manifest)) => {
+                                if manifest.code.is_some() {
+                                    fields.extend(object(self.status(&row_id(&name))));
+                                }
+                                let plugin = own_id(&name, used).expect("not a built-in");
+                                let refused = self.owners.refused(plugin, &manifest).await;
+                                if !refused.is_empty() {
+                                    fields.insert("refused".into(), json!(refused));
+                                }
                             }
                             Some(Err(error)) => {
                                 fields.insert("status".into(), json!("failed"));
                                 fields.insert("error".into(), json!(error.to_string()));
                             }
-                            _ => {}
+                            None => {}
                         }
                     }
                 }
                 item
-            })
-            .collect();
+            });
+        }
         Value::Array(items)
     }
 }
@@ -1169,15 +1384,8 @@ fn object(value: Value) -> Map<String, Value> {
     }
 }
 
-/// Content kinds the manifest carries: no content owner takes plugin
-/// content yet (§9 R2), so each is skipped and reported.
-fn content_kinds(manifest: &Manifest) -> Vec<Kind> {
-    manifest
-        .kinds()
-        .into_iter()
-        .filter(|kind| *kind != Kind::Code)
-        .collect()
-}
+/// The content kinds PluginManager registers with owners. Hooks is M2.
+const CONTENT: [Kind; 2] = [Kind::Skills, Kind::Mcp];
 
 fn status_value(loader: &Loader, entry: &EntryInfo) -> Value {
     let pending = || json!({"status": "pending", "waitingFor": loader.waiting_for(entry)});
@@ -1205,6 +1413,8 @@ pub(crate) struct PluginManagerPlugin {
     loader: Key<Loader>,
     methods: Key<ManagementMethods>,
     parts: Key<PartRegistry>,
+    skills: Key<SkillsCatalog>,
+    mcp: Key<McpService>,
 }
 
 impl PluginManagerPlugin {
@@ -1214,6 +1424,8 @@ impl PluginManagerPlugin {
             loader: names.key()?,
             methods: names.key()?,
             parts: names.key()?,
+            skills: names.key()?,
+            mcp: names.key()?,
         })
     }
 }
@@ -1234,6 +1446,11 @@ impl DynPlugin for PluginManagerPlugin {
             let manager = Manager {
                 state: self.state.clone(),
                 loader: ctx.require_at(&self.loader)?,
+                owners: Owners {
+                    ctx: ctx.clone(),
+                    skills: self.skills.clone(),
+                    mcp: self.mcp.clone(),
+                },
             };
             let keep: Vec<PathBuf> = manager
                 .state
