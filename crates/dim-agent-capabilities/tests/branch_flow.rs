@@ -3041,6 +3041,13 @@ async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
             "an append from a line starts no turn on main"
         );
     }
+    until_events(&session, "main", |events| {
+        events.iter().any(|event| {
+            event.sequence > landed.0
+                && !blocks_with(std::slice::from_ref(event), "<dim-branch-idle").is_empty()
+        })
+    })
+    .await;
     soon(session.idle("main")).await.unwrap();
     tool_call(
         &session,
