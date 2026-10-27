@@ -271,7 +271,7 @@ WorkspaceTools 不变。
 | `{kind: "tool", turn_id, request_id, call_id}` | 要结束的那条线自己的一次工具调用：`branch` 工具的 `end` |
 | `{kind: "host", operation_id}` | 一次宿主操作。可以是 App Server 的 `session.branch_end`，它像 `session.branch_create` 那样生成 `operation_id`（一个 uuid，[connection/tree.rs](../../../crates/dim-app-server/src/connection/tree.rs)），也可以是带自己 id 的插件，例如 Goal 的 `goal:evaluate:N` |
 
-`ancestor` 指向用自己那次结束发起连锁的线：也就是本身不带 `ancestor` 的那次结束。无论多深，每条后代都带这条线，`source` 也从同一次结束复制，于是（source, ancestor）这对值指明一次结束操作：谁要求的，在哪条线上。自己要求结束的线有 `source`、没有 `ancestor`。`branch/ended` 从这条线的 `branch/end` 复制 `source` 和 `ancestor`，并且总是写在结束的那条线自己的父分支上，取自目录。
+`ancestor` 指向用自己那次结束发起连锁的线：也就是本身不带 `ancestor` 的那次结束。连锁结束的每条后代都带这条线，`source` 也从同一次结束复制，于是（source, ancestor）这对值指明一次结束操作：谁要求的，在哪条线上。自己要求结束的线有 `source`、没有 `ancestor`；已被连锁结束之前就提交了自己结束的后代，保留它自己的那对值。`branch/ended` 从这条线的 `branch/end` 复制 `source` 和 `ancestor`，并且总是写在结束的那条线自己的父分支上，取自目录。
 
 **一个通用操作。** `TreeCommands.end(id, source)` 和 `Session::end_branch(id, source)` 只检查目标：它存在、未结束、不是 `main`。结束 `main` 就等于关闭 Session，所以这是关于目标的检查，不是关于调用方的。它们从不检查是谁在调用。
 
@@ -302,7 +302,7 @@ WorkspaceTools 不变。
 
 **恢复。** 父分支上有某个子分支的 `branch/ended` 时，这个子分支不活跃。恢复中的父分支读取历史时会报告这些事件（§5）。这条规则加入现有的几条：父分支不活跃、父分支上有这个子分支的 `branch/create-failed`、子分支的创建从未完成。
 
-一条线有 `branch/end`、但父分支上没有对应的 `branch/ended` 时，不打开它。恢复按最深的线优先补完这类结束：在父分支上补写每条缺失的 `branch/ended`，`source` 与 `ancestor` 取自 `branch/end`，这条线自己的结果最后写。那个父分支同样不会打开，所以记录写进它的存储历史，它的固定头部随之延长。其下自己从未开始结束的线不补写 `branch/ended`：父分支已关闭、不会再重放，写上去也没有人读。恢复把每条这样的线按它停下的头部记为已结束，`source` 取自父分支的 `branch/create`，它的历史仍可读取（§1"结束之后"）。
+一条线有 `branch/end`、但父分支上没有对应的 `branch/ended` 时，不打开它。恢复按最深的线优先补完这类结束：在父分支上补写每条缺失的 `branch/ended`，`source` 与 `ancestor` 取自 `branch/end`，这条线自己的结果最后写。对于它下面的线，那个父分支同样不会打开，所以记录写进它的存储历史，它的固定头部随之延长。其下自己从未开始结束的线不补写 `branch/ended`：父分支已关闭、不会再重放，写上去也没有人读。恢复把每条这样的线按它停下的头部记为已结束，`source` 取自父分支的 `branch/create`，它的历史仍可读取（§1"结束之后"）。
 
 **结束之后：**
 
@@ -403,7 +403,7 @@ WorkspaceTools 不变。
 
 **TUI。** 线有自己的面板、视图和操作：
 
-- `/lines`（别名 `/branches`）列出这个 Session 的每条线，各自缩进在打开它的那条线之下，每条带状态：工作中、等待中、自行结束、被某个操作结束，或创建失败。
+- `/lines`（别名 `/branches`）列出这个 Session 的每条线，各自缩进在打开它的那条线之下，每条带状态：工作中、等待中、自行结束、被某个操作结束、随 X 结束，或创建失败。
 - Enter 显示所选线的对话。输入框向正在显示的线提交，输入框的下边框标出这条线，用 id 的前八个字符。
 - `x` 再 `y` 结束所选线；`main` 上被拒绝。
 - 提问和审批都带线的标签，两条线问同一件事也能分辨（提问显示 `(branch NAME)`，审批显示 `Permission on branch NAME`）。

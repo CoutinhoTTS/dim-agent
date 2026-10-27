@@ -271,7 +271,7 @@ This pair mirrors `branch/create` and `branch/create-failed`: a command on one T
 | `{kind: "tool", turn_id, request_id, call_id}` | A tool call on the ending line itself: the `branch` tool's `end` |
 | `{kind: "host", operation_id}` | A host operation. Either App Server's `session.branch_end`, which mints `operation_id` the way `session.branch_create` does (a uuid, [connection/tree.rs](../../crates/dim-app-server/src/connection/tree.rs)), or a plugin with its own id, such as Goal's `goal:evaluate:N` |
 
-`ancestor` names the line whose own end started the cascade: the end that carries no `ancestor` of its own. Every descendant at any depth carries that line, `source` is copied from that same end, and the pair therefore names one end operation: who asked, and on which line. A line ended at its own request has a `source` and no `ancestor`. `branch/ended` copies `source` and `ancestor` from the line's `branch/end`, and is always written on the ending line's own parent, taken from the directory.
+`ancestor` names the line whose own end started the cascade: the end that carries no `ancestor` of its own. Every descendant the cascade ends carries that line, `source` is copied from that same end, and the pair therefore names one end operation: who asked, and on which line. A line ended at its own request has a `source` and no `ancestor`, and a descendant whose own end was already committed keeps that pair when the cascade reaches it. `branch/ended` copies `source` and `ancestor` from the line's `branch/end`, and is always written on the ending line's own parent, taken from the directory.
 
 **A general operation.** `TreeCommands.end(id, source)` and `Session::end_branch(id, source)` check only the target: it exists, it is open, and it is not `main`. Ending `main` would close the Session, so that check is about the target, not the caller. They never check who calls.
 
@@ -302,7 +302,7 @@ Clients show "ended itself" for a `tool` source and no `ancestor`, and otherwise
 
 **Restore.** A child is inactive when its parent has a `branch/ended` for it. The resumed parent's history read reports these (§5). This joins the existing rules: the parent is inactive, the parent has a `branch/create-failed` for the child, or the child's creation never completed.
 
-A line that has `branch/end` but whose parent has no `branch/ended` for it is not opened. Restore completes such ends deepest line first, writing each missing `branch/ended` on the parent with `source` and `ancestor` taken from `branch/end`, and a line's own result last. That parent is not opened either, so the record joins its stored history and its fixed head follows. A line below one of them whose own end never started gets no `branch/ended`: the parent is closed and never replays, so nothing would read it. Restore records each such line as ended at the head it stopped at, with the `source` its parent's `branch/create` gave it, and its history stays readable (§1, "After the end").
+A line that has `branch/end` but whose parent has no `branch/ended` for it is not opened. Restore completes such ends deepest line first, writing each missing `branch/ended` on the parent with `source` and `ancestor` taken from `branch/end`, and a line's own result last. For a line below it, that parent is not opened either, so the record joins its stored history and its fixed head follows. A line below one of them whose own end never started gets no `branch/ended`: the parent is closed and never replays, so nothing would read it. Restore records each such line as ended at the head it stopped at, with the `source` its parent's `branch/create` gave it, and its history stays readable (§1, "After the end").
 
 **After the end:**
 
@@ -403,7 +403,7 @@ These are run locally on real models, and the results are reported in the implem
 
 **TUI.** Lines get their own panel, view and controls:
 
-- `/lines` (alias `/branches`) lists every line of the Session, each indented under the line that opened it, with its state: working, waiting, ended itself, ended by an operation, or creation failed.
+- `/lines` (alias `/branches`) lists every line of the Session, each indented under the line that opened it, with its state: working, waiting, ended itself, ended by an operation, ended with X, or creation failed.
 - Enter shows the selected line's conversation. The composer submits to the line shown, and the composer's bottom border names it, with the first eight characters of its id.
 - `x`, then `y`, ends the selected line, refused on `main`.
 - Questions and approvals carry the line's label, so two lines asking for the same thing are told apart (`(branch NAME)` on a question, `Permission on branch NAME` on an approval).
