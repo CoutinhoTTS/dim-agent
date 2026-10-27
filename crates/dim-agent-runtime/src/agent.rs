@@ -233,9 +233,6 @@ impl Agent {
                 .map(Session::start)
             }
             .await;
-            // Publication and close admission are decided under the entries
-            // lock (lifecycle §3): once Agent::close has taken its snapshot, a
-            // finished build is closed here instead of being published.
             let unpublished = {
                 let mut entries = owner.0.entries.lock().unwrap();
                 match &result {
@@ -302,9 +299,6 @@ impl Agent {
         }
     }
     pub fn close(&self) -> BoxFuture<'static, Result<()>> {
-        // Freeze admitted builds before cancellation can remove their results.
-        // Keep this lock until CloseOnce owns the snapshot so another closer
-        // cannot win registration with a later, incomplete snapshot.
         let entries = self.0.entries.lock().unwrap();
         self.0.closing.cancel();
         let Some(handle) = self.0.handle.get() else {
@@ -429,8 +423,6 @@ impl Session {
             .await
     }
     pub async fn input(&self, data: InputMessageData, branch: &str) -> Result<Arc<AgentEvent>> {
-        // A reported fault precedes the supervisor's automatic close; surface
-        // the root cause instead of an opaque closed rejection.
         if let Some(error) = self.0.owner.faults.failure() {
             return Err(error);
         }
@@ -648,7 +640,8 @@ impl Session {
         // Every branch is checked under its commit lock before any is frozen,
         // so a refused release never rejects a concurrent append.
         // This is the only path holding several commit locks at once; taking
-        // them in id order keeps concurrent releases from deadlocking (ABBA).
+        // them in id order keeps concurrent releases from deadlocking (ABBA,
+        // idle-unload.md §6.1).
         let mut branches = self.branches();
         branches.sort_by(|a, b| a.id.cmp(&b.id));
         let Some(handles) = branches
@@ -660,18 +653,12 @@ impl Session {
         };
         let Some(tails) = handles
             .iter()
-            // A closed branch commits nothing more, so there is nothing to
-            // check or freeze; Closed is final. Any other branch whose close
-            // has started is refused by `lock_idle`.
             .filter(|branch| !branch.0.is_closed())
             .map(|branch| branch.0.lock_idle())
             .collect::<Option<Vec<_>>>()
         else {
             return Ok(false);
         };
-        // Decided with every commit lock held: an owner drops its hold only
-        // after its last fact is appended, so that fact cannot slip in between
-        // the branch checks and this decision. Later holds get `None`.
         if !lifecycle.refuse_holds() {
             return Ok(false);
         }
@@ -774,8 +761,6 @@ impl Drop for AgentInner {
                 Entry::Building(_) => None,
             })
             .collect();
-        // What the Agent created for itself outlives its Sessions' business
-        // cleanup, then closes.
         if let Some(placed) = self.placed.get()
             && let Some(owned) = placed.owned.lock().unwrap().take()
         {

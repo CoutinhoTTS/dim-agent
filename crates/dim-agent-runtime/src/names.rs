@@ -67,9 +67,6 @@ pub fn register<T: ?Sized + Send + Sync + 'static>(
     let name = name_of::<T>();
     let known = match catalog.key_in(&name, &Build::default()) {
         Err(LoaderError::UnknownService(_)) => None,
-        // A marked type's name resolves globally to its dispatcher until the
-        // host registers it in its group: not registered yet. A process name
-        // already shared keeps its registration.
         Ok(key) if group.is_some() && key.type_id() != TypeId::of::<T>() => None,
         Ok(_) => Some(None),
         Err(LoaderError::OutsideInstance { group, .. }) => Some(Some(group)),
@@ -96,7 +93,6 @@ pub fn register<T: ?Sized + Send + Sync + 'static>(
 pub fn catalog() -> ServiceCatalog {
     let mut catalog = ServiceCatalog::new();
     catalog.share_registered_only();
-    // Where the process plugins of a placement register their parts.
     register::<crate::PartRegistry>(&mut catalog, None);
     let session = Some(SESSION_GROUP);
     register::<SessionConfig>(&mut catalog, session);
@@ -219,7 +215,6 @@ impl<'a> Names<'a> {
                     .catalog
                     .key_in(name, build)
                     .map_err(|_| misplaced(name, &group))?,
-                // The real key needs the copy's instances; check the placement only.
                 Place::Check { groups, instance } => {
                     let instance = instance
                         .filter(|_| groups.contains(&group.as_str()))

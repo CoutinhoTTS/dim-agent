@@ -100,7 +100,6 @@ impl WorkspaceTools {
             return Err(HostError::Cancelled(CAPABILITY_RELOADING.into()));
         }
         let branch = self.tree.get(&context.branch_id).map_err(host_error)?;
-        // One token for the call and the unload of this instance.
         let combined = self.lifecycle.child_token();
         let link = async {
             cancel.cancelled().await;
@@ -229,7 +228,6 @@ impl DynPlugin for WorkspaceToolsPlugin {
             let identity = ctx.require_at(&self.identity)?;
             let tree = ctx.require_at(&self.tree)?;
             let methods = ctx.require_at(&self.methods)?;
-            // `session.create` validated and canonicalized the cwd.
             let cwd = PathBuf::from(&config.cwd);
             let output_dir = self.config.output_root.join(&identity.session_id);
             let tools = Arc::new(WorkspaceTools {

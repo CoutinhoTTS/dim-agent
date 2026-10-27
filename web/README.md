@@ -29,7 +29,7 @@ npm run build      # vue-tsc type check, then vite build into web/dist
 npm run typecheck  # type check only
 ```
 
-`web/dist` is what the entry serves: `index.html` for every non-asset path and `/assets/*` as immutable files. The build keeps to the entry's CSP: no inline scripts, no `data:` fonts, and Shiki highlights with its JavaScript regex engine (WebAssembly would need `wasm-unsafe-eval`).
+`web/dist` is what the entry serves: `index.html` for every non-asset path and `/assets/*` as immutable files. The build keeps to the entry's CSP: no inline scripts, no `data:` fonts, and Shiki highlights with its JavaScript regex engine (WebAssembly would need `wasm-unsafe-eval`). `vite.config.ts` replaces markstream's optional `@terrastruct/d2` renderer with an inert module; that renderer is intentionally not shipped, so removing the alias pulls it into the bundle.
 
 ## Layout
 

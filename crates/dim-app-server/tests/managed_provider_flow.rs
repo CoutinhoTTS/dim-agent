@@ -225,7 +225,6 @@ async fn setup() -> (
     let catalog = dim_app_server::catalog();
     let build = rutis_loader::resolve::Build::default();
     let names = Names::copy(&catalog, &build);
-    // The management table the process providers register with.
     root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
     let fixture = Arc::new(Fixture::default());
     *fixture.recovered_generation.lock().unwrap() = 1;
@@ -264,7 +263,6 @@ async fn abandoned_credential_and_recovery_waiters_release_every_issued_lease() 
             }
             waiter.abort();
             assert!(matches!(waiter.await, Err(error) if error.is_cancelled()));
-            // The provider still finishes the accepted work; its result drops.
             fixture.resume.notify_one();
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 while fixture.leases.released.lock().unwrap().len() < 2 {
@@ -351,15 +349,11 @@ async fn a_lease_of_a_replaced_provider_never_reaches_its_replacement() {
         let cancel = CancellationToken::new();
         first.resume.notify_one();
         let lease = owner.credential("fixture", "model", &cancel).await.unwrap();
-        // The binding that issued a lease settles it.
         first.resume.notify_one();
         drop(owner.recover(&lease, &cancel).await.unwrap());
         owner.finish_rejected(&lease, &cancel).await.unwrap();
         assert_eq!(first.settled.load(Ordering::SeqCst), 2);
 
-        // A replacement with an equal account and the same instance-local
-        // lease IDs is a different binding: the old lease is refused before
-        // the replacement sees it.
         first_plugin.shutdown().await.unwrap();
         let second_plugin = root.plugin(FixturePlugin(second.clone()));
         active(&second_plugin).await;
@@ -377,7 +371,6 @@ async fn a_lease_of_a_replaced_provider_never_reaches_its_replacement() {
             assert_eq!(refused.code, "service_reloading");
         }
         assert_eq!(second.settled.load(Ordering::SeqCst), 0);
-        // The replacement's own lease settles with it.
         second.resume.notify_one();
         drop(owner.recover(&current, &cancel).await.unwrap());
         assert_eq!(second.settled.load(Ordering::SeqCst), 1);
@@ -410,8 +403,6 @@ async fn malformed_leases_are_refused_at_the_host_and_released() {
             .unwrap();
         assert_eq!(refused.code, "account_invalid_response", "{case}");
     }
-    // A malformed recovered lease is refused too; the valid one it replaces
-    // is still the caller's.
     *fixture.malformed.lock().unwrap() = None;
     fixture.resume.notify_one();
     let lease = owner.credential("fixture", "model", &cancel).await.unwrap();

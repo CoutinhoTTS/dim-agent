@@ -16,7 +16,6 @@ impl SteerMark {
     pub fn apply(&mut self, event: &AgentEvent) {
         match &event.kind {
             EventKind::ModelStart(data) => self.0 = Some((data.request_id.clone(), false)),
-            // Samples of the frozen contract carry no mode.
             EventKind::InputApplied(data) if data.mode.unwrap_or_default() != InputMode::Append => {
                 if let Some((_, steered)) = self.0.as_mut() {
                     *steered = true;

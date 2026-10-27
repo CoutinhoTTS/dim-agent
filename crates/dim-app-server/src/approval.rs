@@ -34,7 +34,6 @@ pub(crate) async fn respond(
 /// Approval lock; see `Approval::replay` for the ordering it guarantees.
 pub(crate) fn replay(session: &Session, mut notify: impl FnMut(&str, &ApprovalRequestData)) {
     for branch in session.branches() {
-        // A reloading branch settled its requests; a closed one has none.
         if let Ok(approval) = session.service::<Approval>(&branch.id) {
             approval.replay(|request| notify(&branch.id, request));
         }

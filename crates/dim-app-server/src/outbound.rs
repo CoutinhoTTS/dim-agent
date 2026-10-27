@@ -12,7 +12,6 @@ const MAX_PROGRESS_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) struct Frame {
     pub bytes: Vec<u8>,
     pub written: Option<oneshot::Sender<()>>,
-    // Held through the actual write, not merely until dequeue.
     _slot: OwnedSemaphorePermit,
     _budget: OwnedSemaphorePermit,
 }
@@ -131,7 +130,6 @@ impl std::io::Write for LimitedBytes {
         if bytes.len() > MAX_FRAME_BYTES - self.bytes.len() {
             return Err(std::io::Error::other("outbound frame exceeds 16 MiB"));
         }
-        // Charge serialization before allocating, including concurrent writers.
         let permit = self
             .budget
             .clone()

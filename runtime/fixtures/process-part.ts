@@ -20,7 +20,6 @@ export default definePlugin({
     let calls = 0
     const pending = new Set<Promise<void>>()
     ctx.effect(async () => {
-      // Cancellation is asynchronous; keep owned state until accepted calls settle.
       await Promise.all(pending)
       stopped = true
     })
@@ -33,7 +32,6 @@ export default definePlugin({
     if (config.holdApply) await hold(config.holdApply)
     const status = () => ({ generation, pid: process.pid, calls, alive: !stopped })
     ctx.provide('exampleProcess', { status() { alive(); return status() } })
-    // A method outside the namespace is refused, which fails the row.
     const declarations: MethodDeclaration[] = config.badMethods
       ? [{ name: 'outside.status', mutating: false, interruption: 'report', progress: false }]
       : ['status', 'read', 'error', 'malformed', 'undefined', 'report', 'drain'].map(name => ({
@@ -50,7 +48,6 @@ export default definePlugin({
           alive()
           calls++
           if (call.method === 'example.error') return { code: 'fixture_error', message: 'fixture error' }
-          // Exercise malformed foreign data at the actual native boundary.
           if (call.method === 'example.malformed') return { extra: true } as never
           if (call.method === 'example.undefined') return { kind: 'value' }
           if (call.method === 'example.read') {

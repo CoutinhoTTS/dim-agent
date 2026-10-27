@@ -28,7 +28,6 @@ pub(super) fn apply(
     ) {
         return super::native::apply(request, config, kind, options);
     }
-    // The array order is also the field and intent precedence.
     let mut levels = [
         Controls::default(),
         Controls::default(),

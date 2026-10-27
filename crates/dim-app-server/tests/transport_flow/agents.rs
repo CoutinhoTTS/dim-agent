@@ -57,7 +57,6 @@ async fn parallel_agents_isolate_sessions_and_listing() {
         assert_eq!(default_info["sessions"], 0);
         assert_ne!(default_info["agentId"], first.as_str());
 
-        // Unfiltered v3 lists every Agent's Sessions with their owner.
         let listed = client.rpc("session.list", json!({})).await;
         let sessions = listed["result"].as_array().unwrap();
         assert_eq!(sessions.len(), 2);
@@ -65,7 +64,6 @@ async fn parallel_agents_isolate_sessions_and_listing() {
             let owner = session["agentId"].as_str().unwrap();
             assert!(owner == first || owner == second);
         }
-        // Filtering narrows to one Agent; v1 keeps the default-Agent view.
         let listed = client.rpc("session.list", json!({"agentId":first})).await;
         let sessions = listed["result"].as_array().unwrap();
         assert_eq!(sessions.len(), 1);
@@ -107,7 +105,6 @@ async fn agent_close_settles_sessions_and_leaves_other_agents() {
         .unwrap()
         .to_owned();
 
-    // Attach so the closing Session reports session.closed to this client.
     assert_ok(
         &client
             .rpc("session.attach", json!({"sessionId":closed_session}))
@@ -138,8 +135,6 @@ async fn agent_close_settles_sessions_and_leaves_other_agents() {
         .await;
     assert_eq!(unknown["error"]["data"]["appError"], "agent_unknown");
 
-    // The default Agent is the v1/v2 compatibility target; it stays closable
-    // only through an Agents restart.
     let default_agent = client.rpc("agent.list", json!({})).await["result"]
         .as_array()
         .unwrap()
@@ -210,7 +205,6 @@ async fn legacy_versions_stay_on_the_default_agent() {
         .iter()
         .find(|info| info["default"] == true)
         .unwrap();
-    // v3 without agentId and both legacy Sessions belong to the default Agent.
     assert_eq!(default_info["sessions"], 3);
     let mut params = create(json!([]));
     params["agentId"] = json!("missing");
@@ -296,8 +290,6 @@ async fn session_close_waits_for_a_concurrent_agent_close_settlement() {
     assert_ok(&created);
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
 
-    // agent.close settles through the gated cleanup; session.close races it
-    // from inside the closing window, after the Agent left the live index.
     let closing = client.send("agent.close", json!({"agentId":agent})).await;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -354,16 +346,13 @@ async fn agent_close_cleanup_failure_returns_a_fixed_outbound_message() {
 
     let failed = client.rpc("agent.close", json!({"agentId":agent})).await;
     assert_eq!(failed["error"]["code"], -32000);
-    // Fixed outbound text: no internal paths or cleanup details leak.
     assert_eq!(failed["error"]["message"], "Agent unload failed");
     assert!(failed["error"].get("data").is_none());
 
-    // The Agent is gone.
     let listed = client.rpc("agent.list", json!({})).await;
     let agents = listed["result"].as_array().unwrap();
     assert!(agents.iter().all(|info| info["agentId"] != agent.as_str()));
 
-    // A healthy Agent closes cleanly afterwards.
     fail.store(false, std::sync::atomic::Ordering::SeqCst);
     let next = client.rpc("agent.create", json!({})).await;
     assert_ok(&next);
@@ -454,7 +443,6 @@ async fn session_close_reports_the_settlement_failure_of_a_concurrent_agent_clos
         "session.close must wait for the Agent's settlement"
     );
 
-    // The gated settlement then fails: both closes report fixed messages.
     gate.notify_one();
     let session_reply = client.response(session_close).await;
     assert_eq!(session_reply["error"]["code"], -32000);
@@ -603,7 +591,6 @@ async fn agent_profile_supplies_session_defaults() {
         )
     );
 
-    // Explicit request values win over the profile.
     let created = turn(
         &mut client,
         json!({"cwd":cwd,"agentId":agent,"systemPrompt":"Explicit.","tools":["wait"],"model":{"modelId":"explicit"}}),
@@ -623,7 +610,6 @@ async fn agent_profile_supplies_session_defaults() {
         )
     );
 
-    // The default Agent and a profile-less Agent use the process defaults.
     let defaults = ServerConfig::default().session_defaults;
     let mut tools = defaults.tools.clone().unwrap();
     tools.sort();
@@ -643,8 +629,6 @@ async fn agent_profile_supplies_session_defaults() {
     .await;
     assert_eq!(model.last(), expected);
 
-    // A profile may name a tool nothing registers yet: its Sessions offer it
-    // once a part registers it.
     let pending = client
         .rpc(
             "agent.create",

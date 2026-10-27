@@ -102,8 +102,6 @@ impl SkillsCatalog {
 
     pub async fn query(&self, cwd: Option<&Path>) -> Result<CatalogView, SkillsError> {
         self.check_open()?;
-        // A failed settings read is retried here, so the cache recovers
-        // without waiting for another settings change.
         if self.state.lock().await.settings.is_err() {
             self.reload_settings().await?;
         }
@@ -212,7 +210,6 @@ impl SkillsCatalog {
             .update_skills(current, id.into(), enabled, cancel)
             .await
             .map_err(settings_error)?;
-        // The cache follows the settings service, never a pre-write snapshot.
         self.reload_settings()
             .await
             .map_err(|error| SkillsError::SettingsSync(error.to_string()))?;
@@ -316,7 +313,6 @@ impl SkillsCatalogPlugin {
     ) -> Result<Arc<SkillsCatalog>, Error> {
         let settings = settings.0.clone();
         let lifecycle = ctx.cancellation_token();
-        // Listen before the first read, so no later write goes unread.
         let (wake, mut changes) = watch::channel(());
         ctx.listen::<SettingsChanged>()
             .name(settings_changes(SOURCE))

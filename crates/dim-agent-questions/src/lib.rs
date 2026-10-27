@@ -324,12 +324,9 @@ impl Questions {
                 if self.waiters.lock().unwrap().table.remove(&key).is_some() {
                     return Err(HostError::Cancelled(CANCELLED.into()));
                 }
-                // `respond` removed the entry first and sent under the lock,
-                // or the unload dropped the sender.
                 answer.await
             }
         };
-        // A dropped sender is the unload's: the batch is reload-settled.
         let answered = answered.map_err(|_| HostError::Cancelled(CAPABILITY_RELOADING.into()))?;
         Ok(result(&questions, answered))
     }
@@ -358,8 +355,6 @@ impl Questions {
             (answers, _) => answers,
         };
         let mut waiters = self.waiters.lock().unwrap();
-        // A response to a settled call never reaches a later call that
-        // reuses its call id: their request ids differ.
         let key = (p.branch_id, p.request_id, p.call_id);
         let waiter = waiters.table.get(&key).ok_or_else(|| {
             RpcError::app(
@@ -379,7 +374,6 @@ impl Questions {
             },
         };
         let waiter = waiters.table.remove(&key).expect("checked entry");
-        // Under the lock, so a cancel that finds no entry finds the answer.
         let _ = waiter.sender.send(answered);
         Ok(json!({}))
     }
@@ -475,7 +469,6 @@ impl DynPlugin for QuestionsPlugin {
             });
             let owner = questions.clone();
             ctx.effect(move || async move {
-                // Dropping the senders ends every waiting call as reloading.
                 let mut waiters = owner.waiters.lock().unwrap();
                 waiters.closed = true;
                 waiters.table.clear();

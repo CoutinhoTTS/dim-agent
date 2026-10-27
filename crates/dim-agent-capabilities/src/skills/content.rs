@@ -100,7 +100,6 @@ impl Contents {
             ContentError::Catalog(error) => error,
             ContentError::Lifecycle(error) => {
                 tracing::error!(%error, "Skill contents unavailable");
-                // Preserve the existing public error contract; lifecycle details stay in diagnostics.
                 SkillsError::Closed
             }
         })
@@ -155,11 +154,8 @@ impl Contents {
             if self.instances.contains_key(&id) {
                 continue;
             }
-            // A replaced definition has already retired its previous instance.
-            // Session-scoped identity is sufficient; no random service name is needed.
             let provided = Key::<Contribution>::dynamic(id.clone()).instance(self.session);
             let key = provided.erase();
-            // Await creation to settlement even on cancellation: never abandon a partial instance.
             let instance = loader
                 .create_instance(GROUP)
                 .with(ContentConfig {
@@ -170,7 +166,6 @@ impl Contents {
                 .await
                 .map_err(|error| ContentError::Lifecycle(error.to_string()))?;
             let ready = self.contributions.0.lock().unwrap().contains_key(&key);
-            // The template has one leaf; its provided service proves that leaf applied.
             if cancel.is_cancelled() || !ready {
                 instance
                     .view
@@ -180,7 +175,6 @@ impl Contents {
                 if let Some(error) = instance.view.state().error {
                     return Err(ContentError::Lifecycle(error.to_string()));
                 }
-                // Cancellation is an ordinary close or rollback, not a fault.
                 return Err(if cancel.is_cancelled() {
                     SkillsError::Closed.into()
                 } else {

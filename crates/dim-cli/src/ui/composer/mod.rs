@@ -195,7 +195,7 @@ impl Composer {
     }
 
     /// Skills the palette offers as `$skill:` mentions.
-    #[allow(dead_code)] // Set once the App Server lists skills.
+    #[allow(dead_code)]
     pub fn set_skills(&mut self, skills: Vec<palette::Skill>) {
         self.skills = skills;
     }
@@ -232,8 +232,6 @@ impl Composer {
         self.history.drain(..skip);
     }
 
-    // ---- command palette -------------------------------------------------
-
     /// The query after the leading `/` when the draft is a command being
     /// typed: one line, starting with `/`, no whitespace yet.
     fn command_query(&self) -> Option<&str> {
@@ -257,8 +255,6 @@ impl Composer {
         )
     }
 
-    // ---- keys ------------------------------------------------------------
-
     pub fn handle_key(&mut self, key: KeyEvent) -> Outcome {
         let plain = key.mods.0 & !Modifiers::SHIFT.0 == 0;
         let ctrl_only = key.mods.contains(Modifiers::CTRL) && key.mods.0 == Modifiers::CTRL.0;
@@ -273,8 +269,6 @@ impl Composer {
         {
             return outcome;
         }
-        // `!` into an empty draft enters shell mode, a second `!` the
-        // private one; Backspace on the empty draft steps back out.
         if self.area.text().is_empty() {
             match key.code {
                 KeyCode::Char('!') if plain && self.shell != Some(Shell::Private) => {
@@ -343,7 +337,6 @@ impl Composer {
                 Some(Outcome::Handled)
             }
             KeyCode::Esc => {
-                // First Esc clears the query, the next one closes the palette.
                 if query.is_empty() {
                     self.clear();
                 } else {
@@ -355,8 +348,6 @@ impl Composer {
             }
             KeyCode::Enter | KeyCode::Tab => {
                 let row = rows.get(self.palette.current(&rows))?;
-                // A command that needs a session is still run: the app says
-                // why it cannot, as the full build does.
                 if !row.selectable() {
                     return Some(Outcome::Handled);
                 }
@@ -370,7 +361,6 @@ impl Composer {
                         })
                     }
                     crate::ui::rows::Kind::Skill(name) => {
-                        // A skill is inserted as a mention, not run.
                         let mention = format!("$skill: {name} ");
                         self.clear();
                         self.area.insert_str(&mention);
@@ -384,8 +374,6 @@ impl Composer {
             _ => None,
         }
     }
-
-    // ---- @ mentions ---------------------------------------------------------
 
     /// The `@` mention being typed, unless Esc closed it.
     fn mention(&self) -> Option<mentions::Trigger> {
@@ -502,7 +490,6 @@ impl Composer {
                 shell,
             };
         }
-        // A typed `/name args` is a command, not a message.
         if let Some(rest) = expanded.trim().strip_prefix('/') {
             let (name, args) = match rest.split_once(char::is_whitespace) {
                 Some((name, args)) => (name, args.trim()),
@@ -526,7 +513,6 @@ impl Composer {
             Err(reason) => return Outcome::Rejected(reason),
         };
         self.clear();
-        // A collapsed paste is stored on the host; typed text goes as is.
         if parts
             .iter()
             .any(|part| matches!(part, DraftPart::Block(_) | DraftPart::Paste(_)))
@@ -677,8 +663,6 @@ impl Composer {
         self.tokens.retain(|t| live.contains(&t.id));
     }
 
-    // ---- history -----------------------------------------------------------
-
     /// Up on a single-line draft at the start walks older entries; Down while
     /// browsing, at either end, walks back toward the saved draft.
     fn browse_history(&mut self, up: bool) -> bool {
@@ -735,8 +719,6 @@ impl Composer {
             self.tokens.clear();
         }
     }
-
-    // ---- paste -------------------------------------------------------------
 
     pub fn paste(&mut self, text: &str) {
         let text = sanitize(text);
@@ -825,8 +807,6 @@ impl Composer {
         }
     }
 
-    // ---- drawing -----------------------------------------------------------
-
     /// Rows of the input at `text_width` columns (without prompt/border), the
     /// cursor (row, column) inside them, and how many rows the draft needs.
     pub fn render_rows(&mut self, text_width: u16, p: &Palette) -> (Vec<String>, (u16, u16)) {
@@ -856,7 +836,6 @@ impl Composer {
                     style = style.fg(color);
                 }
                 if cell.modifier.contains(Modifier::BOLD) {
-                    // A token: accent and bold.
                     style = style.add_modifier(Modifier::BOLD);
                     if let Some(color) = accent {
                         style = style.fg(color);
@@ -867,7 +846,6 @@ impl Composer {
                 }
                 x += w.max(1) as u16;
             }
-            // Trailing blanks are dropped; the box pads to its width.
             while cells.last().is_some_and(|c| c.0 == " ") {
                 cells.pop();
             }
@@ -972,12 +950,10 @@ mod tests {
             .join("\n");
         c.paste(&block);
         assert_eq!(c.text(), "[... 12 lines]");
-        // One backspace removes the whole token, not a character of it.
         let mut again = Composer::new(Vec::new());
         again.paste(&block);
         again.handle_key(key(KeyCode::Backspace));
         assert_eq!(again.text(), "");
-        // What the composer collapses is stored on the host, not inlined.
         assert_eq!(
             c.handle_key(key(KeyCode::Enter)),
             Outcome::SubmitDraft {
@@ -985,7 +961,6 @@ mod tests {
                 parts: vec![DraftPart::Paste(block)],
             }
         );
-        // Below the thresholds the paste is typed text and submits as is.
         let mut short = Composer::new(Vec::new());
         short.paste("one\ntwo\nthree");
         assert_eq!(
@@ -996,7 +971,6 @@ mod tests {
 
     #[test]
     fn a_quoted_message_joins_the_draft_and_submits_with_it() {
-        // The Web composer checks the same cases: one format for both.
         let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
             "../../../../../web/src/features/chat/quote-cases.json"
         ))
@@ -1013,7 +987,6 @@ mod tests {
                 field("name")
             );
             assert_eq!(c.text(), result, "{}", field("name"));
-            // What Enter submits is the draft as it stands.
             assert_eq!(
                 c.handle_key(key(KeyCode::Enter)),
                 if result.trim().is_empty() {
@@ -1025,7 +998,6 @@ mod tests {
                 field("name")
             );
         }
-        // A draft keeps its pasted parts; the quote goes after them.
         let mut c = Composer::new(Vec::new());
         let block = (1..=12)
             .map(|n| format!("pasted line {n}"))
@@ -1043,7 +1015,6 @@ mod tests {
                 ],
             }
         );
-        // A shell draft takes no quote: it would run as part of the command.
         let mut c = Composer::new(Vec::new());
         typed(&mut c, "!ls");
         assert!(!c.quote("earlier"));
@@ -1092,7 +1063,6 @@ mod tests {
             DraftPart::Text(format!(" [notes.txt]({}) ", notes.display()))
         );
         assert_eq!(parts[3], DraftPart::Paste(long));
-        // Twenty images at most, the whole group refused.
         let mut c = Composer::new(Vec::new());
         let many = vec![image; 21];
         assert!(c.attach_files(&many).is_err());
@@ -1117,13 +1087,11 @@ mod tests {
         c.attach_files(std::slice::from_ref(&image)).unwrap();
         c.attach_files(std::slice::from_ref(&image)).unwrap();
         assert_eq!(c.text(), "[shot.png] [shot.png #2]");
-        // Without image input an image file is sent as its path.
         let link = format!("[shot.png]({})", image.display());
         assert_eq!(
             c.handle_key(key(KeyCode::Enter)),
             Outcome::Submit(format!("{link} {link}"))
         );
-        // A clipboard image has no path to fall back to: the draft stays.
         let source = crate::images::encoded(std::fs::read(&image).unwrap()).unwrap();
         c.attach_image(source).unwrap();
         assert_eq!(c.text(), "[Image #1]");
@@ -1187,7 +1155,6 @@ mod tests {
         c.handle_key(key(KeyCode::Enter));
         assert_eq!(c.text(), "read @notes.txt ");
         assert!(!c.mention_open());
-        // A directory is typed in and the picker stays open inside it.
         typed(&mut c, "@sr");
         assert_eq!(picked(&mut c, "sr")[0], "src/");
         c.handle_key(key(KeyCode::Tab));
@@ -1195,7 +1162,6 @@ mod tests {
         assert_eq!(picked(&mut c, "src/"), ["src/main.rs"]);
         c.handle_key(key(KeyCode::Enter));
         assert_eq!(c.text(), "read @notes.txt @src/main.rs ");
-        // Esc closes the picker without touching the draft.
         typed(&mut c, "@x");
         c.handle_key(key(KeyCode::Esc));
         assert!(!c.mention_open());
@@ -1210,7 +1176,6 @@ mod tests {
                 main.display()
             ))
         );
-        // Shell mode has no picker.
         typed(&mut c, "!ls @s");
         assert!(!c.mention_open());
     }
@@ -1231,7 +1196,6 @@ mod tests {
     fn history_walks_back_and_returns_the_saved_draft() {
         let mut c = Composer::new(vec!["first".into(), "second".into()]);
         typed(&mut c, "draft");
-        // Up from the end first moves to the start (a single row).
         c.handle_key(key(KeyCode::Up));
         assert_eq!(c.text(), "draft");
         c.handle_key(key(KeyCode::Up));
@@ -1255,7 +1219,6 @@ mod tests {
                 args: String::new(),
             }
         );
-        // Ctrl+Z reaches the editor: it is not a suspend key any more.
         let mut c = Composer::new(Vec::new());
         typed(&mut c, "draft");
         c.handle_key(KeyEvent::new(KeyCode::Char('z'), Modifiers::CTRL));
@@ -1302,7 +1265,6 @@ mod tests {
                 args: "abc123".into()
             }
         );
-        // Unknown slash text goes to the model.
         typed(&mut c, "/etc/hosts is odd");
         assert_eq!(
             c.handle_key(key(KeyCode::Enter)),
@@ -1330,12 +1292,10 @@ mod tests {
         );
         assert_eq!(c.shell(), None, "a run leaves shell mode");
 
-        // A bang inside a message stays text.
         typed(&mut c, "hi!");
         assert_eq!((c.shell(), c.text()), (None, "hi!"));
         c.clear();
 
-        // History brings its mode back, and the draft's mode on the way down.
         typed(&mut c, "!");
         c.handle_key(key(KeyCode::Up));
         assert_eq!((c.shell(), c.text()), (None, "plain"));

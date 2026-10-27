@@ -119,8 +119,6 @@ impl HostPlatform {
                 "PAGER",
                 "GIT_PAGER",
                 "GH_PAGER",
-                // Select the developer directory and git configuration that
-                // the default grants cover.
                 #[cfg(target_os = "macos")]
                 "DEVELOPER_DIR",
                 #[cfg(target_os = "macos")]
@@ -151,8 +149,6 @@ impl HostPlatform {
                     "/Library/Apple",
                     "/private/etc",
                     "/etc",
-                    // The selection links read by /bin/sh and the /usr/bin
-                    // developer shims.
                     "/var/select",
                 ];
                 #[cfg(not(target_os = "macos"))]
@@ -167,9 +163,6 @@ impl HostPlatform {
                         }
                     }
                 }
-                // The shims run DEVELOPER_DIR when the command receives it,
-                // otherwise the directory the link selects. The grant follows
-                // that choice and never substitutes another installation.
                 #[cfg(target_os = "macos")]
                 {
                     let developer = received(&environment, &spec.env, "DEVELOPER_DIR")
@@ -217,15 +210,12 @@ impl HostPlatform {
                     .into(),
             ));
         }
-        // git's default files are macOS grants, which are additive, so they
-        // may lie inside a writable root, such as a home in writablePaths.
         read_only_files.extend(default_files);
         if !enabled {
             return Ok((spec, None, None));
         }
         spec.env
             .retain(|(name, _)| environment.iter().any(|allowed| name == allowed.as_str()));
-        // Linux is unchanged: its namespace has no /tmp and receives no TMPDIR.
         let temporary = if default_writes && cfg!(target_os = "macos") {
             let temporary = temporary_directory()
                 .await
@@ -338,7 +328,6 @@ fn prepare(
          (allow file-read* (literal \"/\") (literal \"/dev/random\") (literal \"/dev/urandom\"))\
          (allow file-read* file-write* (literal \"/dev/null\"))",
     );
-    // Inherited PTYs need terminal control without opening other devices.
     for command in [
         libc::TIOCGETD,
         libc::TIOCGETA,
@@ -370,7 +359,6 @@ fn prepare(
             let mut parameter = OsString::from(format!("{name}="));
             parameter.push(path);
             args.extend(["-D".into(), parameter]);
-            // realpath(3) stats every ancestor of a granted path.
             profile.push_str(&format!(
                 "(allow file-read* {}({filter} (param \"{name}\")))\
                  (allow file-read-metadata (path-ancestors (param \"{name}\")))",
@@ -494,8 +482,6 @@ fn binds(
     args
 }
 
-// CI has no Linux job, so the bind order is checked here rather than by
-// running bubblewrap.
 #[cfg(test)]
 #[tokio::test]
 async fn bubblewrap_binds_file_roots_after_the_directories_that_contain_them() {

@@ -19,7 +19,7 @@ pub enum RowKind {
     Status,
     /// A row kind the UI does not draw specially; it falls back to a status
     /// line.
-    #[allow(dead_code)] // The projection maps every kind it emits.
+    #[allow(dead_code)]
     Other,
 }
 
@@ -37,7 +37,7 @@ impl RowKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowTone {
     Danger,
-    #[allow(dead_code)] // The projection emits no warning statuses yet.
+    #[allow(dead_code)]
     Warning,
 }
 

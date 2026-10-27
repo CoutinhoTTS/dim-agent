@@ -74,7 +74,6 @@ impl Default for Questions {
             pending: Pending::default(),
             handled: HashSet::new(),
             asking: None,
-            // `main` is read when the Session is attached.
             branches: HashSet::from(["main".to_owned()]),
             reads: Vec::new(),
             drained: HashSet::new(),
@@ -262,14 +261,11 @@ impl Questions {
                 display.record("[question answered]")?;
                 self.asking = None;
             }
-            // The batch settled while the reply was outstanding: nothing
-            // waits any more, and its result tells what happened.
             (_, Some(answered)) => {
                 display.record(closed(answered))?;
                 self.asking = None;
             }
             (Reply::NotPending, None) => {
-                // Typeahead is dropped before the line that asks for Enter.
                 if let Some(input) = input {
                     input.prompt("")?;
                 }
@@ -331,7 +327,6 @@ impl Questions {
                 continue;
             };
             if asking.sent.is_some() {
-                // Its reply decides what the prompt says.
                 asking.settled = Some(answered);
                 continue;
             }
@@ -376,7 +371,6 @@ impl Questions {
         display: &mut Display,
     ) -> Result<()> {
         let page = match result {
-            // A branch that closed since its state notice asks nothing.
             Err(error)
                 if error
                     .data

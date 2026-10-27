@@ -1,6 +1,5 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
-        // prompts.rs: exit confirmation
         "The agent is still running." => "智能体仍在运行。",
         "AskUser is waiting for an answer." => "AskUser 正在等待回答。",
         "A permission request is waiting." => "有授权请求正在等待。",
@@ -16,7 +15,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "y restart · n stay · ←→ move · enter confirm" => {
             "Y 重启 · N 留下 · ←→ 移动 · Enter 确认"
         }
-        // upgrade_dialog.rs
         "Update available" => "有新版本",
         "Version {latest} is available (you have {current})." => {
             "{latest} 已发布（当前 {current}）。"
@@ -35,7 +33,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Update failed: {error}" => "升级失败：{error}",
         "←→ move · Enter confirm · Esc close" => "←→ 移动 · Enter 确认 · Esc 关闭",
-        // prompts.rs: permission request
         "Permission required" => "需要授权",
         "Allow once" => "允许一次",
         "Allow always" => "始终允许",
@@ -56,7 +53,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Question on branch {branch}" => "来自分支 {branch} 的问题",
         "Sending answer…" => "正在发送回答…",
         "Question not ready; press Enter to send again" => "问题尚未就绪；按 Enter 重试",
-        // prompts.rs: AskUser
         "Confirm" => "确认",
         "Enter save · Esc back" => "Enter 保存 · Esc 返回",
         "Enter submit · 1-9 edit · Tab/←→ back · Esc decline" => {
@@ -73,7 +69,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Type your own answer" => "输入自定义回答",
         "Review your answers and press Enter to submit." => "确认答案后按 Enter 提交。",
         "Not answered" => "未回答",
-        // approvals_panel.rs
         "Tool Approvals" => "工具审批",
         "full access" => "完全授权",
         "All tools run automatically, bypass permissions" => "所有工具自动执行，跳过权限确认",
@@ -94,7 +89,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Full access reduces confirmation prompts and can run sensitive actions, file changes, or external commands directly. Use it only when you trust the current task." => {
             "完全授权会减少确认步骤，并可直接执行敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。"
         }
-        // transcript/tool_group.rs: summary verbs
         "ran" => "运行了",
         "running" => "正在运行",
         "read" => "读取了",
@@ -113,7 +107,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Editing" => "正在编辑",
         "Changed" => "修改了",
         "Changing" => "正在修改",
-        // transcript/tool_group.rs: counts
         "1 file" => "1 个文件",
         "{count} files" => "{count} 个文件",
         "1 web page" => "1 个网页",
@@ -131,7 +124,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{files} and {pages}" => "{files}和{pages}",
         ", " => "，",
         " · {count} failed" => " · {count} 个失败",
-        // transcript/tool_group.rs: call rows
         "Read" => "读取",
         "List" => "列出",
         "Grep" => "文本搜索",

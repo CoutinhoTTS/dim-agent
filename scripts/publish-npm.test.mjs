@@ -18,7 +18,6 @@ const platforms = [
 function fixture(t, version = '1.2.3', shipped = platforms) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dim-npm-release-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  // The Web workspace package ships with every release, before the wrapper.
   const names = [...shipped.map(([platform]) => `dimcode-${platform}`), 'dimcode-web', 'dimcode'];
   const manifest = { sourceCommit, version, npmPackages: [] };
   for (const name of names) {
@@ -31,7 +30,6 @@ function fixture(t, version = '1.2.3', shipped = platforms) {
       metadata.optionalDependencies = Object.fromEntries(names.slice(0, -1).map((name) => [name, version]));
       metadata.bin = { dim: 'bin/dim.mjs', dimcode: 'bin/dim.mjs' };
     } else if (name === 'dimcode-web') {
-      // Platform-independent: no os or cpu.
     } else {
       const [, os, cpu] = platforms.find(([platform]) => name === `dimcode-${platform}`);
       metadata.os = [os];
@@ -44,7 +42,6 @@ function fixture(t, version = '1.2.3', shipped = platforms) {
     manifest.npmPackages.push({ name, file,
       sha256: createHash('sha256').update(readFileSync(path.join(root, file))).digest('hex') });
   }
-  // Registry writes are the only substituted boundary; package archives are real.
   const bin = path.join(root, 'bin');
   mkdirSync(bin);
   writeFileSync(path.join(bin, 'npm'), `#!/bin/sh

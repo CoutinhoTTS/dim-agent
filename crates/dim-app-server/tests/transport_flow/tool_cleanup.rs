@@ -154,8 +154,6 @@ async fn closed_notification_waits_for_session_resources_and_registry_removal() 
     }
 }
 
-// The tool owns a real child. The TCP peer observes execution and delays cleanup
-// without accessing the Agent or its cancellation token.
 struct ProcessTool(SocketAddr);
 impl ToolDriver for ProcessTool {
     fn definitions(&self) -> Vec<ToolDefinition> {
@@ -210,7 +208,6 @@ impl ToolDriver for ProcessTool {
                     .write_all(b"{\"phase\":\"cleaning\"}\n")
                     .await
                     .unwrap();
-                // Hold the child alive until the external peer releases cleanup.
                 command.clear();
                 assert_ne!(peer.read_line(&mut command).await.unwrap(), 0);
                 assert_eq!(command, "release\n");
@@ -320,7 +317,6 @@ async fn running_tool_stop_and_close_survive_disconnect_during_cleanup() {
                     .await,
             );
 
-            // Establish normal execution, real stdout, process exit and model continuation.
             let (mut peer, pid) = start_tool(&mut origin, &listener, &sid, "NORMAL").await;
             finish_tool(&mut peer, pid, false).await;
             assert_ok(&origin.rpc("session.idle", json!({"sessionId":sid})).await);
@@ -461,7 +457,6 @@ async fn running_tool_stop_and_close_survive_disconnect_during_cleanup() {
                 .rpc("session.submit", json!({"sessionId":sid,"text":"late"}))
                 .await;
             assert_eq!(rejected["error"]["data"]["appError"], "session_closed");
-            // The close settled the third call before the Session ended.
             let events: Vec<_> = session
                 .history("main", None)
                 .await

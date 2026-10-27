@@ -24,6 +24,13 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 - `ToolResult.content` is the only text the model can read. Handles, cursors and state the model needs later must be written into `content`; `structuredContent` is only for persistence, UI and internal logic.
 - Incompatible persistence changes require an explicit format decision; do not silently reuse a version for incompatible committed formats. Validate against disposable databases, never a user's existing store.
 
+## Comments
+
+- Prefer code that needs no comment. A comment is only for what code cannot carry: a stable external reference (`#169`, `ADR 006 D3`), a tool or compiler directive, a `// SAFETY:` precondition, a generated-file marker, or a license header.
+- Pin behavior with names, types, tests and assertion messages; put design rationale in commit messages and design documents, and external context in issues and specifications.
+- Do not narrate code or tests, label sections, restate what a test asserts, or leave a TODO without an issue. Update or remove a comment when the fact it carries changes.
+- `///` and `//!` document caller-visible contracts: behavior, preconditions, errors, panics, and examples where useful, not internal implementation.
+
 ## Documentation
 
 - Cross-module flows live in higher-level documents; lower-level documents only describe their own inputs, outputs and error contracts.

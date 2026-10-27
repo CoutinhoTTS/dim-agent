@@ -239,8 +239,6 @@ impl DynPlugin for SkillsCatalogPlugin {
                 Arc::new(move |method, value, _, _| {
                     let catalog = catalog.clone();
                     Box::pin(async move {
-                        // SkillsCatalog has no caller cancellation argument. Keep its
-                        // accepted future alive and drain it rather than dropping mutations.
                         match method.as_str() {
                             "skills.catalog" => {
                                 let p: SelectionScope = params(value)?;

@@ -16,7 +16,6 @@ export class Jobs {
     try { reply = await this.settings.read({ source: 'schedule', scope: 'user' }) }
     catch (error) { throw new SettingsReadError('failed', error instanceof Error ? error.message : String(error)) }
     if (!reply.ok) throw new SettingsReadError(reply.error.code, reply.error.message)
-    // Settings validates and defaults this source against its declared row schema.
     return { document: reply.value.document as unknown as ScheduleSettings, revision: reply.value.revision }
   }
 

@@ -34,8 +34,6 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-// ------------------------------------------------------------------ model
-
 /// Replies with queued tool batches, then with text.
 #[derive(Default)]
 struct Script {
@@ -96,8 +94,6 @@ impl ModelDriver for Script {
         })
     }
 }
-
-// ------------------------------------------------------------------ harness
 
 /// Provides the process HostPlatform the design lets tests construct.
 struct PlatformPlugin(Arc<HostPlatform>);
@@ -185,7 +181,6 @@ impl Harness {
             &mut builder,
             ModelProviderPlugin::new,
         );
-        // The Agent's own plugin: the catalog and the Skills parts.
         builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
         let agent = builder.build_in(&root);
         Self {
@@ -314,8 +309,6 @@ fn task_of(result: &ToolResult) -> String {
 fn tool_results(events: &[Arc<AgentEvent>]) -> usize {
     count(events, "step/tool-result")
 }
-
-// ------------------------------------------------------------------ tests
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn persistent_isolation_preserves_policy_and_job_control() {
@@ -470,7 +463,6 @@ async fn persistent_isolation_preserves_policy_and_job_control() {
     }
     let mut shell_temporary = None;
     if mode == "default" {
-        // The shell owns one TMPDIR for its lifetime.
         let (content, path) = (
             harness.cwd.join("shell-temporary"),
             harness.cwd.join("tmpdir"),
@@ -753,7 +745,6 @@ async fn new_persistent_shells_and_environment_refresh_use_current_preferences()
     } else {
         "/usr/bin/bash"
     };
-    // The first shell is created after the service and Session were published.
     set_shell(alternate);
     session
         .configure(
@@ -790,7 +781,6 @@ async fn new_persistent_shells_and_environment_refresh_use_current_preferences()
         environment.contains(&format!("<shell>{alternate}</shell>")),
         "{environment}"
     );
-    // Editing the preference does not replace a running shell.
     set_shell("/bin/bash");
     harness
         .run(
@@ -807,7 +797,6 @@ async fn new_persistent_shells_and_environment_refresh_use_current_preferences()
         .run(&session, &[("execute", json!({"command":"exit 7"}))])
         .await;
     session.idle("main").await.unwrap();
-    // A replacement shell reads the current preference, without a Session reload.
     harness
         .run(
             &session,
@@ -832,7 +821,6 @@ async fn foreground_echo_returns_output() {
     let result = &results(&events)[0];
     assert!(text(result).contains("hello"), "{}", text(result));
     assert_eq!(result.is_error, None);
-    // The declaration states the default isolation.
     let declared = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -927,7 +915,6 @@ async fn background_task_returns_task_id_and_completes() {
         text(result)
     );
 
-    // Wait for completion.
     let events = until(&session, "exec ended", |events| ended(events).len() == 1).await;
     let (end_event, end) = &ended(&events)[0];
     assert_eq!(end.status, ExecStatus::Completed);
@@ -944,7 +931,6 @@ async fn background_task_returns_task_id_and_completes() {
         "completion preceded admission"
     );
 
-    // Wake notification.
     let events = until(&session, "wake", |events| !notifications(events).is_empty()).await;
     assert_eq!(
         notifications(&events),
@@ -980,13 +966,11 @@ async fn timeout_occupies_shell_and_wakes() {
         text(result)
     );
 
-    // Wait for completion.
     let events = until(&session, "exec ended", |events| ended(events).len() == 1).await;
     let (end_event, end) = &ended(&events)[0];
     assert_eq!(end.status, ExecStatus::Completed);
     assert_eq!(end.task_id, task_id);
 
-    // Wake notification.
     let events = until(&session, "wake", |events| !notifications(events).is_empty()).await;
     assert_eq!(
         notifications(&events),
@@ -1017,7 +1001,6 @@ async fn stop_background_task() {
     let task_id = task_of(&results(&events)[0]);
     let pid = pid_in(&pid_file).await;
 
-    // Stop via the branch service.
     let stop = session
         .service::<dyn dim_agent_capabilities::exec_stop::ExecStop>("main")
         .unwrap();
@@ -1043,7 +1026,6 @@ async fn shell_exit_settles_tasks() {
         text(result)
     );
 
-    // Next call resets the shell.
     harness
         .run(&session, &[("execute", json!({"command": "echo after"}))])
         .await;
@@ -1055,8 +1037,6 @@ async fn shell_exit_settles_tasks() {
         "{}",
         text(result)
     );
-    // EOF can precede process exit: close the PTY, then exit later. The
-    // session must wait for the status rather than killing the live process.
     harness
         .run(
             &session,
@@ -1086,7 +1066,6 @@ async fn completion_markers_stay_out_of_captures() {
     let session = harness.session().await;
     let background = json!({"command": "sleep 0.2", "runInBackground": true});
 
-    // A background job finishes while a foreground command runs.
     harness
         .run(&session, &[("execute", background.clone())])
         .await;
@@ -1102,7 +1081,6 @@ async fn completion_markers_stay_out_of_captures() {
     assert!(text(result).contains("fg"), "{}", text(result));
     assert!(!text(result).contains("__DIM_"), "{}", text(result));
 
-    // A background job finishes while an occupying task runs.
     harness.run(&session, &[("execute", background)]).await;
     until(&session, "start", |events| tool_results(events) == 3).await;
     harness

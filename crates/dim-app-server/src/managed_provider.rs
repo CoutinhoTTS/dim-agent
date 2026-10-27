@@ -441,8 +441,6 @@ impl ManagedProviders {
     }
 }
 
-// Provider output is checked once here, where it enters the host: the lease
-// carries a bearer, headers and a base URL into model requests.
 fn invalid() -> ManagedProviderError {
     ManagedError::InvalidResponse.into()
 }
@@ -596,7 +594,6 @@ impl DynPlugin for ManagedProviderBinding {
                         *slot = None;
                     }
                 }
-                // The provider's own disposer joins its accepted work.
                 provider.quiesce().await;
                 Ok(())
             })?;

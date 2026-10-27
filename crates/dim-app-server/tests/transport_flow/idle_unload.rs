@@ -264,7 +264,6 @@ async fn a_run_is_not_restored_between_its_calls() {
     client_session(&mut client, &agent, host_policy()).await;
     let id = launch(&sessions).await;
     let session = agent.get_session(&id).unwrap();
-    // Spaced so that passes run between the calls.
     let gap = || tokio::time::sleep(GRACE / 4);
     gap().await;
     sessions
@@ -405,8 +404,6 @@ async fn calls_during_an_unload_wait_and_read_the_restored_session() {
     assert_eq!(native["value"]["through"], through);
     let rpc = client.response(rpc).await;
     assert_ok(&rpc);
-    // Read from the restored Session: its `branch/resume`, a control event
-    // the wire filters, is in the range.
     assert!(
         rpc["result"]["through"].as_u64().unwrap() > through,
         "{rpc}"
@@ -436,7 +433,6 @@ async fn an_index_reload_waits_for_a_release_and_the_next_generation_unloads() {
     let first_id = first.id().to_owned();
     loads.hold(&first_id);
     loads.entered().await;
-    // Created while the old pass is held in the first release.
     let second = idle_run(&sessions, &agent).await;
     let second_id = second.id().to_owned();
     {
@@ -757,8 +753,6 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
             .any(|info| info["sessionId"] == *id && info["sequence"] == heads["main"]),
         "{listed}"
     );
-    // The attach restores the Session and holds it through the reads: no
-    // second unload and restore can come between them.
     assert_ok(&client.rpc("session.attach", json!({"sessionId":id})).await);
     for (branch, head) in &heads {
         let at = json!({"sessionId":id,"branchId":branch});
@@ -828,7 +822,6 @@ async fn listing_while_sessions_unload_never_fails_or_omits_one() {
             }
         }
     };
-    // One read is sure to find a release under way: the last run's.
     loads.hold(&last);
     loads.entered().await;
     check(&mut client).await;
@@ -900,8 +893,6 @@ async fn an_unloaded_session_is_deleted_as_stored_and_forked_after_a_restore() {
         .to_owned();
     assert_eq!(loads.of(&source_id), (2, true));
     for id in [&source_id, &fork_id] {
-        // The two are released by the same passes: one may be gone before
-        // the other has unloaded.
         eventually(&format!("{id} unloaded"), || {
             agent.get_session(id).is_none()
         })

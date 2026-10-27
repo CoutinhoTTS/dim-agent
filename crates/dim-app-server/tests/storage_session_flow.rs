@@ -314,7 +314,6 @@ async fn session_close_and_idle_unload_persist_finalizer_events() {
                 session.close().await.unwrap();
                 session.close().await.unwrap();
             }
-            // Completion includes SQLite publication, not just append admission.
             let head = store.head(&key).await.unwrap();
             let records = store.read(&key, 1..=head).await.unwrap();
             assert_eq!(

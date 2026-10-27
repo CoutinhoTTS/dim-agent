@@ -18,7 +18,6 @@ mod macos {
 
     type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
     const LIMIT: Duration = Duration::from_secs(5);
-    // This fixture exercises explicit read roots without installing a product policy.
     const PROFILE: &str = r#"
         (version 1)
         (deny default)

@@ -1,13 +1,3 @@
-// Local multi-platform build for hands-on testing, the counterpart of the
-// TypeScript CLI's `build:all`: cross-compiles the single `dimcode`
-// executable (App Server and Web workspace included) from this machine into
-// dist/dimcode-<platform>. Releases are built per target by
-// .github/workflows/release.yml.
-//
-//   node scripts/build-all.mjs [--target PLATFORM]... [--debug]
-//
-// macOS targets build with cargo; Linux and Windows targets with
-// cargo-zigbuild (`cargo install --locked cargo-zigbuild`, Zig on PATH).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
@@ -16,7 +6,6 @@ import path from 'node:path';
 const targets = {
   'darwin-arm64': { triple: 'aarch64-apple-darwin', zig: false },
   'darwin-x64': { triple: 'x86_64-apple-darwin', zig: false },
-  // Linked against glibc 2.28 so the binaries run on older distributions.
   'linux-x64': { triple: 'x86_64-unknown-linux-gnu', zig: true, glibc: '2.28' },
   'linux-arm64': { triple: 'aarch64-unknown-linux-gnu', zig: true, glibc: '2.28' },
   'windows-x64': { triple: 'x86_64-pc-windows-gnu', zig: true },

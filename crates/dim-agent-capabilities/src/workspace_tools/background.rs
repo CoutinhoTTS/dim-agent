@@ -93,10 +93,7 @@ impl BackgroundExec {
     ) -> Result<String, StartError> {
         #[cfg(feature = "testing")]
         testing::pause(&request.output_path).await;
-        // Counted by the tracker, so unload waits for this handover.
         let _handover = self.tasks.token();
-        // Taken while the tool call keeps the turn open, before `exec/started`.
-        // `None` once the Session is closing: refused like a closing branch.
         let hold = if self.state.lock().unwrap().closing {
             None
         } else {
@@ -142,9 +139,6 @@ impl BackgroundExec {
         let event = match committed {
             Ok(event) => event,
             Err(error) => {
-                // Registered but not committed: no `exec/started` was written,
-                // so the entry goes too. Dropping its sender ends a `stop`
-                // that found it meanwhile as Closed.
                 if let Some(task_id) = registered {
                     self.state.lock().unwrap().tasks.remove(&task_id);
                 }
@@ -172,26 +166,19 @@ impl BackgroundExec {
                 })
                 .into(),
             );
-            // Released only once `exec/ended` is appended: the branch stays
-            // busy until its dispatch has posted the wake, so no idle unload
-            // comes between the end and the woken turn.
             drop(hold);
-            // Append queues the batch; retain the capture through publication or failure.
             if let Ok(event) = &ended {
                 let mut publication = owner.timeline.watch();
                 let _ = publication
                     .wait_for(|(sequence, closed)| *sequence >= event.sequence || *closed)
                     .await;
                 let published = publication.borrow().0;
-                // A later batch's failure does not undo this event's publication.
                 if published < event.sequence
                     && let Some(error) = owner.timeline.failure()
                 {
                     ended = Err(error);
                 }
             }
-            // A later generation's rebuild writes the missing terminal.
-            // Dropping the task's sender ends a waiting `stop` as Closed.
             let mut state = owner.state.lock().unwrap();
             if let Err(error) = ended {
                 tracing::warn!(%error, task_id = supervised, "exec/ended was not written");
@@ -248,7 +235,6 @@ impl BackgroundExec {
     ) -> BoxFuture<'static, dim_agent_runtime::Result<()>> {
         match &event.kind {
             EventKind::StopInterrupt(data) if data.scope == InterruptScope::Branch => {
-                // Branch close: every task ends cancelled, without a wake.
                 self.state.lock().unwrap().closing = true;
                 self.lifecycle.cancel();
             }
@@ -276,10 +262,6 @@ impl BackgroundExec {
                 state.closing,
             )
         };
-        // A lost wake leaves the result in the history and is posted again by
-        // the next generation; it does not fail dispatch or keep `stop` waiting.
-        // An end ordered after the branch-close interrupt does not wake, even
-        // when the command exited on its own just before.
         if wakes(&data)
             && !closing
             && let Err(error) = self.wake(event_id, &data, name).await
@@ -390,7 +372,6 @@ impl BackgroundExec {
         self.tasks.wait().await;
         let mut state = self.state.lock().unwrap();
         state.closed = true;
-        // Dropping the senders releases pending `stop` callers as Closed.
         state.tasks.clear();
     }
 }

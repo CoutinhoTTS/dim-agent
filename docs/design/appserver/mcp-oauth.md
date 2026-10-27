@@ -554,6 +554,9 @@ callback URLs or authorization server `error_description` text from an unvalidat
 - **Token audience.** `resource` is sent on authorization, token and refresh requests. A token
   is never sent to another server, and `start` never reuses a client or tokens recorded for
   another issuer (§5.2).
+- **SSE endpoint.** The SSE POST route is fixed after discovery. A later `endpoint` event ends
+  the stream instead of retargeting requests, so the bearer cannot be sent to an unvalidated
+  path or origin.
 - **Storage.** The store is mode 0600 with atomic replace through FileStorage. No secret goes
   to the Timeline, `ToolResult.content`, the catalog, `session.mcp`, error messages or
   diagnostics. Mcp emits one `tracing` event per auth operation, target `mcp.auth`, with server

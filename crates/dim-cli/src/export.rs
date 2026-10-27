@@ -114,7 +114,6 @@ pub async fn timeline(
     };
     let result = run_export(command.stdout(create(path)?)).await;
     match &result {
-        // The file is the one `create` made for this export.
         Err(_) => {
             let _ = std::fs::remove_file(path);
         }
@@ -128,7 +127,6 @@ pub async fn timeline(
 
 /// Runs the export and returns its error line as the error.
 async fn run_export(command: &mut tokio::process::Command) -> Result<()> {
-    // `output` would pipe stdout as well; only stderr is collected.
     let output = command.spawn()?.wait_with_output().await?;
     if output.status.success() {
         return Ok(());

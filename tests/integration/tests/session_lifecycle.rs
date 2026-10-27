@@ -25,7 +25,6 @@ async fn agent_close_during_assembly_never_activates_the_session() {
     let cwd = dirs.dir("work");
     hold.arm();
     let agent = env.agent.clone();
-    // A configuration the Session accepts: only the close ends its creation.
     let config = SessionConfig {
         cwd: cwd.to_string_lossy().into_owned(),
         tools: Some(vec!["skill".into(), "gate".into()]),
@@ -63,8 +62,6 @@ async fn agent_close_reports_closing_to_every_session_at_once() {
     let _first = env.session(&cwd, "").await.unwrap();
     let _second = env.session(&cwd, "").await.unwrap();
     probe.wait_for("active", 2).await;
-    // Hold the first Session's unload: Agent::close closes Sessions in turn,
-    // but both must observe closing as soon as it starts.
     probe.hold_next_close();
     let closing = env.agent.close();
     tokio::time::timeout(
@@ -117,12 +114,10 @@ async fn idle_release_waits_until_every_hold_is_dropped() {
     let (session, lifecycle) = idle_session(&env, &dirs, &probe).await;
     let first = lifecycle.take_hold().unwrap();
     let second = lifecycle.take_hold().unwrap();
-    // Holds veto only the release: the branch is idle as before.
     within("idle", session.idle("main")).await.unwrap();
     assert!(!session.unload_if_idle().await.unwrap());
     drop(first);
     assert!(!session.unload_if_idle().await.unwrap());
-    // The owner's task may drop its hold anywhere.
     tokio::spawn(async move { drop(second) }).await.unwrap();
     assert!(session.unload_if_idle().await.unwrap());
     within("release", session.closed()).await.unwrap();
@@ -163,8 +158,6 @@ async fn close_ignores_holds_and_refuses_new_ones() {
     assert!(lifecycle.take_hold().is_none());
     assert!(!session.unload_if_idle().await.unwrap());
     probe.release_close.notify_one();
-    // The close finishes while the hold is still held; its owner drops it as
-    // the closed Session's work ends.
     within("close", closing).await.unwrap();
     drop(held);
     env.agent.close().await.unwrap();
@@ -186,8 +179,6 @@ async fn holds_racing_an_idle_release_never_overlap_it() {
             let (session, start) = (session.clone(), start.clone());
             async move {
                 start.wait().await;
-                // Holding across a yield lets checks land both before and
-                // inside each hold.
                 while let Some(hold) = lifecycle.take_hold() {
                     tokio::task::yield_now().await;
                     assert!(!session.is_unloading(), "a hold overlapped the release");
@@ -218,8 +209,6 @@ async fn a_closed_child_branch_no_longer_refuses_an_idle_release() {
     let probe = Arc::new(LifecycleProbe::default());
     let env = releasable(&dirs, &probe).await;
     let (session, _) = idle_session(&env, &dirs, &probe).await;
-    // The child's first turn waits in `gate`, so its close cannot settle
-    // until the gate opens.
     env.model.push(Step::Tool("gate", serde_json::json!({})));
     let child = session
         .branch(

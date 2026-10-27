@@ -219,7 +219,6 @@ fn builder_with_strategy(
             builder.session_value(Arc::new(CompactionStrategyHost(Some(strategy))));
         }
     }
-    // A manual step builds its request from the adopted configuration.
     defaults::install_with_prompt(
         &mut builder,
         Arc::new(EmptyPromptHost),
@@ -416,8 +415,6 @@ async fn a_manual_compaction_with_no_turn_writes_only_its_facts() {
     else {
         panic!("expected completion, got {:?}", result.outcome)
     };
-    // A manual step keeps only the latest turn, although the last two fit
-    // the token budget: the cut is the third turn's start.
     let starts: Vec<_> = events
         .iter()
         .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
@@ -426,7 +423,6 @@ async fn a_manual_compaction_with_no_turn_writes_only_its_facts() {
     assert_eq!(name, "scripted");
     assert_eq!(diagnostics.reason, CompactionReason::Manual);
     assert_eq!(diagnostics.retain_limit.as_ref(), Some(&starts[2].id));
-    // The next turn starts from the compacted context.
     turns(&session, &["fourth"]).await;
     let events = session.history("main", None).await.unwrap();
     let request = events
@@ -477,8 +473,6 @@ async fn a_manual_compaction_keeps_at_most_the_latest_turn() {
             Arc::new(EchoModel) as Arc<dyn ModelDriver>,
             "second".to_owned(),
         ),
-        // The latest input alone exceeds the retention budget (1,008); its
-        // short reply fits.
         (Arc::new(ShortReply), "y".repeat(1_500)),
     ] {
         let large = latest.len() > 100;
@@ -554,7 +548,6 @@ async fn a_manual_compaction_inside_a_turn_runs_at_the_next_step_boundary() {
         .unwrap()
         .compact()
         .unwrap();
-    // The command is consumed while the request is in flight: pending.
     let mut dispatch = session.dispatch_watch("main").unwrap();
     while dispatch.borrow().sequence < command {
         dispatch.changed().await.unwrap();
@@ -613,8 +606,6 @@ async fn a_manual_compaction_inside_a_turn_runs_at_the_next_step_boundary() {
         data.outcome,
         ContextCompactionResult::Completed { .. }
     ));
-    // The turn's next request is prepared from the compacted context and
-    // keeps the tool call with its result.
     let request = events[next..]
         .iter()
         .find_map(|event| match &event.kind {
@@ -760,7 +751,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             Message::text(Role::User, "second replacement"),
         ]
     );
-    // A branch forked after the compaction inherits the same projection.
     let child = session
         .branch(
             "main".into(),
@@ -776,8 +766,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         .unwrap();
     session.idle(&child).await.unwrap();
     assert!(projected(&session, &child).await.starts_with(&messages));
-    // Turns of the child's own, so that its history is longer than what
-    // settles its creation.
     for turn in 0..4 {
         session
             .submit(format!("child turn {turn}"), InputMode::Queue, &child)
@@ -785,7 +773,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             .unwrap();
         session.idle(&child).await.unwrap();
     }
-    // Another renderer finds the cut from the event id, not the entry id.
     let context = session.context("main", fact).await.unwrap();
     let renamed = renamed_history(&context).unwrap();
     assert_eq!(context_messages(&context, &renamed), messages);
@@ -799,7 +786,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         store.head(&key).await.unwrap()
     };
 
-    // A restored Session projects the same messages, from facts or snapshot.
     let reload = StrategyReload::default();
     let mut builder = builder_with_strategy(
         Arc::new(EchoModel),
@@ -826,10 +812,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         },
     ));
     let agent = builder.build();
-    // A failed read of the history `main` opens with fails the restore with
-    // its storage error; the next restore reads it again. The opening's read
-    // is the first of that range: TimelineTree reads `main`'s restore facts
-    // from it.
     let main_head = head("main").await;
     *store.fail_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 1));
     let failed = agent.restore_session(id.clone()).await;
@@ -838,15 +820,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         "{:?}",
         failed.err()
     );
-    // A failed restore leaves no opening behind.
     assert_eq!(agent.live_openings(), 0);
-    // Each branch opening decodes the history it was built with once: the
-    // opening's read is the only read of `main`'s own events from its
-    // start, whatever the number of capabilities and TimelineTree's restore
-    // facts reading them; a child's creation check reads pages from its
-    // start until its first queued input. Reads past the stored head cover
-    // what the opening wrote. `OpeningReads` holds main's read and reads
-    // meanwhile.
     let main_head = head("main").await;
     let child_head = head(&child).await;
     store.ranges.lock().unwrap().clear();
@@ -880,12 +854,7 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         ranges.sort_by_key(|range| *range.end());
         ranges
     };
-    // `main` is also read to the child's cut, once by the child's opening
-    // although both `OpeningReads` and the capabilities read all of it.
     assert_eq!(from_start("main"), [1..=cut, 1..=main_head], "{reads:?}");
-    // Once the child has its ancestry, a reader takes every part of it from
-    // the copy, including the anchor and the tail of `main`'s checkpoint: it
-    // reads only the child's own events from the store.
     let (context_reads, resume) = child_reads.lock().unwrap().take().unwrap();
     assert_eq!(resume, "main");
     assert!(
@@ -896,8 +865,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
         matches!(&from_start(&child)[..], [range] if *range == (1..=child_head)),
         "{reads:?}"
     );
-    // The child's creation is settled by its first page, which holds less
-    // than its history.
     let pages = std::mem::take(&mut *store.pages.lock().unwrap());
     assert!(
         matches!(&pages[..], [(branch, 0, events)] if *branch == child && (*events as u64) < child_head),
@@ -909,8 +876,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             .all(|range| *range.start() == 1 || *range.start() > child_head),
         "{reads:?}"
     );
-    // Besides the reads above: `OpeningReads`' read of a part, the
-    // child's ancestry, and TimelineTree's validation of the cut.
     assert!(
         of("main").iter().all(|range| *range.start() == 1
             || *range.start() > main_head
@@ -918,8 +883,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
             || *range.end() == cut),
         "{reads:?}"
     );
-    // Once the branch is published, its opening is gone and reads go to the
-    // store again.
     assert_eq!(agent.live_openings(), 0);
     let published = session.sequence("main").unwrap();
     session.local("main", ..).await.unwrap();
@@ -933,8 +896,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     let timeline_context = session.context("main", fact).await.unwrap();
     let history = renamed_history(&timeline_context).unwrap();
     assert_eq!(context_messages(&timeline_context, &history), messages);
-    // A cut inside the retained tail is rejected: the record fails and the
-    // projection stays as it was.
     let command = session
         .service::<AgentLoop>("main")
         .unwrap()
@@ -948,7 +909,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     ));
     assert_eq!(projected(&session, "main").await, messages);
     assert_paired(&events);
-    // A capability reloaded in the active branch rebuilds from the store.
     let generation = |branch: &str| {
         session
             .branch_diagnostics(branch)
@@ -962,7 +922,6 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     store.ranges.lock().unwrap().clear();
     let view = reload.0.lock().unwrap().last().cloned().unwrap();
     view.restart().await.unwrap();
-    // Both branches' Loops rebuild; the Session closes after both.
     for (branch, before) in ["main", child.as_str()].into_iter().zip(before) {
         while !generation(branch).is_some_and(|(generation, state)| {
             generation > before && state == rutis::host::FiberState::Active
@@ -1000,7 +959,6 @@ async fn an_interrupt_cancels_a_running_step_and_a_pending_command() {
         .await
         .unwrap();
     turns(&session, &[first().as_str(), "second", "third"]).await;
-    // Running, with no turn.
     strategy.hold.store(true, Ordering::SeqCst);
     let loop_service = session.service::<AgentLoop>("main").unwrap();
     let command = loop_service.compact().unwrap();
@@ -1018,8 +976,6 @@ async fn an_interrupt_cancels_a_running_step_and_a_pending_command() {
         1,
         "settled once"
     );
-    // Waiting inside a turn: the interrupt settles it without a start and
-    // the turn ends as interrupted turns do.
     model.hold.store(true, Ordering::SeqCst);
     session
         .submit("use the tool".into(), InputMode::Queue, "main")
@@ -1085,7 +1041,6 @@ async fn a_reload_during_a_step_settles_it_without_another_strategy_call() {
         1,
         "settled once"
     );
-    // The reloaded Loop does not resume the step; a new command compacts.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(strategy.calls.load(Ordering::SeqCst), 1);
     let command = session
@@ -1244,7 +1199,6 @@ async fn repeated_and_concurrent_requests_join_the_outstanding_command() {
     let command = commands[0];
     assert!(commands.iter().all(|joined| *joined == command));
     strategy.entered.notified().await;
-    // A repeated request while the step runs joins it as well.
     assert_eq!(loop_service.compact().unwrap(), command);
     strategy.release.notify_one();
     let events = until(&session, |events| result_for(events, command).is_some()).await;
@@ -1259,7 +1213,6 @@ async fn repeated_and_concurrent_requests_join_the_outstanding_command() {
     assert_eq!(starts_of(&events), [Some(command)]);
     assert_eq!(results_of(&events, command), 1);
     assert_eq!(strategy.calls.load(Ordering::SeqCst), 1);
-    // Once the result is consumed, the next request is a new command.
     let result = events
         .iter()
         .find(|event| {

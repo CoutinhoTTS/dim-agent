@@ -258,10 +258,8 @@ async fn a_registered_part_reaches_open_and_later_sessions_and_leaves_with_its_p
         recorder(&log),
     )
     .await;
-    // An open Session mounts it as soon as it is registered.
     let first = format!("mounted {}", before.id());
     eventually(|| log.lock().unwrap().contains(&first)).await;
-    // A later Session mounts it when it opens.
     let after = agent
         .create_session(SessionConfig::default())
         .await
@@ -270,7 +268,6 @@ async fn a_registered_part_reaches_open_and_later_sessions_and_leaves_with_its_p
     eventually(|| log.lock().unwrap().contains(&second)).await;
     assert!(mounted(&before, "test.recorder") && mounted(&after, "test.recorder"));
 
-    // The plugin's unload finishes after every copy has unloaded.
     producer.dispose().await.unwrap();
     let entries = log.lock().unwrap().clone();
     for session in [&before, &after] {
@@ -301,7 +298,6 @@ async fn a_generator_may_mount_nothing_for_an_instance() {
     let log = Log::default();
     let inner = recorder(&log);
     let generator: dim_agent_runtime::Generator = Arc::new(move |mount| {
-        // Only Sessions whose configuration enables the feature get the part.
         if !mount.session.system_prompt.contains("recorded") {
             return Ok(None);
         }
@@ -349,8 +345,6 @@ async fn a_required_part_gates_publication_and_its_failure_fails_the_session() {
         let agent = agent.clone();
         tokio::spawn(async move { agent.create_session(SessionConfig::default()).await })
     };
-    // Nothing has registered the required part yet: the Session waits for
-    // its registration as for a required row.
     let registry = registries.recv().await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
@@ -429,8 +423,6 @@ async fn an_optional_part_settles_before_publication_and_its_failure_stays_local
         let agent = agent.clone();
         tokio::spawn(async move { agent.create_session(SessionConfig::default()).await })
     };
-    // A part registered when the Session opens is still loading: what it
-    // registers would be missing from the published Session.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         !creating.is_finished(),
@@ -518,7 +510,6 @@ async fn agents_of_one_builder_mount_only_their_own_plugins_parts() {
         !Arc::ptr_eq(&registry, &other),
         "each placement has its own"
     );
-    // The builder's own registry serves hosts that place their Agents.
     assert!(!Arc::ptr_eq(&registry, &builder.parts()));
     let log = Log::default();
     let _producer = produce(
@@ -533,7 +524,6 @@ async fn agents_of_one_builder_mount_only_their_own_plugins_parts() {
     eventually(|| log.lock().unwrap().contains(&mounted_first)).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!mounted(&second, "test.recorder"));
-    // Both Agents' plugins run in one host without colliding.
     assert!(mounted(&second, "ToolRegistry"));
     one.close().await.unwrap();
     two.close().await.unwrap();

@@ -8,7 +8,6 @@ import row from './session-title.json' with { type: 'json' }
 
 type Document = { enabled: boolean; maxLength: number; model: ModelId | null }
 type TitleSettings = { read(request: Parameters<Settings['read']>[0]): Promise<SettingsResult<{ document: Document }>> }
-// Native event payloads follow their owners' contracts; the SDK envelope leaves them opaque.
 type HistoryEvent = Omit<AgentEvent, 'data'> & { data: Record<string, any> }
 const SYSTEM = "Write a short title for this conversation: at most 8 words, in the language of the user's message, no quotes, no trailing punctuation. Reply with the title only."
 const failure = (code: string, message: string): SessionMethodReply => ({ code, message })
@@ -45,7 +44,6 @@ async function prefix(sessions: Sessions, sessionId: string, sequence: number, i
   return { first, model, operator }
 }
 
-// The Session part: each Session mounts one copy.
 export const part = definePlugin({
   name: 'SessionTitle',
   inject: ['sessions', 'settings', 'sessionMetadata', 'auxiliaryModel', 'sessionIdentity', 'sessionConfig', 'sessionLifecycle', 'sessionMethods'],
@@ -82,7 +80,6 @@ export const part = definePlugin({
         if (!current() || (stored.ok && stored.value.title)) return
         const snapshot = await prefix(sessions, sessionId, sequence, inputId)
         if (!current() || !snapshot.operator || !snapshot.first) return
-        // Starting one operator attempt retires preflight reads from the same cohort.
         epoch++
         entered = true
         generating = true
@@ -123,7 +120,6 @@ export const part = definePlugin({
       }
     }
 
-    // Only an interactive leader Session gets a title.
     if (config.interactive !== false && config.collaborationRole === 'leader') {
       ctx.on(`session/${sessionId}`, (record: SessionBroadcast) => {
         if (closed || record.kind !== 'event' || record.branchId !== 'main') return

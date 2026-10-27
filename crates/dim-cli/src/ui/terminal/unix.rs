@@ -28,7 +28,8 @@ pub fn is_tty(fd: RawFd) -> bool {
 }
 
 /// Switches the controlling input to raw mode, remembering the original
-/// settings for every exit path.
+/// settings for every exit path. Output post-processing stays on, so a stray
+/// diagnostic `\n` still becomes CRLF; the renderer writes its own `\r\n`.
 pub fn enable_raw_mode() -> io::Result<()> {
     // SAFETY: zeroed termios is a valid out-parameter for tcgetattr.
     let mut current: libc::termios = unsafe { std::mem::zeroed() };
@@ -39,8 +40,6 @@ pub fn enable_raw_mode() -> io::Result<()> {
     let mut raw = current;
     // SAFETY: cfmakeraw only edits the struct.
     unsafe { libc::cfmakeraw(&mut raw) };
-    // Keep output post-processing: the renderer writes `\r\n` itself, but
-    // stray `\n` from diagnostics should not stair-step.
     raw.c_oflag |= libc::OPOST;
     raw.c_cc[libc::VMIN] = 1;
     raw.c_cc[libc::VTIME] = 0;
@@ -69,7 +68,6 @@ pub fn write_all(fd: RawFd, mut bytes: &[u8]) -> io::Result<()> {
             let error = io::Error::last_os_error();
             match error.kind() {
                 io::ErrorKind::Interrupted => continue,
-                // A full pty buffer: wait for the reader to catch up.
                 io::ErrorKind::WouldBlock => {
                     wait_fd(fd, libc::POLLOUT, 100);
                     continue;
@@ -154,7 +152,6 @@ pub fn restore_terminal_once() {
     }
     let mut buf = [0u8; MAX_RESTORE_LEN];
     let len = modes::restore_into(modes::live_bits(), &mut buf);
-    // Best effort: the terminal may already be gone (EIO).
     // SAFETY: buf[..len] is initialized stack memory.
     unsafe { libc::write(STDOUT, buf.as_ptr().cast(), len) };
     disable_raw_mode();
@@ -176,8 +173,6 @@ pub fn raise_stop() {
 
 extern "C" fn on_fatal_signal(signal: libc::c_int) {
     restore_terminal_once();
-    // SA_RESETHAND already restored the default action; with SA_NODEFER the
-    // signal is not blocked, so this ends the process signal-shaped (130/129).
     // SAFETY: raise is async-signal-safe.
     unsafe { libc::raise(signal) };
 }

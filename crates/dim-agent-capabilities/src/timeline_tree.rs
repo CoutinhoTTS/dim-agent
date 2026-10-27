@@ -57,7 +57,6 @@ struct Node {
     started: bool,
 }
 struct TreeState {
-    // A submitted, unconsumed create occupies a node just like an active build.
     nodes: BTreeMap<String, Node>,
     closing: bool,
     cleanup_errors: Vec<AgentError>,
@@ -257,7 +256,6 @@ impl TimelineTree {
             close_started: AtomicBool::new(false),
         })
     }
-    // Initialization may need tree services before the branch is public.
     fn owned_context(&self, id: &str) -> Option<Arc<TimelineContext>> {
         self.state
             .lock()
@@ -316,9 +314,6 @@ impl TimelineTree {
             let deadline = tokio::time::Instant::now() + owner.factory.startup_timeout();
             let mut acquired = None;
             let mut cleanup_failure = None;
-            // The child wrote `branch/start` and its first input: by its own
-            // facts the creation is done, so the parent must not record a
-            // failure for it afterwards.
             let mut started = false;
             let mut outcome = AssertUnwindSafe(async {
                 if let Some(parent_ready) = parent_ready {
@@ -353,7 +348,6 @@ impl TimelineTree {
                     Ok(context) => context,
                 };
                 acquired = Some(context.clone());
-                // Initial input may immediately call a tree-aware capability.
                 owner
                     .state
                     .lock()
@@ -368,9 +362,6 @@ impl TimelineTree {
                         head,
                         failed_creates,
                     } => {
-                        // Still opening: the read shares the history the
-                        // capabilities rebuilt from instead of decoding it
-                        // again.
                         let history = tokio::select! {
                             result = context.timeline().local(..=head) => result?,
                             _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
@@ -390,9 +381,6 @@ impl TimelineTree {
                         (EventKind::BranchResume(BranchResumeData {}), None)
                     }
                 };
-                // Every capability is loaded: open the branch, and wait until
-                // its opening is dispatched, so what capabilities write in
-                // response precedes every input.
                 let opened = context.timeline().append(opening.into())?;
                 let mut dispatch = context.branch().dispatch_watch();
                 loop {
@@ -438,7 +426,6 @@ impl TimelineTree {
                 ))
             });
             if let Ok(branch) = &outcome {
-                // Publication and close are decided under the tree lock.
                 let state = owner.state.lock().unwrap();
                 if !state.closing {
                     if let Some(context) = &acquired {
@@ -475,7 +462,6 @@ impl TimelineTree {
             if let Some(error) = cleanup_failure {
                 state.cleanup_errors.push(error);
             }
-            // Failed candidates never become public, even during close.
             state.nodes.remove(&id);
             ready.send_replace(Some(outcome));
         });
@@ -492,9 +478,6 @@ impl TimelineTree {
         if state.closing {
             return Ok(());
         }
-        // Only a reserved, not yet launched create starts a build. A create a
-        // previous TreeTimeline generation already settled while unloading
-        // has its terminal and is not built again.
         if !state
             .nodes
             .get(&data.branch)
@@ -702,8 +685,6 @@ impl TimelineTreeControl for TimelineTree {
                 let (ready, reported) = {
                     let mut state = self.state.lock().unwrap();
                     let ready = self.reserve(&mut state, next.clone())?;
-                    // A root that never started (its Session was created and
-                    // the process stopped) starts now; anything else resumes.
                     let (opening, reported) = if next.parent.is_none() && stored.sequence == 0 {
                         let start = BranchStartData {
                             parent: None,
@@ -755,9 +736,6 @@ impl TimelineTreeControl for TimelineTree {
                     "branch position is beyond committed history".into(),
                 ));
             }
-            // Reject an untrusted requested cut before any trusted `before`
-            // hook can transform the draft. The final transformed cut is
-            // checked independently by the branch build task.
             let requested = crate::history::read_context(timeline, at).await?;
             crate::history::validate_context_boundary(&requested)
                 .map_err(AgentError::InvalidInput)?;
@@ -797,8 +775,6 @@ impl TimelineTreeControl for TimelineTree {
                     if admission.is_cancelled() {
                         return Err(AgentError::Cancelled("branch admission".into()));
                     }
-                    // Reservation runs inside the commit lock, before the
-                    // event is visible to the tree-side create subscription.
                     ready = Some(self.reserve(
                         &mut self.state.lock().unwrap(),
                         TimelineInfo {
@@ -810,8 +786,6 @@ impl TimelineTreeControl for TimelineTree {
                     )?);
                     Ok(())
                 })?;
-            // The creation is a fact once committed: a caller that stops
-            // waiting does not undo it, and the tree finishes the build.
             tokio::select! {
                 result = Self::await_branch(ready.expect("committed branch reservation")) => result,
                 _ = admission.cancelled() => Err(AgentError::Cancelled(

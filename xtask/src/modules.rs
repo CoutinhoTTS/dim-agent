@@ -150,7 +150,6 @@ pub fn generate(workspace: &Path) -> Result<Vec<(&'static str, String)>> {
                     .replace('-', "_");
                 dependencies.insert(alias, dep_name.replace('-', "_"));
             }
-            // A package's binary can refer to its library through the crate name.
             dependencies.insert(library.clone(), library.clone());
             graph.dependencies.insert(root.clone(), dependencies);
             let file = PathBuf::from(target["src_path"].as_str().ok_or("target source missing")?);
@@ -367,8 +366,6 @@ impl SourceGraph {
                 )
             })
             .collect();
-        // Fixed-point propagation handles cyclic crate globs without recursive
-        // path explosion. Imports affect lookup; only actual references add edges.
         for _ in 0..self.modules.len().saturating_mul(4).saturating_add(8) {
             let mut next = BTreeMap::new();
             for (id, module) in &self.modules {
@@ -534,8 +531,6 @@ impl SourceGraph {
             {
                 return Err(format!("types reverse dependency: {from} -> {to}").into());
             }
-            // D4: Settings is persistence infrastructure, not a business or RPC owner.
-            // Its change contract, declared in capabilities, follows the same rule.
             let within = |module: &str, root: &str| {
                 module == root || module.starts_with(&format!("{root}::"))
             };
@@ -550,8 +545,6 @@ impl SourceGraph {
             {
                 return Err(format!("settings business dependency: {from} -> {to}").into());
             }
-            // Built-in Session contracts remain in protocol; contributed management
-            // wire types do not. In particular, do not ban Connection -> MCP.
             if within(from, "dim_app_server::protocol")
                 && within(to, "dim_app_server")
                 && (within(to, "dim_app_server::skills_management")
@@ -567,8 +560,6 @@ impl SourceGraph {
                 .into());
             }
         }
-        // Nor does it define a business document of its own: each belongs to
-        // the owner of its namespace.
         if let Some(id) = self.modules.iter().find_map(|(id, module)| {
             (module.business_document
                 && (id == "dim_app_server::settings"
@@ -756,6 +747,19 @@ fn escape(label: &str) -> String {
 mod tests {
     use super::*;
 
+    fn temporary_workspace(prefix: &str) -> PathBuf {
+        let workspace = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        workspace
+    }
+
     #[test]
     fn cli_layers_reject_upward_and_cross_client_dependencies() {
         for (from, to) in [
@@ -852,6 +856,77 @@ mod tests {
                 Some(expected) => assert!(result.unwrap_err().to_string().contains(expected)),
             }
         }
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn a_package_binary_resolves_its_library_through_the_crate_name() {
+        let workspace = temporary_workspace("dim-module-bin");
+        fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"dim-agent-demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[lib]\npath = \"src/lib.rs\"\n[[bin]]\nname = \"demo\"\npath = \"src/main.rs\"\n[workspace]\n").unwrap();
+        fs::write(
+            workspace.join("src/lib.rs"),
+            "pub mod thing { pub struct Value; }\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("src/main.rs"),
+            "use dim_agent_demo::thing::Value;\nfn main() { let _: Option<Value> = None; }\n",
+        )
+        .unwrap();
+        let output = generate(&workspace).unwrap();
+        let json: Value = serde_json::from_str(
+            &output
+                .iter()
+                .find(|(name, _)| *name == "modules.json")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        assert!(
+            json["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| edge["from"] == "dim_agent_demo::@bin:demo"
+                    && edge["to"] == "dim_agent_demo::thing"),
+            "a binary must resolve its library through the crate name"
+        );
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn cyclic_crate_globs_terminate_without_adding_unused_edges() {
+        let workspace = temporary_workspace("dim-module-glob");
+        fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"dim-agent-demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n").unwrap();
+        fs::write(
+            workspace.join("src/lib.rs"),
+            "mod a { use crate::b::*; pub struct A; }\nmod b { use crate::a::*; pub struct B; }\nmod c { use crate::a::A; pub fn read(_: A) {} }\n",
+        )
+        .unwrap();
+        let output = generate(&workspace).unwrap();
+        let json: Value = serde_json::from_str(
+            &output
+                .iter()
+                .find(|(name, _)| *name == "modules.json")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        let edges = json["edges"].as_array().unwrap();
+        assert!(
+            !edges.iter().any(|edge| matches!(
+                (edge["from"].as_str(), edge["to"].as_str()),
+                (Some("dim_agent_demo::a"), Some("dim_agent_demo::b"))
+                    | (Some("dim_agent_demo::b"), Some("dim_agent_demo::a"))
+            )),
+            "an unused glob must not add an edge"
+        );
+        assert!(
+            edges.iter().any(
+                |edge| edge["from"] == "dim_agent_demo::c" && edge["to"] == "dim_agent_demo::a"
+            ),
+            "an actual use creates the edge"
+        );
         fs::remove_dir_all(workspace).unwrap();
     }
 }

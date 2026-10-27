@@ -1,6 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
 
-// Experimental contracts for the C4 transport probe; not product services.
 type SessionHost = { identity(): string; closed(): void }
 type Notice =
   | { kind: 'event'; branchId: string; event: { sequence: number } }

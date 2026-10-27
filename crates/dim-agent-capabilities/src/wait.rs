@@ -104,7 +104,6 @@ impl Wait {
                 state.open = false;
                 state.pending.clear();
             }
-            // Only arrivals of an open turn count.
             EventKind::InputMessage(_) if !state.open => {}
             EventKind::InputMessage(data) => {
                 if let Some(task_id) = tagged(event, WAKE_TASK_TAG) {
@@ -370,8 +369,6 @@ impl DynPlugin for WaitBranchPlugin {
                 state: Mutex::new(State::default()),
                 arrived: Notify::new(),
             });
-            // A rebuild restores only whether a turn is open; arrivals
-            // before a reload are not replayed.
             let consumer = wait.clone();
             dispatcher
                 .follow(

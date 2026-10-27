@@ -95,7 +95,6 @@ pub async fn graph() -> Result<Value> {
 /// The process layer of a served profile: every plugin outside the Agent
 /// instances, and the services they provide.
 pub fn process_layer(mut snapshot: RuntimeDiagnostics) -> RuntimeDiagnostics {
-    // An Agent instance is everything under the `AgentScope` plugin's parent.
     let parents: BTreeMap<_, _> = snapshot
         .plugins
         .iter()

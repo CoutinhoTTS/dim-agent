@@ -61,7 +61,6 @@ struct Form {
 impl Form {
     fn rows(&self) -> Vec<Field> {
         if let Some(name) = &self.name {
-            // A new record needs all three before it can be tested.
             let mut rows = vec![Field::Name, Field::BaseUrl, Field::ApiKey];
             if [name, &self.base_url, &self.api_key]
                 .iter()
@@ -120,7 +119,6 @@ impl ProvidersPanel {
         }
         if let Ok(providers) = providers {
             self.providers = providers;
-            // A form of a provider that changed shows its new state.
             if let Some(form) = &mut self.form
                 && let Some(entry) = self.providers.iter().find(|p| p.id == form.provider_id)
             {
@@ -141,7 +139,7 @@ impl ProvidersPanel {
                     form.base_url = LineInput::new(&form.original_base_url);
                 }
                 if form.name.take().is_some() {
-                    form.active = 2; // Apply the retained URL/key draft.
+                    form.active = 2;
                 }
                 form.api_key_preview = entry.api_key_preview.clone();
                 form.busy = false;
@@ -157,10 +155,8 @@ impl ProvidersPanel {
             let failed = result.is_err();
             form.busy = false;
             form.message = Some(result);
-            // The key is kept on a failure (retry) and cleared once stored.
             if !failed {
                 form.api_key.clear();
-                // A saved custom provider's form becomes its connect form.
                 if form.name.take().is_some() {
                     form.connected = true;
                     form.active = 1;
@@ -271,7 +267,6 @@ impl ProvidersPanel {
         }
         let rows = form.rows();
         let count = rows.len();
-        // The focused field edits first; the keys it leaves navigate.
         let edited = match rows.get(form.active) {
             Some(Field::Name) => form.name.as_mut().is_some_and(|name| name.handle_key(key)),
             Some(Field::BaseUrl) => form.base_url.handle_key(key),
@@ -409,8 +404,6 @@ impl ProvidersPanel {
             ),
             _ => return None,
         };
-        // The top border, then a blank row, then the fields; a row starts
-        // after the border and its space.
         Some((
             2 + form.active,
             2 + display_width(SELECTED_MARKER) + display_width(label) + 2 + column,
@@ -495,7 +488,6 @@ impl ProvidersPanel {
             ));
         }
         if let Some(message) = &form.message {
-            // An error is one more row under the actions, in the danger colour.
             let (text, color) = match message {
                 Ok(notice) => (notice.clone(), &p.muted),
                 Err(error) => (tf("Error: {error}", &[("error", error)]), &p.danger),
@@ -516,10 +508,7 @@ fn build_rows(providers: &[ProviderEntry]) -> Vec<Item> {
     heading.id = PROVIDERS_KEY.into();
     heading.sticky = true;
     rows.push(heading);
-    // A repeated display name gets a ` (n)` suffix, counted over the full
-    // list so the alias stays put while the filter narrows the rows.
     let mut seen: std::collections::HashMap<&str, usize> = Default::default();
-    // Dim signs in with `/login`, not here.
     for provider in providers.iter().filter(|p| p.id != DIM_OAUTH_ID) {
         let count = seen.entry(provider.name.as_str()).or_insert(0);
         *count += 1;
@@ -720,7 +709,6 @@ mod tests {
         let mut panel = ProvidersPanel::new();
         panel.set_providers(Ok(vec![entry("mock", "mock", "connected", true)]));
         let key = |code| KeyEvent::new(code, Modifiers::NONE);
-        // The last row adds; Apply appears once the three fields are filled.
         assert!(matches!(panel.handle_key(key(KeyCode::End)), Effect::None));
         assert!(matches!(
             panel.handle_key(key(KeyCode::Enter)),
@@ -737,7 +725,6 @@ mod tests {
         for c in "My LLM!".chars() {
             panel.handle_key(key(KeyCode::Char(c)));
         }
-        // Enter moves on; a paste lands in the focused field, on one line.
         panel.handle_key(key(KeyCode::Enter));
         panel.paste("http://localhost:8080/v1\n");
         panel.handle_key(key(KeyCode::Enter));
@@ -765,7 +752,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // Saved: the form is the new provider's connect form.
         panel.set_result(Ok("Added My LLM!".into()));
         let mut saved = entry(&allocated_id, "My LLM!", "connected", false);
         saved.version = 1;
