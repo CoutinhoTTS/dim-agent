@@ -64,9 +64,6 @@ pub struct ServerConfig {
     /// A managed provider plugin built outside this repository.
     pub managed_provider: Option<managed_provider::ManagedProviderRow>,
     pub session_typescript: Option<session_typescript::SessionTypeScriptConfig>,
-    /// The default configuration file shipped with Dim (PluginManager §2.3):
-    /// default plugins, locked names and the runtimes' configuration.
-    pub defaults: Option<PathBuf>,
     pub daemon_profile: protocol::DaemonProfile,
     /// Admission is disabled until the product execution profile is installed.
     pub session_execution: bool,
@@ -94,7 +91,6 @@ impl Default for ServerConfig {
             product_home: None,
             managed_provider: None,
             session_typescript: None,
-            defaults: None,
             daemon_profile: protocol::DaemonProfile::Mock,
             session_execution: true,
             model_catalog: None,

@@ -93,7 +93,7 @@ The default configuration file ([PluginManager §2.3](PluginManager.md#23-the-de
 
 Every path is a function of the pins, the configuration and the home, so the App Server builds the `LocalRuntime` objects and the row resolvers from them before reconciliation, as it does today with configured paths; the runtime process starts only when RuntimeManager mounts the runtime. With `source: system`, the interpreter path is looked up on `PATH` when the App Server builds the objects.
 
-The Python runtime's project directory is `<home>/plugins/python/`, PluginManager's (§4). The Node runtime's anchor is the `package.json` of its packages directory.
+The Python runtime's project directory is `<home>/plugins/.python/`, PluginManager's (§4). The Node runtime's anchor is the `package.json` of its packages directory.
 
 ### 2.4 `runtimes.json`
 
@@ -140,7 +140,7 @@ A Dim version with new pins acquires into new directories (their names carry the
 
 The rutis Python runtime is one process; a row `py:<module>` is imported with `importlib.import_module` from the runtime's `sys.path`, which holds its project directory. A plugin directory may be anywhere (a local path is used in place; a Git install is `<home>/plugins/<id>/<commit>`).
 
-- The Python runtime's project directory is `<home>/plugins/python/`, which PluginManager owns; the App Server creates it at startup so the runtime's import path exists before the first plugin.
+- The Python runtime's project directory is `<home>/plugins/.python/`, which PluginManager owns; the App Server creates it at startup so the runtime's import path exists before the first plugin.
 - When a Python plugin is turned on, PluginManager creates there a directory link `<package>` to the plugin directory (`<package>` is the plugin id with `-` replaced by `_`; a junction on Windows), and creates the row `py:<package>.<entry module>`. A new plugin is importable by the running process without a restart.
 - Inside a plugin, modules import each other relatively (`from . import helpers`). Reload re-imports the entry module when its file changed, as rutis does for every Python row ([requirement 3](../plugin-management.md)).
 - When PluginManager turns on a Python plugin and Python is off, it calls `RuntimeService::install("python")` (§5).
@@ -166,7 +166,7 @@ plugins/<name>/             # goal, web, session-title, workflow, scheduler, wit
 LICENSE  NOTICE  release-manifest.json
 ```
 
-`scripts/stage-plugins.mjs` copies `runtime/default-plugins.json` and each default plugin's directory (without tests, `tsconfig.json` or `node_modules`) and runs `npm ci --omit=dev --ignore-scripts --no-bin-links` in each, from its pinned lock; `stage-release.mjs --plugins DIR` puts the result beside `bin/`. A default plugin resolves `@arcships/rutis` from its own `node_modules`; it must not resolve a Cordis of its own, since rutis-runtime refuses a plugin whose Cordis differs from the runtime's. The CLI passes `--defaults <executable's directory>/../default-plugins.json` to the App Server when the file exists; development passes `runtime/default-plugins.json` (or sets `DIMCODE_DEFAULTS`). Without `--defaults`, the App Server has no RuntimeManager and behaves as today (explicit `--node`, `--js-runtime` and `--python` remain for development and tests).
+`scripts/stage-plugins.mjs` copies `runtime/default-plugins.json` and each default plugin's directory (without tests, `tsconfig.json` or `node_modules`) and runs `npm ci --omit=dev --ignore-scripts --no-bin-links` in each, from its pinned lock; `stage-release.mjs --plugins DIR` puts the result beside `bin/`. A default plugin resolves `@arcships/rutis` from its own `node_modules`; it must not resolve a Cordis of its own, since rutis-runtime refuses a plugin whose Cordis differs from the runtime's. The plugin entries are TypeScript, also under an npm package's `node_modules`: the Node runtime loads them through tsx, not Node's own type stripping. Finding the file (`<prefix>/default-plugins.json`, the parent of `bin/`, or `DIMCODE_DEFAULT_PLUGINS`) and the App Server's `--defaults` flag are PluginManager's ([#485](https://github.com/arcships/dim/pull/485)); RuntimeManager reads the `runtimes` section of that file. With `--defaults` and without `--node`, the App Server acquires the runtimes with RuntimeManager; otherwise it behaves as today (explicit `--node`, `--js-runtime` and `--python` remain for development and tests).
 
 ## 7. Security
 
@@ -206,6 +206,6 @@ None to rutis: `LocalRuntime` built from fixed paths starts its process only whe
 | --- | --- |
 | Blocked by | A Python plugin's directory is not on the running Python runtime's import path. |
 | Existing mechanisms considered | Adding each directory to `PYTHONPATH` and restarting the Python runtime per install (restarts every Python row; same-named modules of two plugins collide). |
-| Generic capability | PluginManager keeps `<home>/plugins/python/<package>` links and names Python rows `py:<package>.<entry>` (§4), and calls `RuntimeService::install("python")` when it turns on a Python plugin while Python is off. |
+| Generic capability | PluginManager keeps `<home>/plugins/.python/<package>` links and names Python rows `py:<package>.<entry>` (§4), and calls `RuntimeService::install("python")` when it turns on a Python plugin while Python is off. |
 | Effect on sequence, batch, interrupt, reload | None on the Timeline. |
 | Owner and issue | PluginManager, [#3](https://github.com/arcships/dim/issues/3). |

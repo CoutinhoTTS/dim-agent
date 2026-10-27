@@ -470,11 +470,8 @@ and Session method namespaces from its own `apply`, with the `toolRegistry` and 
 services it injects; the row's `RowSchema.provides` lists only the process services it provides by name. See the [binding contract](../../docs/design/session-typescript.md)
 and [typed authoring example](../../docs/typescript-plugin-authoring.md#session-tools-and-client-methods).
 
-With `--defaults PATH` (the default configuration file) and without `--node`, the runtimes are
-acquired by RuntimeManager into the home and the rows wait for them
-([RuntimeManager](../../docs/design/plugins/RuntimeManager.md)); `--session-rows FILE` then only
-lists the rows. Otherwise the `dim-app-server` binary builds this configuration from
-`--session-rows FILE` with the existing `--node` and `--js-runtime` flags, and `--python PATH` for `py:` rows. `FILE` is a JSON
+The `dim-app-server` binary builds this configuration from `--session-rows FILE` with the
+existing `--node` and `--js-runtime` flags, and `--python PATH` for `py:` rows. `FILE` is a JSON
 array of ordinary loader rows, one per plugin; it is also the anchor, so package names in the
 rows resolve from its location and `py:` modules are imported from its directory. Rows are
 validated as they are for an embedding host; nothing is installed by default. Optional packages such as

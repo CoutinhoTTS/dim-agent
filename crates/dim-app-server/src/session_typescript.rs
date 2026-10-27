@@ -94,7 +94,7 @@ pub struct SessionTypeScriptConfig {
 impl SessionTypeScriptConfig {
     /// The runtimes RuntimeManager acquires into `home` (RuntimeManager
     /// §2.3), with `rows`. The Python runtime imports plugins from
-    /// `<home>/plugins/python/` (§4).
+    /// `<home>/plugins/.python/` (§4).
     pub fn acquired(
         home: &std::path::Path,
         runtimes: Arc<crate::runtime_manager::Runtimes>,
@@ -108,7 +108,7 @@ impl SessionTypeScriptConfig {
             anchor: runtimes.anchor(),
             python: Some(PythonConfig {
                 interpreter: python.interpreter.clone(),
-                project: home.join("plugins").join("python"),
+                project: home.join("plugins").join(".python"),
                 packages: Some(python.packages.clone()),
             }),
             acquire: Some(runtimes),

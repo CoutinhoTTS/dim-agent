@@ -93,7 +93,7 @@ ctx.plugin(LocalRuntime)  ──提供──▶  Runtime#session-node / Runtime#
 
 每个路径都由固定版本、配置和 home 算出，所以 App Server 在 reconcile 之前就能用它们建好 `LocalRuntime` 对象和行解析器，就像现在用配置的路径一样；运行时进程要等 RuntimeManager 挂载运行时才启动。`source: system` 时，解释器路径在 App Server 建对象时从 `PATH` 查找。
 
-Python 运行时的 project 目录是 `<home>/plugins/python/`，归 PluginManager（§4）。Node 运行时的 anchor 是它的包目录里的 `package.json`。
+Python 运行时的 project 目录是 `<home>/plugins/.python/`，归 PluginManager（§4）。Node 运行时的 anchor 是它的包目录里的 `package.json`。
 
 ### 2.4 `runtimes.json`
 
@@ -140,7 +140,7 @@ Python 运行时的 project 目录是 `<home>/plugins/python/`，归 PluginManag
 
 rutis 的 Python 运行时是一个进程；行 `py:<模块>` 用 `importlib.import_module` 从运行时的 `sys.path` 导入，`sys.path` 里有它的 project 目录。插件目录可以在任何位置（本地路径原地使用；Git 安装在 `<home>/plugins/<id>/<commit>`）。
 
-- Python 运行时的 project 目录是 `<home>/plugins/python/`，归 PluginManager；App Server 启动时创建它，让运行时的导入路径在第一个插件之前就存在。
+- Python 运行时的 project 目录是 `<home>/plugins/.python/`，归 PluginManager；App Server 启动时创建它，让运行时的导入路径在第一个插件之前就存在。
 - 开启一个 Python 插件时，PluginManager 在那里建一个目录链接 `<包名>` 指向插件目录（`<包名>` 是插件 id 把 `-` 换成 `_`；Windows 上用 junction），并建行 `py:<包名>.<入口模块>`。正在运行的进程不重启就能导入新插件。
 - 插件内部的模块之间用相对导入（`from . import helpers`）。reload 时，入口模块文件变了就重新导入，这是 rutis 对每个 Python 行的做法（[需求第 3 条](../../../design/plugin-management.md)）。
 - PluginManager 开启 Python 插件而 Python 处于关闭时，调用 `RuntimeService::install("python")`（§5）。
@@ -166,7 +166,7 @@ plugins/<name>/             # goal、web、session-title、workflow、scheduler�
 LICENSE  NOTICE  release-manifest.json
 ```
 
-`scripts/stage-plugins.mjs` 复制 `runtime/default-plugins.json` 和每个默认插件的目录（不含测试、`tsconfig.json`、`node_modules`），在每个目录里按它固定的 lock 执行 `npm ci --omit=dev --ignore-scripts --no-bin-links`；`stage-release.mjs --plugins DIR` 把结果放在 `bin/` 旁边。默认插件从自己的 `node_modules` 解析 `@arcships/rutis`；它不能解析出自己的一份 Cordis，因为 rutis-runtime 拒绝 Cordis 与运行时不同的插件。CLI 在文件存在时给 App Server 传 `--defaults <可执行文件目录>/../default-plugins.json`；开发时传 `runtime/default-plugins.json`（或设 `DIMCODE_DEFAULTS`）。没有 `--defaults` 时 App Server 没有 RuntimeManager，行为与现在相同（显式的 `--node`、`--js-runtime`、`--python` 继续用于开发和测试）。
+`scripts/stage-plugins.mjs` 复制 `runtime/default-plugins.json` 和每个默认插件的目录（不含测试、`tsconfig.json`、`node_modules`），在每个目录里按它固定的 lock 执行 `npm ci --omit=dev --ignore-scripts --no-bin-links`；`stage-release.mjs --plugins DIR` 把结果放在 `bin/` 旁边。默认插件从自己的 `node_modules` 解析 `@arcships/rutis`；它不能解析出自己的一份 Cordis，因为 rutis-runtime 拒绝 Cordis 与运行时不同的插件。插件入口是 TypeScript，放在 npm 包的 `node_modules` 下也可以：Node 运行时通过 tsx 加载它们，不用 Node 自带的去类型。查找这个文件（`<prefix>/default-plugins.json`，即 `bin/` 的上一级，或 `DIMCODE_DEFAULT_PLUGINS`）和 App Server 的 `--defaults` 参数归 PluginManager（[#485](https://github.com/arcships/dim/pull/485)）；RuntimeManager 读这个文件的 `runtimes` 一节。有 `--defaults` 且没有 `--node` 时，App Server 用 RuntimeManager 获取运行时；否则行为与现在相同（显式的 `--node`、`--js-runtime`、`--python` 继续用于开发和测试）。
 
 ## 7. 安全
 
@@ -206,6 +206,6 @@ RuntimeManager 不是 Capability：它没有 Timeline 状态，不写 Timeline �
 | --- | --- |
 | 阻塞 | Python 插件的目录不在正在运行的 Python 运行时的导入路径上。 |
 | 考虑过的已有机制 | 把每个目录加到 `PYTHONPATH`、每次安装重启 Python 运行时（所有 Python 行都要重启；两个插件的同名模块会冲突）。 |
-| 通用能力 | PluginManager 维护 `<home>/plugins/python/<包名>` 链接，Python 行命名为 `py:<包名>.<入口>`（§4）；开启 Python 插件而 Python 关闭时调用 `RuntimeService::install("python")`。 |
+| 通用能力 | PluginManager 维护 `<home>/plugins/.python/<包名>` 链接，Python 行命名为 `py:<包名>.<入口>`（§4）；开启 Python 插件而 Python 关闭时调用 `RuntimeService::install("python")`。 |
 | 对序列、批次、中断、reload 的影响 | 对 Timeline 没有影响。 |
 | 所有者与 issue | PluginManager，[#3](https://github.com/arcships/dim/issues/3)。 |

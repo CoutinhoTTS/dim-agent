@@ -19,7 +19,7 @@ async fn appears(path: &Path) {
 }
 
 /// Node is on at startup; Python is off until `runtime.install`, and a
-/// Python plugin is imported through a link in `<home>/plugins/python/`.
+/// Python plugin is imported through a link in `<home>/plugins/.python/`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires node 22.19+ and python3 3.10+ with pip on PATH, and the npm and PyPI registries"]
 async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
@@ -54,10 +54,10 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
     )
     .unwrap();
     // What PluginManager does when it turns the Python plugin on (§4).
-    std::fs::create_dir_all(home.join("plugins/python")).unwrap();
+    std::fs::create_dir_all(home.join("plugins/.python")).unwrap();
     std::os::unix::fs::symlink(
         plugins.join("probe-py"),
-        home.join("plugins/python/probe_py"),
+        home.join("plugins/.python/probe_py"),
     )
     .unwrap();
     let rows = vec![
