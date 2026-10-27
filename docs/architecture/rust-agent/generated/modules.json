@@ -14991,6 +14991,7 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::BranchEnded",
         "path AgentError::InvalidInput"
       ]
     },
