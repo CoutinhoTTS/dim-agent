@@ -77,7 +77,7 @@ ctx.plugin(LocalRuntime)  ──提供──▶  Runtime#session-node / Runtime#
 }
 ```
 
-- `source`：`download` 用上面的压缩包；`system` 用 `PATH` 上的解释器（`node`；`python3`，Windows 上是 `python`），获取时检查：Node 22.19 或更高（`@arcships/rutis-runtime` 的 `engines`）且带自己的 npm，Python 3.10 或更高且有 pip。检查不通过就是这个运行时的失败（§3.3）。
+- `source`：`download` 用上面的压缩包；`system` 用 `PATH` 上的解释器（`node`；`python3`，Windows 上是 `python`），获取时检查：Node 22.19 或更高（`@arcships/rutis-runtime` 的 `engines`）且带自己的 npm（`npm-cli.js` 在官方压缩包和安装程序放的位置；没有它的 Node 会失败，原因里写出这个路径），Python 3.10 或更高且有 pip。检查不通过就是这个运行时的失败（§3.3）。
 - `auto`：`true` 每次启动都获取。`false` 在 `runtime.install`（§5）之前不动；装好后会被记录（§2.4），之后每次启动都像 `auto` 一样获取。
 - 用户在 `<home>/runtimes/config.json` 里覆盖预置，形状相同，按运行时、按字段覆盖。它在 home 里，所以只有用户本地配置能改，项目配置不能。
 
@@ -104,7 +104,7 @@ Python 运行时的 project 目录是 `<home>/plugins/.python/`，归 PluginMana
   "python": { "source": "download", "version": "3.12.15+20261003", "sha256": "…", "packages": "python-packages-…" } }
 ```
 
-只由 RuntimeManager 在运行时和它的包装好之后写。`sha256` 是压缩包校验时用的官方 SHA-256。某一项的 source、version、packages 与固定版本和配置算出的一致、且对应目录存在，就是已安装：下次启动直接用，不再下载。`auto: false` 的运行时有记录，表示用户装过它。别的都不存；运行时是否在运行是 rutis 的状态（`RuntimeHandle::state`）。
+只由 RuntimeManager 在运行时和它的包装好之后写。`version` 对 `download` 是固定的版本；对 `system` 是解释器的版本，每次启动都检查，`runtime.list` 报告的也是它。`sha256` 是压缩包校验时用的官方 SHA-256。某一项的 source、version、packages 与固定版本和配置算出的一致、且对应目录存在，就是已安装：下次启动直接用，不再下载。`auto: false` 的运行时有记录，表示用户装过它。别的都不存；运行时是否在运行是 rutis 的状态（`RuntimeHandle::state`）。
 
 ## 3. 流程
 
@@ -176,6 +176,7 @@ LICENSE  NOTICE  release-manifest.json
 - 压缩包条目只解压到它的目录里：拒绝绝对路径和 `..`，也拒绝目标离开目录的链接（Windows 上，目录内的链接解压为副本）；zip 包里的链接条目一律拒绝。不保留 setuid、setgid、sticky 位（Unix 上权限最多为 `rwxr-xr-x`）。
 - npm 带 `--ignore-scripts` 运行；pip 只装 wheel（`--only-binary :all:`），安装期间不运行任何包的代码。
 - RuntimeManager 只写 `<home>/runtimes/`。不使用也不保存任何凭据。
+- 完整性在获取时保证。之后启动时，RuntimeManager 信任自己的记录和已安装的目录，不再重新算 hash：它们在用户的 home 里，只有用户自己的进程会写；能改它们的进程，同样能改配置或插件本身。校验防的是网络上来的内容，不是 home。
 
 ## 8. 规则检查
 

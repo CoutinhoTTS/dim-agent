@@ -89,6 +89,17 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
             .unwrap();
     assert_eq!(records["node"]["source"], "system");
     assert_eq!(records["python"]["source"], "system");
+    let checked = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .unwrap();
+    let checked = String::from_utf8(checked.stdout).unwrap();
+    assert_eq!(
+        records["node"]["version"],
+        checked.trim().trim_start_matches('v')
+    );
+    let list = client.rpc("runtime.list", json!({})).await;
+    assert_eq!(list["result"][0]["version"], records["node"]["version"]);
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

@@ -77,7 +77,7 @@ The default configuration file ([PluginManager §2.3](PluginManager.md#23-the-de
 }
 ```
 
-- `source`: `download` uses the archive above; `system` uses the interpreter on `PATH` (`node`; `python3`, or `python` on Windows), checked when it is acquired: Node 22.19 or later (the `engines` of `@arcships/rutis-runtime`) with its bundled npm, Python 3.10 or later with pip. A check that fails is that runtime's failure (§3.3).
+- `source`: `download` uses the archive above; `system` uses the interpreter on `PATH` (`node`; `python3`, or `python` on Windows), checked when it is acquired: Node 22.19 or later (the `engines` of `@arcships/rutis-runtime`) with its bundled npm (`npm-cli.js` where the official archives and installers put it; a Node without it fails with a reason naming that path), Python 3.10 or later with pip. A check that fails is that runtime's failure (§3.3).
 - `auto`: `true` acquires the runtime at every start. `false` leaves it off until `runtime.install` (§5); once installed, it is recorded (§2.4) and acquired at every start like an `auto` one.
 - The user overrides the preset in `<home>/runtimes/config.json`, the same shape, merged per runtime and field over the preset. It is in the home, so only the user's local configuration changes it; no project source does.
 
@@ -104,7 +104,7 @@ The Python runtime's project directory is `<home>/plugins/.python/`, PluginManag
   "python": { "source": "download", "version": "3.12.15+20261003", "sha256": "…", "packages": "python-packages-…" } }
 ```
 
-Written by RuntimeManager only, after a runtime and its packages are installed. `sha256` is the official digest the archive was verified against. An entry whose source, version and packages equal what the fixed versions and configuration give, with its directories present, is installed: the next start uses it without downloading. An entry for an `auto: false` runtime means the user installed it. Nothing else is stored; whether a runtime is running is rutis' state (`RuntimeHandle::state`).
+Written by RuntimeManager only, after a runtime and its packages are installed. `version` is the fixed version for `download`; for `system` it is the version of the interpreter, which is checked at every start, and `runtime.list` reports the same. `sha256` is the official digest the archive was verified against. An entry whose source, version and packages equal what the fixed versions and configuration give, with its directories present, is installed: the next start uses it without downloading. An entry for an `auto: false` runtime means the user installed it. Nothing else is stored; whether a runtime is running is rutis' state (`RuntimeHandle::state`).
 
 ## 3. Flows
 
@@ -176,6 +176,7 @@ LICENSE  NOTICE  release-manifest.json
 - Archive entries are unpacked only inside their directory: absolute paths and `..` are refused, and so are links whose target leaves it (on Windows a link inside is unpacked as a copy); link entries of a zip archive are always refused. No setuid, setgid or sticky bit is kept (on Unix permissions are at most `rwxr-xr-x`).
 - npm runs with `--ignore-scripts`; pip installs only wheels (`--only-binary :all:`), so no package code runs during installation.
 - RuntimeManager writes only under `<home>/runtimes/`. No credentials are used or stored.
+- Integrity is established at acquisition. At later starts RuntimeManager trusts its record and the installed directories without hashing them again: they are in the user's home, which only the user's own processes write, and a process that can change them can equally change the configuration or the plugins themselves. Verification guards what comes over the network, not the home.
 
 ## 8. Rule check
 

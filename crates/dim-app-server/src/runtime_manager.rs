@@ -310,10 +310,10 @@ struct Record {
     packages: String,
 }
 impl Record {
-    fn of(plan: &Plan, sha256: Option<String>) -> Self {
+    fn of(plan: &Plan, version: &str, sha256: Option<String>) -> Self {
         Self {
             source: plan.source,
-            version: plan.version.clone(),
+            version: version.to_owned(),
             sha256,
             packages: plan
                 .packages
@@ -337,7 +337,10 @@ fn read_records(path: &Path) -> BTreeMap<String, Record> {
 pub struct RuntimeStatus {
     pub name: &'static str,
     pub source: Source,
-    pub version: String,
+    /// The fixed version for `download`; for `system`, the version of the
+    /// checked interpreter, absent until it is checked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     /// `off`, `acquiring`, `failed`, or rutis' runtime state once mounted:
     /// `idle`, `starting`, `ready`, `down`.
     pub status: &'static str,
@@ -358,6 +361,7 @@ pub struct RuntimeService {
     runtimes: Arc<Runtimes>,
     local: [Arc<LocalRuntime>; 2],
     states: Mutex<[State; 2]>,
+    versions: Mutex<[Option<String>; 2]>,
     record: tokio::sync::Mutex<()>,
     ctx: Ctx,
     stop: CancellationToken,
@@ -370,6 +374,7 @@ impl RuntimeService {
     /// Every runtime's status.
     pub fn list(&self) -> Vec<RuntimeStatus> {
         let states = self.states.lock().unwrap();
+        let versions = self.versions.lock().unwrap();
         Kind::ALL
             .into_iter()
             .map(|kind| {
@@ -388,7 +393,10 @@ impl RuntimeService {
                 RuntimeStatus {
                     name: kind.name(),
                     source: plan.source,
-                    version: plan.version.clone(),
+                    version: match plan.source {
+                        Source::Download => Some(plan.version.clone()),
+                        Source::System => versions[Self::index(kind)].clone(),
+                    },
                     status,
                     reason,
                 }
@@ -425,11 +433,15 @@ impl RuntimeService {
                         _ = service.stop.cancelled() => return,
                     };
                     let state = match result {
-                        Ok(()) => State::Mounted(
-                            service
-                                .ctx
-                                .plugin(Mounted(service.local[Self::index(kind)].clone(), kind)),
-                        ),
+                        Ok(version) => {
+                            service.versions.lock().unwrap()[Self::index(kind)] = Some(version);
+                            State::Mounted(
+                                service.ctx.plugin(Mounted(
+                                    service.local[Self::index(kind)].clone(),
+                                    kind,
+                                )),
+                            )
+                        }
                         Err(reason) => {
                             tracing::warn!(runtime = kind.name(), %reason, "runtime acquisition failed");
                             State::Failed(reason)
@@ -442,21 +454,22 @@ impl RuntimeService {
         }
     }
 
-    async fn acquire(&self, kind: Kind) -> Result<(), String> {
+    async fn acquire(&self, kind: Kind) -> Result<String, String> {
         let plan = self.runtimes.plan(kind);
+        let version = match plan.source {
+            Source::Download => plan.version.clone(),
+            Source::System => check_system(kind, &plan.interpreter).await?,
+        };
         let installed = read_records(&self.runtimes.record_file())
             .get(kind.name())
-            .is_some_and(|record| {
-                let expected = Record::of(plan, record.sha256.clone());
-                *record == expected
-            })
+            .is_some_and(|record| *record == Record::of(plan, &version, record.sha256.clone()))
             && plan
                 .archive
                 .as_ref()
                 .is_none_or(|(_, directory)| directory.is_dir())
             && plan.packages.is_dir();
         if installed {
-            return Ok(());
+            return Ok(version);
         }
         std::fs::create_dir_all(&self.runtimes.root).map_err(|e| e.to_string())?;
         let sha256 = match &plan.archive {
@@ -468,12 +481,9 @@ impl RuntimeService {
                 }
                 Some(sha256)
             }
-            None => {
-                check_system(kind, &plan.interpreter).await?;
-                None
-            }
+            None => None,
         };
-        let record = Record::of(plan, sha256);
+        let record = Record::of(plan, &version, sha256);
         if !plan.packages.is_dir() {
             match kind {
                 Kind::Node => npm_ci(plan).await?,
@@ -485,11 +495,19 @@ impl RuntimeService {
         let mut records = read_records(&path);
         records.insert(kind.name().to_owned(), record);
         let bytes = serde_json::to_vec_pretty(&records).expect("records serialize");
-        let partial = path.with_extension("json.partial");
+        let partial = sibling(&path, ".partial");
         std::fs::write(&partial, bytes)
             .and_then(|()| std::fs::rename(&partial, &path))
-            .map_err(|e| format!("{}: {e}", path.display()))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(version)
     }
+}
+
+/// `path` with `suffix` appended to its whole file name.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_owned();
+    name.push(suffix);
+    path.with_file_name(name)
 }
 
 struct Mounted(Arc<LocalRuntime>, Kind);
@@ -545,8 +563,8 @@ async fn download(
     sha256: &str,
     directory: &Path,
 ) -> Result<(), String> {
-    let partial = directory.with_extension("partial");
-    let archive = directory.with_extension("download");
+    let partial = sibling(directory, ".partial");
+    let archive = sibling(directory, ".download");
     let mut errors = Vec::new();
     for source in sources {
         let url = source.replace("{file}", &file.replace('+', "%2B"));
@@ -754,7 +772,8 @@ async fn run(mut command: tokio::process::Command, what: &str) -> Result<String,
     ))
 }
 
-async fn check_system(kind: Kind, interpreter: &Path) -> Result<(), String> {
+/// Checks a `system` interpreter (design §2.2) and returns its version.
+async fn check_system(kind: Kind, interpreter: &Path) -> Result<String, String> {
     let mut command = tokio::process::Command::new(interpreter);
     let (minimum, accepts): (&str, fn(u32, u32) -> bool) = match kind {
         Kind::Node => {
@@ -764,7 +783,7 @@ async fn check_system(kind: Kind, interpreter: &Path) -> Result<(), String> {
             })
         }
         Kind::Python => {
-            command.args(["-c", "import sys; print('%d.%d' % sys.version_info[:2])"]);
+            command.args(["-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"]);
             ("3.10", |major, minor| {
                 major > 3 || (major == 3 && minor >= 10)
             })
@@ -780,13 +799,22 @@ async fn check_system(kind: Kind, interpreter: &Path) -> Result<(), String> {
         .trim_start_matches('v')
         .split('.')
         .map(|part| part.parse::<u32>().ok());
+    let version = version.trim().trim_start_matches('v').to_owned();
     match (parts.next().flatten(), parts.next().flatten()) {
-        (Some(major), Some(minor)) if accepts(major, minor) => Ok(()),
-        _ => Err(format!(
-            "{what} is {}, {minimum} or later is required",
-            version.trim()
-        )),
+        (Some(major), Some(minor)) if accepts(major, minor) => {}
+        _ => {
+            return Err(format!(
+                "{what} is {version}, {minimum} or later is required"
+            ));
+        }
     }
+    if kind == Kind::Node && !npm_cli(interpreter).is_file() {
+        return Err(format!(
+            "{what} has no bundled npm at {}",
+            npm_cli(interpreter).display()
+        ));
+    }
+    Ok(version)
 }
 
 fn npm_cli(node: &Path) -> PathBuf {
@@ -800,13 +828,13 @@ fn npm_cli(node: &Path) -> PathBuf {
 }
 
 async fn npm_ci(plan: &Plan) -> Result<(), String> {
-    let partial = plan.packages.with_extension("partial");
+    let partial = sibling(&plan.packages, ".partial");
     let _ = std::fs::remove_dir_all(&partial);
     std::fs::create_dir_all(&partial).map_err(|e| e.to_string())?;
     std::fs::write(partial.join("package.json"), NODE_PACKAGE)
         .and_then(|()| std::fs::write(partial.join("package-lock.json"), NODE_LOCK))
         .map_err(|e| e.to_string())?;
-    let cache = plan.packages.with_extension("npm-cache");
+    let cache = sibling(&plan.packages, ".npm-cache");
     let mut errors = Vec::new();
     for registry in &plan.indexes {
         let mut command = tokio::process::Command::new(&plan.interpreter);
@@ -843,8 +871,8 @@ async fn npm_ci(plan: &Plan) -> Result<(), String> {
 }
 
 async fn pip_install(plan: &Plan) -> Result<(), String> {
-    let partial = plan.packages.with_extension("partial");
-    let requirements = plan.packages.with_extension("requirements.txt");
+    let partial = sibling(&plan.packages, ".partial");
+    let requirements = sibling(&plan.packages, ".requirements.txt");
     let _ = std::fs::remove_dir_all(&partial);
     std::fs::write(&requirements, PYTHON_REQUIREMENTS).map_err(|e| e.to_string())?;
     let mut errors = Vec::new();
@@ -932,6 +960,7 @@ impl DynPlugin for RuntimeManagerPlugin {
                 runtimes: self.runtimes.clone(),
                 local: self.local.clone(),
                 states: Mutex::new([State::Off, State::Off]),
+                versions: Mutex::new([None, None]),
                 record: tokio::sync::Mutex::new(()),
                 ctx: ctx.clone(),
                 stop: CancellationToken::new(),
