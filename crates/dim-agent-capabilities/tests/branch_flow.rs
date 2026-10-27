@@ -2737,6 +2737,41 @@ async fn an_idle_line_tells_main_once_when_its_turn_ends_without_a_word() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_that_steered_main_writes_no_idle_notice() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe);
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    until_events(&session, "main", |events| {
+        !blocks_with(events, "<dim-branch-idle").is_empty()
+    })
+    .await;
+    soon(session.idle("main")).await.unwrap();
+    let before = blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len();
+    let call = format!(
+        r#"{{"action":"message","to":"main","content":"the leak is in cache.rs","mode":"steer"}}"#
+    );
+    let result = tool_call(&session, &child, &call).await;
+    assert_eq!(result.is_error, None, "{:?}", result.content);
+    until_events(&session, "main", |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::TurnStart(_)))
+    })
+    .await;
+    soon(session.idle("main")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let after = blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len();
+    assert_eq!(
+        after, before,
+        "a turn that steered main writes no idle notice"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_with_a_held_steer_still_tells_main_the_line_stopped() {
     let probe = Arc::new(Probe::default());
     let agent = setup(&probe);

@@ -1640,8 +1640,8 @@ impl DynPlugin for BranchLinePlugin {
                         "input/deleted",
                         "stop/interrupt",
                         "turn/end",
-                        "tool/use",
-                        "tool/result",
+                        "step/tool-use",
+                        "step/tool-result",
                     ],
                     move |delivery| {
                         let consumer = consumer.clone();
