@@ -37,21 +37,30 @@ pub async fn serve_product(
     dir: &Path,
     observe: impl FnOnce(&mut AgentBuilder),
 ) -> Result<RunningServer> {
-    let home = dir.join("home");
+    serve_home(&dir.join("home"), dir, dir.join("command-output"), observe).await
+}
+
+/// [`serve_product`] on an existing product home: its native store stays at
+/// `home/rust`, the layout `dimcode` starts the daemon with.
+pub async fn serve_home(
+    home: &Path,
+    cwd: &Path,
+    output_root: PathBuf,
+    observe: impl FnOnce(&mut AgentBuilder),
+) -> Result<RunningServer> {
+    let home = home.to_path_buf();
     let mut config = ServerConfig {
         websocket_address: Some(([127, 0, 0, 1], 0).into()),
         product_home: Some(home.clone()),
-        target_home: Some(dir.join("rust")),
+        target_home: Some(home.join("rust")),
         ..Default::default()
     };
-    config.session_defaults.cwd = dir.to_string_lossy().into_owned();
+    config.session_defaults.cwd = cwd.to_string_lossy().into_owned();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install_local_execution(
         &mut builder,
         ModelProviderPlugin::process,
-        WorkspaceToolsConfig {
-            output_root: dir.join("command-output"),
-        },
+        WorkspaceToolsConfig { output_root },
     );
     dim_app_server::permission_rules::install(&mut builder);
     builder

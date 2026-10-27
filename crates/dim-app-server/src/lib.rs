@@ -207,6 +207,11 @@ impl RunningServer {
     pub fn diagnostics(&self) -> rutis::host::diagnostics::RuntimeDiagnostics {
         self.root.diagnostics()
     }
+    /// A process service of the served profile; the `summary-eval` runner reads
+    /// the provider catalog, the model host and file storage this way.
+    pub fn service<T: ?Sized + Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        self.root.get::<T>()
+    }
     /// Emits a Session notice from the process root, standing in for an
     /// owner of process-level state after its commit. Feature `testing` only.
     #[cfg(feature = "testing")]

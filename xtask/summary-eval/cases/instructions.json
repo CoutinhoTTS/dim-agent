@@ -1,0 +1,65 @@
+{
+  "id": "instructions",
+  "description": "Constraints given over several turns, one later revised",
+  "contextWindow": null,
+  "earlierSummary": null,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Write the compaction runner in xtask as a tool, not library code: unwrap freely, it will never be called from production."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Understood: plain unwrap in the runner, no Result plumbing for the tool's own setup."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Correction from the team review: no unwrap outside tests anywhere in the repository, tools included. Switch the runner to ? and a small error type."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I will replace the unwraps in the runner with ? and a Box<dyn Error> result, and keep unwrap only inside the test module."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Also keep the case files under /work/dim and affordable to run."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Then the runner takes --runs and the case files stay small; I will keep the folding case narrowed with contextWindow instead of a huge history."
+        }
+      ]
+    }
+  ],
+  "retainFrom": 4,
+  "probes": [
+    {
+      "id": "revision",
+      "kind": "fact",
+      "text": "The unwrap rule was revised: unwrap is not allowed outside tests, the runner included."
+    },
+    {
+      "id": "old-rule",
+      "kind": "absent",
+      "text": "The runner may use unwrap freely because it is only a tool."
+    },
+    {
+      "id": "error-type",
+      "kind": "exact",
+      "text": "Box<dyn Error>"
+    }
+  ]
+}
