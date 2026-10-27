@@ -104,7 +104,6 @@ impl Draft {
         }
         self.cursor += inserted;
         self.join_text();
-        // Inserting a combining character can join both adjacent graphemes.
         self.snap_cursor();
     }
 
@@ -320,7 +319,6 @@ impl Draft {
             }
             parts.push(Part::File { label, content });
         }
-        // Commit the group only after every local source has been accepted.
         self.erase(replace.start, replace.end);
         for part in parts {
             self.insert(part);
@@ -900,7 +898,6 @@ pub async fn edit(
                 continue;
             },
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)), if completion.is_some() && decoder.bytes == b"\x1b" && decoder.paste.is_none() => {
-                // Keep a delayed CSI or paste prefix intact after closing suggestions.
                 completion = None;
                 dismissed = true;
                 screen.draw(draft, size, notice.as_deref(), None)?;

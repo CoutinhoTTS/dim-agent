@@ -38,8 +38,6 @@ const END: &str = "<!-- /generated -->";
 const TOOLS: [&str; 8] = [
     "read", "write", "edit", "glob", "grep", "exec", "wait", "skill",
 ];
-// Runtime assembly and the scripted model adapter are not business plugins.
-// Keep this exclusion list narrow: a newly assembled capability needs a page.
 const INFRASTRUCTURE: [&str; 13] = [
     "rutis-loader",
     "session",
@@ -132,9 +130,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         "---\nname: graph\ndescription: Architecture fixture\n---\nGraph fixture instructions.\n",
     )?;
     let process = rutis::Ctx::root()?;
-    // FileStorage refuses symlinked components such as macOS `/var`.
     (&process.plugin(FileStoragePlugin::new(vec![storage.canonicalize()?]))).await?;
-    // As the product's HostPlatform, with its local configuration sources.
     (&process.plugin(GraphPlatform {
         home: storage.canonicalize()?,
         storage: Key::of(),
@@ -155,11 +151,8 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
             output_root: dir.join("outputs"),
         },
     );
-    // `serve` adds Attachments where the host has native storage.
     dim_agent_attachments::install(&mut builder);
-    // The product profiles add Questions.
     dim_agent_questions::install(&mut builder);
-    // The Agent's own plugin: the catalog and the Skills parts it registers.
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
     let agent = builder.build_in(&process);
     let session = agent
@@ -171,7 +164,6 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         .await?;
     let session_diagnostics = session.diagnostics()?;
     let main_diagnostics = session.branch_diagnostics("main")?;
-    // Scoped keys carry the instance of the scope plugin's loader group.
     let instance = |d: &rutis::host::diagnostics::RuntimeDiagnostics, name: &str| {
         let scope = d
             .plugins
@@ -190,9 +182,6 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     ];
     let mut snapshot = process.diagnostics();
     let root = process.root_view().expect("process root").id;
-    // The process: the host's plugins, and those rows of the Agent's own
-    // loader that provide a process service. The plugins that only register
-    // parts are seen through their parts.
     let loader = snapshot
         .plugins
         .iter()

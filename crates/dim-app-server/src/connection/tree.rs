@@ -92,8 +92,6 @@ impl Connection {
         if params.after > through {
             return Err(RpcError::invalid("History cursor exceeds fixed position"));
         }
-        // A published head is a complete batch boundary. Wait for this fixed
-        // head to be dispatched; later input never extends the snapshot.
         loop {
             let state = dispatched.borrow().clone();
             if let Some(error) = state.failure {
@@ -140,7 +138,6 @@ impl Connection {
         if params.prompt.trim().is_empty() {
             return Err(RpcError::invalid("Branch prompt must not be empty"));
         }
-        // Without a mount list the Session mounts every tool, `branch` too.
         if !session
             .config()
             .tools
@@ -155,8 +152,6 @@ impl Connection {
             .map_err(RpcError::from)?;
         dim_agent_capabilities::history::validate_context_boundary(&prefix)
             .map_err(RpcError::invalid)?;
-        // Branch creation has no admission in the first release: this trusted
-        // entry creates the branch directly.
         let id = session
             .branch(
                 params.parent_branch_id,

@@ -5,7 +5,6 @@ import type { SessionMethods, ToolRegistry } from '../../npm/plugin.js'
 
 export const part = definePlugin({
   name: 'LateSessionTypeScriptFixture',
-  // Pending until the test provides `lateGate` in its Session.
   inject: ['lateGate', 'toolRegistry', 'sessionMethods'],
   provides,
   async apply(ctx) {

@@ -240,9 +240,6 @@ pub(super) async fn authorize(
         .resolve_metadata_from_challenge(request.challenge)
         .await
         .map_err(|error| port.failure(error))?;
-    // Only metadata the server published through PRM, else the configured
-    // override; never rmcp's guesses at the server origin or its
-    // synthesized endpoints.
     let metadata = match resolution.source {
         AuthorizationMetadataSource::ProtectedResourceMetadata => resolution.metadata,
         _ => match request
@@ -258,7 +255,6 @@ pub(super) async fn authorize(
     let previous = request
         .previous
         .filter(|previous| previous.issuer == checked.issuer);
-    // The latest challenge, and every scope a `403` asked for (step-up).
     let challenged = union(
         &request
             .challenge
@@ -274,9 +270,6 @@ pub(super) async fn authorize(
         None => match previous {
             Some(previous) => union(&previous.requested_scopes, &challenged),
             None if !challenged.is_empty() => challenged,
-            // Before metadata is set, rmcp's selection holds only the
-            // server's own scopes (PRM `scopes_supported`), never the
-            // authorization server's.
             None => manager.select_scopes(None, &[]),
         },
     };
@@ -294,8 +287,6 @@ pub(super) async fn authorize(
     let configured = request.settings.and_then(|s| s.client_id.clone());
     let (registration, client_id, secret) = match configured {
         Some(client_id) => {
-            // Credentials recorded for another authorization server are never
-            // reused; a configured client must be signed out first.
             if request
                 .previous
                 .is_some_and(|previous| previous.issuer != checked.issuer)
@@ -354,7 +345,6 @@ pub(super) async fn authorize(
         .unwrap()
         .take()
         .ok_or(McpAuthError::DiscoveryFailed)?;
-    // The record repeats exactly the resource the authorization carried.
     let resource = Url::parse(&url)
         .ok()
         .and_then(|url| {
@@ -525,7 +515,6 @@ pub(super) fn callback(
     iss_required: bool,
 ) -> Result<Callback, McpAuthError> {
     let invalid = McpAuthError::CallbackInvalid;
-    // Compared without normalization: exactly the registered redirect URI.
     let query = callback
         .strip_prefix(redirect_uri)
         .and_then(|rest| rest.strip_prefix('?'))
@@ -658,7 +647,6 @@ pub(super) async fn token(
     }
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| TokenError::Failed("invalid_response"))?;
-    // An empty optional field is absent, as many servers send it.
     let string = |name: &str| match value.get(name) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) if value.is_empty() => Ok(None),

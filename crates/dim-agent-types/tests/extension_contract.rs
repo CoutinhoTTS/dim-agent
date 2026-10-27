@@ -41,7 +41,6 @@ fn an_undefined_type_round_trips_as_an_extension_event() {
     for text in texts(&json!({"type":"goal","name":"set","data":{"objective":"ship","n":[1,2]}})) {
         assert_eq!(serde_json::from_str::<AgentEvent>(&text).unwrap(), decoded);
     }
-    // The frozen v1 union has no view of it.
     assert!(v1::EventRef::new(&decoded).is_none());
 }
 
@@ -53,10 +52,6 @@ fn reserved_domains_decode_only_through_their_typed_contract() {
             "{domain}"
         );
     }
-    // A core event with a payload outside its contract, or an unknown name in
-    // a core domain, fails with its typed decoder's own error, which names the
-    // field or name, never as an extension event; whichever comes first in
-    // the map.
     for (kind, cause) in [
         (
             json!({"type":"input","name":"message","data":{"blocks":[],"unexpected":1}}),
@@ -88,7 +83,6 @@ fn reserved_domains_decode_only_through_their_typed_contract() {
             assert!(error.to_string().starts_with(cause), "{kind}: {error}");
         }
     }
-    // Every reserved domain has its typed decoder.
     for domain in RESERVED_DOMAINS {
         let kind = json!({"type":domain,"name":"anything","data":{}});
         let error = serde_json::from_value::<AgentEvent>(event(kind)).unwrap_err();

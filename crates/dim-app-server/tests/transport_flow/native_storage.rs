@@ -38,8 +38,6 @@ async fn summaries_read_dormant_sessions_without_loading_them() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // Shutdown itself appends finalizer events. Compare against the final
-    // committed record, not the earlier idle boundary.
     let database = Connection::open(directory.join("dimcode.sqlite")).unwrap();
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
     assert!(agent.sessions().is_empty());
@@ -160,8 +158,6 @@ async fn product_submit_acknowledges_only_a_committed_input() {
     );
     let mut observer = Client::new_version(&server, true, 3).await;
     let lookup = json!({"sessionId":sid,"branchId":"main","submissionId":submission});
-    // The lookup first waits until the committed input is published, so
-    // `unknown` is final for every write that returned before it.
     let looked_up = observer.send("session.input_lookup", lookup.clone()).await;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), observer.response(looked_up))
@@ -184,7 +180,6 @@ async fn product_submit_acknowledges_only_a_committed_input() {
     let accepted = observer.rpc("session.input_lookup", lookup).await;
     assert_eq!(accepted["result"]["status"], "accepted");
     assert_eq!(accepted["result"]["event"], *event);
-    // RPC reload cancels its wait, not the input already owned by storage.
     assert_ok(
         &client
             .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
@@ -349,8 +344,6 @@ async fn summaries_read_atomic_configuration_tails_and_survive_restart() {
             &mut builder,
             Arc::new(InitialPromptHost {
                 loads: Arc::new(AtomicUsize::new(0)),
-                // Preserve an atomic prompt/configuration tail without a rule
-                // input whose later adoption would advance the observed head.
                 delivery: dim_agent_types::PromptDelivery::System,
             }),
             None,
@@ -408,7 +401,6 @@ async fn summaries_read_atomic_configuration_tails_and_survive_restart() {
     server.shutdown();
     server.join().await.unwrap();
 
-    // Shutdown may append finalizers; the dormant row must match its stored head.
     let database = Connection::open(directory.join("dimcode.sqlite")).unwrap();
     let body: String = database.query_row(
         "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id='main' ORDER BY sequence DESC LIMIT 1",
@@ -707,8 +699,6 @@ async fn damaged_native_records_do_not_hide_healthy_agents_or_sessions() {
             )
             .await,
     );
-    // A new Session prunes inactive version entries, but failed restored
-    // Sessions still need their original protocol boundary.
     assert_ok(
         &client
             .rpc("session.create", session_for(&healthy_agent))
@@ -818,7 +808,6 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
         ..Default::default()
     };
     let (server, original_agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
-    // The server creates the missing database directory owner-only.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1200,7 +1189,6 @@ async fn stored_directories_outlive_idle_instances() {
                 .rpc("session.attach", json!({"sessionId":ids[1]}))
                 .await,
         );
-        // The server keeps instances loaded; a host releases idle ones.
         assert!(first.unload_if_idle().await.unwrap());
         assert!(first.is_unloading());
         let connection = Connection::open(&database).unwrap();

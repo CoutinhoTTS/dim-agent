@@ -130,8 +130,6 @@ pub(super) async fn run(
     .await?
     .map_err(|Cancelled| cancelled())?;
     let (result, binding) = outcome;
-    // Bound only once the model received the text or its output path: a
-    // failed offload must not allow overwriting a file the model never saw.
     let result = offload(tools, call_id, result).await?;
     if let Some((path, binding)) = binding {
         reads.set(path, binding);
@@ -161,7 +159,6 @@ async fn offload(
         uuid::Uuid::new_v4()
     ));
     let (text, target) = (content.clone(), path.clone());
-    // Same modes as the exec output files: directory 0700, file 0600.
     blocking(move || {
         let mut directory = std::fs::DirBuilder::new();
         directory.recursive(true);
@@ -257,7 +254,6 @@ fn read_text(
         Ok(resolved) => resolved,
         Err(error) => return done(error.into_result()),
     };
-    // NUL is normal in UTF-16, not in the other supported encodings.
     if !matches!(
         resolved.encoding,
         TextEncoding::Utf16Le | TextEncoding::Utf16Be
@@ -265,9 +261,6 @@ fn read_text(
     {
         return done(binary(display));
     }
-    // Every line holds at least one byte after the BOM, so an offset beyond
-    // the opened file's size is out of range without hashing the whole file.
-    // A file without content still succeeds with an empty read below.
     let size = match file.metadata() {
         Ok(opened) => opened.len(),
         Err(error) => return done(open_failure(&error, display)),
@@ -415,7 +408,6 @@ fn stream_text(
             break;
         }
     }
-    // A last line without a line end.
     if collecting && has_content && !last_is_newline && line_no >= first && line_no <= last_line {
         finish_line(
             &mut current,
@@ -479,9 +471,6 @@ fn render_window(window: &[String], input: &Input, total_lines: u64) -> String {
         budget += js_len(record) + usize::from(index > 0);
         if budget > READ_RESULT_MAX_CHARS {
             if index == 0 {
-                // Collection retains a character beyond the budget, so even
-                // a clipped single line is distinguishable from a full line.
-                // Put the warning first so it survives offload's preview.
                 return format!(
                     "Line {start} exceeds the safe read budget and is truncated. The rest of this line is not included; a line-based offset cannot retrieve it. Use exec to inspect it in smaller chunks.\n\n{}",
                     js_prefix(record, READ_RESULT_MAX_CHARS)

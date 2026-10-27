@@ -4,7 +4,7 @@ set -euo pipefail
 repository=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 inherited_names=()
 inherited_values=()
-for setting in DIM_OAUTH_SOURCE_DIR DIMCODE_HOME DIMCODE_MODEL_CONFIG DIMCODE_PROVIDER DIMCODE_MODEL DIMCODE_WEB_ASSETS; do
+for setting in DIM_OAUTH_CLIENT_ID_CN DIM_OAUTH_CLIENT_ID_GLOBAL DIMCODE_HOME DIMCODE_MODEL_CONFIG DIMCODE_PROVIDER DIMCODE_MODEL DIMCODE_WEB_ASSETS; do
   if declare -p "$setting" >/dev/null 2>&1; then
     inherited_names+=("$setting")
     inherited_values+=("${!setting}")
@@ -31,8 +31,8 @@ if [[ "$action" == help ]]; then
 Usage: ./dev [CLI arguments]
        ./dev restart [CLI arguments] | stop | check
 
-With the sibling dim-oauth-plugin-rust checkout (or DIM_OAUTH_SOURCE_DIR), the
-account build of dimcode is built there and run; otherwise the public one.
+With DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL set, dimcode is
+built as the account build; otherwise as the API-key build.
 Use --model-config PATH for independent API-key development.
 Optional local configuration: .env.dev (see .env.example).
 USAGE
@@ -43,7 +43,7 @@ if [[ "$action" == check ]]; then
   (
     cd -- "$repository"
     cargo fmt --all -- --check
-    cargo clippy --locked -p dim-cli -p dim-app-server -p dimcode --all-targets -- -D warnings
+    cargo clippy --locked -p dim-cli -p dim-app-server -p dim-oauth -p dimcode --all-targets -- -D warnings
   ) >&2
   exit 0
 fi
@@ -93,15 +93,7 @@ if [[ -z "$product_home" ]]; then
   product_home="$HOME/.dimcode-dev/${scope:0:10}"
 fi
 
-# An account build compiles the private Dim account plugin into its own dimcode.
-source_directory=${DIM_OAUTH_SOURCE_DIR:-"$repository/../dim-oauth-plugin-rust"}
-if [[ "$source_directory" != /* ]]; then source_directory="$repository/$source_directory"; fi
-if [[ -f "$source_directory/Cargo.toml" ]]; then
-  binary="$source_directory/target/debug/dimcode"
-else
-  source_directory=
-  binary="$repository/target/debug/dimcode"
-fi
+binary="$repository/target/debug/dimcode"
 if [[ "$action" == stop ]]; then
   [[ ${#caller_args[@]} == 0 ]] || { echo 'Use DIMCODE_HOME to select the home for stop.' >&2; exit 1; }
   if [[ ! -x "$binary" ]]; then
@@ -129,11 +121,7 @@ if [[ "$chat" == true && "$resumed" == false && "$explicit_selection" == false ]
   fi
 fi
 
-if [[ -n "$source_directory" ]]; then
-  (cd -- "$source_directory" && DIM_PUBLIC_REPO="$repository" scripts/sync-lock.sh && cargo build -p dim-oauth) >&2
-else
-  (cd -- "$repository" && cargo build --locked -p dimcode) >&2
-fi
+(cd -- "$repository" && cargo build --locked -p dimcode) >&2
 if [[ "$native_help" == false ]]; then
   mkdir -p -m 700 -- "$product_home"
   product_home=$(cd -- "$product_home" && pwd)

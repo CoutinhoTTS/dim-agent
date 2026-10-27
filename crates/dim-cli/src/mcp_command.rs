@@ -31,7 +31,6 @@ pub async fn list(client: &mut Client, options: &Options) -> Result<()> {
     Ok(())
 }
 
-// A cancelled interactive waiter still drains its admitted RPC before the next command.
 async fn settle<T>(
     request: impl Future<Output = Result<T>>,
     deadline: Option<Instant>,
@@ -148,7 +147,6 @@ pub async fn sign_in(
                 None => std::future::pending().await,
             }
         };
-        // Register interruption before displaying the input prompt.
         let (callback, browser) = tokio::select! {
             biased;
             signal = tokio::signal::ctrl_c() => { signal?; return Ok(stopped(id, deadline)); },
@@ -194,7 +192,6 @@ pub async fn sign_in(
                 if interrupted {
                     return Ok(stopped(id, deadline));
                 }
-                // Check the owner-provided code before mapping its action text.
                 if error
                     .downcast_ref::<crate::client::RpcError>()
                     .and_then(|error| error.data.as_ref())

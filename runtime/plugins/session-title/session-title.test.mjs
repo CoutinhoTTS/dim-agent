@@ -189,6 +189,22 @@ test('overlapping adoption reads produce one title from the first operator input
   assert.equal(p.state.metadata.revision, 1)
 })
 
+/** Two applied inputs in one dispatch cohort read the same epoch; the first through preflight retires the other. */
+test('concurrent applied inputs produce at most one auxiliary request and title', async t => {
+  const p = await fixture(t)
+  p.adopted()
+  const release = deferred()
+  p.state.beforeRead = () => release.promise
+  const first = await p.input([{ type: 'text', text: 'first concurrent input' }])
+  const second = await p.input([{ type: 'text', text: 'second concurrent input' }])
+  await Promise.all([p.apply(first), p.apply(second)])
+  release.resolve()
+  await flush()
+  assert.equal(p.state.requests.length, 1, 'one cohort yields one auxiliary request')
+  assert.equal(p.state.requests[0].request.messages[0].content, 'first concurrent input')
+  assert.equal(p.state.metadata.revision, 1, 'one cohort yields one title write')
+})
+
 test('three failed attempts stop until reload; Settings failures never use a fallback document', async t => {
   const p = await fixture(t, { settingsError: true })
   p.adopted()

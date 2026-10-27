@@ -25,7 +25,6 @@ impl Stream for NativeStream {
     fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.parts.pop_front() {
             Some(part) => Poll::Ready(Some(part)),
-            // Keep the transport open so completion must release it itself.
             None => Poll::Pending,
         }
     }
@@ -154,7 +153,6 @@ async fn native_content_and_tools_convert_in_order_to_agent_chunks() {
             provider_metadata: None,
         }),
         Ok(tool("{\"query\":\"test\"}")),
-        // A call delivered whole, without input streaming.
         Ok(StreamPart::ToolCall {
             tool_call_id: "call-2".into(),
             tool_name: "lookup".into(),

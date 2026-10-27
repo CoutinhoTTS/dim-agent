@@ -101,7 +101,6 @@ impl Fixture {
         let names = Names::copy(&catalog, &build);
         let (publication, loader) = mcp_host::Host::start(&root).await;
         let capture = Arc::new(OnceLock::new());
-        // Where Mcp registers its Session part; no Agent mounts it here.
         root.provide_as::<dim_agent_runtime::PartRegistry>(Arc::new(
             dim_agent_runtime::PartRegistry::default(),
         ))
@@ -274,7 +273,6 @@ async fn http_shutdown_aborts_stalled_get_and_bounds_session_delete() {
                                 let release = release.clone();
                                 async move {
                                     started.notify_one();
-                                    // Never send GET response headers before Plugin shutdown.
                                     release.cancelled().await;
                                     StatusCode::NO_CONTENT
                                 }
@@ -305,8 +303,6 @@ async fn http_shutdown_aborts_stalled_get_and_bounds_session_delete() {
     tokio::time::timeout(Duration::from_secs(5), remote.deleting.notified())
         .await
         .unwrap();
-    // Neither GET nor DELETE has responded. The SDK aborts its GET task and
-    // bounds DELETE at five seconds rather than delegating that policy to us.
     tokio::time::timeout(Duration::from_secs(8), closing)
         .await
         .unwrap()
@@ -531,8 +527,6 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     remote.repeating.store(false, Ordering::SeqCst);
     replacement.tools(&cancel).await.unwrap();
     let catalog = fixture.mcp.catalog(None, &cancel).await.unwrap();
-    // Disabling returns once the server has stopped, even for a connection a
-    // request still holds, so the remote's DELETE is released beforehand.
     remote.release_delete.notify_one();
     fixture
         .mcp
@@ -597,7 +591,6 @@ async fn http_plugin_discovers_calls_cancels_and_drains_the_remote_session() {
     assert_eq!(remote.deletes.load(Ordering::SeqCst), 3);
     assert_eq!(remote.cancelled.load(Ordering::SeqCst), 2);
 
-    // Authentication failures must also drain the consumed initialization transport.
     let rejected = Fixture::new(&url, "rejected").await;
     let connection = rejected
         .mcp
@@ -669,8 +662,6 @@ async fn connection_generations_live_until_the_last_lease_and_force_close_togeth
     assert_eq!(remote.initializes.load(Ordering::SeqCst), 2);
     assert_eq!(remote.deletes.load(Ordering::SeqCst), 0);
     first.tools(&cancel).await.unwrap();
-    // Disconnect must join every generation it accepted, even if the caller
-    // drops another generation's last lease while the first is still closing.
     let second_state = second.subscribe();
     let mut second = Some(second);
     let mut closing = {

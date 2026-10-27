@@ -32,7 +32,6 @@ pub struct ToolProviderChanged {
     pub name: String,
 }
 impl Event for ToolProviderChanged {
-    // Dispatched only under a Session's private name.
     const NAME: &'static str = "";
     type Value = ();
     fn name(&self) -> &str {
@@ -208,7 +207,6 @@ impl ToolRegistry {
                     })
                 })
                 .collect(),
-            // The registered sets' keys sort by tool name.
             None => self
                 .host
                 .iter()
@@ -390,8 +388,6 @@ impl ToolRegistry {
         statuses
             .0
             .retain(|key, _| offered.iter().any(|(_, sets)| sets.contains_key(key)));
-        // Repeat until nothing more is adopted: a set rejected for a name that
-        // a later replacement in the same pass frees is adopted now.
         let mut progressed = true;
         while progressed {
             progressed = false;
@@ -445,8 +441,6 @@ impl ToolRegistry {
         }
         sources.replaced.retain(|_, set| set.strong_count() > 0);
         drop(sources);
-        // Branch bindings follow this state (`sources_state`); every adopted
-        // or withdrawn set changes it.
         self.state.send_if_modified(|state| {
             let modified = *state != statuses;
             *state = statuses;
@@ -672,8 +666,6 @@ impl HostDispatch for ForeignRegistry {
                 "register needs the tool's declaration and its execute function".into(),
             ));
         };
-        // Registered now, while the calling row is known; the caller awaits
-        // the outcome.
         let registered = self
             .0
             .register_foreign(&caller, declaration, execute)
@@ -768,7 +760,6 @@ impl DynPlugin for ToolRegistryPlugin {
                 sources: Mutex::default(),
                 state: watch::Sender::new(ToolSourcesState::default()),
             });
-            // Subscribe before the first read; notifications carry no state.
             let listener = registry.clone();
             ctx.listen::<ToolProviderChanged>()
                 .name(tool_provider_changes(self.session))
@@ -779,20 +770,14 @@ impl DynPlugin for ToolRegistryPlugin {
                         Ok(None)
                     }
                 })?;
-            // Taken before the first read, so no registration goes unseen.
             let mut tools = registry.tools.changes();
             let mut providers = registry.providers.changes();
             let refresher = registry.clone();
-            // Background refreshes start once the Session is published and
-            // end when it starts closing; a change before publication stays
-            // unseen until then, and ToolBinding's first snapshot reads the
-            // registrations itself.
             let task = tokio::spawn(async move {
                 if !lifecycle.activated().await {
                     return;
                 }
                 loop {
-                    // Closing wins over a change that arrived at the same time.
                     tokio::select! {
                         biased;
                         _ = lifecycle.closing() => return,
@@ -802,24 +787,16 @@ impl DynPlugin for ToolRegistryPlugin {
                     refresher.refresh();
                 }
             });
-            ctx.effect(move || {
-                async move {
-                    // Aborting ends the task at its next wait; awaiting it
-                    // lets a refresh already running finish first.
-                    task.abort();
-                    let _ = task.await;
-                    Ok(())
-                }
+            ctx.effect(move || async move {
+                task.abort();
+                let _ = task.await;
+                Ok(())
             })?;
             registry.refresh();
             ctx.provide_at(
                 self.view.clone(),
                 Arc::new(ToolSourcesView(registry.sources_state())),
             )?;
-            // Other languages reach the registry at its dispatcher key (rutis
-            // usage §3.5), provided with it: a row waiting for it starts
-            // loading as the registry becomes active, while its Session is
-            // created.
             ctx.provide_at::<dyn HostDispatch>(
                 host_key_in(
                     &dim_agent_runtime::names::name_of::<ToolRegistry>(),

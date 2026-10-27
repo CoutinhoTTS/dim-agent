@@ -78,7 +78,6 @@ impl Worker {
                     BranchCreateFailedData::Cancelled { branch, reason, .. } => (branch, reason),
                 };
                 let history = self.task_history.entry(branch.clone()).or_default();
-                // Discovery and later adoption can observe the same creation failure.
                 let newly_failed = !history.done;
                 history.done = true;
                 history.error = None;
@@ -202,7 +201,6 @@ impl Worker {
                 history.through = Some(page.through);
                 history.done = page.done && !history.catch_up;
                 if page.done && history.catch_up {
-                    // Re-read facts discarded during the failure after finishing its fixed window.
                     history.through = None;
                     history.catch_up = false;
                 }
@@ -268,7 +266,6 @@ impl Worker {
         let stop_workflows = self.client.supports(&["workflow.stop"]);
         let mut members = HashSet::new();
         let mut targets = VecDeque::new();
-        // Workflow stops can wait without bound; they follow the others.
         let mut workflows = Vec::new();
         let mut unavailable = 0;
         for task in self
@@ -283,7 +280,6 @@ impl Worker {
                     targets.push_back(task.kind.clone())
                 }
                 TaskKind::Member(MemberTarget::Session(_)) => {}
-                // Not delivered yet, or a provider member: no Session to stop.
                 TaskKind::Member(MemberTarget::Starting | MemberTarget::Provider) => {
                     unavailable += 1
                 }

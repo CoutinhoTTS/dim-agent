@@ -109,7 +109,6 @@ fn create(
         Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
         RootDirectory: parent.map_or(null_mut(), |p| p.as_raw_handle()),
         ObjectName: &mut object_name,
-        // Respect the actual directory's case-sensitivity setting.
         Attributes: 0,
         SecurityDescriptor: security.cast(),
         SecurityQualityOfService: null(),
@@ -456,11 +455,8 @@ pub(super) fn reserved(directory: &File) -> io::Result<[Option<Identity>; 2]> {
     Ok([entry(LOCK_DIRECTORY)?, entry("auth.json.lock")?])
 }
 pub(super) fn entries(directory: &File) -> io::Result<Vec<(DirectoryEntry, Identity)>> {
-    // Records are 8-byte aligned within the buffer.
     let mut buffer = vec![0u64; 8 * 1024];
     let mut entries = Vec::new();
-    // The first query restarts the scan, so every listing of a handle is
-    // complete; later queries continue it.
     let mut class = FileIdExtdDirectoryRestartInfo;
     loop {
         if unsafe {
@@ -475,8 +471,6 @@ pub(super) fn entries(directory: &File) -> io::Result<Vec<(DirectoryEntry, Ident
             let error = io::Error::last_os_error();
             return match error.raw_os_error().map(|code| code as u32) {
                 Some(ERROR_NO_MORE_FILES) => Ok(entries),
-                // FAT, exFAT and some network file systems report no file IDs
-                // during enumeration, which hiding resource aliases needs.
                 Some(
                     ERROR_INVALID_PARAMETER
                     | ERROR_INVALID_LEVEL
@@ -540,10 +534,6 @@ pub(super) fn target_name(parent: &File, name: &OsString) -> io::Result<OsString
                 FILE_NAME_NORMALIZED | VOLUME_NAME_NT,
             )
         };
-        // A file a concurrent removal deleted counts as missing, as on Unix,
-        // where no name is resolved. NTFS then reports a path inside
-        // `\$Extend\$Deleted`, or fails; only a name that still links the file
-        // in `parent` is its stored name.
         if length == 0 {
             let error = io::Error::last_os_error();
             return if deleted(&file).unwrap_or(false) {
@@ -622,7 +612,6 @@ pub(super) fn permissions(parent: &File, name: &OsString) -> io::Result<Option<P
         Err(error) => Err(error),
     }
 }
-// Descriptors have two native allocators; release each allocation exactly once.
 struct SecurityDescriptor {
     pointer: PSECURITY_DESCRIPTOR,
     derived: bool,
@@ -630,8 +619,6 @@ struct SecurityDescriptor {
 /// Snapshot native ownership and DACL (including protection flags), without a storage
 /// authorization/service dependency. Used to detect concurrent security changes.
 pub(crate) fn workspace_security_revision(file: &File) -> io::Result<Vec<u8>> {
-    // Native replacement does not merge alternate streams. Until stream copy
-    // is supported, fail explicitly instead of silently dropping user data.
     let mut streams = vec![0usize; 8192];
     if unsafe {
         GetFileInformationByHandleEx(
@@ -780,14 +767,10 @@ pub(crate) fn create_temp(
         Err(error) => return Err(error),
     };
     let protected = security.protected()?;
-    // Apply the target ACL at creation, before any external reader can obtain a
-    // handle. The maintenance directory must never broaden the effective ACL.
     security.set_protected(true)?;
     let file = open(
         Some(parent),
         name,
-        // FILE_READ_ATTRIBUTES feeds the handle validation in `open`; without it
-        // GetFileInformationByHandle fails with ACCESS_DENIED on the fresh handle.
         FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES | READ_CONTROL | WRITE_DAC | DELETE,
         FILE_CREATE,
         FILE_NON_DIRECTORY_FILE | FILE_WRITE_THROUGH,
@@ -814,7 +797,6 @@ pub(crate) fn create_temp(
     Ok(file)
 }
 pub(super) fn sync_replacement(file: &File, _: &File, _: &File) -> io::Result<()> {
-    // Windows cannot provide the Unix directory-fsync durability contract.
     file.sync_all()
 }
 pub(crate) fn replace(
@@ -824,8 +806,6 @@ pub(crate) fn replace(
     target_parent: &File,
     target: &OsString,
 ) -> io::Result<()> {
-    // The Win32 wrapper rejects RootDirectory; the native API accepts the held
-    // directory and a basename without resolving an absolute path again.
     let name: Vec<u16> = target.encode_wide().collect();
     let bytes = size_of::<FILE_RENAME_INFORMATION>() + name.len() * 2;
     let mut buffer = vec![0usize; bytes.div_ceil(size_of::<usize>())];
@@ -963,9 +943,6 @@ fn volume_mount_point(entry: &File) -> io::Result<bool> {
     }
     let data =
         unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), returned as usize) };
-    // REPARSE_DATA_BUFFER: tag, data length and reserved, then for a mount
-    // point the substitute name's byte offset and length into the path
-    // buffer that starts at byte 16.
     let field = |offset: usize| {
         data.get(offset..offset + 2)
             .map(|bytes| usize::from(u16::from_le_bytes([bytes[0], bytes[1]])))

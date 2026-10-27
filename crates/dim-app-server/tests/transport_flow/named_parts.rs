@@ -122,7 +122,6 @@ async fn node_named_parts_share_services_across_languages_per_session() {
         "id": "named-greeter",
         "name": root.join("named-greeter.ts"),
         "provides": {},
-        // Its Session part provides `namedGreeter` in each Session.
         "instanceNames": {"namedGreeter": "session"},
         "config": {},
     })];
@@ -145,16 +144,12 @@ async fn node_named_parts_share_services_across_languages_per_session() {
         ids.push(new_session(&mut client, json!(["echo"])).await);
     }
     for id in &ids {
-        // Rust provides, TypeScript reads: the row asks its own Session's
-        // Rust greeter.
         let asked = client
             .rpc("session.greeter.ask", json!({"sessionId":id}))
             .await;
         assert_ok(&asked);
         assert_eq!(asked["result"], json!(format!("hello {id}")));
     }
-    // TypeScript provides, Rust reads: each Session's main branch reached
-    // its own Session's row.
     let read = log.lock().unwrap().clone();
     for id in &ids {
         assert!(

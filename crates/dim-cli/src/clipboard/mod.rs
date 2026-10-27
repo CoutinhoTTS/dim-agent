@@ -111,7 +111,6 @@ mod native_flow {
     #[test]
     fn private_pasteboard_preserves_formats_precedence_pixels_and_rejections() {
         objc2::rc::autoreleasepool(|_| {
-            // A unique board exercises AppKit without reading or replacing the user's clipboard.
             let board = NSPasteboard::pasteboardWithUniqueName();
             let plain = NSString::from_str("public.utf8-plain-text");
             let png = NSString::from_str("public.png");
@@ -499,7 +498,6 @@ mod windows_flow {
 
     #[test]
     fn clipboard_preserves_files_images_text_and_rejects_invalid_data() {
-        // Uses the current clipboard; the message-only window owns the fixture data.
         let window = Window(unsafe {
             CreateWindowExW(
                 0,

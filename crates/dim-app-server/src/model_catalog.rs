@@ -529,8 +529,6 @@ impl BundledCatalog {
                 return Some((pid.into(), m.clone(), format!("{pid}-{kind}"), score));
             }
         }
-        // Media lookup is deliberately non-fuzzy and compares all candidate
-        // signatures before choosing a provider, rather than first-match wins.
         for exact in [true, false] {
             let candidates: Vec<_> = self
                 .providers

@@ -157,8 +157,6 @@ impl Config {
         if self == production {
             return Ok(());
         }
-        // Local fixture configuration is all-or-nothing, never a production
-        // authority combined with an attacker-controlled token endpoint.
         let fixture = self.issuer.scheme() == "http"
             && self.issuer.host_str() == Some("127.0.0.1")
             && [&self.issuer, &self.token, &self.relay]
@@ -728,15 +726,12 @@ impl Service {
             .device
             .clone()
             .ok_or(OAuthError::Config("device flow unavailable"))?;
-        // Capture the provider revision before the first request. A login that
-        // started against an old account must never replace a concurrent login.
         let mut lease = self.lease(cancel).await?;
         let revision = self.read(&mut lease, cancel).await?.revision()?;
         drop(lease);
         let started = Self::now();
         let id = Uuid::new_v4();
         let attempt_cancel = CancellationToken::new();
-        // Reserve admission before requesting a grant, not after remote I/O.
         self.insert_attempt(
             id,
             Attempt {
@@ -941,8 +936,6 @@ impl Service {
         if record.revision()? != revision {
             return Err(OAuthError::AccountChanged);
         }
-        // File lease precedes the attempt gate, also used by logout. Once
-        // admitted here, the owned task settles the atomic replacement.
         let mut attempts = self.attempts.lock().await;
         let attempt = attempts.get_mut(&id).ok_or(OAuthError::AttemptNotFound)?;
         if attempt.status != AttemptStatus::Pending
@@ -1001,8 +994,6 @@ impl Service {
         {
             return Err(OAuthError::InvalidStore("credential revision exhausted"));
         }
-        // Refresh may rotate a remote grant. Once sent, receive and settle it
-        // even if the caller disappears; HTTP timeout bounds Plugin shutdown.
         let tokens = record.tokens.take().ok_or(OAuthError::Missing)?;
         let response = self
             .token_request()
@@ -1171,7 +1162,6 @@ impl Service {
             kind: "oauth".into(),
             refresh,
             access,
-            // Preserve the existing TS contract for servers omitting expiry.
             expires: expiry(Self::now(), seconds(&value, "expires_in", Some(3600))?)?,
             account_id,
             account_label: account_label

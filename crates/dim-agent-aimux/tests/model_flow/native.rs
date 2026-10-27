@@ -370,7 +370,6 @@ async fn xai_native_continuation_roundtrips_and_owner_releases_streams() {
     let server = MockServer::start().await;
     let frames = [
         json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs-native"}}),
-        // A delta can be the first summary event, just like reasoning_text.delta.
         json!({"type":"response.reasoning_summary_text.delta","item_id":"rs-native","summary_index":0,"delta":"first "}),
         json!({"type":"response.reasoning_summary_part.added","item_id":"rs-native","summary_index":0}),
         json!({"type":"response.reasoning_summary_text.delta","item_id":"rs-native","summary_index":0,"delta":"thought"}),
@@ -966,8 +965,6 @@ async fn chat_reasoning_can_reopen_a_completed_segment_identity() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
     let server = MockServer::start().await;
-    // Real Chat providers send empty content alongside nonempty reasoning.
-    // AiMux closes and reopens reasoning-0; each balanced lifetime is distinct.
     let body = frame(
         json!({"reasoning_content":"first", "content":""}),
         Value::Null,
@@ -1478,7 +1475,6 @@ async fn respond_native(
         }
         _ => unreachable!(),
     };
-    // A Gemini terminal frame must complete without waiting for HTTP EOF.
     let hold = endpoint.kind == "gemini" && !missing_terminal;
     let body = Body::from_stream(async_stream::stream! {
         yield Ok::<_, Infallible>(data);
@@ -1572,7 +1568,6 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                     }
                 }
             }
-            // All native paths must release both unpolled and partially consumed streams.
             let host=agent.root.get::<ModelHost>().unwrap();
             let protocol=match kind {"openai-chat"=>ModelProtocol::OpenaiChat,"openai-responses"=>ModelProtocol::OpenaiResponses,"anthropic"=>ModelProtocol::Anthropic,_=>ModelProtocol::Gemini};
             let connection=||ModelConnection::Http(HttpModelConnection{protocol,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:if kind=="anthropic" {Some("bearer-secret".into())} else {None},api_key:None,preset:None});
@@ -1741,7 +1736,6 @@ async fn native_content_rejects_lost_continuation_and_respects_committed_tools()
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             let events = session.history("main", None).await.unwrap();
-            // Text is committed per block; the projection joins adjacent text anyway.
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.starts_with("before"))), "{kind}: {prompt}");
             assert!(events.iter().any(|event| matches!(event.kind, EventKind::ToolUse(_))), "complete native tool input must precede EOF");
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))), "{kind}: {prompt}");

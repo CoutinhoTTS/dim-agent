@@ -144,7 +144,6 @@ impl Fixture {
                 }),
             );
         defaults::install(&mut builder);
-        // The host's `wait` holds a batch open next to `ask_user`.
         defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_agent_questions::install(&mut builder);
         let slot = probe.clone();
@@ -371,7 +370,6 @@ async fn answers_and_declines_become_the_results_the_model_reads() {
     let mut neither = both.clone();
     neither.as_object_mut().unwrap().remove("answers");
     neither.as_object_mut().unwrap().remove("declined");
-    // The request is part of the call's name.
     let mut unnamed = params(&session, &c1, valid.clone());
     unnamed.as_object_mut().unwrap().remove("requestId");
     for wrong in [both, neither, unnamed] {
@@ -380,7 +378,6 @@ async fn answers_and_declines_become_the_results_the_model_reads() {
             "invalid_params"
         );
     }
-    // Two clients answer: exactly one is accepted.
     let (first, second) = tokio::join!(
         respond(&session, params(&session, &c1, valid.clone())),
         respond(&session, params(&session, &c1, valid.clone())),
@@ -404,7 +401,6 @@ async fn answers_and_declines_become_the_results_the_model_reads() {
             {"questionId":"2","selected":["Auth","Search"],"custom":"audit log"},
             {"questionId":"ship","selected":["Yes"]}]})
     );
-    // The model reads the answer only as the call's tool result.
     let request = fixture.model.last_request();
     let read = request
         .messages
@@ -538,8 +534,6 @@ async fn invalid_input_non_interactive_sessions_and_duplicate_ids_never_wait() {
     }
     let interactive_tools = fixture.model.last_request().tools.clone();
 
-    // Call ids are unique only by convention: a second call with the key of a
-    // waiting one is refused through the tool contract and never answered.
     let tool = fixture.probe.tool();
     let call = ToolCall {
         id: "dup".into(),
@@ -581,8 +575,6 @@ async fn invalid_input_non_interactive_sessions_and_duplicate_ids_never_wait() {
         text(&duplicate),
         "Invalid ask_user input: duplicate call id dup"
     );
-    // A token that fired before the handler started ends the call before it
-    // looks at the table, and the waiting call is untouched.
     let fired = CancellationToken::new();
     fired.cancel();
     match tool.handler.execute(call, context, fired).await {
@@ -632,7 +624,6 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
     let ask = || json!({"questions":[today()]});
     let yes = || json!([{"questionId":"ship","selected":["Yes"]}]);
 
-    // Stop, then answer.
     fixture.model.push(&[("ask_user", "c1", ask())]);
     session
         .submit("stop".into(), InputMode::Queue, "main")
@@ -654,7 +645,6 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
         "question_not_pending"
     );
 
-    // Answer, then stop while a slow call holds the batch open.
     fixture.model.push(&[
         ("ask_user", "c2", ask()),
         ("wait", "slow", json!({"millis":60000})),
@@ -675,7 +665,6 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
     assert_eq!(result(&events, "slow").is_error, Some(true));
     assert!(matches!(last_turn(&events), TurnOutcome::Cancelled { .. }));
 
-    // The Questions part reloads: its waiters end as reloading.
     fixture.model.push(&[("ask_user", "c3", ask())]);
     session
         .submit("reload".into(), InputMode::Queue, "main")
@@ -697,8 +686,6 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
         ),
         "question_not_pending"
     );
-    // A call that still reaches the unloaded generation, from a request built
-    // before the reload, finds its table closed instead of waiting on nothing.
     let late = ToolCall {
         id: "late".into(),
         name: "ask_user".into(),
@@ -739,7 +726,6 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
     );
     assert!(matches!(last_turn(&events), TurnOutcome::Completed { .. }));
 
-    // ToolExecutor reloads: the batch token ends the wait.
     let session = fixture.session(true).await;
     fixture.model.push(&[("ask_user", "c4", ask())]);
     session
@@ -762,8 +748,6 @@ async fn interrupt_reload_and_close_settle_a_waiting_call() {
         "question_not_pending"
     );
 
-    // `session.close` is a business close: it interrupts the branch, so the
-    // waiting call ends as interrupted, and a restore asks nothing again.
     let session = fixture.session(true).await;
     fixture.model.push(&[("ask_user", "c5", ask())]);
     session
@@ -840,7 +824,6 @@ async fn branches_answer_their_own_questions_by_branch_id() {
     )
     .await
     .unwrap();
-    // main's call with the same id still waits for its own questions.
     assert!(waits(&session, &main_c1).await);
     respond(
         &session,
@@ -886,7 +869,6 @@ async fn a_late_answer_never_reaches_a_later_call_that_reuses_its_id() {
         .await
         .unwrap();
     let first = waiting(&session, "main", "c1").await;
-    // Client A answers turn 1.
     assert_eq!(
         respond(&session, params(&session, &first, choose("Yes")))
             .await
@@ -904,7 +886,6 @@ async fn a_late_answer_never_reaches_a_later_call_that_reuses_its_id() {
         .unwrap();
     let second = waiting(&session, "main", "c1").await;
     assert_ne!(first.1, second.1, "the later call has its own request");
-    // Client B answers and declines turn 1's call late.
     for late in [
         params(&session, &first, choose("Yes")),
         declined(&session, &first),
@@ -924,7 +905,6 @@ async fn a_late_answer_never_reaches_a_later_call_that_reuses_its_id() {
     let events = turn(&session, "main").await;
     let expected = "User answered:\n1. Delete production data?\n   -> No";
     assert_eq!(text(&result(&events, "c1")), expected);
-    // The model reads it as turn 2's `c1` result, after turn 1's.
     let read: Vec<_> = fixture
         .model
         .last_request()

@@ -17,6 +17,7 @@ embedded-web = ["dim-app-server/embedded-web"]
 [dependencies]
 dim-cli = { path = "../dim-cli" }
 dim-app-server.workspace = true
+dim-oauth = { path = "../dim-oauth" }
 
 [dev-dependencies]
 agent-client-protocol-schema = { version = "=1.12.0", default-features = false }

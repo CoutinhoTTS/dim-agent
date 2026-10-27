@@ -95,8 +95,6 @@ impl DynPlugin for PromptRegistryPlugin {
         Box::pin(async move {
             let config = ctx.require_at(&self.config)?;
             let registry = Arc::new(PromptRegistry::default());
-            // A branch adopts every source registered when it opens; a new
-            // Session also adopts its selected model.
             let sources = registry.clone();
             let initial = InitialPromptConfiguration::read(move || {
                 Some(ConfigureUpdate {

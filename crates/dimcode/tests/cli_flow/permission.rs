@@ -29,7 +29,6 @@ fn quiet_turn(wire: &mut Wire) {
 
 #[test]
 fn permission_flag_selects_the_new_and_resumed_preset_with_version_checks() {
-    // A new Session receives the preset in its creation policy.
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&PRESET_METHODS);
@@ -54,7 +53,6 @@ fn permission_flag_selects_the_new_and_resumed_preset_with_version_checks() {
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("permission: read-only"));
 
-    // A resumed Session changes main; a conflict reads again and keeps the tool lists.
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&PRESET_METHODS);
@@ -107,7 +105,6 @@ fn permission_flag_selects_the_new_and_resumed_preset_with_version_checks() {
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("permission: full-access"));
 
-    // The preset already in force is not written again.
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&PRESET_METHODS);
@@ -139,7 +136,6 @@ fn permission_flag_selects_the_new_and_resumed_preset_with_version_checks() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Without the methods the resumed Session is never attached or submitted to.
     let home = Home::new();
     let daemon = home.daemon(|wire| wire.hello(&[]));
     let output = home
@@ -184,7 +180,6 @@ fn interactive_always_allow_writes_rules_retries_conflicts_and_falls_back_to_onc
         };
         let deny_push = json!({"command":"git push","match":"prefix","decision":"deny"});
         let allow_test = json!({"command":"cargo test","match":"prefix","decision":"allow"});
-        // A prefix rule; the first write conflicts and the rule joins the newer list.
         approval(wire, "first", "cargo test -p fixture");
         let rules = wire.read("permission.rules");
         wire.reply(&rules, json!({"revision":"r1","commandRules":[]}));
@@ -206,15 +201,12 @@ fn interactive_always_allow_writes_rules_retries_conflicts_and_falls_back_to_onc
         );
         wire.reply(&write, json!({"revision":"r3"}));
         answered(wire, "first", "allow");
-        // A failed write still lets the user answer once.
         approval(wire, "second", "cargo build --release");
         let rules = wire.read("permission.rules");
         fail(wire, &rules, "permission_rules_failed");
         answered(wire, "second", "allow");
-        // A command with a separator is never offered "always".
         approval(wire, "third", "cargo test && rm -rf target");
         answered(wire, "third", "deny");
-        // Other words re-ask; an existing rule is not written again.
         approval(wire, "fourth", "cargo fmt");
         let rules = wire.read("permission.rules");
         wire.reply(
@@ -223,7 +215,6 @@ fn interactive_always_allow_writes_rules_retries_conflicts_and_falls_back_to_onc
                 {"command":"cargo  fmt","match":"exact","decision":"allow"}]}),
         );
         answered(wire, "fourth", "allow");
-        // Ctrl+C during the write abandons the rule and answers nothing.
         approval(wire, "fifth", "cargo clippy");
         let rules = wire.read("permission.rules");
         reading.send(()).unwrap();
@@ -285,7 +276,6 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
         methods.extend(RULE_METHODS);
         wire.hello(&methods);
         wire.created();
-        // Interactive start shows the preset.
         let get = wire.read("session.permission.get");
         wire.reply(
             &get,
@@ -304,16 +294,13 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
         let deny_push = json!({"command":"git push","match":"prefix","decision":"deny"});
         let allow_make = json!({"command":"make","match":"exact","decision":"allow"});
         let allow_check = json!({"command":"cargo check","match":"exact","decision":"allow"});
-        // /approvals
         state(wire, 3, "workspace-write");
         let rules = wire.read("permission.rules");
         wire.reply(
             &rules,
             json!({"revision":"r1","commandRules":[allow_test, deny_push]}),
         );
-        // /approvals full-access, declined
         state(wire, 3, "workspace-write");
-        // /approvals full-access, confirmed but changed elsewhere
         state(wire, 3, "workspace-write");
         let update = wire.read("session.permission.update");
         assert_eq!(
@@ -323,9 +310,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
         );
         fail(wire, &update, "permission_conflict");
         state(wire, 5, "read-only");
-        // /approvals read-only
         state(wire, 5, "read-only");
-        // /permissions workspace-write
         state(wire, 5, "read-only");
         let update = wire.read("session.permission.update");
         assert_eq!(update["params"]["expectedVersion"], 5);
@@ -337,14 +322,12 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
             &update,
             json!({"version":10,"policy":policy("workspace-write", &[], &["blocked-tool"])}),
         );
-        // /approvals remove 1, against the listing
         let write = wire.read("permission.set_rules");
         assert_eq!(
             write["params"],
             json!({"expectedRevision":"r1","commandRules":[deny_push]})
         );
         wire.reply(&write, json!({"revision":"r2"}));
-        // /approvals remove 1, changed since the listing
         let write = wire.read("permission.set_rules");
         assert_eq!(
             write["params"],
@@ -356,13 +339,11 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
             &rules,
             json!({"revision":"r4","commandRules":[deny_push, allow_make]}),
         );
-        // /approvals deny prefix git push
         let rules = wire.read("permission.rules");
         wire.reply(
             &rules,
             json!({"revision":"r4","commandRules":[deny_push, allow_make]}),
         );
-        // /approvals allow exact cargo check
         let rules = wire.read("permission.rules");
         wire.reply(
             &rules,
@@ -374,15 +355,12 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
             json!({"expectedRevision":"r4","commandRules":[deny_push, allow_make, allow_check]})
         );
         wire.reply(&write, json!({"revision":"r5"}));
-        // /approvals remove 3 refers to the listing extended by the addition.
         let write = wire.read("permission.set_rules");
         assert_eq!(
             write["params"],
             json!({"expectedRevision":"r5","commandRules":[deny_push, allow_make]})
         );
         wire.reply(&write, json!({"revision":"r6"}));
-        // Two removals in a row: the second number refers to the list the
-        // first one printed.
         let deny = |command: &str| json!({"command":command,"match":"exact","decision":"deny"});
         state(wire, 10, "workspace-write");
         let rules = wire.read("permission.rules");
@@ -402,7 +380,6 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
             json!({"expectedRevision":"r8","commandRules":[deny("beta")]})
         );
         wire.reply(&write, json!({"revision":"r9"}));
-        // Changes during a turn: this client's own write is already reported.
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["text"], "after");
         wire.reply(&submit, json!({"event":{}}));
@@ -444,7 +421,6 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.write(b"/permissions workspace-write\n");
     terminal.until("Preset (main branch): workspace-write. Child branches created later inherit it; agent members keep the Session's starting preset.");
     terminal.until("\n> ");
-    // Every write prints the numbered list that `remove N` refers to next.
     terminal.write(b"/approvals remove 1\n");
     terminal.until("Rule removed: allow exact `cargo test`");
     terminal.until("Command rules (user scope, every Session):");
@@ -480,7 +456,6 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.until("Rule removed: deny exact `gamma`");
     terminal.until("  1  deny   exact   beta");
     terminal.until("\n> ");
-    // Rejected before any call.
     terminal.write(b"/approvals allow exact cargo test; rm -rf target\n");
     terminal.until("Error: A command rule needs a simple command");
     terminal.until("\n> ");
@@ -682,7 +657,6 @@ impl Drop for RealDaemon {
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn real_daemon_exec_presets_decide_process_tools_without_automatic_approval() {
     let daemon = RealDaemon::start();
-    // The default preset still asks, so headless exec denies and exits 3.
     let (code, _, stderr) = daemon.run(&["exec", "-p", "exec: printf default-ran"]);
     assert_eq!(code, Some(3), "{stderr}");
     assert!(stderr.contains("Interactive approval required"), "{stderr}");
@@ -692,7 +666,6 @@ fn real_daemon_exec_presets_decide_process_tools_without_automatic_approval() {
         .find_map(|line| line.strip_prefix("session: "))
         .unwrap()
         .to_owned();
-    // full-access runs the process tool without a question.
     let (code, stdout, stderr) = daemon.run(&[
         "exec",
         "--permission",
@@ -708,7 +681,6 @@ fn real_daemon_exec_presets_decide_process_tools_without_automatic_approval() {
     assert!(stderr.contains("permission: full-access"), "{stderr}");
     assert!(stderr.contains("[done] exec"), "{stderr}");
     assert!(!stderr.contains("approval"), "{stderr}");
-    // Resume with the flag changes the resumed branch; without it the change stays.
     for (args, marker) in [
         (vec!["--permission", "full-access"], "resumed-ran"),
         (vec![], "kept-ran"),
@@ -722,7 +694,6 @@ fn real_daemon_exec_presets_decide_process_tools_without_automatic_approval() {
         assert!(stdout.contains(marker), "{stdout}");
         assert!(!stderr.contains("approval"), "{stderr}");
     }
-    // read-only denies without a question; the model sees Permission's denial.
     let (code, stdout, stderr) = daemon.run(&[
         "exec",
         "resume",
@@ -757,7 +728,6 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
     terminal.until("[rule saved] allow exact `printf always-ran`");
     terminal.until("tool said:");
     terminal.editor();
-    // The identical call now runs without asking.
     let mark = terminal.transcript.len();
     terminal.write(b"exec: printf always-ran\n");
     terminal.until("tool said:");
@@ -788,7 +758,6 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
     );
     terminal.write(b"/exit\n");
     assert!(terminal.wait().success());
-    // Without the rule, a new Session asks again.
     let (code, _, stderr) = daemon.run(&["exec", "-p", "exec: printf always-ran"]);
     assert_eq!(code, Some(3), "{stderr}");
 }

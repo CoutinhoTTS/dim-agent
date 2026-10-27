@@ -23,7 +23,7 @@ External protocols include v1/v2/v3; see [dim-app-server](../../../crates/dim-ap
 
 每个进程一个 rutis root。进程级服务、Session 与分支都是这棵树上的 Plugin；所有有状态服务、监听器和长期任务都由 Plugin 提供，依赖全部经 `TypedPlugin::Deps` 声明。`main` 只解析启动参数、建立 Tokio runtime、调用 `serve`、处理进程信号；纯协议解析、序列化与无状态转换是普通函数。
 
-可选的 managed provider 是外部维护的 Rust 进程级 Plugin（Dim 账号在私有仓库 `dim-oauth-plugin-rust`）：账号版的 `dimcode` 通过 `cli::run_with` 注册它的行，它以类型化服务 `ManagedProvider` 提供，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；没有它时 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#managed-provider-plugins)）。
+可选的 managed provider 是 Rust 进程级 Plugin（Dim 账号在 `crates/dim-oauth`，client ID 在编译期从密钥注入）：账号版的 `dimcode` 通过 `cli::run_with` 注册它的行，它以类型化服务 `ManagedProvider` 提供，`ManagedProviderBinding` 把它绑定到进程服务 `ManagedProviders`。公开宿主只暴露通用的 provider/账号操作与请求内凭据租约，不实现具体账号体系、token 交换或刷新策略；没有它时 managed provider 请求明确失败，API-key 与原生订阅 provider 不受影响（合同见 [dim-app-server](../../../crates/dim-app-server/README.md#managed-provider-plugins)）。
 
 MCP connection generations are nested `McpConnections` group instances owned by
 each Session in the same loader. `McpPublication` serializes source selection
@@ -275,8 +275,10 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 - **`session.create`**：App Server 解析工作目录、显式或默认模型与准入（产品 profile 经 `ProviderService`），再由 `Agent` 创建 Session。
 - **无 Session 的管理请求**：使用进程 `ProviderService` 与账号服务（Codex/Grok OAuth、`ManagedProviders`），不创建隐藏 Session。
 - **WS**：账号与 provider 管理只经本地传输（Unix socket / Windows named pipe）开放，WS 不开放账号与配置方法。
-- **重载窗口**：`ConnectionHub` 未注册 `RpcService` 时，hello 与请求均返回 `-32000`，`data.appError = "service_reloading"`。请求在持有当前处理器期间完成准入并登记到其命令集合，已关闭或属于旧实例的连接不再受理；卸载的处理器排空它受理的全部命令。
-- **实例换代**：连接记录 hello 时的 instanceId；注册 instanceId 不同的 `RpcService` 时关闭这些连接，client 重新 hello。
+- **本地传输**：Windows named pipe 客户端沿用 Tokio `ClientOptions` 的默认 QOS（`SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`），使服务器在 `Authenticate` 期间不能冒充客户端；连接后按所连内核对象的所有者 SID 与当前用户比较，PID、名称或重新打开的句柄不构成同一权限。
+- **重载窗口**：`ConnectionHub` 未注册 `RpcService` 时，hello 与请求均返回 `-32000`，`data.appError = "service_reloading"`。请求在持有当前处理器期间完成准入并登记到其命令集合，已关闭或属于旧实例的连接不再受理；卸载的处理器排空它受理的全部命令。卸载中的 Rpc load 在持有处理器锁时拒绝 hello，客户端对下一轮 load 重试。
+- **实例换代**：连接记录 hello 时的 instanceId；注册 instanceId 不同的 `RpcService` 时关闭这些连接，client 重新 hello。hello 记录的 instanceId 在处理器锁内写入，因此与换代关闭旧连接有序，连接不会绑定到已被替换的处理器。
+- **hello**：连接的协议版本（通知资格）在 hello 应答进入该连接的有序出站队列之后才发布；v3 通知因此不会先于 hello 应答，也不会到达 v2 连接。
 
 ## 启动
 
@@ -286,6 +288,8 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 4. 任一 Plugin 失败或超期：门闩不打开，root shutdown 并等待回滚，返回原始错误并汇总清理错误；不留下 socket、登录轮询或 Session。
 5. `serve` 在交出 `RunningServer` 前被丢弃时，同样请求 root shutdown。
 
+命名管道监听器在仍持有已接受实例时创建下一个实例，握手失败后也如此；从接受、交接直到替换实例绑定完成，端点始终有一个实例，竞争守护进程没有可抢占的间隙。
+
 ## 关闭
 
 正常关闭由 `daemon.shutdown`、进程信号、`RunningServer::shutdown` 或 `RunningServer` 被丢弃触发，由 `serve` 建立的协调任务执行；等待方放弃不取消该任务：
@@ -294,6 +298,8 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 2. 全部 `Agent::close()`（并行，错误汇总）：等待已受理的构建、Session、分支及模型/工具操作结算；随后排空命令任务。
 3. `ConnectionHub` 通知连接关闭并等待读写任务退出。
 4. 协调任务执行 `Ctx::shutdown()`（含存储与插件释放）；`RunningServer::join` 返回该结果。此后才向非强制 `daemon.shutdown` 写出成功应答（v3 `hello.features` 含 `daemon.shutdown.completed`）；清理失败返回 `shutdown_failed`，不暴露释放错误细节；连接 EOF 不代表成功。
+
+交给关闭协调任务的写端必须来自完整写出的帧：帧写出超时或失败时不交接该写端，写截止时间同时约束连接清理；关闭应答因此不会追加到半个帧上，也不会让清理挂起。
 
 监听器异常退出进入同一路径，保留原始错误并汇总清理错误。`daemon.shutdown(force=true)`：应答先写出，进程可立即退出，结果报告 `Forced`，不声称 root 已完整清理；强制请求胜出时，等待中的非强制调用方得到 `shutdown_failed`。客户端断开不取消已受理的清理。合同见 [dim-app-server](../../../crates/dim-app-server/README.md#shutdown-completion)。
 

@@ -128,7 +128,6 @@ impl Decoder {
                     self.pending = tail;
                     self.drain(&mut events);
                 } else {
-                    // Only the last bytes can start the end marker.
                     let keep = PASTE_END.len() - 1;
                     if paste.len() > keep {
                         paste.drain(..paste.len() - keep);
@@ -144,12 +143,9 @@ impl Decoder {
                     .replace('\r', "\n");
                 self.paste = None;
                 events.push(InputEvent::Paste(text));
-                // Whatever followed the paste end is ordinary input again.
                 self.pending = tail;
                 self.drain(&mut events);
             } else if paste.len() > MAX_PASTE {
-                // Unterminated flood: deliver what we have rather than hold it,
-                // and keep discarding until the end marker arrives.
                 let text = String::from_utf8_lossy(paste)
                     .replace("\r\n", "\n")
                     .replace('\r', "\n");
@@ -180,7 +176,6 @@ impl Decoder {
                     && !rest.starts_with(b"P")
                     && !rest.starts_with(b"]") =>
             {
-                // ESC + a partial UTF-8 char is not worth reporting.
                 Vec::new()
             }
             _ => Vec::new(),
@@ -297,7 +292,6 @@ fn parse_one(buf: &[u8]) -> Parse {
         0x7f | 0x08 => Parse::Consumed(1, key(KeyCode::Backspace, Modifiers::NONE)),
         0x00 => Parse::Consumed(1, key(KeyCode::Char(' '), Modifiers::CTRL)),
         byte @ 0x01..=0x1a => {
-            // Ctrl+A..Ctrl+Z (Ctrl+I/Ctrl+M/Ctrl+H were matched above).
             let letter = (b'a' + byte - 1) as char;
             Parse::Consumed(1, key(KeyCode::Char(letter), Modifiers::CTRL))
         }
@@ -362,23 +356,19 @@ fn parse_escape(buf: &[u8]) -> Parse {
                 }
             }
         },
-        // DCS (XTVERSION reply and friends) and OSC: swallow to the terminator.
         b'P' | b']' | b'_' | b'^' | b'X' => match string_terminator(&buf[2..]) {
             Some(len) => Parse::Consumed(2 + len, Outcome::Ignored),
             None => Parse::Incomplete,
         },
         0x1b => Parse::Consumed(1, key(KeyCode::Esc, Modifiers::NONE)),
-        _ => {
-            // Alt+<char> (ESC prefix).
-            match parse_one(&buf[1..]) {
-                Parse::Incomplete => Parse::Incomplete,
-                Parse::Consumed(len, Outcome::Key(mut event)) => {
-                    event.mods.0 |= Modifiers::ALT.0;
-                    Parse::Consumed(1 + len, Outcome::Key(event))
-                }
-                Parse::Consumed(len, other) => Parse::Consumed(1 + len, other),
+        _ => match parse_one(&buf[1..]) {
+            Parse::Incomplete => Parse::Incomplete,
+            Parse::Consumed(len, Outcome::Key(mut event)) => {
+                event.mods.0 |= Modifiers::ALT.0;
+                Parse::Consumed(1 + len, Outcome::Key(event))
             }
-        }
+            Parse::Consumed(len, other) => Parse::Consumed(1 + len, other),
+        },
     }
 }
 
@@ -396,7 +386,6 @@ fn string_terminator(body: &[u8]) -> Option<usize> {
 }
 
 fn parse_csi(buf: &[u8]) -> Parse {
-    // buf = ESC [ <params 0x30-0x3f>* <intermediates 0x20-0x2f>* <final 0x40-0x7e>
     let mut index = 2;
     while index < buf.len() && (0x30..=0x3f).contains(&buf[index]) {
         index += 1;
@@ -409,7 +398,6 @@ fn parse_csi(buf: &[u8]) -> Parse {
         return Parse::Incomplete;
     };
     if !(0x40..=0x7e).contains(&final_byte) {
-        // Malformed: drop the introducer so the stream resynchronizes.
         return Parse::Consumed(2, Outcome::Ignored);
     }
     let len = index + 1;
@@ -433,7 +421,6 @@ fn csi_outcome(params: &str, final_byte: u8) -> Outcome {
     if let Some(sgr) = params.strip_prefix('<') {
         return mouse(sgr, final_byte);
     }
-    // Replies and reports: leading private markers belong to terminal answers.
     if params.starts_with('?') || params.starts_with('>') || params.starts_with('=') {
         return Outcome::Ignored;
     }
@@ -463,11 +450,9 @@ fn csi_outcome(params: &str, final_byte: u8) -> Outcome {
             }),
             mods_of(1),
         ),
-        // F3 is `CSI 1 ; mods R`; a cursor position report is `CSI row ; col R`.
         b'R' if groups.len() == 2 && first == 1 => key(KeyCode::F(3), mods_of(1)),
         b'~' => tilde(first, &groups, mods_of(1)),
         b'u' => kitty(&groups),
-        // Focus in/out, DA replies without markers, CPR, window reports.
         _ => Outcome::Ignored,
     }
 }
@@ -480,7 +465,6 @@ fn mouse(params: &str, final_byte: u8) -> Outcome {
     else {
         return Outcome::Ignored;
     };
-    // Modifier bits (4 shift, 8 alt, 16 ctrl) do not change the meaning.
     let code = button & !(4 | 8 | 16);
     let kind = match (code, final_byte) {
         (64, b'M') => MouseKind::WheelUp,
@@ -511,7 +495,6 @@ fn tilde(first: u32, groups: &[Vec<u32>], mods: Modifiers) -> Outcome {
         11..=15 => key(KeyCode::F((first - 10) as u8), mods),
         17..=21 => key(KeyCode::F((first - 11) as u8), mods),
         23 | 24 => key(KeyCode::F((first - 12) as u8), mods),
-        // xterm modifyOtherKeys: CSI 27 ; mods ; code ~
         27 => {
             let mods = groups
                 .get(1)
@@ -587,7 +570,7 @@ mod tests {
     #[test]
     fn sgr_mouse_reports_become_mouse_events() {
         let mut d = Decoder::new();
-        let events = d.feed(b"\x1b[<64;3;5M\x1b[<0;10;2M\x1b[<32;11;2M\x1b[<0;12;2m\x1b[<2;1;1M");
+        let events = d.feed(b"\x1b[<64;3;5M\x1b[<0;10;2M\x1b[<32;11;2M\x1b[<0;12;2m\x1b[<2;1;1M\x1b[<4;10;2M\x1b[<8;10;2M\x1b[<16;10;2M\x1b[<48;11;2M\x1b[<80;3;5M");
         let kinds: Vec<_> = events
             .into_iter()
             .map(|event| match event {
@@ -602,6 +585,11 @@ mod tests {
                 (MouseKind::Press, 9, 1),
                 (MouseKind::Drag, 10, 1),
                 (MouseKind::Release, 11, 1),
+                (MouseKind::Press, 9, 1),
+                (MouseKind::Press, 9, 1),
+                (MouseKind::Press, 9, 1),
+                (MouseKind::Drag, 10, 1),
+                (MouseKind::WheelUp, 2, 4),
             ]
         );
     }
@@ -625,7 +613,6 @@ mod tests {
     #[test]
     fn terminal_replies_never_become_keys() {
         let mut d = Decoder::new();
-        // kitty flags report, DA1, DA2, XTVERSION, focus in, cursor position
         let replies =
             b"\x1b[?5u\x1b[?62;4c\x1b[>1;10;0c\x1bP>|WezTerm 2024\x1b\\\x1b[I\x1b[12;40Rx";
         assert_eq!(keys(d.feed(replies)), vec![(KeyCode::Char('x'), 0)]);
@@ -634,7 +621,6 @@ mod tests {
     #[test]
     fn kitty_press_repeat_and_release() {
         let mut d = Decoder::new();
-        // Ctrl+C press, then its release, then Ctrl+D press.
         let events = d.feed(b"\x1b[99;5u\x1b[99;5:3u\x1b[100;5:1u");
         assert_eq!(
             keys(events),
@@ -688,7 +674,6 @@ mod tests {
         let typed = coalesce_paste(d.feed(b"hi\r"), COALESCE_MIN_RUN);
         assert_eq!(typed.len(), 3, "a short burst is ordinary typing");
 
-        // A control key splits runs; each side is judged on its own.
         let mut d = Decoder::new();
         let mixed = coalesce_paste(d.feed(b"abcdefghij\x03kl"), COALESCE_MIN_RUN);
         assert_eq!(mixed.len(), 4);
@@ -697,7 +682,6 @@ mod tests {
 
     #[test]
     fn unix_needs_a_much_longer_burst_before_it_is_a_paste() {
-        // A typed line that arrives in one read stays keystrokes, Enter included.
         let mut d = Decoder::new();
         let typed = coalesce_paste(d.feed(b"fix the bug\r"), COALESCE_MIN_RUN_UNIX);
         assert!(
@@ -716,7 +700,6 @@ mod tests {
         let mut d = Decoder::new();
         let mut events = d.feed(b"\x1b[200~");
         events.extend(d.feed(&vec![b'a'; MAX_PASTE + 1]));
-        // The rest of the paste, with newlines, then the end marker.
         events.extend(d.feed(b"\r\rrm -rf\x1b[201~x"));
         assert!(matches!(events[0], InputEvent::Paste(_)), "{events:?}");
         let keys: Vec<_> = events

@@ -34,8 +34,6 @@ pub fn install(images: PathBuf) {
 
 pub fn install_tracking() {
     FILES.set(Mutex::new(HashMap::new())).ok().unwrap();
-    // The delegated VFS owns the native file layout. Only three I/O callbacks
-    // change; every other operation uses the original callback and file pointer.
     unsafe {
         assert_eq!(ffi::sqlite3_initialize(), ffi::SQLITE_OK);
         let original = ffi::sqlite3_vfs_find(std::ptr::null());
@@ -150,9 +148,6 @@ unsafe extern "C" fn sync(file: *mut ffi::sqlite3_file, flags: i32) -> i32 {
             std::thread::park();
         }
     }
-    // `TIMELINE_ACCEPTANCE_PLAIN_FSYNC` turns macOS F_FULLFSYNC into a plain
-    // fsync, a model of a disk whose sync is fast; SQLite uses F_FULLFSYNC
-    // nowhere else.
     let flags = if flags & 0x0f == ffi::SQLITE_SYNC_FULL
         && *PLAIN_FSYNC
             .get_or_init(|| std::env::var_os("TIMELINE_ACCEPTANCE_PLAIN_FSYNC").is_some())

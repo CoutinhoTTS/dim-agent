@@ -21,7 +21,6 @@ export const part = definePlugin({
         if (call.method === 'session.files.hold') {
           let started!: () => void
           const connected = new Promise<void>(resolve => { started = resolve })
-          // The scope owns this transaction after the admitted method returns.
           void scope.withLock('public-files/state.json', async file => {
             const socket = createConnection(config.gate)
             try {

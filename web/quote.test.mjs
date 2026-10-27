@@ -1,4 +1,3 @@
-// The quote format both composers submit; the TUI composer checks the same cases.
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"

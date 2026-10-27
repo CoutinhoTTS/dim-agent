@@ -16,12 +16,10 @@ import { useUiStore } from "./stores/ui"
 
 watch(i18n.global.locale, (locale) => { document.documentElement.lang = locale }, { immediate: true })
 const pinia = createPinia()
-// The ui store applies the color scheme before anything paints.
 useUiStore(pinia)
 
 void Promise.all([exchangeBootstrapToken(), setAppLocale(navigator.language)]).then(() => {
   useConnectionStore(pinia).client.start()
   createApp(AppRoot).use(pinia).use(i18n).use(router).directive("tooltip", vTooltip).mount("#app")
-  // Every reply renders through markstream-vue, its own chunk: warm it once the shell is up.
   setTimeout(() => void loadMarkdownRenderer(), 0)
 })

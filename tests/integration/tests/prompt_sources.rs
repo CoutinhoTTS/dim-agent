@@ -78,7 +78,6 @@ async fn system_is_static_and_instructions_and_environment_arrive_as_inputs() {
 
     let sent = requests(&session).await;
     let system = last_system(&sent);
-    // How to use Skills is fixed text in the system; the list is state.
     in_order(
         &system,
         &[
@@ -125,7 +124,6 @@ async fn system_is_static_and_instructions_and_environment_arrive_as_inputs() {
             "hello",
         ],
     );
-    // The system stays byte-identical through the session.
     run(&session, "again").await;
     let sent = requests(&session).await;
     assert!(sent.windows(2).all(|pair| pair[0].system == pair[1].system));
@@ -197,7 +195,6 @@ async fn agents_md_changes_arrive_as_rules_from_the_periodic_check() {
         let system = system_text(request.system.as_deref().unwrap());
         !system.contains("RULE-ONE") && !system.contains("RULE-TWO")
     }));
-    // The explicit refresh finds nothing new.
     assert_eq!(
         session.configure(refresh_update(), "main").await.unwrap(),
         ConfigureOutcome::Unchanged
@@ -289,7 +286,6 @@ async fn unreadable_project_instructions_keep_the_adopted_version() {
 
     std::fs::set_permissions(&project, std::fs::Permissions::from_mode(0o000)).unwrap();
     if std::fs::read(&project).is_ok() {
-        // Running with privileges that bypass file modes; nothing to check.
         return;
     }
     let before = prompt_changes(&session.history("main", None).await.unwrap()).len();
@@ -346,8 +342,6 @@ async fn a_loaded_branch_appends_a_date_reminder_when_the_day_changes() {
     run(&session, "first").await;
     run(&session, "second").await;
 
-    // The reminder is its own Append input, ahead of the first user input,
-    // and user inputs carry no date.
     let sent = inputs(&session).await;
     let user = sent.iter().position(|input| input.user.is_some()).unwrap();
     let at = sent.iter().position(|input| date(input).is_some()).unwrap();
@@ -360,8 +354,6 @@ async fn a_loaded_branch_appends_a_date_reminder_when_the_day_changes() {
             .contains("<dim-state source=\"dim/environment/date\">2026-09-30</dim-state>")
     );
 
-    // The day changes while the branch is idle: the reminder is appended at
-    // the change, without any input, and does not start a turn.
     *today.lock().unwrap() = "2026-10-01".into();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while dates(&session).await.len() < 2 {
@@ -379,7 +371,6 @@ async fn a_loaded_branch_appends_a_date_reminder_when_the_day_changes() {
     assert!(!system.contains("2026-09-30") && !system.contains("2026-10-01"));
     env.agent.close().await.unwrap();
 
-    // Restored on the same day: no repeated reminder.
     let options = Options {
         store: Some(store),
         today,

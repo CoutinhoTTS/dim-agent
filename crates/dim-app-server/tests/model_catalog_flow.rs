@@ -59,7 +59,6 @@ fn effective_override_and_reset_use_the_same_bundled_projection() {
     assert_eq!(overridden[0].display_name, "Mine");
     assert_eq!(reset[0].display_name, "GPT-5 Nano");
     assert_eq!(reset[0].capabilities.max_output_tokens, 128_000);
-    // Historical default limits may be corrected; explicit stored booleans may not.
     let mut stored = defaults[0].clone();
     stored.capabilities = Default::default();
     let effective = catalog.effective_models(&provider, &[stored], &[]);

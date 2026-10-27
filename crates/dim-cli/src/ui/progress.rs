@@ -65,8 +65,6 @@ fn draws(env: &Env) -> bool {
         || var("ConEmuANSI") == "ON"
         || program == "ghostty"
         || var("TERM") == "xterm-ghostty"
-        // Releases older than WezTerm's progress support reject the
-        // sequence: no bar, and no notification either.
         || program == "WezTerm"
         || (program == "iTerm.app" && release(var("TERM_PROGRAM_VERSION")) >= [3, 6, 6])
 }
@@ -135,8 +133,6 @@ impl ProgressBar {
 mod tests {
     use super::*;
 
-    // The wire format: a terminal parses these bytes, and the removal is the
-    // restore path's.
     #[test]
     fn a_run_working_or_held_up_shows_a_bar_and_nothing_else_does() {
         assert_eq!(bar(&Status::Working), Some(&b"\x1b]9;4;3\x07"[..]));
@@ -164,7 +160,6 @@ mod tests {
             &[("WT_SESSION", "0f8a")][..],
             &[("ConEmuANSI", "ON")],
             &ghostty,
-            // Over ssh only TERM is left.
             &[("TERM", "xterm-ghostty")],
             &[("TERM_PROGRAM", "WezTerm")],
             &[
@@ -179,7 +174,6 @@ mod tests {
                 ("TERM_PROGRAM", "iTerm.app"),
                 ("TERM_PROGRAM_VERSION", "4.0"),
             ],
-            // `on` draws on a terminal the list does not know, and in tmux.
             &[("TERM_PROGRAM", "Apple_Terminal"), (ENV_KEY, " On ")],
             &[("TMUX", "/tmp/tmux-501/default,1,0"), (ENV_KEY, "on")],
         ] {
@@ -190,7 +184,6 @@ mod tests {
             &[("TERM_PROGRAM", "Apple_Terminal")],
             &[("TERM", "xterm-kitty")],
             &[("TERM_PROGRAM", "rex"), ("TERM", "xterm-rex")],
-            // iTerm2 before 3.6.6 shows the sequence as a notification.
             &[
                 ("TERM_PROGRAM", "iTerm.app"),
                 ("TERM_PROGRAM_VERSION", "3.6.5"),
@@ -200,7 +193,6 @@ mod tests {
                 ("TERM_PROGRAM_VERSION", "3.6"),
             ],
             &[("TERM_PROGRAM", "iTerm.app")],
-            // A multiplexer inherits the outer terminal's variables.
             &[
                 ("TMUX", "/tmp/tmux-501/default,1,0"),
                 ("WT_SESSION", "0f8a"),
@@ -220,12 +212,10 @@ mod tests {
         let mut progress = ProgressBar::new(true);
         let permission = Status::Permission("exec".into());
         let steps = [
-            // No bar to begin with, so none to remove.
             (Status::Idle, 0, None),
             (Status::Working, 0, Some(BUSY)),
             (Status::Working, 999, None),
             (Status::Working, 1000, Some(BUSY)),
-            // A change is drawn at once, a repeat once a second has passed.
             (permission.clone(), 1100, Some(PAUSED)),
             (Status::Question, 1500, None),
             (Status::Question, 2100, Some(PAUSED)),
@@ -236,10 +226,8 @@ mod tests {
         for (step, (status, ms, drawn)) in steps.into_iter().enumerate() {
             assert_eq!(progress.report(&status, at(ms)), drawn, "step {step}");
         }
-        // After a suspend removed it, the bar is drawn again at once.
         progress.forget();
         assert_eq!(progress.report(&Status::Working, at(9001)), Some(BUSY));
-        // Switched off, nothing is drawn, so nothing needs removing.
         let mut off = ProgressBar::new(false);
         assert_eq!(off.report(&Status::Working, at(0)), None);
         assert_eq!(off.report(&permission, at(5000)), None);

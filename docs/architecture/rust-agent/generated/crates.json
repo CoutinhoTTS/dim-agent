@@ -144,12 +144,32 @@
     "to": "rutis"
   },
   {
+    "from": "dim-oauth",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-oauth",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-oauth",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "dim-oauth",
+    "to": "rutis"
+  },
+  {
     "from": "dimcode",
     "to": "dim-app-server"
   },
   {
     "from": "dimcode",
     "to": "dim-cli"
+  },
+  {
+    "from": "dimcode",
+    "to": "dim-oauth"
   },
   {
     "from": "dimcode",

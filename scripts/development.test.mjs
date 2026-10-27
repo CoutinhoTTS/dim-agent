@@ -48,7 +48,6 @@ if (args.slice(-2).join(' ') === 'daemon stop') {
   assert.match(first.stderr, /build output/);
   assert.equal(statSync(home).mode & 0o077, 0);
   assert.equal(existsSync(path.join(repo, '.dev')), false);
-  // The account mode is the product home itself: no package, Node or plugin flags.
   const account = run(['login', 'dimcode-api-oauth']);
   assert.equal(account.status, 0, account.stderr);
   assert.deepEqual(JSON.parse(account.stdout).args, ['--home', home, 'login', 'dimcode-api-oauth']);

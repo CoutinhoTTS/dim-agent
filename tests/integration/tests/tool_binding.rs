@@ -70,7 +70,6 @@ impl ToolHandler for Handler {
 
 struct TestSource {
     sets: Mutex<Vec<Arc<ToolSourceSet>>>,
-    // Initial values are moved into the next Session's source.
     emitter: Option<(Ctx, InstanceId)>,
 }
 impl PublicService for TestSource {}
@@ -290,7 +289,6 @@ async fn adopted(session: &Session, branch: &str, sources: &[(&str, &str)]) {
                     EventKind::ContextConfigured(data) => Some(data.settings.tool_sources.clone()),
                     _ => None,
                 });
-            // The registered tools' own sets come with the source sets.
             let sources = current.map(|sources| {
                 sources
                     .into_iter()
@@ -572,8 +570,6 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
         .unwrap();
     session.idle("main").await.unwrap();
     assert_eq!(last_result(&session, "main").await, "generation 2");
-    // Generation 1 is released once its requests finished: nothing that
-    // binds through `bind_current` pins it.
     assert!(provided.lock().unwrap()[0].upgrade().is_none());
     assert!(
         !session
@@ -592,8 +588,6 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
         .find(|plugin| plugin.name == "Loop")
         .unwrap();
     let loop_view = root.view(previous_loop.id).unwrap();
-    // A restarted registry holds no registration: the contributor reloads
-    // with it and registers its next generation.
     root.view(registry_id).unwrap().restart().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop_view
@@ -671,8 +665,6 @@ async fn contributors_are_current_for_the_first_request_without_initial_configur
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    // Without a tool part each request declares the current contributors, so
-    // the first request already reaches the provider's second generation.
     assert_eq!(declared(&requests(&session).await[0]), ["optional", "echo"]);
     assert_eq!(last_result(&session, "main").await, "generation 2");
     let id = session.id().to_owned();
@@ -726,8 +718,6 @@ async fn an_accepted_source_change_is_adopted_after_its_emitter_closes() {
     (&emitter).await.unwrap();
     let emitting = receive.recv().await.unwrap();
 
-    // Hold one dispatch after its registry read so the next accepted change
-    // remains queued until its emitter has started closing.
     let gate = Arc::new(Gate::default());
     let pause = gate.clone();
     ctx.listen::<ToolProviderChanged>()
@@ -758,7 +748,6 @@ async fn an_accepted_source_change_is_adopted_after_its_emitter_closes() {
         .unwrap();
 
     adopted(&session, "main", &[("mcp:a", "v2")]).await;
-    // The other Session has its own source state and scoped notification key.
     assert_eq!(
         other.session_service::<ToolSourcesView>().unwrap().get().0["mcp:a"]
             .adopted
@@ -791,7 +780,6 @@ async fn a_call_runs_the_version_its_request_declared_and_old_versions_are_relea
     let source = session.session_service::<TestSource>().unwrap();
     adopted(&session, "main", &[("mcp:a", "v1")]).await;
 
-    // The call starts on v1; v2 is adopted while it runs.
     env.model.push(Step::Tool("lookup", serde_json::json!({})));
     env.model.push(Step::Text("done"));
     session
@@ -806,13 +794,11 @@ async fn a_call_runs_the_version_its_request_declared_and_old_versions_are_relea
     assert_eq!(last_result(&session, "main").await, "v1 ran lookup");
     assert_eq!(declared(&requests(&session).await[0]), ["gate", "lookup"]);
 
-    // The next request declares and runs v2; binding it releases v1.
     env.turn(&session, "main", &["lookup"]).await;
     assert_eq!(last_result(&session, "main").await, "v2 ran lookup");
     assert!(log.dropped.lock().unwrap().contains(&"v1".to_owned()));
     assert!(!log.dropped.lock().unwrap().contains(&"v2".to_owned()));
 
-    // A withdrawn source is no longer declared or run.
     source.offer(Vec::new());
     adopted(&session, "main", &[]).await;
     let calls = log.calls.lock().unwrap().len();
@@ -825,7 +811,6 @@ async fn a_call_runs_the_version_its_request_declared_and_old_versions_are_relea
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn conflicting_sets_are_rejected_whole_and_recover_once_the_name_is_free() {
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
-    // `gate` is a fixed tool; `b` repeats `a`'s tool.
     source.seed(vec![
         set("mcp:a", "a1", &["find"], &log, None),
         set("mcp:b", "b1", &["find", "other"], &log, None),
@@ -845,7 +830,6 @@ async fn conflicting_sets_are_rejected_whole_and_recover_once_the_name_is_free()
     env.turn(&session, "main", &[]).await;
     assert_eq!(declared(&requests(&session).await[0]), ["gate", "find"]);
 
-    // Withdrawing `a` frees the name: `b` is adopted as a whole.
     source.offer(vec![set("mcp:b", "b1", &["find", "other"], &log, None)]);
     adopted(&session, "main", &[("mcp:b", "b1")]).await;
     env.turn(&session, "main", &["other"]).await;
@@ -865,7 +849,6 @@ async fn a_name_freed_in_the_same_refresh_admits_the_rejected_set() {
     let session = env.session().await;
     let source = session.session_service::<TestSource>().unwrap();
     adopted(&session, "main", &[("mcp:z", "z1")]).await;
-    // `a` wants the name `z` holds.
     source.offer(vec![
         set("mcp:a", "a1", &["lookup"], &log, None),
         set("mcp:z", "z1", &["lookup"], &log, None),
@@ -884,8 +867,6 @@ async fn a_name_freed_in_the_same_refresh_admits_the_rejected_set() {
     })
     .await
     .expect("a rejected");
-    // One change frees the name: `a` is checked before `z` is replaced, and
-    // still adopted in the same refresh.
     source.offer(vec![
         set("mcp:a", "a1", &["lookup"], &log, None),
         set("mcp:z", "z2", &["other"], &log, None),
@@ -960,7 +941,6 @@ async fn a_restored_branch_adopts_the_new_versions_before_its_first_request() {
     let id = session.id().to_owned();
     env1.agent.close().await.unwrap();
 
-    // A new process: the source offers a new version of the same key.
     let source = TestSource::new();
     source.seed(vec![set("mcp:a", "v2", &["lookup"], &log, None)]);
     let env2 = env(source, Some(store));
@@ -1122,7 +1102,6 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
         .await
         .unwrap()
         .unwrap();
-        // The branch remains in assembly even though ToolBinding is available.
         let premature = tokio::time::timeout(Duration::from_millis(150), published.changed())
             .await
             .is_ok();
@@ -1154,8 +1133,6 @@ async fn tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_ass
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registered_sources_keep_their_names_apart_from_contributed_tools() {
-    // `contributed` is an ordinary source name: the registry's own sets use
-    // `#contributed`, which no registered name may contain.
     let (source, log) = (TestSource::new(), Arc::new(Log::default()));
     source.seed(vec![set("contributed:a", "v1", &["lookup"], &log, None)]);
     let env = env_named(source, None, "contributed");
@@ -1258,9 +1235,6 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
         .subscribe();
     let first = follow(&mut sources, |version| version.is_some()).await;
 
-    // While the Session is open, the registry follows the provider without
-    // waiting for a request: retirement withdraws the tool, and the next
-    // generation is offered under a new version.
     enabled.dispose().await.unwrap();
     plugin_state(&provider, rutis::host::FiberState::Pending).await;
     follow(&mut sources, |version| version.is_none()).await;
@@ -1273,8 +1247,6 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
     tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
         .await
         .unwrap();
-    // The provider retires after the close started: the registry's
-    // background refresh has ended, so nothing rereads or withdraws its tool.
     enabled.dispose().await.unwrap();
     plugin_state(&provider, rutis::host::FiberState::Pending).await;
     let refreshed = tokio::time::timeout(Duration::from_millis(150), sources.changed())
@@ -1343,9 +1315,6 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
     let generations = Arc::new(AtomicUsize::new(0));
     let log = Arc::new(Log::default());
     let registry: Arc<Mutex<Option<Arc<ToolRegistry>>>> = Arc::default();
-    // Each build is a new process: a new registry and provider generation,
-    // with a dynamic source whose own version stays the same, so the
-    // configuration keeps a tool part that records contributed versions.
     let build = || {
         let source = TestSource::new();
         source.seed(vec![set("mcp:a", "v1", &["lookup"], &log, None)]);
@@ -1409,14 +1378,10 @@ async fn a_persisted_contributed_version_names_one_generation_across_restores() 
         .unwrap();
     restored.idle("main").await.unwrap();
     assert_eq!(last_result(&restored, "main").await, "generation 2");
-    // The restored branch adopted the new generation under a version the
-    // first process never used, so the persisted one still names generation 1.
     let after = adopted_version(&restored, "main", "#contributed:optional")
         .await
         .unwrap();
     assert_ne!(after, before);
-    // `bind` resolves a prefix's versions through `source`: the persisted one
-    // resolves to nothing in the restored process, never to generation 2.
     let registry = registry.lock().unwrap().clone().unwrap();
     assert!(registry.source("#contributed:optional", &before).is_none());
     let current = registry.source("#contributed:optional", &after).unwrap();

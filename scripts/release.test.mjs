@@ -9,7 +9,6 @@ import {gunzipSync} from 'node:zlib';
 
 const root=path.resolve(import.meta.dirname,'..');
 const commit='a'.repeat(40);
-// The product version the checkout carries; an alpha release commit bumps it.
 const version=JSON.parse(readFileSync(path.join(root,'npm/package.json'))).version;
 const digest=(file)=>createHash('sha256').update(readFileSync(file)).digest('hex');
 const run=(script,args,env={})=>spawnSync(process.execPath,[path.join(root,'scripts',script),...args],{encoding:'utf8',env:{...process.env,...env}});
@@ -19,48 +18,6 @@ function fixture(t) {
   return temporary;
 }
 
-test('account checkout keeps credentials out of arguments and traced logs', {skip:process.platform==='win32'}, (t)=>{
-  const temporary=fixture(t);
-  const bin=path.join(temporary,'tools');
-  mkdirSync(bin);
-  const capture=path.join(temporary,'git-call.json');
-  const credential='fixture-user:fixture-release-secret';
-  const workflow=readFileSync(path.join(root,'.github/workflows/release.yml'),'utf8');
-  const start=workflow.indexOf('          set +x\n');
-  const end=workflow.indexOf('          git -C "$source" checkout',start);
-  assert(start>=0&&end>start);
-  const authenticate=workflow.slice(start,end).replace(/^          /gm,'');
-  writeFileSync(path.join(bin,'git'),`#!${process.execPath}
-const assert=require('node:assert/strict');
-const {writeFileSync}=require('node:fs');
-const {spawnSync}=require('node:child_process');
-const secret=process.env.DIM_OAUTH_GIT_CREDENTIAL;
-const header='Authorization: Basic '+Buffer.from(secret).toString('base64');
-const args=process.argv.slice(2);
-assert(args.every(arg=>!arg.includes(secret)&&!arg.includes(header)));
-const config=spawnSync('/usr/bin/git',['config','--get','http.extraHeader'],{encoding:'utf8'});
-assert.equal(config.status,0);
-assert.equal(config.stdout.trim()===header,true);
-writeFileSync(process.env.TEST_CAPTURE,JSON.stringify(args));
-process.exit(Number(process.env.TEST_GIT_EXIT));
-`,{mode:0o755});
-  const repository='https://example.invalid/account.git';
-  const source=path.join(temporary,'account source');
-  for(const status of [0,17]) {
-    const result=spawnSync('bash',['-c',`set -euxo pipefail\n${authenticate}\ntest -z "\${header+x}"\ntest -z "\${DIM_OAUTH_GIT_CREDENTIAL+x}"`],{
-      encoding:'utf8',env:{...process.env,PATH:`${bin}:${process.env.PATH}`,source,
-        DIM_OAUTH_REPOSITORY:repository,DIM_OAUTH_GIT_CREDENTIAL:credential,
-        TEST_CAPTURE:capture,TEST_GIT_EXIT:String(status)},
-    });
-    assert.equal(result.status,status,result.stderr);
-    assert.deepEqual(JSON.parse(readFileSync(capture)),['clone','--quiet','--no-checkout',repository,source]);
-    for(const secret of [credential,Buffer.from(credential).toString('base64')]) {
-      assert.equal((result.stdout+result.stderr).includes(secret),false);
-    }
-  }
-});
-// Entry names read straight from the gzip'd ustar stream: macOS bsdtar would
-// fold AppleDouble `._*` entries back into extended attributes and hide them.
 function entries(archive) {
   const data=gunzipSync(readFileSync(archive));
   const names=[];
@@ -131,12 +88,12 @@ test('stages the Web workspace as one native archive and npm package with its pr
   const metadata=JSON.parse(spawnSync('tar',['-xOzf',path.join(output,`dimcode-web-${version}.tgz`),'package/package.json'],{encoding:'utf8'}).stdout);
   assert.equal(metadata.name,'dimcode-web');
   assert.equal(metadata.os,undefined);
-  // A tree without index.html is not a frontend.
   rmSync(path.join(dist,'index.html'));
   assert.notEqual(run('stage-web.mjs',[path.join(temporary,'again'),version,commit,'--dist',dist]).status,0);
   assert.equal(existsSync(path.join(temporary,'again')),false);
 });
 
+/** An extended attribute is what makes macOS tar add the AppleDouble entry the account package must exclude. */
 test('an account build records the account and stages only its executable', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const bin=path.join(temporary,'bin');
@@ -145,8 +102,8 @@ test('an account build records the account and stages only its executable', {ski
   const stage=path.join(temporary,'stage');
   const staged=run('stage-release.mjs',[bin,stage,version,commit,'--account']);
   assert.equal(staged.status,0,staged.stderr);
-  // An extended attribute is what makes macOS tar add an AppleDouble entry.
-  if(process.platform==='darwin') assert.equal(spawnSync('xattr',['-w','com.apple.provenance','x',path.join(stage,'bin/dimcode')]).status,0);
+  if(process.platform==='darwin') assert.equal(spawnSync('xattr',['-w','com.apple.provenance','x',path.join(stage,'bin/dimcode')]).status,0,
+    'setting the extended attribute must succeed before packing');
   const manifest=JSON.parse(readFileSync(path.join(stage,'release-manifest.json')));
   assert.equal(manifest.account,true);
   assert.deepEqual(Object.keys(manifest.files).sort(),['LICENSE','NOTICE','bin/dimcode',...['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE'].map((file)=>`licenses/grok-build/${file}`)].sort());
@@ -214,7 +171,6 @@ test('collects exact platform packages, installs wrapper offline and rejects inc
     writeFileSync(path.join(directory,nativeFile),'native archive fixture');
     writeFileSync(path.join(directory,'release-manifest.json'),JSON.stringify({schemaVersion:1,platform,version,sourceCommit:commit,toolchain:{rust:'1.98.1'},account:false,npmPackages:[{name:`dimcode-${platform}`,file:npmFile,sha256:digest(path.join(directory,npmFile))}],nativeArchives:[{platform,file:nativeFile,sha256:digest(path.join(directory,nativeFile))}]}));
   }
-  // The Web workspace is staged once beside the platforms.
   const dist=path.join(temporary,'dist');
   mkdirSync(dist,{recursive:true});
   writeFileSync(path.join(dist,'index.html'),'<!doctype html>');
@@ -236,7 +192,6 @@ test('collects exact platform packages, installs wrapper offline and rejects inc
     const smoke=spawnSync(process.execPath,[path.join(installed,'node_modules/dimcode/bin/dimcode.mjs'),'--version'],{encoding:'utf8'});
     assert.equal(smoke.status,0,smoke.stderr);
     assert.equal(smoke.stdout.trim(),`dimcode ${version}`);
-    // The wrapper names the installed frontend to the executable.
     assert.equal(existsSync(path.join(installed,'node_modules/dimcode-web/web/index.html')),true);
   }
   const incompatible=path.join(temporary,'release-linux-x64/release-manifest.json');

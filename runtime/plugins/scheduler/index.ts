@@ -93,7 +93,6 @@ export default definePlugin({
         }
       },
     }
-    // Keep the namespace known even when restoration fails, without admitting new work during it.
     try { await scheduler.restore() }
     catch (error) { scheduler.fault = error }
 
@@ -143,7 +142,6 @@ export default definePlugin({
     )
     if (scheduler.fault) throw scheduler.fault
     ctx.provide('scheduleJobs', owner)
-    // Each Session mounts the `schedule` tool part (session.ts).
     await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'SchedulerSession', session)
     ctx.on('settings/schedule', () => scheduler.changed())
     scheduler.startTimer()

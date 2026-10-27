@@ -161,7 +161,6 @@ mod tests {
         std::fs::write(&plain, "").unwrap();
         std::fs::create_dir(&folder).unwrap();
         let raw = spaced.display().to_string();
-        // Raw spaces, quotes and a file URL each name one path.
         assert_eq!(pasted_entries(&raw, base), Some(vec![spaced.clone()]));
         assert_eq!(
             pasted_entries(&format!("'{raw}'"), base),
@@ -172,7 +171,6 @@ mod tests {
             pasted_entries(url.as_str(), base),
             Some(vec![spaced.clone()])
         );
-        // Several on a line, and one per line, files and directories.
         #[cfg(unix)]
         {
             let escaped = raw
@@ -191,7 +189,6 @@ mod tests {
             ),
             Some(vec![plain.clone(), folder.clone()])
         );
-        // Text with a path in it is still text; files only for pasted_paths.
         assert_eq!(
             pasted_entries(&format!("see {}", plain.display()), base),
             None

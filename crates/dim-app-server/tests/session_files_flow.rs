@@ -89,7 +89,6 @@ impl Store {
     async fn mount(home: &Home, file_storage: bool) -> Self {
         let root = Ctx::root().unwrap();
         if file_storage {
-            // Nothing depends on FileStorage, so wait for it before a put.
             (&root.plugin(FileStoragePlugin::new(vec![home.0.clone()])))
                 .await
                 .unwrap();
@@ -181,12 +180,10 @@ async fn a_put_stores_an_immutable_file_its_session_owns() {
         [format!("Text(\"s1|{}\")", stored.file_id)]
     );
 
-    // Every put is a new file, even with the same name and bytes.
     let again = store.put("s1", "paste.txt", b"pasted text").await.unwrap();
     assert_ne!(again.file_id, stored.file_id);
     assert_eq!(home.entries().len(), 2);
 
-    // Rejected puts write nothing.
     let rows = |home: &Home| {
         (
             home.rows("SELECT file_id FROM session_files"),
@@ -236,7 +233,6 @@ async fn a_put_stores_an_immutable_file_its_session_owns() {
     );
     assert_eq!(rows(&home), before);
 
-    // A Session creation rollback releases its owner rows with its records.
     store
         .sessions
         .timeline_store()
@@ -276,9 +272,6 @@ async fn sweeps_remove_only_what_no_row_of_this_database_owns() {
     let kept = store.put("s1", "kept.txt", b"kept").await.unwrap();
     store.root.shutdown().await.unwrap();
 
-    // What a crashed generation and stray writers leave: a pending row of a
-    // dead generation with its directory, a directory and a file without a
-    // row, and another database's Session files beside this one's.
     let dead = uuid::Uuid::new_v4().to_string();
     Connection::open(home.database())
         .unwrap()
@@ -305,7 +298,6 @@ async fn sweeps_remove_only_what_no_row_of_this_database_owns() {
     let mut owned = vec![kept.file_id.clone(), fresh.file_id.clone()];
     owned.sort();
     let rows: Vec<_> = owned.iter().map(|id| format!("Text(\"{id}\")")).collect();
-    // The sweep removes an entry, then its row.
     eventually(|| {
         home.entries() == owned && home.rows("SELECT file_id FROM session_files") == rows
     })
@@ -316,7 +308,6 @@ async fn sweeps_remove_only_what_no_row_of_this_database_owns() {
         b"other database"
     );
 
-    // Releasing the last owner, here by a creation rollback, sweeps its files.
     store
         .sessions
         .timeline_store()
@@ -340,7 +331,6 @@ async fn a_put_without_active_file_storage_reports_node_unavailable() {
         store.put("s1", "paste.txt", b"pasted").await,
         Err(SessionFileErrorCode::NodeUnavailable)
     );
-    // Nothing is written and nothing above FileStorage reloads.
     assert!(home.rows("SELECT file_id FROM session_files").is_empty());
     assert!(!home.files().exists());
     assert_eq!(store.consumer.watch().borrow().state, FiberState::Active);
@@ -404,7 +394,6 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
             .put(session.id(), "paste.txt", b"pasted for the model")
             .await
             .unwrap();
-        // Outside the working directory, next to the native database.
         assert!(!stored.path.starts_with(&work));
         let before = session.get::<PermissionState>("main").unwrap().unwrap();
         session

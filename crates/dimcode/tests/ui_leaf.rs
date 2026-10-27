@@ -232,7 +232,6 @@ impl Home {
         ));
         std::fs::create_dir_all(&base).unwrap();
         let canonical = std::fs::canonicalize(&base).unwrap();
-        // `<base>/<pad>/home/rust/daemon.sock`
         let fixed = canonical.as_os_str().len() + "/".len() + "/home/rust/daemon.sock".len();
         assert!(
             length > fixed,
@@ -308,7 +307,6 @@ impl Home {
 impl Drop for Home {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
-        // `with_socket_length` puts the root one level down.
         if let Some(parent) = self.root.parent()
             && parent
                 .file_name()
@@ -396,12 +394,10 @@ fn normal_dimcode_is_the_leaf_until_it_leaves() {
     let ui_id = leaf["uiId"].as_str().unwrap().to_owned();
     let first_session = leaf["sessionId"].as_str().unwrap().to_owned();
     assert!(ui_id.starts_with("ui-"), "{leaf}");
-    // Input reaches the hosted TUI on this terminal.
     pty.write(b"leaf-input-proof");
     pty.read_until("leaf-input-proof");
     pty.write(b"\x15");
 
-    // `/web` toggles the daemon switch and leaves the TUI in place.
     for want in [true, false] {
         pty.write(b"/web\r");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -414,7 +410,6 @@ fn normal_dimcode_is_the_leaf_until_it_leaves() {
             assert!(Instant::now() < deadline, "Web switch: {status}");
         }
     }
-    // `/new` keeps the one registration; it follows the new Session.
     pty.write(b"/new\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -432,9 +427,6 @@ fn normal_dimcode_is_the_leaf_until_it_leaves() {
         }
         assert!(Instant::now() < deadline, "Session switch did not reattach");
     }
-    // Leaving returns the TUI's code and takes the registration with it.
-    // Type the command, see it in the composer, then submit it, so it is
-    // not taken while the new Session is still settling.
     pty.drain(Duration::from_millis(300));
     pty.write(b"/exit");
     pty.read_until("/exit");
@@ -450,8 +442,6 @@ fn normal_dimcode_is_the_leaf_until_it_leaves() {
 fn the_daemon_closes_leaves_and_restores_their_terminals() {
     let home = Home::new("ui-leaf");
 
-    // `ui.close` unloads the hosted TUI: the terminal is restored and the
-    // process exits once its link stops.
     let first_pty = Pty::new();
     let mut first = home.dimcode(&first_pty);
     first_pty.read_until("Welcome to DIM");
@@ -470,8 +460,6 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
     assert_restored(&first_pty);
     assert!(instances(&mut rpc).is_empty());
 
-    // A stopped process cannot unload; the daemon still lets go of it, and
-    // the process leaves when it continues.
     let second_pty = Pty::new();
     let mut second = home.dimcode(&second_pty);
     second_pty.read_until("Welcome to DIM");
@@ -480,7 +468,6 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
         .unwrap()
         .to_owned();
     let pid = second.id() as libc::pid_t;
-    // The shell's child is dimcode; stop the whole process group.
     let dimcode = Command::new("pgrep")
         .args(["-P", &pid.to_string()])
         .output()
@@ -496,7 +483,6 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
     wait_exit(&mut second, &second_pty);
     assert_restored(&second_pty);
 
-    // Daemon shutdown unloads a leaf that is still online.
     let third_pty = Pty::new();
     let mut third = home.dimcode(&third_pty);
     third_pty.read_until("Welcome to DIM");
@@ -510,8 +496,6 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
 
 #[test]
 fn a_home_the_daemon_fits_also_fits_its_leaf() {
-    // The longest socket path the platform takes (sun_path minus its NUL):
-    // `daemon.sock` just fits, and the leaf's socket must too.
     let limit = std::mem::size_of::<libc::sockaddr_un>()
         - std::mem::offset_of!(libc::sockaddr_un, sun_path)
         - 1;
