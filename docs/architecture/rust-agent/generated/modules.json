@@ -26900,6 +26900,7 @@
         "path SessionPort",
         "path Update",
         "path Update::Snapshot",
+        "path Update::Switched",
         "path crate::model::session::SwitchKind::Resumed"
       ]
     },

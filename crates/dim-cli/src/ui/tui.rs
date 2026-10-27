@@ -3021,6 +3021,7 @@ impl App {
         self.window_info = (0, 0);
         self.history_request = None;
         self.awaiting_window = true;
+        self.pending_line = None;
         self.pending_boundary = match kind {
             SwitchKind::New if first => None,
             kind => Some(kind),
@@ -4154,6 +4155,40 @@ mod tests {
         for row in ["line first", "line second", "line third"] {
             assert!(text.contains(row), "{row} is drawn: {text}");
         }
+    }
+
+    #[test]
+    fn a_session_switch_drops_a_line_boundary_the_old_one_still_owed() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn.show(&[("m1", "main work")], "main", true);
+        drawn.show(&[("l1", "line work")], "b-7c", true);
+        let snapshot = |session: &str, focus: &str, complete: bool| {
+            Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: session.into(),
+                focus: focus.into(),
+                main_history_complete: complete,
+                ..ViewSnapshot::default()
+            }))
+        };
+        drawn.app.apply(snapshot("s1", "main", false));
+        drawn.draw();
+        assert!(
+            !drawn.transcript().contains("line main"),
+            "the boundary of the line shown first is still owed"
+        );
+        drawn.app.apply(Update::Switched {
+            session_id: "s2".into(),
+            kind: crate::model::session::SwitchKind::Resumed,
+        });
+        drawn.app.apply(snapshot("s2", "main", true));
+        drawn.draw();
+        let text = drawn.transcript();
+        assert!(text.contains("resumed s2"), "{text}");
+        assert!(
+            !text.contains("line main"),
+            "the new session starts at main: {text}"
+        );
+        assert_eq!(text.matches("line b-7c").count(), 1, "{text}");
     }
 
     fn questions() -> crate::question::Call {
