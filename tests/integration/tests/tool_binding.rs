@@ -447,6 +447,241 @@ async fn plugin_state(view: &rutis::host::FiberView, state: rutis::host::FiberSt
     .unwrap();
 }
 
+fn unconfigured_builder(prepare: Arc<dyn PrepareModel>) -> AgentBuilder {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::tool_host(
+        &mut builder,
+        Arc::new(dim_agent_capabilities::adapters::MockTools),
+    );
+    builder
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(Arc::new(
+            dim_agent_capabilities::adapters::EchoModel,
+        ))))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
+        .session_value(Arc::new(PrepareModelHost(prepare)));
+    defaults::install(&mut builder);
+    builder
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_preparing_request_keeps_its_contributor_generation() {
+    struct PausedPrepare {
+        config: Arc<SessionConfig>,
+        ready: Arc<tokio::sync::Notify>,
+        resume: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+    impl PrepareModel for PausedPrepare {
+        fn prepare(
+            &self,
+            turn_id: &str,
+            request_id: &str,
+            history: &[Message],
+            available_tools: &[ToolDefinition],
+        ) -> std::result::Result<ModelSettings, HostError> {
+            let settings = dim_agent_capabilities::adapters::DefaultPrepareModel {
+                config: self.config.clone(),
+            }
+            .prepare(turn_id, request_id, history, available_tools)?;
+            if let Some(resume) = self.resume.lock().unwrap().take() {
+                self.ready.notify_one();
+                resume
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("release prepared request");
+            }
+            Ok(settings)
+        }
+    }
+    for replace in [false, true] {
+        let dirs = Dirs::new();
+        let root = Ctx::root().unwrap();
+        let enabled = root.plugin(EnableContributor);
+        plugin_state(&enabled, rutis::host::FiberState::Active).await;
+        let config = SessionConfig {
+            cwd: dirs.root.to_string_lossy().into_owned(),
+            tools: Some(vec!["optional".into(), "echo".into()]),
+            permission_policy: PermissionPolicy {
+                allowed_tools: vec!["optional".into(), "echo".into()],
+                ..PermissionPolicy::default()
+            },
+            ..SessionConfig::default()
+        };
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let (resume, receiver) = std::sync::mpsc::channel();
+        let mut builder = unconfigured_builder(Arc::new(PausedPrepare {
+            config: Arc::new(config.clone()),
+            ready: ready.clone(),
+            resume: Mutex::new(Some(receiver)),
+        }));
+        let provided = Arc::new(Mutex::new(Vec::new()));
+        add_optional(
+            &mut builder,
+            Arc::default(),
+            Arc::default(),
+            provided.clone(),
+        );
+        let agent = builder.build_in(&root);
+        let session = agent.create_session(config).await.unwrap();
+        session
+            .submit("tool:optional {}".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), ready.notified())
+            .await
+            .expect("preparation read its declaration");
+        enabled.dispose().await.unwrap();
+        let provider = root
+            .view(
+                session
+                    .diagnostics()
+                    .unwrap()
+                    .plugins
+                    .iter()
+                    .find(|plugin| plugin.name == "OptionalContributor")
+                    .unwrap()
+                    .id,
+            )
+            .unwrap();
+        plugin_state(&provider, rutis::host::FiberState::Pending).await;
+        assert!(
+            provided.lock().unwrap()[0].upgrade().is_some(),
+            "preparation keeps its original source alive"
+        );
+        if replace {
+            root.plugin(EnableContributor);
+            plugin_state(&provider, rutis::host::FiberState::Active).await;
+        }
+        resume.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), session.idle("main"))
+            .await
+            .unwrap()
+            .unwrap();
+        let sent = requests(&session).await;
+        assert_eq!(declared(&sent[0]), ["optional", "echo"]);
+        assert!(
+            last_result(&session, "main")
+                .await
+                .contains("provider unloaded"),
+            "the pinned retired handler must run instead of the replacement"
+        );
+        assert!(
+            provided.lock().unwrap()[0].upgrade().is_none(),
+            "the settled request releases the retired generation"
+        );
+        let next = if replace {
+            "tool:optional {}"
+        } else {
+            "tool:echo {\"text\":\"host still works\"}"
+        };
+        session
+            .submit(next.into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), session.idle("main"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            last_result(&session, "main").await,
+            if replace {
+                "generation 2"
+            } else {
+                "host still works"
+            }
+        );
+        agent.close().await.unwrap();
+        root.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn custom_preparation_keeps_none_empty_and_filtered_declarations() {
+    struct Selected(Option<Vec<ToolDefinition>>);
+    impl PrepareModel for Selected {
+        fn prepare(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[Message],
+            available_tools: &[ToolDefinition],
+        ) -> std::result::Result<ModelSettings, HostError> {
+            assert!(available_tools.iter().any(|tool| tool.name == "optional"));
+            let mut settings = ModelSettings::new("mock", "echo");
+            settings.tools = self.0.clone();
+            Ok(settings)
+        }
+    }
+    let echo = dim_agent_capabilities::adapters::MockTools
+        .definitions()
+        .into_iter()
+        .find(|tool| tool.name == "echo")
+        .unwrap();
+    let unavailable = definition(
+        "unavailable",
+        "Unavailable tool",
+        serde_json::json!({"type":"object"}),
+    );
+    for (selected, valid) in [
+        (None, true),
+        (Some(vec![]), true),
+        (Some(vec![echo]), true),
+        (Some(vec![unavailable]), false),
+    ] {
+        let dirs = Dirs::new();
+        let root = Ctx::root().unwrap();
+        let enabled = root.plugin(EnableContributor);
+        plugin_state(&enabled, rutis::host::FiberState::Active).await;
+        let mut builder = unconfigured_builder(Arc::new(Selected(selected.clone())));
+        add_optional(&mut builder, Arc::default(), Arc::default(), Arc::default());
+        let agent = builder.build_in(&root);
+        let session = agent
+            .create_session(SessionConfig {
+                cwd: dirs.root.to_string_lossy().into_owned(),
+                tools: Some(vec!["optional".into(), "echo".into()]),
+                permission_policy: PermissionPolicy {
+                    allowed_tools: vec!["echo".into()],
+                    ..PermissionPolicy::default()
+                },
+                ..SessionConfig::default()
+            })
+            .await
+            .unwrap();
+        let calls_echo = valid && selected.as_ref().is_some_and(|tools| !tools.is_empty());
+        session
+            .submit(
+                if calls_echo {
+                    "tool:echo {\"text\":\"selected\"}"
+                } else {
+                    "hello"
+                }
+                .into(),
+                InputMode::Queue,
+                "main",
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), session.idle("main"))
+            .await
+            .unwrap()
+            .unwrap();
+        let sent = requests(&session).await;
+        if valid {
+            assert!(!sent.is_empty());
+            assert_eq!(sent[0].tools.as_deref(), selected.as_ref());
+            if calls_echo {
+                assert_eq!(last_result(&session, "main").await, "selected");
+            }
+        } else {
+            assert!(sent.is_empty());
+            assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::TurnEnd(data) if data.outcome == TurnOutcome::Failed { error: "invalid input: tool unavailable has no handler".into() })));
+        }
+        agent.close().await.unwrap();
+        root.shutdown().await.unwrap();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations() {
     let root = Ctx::root().unwrap();

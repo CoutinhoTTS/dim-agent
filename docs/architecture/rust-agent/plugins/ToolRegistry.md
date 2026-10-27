@@ -93,7 +93,7 @@ Initial attachment and adoption satisfy
 through ToolBinding initialization and the existing Prompt / BranchOpening path,
 before Session publication and input admission. A branch whose configuration
 has no tool part declares the registry's current host and registered tools
-through PrepareModelHost / `bind_current` on each request; a registration change
+through [ToolBinding request preparation](ToolExecution.md#toolbinding) on each request; a registration change
 needs no adoption there.
 
 ## Tests
@@ -145,5 +145,5 @@ owned by Dim and built on existing rutis effects and the bridge's calling row.
 | 作用域 | Session |
 | 注入 | `S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:ToolHost` |
 | 提供 | `S:ToolRegistry`、`S:ToolSourcesView`、`S:dyn HostDispatch#toolRegistry` |
-| 被注入于 | `BranchTool`、`PrepareModelHost`、`Questions`、`Skills`、`ToolBinding`、`Wait` |
+| 被注入于 | `BranchTool`、`Questions`、`Skills`、`ToolBinding`、`Wait` |
 <!-- /generated -->

@@ -111,11 +111,14 @@ impl ModelSettings {
 }
 
 pub trait PrepareModel: Send + Sync + 'static {
+    /// Prepares settings against the request's pinned available tools.
+    /// Returned tools must match these definitions; `None` declares no tools.
     fn prepare(
         &self,
         turn_id: &str,
         request_id: &str,
         history: &[Message],
+        available_tools: &[ToolDefinition],
     ) -> Result<ModelSettings, HostError>;
 }
 pub struct PrepareModelHost(pub Arc<dyn PrepareModel>);

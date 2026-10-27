@@ -148,7 +148,7 @@ New bindings automatically adopt the replacement through the existing flow below
 
 | 组件 | 作用域 | 注入 | 提供 | 被谁注入 |
 | --- | --- | --- | --- | --- |
-| `ToolRegistryPlugin` | Session | `S:ToolHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle` | `S:ToolRegistry`、`S:ToolSourcesView` | ToolBinding、PrepareModelHost；注册工具或来源的部件（BranchTool、Questions、Skills、Wait、CollaborationSession、McpSession） |
+| `ToolRegistryPlugin` | Session | `S:ToolHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle` | `S:ToolRegistry`、`S:ToolSourcesView` | ToolBinding；注册工具或来源的部件（BranchTool、Questions、Skills、Wait、CollaborationSession、McpSession） |
 | `ToolBindingPlugin` | 分支 | `S:ToolRegistry`、`B:Prompt`（采用入口）、`B:Timeline`、`B:BranchLifecycle`、`B:Dispatcher`、`B:BranchOpening` | `B:ToolBinding` | Loop、ToolExecutor |
 
 - 来源方注入 ToolRegistry 以注册来源（沿用第 3 节），不注入 ToolBinding。
@@ -239,7 +239,8 @@ ToolBinding 先取得注册表的来源状态 watch 再初读注册表，状态�
 | 方法 | 调用方 | 输入 → 输出 | 错误 |
 | --- | --- | --- | --- |
 | `bind(request_id, through, tools, tool_sources)` | Loop | 前缀（至 `through`）中已采用配置的声明与来源版本 → 登记快照；成功后按 7.6 释放旧 pin | `tool source <key>@<version> is unavailable`；`tool <name> has no handler`（声明名在所绑集合与固定表中都不存在）；`request_id` 已登记 |
-| `bind_current(request_id, declared: Option<_>)` | Loop | `None`：配置没有工具部分，声明注册表当前的宿主与注册工具；`Some`：核对 `PrepareModelHost` 给出的声明 → 按注册表当前状态登记快照 | 声明名不存在或与当前定义不等 |
+| `bind_current(request_id, declared: Option<_>)` | Loop | `None`：配置没有工具部分，声明注册表当前的宿主与注册工具；`Some`：核对显式声明 → 按注册表当前状态登记快照 | 声明名不存在或与当前定义不等 |
+| `prepare(request_id, prepare)` | Loop | 捕获并持有当前声明与来源集合，让宿主从这些声明选择本请求的工具，再以同一快照绑定其返回的声明 | 宿主准备失败；声明名不存在或与捕获的定义不等 |
 | `handler(request_id, name)` | ToolExecutor | → 快照中的 `Arc<ToolContribution>`（`handler` 用于执行，`definition.risk` 供审批） | `request <id> has no active tool binding`；`Unknown tool: <name>`。ToolExecutor 写成工具错误结果 |
 | `transfer(from, to)` | Loop（预算恢复） | 原请求快照改登记到新 `request_id` | `from` 无快照 |
 | `release(request_id)` | Loop | 释放快照；不存在时无操作 | — |
@@ -255,7 +256,7 @@ ToolBinding 先取得注册表的来源状态 watch 再初读注册表，状态�
 
 ```text
 apply:
-  前缀无已采用模型 ──> 提供 ToolBinding；请求经 PrepareModelHost + bind_current
+  前缀无已采用模型 ──> 提供 ToolBinding；请求经其 prepare 操作
   配置无工具部分且注册表无动态来源 ──> 视为一致，不采用；请求经 bind_current(None)
   读前缀最后一个已采用配置的 tools / tool_sources
   声明与来源版本都等于注册表当前 ──> 直接 pin，序号记 0
@@ -279,7 +280,9 @@ Loop.start_preparation(through)
   读前缀、确定配置、渲染历史、得到 ModelSettings
   有已采用配置 ──> bind(request_id, through, settings.tools, settings.tool_sources)
   无工具部分     ──> bind_current(request_id, None)
-  无             ──> PrepareModelHost ──> bind_current(request_id, Some(settings.tools))
+  无             ──> ToolBinding.prepare 捕获当前快照
+                   ──> PrepareModelHost 从可用声明选择工具
+                   ──> 按原快照绑定 settings.tools；准备期间换代不改绑
   失败 ──> step/model-output-end(Failed)，turn Failed
 ToolExecutor ──> handler(request_id, name) ──> 执行（流程见入口文档）
 Loop 释放:
@@ -320,7 +323,7 @@ Loop 释放:
 6. 子分支：继承配置可绑定；父分支换代并释放旧版本后创建的子分支，首个请求前有一次工具采用；继承 pin 记 0 时后续采用与释放不泄漏、不误释放。
 7. 重载与恢复：`ToolHost` 重载时在途批次带重载结算、来源未变时不写新 `context/configured`；进程重启（SQLite profile）后每个活分支在首个请求前有一次工具采用，首个请求绑定成功。
 8. 并发更新：`ConfigureUpdate.model` 与工具采用同时提交，二者都 `Adopted`，最终 `context/configured.settings` 同时含新模型与新工具。
-9. 开发路径：无采用配置时经 `bind_current` 绑定，现有 `prompt_lifecycle`、`interrupt` 流程通过。
+9. 开发路径：无采用配置时经 `prepare` 固定工具；准备期间撤回或换代时调用原代的处理器并按其停止合同结算，下一请求使用当前工具；自定义宿主的 `None`、空列表、过滤列表和无效声明保留其含义。现有 `prompt_lifecycle`、`interrupt` 流程通过。
 
 未覆盖：第 2 项的「`step/model-start` 已写、`bind` 未发生时换代」（没有门控准备的测试钩子）；第 7 项的 `ToolHost` 重载与 SQLite profile 重启（以内存存储的重启覆盖）。
 
@@ -329,3 +332,22 @@ Loop 释放:
 模型与工具分两部分更新、在 Prompt 串行队列中合成，而不是另设工具采用事件或让模型更新携带工具（前者多一套投影，后者让模型更新方读取工具状态且两者互相淘汰）。快照与 pin 归分支级 ToolBinding，随分支卸载自动释放。旧 pin 在新版本首次绑定成功后释放，而不是采用返回即释放（会与 `step/model-start` 之后的异步绑定竞争）。
 
 结构上只有一个分支插件（采用、pin、快照三者生命周期相同）和一个 Session 级来源端口；来源条目、快照条目与 `handler` 返回值都复用 `Arc<ToolContribution>`，旧版本保留复用 `Arc` 所有权，采用复用 Prompt 的串行队列与 `context/configured`，没有新增事件类型、引用计数表或租约。`ToolSourcesState` 是来源被拒时唯一可见的结果，保留。
+
+## Appendix A: Rust preparation binding
+
+`PrepareModelHost` implementations receive the available definitions captured by
+ToolBinding and return their selection in `ModelSettings.tools`:
+
+```rust
+fn prepare(
+    &self,
+    turn_id: &str,
+    request_id: &str,
+    history: &[Message],
+    available_tools: &[ToolDefinition],
+) -> Result<ModelSettings, HostError>;
+```
+
+`Some(tools)` selects matching definitions from that snapshot. `None` and
+`Some(Vec::new())` bind no tools and keep their distinct request representation.
+Implementations do not reread ToolRegistry to select the request's tools.

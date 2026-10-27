@@ -2459,23 +2459,12 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
             "service": "dim_agent_runtime::config::SessionConfig@session",
             "scope": null,
             "status": "Ready"
           }
         ],
         "resolved": [
-          {
-            "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
-            "scope": null,
-            "provider": 46,
-            "generation": 1
-          },
           {
             "service": "dim_agent_runtime::config::SessionConfig@session",
             "scope": null,
@@ -2484,12 +2473,6 @@
           }
         ],
         "reads": [
-          {
-            "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
-            "provider": 46,
-            "declared": true,
-            "external": true
-          },
           {
             "service": "dim_agent_runtime::config::SessionConfig@session",
             "provider": 30,

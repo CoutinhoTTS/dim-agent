@@ -1,7 +1,7 @@
 use crate::{AimuxModels, driver::AimuxDriver};
-use dim_agent_capabilities::{host::*, tool_registry::ToolRegistry};
+use dim_agent_capabilities::host::*;
 use dim_agent_runtime::{Names, SessionConfig, SessionIdentity};
-use dim_agent_types::{Message, SystemPrompt};
+use dim_agent_types::{Message, SystemPrompt, ToolDefinition};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use rutis::{Ctx, Plugin};
 use std::sync::Arc;
@@ -160,7 +160,6 @@ pub struct ConfiguredModelPlugin {
     models: Key<AimuxModels>,
     config: Key<SessionConfig>,
     identity: Key<SessionIdentity>,
-    tools: Key<ToolRegistry>,
 }
 impl ConfiguredModelPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -169,7 +168,6 @@ impl ConfiguredModelPlugin {
             models: names.key()?,
             config: names.key()?,
             identity: names.key()?,
-            tools: names.key()?,
         })
     }
 }
@@ -182,7 +180,6 @@ impl DynPlugin for ConfiguredModelPlugin {
             self.models.erase(),
             self.config.erase(),
             self.identity.erase(),
-            self.tools.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -190,7 +187,6 @@ impl DynPlugin for ConfiguredModelPlugin {
             let models = ctx.require_at(&self.models)?;
             let config = ctx.require_at(&self.config)?;
             let identity = ctx.require_at(&self.identity)?;
-            let tools = ctx.require_at(&self.tools)?;
             let defaults = models
                 .get(&config.model.provider_id, &config.model.model_id)
                 .map_err(|error| {
@@ -205,7 +201,6 @@ impl DynPlugin for ConfiguredModelPlugin {
                 Arc::new(PrepareModelHost(Arc::new(Prepare {
                     config,
                     identity,
-                    tools,
                     defaults,
                 }))),
             )?;
@@ -216,7 +211,6 @@ impl DynPlugin for ConfiguredModelPlugin {
 struct Prepare {
     config: Arc<SessionConfig>,
     identity: Arc<SessionIdentity>,
-    tools: Arc<ToolRegistry>,
     defaults: dim_agent_types::ModelConfig,
 }
 impl PrepareModel for Prepare {
@@ -225,6 +219,7 @@ impl PrepareModel for Prepare {
         turn_id: &str,
         request_id: &str,
         _: &[Message],
+        available_tools: &[ToolDefinition],
     ) -> Result<ModelSettings, HostError> {
         let mut settings =
             ModelSettings::new(&self.config.model.provider_id, &self.config.model.model_id);
@@ -239,7 +234,7 @@ impl PrepareModel for Prepare {
         );
         settings.system = (!self.config.system_prompt.is_empty())
             .then(|| SystemPrompt::Text(self.config.system_prompt.clone()));
-        settings.tools = Some(self.tools.definitions());
+        settings.tools = Some(available_tools.to_vec());
         let mut metadata = self.config.model.metadata.clone().unwrap_or_default();
         metadata.session_id = Some(self.identity.session_id.clone());
         metadata.turn_id = Some(turn_id.into());
