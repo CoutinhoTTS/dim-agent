@@ -139,10 +139,12 @@ These commands stage an API-key-only distribution. An account build is the `dimc
 node scripts/stage-release.mjs ../dim-oauth-plugin-rust/target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account
 ```
 
-In CI, set the `DIM_OAUTH_REPOSITORY` (HTTPS clone URL) and `DIM_OAUTH_REVISION` (full commit) variables and the `DIM_OAUTH_GIT_CREDENTIAL` secret (`user:token` of a read-only deploy token). Every target then clones that commit beside the public checkout and builds its `dimcode`; without both variables CI builds API-key-only payloads, and a partial configuration fails. Bump `DIM_OAUTH_REVISION` to release a new plugin version. The credential is used only for the clone and never enters manifests. The account build adds no runtime, package or Node: each platform package and native archive holds only the executable:
+In CI, set the `DIM_OAUTH_REPOSITORY` (HTTPS clone URL) and `DIM_OAUTH_REVISION` (full commit) variables and the `DIM_OAUTH_GIT_CREDENTIAL` secret (`user:token` of a read-only deploy token). Every target then clones that commit beside the public checkout and builds its `dimcode`; without both variables CI builds API-key-only payloads, and a partial configuration fails. Bump `DIM_OAUTH_REVISION` to release a new plugin version. The credential is used only for the clone and never enters manifests. The account build adds no runtime, package or Node. Each platform package and native archive holds the executable, the default configuration file and the default plugins (`scripts/stage-plugins.mjs`, then `stage-release.mjs --plugins DIR`); the Node and Python runtimes are not bundled: RuntimeManager downloads them, verified against pins compiled into Dim, into the home ([RuntimeManager](../design/plugins/RuntimeManager.md)):
 
 ```text
 bin/dimcode[.exe]              # the CLI; runs its daemon as `dimcode app-server`
+default-plugins.json          # the default configuration file, passed as `--defaults`
+plugins/<name>/               # the default plugins with their production node_modules
 LICENSE
 NOTICE
 release-manifest.json         # `account` records whether this is the account build

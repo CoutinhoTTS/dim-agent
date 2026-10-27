@@ -89,7 +89,7 @@ The default configuration file ([PluginManager §2.3](PluginManager.md#23-the-de
 | `python-packages-<requirements digest>/` | the `rutis` package from `pip install --target` |
 | `runtimes.json` | RuntimeManager's record (§2.4) |
 | `config.json` | the user's override (§2.2), optional |
-| `*.partial/` | work in progress; removed before each attempt |
+| `*.partial/`, `*.download` | work in progress; removed before each attempt |
 
 Every path is a function of the pins, the configuration and the home, so the App Server builds the `LocalRuntime` objects and the row resolvers from them before reconciliation, as it does today with configured paths; the runtime process starts only when RuntimeManager mounts the runtime. With `source: system`, the interpreter path is looked up on `PATH` when the App Server builds the objects.
 
@@ -119,7 +119,7 @@ Startup does not wait for any runtime: a first start without a network reaches t
 For each runtime, in its task:
 
 1. If `runtimes.json` records it as installed (§2.4), go to step 5.
-2. `download`: fetch the platform's file from each source in order into `<home>/runtimes/<name>.partial/`, compute SHA-256 while writing, and keep the first that matches the pin. Unpack it only after it matches; reject archive paths leaving the directory, links included. Rename the unpacked directory to its final path, replacing nothing that verified before. `system`: look up and check the interpreter (§2.2).
+2. `download`: fetch the platform's file from each source in order into `<home>/runtimes/<directory>.download`, compute SHA-256 while writing, and keep the first that matches the pin. Unpack it only after it matches, into `<directory>.partial/`, refusing entries that leave the directory and links that point outside it. Rename the unpacked directory to its final path, replacing nothing that verified before. `system`: look up and check the interpreter (§2.2).
 3. Packages, into `<dir>.partial/` then renamed: Node runs `npm ci --ignore-scripts --omit=dev --no-audit --no-fund --registry <r>` with the verified (or system) Node's own npm over the pinned `package.json` and lock, trying each registry in order; npm verifies every package against the lock's `integrity`. Python runs `python -m pip install --require-hashes --no-deps --only-binary :all: --target <dir> --index-url <i> -r requirements`, trying each index in order.
 4. Write `runtimes.json`.
 5. Mount the `LocalRuntime` as RuntimeManager's child.
@@ -150,8 +150,8 @@ The rutis Python runtime is one process; a row `py:<module>` is imported with `i
 | Interface | Content |
 | --- | --- |
 | Runtime names | `Runtime#session-node`, `Runtime#py`: provided while the runtime runs. |
-| `RuntimeService` (process service, `#[rutis::service]`) | `list() -> [RuntimeStatus]`; `install(name)`: turns the runtime on and starts its acquisition; does nothing while it is being acquired or is running; after a failure or an ended process, tries again. Read with an optional dependency, so RuntimeManager's reload does not reload the caller. |
-| `runtime.list` (management method) | `[{name, source, version, status, reason?}]`; `status` is `off`, `acquiring`, `failed`, or rutis' runtime state (`starting`, `ready`, `down`). |
+| `RuntimeService` (Rust process service) | `list() -> [RuntimeStatus]`; `install(name)`: turns the runtime on and starts its acquisition; does nothing while it is being acquired or is running; after a failure or an ended process, tries again. Read with an optional dependency, so RuntimeManager's reload does not reload the caller. |
+| `runtime.list` (management method) | `[{name, source, version, status, reason?}]`; `status` is `off`, `acquiring`, `failed`, or rutis' runtime state once mounted (`idle`, `starting`, `ready`, `down`, with its reason). |
 | `runtime.install {name}` (management method, mutating) | `RuntimeService::install`; replies at once with the status. |
 | `dimcode runtime list`, `dimcode runtime install <node|python>` | The methods above. |
 
@@ -166,12 +166,12 @@ plugins/<name>/             # goal, web, session-title, workflow, scheduler, wit
 LICENSE  NOTICE  release-manifest.json
 ```
 
-`stage-release.mjs` copies `runtime/default-plugins.json` and `runtime/plugins/*` (sources and manifests, not tests) and runs `npm ci --omit=dev --ignore-scripts` in each plugin that has a lock. The CLI passes `--defaults <executable's directory>/../default-plugins.json` to the App Server when the file exists; development passes `runtime/default-plugins.json`. Without `--defaults`, the App Server has no RuntimeManager and behaves as today (explicit `--node`, `--js-runtime` and `--python` remain for development and tests).
+`scripts/stage-plugins.mjs` copies `runtime/default-plugins.json` and each default plugin's directory (without tests, `tsconfig.json` or `node_modules`) and runs `npm ci --omit=dev --ignore-scripts --no-bin-links` in each, from its pinned lock; `stage-release.mjs --plugins DIR` puts the result beside `bin/`. A default plugin resolves `@arcships/rutis` from its own `node_modules`; it must not resolve a Cordis of its own, since rutis-runtime refuses a plugin whose Cordis differs from the runtime's. The CLI passes `--defaults <executable's directory>/../default-plugins.json` to the App Server when the file exists; development passes `runtime/default-plugins.json` (or sets `DIMCODE_DEFAULTS`). Without `--defaults`, the App Server has no RuntimeManager and behaves as today (explicit `--node`, `--js-runtime` and `--python` remain for development and tests).
 
 ## 7. Security
 
 - Every downloaded file is verified against a hash compiled into Dim before it is unpacked or run; npm and pip packages are verified by the pinned lock and requirements. Sources and mirrors add no trust.
-- Archive entries are unpacked only inside their directory; absolute paths, `..` and links are refused.
+- Archive entries are unpacked only inside their directory: absolute paths and `..` are refused, and so are links whose target leaves it (on Windows a link inside is unpacked as a copy).
 - npm runs with `--ignore-scripts`; pip installs only wheels (`--only-binary :all:`), so no package code runs during installation.
 - RuntimeManager writes only under `<home>/runtimes/`. No credentials are used or stored.
 

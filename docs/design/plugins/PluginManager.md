@@ -159,7 +159,7 @@ Shipped with Dim, read-only, given to the App Server with `--defaults PATH` (the
 
 ### 2.5 Runtimes
 
-Plugin code runs in the Node or Python rutis runtime. Supplying them is not PluginManager's business: how runtimes are acquired, pinned and verified, and how plugin rows start once a runtime is available, is the runtime acquisition design ([#476](https://github.com/arcships/dim/issues/476), M1). PluginManager only creates rows; a row whose runtime is not there shows rutis' status and reason in `plugin.list`. Reload re-imports only the entry module ([requirement 3](../plugin-management.md)).
+Plugin code runs in the Node or Python rutis runtime. Supplying them is not PluginManager's business: how runtimes are acquired, pinned and verified, and how plugin rows start once a runtime is available, is [RuntimeManager](RuntimeManager.md) ([#476](https://github.com/arcships/dim/issues/476), M1). PluginManager only creates rows; a row whose runtime is not there shows rutis' status and reason in `plugin.list`. Reload re-imports only the entry module ([requirement 3](../plugin-management.md)).
 
 ## 3. Flows
 

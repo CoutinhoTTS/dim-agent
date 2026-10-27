@@ -29,11 +29,12 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | [RemoteGateway](RemoteGateway.md) | remote entry, devices | — | — | P3 |
 | [Modality](Modality.md) | tasks, realtime connections | — | — | P3 |
 | [PluginManager](PluginManager.md) | plugin configuration (`plugins.json`), install, loader rows of plugin code, content registration | `PluginTools` (plugin tools) | — | M1 |
+| [RuntimeManager](RuntimeManager.md) | the Node and Python runtimes of plugin code: pinned download, verification, start; `runtime.*` | — | — | M1 (#476) |
 
 ## By scope
 
 | Scope | Parts |
 | --- | --- |
-| Process parts | Provider (management supplement proposed), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway in the daemon; AcpGateway in its client host process |
+| Process parts | Provider (management supplement proposed), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway in the daemon; AcpGateway in its client host process |
 | Session parts | Questions, ShellInput, Attachments, SessionTitle, Goal, Web, Recall, Hooks, Scheduler, Workflow |
 | Branch parts | Goal (with Pursuit), Hooks |
