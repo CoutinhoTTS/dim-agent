@@ -17,6 +17,7 @@ embedded-web = ["dim-app-server/embedded-web"]
 [dependencies]
 dim-cli = { path = "../dim-cli" }
 dim-app-server.workspace = true
+dim-oauth = { path = "../dim-oauth" }
 
 [dev-dependencies]
 base64 = "0.22.1"

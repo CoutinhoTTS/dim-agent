@@ -132,14 +132,14 @@ The executable carries no frontend. `stage-web.mjs` builds `web/` once (`npm ci`
 
 For a cross build, set `DIM_BUILD_PLATFORM` to the intended platform, build with the matching Rust `--target`, and stage from `target/TARGET/release`. The runner must use the same OS as the target. The six platform names are listed in the workflow matrix.
 
-These commands stage an API-key-only distribution. An account build is the `dimcode` of the private `dim-oauth-plugin-rust` repository, checked out beside this one; it starts from this checkout's `Cargo.lock`:
+These commands stage an API-key-only distribution. An account build is the same `dimcode` compiled with the Dim account's OAuth client IDs, which never enter the repository:
 
 ```sh
-(cd ../dim-oauth-plugin-rust && scripts/sync-lock.sh && cargo build --release -p dim-oauth)
-node scripts/stage-release.mjs ../dim-oauth-plugin-rust/target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account
+DIM_OAUTH_CLIENT_ID_CN=… DIM_OAUTH_CLIENT_ID_GLOBAL=… cargo build --release --locked -p dimcode
+node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account
 ```
 
-In CI, set the `DIM_OAUTH_REPOSITORY` (HTTPS clone URL) and `DIM_OAUTH_REVISION` (full commit) variables and the `DIM_OAUTH_GIT_CREDENTIAL` secret (`user:token` of a read-only deploy token). Every target then clones that commit beside the public checkout and builds its `dimcode`; without both variables CI builds API-key-only payloads, and a partial configuration fails. Bump `DIM_OAUTH_REVISION` to release a new plugin version. The credential is used only for the clone and never enters manifests. The account build adds no runtime, package or Node: each platform package and native archive holds only the executable:
+In CI, set the `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` repository secrets. Every target is then an account build; without both secrets CI builds API-key-only payloads, and a partial configuration fails. The IDs are compiled into the executable and never enter manifests. The account build adds no runtime, package or Node: each platform package and native archive holds only the executable:
 
 ```text
 bin/dimcode[.exe]              # the CLI; runs its daemon as `dimcode app-server`

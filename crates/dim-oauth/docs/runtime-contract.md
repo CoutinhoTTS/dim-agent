@@ -1,0 +1,19 @@
+# Runtime contract
+
+The Dim account (`dimcode-api-oauth`) is the rutis plugin `DimOAuth` ([`src/lib.rs`](../src/lib.rs)). It runs in the App Server process of the account build; no Node runtime or plugin package is involved. It owns the account login (browser PKCE and device flow), the `auth.json` account record, token refresh, the relay model catalog and request credential leases, and publishes them as the process's `ManagedProvider` (below).
+
+The flow is a public OAuth client: there is no client secret. The client IDs of the `dimagent.com` directory and of every other directory are in [`ClientIds::production`](../src/http.rs). A realm discovered from the login email may name its own client ID, which wins.
+
+Login selects a directory (`--directory` or the CLI entry's default) and optional enterprise email. Discovery reads the directory's `/.well-known/openid-configuration`, falling back to `/oauth/authorize`, `/oauth/token` and `/oauth/device_authorization` under the issuer, and the relay is `{issuer}/v1`. Browser redirects permit only HTTP localhost, 127.0.0.1 or ::1 at `/auth/callback`; the host owns the callback listener and browser, the provider owns code exchange and the `/oauth/userinfo` confirmation. Device polling continues in the provider after the initiating call returns.
+
+## Account record
+
+`<product home>/auth.json` is the only persisted source of Dim credentials (`nextApiOauth`) and account state (`dimAccountState`, schema 1: `credentialEpoch`, `generation`, `credentialRevision`, `state`, and when authenticated `identity` and `tokenDigest`). It is plain JSON shared with the native subscription providers; other root fields belong to their owners and are preserved. Writes go through the product root's FileStorage lease, which also serializes concurrent processes, with Unix mode 0600. `tokenDigest` is the SHA-256 of the grant's RFC 8785 canonical JSON.
+
+The TypeScript plugin (0.2.0) wrote this file as a PluginFiles record `{"version":1,"text":...}`. Reading accepts that record, keeping fields other owners wrote beside it; the next write stores plain JSON. Its digests verify unchanged, so a signed-in account survives the upgrade with the same epoch and generation.
+
+JSON or root errors and an unknown schema remain errors and are never shown as signed out. Only an explicit login or logout resets a corrupt schema-1 record: the complete original bytes are first written exclusively to `auth.json.dim-reset-backup`, then only the Dim fields are replaced by a new signed-out state. An existing backup blocks another reset and is never overwritten or removed. Explicit recovery (`account.recover`) accepts a legacy grant or a digest mismatch, confirms the identity online and starts a new epoch at generation 1.
+
+Login captures the record's revision before starting and compares it when committing. Logout advances the signed-out generation, including when already signed out, and revokes the refresh token on a best-effort basis. Credentials are refreshed within a 30-second freshness window, under the account lock, and a rotated grant is persisted before the lock is released; 408, 429, 5xx and network failures keep the stored grant, and an explicit rejection signs out only the grant that holds the lock. Requests resolve their credential under this window, which is the correctness boundary. While the process runs, a background task also renews the grant as it enters the window, so an idle process does not let its refresh token lapse. It retries a transient failure after 60 seconds, and stops after a sign-out or an unusable record until this process signs in again. Quiesce ends it.
+
+The public host contract (`ManagedProvider`, its DTOs, leases, quiesce and error mapping) is in the [App Server README](../../dim-app-server/README.md#managed-provider-contract).
