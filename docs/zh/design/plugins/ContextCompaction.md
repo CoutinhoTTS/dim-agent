@@ -284,12 +284,13 @@ pub struct ProductSummaryStrategyPlugin { host: DepKey<CompactionStrategyHost> }
 pub struct ContextMethodsPlugin;
 //   Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>)；methods.register(ctx, "session.context", ..)
 
-// dim-app-server/src/main.rs，仅产品配置（没有 --models 文件）：
-builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextModel)))))
+// dim-app-server/src/cli.rs 的 defaults::install_compaction，每种会压缩的配置共用这一处安装；
+// 产品配置传入 ProductContextModel 和产品 home，--models 配置传入 AimuxModels 和它的 --home：
+builder.session_value(Arc::new(ContextModelHost(Some(model))))
        .require_feature(Feature::new("ContextCompaction")
            .session("ProductSummaryStrategy", |names| names.part(ProductSummaryStrategyPlugin::new(names)?))
            .session("ContextMethods", |names| names.part(ContextMethodsPlugin)));
-// --models 与 mock 配置绑定 ContextModelHost(None) 和 CompactionStrategyHost(None)
+// mock 配置绑定 ContextModelHost(None) 和 CompactionStrategyHost(None)。
 ```
 
 ## 5. 流程
@@ -307,6 +308,8 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | `output_tokens` | 有 `request.config.maxTokens` 时取它，否则取 `snapshot.capabilities.maxOutputTokens`；不超过后者 |
 | `threshold_tokens` | `B − reserve`，其中 `B = context_window − output_tokens`（输入预算），`reserve = min(max(0.10 × B, 16,000), 0.20 × B)`。余量用来吸收下一个请求的估算误差；它是暂定的经验值，不能覆盖每一个没有提供方基线的请求（[研究 §3.3、§6.4](../research/compaction-trigger.md#33-建议)） |
 | `count_tokens` | 序列化后的系统提示、消息和工具声明的 UTF-8 字节数除以 4；每个图片部件按固定 1,600 token 计。暂定（#128）。用于：在提供方的 `prompt_tokens` 之上算增量、第一个请求、`validate`、以及检查压缩是否减少了输入 |
+
+`--models` 配置从模型文件解析同样的窗口事实：`AimuxModels` 按请求的 provider 与 model id 读取对应的模型条目；请求的能力快照保持未设置，所以能力未知时图片照常发出。
 
 ### 5.2 ProductSummaryStrategy
 
@@ -505,7 +508,8 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | Rpc `ProductEvent`（`tree_protocol.rs`） | 让 v3 连接能看到 `context/compact`、`context/compaction-start` 和 `context/compaction` |
 | turn 的消费方（客户端、将来的 Goal、Hooks） | 不受影响。turn 之外的手动压缩不写 `turn/*` |
 | #2 动态事件 | 不变：两个事件保留为 `EventKind` 变体，wire 形式不变 |
-| `--models` 配置、mock 配置 | 两个宿主都是 `None`：不压缩，也不登记 `session.context` |
+| `--models` 配置 | 同样的策略和 `session.context` 方法；窗口事实来自模型条目，请求的能力快照保持未设置 |
+| mock 配置 | 两个宿主都是 `None`：不压缩，也不登记 `session.context` |
 | ManagedProviders 套餐用量、CLI `/compact` 与 `/usage` | 不在 F1 的验收内 |
 
 ## 9. 规则检查
@@ -563,7 +567,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | 端口 | `ContextModel`（窗口事实）与 `CompactionStrategy`（替换内容），各来自自己的 Session 值 |
 | 其他策略、组合 | F1 不做 |
 | 新事件类型 | `context/compact` 与 `context/compaction-start` 作为 `EventKind` 变体 |
-| `--models` 配置 | 没有能力快照，不压缩：接受 |
+| `--models` 配置 | 窗口事实来自模型条目；能力快照保持未设置 |
 | 提供方报告的溢出 | 单独的 Aimux issue，不在 F1 内 |
 | 诊断 | 现在就改成与策略无关：公共计数加一个由策略拥有的对象（破坏性修改） |
 | 压缩状态 | 事实：待处理 = 有指令无开始，运行中 = 有开始无结果，已结束 = 结果（§5.7） |
@@ -575,7 +579,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 ## 11. 验收（流程测试）
 
-测试用产品配置的 App Server 连接一个上下文窗口很小的 mock HTTP 提供方（`crates/dim-app-server/tests`），另加 `crates/dim-agent-capabilities/tests` 中的 Loop 与策略流程测试。
+测试用产品配置的 App Server 连接一个上下文窗口很小的 mock HTTP 提供方，也用同样的 App Server 连接一个模型条目声明了小窗口的 `--models` 文件（`crates/dim-app-server/tests`），另加 `crates/dim-agent-capabilities/tests` 中的 Loop 与策略流程测试。
 
 1. **自动。** 超过阈值后，下一次准备依次写 `context/budget`、`context/compaction-start {trigger: threshold}`，并发出一个摘要请求。它提交 `completed` 的 `context/compaction`：带该请求的 id 和 `start`，没有 `command`，`strategy: "summary"`，`replacement` 只有一条消息，`retain_from` 为保留尾部放得进 `0.25 × B` 的最早合法切点。模型请求以这条消息开头，原样保留该尾部。产品窗口事实给出余量的上限、下限和比例（32k/8k → 19,200；128k/8k → 104,000；1M/128k → 784,800）。一个大轮次之后的许多小轮次会保留两轮以上；切点后会重放的带 key 块，比同样内容不带 key 时保留的轮次少。
 2. **预算恢复。** 重试时以 `trigger: provider_output_budget_exhausted` 压缩。有提供方基线时，本地计数放得进窗口、但基线估算超过 `B` 的请求会恢复；基线估算放得下的不会。
@@ -659,7 +663,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 - 文件不可读或无效时压缩失败（`failed`，回复 `compaction_failed`），消息点名 `compaction.json`，与无效的 `exec-shell.json` 让需要它的命令失败相同。这个文件是用户的明确选择，悄悄换成别的值会把它藏起来。
 - 只有用户作用域。不提供项目文件：摘要器推理是用户的成本与质量偏好，不是某个仓库的。
 - 它不是声明式 Settings 源（那是给非 Rust 所有者的），也不是带管理方法的 `BusinessDocument`：#170 中没有客户端编辑它。等客户端需要时，它以同样的文档变成带所有者方法的 `BusinessDocument`。
-- `--models` 和 mock 配置不安装该策略，所以没有这个文件。
+- mock 配置不安装该策略，所以没有这个文件。`--models` 配置用它的 `--home` 安装该策略，也就是其存储本来使用的 home，所以它的 `compaction.json` 放在那里。
 
 **如何经过 Provider 映射。** 强度映射已经存在：`ModelPreferences::configure`（[preferences.rs](../../../../crates/dim-app-server/src/provider/preferences.rs)）按协议把 `reasoningEffort` 转成 config 字段。对 `none`，它使用模型的 `reasoning.off` 声明（`thinking_type: disabled`、`thinking_budget: 0`、`enable_thinking: false`），或模型声明的原生 `none` 强度；否则拒绝。目前只能经 App Server 中的 `ProviderService::configuration` 和 `apply_preferences` 用到它。
 
