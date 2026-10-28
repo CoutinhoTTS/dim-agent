@@ -9,6 +9,7 @@ mod tools;
 
 use crate::mcp::McpService;
 use crate::methods::ManagementMethods;
+use crate::settings::{SettingsService, SourceDeclaration};
 use acquire::PluginsDir;
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, Progress, RpcError};
 use dim_agent_capabilities::skills::{SkillIssue, SkillsCatalog};
@@ -500,6 +501,7 @@ pub(crate) struct Manager {
     ctx: Ctx,
     runtimes: Key<crate::runtime_manager::RuntimeService>,
     owners: Owners,
+    settings: Key<SettingsService>,
 }
 
 /// The content owners, read only if present (§1): an absent owner skips
@@ -1362,6 +1364,34 @@ impl Manager {
         status_value(&self.loader, &entry)
     }
 
+    /// Settings, if present, and the declared sources the plugin `name`
+    /// uses registered (§6 `config`, §9 R4); none when the name is off or
+    /// its row is not running.
+    pub(crate) fn sources(
+        &self,
+        name: &str,
+    ) -> Result<(Option<Arc<SettingsService>>, Vec<SourceDeclaration>), PluginError> {
+        let record = self.state.record.lock().unwrap().clone();
+        if !names(&record, &self.state.defaults, self.builtins()).contains(name) {
+            return Err(not_found(name));
+        }
+        let row = match self.using(&record, name) {
+            None => return Ok((None, Vec::new())),
+            Some(Use::Builtin) => name.to_owned(),
+            Some(_) => row_id(name),
+        };
+        let Some(settings) = self.ctx.get_at(&self.settings) else {
+            return Ok((None, Vec::new()));
+        };
+        let sources = self
+            .loader
+            .get(&row)
+            .and_then(|entry| entry.view)
+            .map(|view| settings.declared_by(view.instance()))
+            .unwrap_or_default();
+        Ok((Some(settings), sources))
+    }
+
     /// `plugin.list` (§3.6).
     async fn list(&self) -> Value {
         let record = self.state.record.lock().unwrap().clone();
@@ -1465,6 +1495,7 @@ pub(crate) struct PluginManagerPlugin {
     skills: Key<SkillsCatalog>,
     mcp: Key<McpService>,
     runtimes: Key<crate::runtime_manager::RuntimeService>,
+    settings: Key<SettingsService>,
 }
 
 impl PluginManagerPlugin {
@@ -1477,6 +1508,7 @@ impl PluginManagerPlugin {
             skills: names.key()?,
             mcp: names.key()?,
             runtimes: names.key()?,
+            settings: names.key()?,
         })
     }
 }
@@ -1504,6 +1536,7 @@ impl DynPlugin for PluginManagerPlugin {
                 },
                 ctx: ctx.clone(),
                 runtimes: self.runtimes.clone(),
+                settings: self.settings.clone(),
             };
             let keep: Vec<PathBuf> = manager
                 .state

@@ -65,6 +65,13 @@ pub enum Command {
         projection_id: u64,
         target: Option<TaskTarget>,
     },
+    FocusLine(String),
+    /// End a line of the displayed attachment, as the user asked.
+    EndLine {
+        session_id: String,
+        projection_id: u64,
+        branch_id: String,
+    },
     /// Observe one delivered member without selecting its Session for editing.
     WatchMember {
         projection_id: u64,

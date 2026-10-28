@@ -135,6 +135,13 @@ pub const COMMANDS: &[Command] = &[
         Needs::Session,
     ),
     slash(
+        "lines",
+        "session",
+        "follow, talk to and end this session's lines",
+        &["branches"],
+        Needs::Session,
+    ),
+    slash(
         "history",
         "session",
         "load the previous page of messages",
