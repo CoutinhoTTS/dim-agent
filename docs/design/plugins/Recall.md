@@ -241,8 +241,9 @@ tools it called with counts, and its outcome from `turn/end` (`completed`, `fail
 The inputs that open a turn are the ones it consumed before its first model request; an input read
 later, such as a steer while it works, does not open it. The line gives the first user text among
 the opening inputs; when none of them carries user text (a Goal continuation, a message from
-another line), the first of them that carries a line write (§3.4), or else the first one's
-`<blocks>`. A turn with no opening input has none of these: its line reads
+another line), the first of them that carries a line write (§3.4), or else the driving input's
+`<blocks>`: the first opening input that is not Append, since an Append input joins the request
+but does not open the turn. A turn with no opening input has none of these: its line reads
 `turn: no opening input`.
 
 A turn without `turn/end` in the pinned history is `in progress` when it is the calling turn, and
