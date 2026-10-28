@@ -133,6 +133,35 @@ async fn tool_results(session: &Session, branch: &str) -> Vec<ToolResult> {
         .collect()
 }
 
+/// Waits until `holds` reads true of the branch's events, waking on the
+/// branch's dispatch progress instead of polling, and fails with the event
+/// kinds seen last.
+async fn wait_for_events(
+    session: &Session,
+    branch: &str,
+    what: &str,
+    mut holds: impl FnMut(&[Arc<AgentEvent>]) -> bool,
+) {
+    let mut dispatch = session.dispatch_watch(branch).unwrap();
+    let mut seen = String::new();
+    let waited = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let events = session.history(branch, None).await.unwrap();
+            seen = events
+                .iter()
+                .map(|event| event.kind.key().to_owned())
+                .collect::<Vec<_>>()
+                .join(",");
+            if holds(&events) {
+                return;
+            }
+            dispatch.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert!(waited.is_ok(), "waiting until {what}: {seen}");
+}
+
 /// The id of the branch's newest `turn/start` line.
 fn last_turn(events: &[Arc<AgentEvent>]) -> String {
     events
@@ -364,15 +393,12 @@ async fn a_turn_tells_its_input_its_replies_its_calls_with_results_and_an_interr
             )
             .await
             .unwrap();
-        loop {
-            let events = session.local("main", ..).await.unwrap();
-            if events.iter().any(
+        wait_for_events(&session, "main", "the wait call starts", |events| {
+            events.iter().any(
                 |event| matches!(&event.kind, EventKind::ToolUseStart(data) if data.name == "wait"),
-            ) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+            )
+        })
+        .await;
         session.stop("main", "user stop".into()).await.unwrap();
         session.idle("main").await.unwrap();
         let events = session.history("main", None).await.unwrap();
@@ -810,26 +836,19 @@ async fn a_child_branch_opens_inherited_ids_and_tells_its_fork_and_the_cut_paren
             )
             .await
             .unwrap();
-        let mut arrived = false;
-        let mut seen = String::new();
-        for _ in 0..300 {
-            let events = session.history("main", None).await.unwrap();
-            seen = events
-                .iter()
-                .map(|event| event.kind.key().to_owned())
-                .collect::<Vec<_>>()
-                .join(",");
-            arrived = events.iter().any(|event| {
-                matches!(&event.kind, EventKind::InputMessage(data)
-                    if data.blocks.iter().any(|block| format!("{block:?}").contains("the logs are clean")))
-            });
-            if arrived {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_for_events(
+            &session,
+            "main",
+            "main receives the line's final message",
+            |events| {
+                events.iter().any(|event| {
+                    matches!(&event.kind, EventKind::InputMessage(data)
+                        if data.blocks.iter().any(|block| format!("{block:?}").contains("the logs are clean")))
+                })
+            },
+        )
+        .await;
         session.idle("main").await.unwrap();
-        assert!(arrived, "main receives the line's final message: {seen}");
         // Both writes land on main as its last turn is running or after it, so
         // a search tells each line wherever it falls (§3.6).
         let (page, error) = recall(&session, "main", json!({ "about": "the logs are clean" })).await;
