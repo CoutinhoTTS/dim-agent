@@ -1407,3 +1407,18 @@ fn item_table(rows: &[Value]) -> Option<String> {
     }
     Some(text)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every committed case parses and validates without a model call.
+    #[test]
+    fn summary_eval_cases_parse_and_validate() {
+        let cases = read_cases(&cases_directory()).unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            cases.iter().any(|case| case.id == "chain"),
+            "the chain case is present"
+        );
+    }
+}
