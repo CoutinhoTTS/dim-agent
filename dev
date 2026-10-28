@@ -125,7 +125,7 @@ options=()
 if [[ "$migration" == false || "$explicit_home" == true ]]; then
   options+=(--home "$product_home")
 fi
-if [[ "$native_help" == false && -n "$model_config" && "$explicit_model_config" == false ]]; then
+if [[ "$native_help" == false && "$migration" == false && -n "$model_config" && "$explicit_model_config" == false ]]; then
   options+=(--model-config "$model_config")
 fi
 if [[ "$chat" == true && "$resumed" == false && "$explicit_selection" == false ]]; then
