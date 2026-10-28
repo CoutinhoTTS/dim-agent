@@ -47,8 +47,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/{name} needs {argument}" => "/{name} には {argument} が必要です",
         "e edit · b branch · f fork" => "e 編集 · b ブランチ · f フォーク",
         "e edit" => "e 編集",
-        "Fork the session before this message? (y/N)" => {
-            "このメッセージの前でセッションをフォークしますか？(y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "「{message}」の前でセッションをフォークしますか？(y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "最後のターンの後でセッションをフォークしますか？(y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ {id} から新しいライン · Esc キャンセル",
         "A fork copies main; b opens a line here" => {

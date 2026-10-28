@@ -49,8 +49,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/{name} needs {argument}" => "/{name}에는 {argument}이(가) 필요합니다",
         "e edit · b branch · f fork" => "e 편집 · b 브랜치 · f 포크",
         "e edit" => "e 편집",
-        "Fork the session before this message? (y/N)" => {
-            "이 메시지 앞에서 세션을 포크할까요? (y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "“{message}” 앞에서 세션을 포크할까요? (y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "마지막 턴 뒤에서 세션을 포크할까요? (y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ {id}에서 새 라인 · Esc 취소",
         "A fork copies main; b opens a line here" => {

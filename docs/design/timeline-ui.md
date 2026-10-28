@@ -70,7 +70,7 @@ A box too narrow for the hint shows `e edit`.
 
 ### 4.3 `f`: fork here
 
-On `main` only. The composer's border asks `Fork the session before this message? (y/N)`; `y` sends `session.fork {sessionId, at}` and attaches to the fork under a `forked ID · N messages` boundary, with the picked message in its composer. A fork starts no work until the user submits (fork design §6.5).
+On `main` only, from a Tab pick or `/timeline` (§4.6), which is how scrollback picks a message. The composer's border names what it forks: `Fork the session before “try RwLock for the cache”? (y/N)` for a picked message, `Fork the session after the last turn? (y/N)` for `/fork`. `y` sends `session.fork {sessionId, at}` and attaches to the fork under a `forked ID · N messages` boundary, with the picked message in its composer. A fork starts no work until the user submits (fork design §6.5).
 
 ### 4.4 Markers
 
@@ -144,11 +144,11 @@ The new line answers in a panel while the screen stays on the parent. In fullscr
 │                                                              │
 │ The lock is held across the await in cache.rs:88; moving the │
 │ parse out of the guard removes the race. Patched and tested. │
-│ ⑂ waiting                                                    │
+│ ⑂ done                                                       │
 ╰──────────────────────────────────────────────── Esc close ─╯
 ```
 
-1. The panel draws the line's transcript as the screen draws one, without the opening input its title names: thinking, tool calls at the tool detail setting, and replies as they arrive. It shows the tail when longer than a third of the screen, and the line's state (`working`, `waiting`, `ended`) on its last row.
+1. The panel draws the line's transcript as the screen draws one, without the opening input its title names: thinking, tool calls at the tool detail setting, and replies as they arrive. It shows the tail when longer than a third of the screen, and the line's state on its last row: `working…` while a turn runs, `done` once it ended and the line waits for input, or how it ended.
 2. `Esc` closes the panel before it does anything else. The line keeps running; closing it only stops the panel following it. The `⑂` marker (§4.4) is what stays in scrollback, and `Enter` on it, or `/lines`, shows the line.
 3. One panel at a time: another `/branch` or `b` replaces it. Showing a line, switching Session or `/new` closes it.
 4. In fullscreen the panel pushes the transcript up, and closing it brings the transcript back down onto the composer. Scrollback never lifts the composer, so there the panel opens below it, where menus open, and closing it leaves no gap above the composer.

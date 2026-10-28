@@ -55,8 +55,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/{name} needs {argument}" => "/{name} necesita {argument}",
         "e edit · b branch · f fork" => "e editar · b rama · f bifurcar",
         "e edit" => "e editar",
-        "Fork the session before this message? (y/N)" => {
-            "¿Bifurcar la sesión antes de este mensaje? (y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "¿Bifurcar la sesión antes de «{message}»? (y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "¿Bifurcar la sesión tras el último turno? (y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ nueva línea desde {id} · Esc cancelar",
         "A fork copies main; b opens a line here" => {

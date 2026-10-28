@@ -45,7 +45,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/{name} needs {argument}" => "/{name} 需要 {argument}",
         "e edit · b branch · f fork" => "e 編輯 · b 分支 · f 派生",
         "e edit" => "e 編輯",
-        "Fork the session before this message? (y/N)" => "在這則訊息之前派生會話？(y/N)",
+        "Fork the session before “{message}”? (y/N)" => "在「{message}」之前派生會話？(y/N)",
+        "Fork the session after the last turn? (y/N)" => "在最近一個回合之後派生會話？(y/N)",
         "⑂ new line from {id} · Esc cancel" => "⑂ 從 {id} 開新線 · Esc 取消",
         "A fork copies main; b opens a line here" => "派生只複製 main；按 b 在這裡開線",
         "A line opens from text; images and files were not included" => {

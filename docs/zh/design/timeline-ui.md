@@ -70,7 +70,7 @@ fullscreen 的 Tab 选取本来就停在用户消息上。被选消息的点是�
 
 ### 4.3 `f`：从这里 fork
 
-仅 `main`。composer 底边询问 `在这条消息之前派生会话？(y/N)`；`y` 发送 `session.fork {sessionId, at}`，在 `已派生 ID · N 条消息` 边界下 attach 到 fork，并把被选消息放进它的 composer。fork 在用户提交之前不开始任何工作（fork 设计 §6.5）。
+仅 `main`，从 Tab 选取或 `/timeline`（§4.6）发起；scrollback 就是用 `/timeline` 选消息。composer 底边写明派生的位置：选中消息时问 `在“把 cache 的锁换成 RwLock 试试”之前派生会话？(y/N)`，`/fork` 问 `在最近一个回合之后派生会话？(y/N)`。`y` 发送 `session.fork {sessionId, at}`，在 `已派生 ID · N 条消息` 边界下 attach 到 fork，并把被选消息放进它的 composer。fork 在用户提交之前不开始任何工作（fork 设计 §6.5）。
 
 ### 4.4 标记
 
@@ -144,11 +144,11 @@ Timeline 的点就是它的用户消息。Tab 从最新一条起逐条走；`/ti
 │                                                              │
 │ The lock is held across the await in cache.rs:88; moving the │
 │ parse out of the guard removes the race. Patched and tested. │
-│ ⑂ waiting                                                    │
+│ ⑂ done                                                       │
 ╰──────────────────────────────────────────────── Esc close ─╯
 ```
 
-1. 面板像屏幕画 transcript 一样画出这条线的过程（标题里已有的开场输入除外）：思考、按工具详情设置显示的工具调用，以及边到边显示的回答。超过屏幕三分之一时显示末尾，最后一行是线的状态（`working`、`waiting`、`ended`）。
+1. 面板像屏幕画 transcript 一样画出这条线的过程（标题里已有的开场输入除外）：思考、按工具详情设置显示的工具调用，以及边到边显示的回答。超过屏幕三分之一时显示末尾，最后一行是线的状态：回合运行时是 `working…`，回合结束、线等待输入时是 `done`，线结束时写明它是怎么结束的。
 2. `Esc` 先关面板，再做别的事。线继续运行，关掉的只是面板对它的跟随。留在 scrollback 里的是 `⑂` 标记（§4.4），在它上面按 `Enter`，或用 `/lines`，可以显示这条线。
 3. 同一时间只有一个面板：再一次 `/branch` 或 `b` 会替换它。显示某条线、切换 Session 或 `/new` 会关闭它。
 4. fullscreen 下面板把 transcript 顶上去，关闭后 transcript 回到 composer 上方贴底。scrollback 不会抬起 composer，所以面板开在 composer 下方，和菜单同一个位置，关闭时 composer 上方不会留空。

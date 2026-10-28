@@ -521,7 +521,7 @@ fn run_terminal(
                             if pressed == 'b' {
                                 app.draft_line(at, &text);
                             } else {
-                                app.ask_fork(at, text);
+                                app.ask_fork(at, text.clone(), Some(text));
                             }
                         }
                         full.clear_focus();
@@ -828,14 +828,23 @@ struct App {
     /// A line about to open on the shown line: the next submit is its
     /// opening input (timeline UI §4.2).
     line_draft: Option<LineDraft>,
-    /// A fork the user picked, until they answer: its cut and the picked
-    /// message (timeline UI §4.3).
-    fork_confirm: Option<(u64, String)>,
+    /// A fork the user asked for, until they answer (timeline UI §4.3).
+    fork_confirm: Option<ForkAsk>,
     /// The picked message, set in the fork's composer once it is attached.
     fork_draft: Option<String>,
 }
 
 /// Where a line the user is drafting opens.
+/// A fork waiting for its `y`.
+struct ForkAsk {
+    at: u64,
+    /// What the fork's composer starts with.
+    text: String,
+    /// The picked message the fork cuts before; none for `/fork`, which
+    /// cuts after the last turn.
+    before: Option<String>,
+}
+
 struct LineDraft {
     session_id: String,
     projection_id: u64,
@@ -1538,9 +1547,9 @@ impl App {
         if ctrl && key.code == KeyCode::Char('c') {
             return self.ctrl_c();
         }
-        if let Some((at, text)) = self.fork_confirm.take() {
+        if let Some(ask) = self.fork_confirm.take() {
             if matches!(key.code, KeyCode::Char('y' | 'Y')) && key.mods == Modifiers::NONE {
-                self.fork(at, text);
+                self.fork(ask.at, ask.text);
             }
             return Outcome::Continue;
         }
@@ -1864,8 +1873,20 @@ impl App {
     }
 
     fn place_label(&self) -> String {
-        if self.fork_confirm.is_some() {
-            return t("Fork the session before this message? (y/N)").to_owned();
+        if let Some(ask) = &self.fork_confirm {
+            return match &ask.before {
+                Some(message) => tf(
+                    "Fork the session before “{message}”? (y/N)",
+                    &[(
+                        "message",
+                        &truncate_cells(
+                            &crate::sanitize::safe(message.lines().next().unwrap_or_default()),
+                            32,
+                        ),
+                    )],
+                ),
+                None => t("Fork the session after the last turn? (y/N)").to_owned(),
+            };
         }
         if let Some(draft) = &self.line_draft {
             let lines = self.snapshot.as_ref().map_or(&[][..], |s| &s.lines[..]);
@@ -1936,14 +1957,14 @@ impl App {
     }
 
     /// `f` on a picked message, or `/fork`: asks before forking `main` at
-    /// `at` (timeline UI §4.3).
-    fn ask_fork(&mut self, at: u64, text: String) {
+    /// `at` (timeline UI §4.3), naming the message it cuts before.
+    fn ask_fork(&mut self, at: u64, text: String, before: Option<String>) {
         match &self.snapshot {
             None => self.set_notice(t("No active session")),
             Some(snapshot) if snapshot.focus != "main" => {
                 self.set_notice(t("A fork copies main; b opens a line here"));
             }
-            Some(_) => self.fork_confirm = Some((at, text)),
+            Some(_) => self.fork_confirm = Some(ForkAsk { at, text, before }),
         }
     }
 
@@ -2545,7 +2566,7 @@ impl App {
             }
             "fork" => {
                 if let Some(at) = self.head_cut() {
-                    self.ask_fork(at, args.to_owned());
+                    self.ask_fork(at, args.to_owned(), None);
                 }
                 Outcome::Continue
             }
@@ -3500,7 +3521,7 @@ impl App {
             }
             TimelineAction::Fork => {
                 if let Some(at) = cut {
-                    self.ask_fork(at, text);
+                    self.ask_fork(at, text.clone(), Some(text));
                 }
             }
         }
@@ -3551,12 +3572,13 @@ impl App {
         self.rebuild_window(start);
     }
 
-    /// Entering fullscreen: earlier history scrollback drew page by page is
-    /// drawn again in order, under the load-more row.
+    /// Entering fullscreen: the shown line is drawn again from its window,
+    /// earlier history scrollback drew page by page in order under the
+    /// load-more row, so nothing else scrollback committed (an earlier
+    /// Session among it) carries over.
     fn redraw_window(&mut self) {
-        let floor = self.history_floor.min(self.window_floor);
-        if floor > 0 && !self.awaiting_window {
-            self.rebuild_window(floor);
+        if !self.awaiting_window {
+            self.rebuild_window(self.history_floor.min(self.window_floor));
         }
     }
 
@@ -4057,6 +4079,7 @@ fn side_panel(
     rows.resize_with(height, String::new);
     let state = match side.state {
         LineState::Working => format!("{}…", t("working")),
+        LineState::Waiting => t("done").to_owned(),
         _ => crate::ui::lines_panel::state_label(&side.state),
     };
     rows.push(fg(&truncate_cells(&format!("⑂ {state}"), inner), &p.muted));
@@ -4626,14 +4649,21 @@ mod tests {
         assert!(app.line_draft.is_none() && app.composer.is_empty());
 
         app.apply(snapshot("b-7c"));
-        app.ask_fork(4, "from a line".into());
+        app.ask_fork(4, "from a line".into(), Some("try RwLock".into()));
         assert!(app.fork_confirm.is_none(), "a fork copies main only");
         app.apply(snapshot("main"));
-        app.ask_fork(4, "try RwLock".into());
+        app.ask_fork(4, String::new(), None);
+        assert!(app.place_label().contains("after the last turn"));
+        app.handle_input(key(KeyCode::Char('n')));
+        app.ask_fork(4, "try RwLock".into(), Some("try RwLock".into()));
+        assert!(
+            app.place_label().contains("before “try RwLock”"),
+            "the question names the message"
+        );
         app.handle_input(key(KeyCode::Char('n')));
         assert!(app.fork_confirm.is_none());
         let count = sent.borrow().len();
-        app.ask_fork(4, "try RwLock".into());
+        app.ask_fork(4, "try RwLock".into(), Some("try RwLock".into()));
         app.handle_input(key(KeyCode::Char('y')));
         assert!(matches!(
             sent.borrow()[count..],
@@ -4772,6 +4802,14 @@ mod tests {
         assert!(shown.contains("Exploring"), "the process shows: {shown}");
         assert!(shown.contains("The lock is held across the await."));
         assert!(shown.contains("⑂ working…"));
+        if let Some(side) = app.snapshot.as_mut().and_then(|s| s.side.as_mut()) {
+            side.state = LineState::Waiting;
+        }
+        let shown = screen(&mut app);
+        assert!(
+            shown.contains("⑂ done") && !shown.contains("waiting"),
+            "a line whose turn ended reads done: {shown}"
+        );
 
         app.handle_input(key(KeyCode::Esc));
         assert!(matches!(sent.borrow().last(), Some(Command::CloseSide)));
@@ -5278,6 +5316,28 @@ mod tests {
         let draft = drawn.app.line_draft.as_ref().expect("a line draft");
         assert_eq!((draft.parent.as_str(), draft.at), ("main", 2));
         assert_eq!(drawn.app.composer.text(), "ask 2");
+    }
+
+    /// Entering fullscreen lays out only the shown Session's transcript,
+    /// not what scrollback committed before it.
+    #[test]
+    fn entering_fullscreen_reloads_the_shown_transcript() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn.show(&[("m1", "first session work")], "main", true);
+        drawn.app.apply(Update::Switched {
+            session_id: "s2".into(),
+            kind: crate::model::session::SwitchKind::Resumed,
+        });
+        drawn.show(&[("m2", "second session work")], "main", true);
+        let committed = |app: &App| format!("{:?}", app.history);
+        assert!(committed(&drawn.app).contains("first session work"));
+
+        drawn.app.fullscreen = true;
+        drawn.app.redraw_window();
+        let _ = drawn.app.frame(drawn.size);
+        let shown = committed(&drawn.app);
+        assert!(shown.contains("second session work"), "{shown}");
+        assert!(!shown.contains("first session work"), "{shown}");
     }
 
     #[test]
