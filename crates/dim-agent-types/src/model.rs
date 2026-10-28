@@ -793,7 +793,58 @@ pub struct CompactionDiagnosticsRecord {
     pub model_call_count: u64,
     #[serde(with = "crate::safe_integer")]
     pub duration_ms: u64,
+    /// Present on a completed compaction whose parts it cannot shrink exceed
+    /// `0.5 × B` on their own; descriptive, and no decision reads it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub insufficient_space: Option<InsufficientSpace>,
     pub strategy: CompactionStrategyRecord,
+}
+
+/// The parts that keep a completed compaction above `0.5 × B`: the largest
+/// first, until their sizes cover the excess.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InsufficientSpace {
+    pub parts: Vec<InsufficientSpacePart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InsufficientSpacePart {
+    pub part: InsufficientSpacePartName,
+    #[serde(with = "crate::finite_number")]
+    pub tokens: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InsufficientSpacePartName {
+    SystemPrompt,
+    Tools,
+    AppendedMessages,
+    KeyedBaseline,
+    PinnedInputs,
+    Digest,
+    Summary,
+}
+
+impl InsufficientSpacePartName {
+    /// The part's name as the record spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::SystemPrompt => "systemPrompt",
+            Self::Tools => "tools",
+            Self::AppendedMessages => "appendedMessages",
+            Self::KeyedBaseline => "keyedBaseline",
+            Self::PinnedInputs => "pinnedInputs",
+            Self::Digest => "digest",
+            Self::Summary => "summary",
+        }
+    }
 }
 
 /// The strategy's own diagnostics: `kind` names the strategy, the other

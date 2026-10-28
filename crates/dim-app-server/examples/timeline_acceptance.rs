@@ -177,6 +177,7 @@ impl CompactionStrategy for FixedSummary {
     ) -> HostFuture<'_, StrategyOutcome> {
         Box::pin(async move {
             let diagnostics = StrategyDiagnostics {
+                model_usage: None,
                 model_call_count: 0,
                 record: CompactionStrategyRecord {
                     kind: "fixed".into(),

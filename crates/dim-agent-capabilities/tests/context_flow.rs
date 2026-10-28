@@ -25,6 +25,13 @@ struct Context {
     /// The planned replacement size reported to the retention rule; `None`
     /// reports the size of the replacement this strategy returns.
     replacement: Option<f64>,
+    /// The text of the summary message this strategy returns; `None` returns
+    /// `"short"`. It can overshoot the planned size, which stays planned
+    /// (ContextCompaction §5.2).
+    summary: Option<&'static str>,
+    /// Window facts override the default 4096 / 64 when nonzero.
+    window: f64,
+    output: f64,
 }
 impl ResolveContextModel for Context {
     fn resolve(
@@ -38,10 +45,14 @@ impl ResolveContextModel for Context {
 }
 impl ContextModel for Context {
     fn context_window(&self) -> f64 {
-        4096.
+        if self.window == 0. {
+            4096.
+        } else {
+            self.window
+        }
     }
     fn output_tokens(&self) -> f64 {
-        64.
+        if self.output == 0. { 64. } else { self.output }
     }
     fn threshold_tokens(&self) -> f64 {
         self.threshold.unwrap_or(10_000.)
@@ -108,7 +119,9 @@ impl CompactionStrategy for Context {
             };
             Ok(StrategyOutcome::Completed {
                 retain_from,
-                replacement: vec![dim_agent_capabilities::history::summary_message("short")],
+                replacement: vec![dim_agent_capabilities::history::summary_message(
+                    self.summary.unwrap_or("short"),
+                )],
                 diagnostics: test_diagnostics(),
             })
         })
@@ -522,7 +535,7 @@ async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() 
             Context {
                 foreign_cursor: true,
                 threshold: Some(10_000.),
-                replacement: None,
+                ..Context::default()
             },
         )
         .build();

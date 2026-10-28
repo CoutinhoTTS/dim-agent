@@ -400,3 +400,171 @@ async fn automatic_compaction_waits_for_a_quarter_of_the_budget_of_new_history()
     assert_eq!(starts(&events), 2, "the quarter of new history is reached");
     agent.close().await.unwrap();
 }
+
+/// Runs one keyed block, then small turns until an automatic compaction
+/// completes under the given window facts.
+async fn compact_marked(
+    window: f64,
+    output: f64,
+    threshold: f64,
+    block: usize,
+    keyed: bool,
+) -> Vec<Arc<AgentEvent>> {
+    let agent = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(threshold),
+            window,
+            output,
+            ..Context::default()
+        },
+    )
+    .build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .input(
+            InputMessageData {
+                blocks: vec![context_block::raw(
+                    "k".repeat(block),
+                    keyed.then(|| "state".to_owned()),
+                )],
+                ..InputMessageData::text("x".repeat(200), Some(InputMode::Queue))
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    for index in 0..30 {
+        let events = session.history("main", None).await.unwrap();
+
+        if events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                EventKind::ContextCompaction(ContextCompactionData {
+                    outcome: ContextCompactionResult::Completed { .. },
+                    ..
+                })
+            )
+        }) {
+            agent.close().await.unwrap();
+            return events;
+        }
+        session
+            .submit(format!("small {index}"), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    panic!("no automatic compaction");
+}
+
+fn completed_mark(events: &[Arc<AgentEvent>]) -> Option<InsufficientSpace> {
+    events.iter().find_map(|event| match &event.kind {
+        EventKind::ContextCompaction(ContextCompactionData {
+            outcome: ContextCompactionResult::Completed { diagnostics, .. },
+            ..
+        }) => diagnostics.insufficient_space.clone(),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn a_compaction_whose_resident_parts_exceed_half_the_budget_is_marked() {
+    // 32,000 / 8,000: `0.5 × B` is 12,000, and the keyed baseline alone is
+    // larger, so the completed compaction names it and nothing small
+    // (ContextCompaction §11 test 10).
+    let events = compact_marked(32_000., 8_000., 13_000., 12_400, true).await;
+    let mark = completed_mark(&events).expect("a mark");
+    assert_eq!(mark.parts[0].part, InsufficientSpacePartName::KeyedBaseline);
+    assert!(mark.parts[0].tokens > 12_000., "{:?}", mark.parts);
+    assert!(mark.parts.iter().all(|part| part.tokens > 1_000.));
+
+    // 200,000 / 64,000: the same parts are within `0.5 × B`, so no mark.
+    let events = compact_marked(200_000., 64_000., 60_600., 60_000, false).await;
+    assert!(completed_mark(&events).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_summary_that_overshoots_the_budget_fails_the_recovery_request() {
+    // A summary that overshoots its planned size still completes (§5.2), so
+    // a recovery compaction can leave the request over `B`. The turn then
+    // fails with the recovery error naming the summary, no second compaction
+    // runs, and the failed request carries the budget facts (§5.3).
+    let budget = 8_192. - 2_048.;
+    let agent = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context {
+            window: 8_192.,
+            output: 2_048.,
+            summary: Some(Box::leak("s".repeat(6_000).into_boxed_str())),
+            ..Context::default()
+        },
+    )
+    .build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("x".repeat(8_000), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    let starts = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::ContextCompactionStart(_)))
+        .count();
+    assert_eq!(starts, 1, "budget recovery compacts once, and never again");
+    let mark = completed_mark(&events).expect("the completed compaction is marked");
+    assert_eq!(mark.parts[0].part, InsufficientSpacePartName::Summary);
+    let tokens = mark.parts[0].tokens;
+    assert!(tokens > budget / 2., "{tokens}");
+    let error = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::TurnEnd(data) => match &data.outcome {
+                TurnOutcome::Failed { error } => Some(error.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the turn failed");
+    assert!(
+        error.contains("Context recovery could not fit the request"),
+        "{error}"
+    );
+    assert!(
+        error.contains(&format!("summary {tokens:.0} tokens")),
+        "{error}"
+    );
+    let (failed, facts) = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(data) => match &data.outcome {
+                ModelOutputOutcome::Failed { error, budget, .. } => {
+                    Some((error.clone(), budget.clone()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the recovered request failed");
+    assert!(
+        failed.contains("Context recovery could not fit"),
+        "{failed}"
+    );
+    let facts = facts.expect("the failed request carries the budget facts");
+    assert_eq!(facts.context_window, 8_192.);
+    assert_eq!(facts.requested_max_tokens, 2_048.);
+    assert!(facts.input_tokens > budget, "{facts:?}");
+    agent.close().await.unwrap();
+}

@@ -282,10 +282,14 @@ impl ContextPolicy {
             unreachable!("a compaction step commits a compaction")
         };
         match (&data.outcome, compacted.request) {
-            (_, Some(request)) => request.map(|request| {
+            (_, Some(request)) => {
+                let request = request?;
                 let input = model.count_tokens(&request);
-                (request, input)
-            }),
+                if source.recovery.is_some() && input > input_budget(model.as_ref()) {
+                    return Err(recovery_overflow(&data.outcome, input, model.as_ref()));
+                }
+                Ok((request, input))
+            }
             (ContextCompactionResult::Cancelled { reason }, _) => {
                 Err(HostError::Cancelled(reason.clone()))
             }
@@ -370,7 +374,8 @@ impl ContextPolicy {
         let record = |retain_from: Option<String>,
                       output: Option<f64>,
                       replaced: usize,
-                      diagnostics: StrategyDiagnostics| {
+                      diagnostics: StrategyDiagnostics,
+                      insufficient_space: Option<InsufficientSpace>| {
             Box::new(CompactionDiagnosticsRecord {
                 reason: match step.trigger {
                     CompactionTrigger::Manual => CompactionReason::Manual,
@@ -384,6 +389,7 @@ impl ContextPolicy {
                 entries_replaced: replaced as u64,
                 model_call_count: diagnostics.model_call_count,
                 duration_ms: started.elapsed().as_millis() as u64,
+                insufficient_space,
                 strategy: diagnostics.record,
             })
         };
@@ -440,6 +446,16 @@ impl ContextPolicy {
                     });
                 match checked {
                     Ok((replaced, baseline, tokens, replacement, replacement_parts)) => {
+                        let mark = insufficient_space(
+                            resident_parts(
+                                view,
+                                model.as_ref(),
+                                &baseline,
+                                &replacement,
+                                replacement_parts,
+                            ),
+                            BOUND_SHARE * input_budget(model.as_ref()),
+                        );
                         ContextCompactionResult::Completed {
                             retain_from: retain_from.clone(),
                             replacement,
@@ -449,6 +465,7 @@ impl ContextPolicy {
                                 Some(tokens),
                                 replaced,
                                 diagnostics,
+                                mark,
                             ),
                             context_baseline: baseline.to_vec(),
                             replacement_parts,
@@ -456,7 +473,7 @@ impl ContextPolicy {
                     }
                     Err(error) => ContextCompactionResult::Failed {
                         error: error.into(),
-                        diagnostics: Some(record(Some(retain_from), None, 0, diagnostics)),
+                        diagnostics: Some(record(Some(retain_from), None, 0, diagnostics, None)),
                     },
                 }
             }
@@ -465,7 +482,7 @@ impl ContextPolicy {
                 diagnostics,
             }) => ContextCompactionResult::Skipped {
                 reason,
-                diagnostics: record(None, None, 0, diagnostics),
+                diagnostics: record(None, None, 0, diagnostics, None),
             },
             Err(_) if cancel.is_cancelled() => ContextCompactionResult::Cancelled {
                 reason: cancelled(),
@@ -905,6 +922,134 @@ fn resident(
     ) - empty;
     let pins = count(pinned_inputs(view, turn_id, &cut.retain_from, model)) - empty;
     frame + baseline + pins + replacement_size
+}
+
+/// The resident parts of a completed compaction, measured on the result
+/// (ContextCompaction §5.3 step 5): the frame, the keyed baseline, and the
+/// replacement's summary, digest and pinned inputs at their actual sizes.
+fn resident_parts(
+    view: &View,
+    model: &dyn ContextModel,
+    baseline: &[ContextBaselineEntry],
+    replacement: &[Message],
+    parts: Option<ReplacementParts>,
+) -> Vec<(InsufficientSpacePartName, f64)> {
+    let count = |messages: Vec<Message>| model.count_tokens(&ModelRequest::new("", "", messages));
+    let base = count(Vec::new());
+    let only = |system: Option<Arc<SystemPrompt>>, tools: Option<Arc<Vec<ToolDefinition>>>| {
+        let mut request = ModelRequest::new("", "", Vec::new());
+        request.system = system;
+        request.tools = tools;
+        model.count_tokens(&request) - base
+    };
+    let (strategy, digest) = parts.map_or((replacement.len(), 0), |parts| {
+        (
+            (parts.strategy as usize).min(replacement.len()),
+            parts.digest as usize,
+        )
+    });
+    let after_digest = (strategy + digest).min(replacement.len());
+    vec![
+        (
+            InsufficientSpacePartName::SystemPrompt,
+            only(view.request.system.clone(), None),
+        ),
+        (
+            InsufficientSpacePartName::Tools,
+            only(None, view.request.tools.clone()),
+        ),
+        (
+            InsufficientSpacePartName::AppendedMessages,
+            count(
+                view.request.messages[view.prefix_len..]
+                    .iter()
+                    .map(|message| (**message).clone())
+                    .collect(),
+            ) - base,
+        ),
+        (
+            InsufficientSpacePartName::KeyedBaseline,
+            count(baseline.iter().map(|entry| entry.message.clone()).collect()) - base,
+        ),
+        (
+            InsufficientSpacePartName::Summary,
+            count(replacement[..strategy].to_vec()) - base,
+        ),
+        (
+            InsufficientSpacePartName::Digest,
+            count(replacement[strategy..after_digest].to_vec()) - base,
+        ),
+        (
+            InsufficientSpacePartName::PinnedInputs,
+            count(replacement[after_digest..].to_vec()) - base,
+        ),
+    ]
+}
+
+/// The mark of a completed compaction whose resident parts exceed `bound`
+/// on their own: the named parts, largest first, until their sizes cover
+/// the excess (ContextCompaction §5.3 step 5).
+fn insufficient_space(
+    parts: Vec<(InsufficientSpacePartName, f64)>,
+    bound: f64,
+) -> Option<InsufficientSpace> {
+    let mut excess: f64 = parts.iter().map(|(_, tokens)| tokens).sum::<f64>() - bound;
+    if excess <= 0. {
+        return None;
+    }
+    let mut sorted = parts;
+    sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut marked = Vec::new();
+    for (part, tokens) in sorted {
+        if excess <= 0. {
+            break;
+        }
+        marked.push(InsufficientSpacePart { part, tokens });
+        excess -= tokens;
+    }
+    Some(InsufficientSpace { parts: marked })
+}
+
+/// The error of a recovery compaction whose request still does not fit:
+/// budget facts, and a message naming what keeps it there — the resident
+/// parts by the mark's naming rule, or the entries the last event placed
+/// (ContextCompaction §5.3).
+fn recovery_overflow(
+    outcome: &ContextCompactionResult,
+    input: f64,
+    model: &dyn ContextModel,
+) -> HostError {
+    let message = match outcome {
+        ContextCompactionResult::Completed { diagnostics, .. } => {
+            match &diagnostics.insufficient_space {
+                Some(mark) => format!(
+                    "Context recovery could not fit the request; too large: {}",
+                    mark.parts
+                        .iter()
+                        .map(|part| format!("{} {:.0} tokens", part.part.name(), part.tokens))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => "Context recovery could not fit the request; the entries the last \
+                         event placed cannot be cut."
+                    .into(),
+            }
+        }
+        _ => "Context recovery could not fit the request.".into(),
+    };
+    HostError::Failed {
+        kind: crate::host::HostErrorKind::Other,
+        message,
+        budget: Some(ProviderOutputBudgetFacts {
+            input_tokens: input,
+            context_window: model.context_window(),
+            requested_max_tokens: model.output_tokens(),
+            allowed_max_tokens: (model.context_window() - input).max(0.),
+            ratio: 1.,
+        }),
+        model: None,
+        presentation: None,
+    }
 }
 
 /// The index in `cuts` of the earliest cut whose kept tail fits

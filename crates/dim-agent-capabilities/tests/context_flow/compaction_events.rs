@@ -445,7 +445,7 @@ async fn final_outcome_controls_normal_preparation_and_budget_recovery() {
                 Context {
                     foreign_cursor: matches!(edit, Edit::Completed),
                     threshold: (!recovery).then_some(300.),
-                    replacement: None,
+                    ..Context::default()
                 },
             );
             builder.require_feature(
