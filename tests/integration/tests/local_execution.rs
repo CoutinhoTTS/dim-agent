@@ -2594,7 +2594,7 @@ async fn wait_ends_on_a_steer_or_a_stop_and_refuses_a_second_wait() {
         .await
         .unwrap();
     let events = until(&session, "steer", |events| wait_texts(events).len() == 1).await;
-    assert_eq!(wait_texts(&events)[0], "wait ended: user steer");
+    assert_eq!(wait_texts(&events)[0], "wait ended: steer");
     session.idle("main").await.unwrap();
 
     harness
