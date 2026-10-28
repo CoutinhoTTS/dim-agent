@@ -21,8 +21,8 @@ const PROBE_ROOT: &str = "DIM_FILE_STORAGE_LOCK_PROBE_ROOT";
 struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
-        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target/file-storage-flow")
+        let directory = std::env::temp_dir()
+            .join("dim-file-storage-flow")
             .join(uuid::Uuid::new_v4().to_string());
         let authorized = directory.join("authorized");
         fs::create_dir_all(&authorized).unwrap();
