@@ -3224,7 +3224,8 @@
       "file": "crates/dim-cli/src/ui/i18n/mod.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "panic"
       ]
     },
     {
