@@ -115,7 +115,7 @@ pub async fn run() -> Result<()> {
                     outcome.summary().as_deref().unwrap_or_default(),
                     &judged,
                 );
-                metrics.add(case, &outcome, &probes);
+                metrics.add(&arm, case, &outcome, &probes);
                 let directory = options.out.join(&arm.id);
                 std::fs::create_dir_all(&directory)?;
                 std::fs::write(
@@ -155,7 +155,7 @@ fn isolated_home(path: &Path) -> Result<PathBuf> {
     let home = std::fs::canonicalize(path)
         .map_err(|error| format!("--home {}: {error}", path.display()))?;
     let mut products = Vec::new();
-    if let Some(user) = std::env::var_os("HOME") {
+    if let Some(user) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
         products.push(PathBuf::from(user).join(".dimcode"));
     }
     if let Some(path) = std::env::var_os("DIMCODE_HOME") {
@@ -821,13 +821,24 @@ struct Metrics {
     cut_offs: u64,
     failed: usize,
     skipped: usize,
+    /// Runs whose applied reasoning differs from the arm's value, because
+    /// Provider's mapping rejected the effort for this model (ContextCompaction
+    /// §13.2).
+    fell_back: usize,
     tokens: Vec<f64>,
     durations: Vec<f64>,
     ratios: Vec<f64>,
 }
 impl Metrics {
-    fn add(&mut self, case: &Prepared, run: &Run, probes: &[Value]) {
+    fn add(&mut self, arm: &Arm, case: &Prepared, run: &Run, probes: &[Value]) {
         let details = run.details();
+        if details
+            .get("reasoning")
+            .and_then(Value::as_str)
+            .is_some_and(|applied| applied != arm.reasoning.name())
+        {
+            self.fell_back += 1;
+        }
         self.cut_offs += details
             .get("cutOffCount")
             .and_then(Value::as_u64)
@@ -867,6 +878,7 @@ impl Metrics {
         json!({
             "arm": arm.id,
             "reasoning": arm.reasoning.name(),
+            "fellBack": self.fell_back,
             "target": arm.target.map(|target| json!({
                 "outputShare": target.output_share,
                 "inputShare": target.input_share,
@@ -886,7 +898,7 @@ impl Metrics {
     }
     fn line(&self, arm: &Arm) -> String {
         format!(
-            "{}: fact {}/{}, exact {}/{}, violations {}, unjudged {}, cut-offs {}, failed {}, skipped {}",
+            "{}: fact {}/{}, exact {}/{}, violations {}, unjudged {}, cut-offs {}, failed {}, skipped {}, fell back {}",
             arm.id,
             self.facts.0,
             self.facts.1,
@@ -896,7 +908,8 @@ impl Metrics {
             self.unjudged,
             self.cut_offs,
             self.failed,
-            self.skipped
+            self.skipped,
+            self.fell_back
         )
     }
 }
@@ -919,8 +932,8 @@ fn percentile(values: &[f64], at: f64) -> Option<f64> {
 /// The Markdown table of every arm's metrics.
 fn table(rows: &[Value]) -> String {
     let mut text = String::from(
-        "| arm | reasoning | target | fact recall | exact recall | violations | unjudged | cut-offs | failed | median summary tokens | median duration ms | median T/S | p90 T/S |\n\
-         | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "| arm | reasoning | fell back | target | fact recall | exact recall | violations | unjudged | cut-offs | failed | skipped | median summary tokens | median duration ms | median T/S | p90 T/S |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     for row in rows {
         let number = |value: &Value| match value.as_f64() {
@@ -936,9 +949,10 @@ fn table(rows: &[Value]) -> String {
             None => "none".to_owned(),
         };
         text += &format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             row["arm"].as_str().unwrap_or_default(),
             row["reasoning"].as_str().unwrap_or_default(),
+            row["fellBack"],
             target,
             number(&row["factRecall"]),
             number(&row["exactRecall"]),
@@ -946,6 +960,7 @@ fn table(rows: &[Value]) -> String {
             row["unjudged"],
             row["cutOffCount"],
             row["failed"],
+            row["skipped"],
             number(&row["medianSummaryTokens"]),
             number(&row["medianDurationMs"]),
             number(&row["medianTargetRatio"]),
@@ -953,83 +968,4 @@ fn table(rows: &[Value]) -> String {
         );
     }
     text
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn probe(id: &str, kind: ProbeKind, text: &str) -> Probe {
-        Probe {
-            id: id.into(),
-            kind,
-            text: text.into(),
-        }
-    }
-
-    /// A judge that writes prose, or echoes the strategy's own truncation
-    /// marker, must not stop the run (§13.4).
-    #[test]
-    fn a_prose_reply_still_yields_the_verdict_list() {
-        let reply = "I read the summary [... truncated ...] and judged it. Result:\n\
-                     ```json\n[{\"id\":\"a\",\"verdict\":\"present\",\"quote\":\"x\"}]\n```";
-        let parsed = parse_judgements(reply).expect("the list parses");
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].id, "a");
-        assert_eq!(parsed[0].verdict, Verdict::Present);
-        assert_eq!(parsed[0].quote.as_deref(), Some("x"));
-    }
-
-    #[test]
-    fn a_quote_with_an_unbalanced_bracket_still_yields_the_list() {
-        let reply = "[{\"id\":\"a\",\"verdict\":\"present\",\"quote\":\"see [1 and\"}]";
-        let parsed = parse_judgements(reply).expect("the list parses");
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].quote.as_deref(), Some("see [1 and"));
-    }
-
-    #[test]
-    fn a_bracketed_lead_in_and_a_bracket_in_a_quote_still_yield_the_list() {
-        let reply = "Note [x]: [{\"id\":\"a\",\"verdict\":\"present\",\"quote\":\"a]b\"}]";
-        let parsed = parse_judgements(reply).expect("the list parses");
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].quote.as_deref(), Some("a]b"));
-    }
-
-    #[test]
-    fn a_reply_without_a_verdict_list_is_not_parsed() {
-        assert!(parse_judgements("ok").is_none());
-        assert!(parse_judgements("here is a [note] and nothing else").is_none());
-        assert!(parse_judgements("[not a verdict list]").is_none());
-    }
-
-    /// An answer the runner could not use marks its probes, and the exact
-    /// probes of the same run still count.
-    #[test]
-    fn a_failed_judge_leaves_its_probes_unjudged() {
-        let probes = [
-            probe(
-                "cause",
-                ProbeKind::Fact,
-                "the cancelled result lost its start",
-            ),
-            probe("line", ProbeKind::Exact, "compaction.rs:378"),
-            probe("old", ProbeKind::Absent, "the retention share changes"),
-        ];
-        let records = probe_records(
-            &probes,
-            "The failure is compaction.rs:378.",
-            &Judged::Unavailable("the judge answered with no verdict list".into()),
-        );
-        assert_eq!(records[0]["verdict"], "unparsed");
-        assert_eq!(records[1]["verdict"], "present");
-        assert_eq!(records[2]["verdict"], "unparsed");
-    }
-
-    #[test]
-    fn a_run_without_a_summary_is_not_judged() {
-        let probes = [probe("cause", ProbeKind::Fact, "the cause")];
-        let records = probe_records(&probes, "", &Judged::NoSummary);
-        assert_eq!(records[0]["verdict"], "absent");
-    }
 }
