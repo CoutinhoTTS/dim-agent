@@ -77,6 +77,9 @@ is the one `wait` already uses ([wait.rs](../../../crates/dim-agent-capabilities
 Session tool that resolves the calling branch from `ToolExecutionContext.branch_id` through
 `TreeCommands`. Recall does not apply compaction: it walks the whole list.
 
+On a line while it is ending, `branch/end` is not told and the `end` call is told like any other
+call.
+
 ### 3.2 Things: an origin event and what joins it
 
 The projection folds events into **things**. A thing has one **origin event** and the later
@@ -91,8 +94,13 @@ id; its ending is the state left after every joined event is folded in.
 | Interrupt | `stop/interrupt` | — |
 | Permission change | `permission/changed` | — |
 | Compaction | `context/compaction` with outcome `completed` | — |
-| Fork | this branch's `branch/start` with a `parent` | — |
+| Line opening | this line's `branch/start` with a `parent` | — |
 | Session fork | `session/forked` | — |
+
+A compaction is a thing only when it completed: `context/compact` and
+`context/compaction-start` are its command and its start, and one that skipped, failed or was
+cancelled replaced nothing, so neither the command nor an uncompleted result is a thing. The
+summary a completed compaction carries stays in that one record (§3.5).
 
 One input event is one thing. Its user content and every `InputBlock::Raw` it carries share its
 event id and are told together, so an id never names more than one entry; there is no block index
@@ -119,9 +127,9 @@ already applies ([history.rs](../../../crates/dim-agent-capabilities/src/history
 above, in the shapes named there, and `turn/start` and `turn/end`, which delimit turns (§3.6).
 Every other event is not told, by rule: a core event or an opaque one
 ([ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)), existing or added
-later. Event kinds are added dynamically, so a new kind needs no change to Recall and never shows
-up in a result; a capability that wants content seen writes an adopted input or a tool result, and
-Recall tells those.
+later. `branch/end` and `branch/ended` are not told. Event kinds are added dynamically, so a new
+kind needs no change to Recall and never shows up in a result; a capability that wants content seen
+writes an adopted input or a tool result, and Recall tells those.
 
 ### 3.3 What counts
 
@@ -141,14 +149,36 @@ context is the origin of, or joined to, a thing (§14).
 
 | Thing | Line |
 | --- | --- |
-| Input | with user content: `user: <text>` (images as `[image]`; a `steer` input is `user (while you were working): <text>`), followed by `+ <blocks>` when it also carries blocks; with blocks only: `<blocks>: <first line of the first block's body>`. `<blocks>` names each block in order by its opening tag and attributes as written, or `block` for a block whose text opens with no tag, with `(current)` for a live block and `(ended)` for one that retires its `key` |
+| Input | with user content: `user: <text>` (images as `[image]`), followed by `+ <blocks>` when it also carries blocks; with blocks only: `<blocks>: <first line of the first block's body>`. `<blocks>` names each block in order by its opening tag and attributes as written, or `block` for a block whose text opens with no tag, with `(current)` for a live block and `(ended)` for one that retires its `key` |
 | Your reply | `you: <text>`, thinking left out; an output that did not complete is `your reply was cut off (<reason>): <partial text>`, with the committed text and the outcome of its `step/model-output-end`; an output the head ends inside is `you (still writing): <text so far>` |
 | Tool call | `you called <tool> <input brief> → <ending>`; a call whose arguments never arrived is `you started calling <tool> (arguments not received) → <ending>` |
 | Interrupt | `the user interrupted the turn` |
 | Permission change | `permission mode changed to <mode>` |
 | Compaction | `the conversation up to here was summarized` |
-| Fork | `this branch was forked from <parent branch>`; its first input, told next, is its task |
+| Line opening | `this line was opened by <parent line>`; its opening input, told next, is its identity and purpose |
 | Session fork | `this conversation was copied from another session up to here` |
+
+An input another line wrote — a message, a final message, an idle notice, an ended notice — is that
+input's block, and it is that line's word, not the user's. The write is Timeline branches'
+([timeline-branches](../timeline-branches.md) §6, §7.1, §10, §12.1); Recall reads these by the
+marker block they carry:
+
+| Marker | Line |
+| --- | --- |
+| `<dim-branch-message from="L" to="P">` | `line L: <text>`, or `line L (while you were working): <text>` when the line read it after its turn's first model step |
+| the same marker with `final="true"` | `line L's final message: <text>` |
+| `<dim-branch-idle branch="L" status="…">` | `line L's turn ended (<status>) without a message to you` |
+| `<dim-branch-ended branch="L">` | `line L was ended from outside` |
+
+The timing words come from the input's position, not from its mode: an input consumed before its
+turn's first model step was read by a line that was not working, so a message that wakes an idle
+line reads `line L: <text>`; one read after a model step of the same turn reads the words. For an
+input with user content the same rule gives `user (while you were working): <text>`.
+
+The marker is the first block of the input that opens with one of these tags, so a roster update
+that carries an ended notice reads as the notice. A marked input never reads as `user: …`,
+whatever mode it arrived in. Opening it shows its blocks whole, so the message text, the purpose a line was
+opened with and the roster itself are behind `open`.
 
 Recall reads blocks generically, by the opening tag and attributes of their text and by the
 `key` and `retire` fields of `InputBlock::Raw`; it knows no producer, so a new kind of block needs
@@ -178,7 +208,7 @@ context)` or `(ended)` where it applies, paged by characters like any thing.
 **Every line has a fixed maximum length.** A line is one line: a quoted text is its first line.
 Each variable part of a line is cut at 120 characters with `…`: a quoted text (user text, a reply,
 a block's body, a result), the input brief as a whole, `<blocks>`, a tool name, a turn's tool
-summary, a reason, a task id, an agent name, a mode or a parent branch. No line has more than four
+summary, a reason, a task id, an agent name, a mode or a parent line. No line has more than four
 variable parts (the most is a tool call: tool name, input brief, task and result text), and its
 time, id and fixed words take at most 120 characters, so **a line never exceeds 600 characters**.
 A page of 20 entries, with its date lines and its last line, therefore stays under 13,000
@@ -198,17 +228,20 @@ it:
   not a retiring one (the rule context assembly replays as the keyed baseline), is marked
   `(current)` on its input's line and `(current version in your context)` when opened; opening an
   input with an earlier block of that key shows the version delivered then;
-- the latest summary is in context; its compaction line says so and does not repeat it.
+- the latest summary is in context; its compaction line says so and does not repeat it;
+- the line's own identity block is the one that is `(current)`; an earlier block of its key reads
+  as the earlier version.
 
 ### 3.6 Turns
 
 A turn is the span of one `turn_id` from `turn/start` to `turn/end`; the inputs it consumed belong
-to it. Things outside any turn (a compaction between turns, the fork, the Session fork) are lines
-of their own between turns. A turn's line in the index gives its first user text (or, for a turn
-opened by an input without user text, such as a Goal continuation, that input's `<blocks>`), the tools it
-called with counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`). A turn
+to it. Things outside any turn (a compaction between turns, the line opening, the Session fork)
+are lines of their own between turns. A turn's line in the index gives its first user text (or,
+for a turn opened by an input without user text, such as a Goal continuation or a message from
+another line, that input's `<blocks>` or the line write it carries (§3.4)), the tools it called
+with counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`). A turn
 without `turn/end` in the pinned history is `in progress` when it is the calling turn, and
-`continued on the parent branch` when it is the parent's turn that a child's inherited prefix cuts
+`continued on the parent line` when it is the parent's turn that a child's inherited prefix cuts
 into. The calling `recall` call is itself in the calling turn, with the ending `no result yet`.
 
 The index lists turns and the lines between them, latest first. A search lists the matching lines
@@ -499,7 +532,8 @@ in `crates/dim-app-server/tests` that finds `recall` in the tool table of both t
    Prompt rule, a Prompt state and a background notification block each appear by their tag and
    attributes, a live keyed block is marked `(current)` and a retiring block `(ended)`. An input
    with user content and several blocks is one entry, and a search page that ends on it continues
-   with `before=<its id>` at the next earlier entry, skipping none. Every event `project_history` places in context belongs to a thing.
+   with `before=<its id>` at the next earlier entry, skipping none. Every event `project_history` places in context belongs to a thing, the identity block of a
+   line's opening input and the inputs other lines write included.
 5. **Compaction.** After two compactions, recall still reaches the first turn; each compaction is
    one line; ids returned before a compaction still open the same things after it.
 6. **Search.** `about` with words in another order and case finds a user message from before the
@@ -508,12 +542,16 @@ in `crates/dim-app-server/tests` that finds `recall` in the tool table of both t
 7. **Tool call endings.** One call each that is denied, never dispatched, moved to a background
    task that later ends, answered by a sub-agent, failed and succeeded is told on one line with the
    ending of §3.4; a steer input is told as the user speaking while the model worked.
-8. **Ids and forks.** A line's full id opens it; an id that is not a line's id is not found. A child
-   created by the `branch` tool opens inherited ids, tells its fork line from its own
-   `branch/start`, and tells the parent turn its prefix cuts into as `continued on the parent
-   branch`; the calling turn is `in progress`. In a Session forked from that branch's Session,
-   an id returned before the fork opens the same thing, and the `session/forked` line follows the
-   copied turns.
+8. **Ids and lines.** A line's full id opens it; an id that is not a line's id is not found. A
+   child opened by the `branch` tool's `create` action opens inherited ids, tells its opening from
+   its own `branch/start`, tells its identity input by its `branch:line` block, and tells the
+   parent turn its prefix cuts into as `continued on the parent line`; the calling turn is
+   `in progress`. On the parent, the roster update, a message the line sends, its final message, its
+   idle notice and an ended notice each read as `line <line> …` — a message that wakes an idle line
+   reads `line <line>: …` and one read after a model step of the same turn reads
+   `line <line> (while you were working): …` — and `branch/end` and `branch/ended` are never told.
+   In a Session forked from that branch's Session, an id returned
+   before the fork opens the same thing, and the `session/forked` line follows the copied turns.
 9. **Pages and no side effects.** The index, a search and a turn return at most 20 entries a
    page. A call with 1,000 scalar arguments and a 1,000-character tool name, an input with 50
    blocks and a turn that called 100 different tools each give a line of at most 600 characters,
@@ -559,12 +597,23 @@ Nothing is left open.
 ```rust
 // dim-agent-capabilities/src/recall.rs (new)
 pub const RECALL_TOOL: &str = "recall";
-pub struct RecallPlugin;
-//   Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>)
-//   apply: tools.register(ctx, ToolContribution { definition, handler: RecallTool(tree) })
+pub fn feature() -> Feature {
+    Feature::new("Recall").session("Recall", |names| Ok(Box::new(RecallPlugin::new(names)?)))
+}
+pub struct RecallPlugin {
+    tree: Key<TreeCommands>,
+    tools: Key<ToolRegistry>,
+}
+impl RecallPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> { /* both: names.key()? */ }
+}
+impl DynPlugin for RecallPlugin {
+    // injects: [tree.erase(), tools.erase()]
+    // apply: tools.register(ctx, ToolContribution { definition, handler: RecallTool(tree) })
+}
 struct RecallTool(Arc<TreeCommands>);
 impl ToolHandler for RecallTool { /* §3–§6 */ }
 
 // dim-agent-capabilities/src/defaults.rs, install_local_execution, beside wait::install
-builder.require_feature(Feature::new("Recall").session("Recall", |names| names.part(RecallPlugin)));
+crate::recall::install(builder);   // builder.require_feature(recall::feature())
 ```

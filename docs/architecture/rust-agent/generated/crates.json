@@ -25,6 +25,10 @@
   },
   {
     "from": "dim-agent-capabilities",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-agent-capabilities",
     "to": "dim-agent-runtime"
   },
   {

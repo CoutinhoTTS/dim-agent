@@ -22,6 +22,7 @@ pub mod prompt;
 pub mod prompt_registry;
 pub mod prompt_sources;
 pub mod prompt_state;
+pub mod recall;
 pub mod session_broadcast;
 pub mod settings;
 pub mod shell_input;

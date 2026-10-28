@@ -663,14 +663,17 @@ impl Composer {
         self.tokens.retain(|t| live.contains(&t.id));
     }
 
-    /// Up on a single-line draft at the start walks older entries; Down while
-    /// browsing, at either end, walks back toward the saved draft.
+    /// Up at the start of the draft walks older entries; on a multi-line draft
+    /// the first Up on the top row moves the cursor there. Down while browsing
+    /// at the end (or at the start of a single line) walks back toward the
+    /// saved draft.
     fn browse_history(&mut self, up: bool) -> bool {
-        if self.history.is_empty() || self.area.text().contains('\n') {
+        if self.history.is_empty() {
             return false;
         }
         let cursor = self.area.cursor();
         let len = self.area.text().len();
+        let single_line = !self.area.text().contains('\n');
         let browsing = self.history_index.is_some_and(|i| i < self.history.len());
         if up {
             if cursor != 0 {
@@ -686,7 +689,7 @@ impl Composer {
             self.load_history(0);
             return true;
         }
-        if !browsing || (cursor != 0 && cursor != len) {
+        if !browsing || !(cursor == len || (cursor == 0 && single_line)) {
             return false;
         }
         match self.history_index {
@@ -1206,6 +1209,28 @@ mod tests {
         assert_eq!(c.text(), "second");
         c.handle_key(key(KeyCode::Down));
         assert_eq!(c.text(), "draft");
+    }
+
+    #[test]
+    fn a_multi_line_draft_walks_history_from_its_start_and_comes_back() {
+        let mut c = Composer::new(vec!["one\ntwo".into(), "last".into()]);
+        typed(&mut c, "top");
+        c.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::SHIFT));
+        typed(&mut c, "bottom");
+        c.handle_key(key(KeyCode::Up));
+        c.handle_key(key(KeyCode::Up));
+        assert_eq!(c.text(), "top\nbottom");
+        c.handle_key(key(KeyCode::Up));
+        assert_eq!(c.text(), "last");
+        c.handle_key(key(KeyCode::Up));
+        assert_eq!(c.text(), "one\ntwo");
+        c.handle_key(key(KeyCode::Down));
+        assert_eq!(c.text(), "one\ntwo");
+        c.handle_key(key(KeyCode::Down));
+        c.handle_key(key(KeyCode::Down));
+        assert_eq!(c.text(), "last");
+        c.handle_key(key(KeyCode::Down));
+        assert_eq!(c.text(), "top\nbottom");
     }
 
     #[test]
