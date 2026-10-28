@@ -1262,6 +1262,28 @@ fn compaction(through: u64) -> EventKind {
     })
 }
 
+/// A compaction that replaced nothing: it skipped (§3.2).
+fn skipped_compaction(through: u64) -> EventKind {
+    EventKind::ContextCompaction(ContextCompactionData {
+        turn_id: None,
+        request_id: None,
+        command: None,
+        start: None,
+        through,
+        outcome: ContextCompactionResult::Skipped {
+            reason: "nothing to compact".into(),
+            diagnostics: Box::new(
+                serde_json::from_value(json!({
+                    "reason": "auto", "trigger": "threshold", "estimatedInputTokens": 1,
+                    "entriesReplaced": 0, "modelCallCount": 0, "durationMs": 1,
+                    "strategy": {"kind": "test"}
+                }))
+                .unwrap(),
+            ),
+        },
+    })
+}
+
 fn history_summary() -> Message {
     Message::text(
         Role::User,
@@ -1705,6 +1727,8 @@ fn compactions_are_one_line_each_and_ids_taken_before_them_still_open() {
     simple_turn(&mut recorded, "t2", "second task", "second answer");
     recorded.at(13, 30);
     let latest = recorded.push(compaction(16));
+    recorded.at(13, 35);
+    let skipped = recorded.push(skipped_compaction(20));
     recorded.at(13, 40);
     simple_turn(&mut recorded, "t3", "third task", "third answer");
 
@@ -1747,6 +1771,10 @@ fn compactions_are_one_line_each_and_ids_taken_before_them_still_open() {
             "the conversation up to here was summarized (that summary is in your context)"
         ),
         "{thing}"
+    );
+    assert!(
+        !recorded.narrative().tells(&skipped),
+        "a compaction that replaced nothing is not told (§3.2)"
     );
 }
 

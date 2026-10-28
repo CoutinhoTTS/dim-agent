@@ -59,6 +59,8 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 | 开通本行 | 本行带 `parent` 的 `branch/start` | — |
 | Session fork | `session/forked` | — |
 
+压缩只有完成时才算一件事：`context/compact` 与 `context/compaction-start` 是它的命令与开始；skipped、failed 或 cancelled 的压缩没有替换任何内容，所以命令和未完成的结果都不是一件事。完成的压缩携带的摘要留在这条记录里（§3.5）。
+
 一个输入事件是一件事。它的用户内容和它携带的每个 `InputBlock::Raw` 共用它的事件 id，并一起讲述，所以一个 id 不会指向多个条目；没有块序号，也没有子把手。块是否仍然生效，由之后同一 `key` 的块判断（§3.5）。
 
 后五种从未进入模型上下文，但它们属于发生过的事：用户的决定，以及对话的形状。

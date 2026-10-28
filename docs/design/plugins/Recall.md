@@ -97,6 +97,11 @@ id; its ending is the state left after every joined event is folded in.
 | Line opening | this line's `branch/start` with a `parent` | — |
 | Session fork | `session/forked` | — |
 
+A compaction is a thing only when it completed: `context/compact` and
+`context/compaction-start` are its command and its start, and one that skipped, failed or was
+cancelled replaced nothing, so neither the command nor an uncompleted result is a thing. The
+summary a completed compaction carries stays in that one record (§3.5).
+
 One input event is one thing. Its user content and every `InputBlock::Raw` it carries share its
 event id and are told together, so an id never names more than one entry; there is no block index
 or sub-handle. Whether a block is still live is read from the later blocks with the same `key`
