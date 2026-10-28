@@ -19,7 +19,7 @@ the source name, its files, a JSON Schema (with `default` values) and its user-o
 
 - the process service `settings`, which the owner uses: `register`, `read`, `update` (CAS on
   the revision) and `projects`;
-- the client management methods `settings.read` and `settings.update`;
+- the client management methods `settings.read`, `settings.update` and `settings.fill`;
 - the same rutis events as S8a, `settings.changed` and `settings.project_authorized`. Their
   payloads become serializable. There is no `subscribe(source)`.
 
@@ -436,11 +436,21 @@ F2 left open whether to fold its methods into `settings.read/update`. They stay:
 
 - `permission` is a Rust source. Its validation (no separator characters, at least one word) is
   Rust code. `settings.update` validates against a declared JSON Schema, so serving Rust sources
-  would need a type-erased registry of Rust documents in Settings. Nothing else needs that.
+  would expose a general replacement path for business documents. Native missing-field import uses each registered owner’s validator through `settings.fill`, without adding a Rust document replacement path.
 - `permission.set_rules` already has a typed contract and error codes, and F6 is designed against
   it.
 - The rule is the same for MCP and Skills: a Rust owner keeps its own methods, and
-  `settings.*` serves declared sources.
+  `settings.read/update` serves declared sources.
+
+### 8.2 Native missing-field import
+
+The protected local management method `settings.fill` accepts `{source, document}` for a currently registered user source and requires native storage. The document is an object of final target fields. The owning Rust document validator or declared JSON Schema validates the result; Settings names no business source and performs no legacy conversion. Client-only fields may be filled, as on the client update path.
+
+One SQLite transaction compares and fills top-level fields. Presence is configuration: false, null, an empty list and an empty object are retained. Equal values return `unchanged`, different configured values return `conflict`, newly committed values return `imported`, and incompatible fields return `rejected`. An absent group is validated together so dependent fields such as a fixed model and its mode enter atomically. If that group is invalid, independently valid fields may still enter. The reply is an object from field name to outcome and contains no setting values.
+
+A native source seeded from a missing user file has no configured fields. Settings records the actual file keys and subsequent fills in native format v22's `settings_import_fields` table, atomically with the fully normalized document. Retry cannot mistake imported false/empty values for defaults. Without this provenance, a version-1 document imported from `missing` is unconfigured, and other existing documents are conservatively configured at their stored keys. Owner replacement writes remove the presence row and keep their existing whole-document meaning. The original import revision stays unchanged. Only committed changes publish the source's normal change event. Importing enabled configuration can start its ordinary business behavior.
+
+`settings.read/update` retains its declared-source restriction and CAS contract. Fill failures use its existing error vocabulary, and an unavailable source is reported rather than installed or enabled by Settings.
 
 ## 9. Rule check
 

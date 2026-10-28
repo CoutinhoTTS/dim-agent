@@ -10,15 +10,19 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 21;
+const FORMAT: u32 = 22;
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 21))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 22))",
     ),
     (
         "settings_documents",
         "CREATE TABLE settings_documents (source TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), document TEXT NOT NULL, imported_revision TEXT NOT NULL)",
+    ),
+    (
+        "settings_import_fields",
+        "CREATE TABLE settings_import_fields (source TEXT NOT NULL PRIMARY KEY REFERENCES settings_documents(source), fields TEXT NOT NULL)",
     ),
     (
         "provider_imports",
@@ -112,7 +116,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 7] = [
+const UPGRADES: [(u32, &[&str]); 8] = [
     (
         13,
         &[
@@ -140,6 +144,7 @@ const UPGRADES: [(u32, &[&str]); 7] = [
             "provider_import_coverage",
         ],
     ),
+    (21, &["settings_import_fields"]),
 ];
 
 fn format_table(version: u32) -> String {

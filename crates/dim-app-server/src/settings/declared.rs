@@ -72,7 +72,7 @@ impl Declared {
         )
     }
     /// Defaults, then the schema (§3.2).
-    fn prepare(&self, mut document: Value) -> std::result::Result<Value, String> {
+    pub(super) fn prepare(&self, mut document: Value) -> std::result::Result<Value, String> {
         if !document.is_object() {
             return Err("document must be an object".into());
         }

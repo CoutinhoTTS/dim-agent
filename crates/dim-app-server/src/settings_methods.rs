@@ -13,7 +13,16 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use serde::Deserialize;
+use serde_json::Value;
 use std::sync::Arc;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Fill {
+    source: String,
+    document: Value,
+}
 
 /// The client path's wire errors (§4.3).
 fn wire(error: SettingsError) -> RpcError {
@@ -62,11 +71,21 @@ impl DynPlugin for SettingsMethodsPlugin {
                 vec![
                     MethodDecl::new("settings.read", false, Interruption::Report),
                     MethodDecl::new("settings.update", true, Interruption::Report),
+                    MethodDecl::new("settings.fill", true, Interruption::Report),
                 ],
                 Arc::new(move |method, value, stopping, _| {
                     let service = service.clone();
                     Box::pin(async move {
                         match method.as_str() {
+                            "settings.fill" => {
+                                let Fill { source, document } = params(value)?;
+                                reply(
+                                    service
+                                        .fill_missing(source, document, &stopping)
+                                        .await
+                                        .map_err(wire)?,
+                                )
+                            }
                             "settings.read" => {
                                 let Read { source, scope } = params(value)?;
                                 reply(

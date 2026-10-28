@@ -13,6 +13,7 @@ use dim_agent_runtime::{Names, Registrations};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, InstanceId, Key, TypeKey};
 use rutis::{Ctx, Event};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     any::TypeId,
@@ -138,6 +139,7 @@ struct Source {
     user_file: String,
     project_file: Option<String>,
     kind: Kind,
+    validate: Arc<dyn Fn(&Value) -> Result<Value> + Send + Sync>,
 }
 enum Kind {
     Rust(TypeId),
@@ -178,6 +180,21 @@ impl SettingsService {
                 user_file: D::USER_FILE.into(),
                 project_file: D::PROJECT_FILE.map(Into::into),
                 kind: Kind::Rust(TypeId::of::<D>()),
+                validate: Arc::new(|value| {
+                    let mut defaults = serde_json::to_value(D::default())
+                        .map_err(|_| SettingsError::Invalid("cannot encode source defaults"))?;
+                    if let (Some(defaults), Some(fields)) =
+                        (defaults.as_object_mut(), value.as_object())
+                    {
+                        defaults.extend(fields.clone());
+                    } else {
+                        defaults = value.clone();
+                    }
+                    let document: D = serde_json::from_value(defaults.clone())
+                        .map_err(|_| SettingsError::Invalid("invalid source document"))?;
+                    document.validate()?;
+                    Ok(defaults)
+                }),
             },
         )
     }
@@ -193,6 +210,8 @@ impl SettingsService {
         let declared = Declared::compile(declaration)
             .map_err(|reason| registration_failed(&source, reason))?;
         let (user_file, project_file) = declared.files();
+        let declared = Arc::new(declared);
+        let validator = declared.clone();
         self.insert(
             ctx,
             &source,
@@ -200,7 +219,12 @@ impl SettingsService {
                 owner: ctx.instance(),
                 user_file,
                 project_file,
-                kind: Kind::Declared(Arc::new(declared)),
+                kind: Kind::Declared(declared),
+                validate: Arc::new(move |value| {
+                    validator
+                        .prepare(value.clone())
+                        .map_err(SettingsError::Document)
+                }),
             },
         )
     }
