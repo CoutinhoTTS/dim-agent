@@ -140,6 +140,8 @@ The list in §4, and nothing else. The gap this item closes: the projection drop
 
 The summary prompt's wording is product policy. A change to it goes through the relative evaluation of §6. The prompt is the fixed one at [summary_strategy.rs:19](../../crates/dim-agent-capabilities/src/summary_strategy.rs).
 
+The requirements for this text, and for the rest of the prompt layer, are in [Model-facing prompts](model-prompts.md).
+
 ## 8. Rule check
 
 Against [design rules §4](../architecture/rust-agent/principles.md#4-通过时间线扩展行为):

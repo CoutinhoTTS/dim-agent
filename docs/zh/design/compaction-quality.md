@@ -140,6 +140,8 @@
 
 摘要提示词的措辞是产品策略。改动它要走 §6 的相对评估。提示词就是 [summary_strategy.rs:19](../../../crates/dim-agent-capabilities/src/summary_strategy.rs) 里那份固定的文本。
 
+这份文本以及整个提示词层的需求见 [面向模型的提示词](model-prompts.md)。
+
 ## 8. 规则检查
 
 对照[设计规则 §4](../../architecture/rust-agent/principles.md#4-通过时间线扩展行为)：
