@@ -1541,8 +1541,10 @@ refused before any model call. `earlierSummary` and `contextWindow` stay members
 chain is five compactions in sequence:
 
 - Step 1 takes `earlierSummary` as its checkpoint when present and none otherwise. Every later
-  step's checkpoint is the previous step's summary, `[summary_message(text)]` with
-  `replacement_parts { strategy: 1, digest: 0 }`.
+  step's checkpoint is the previous step's completed replacement, unchanged, with
+  `replacement_parts { strategy: <its length>, digest: 0 }`, the way a committed compaction
+  becomes the next checkpoint (§4.3, §5.2); the rendered text is used only for the report and
+  the judge.
 - Each step's `messages` is the history after its checkpoint: for step k ≥ 2 it must begin with
   step k−1's `messages[retainFrom..]` verbatim, because a real compaction keeps that tail and the
   next compaction sees it before the new messages. A chain that breaks this is refused before any

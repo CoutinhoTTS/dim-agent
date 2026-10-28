@@ -859,7 +859,7 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 
 **压缩链 (b)。** 用例保留上面的形状，或改用 `steps`：一个由 `{ "messages": [...], "retainFrom": n }` 组成的数组，链正好五步。两种形状互斥；两者都有、都没有、或 `steps` 步数不是五的用例，都在任何模型调用之前拒绝。`earlierSummary` 和 `contextWindow` 仍是用例的成员。一条链是连续五次压缩：
 
-- 第 1 步在有 `earlierSummary` 时以它为检查点，否则没有检查点。之后每一步的检查点是上一步的摘要，即 `[summary_message(text)]` 并带 `replacement_parts { strategy: 1, digest: 0 }`。
+- 第 1 步在有 `earlierSummary` 时以它为检查点，否则没有检查点。之后每一步的检查点是上一步完成时产出的 replacement，原样使用，并带 `replacement_parts { strategy: <其长度>, digest: 0 }`，与已提交的压缩成为下一个检查点的方式相同（§4.3、§5.2）。渲染出的文本只用于报告和评判。
 - 每一步的 `messages` 是它检查点之后的历史：第 k ≥ 2 步必须以上一步的 `messages[retainFrom..]` 原样开头，因为真实的压缩会保留那段尾部，下一次压缩在读取新消息之前先看到它。破坏这一点的链在任何模型调用之前被拒绝；否则切点之后的内容不是被提示词丢掉，而是按构造丢失。
 - 每一步都是对已发布策略的一次调用，其历史、请求和切点与单个用例的构造完全相同，所以 `validate_cut` 逐步运行。
 - 探针只在第五份摘要上评判。
