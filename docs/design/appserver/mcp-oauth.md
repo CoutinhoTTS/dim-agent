@@ -481,6 +481,20 @@ entry's `id` is `<plugin id>:<server>`, as `mcp.catalog` lists it
 | `mcp.auth.start` | `{source: "user" \| "project" \| "plugin", id, cwd?, clientSecret?}` | `{attemptId, authorizationUrl, redirectUri, resource, issuer, expiresAt}` | The entry must be a remote, enabled entry without static credentials. `clientSecret` is accepted only with `oauth.clientId`. `expiresAt` is Unix ms, 10 min ahead. Replaces a pending attempt of the same key |
 | `mcp.auth.complete` | `{attemptId, callbackUrl}` | `{}` | §5.4. Returns after the record is persisted |
 | `mcp.auth.logout` | `{source, id, cwd?}` | `{revoked: boolean}` | Allowed for disabled entries and for remote entries that no longer use OAuth. No record: `{revoked: false}` |
+| `mcp.auth.import_legacy` | `{id, entry}` | `"imported" \| "already_imported" \| "conflict"` | Explicit stopped-source import into an existing user entry; the owner validates and commits the compatible grant |
+
+The import accepts the legacy camelCase credential entry, including
+`clientInfo.metadata.redirectUri`. It requires the configured canonical server URL,
+trusted issuer and token endpoint, an HTTP loopback registration redirect, a usable
+client authentication method and a non-expired client secret. A configured client ID
+must match the legacy registration. Without one, the stored registration is dynamic.
+Expired access tokens need a refresh token. Pending PKCE verifiers and OAuth states
+are not imported. Incompatible entries return `mcp_auth_unsupported` without writing.
+Import does not enable a disabled entry or perform a login; normal native use refreshes
+and validates the grant. The credential and a source digest in the optional
+`legacyImports` map commit in one store replacement. Existing target records win.
+An exact repeat is acknowledged even after logout; changed source content conflicts,
+and a repeat never recreates a signed-out grant. Reports contain no credential fields.
 
 Per-call progress (C1, PR [#83](https://github.com/arcships/dim/pull/83)) is not needed:
 `start` returns the URL directly, and nothing completes an attempt in the background.

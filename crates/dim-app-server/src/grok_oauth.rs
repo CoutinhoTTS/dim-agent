@@ -33,6 +33,13 @@ impl GrokOAuthService {
     pub async fn recover(&self, c: &CancellationToken) -> Result<()> {
         self.0.recover(c).await
     }
+    pub async fn import_legacy(
+        &self,
+        document: serde_json::Value,
+        c: &CancellationToken,
+    ) -> Result<dim_agent_types::AccountImportStatus> {
+        self.0.import_legacy(document, c).await
+    }
     pub async fn credential(
         &self,
         rejected: Option<&CredentialLease>,

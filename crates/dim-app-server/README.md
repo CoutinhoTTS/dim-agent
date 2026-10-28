@@ -417,6 +417,23 @@ type Usage = {
 
 Account and login operations are exposed as `account.providers`, `account.status`, `account.recover`, `account.logout`, `account.usage`, `account.login.begin`, `account.login.browser.begin`, `account.login.browser.complete`, `account.login.status` and `account.login.cancel`; a failed attempt reports only `Login failed`. Existing `account.codex.*` and `account.grok.*` retain their native contracts. Attempt secrets are memory-only and cleared on completion, cancellation or expiry; a terminal attempt stays queryable until its deadline.
 
+Explicit legacy account import uses `account.import_legacy {providerId, document}`,
+`account.codex.import_legacy {document}` or `account.grok.import_legacy {document}`
+on protected local v3 management. These mutating calls drain accepted work and return
+`"imported"`, `"already_imported"` or `"conflict"`. A managed provider without
+an import implementation returns `account_unsupported_schema`.
+Each account owner selects only its own grant and state fields, validates the source
+schema, digest, endpoint and client binding, and preserves existing target account
+configuration. The Dim owner's automatically seeded signed-out default is unconfigured;
+an explicit logout is configured. Compatible grants pass through the owner's ordinary
+online identity recovery before they become native credentials. A pending receipt binds
+the source digest to the exact stored grant. Transient failure remains retryable, and a
+rotated grant retains that binding. Recovery and the completed receipt commit atomically;
+a concurrent account change wins. Rejected grants are not reported as imported. An exact
+repeat of a completed import remains acknowledged after logout, without restoring tokens.
+Unrelated token-file fields and pending login attempts are never imported. Import replies
+and diagnostics contain no token or account-body data.
+
 `ManagedModel` is `{entry: ModelEntry, protocol, unavailableReason, zdr}`. `ModelEntry`, capabilities and metadata are defined in [`model_catalog.rs`](src/model_catalog.rs) and `dim-agent-types`. A provider supplies final public model descriptions; `BundledCatalog::fallback` offers the provider service's bundled metadata (refreshed before each release) for what its source omits. An unavailable model keeps a reason and is unselectable.
 
 `CredentialLease` carries the account snapshot, protocol, final protocol base URL (the model adapter adds its endpoint), request headers and bearer. It has no `Debug` or serialization; credential methods are internal to the model resolver and never appear in terminal RPC, history, Timeline, configuration replies or logs. Refresh tokens stay inside the provider. A lease is released when its last holder drops it, including a result whose caller went away. Leases are bound to the provider instance, account and grant revision, expire after 30 minutes and are capped at 1024. `ManagedProviders` stamps each lease with the binding that issued it: recovery and final rejection of a lease whose binding was replaced fail with `service_reloading` before any provider sees them, even when the replacement reports an equal account and reuses its lease IDs. `recover_rejected` performs one controlled recovery: it adopts a newer persisted grant or performs one serialized refresh. `finish_rejected` signs out only if the rejected grant still owns the account. Host recovery is limited to HTTP 401; unrelated failures retain the account.

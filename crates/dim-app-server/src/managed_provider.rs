@@ -148,6 +148,8 @@ impl std::fmt::Debug for ManagedProviderRow {
     }
 }
 
+pub use dim_agent_types::AccountImportStatus;
+
 /// The managed-provider service. Implementations own every accepted
 /// operation: a caller dropping a returned future never abandons a token
 /// rotation or a persisted login.
@@ -155,6 +157,15 @@ pub trait ManagedProvider: Send + Sync + 'static {
     fn providers(&self) -> Vec<ProviderDescriptor>;
     fn status(&self, provider: &str) -> ManagedFuture<AccountSnapshot>;
     fn recover(&self, provider: &str) -> ManagedFuture<AccountSnapshot>;
+    /// Imports compatible legacy account data through this credential owner.
+    /// The default rejects import without changing the account.
+    fn import_legacy(
+        &self,
+        _provider: &str,
+        _document: serde_json::Value,
+    ) -> ManagedFuture<dim_agent_types::AccountImportStatus> {
+        Box::pin(async { Err(ManagedError::UnsupportedSchema) })
+    }
     fn begin_browser(&self, login: BrowserLoginBegin) -> ManagedFuture<BrowserLogin>;
     fn complete_browser(
         &self,
@@ -336,6 +347,14 @@ impl ManagedProviders {
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
         checked_account(self.provider(cancel)?.recover(id).await?)
+    }
+    pub async fn import_legacy(
+        &self,
+        id: &str,
+        document: serde_json::Value,
+        cancel: &CancellationToken,
+    ) -> Result<dim_agent_types::AccountImportStatus, ManagedProviderError> {
+        Ok(self.provider(cancel)?.import_legacy(id, document).await?)
     }
     pub async fn begin_browser(
         &self,

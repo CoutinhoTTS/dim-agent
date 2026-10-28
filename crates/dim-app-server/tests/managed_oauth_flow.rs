@@ -305,6 +305,82 @@ fn write(home: &Path, value: &Value) {
     .unwrap();
 }
 
+#[tokio::test]
+async fn legacy_import_recovers_after_restart_and_never_replaces_later_account_choices() {
+    use dim_agent_types::AccountImportStatus::*;
+    let (f, server, home) = fixture().await;
+    let source = json!({"openaiCodex":{"type":"oauth","access":"old-access","refresh":"old-refresh","expires":4102444800000u64},"unrelated":{"secret":"not-imported"}});
+    let cancel = CancellationToken::new();
+    let (root, _, _, service) = codex(&home, &f.base).await;
+    *f.rejection.lock().unwrap() = Some((StatusCode::SERVICE_UNAVAILABLE, "unavailable"));
+    assert!(matches!(
+        service.import_legacy(source.clone(), &cancel).await,
+        Err(OAuthError::Transient(_))
+    ));
+    assert!(service.status(&cancel).await.unwrap().recovery_required);
+    assert_eq!(
+        read(&home)["openaiCodexAccountStateImport"]["complete"],
+        false
+    );
+    root.shutdown().await.unwrap();
+
+    *f.rejection.lock().unwrap() = None;
+    let (root, _, _, service) = codex(&home, &f.base).await;
+    assert_eq!(
+        service
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+        Imported
+    );
+    let stored = read(&home);
+    assert_eq!(stored["openaiCodexAccountStateImport"]["complete"], true);
+    assert!(stored.get("openaiCodexAccountState").is_some());
+    assert!(stored.get("unrelated").is_none());
+    assert!(service.status(&cancel).await.unwrap().authenticated);
+    let calls = f.refreshes.load(Ordering::SeqCst);
+    service.logout(&cancel).await.unwrap();
+    assert_eq!(
+        service
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+        AlreadyImported
+    );
+    assert!(!service.status(&cancel).await.unwrap().authenticated);
+    assert_eq!(f.refreshes.load(Ordering::SeqCst), calls);
+
+    write(&home, &json!({}));
+    *f.rejection.lock().unwrap() = Some((StatusCode::SERVICE_UNAVAILABLE, "unavailable"));
+    assert!(
+        service
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .is_err()
+    );
+    service.logout(&cancel).await.unwrap();
+    let cleared = fs::read(home.join("auth.json")).unwrap();
+    assert_eq!(
+        service
+            .import_legacy(source.clone(), &cancel)
+            .await
+            .unwrap(),
+        Conflict
+    );
+    assert_eq!(fs::read(home.join("auth.json")).unwrap(), cleared);
+    *f.rejection.lock().unwrap() = None;
+    login(&service, "chosen-new-account").await;
+    let chosen = fs::read(home.join("auth.json")).unwrap();
+    assert_eq!(
+        service.import_legacy(source, &cancel).await.unwrap(),
+        Conflict
+    );
+    assert_eq!(fs::read(home.join("auth.json")).unwrap(), chosen);
+    root.shutdown().await.unwrap();
+    server.abort();
+    fs::remove_dir_all(home).unwrap();
+}
+
 /// Login and refresh preserve the existing TS contract; a token response that omits `expires_in`
 /// defaults to 3600 seconds.
 #[tokio::test]

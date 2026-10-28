@@ -409,6 +409,92 @@ fn typescript_record(issuer: &str, digest: &str) -> Vec<u8> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_import_settles_rotated_tokens_with_its_receipt_and_preserves_target_choices() {
+    use dim_app_server::managed_provider::AccountImportStatus::*;
+    let fixture = oauth::start().await;
+    let home = home();
+    let source = json!({"nextApiOauth":{"type":"oauth","access":"legacy-access","refresh":"legacy-refresh",
+        "expires":1,"issuer":fixture.base,"tokenEndpoint":format!("{}/oauth/token",fixture.base),
+        "clientId":"legacy-client","relayBaseUrl":format!("{}/v1",fixture.base),"scope":"openid profile"},
+        "unrelated":{"secret":"not-imported"}});
+    let Process { root, providers } = process(&home).await;
+    providers.status(PROVIDER, &cancel()).await.unwrap();
+    fixture
+        .service
+        .unavailable_userinfo
+        .store(true, Ordering::SeqCst);
+    assert!(
+        providers
+            .import_legacy(PROVIDER, source.clone(), &cancel())
+            .await
+            .is_err()
+    );
+    let pending = auth(&home);
+    assert_eq!(pending["dimAccountImport"]["complete"], false);
+    assert_eq!(pending["nextApiOauth"]["access"], "access-0");
+    assert!(pending.get("dimAccountState").is_none());
+    assert!(pending.get("unrelated").is_none());
+    root.shutdown().await.unwrap();
+
+    fixture
+        .service
+        .unavailable_userinfo
+        .store(false, Ordering::SeqCst);
+    let Process { root, providers } = process(&home).await;
+    assert_eq!(
+        providers
+            .import_legacy(PROVIDER, source.clone(), &cancel())
+            .await
+            .unwrap(),
+        Imported
+    );
+    assert_eq!(fixture.service.refreshes.load(Ordering::SeqCst), 1);
+    let imported = auth(&home);
+    assert_eq!(imported["dimAccountImport"]["complete"], true);
+    assert_eq!(imported["dimAccountState"]["state"], "authenticated");
+    providers.logout(PROVIDER, &cancel()).await.unwrap();
+    assert_eq!(
+        providers
+            .import_legacy(PROVIDER, source.clone(), &cancel())
+            .await
+            .unwrap(),
+        AlreadyImported
+    );
+    assert!(
+        providers
+            .status(PROVIDER, &cancel())
+            .await
+            .unwrap()
+            .account
+            .is_none()
+    );
+
+    std::fs::write(home.join("auth.json"), b"{}").unwrap();
+    fixture
+        .service
+        .unavailable_userinfo
+        .store(true, Ordering::SeqCst);
+    assert!(
+        providers
+            .import_legacy(PROVIDER, source.clone(), &cancel())
+            .await
+            .is_err()
+    );
+    providers.logout(PROVIDER, &cancel()).await.unwrap();
+    let cleared = std::fs::read(home.join("auth.json")).unwrap();
+    assert_eq!(
+        providers
+            .import_legacy(PROVIDER, source, &cancel())
+            .await
+            .unwrap(),
+        Conflict
+    );
+    assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), cleared);
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn typescript_account_files_load_and_other_owners_fields_survive() {
     let fixture = oauth::start().await;
     let home = home();

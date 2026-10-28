@@ -848,6 +848,20 @@ struct DevicePoll {
 }
 
 impl ManagedProvider for DimOAuth {
+    fn import_legacy(
+        &self,
+        provider: &str,
+        document: Value,
+    ) -> ManagedFuture<dim_app_server::managed_provider::AccountImportStatus> {
+        let provider = provider.to_owned();
+        self.owned(|inner| async move {
+            input(&provider)?;
+            let status = inner.store.import_legacy(document).await?;
+            inner.forget_catalog();
+            inner.signed_in.notify_one();
+            Ok(status)
+        })
+    }
     fn providers(&self) -> Vec<ProviderDescriptor> {
         vec![ProviderDescriptor {
             provider_id: PROVIDER_ID.into(),

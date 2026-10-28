@@ -179,6 +179,7 @@ pub(super) fn provide(
             "account.providers",
             "account.status",
             "account.recover",
+            "account.import_legacy",
             "account.login.begin",
             "account.login.browser.begin",
             "account.login.browser.complete",
@@ -220,6 +221,21 @@ pub(super) fn provide(
                         reply(
                             oauth
                                 .recover_account(&p.provider_id, cancel)
+                                .await
+                                .map_err(error)?,
+                        )
+                    }
+                    "account.import_legacy" => {
+                        #[derive(Deserialize)]
+                        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                        struct Import {
+                            provider_id: String,
+                            document: serde_json::Value,
+                        }
+                        let p: Import = params(value)?;
+                        reply(
+                            oauth
+                                .import_legacy(&p.provider_id, p.document, cancel)
                                 .await
                                 .map_err(error)?,
                         )

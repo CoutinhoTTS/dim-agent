@@ -724,6 +724,60 @@ async fn until(condition: impl Fn() -> bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_import_uses_native_refresh_and_keeps_logout_authoritative() {
+    let servers = Servers::start().await;
+    let (resource, authority) = (servers.resource.clone(), servers.authority.clone());
+    let daemon = Daemon::start(&[("docs", json!({"type":"http","url":resource.url()}))]).await;
+    let mut client = daemon.client().await;
+    let issued = authority.issue(1, "files:read offline_access");
+    let entry = json!({"serverUrl":resource.url(),
+        "tokens":{"accessToken":issued["access_token"],"refreshToken":issued["refresh_token"],"expiresAt":1,"scope":"files:read offline_access"},
+        "clientInfo":{"clientId":"dcr-client","tokenEndpointAuthMethod":"none","metadata":{"redirectUri":"http://127.0.0.1:49321/callback/old-secret"}},
+        "authorizationMetadata":{"issuer":authority.base(),"token_endpoint":format!("{}/token",authority.base())},
+        "protectedResourceMetadata":{"resource":resource.url()},
+        "codeVerifier":"abandoned-attempt","oauthState":"abandoned-state"});
+    let params = json!({"id":"docs","entry":entry});
+    assert_eq!(
+        client.ok("mcp.auth.import_legacy", params.clone()).await,
+        "imported"
+    );
+    assert_eq!(
+        client.ok("mcp.auth.import_legacy", params.clone()).await,
+        "already_imported"
+    );
+    assert_eq!(authority.refreshes.load(Ordering::SeqCst), 0);
+    let mut changed = params.clone();
+    changed["entry"]["tokens"]["accessToken"] = json!("changed-secret");
+    assert_eq!(
+        client.ok("mcp.auth.import_legacy", changed).await,
+        "conflict"
+    );
+    let session = daemon.session(&mut client).await;
+    client.until_serving(&session).await;
+    client.mcp_state(&session, "docs", "ready").await;
+    assert_eq!(authority.refreshes.load(Ordering::SeqCst), 1);
+    let stored = daemon.store();
+    assert_ne!(
+        stored["credentials"][0]["tokens"]["accessToken"],
+        issued["access_token"]
+    );
+    assert!(stored["credentials"][0].get("codeVerifier").is_none());
+    client.ok("mcp.auth.logout", user("docs")).await;
+    assert_eq!(
+        client.ok("mcp.auth.import_legacy", params).await,
+        "already_imported"
+    );
+    assert!(
+        daemon.store()["credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record.get("tokens").is_none())
+    );
+    daemon.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
     let logs = logs();
     let servers = Servers::start().await;

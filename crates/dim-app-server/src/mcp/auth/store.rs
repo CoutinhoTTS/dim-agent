@@ -15,6 +15,8 @@ const VERSION: u64 = 1;
 #[serde(rename_all = "camelCase")]
 pub(super) struct Document {
     pub credentials: Vec<Record>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub legacy_imports: std::collections::BTreeMap<String, String>,
     #[serde(flatten)]
     extra: Map<String, Value>,
 }

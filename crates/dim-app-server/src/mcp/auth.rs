@@ -2,6 +2,7 @@
 //! ([design](../../../../docs/design/appserver/mcp-oauth.md)). It owns the
 //! credential store, the pending sign-in attempts and the per-key challenge
 //! state; connections take a bearer from it for every request.
+mod import;
 mod oauth;
 mod store;
 

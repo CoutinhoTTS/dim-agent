@@ -1,5 +1,6 @@
 //! Typed wire contracts matching agent-v4 at commit 8565538d5ff70a63bbf10cb9ad9198107244bac0.
 
+mod account;
 mod checkpoint;
 mod content;
 mod conversation;
@@ -11,6 +12,7 @@ mod prompt;
 mod tool;
 pub mod v1;
 
+pub use account::*;
 pub use checkpoint::*;
 pub use content::*;
 pub use conversation::*;
