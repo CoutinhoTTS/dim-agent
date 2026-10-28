@@ -265,7 +265,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         assert_eq!(
             live[0],
-            json!({"kind":"header","export":1,"session_id":session,"store_format":20,"sensitive":true})
+            json!({"kind":"header","export":1,"session_id":session,"store_format":22,"sensitive":true})
         );
         let branches: Vec<_> = live.iter().filter(|line| line["kind"] == "branch").collect();
         assert_eq!(branches.len(), 2);
@@ -328,9 +328,16 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (13, "DROP TABLE session_file_owners; DROP TABLE session_files; DROP TABLE session_metadata;"),
             (17, ""),
             (19, ""),
+            (20, ""),
+            (21, ""),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
-            changed(&database, &older, &format!("{dropped} DROP TABLE agent_store_format;
+            let imported = if version <= 20 {
+                "DROP TABLE conversation_import_files; DROP TABLE conversation_imports; DROP TABLE provider_import_coverage; DROP TABLE settings_import_fields;"
+            } else {
+                "DROP TABLE settings_import_fields;"
+            };
+            changed(&database, &older, &format!("{imported} {dropped} DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
             let bytes = std::fs::read(&older).unwrap();
@@ -343,8 +350,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 21));
-                INSERT INTO agent_store_format VALUES (21);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23));
+                INSERT INTO agent_store_format VALUES (23);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

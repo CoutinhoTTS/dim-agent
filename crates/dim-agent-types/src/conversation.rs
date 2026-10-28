@@ -51,6 +51,7 @@ pub enum ConversationStatus {
     Preparing,
     Committed,
     Deleted,
+    Conflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

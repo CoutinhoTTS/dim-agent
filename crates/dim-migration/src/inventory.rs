@@ -27,7 +27,7 @@ pub(crate) async fn inspect(owner: &Migration, task: &TaskState, source: &Source
     for file in [
         "hooks.json",
         "modality.json",
-        "web-plugin.json",
+        "prompt-locale.json",
         "mcp-projects.json",
         "remote.json",
     ] {
@@ -53,7 +53,7 @@ pub(crate) async fn inspect(owner: &Migration, task: &TaskState, source: &Source
             continue;
         }
         let path = format!("data/plugins/{plugin}/state.json");
-        if document(owner, task, source, &path).await?.is_some() {
+        if plugin != "web" && document(owner, task, source, &path).await?.is_some() {
             retained(owner,task,path,if plugin=="schedule" {"Legacy Schedule state controls tool visibility, not job execution; no equivalent native visibility field exists"} else {"Private plugin state requires its schema owner's import mapping; it is not copied as native state"}).await?;
         }
         let sessions = format!("data/plugins/{plugin}/sessions");

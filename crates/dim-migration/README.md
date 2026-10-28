@@ -65,6 +65,18 @@ clearing a client preference stores null. Unknown client fields and private plug
 state are reported and retained. Executable legacy Workflow definitions are not
 registered as native declarative Workflows.
 
+Web reads the shared version-1 `data/plugins/web/state.json` (the old CLI file
+is used only when shared state is absent). Explicit Brave selection maps to
+Web's search service; inactive adapters, account-dependent defaults and result
+count preferences are reported without choosing a replacement. PluginManager
+fills only absent, unlocked shipped selections; explicit target choices win.
+Configuration fills precede normal plugin enablement reconciliation.
+
+Skills disabled lists retain unchanged shared user IDs with one path component
+and workspace IDs tied to an absolute `.agents/skills` root. Ambiguous nested
+user IDs and host/plugin IDs defer the entire configured list, preserving a later
+complete import. Shared Skills directories are reused without copying.
+
 Command permissions map word-exact and word-prefix allow/deny rules. Connected
 precedence groups containing unsupported rules or allow exceptions that native
 deny priority cannot express are retained without approximation. Empty configured
@@ -84,14 +96,18 @@ private format-1 records. They contain identities, progress, outcomes and fixed
 diagnostics, never credentials or conversation bodies. A physical run lease
 distinguishes active work from an interrupted process. A task left running without
 that lease is reported as interrupted.
+An interrupted directory created before its first state and result is ignored by
+listing. Results without their task state remain an explicit integrity error.
 
 Retry creates a new task with `retryOf` pointing to the previous task; its old
 report remains queryable. It scans the selected source again and reconciles native
 receipts. Completed objects are acknowledged without duplicate publication,
 configured targets are preserved and deleted imports are not recreated. Changed
 immutable source content conflicts rather than silently editing imported history.
-Correction of a failed source object can succeed without stale failures from the
-previous report. Source paths do not serve as durable object identities.
+Objects rejected before reservation can be corrected without stale failures from
+the previous report. An existing immutable reservation requires the same content;
+changed content conflicts even while it remains unpublished. Source paths do not
+serve as durable object identities.
 
 Progress stages identify their units: source/object counts, `file-bytes` and
 `message-chunks`. Progress may be missed; persisted results and owner receipts are

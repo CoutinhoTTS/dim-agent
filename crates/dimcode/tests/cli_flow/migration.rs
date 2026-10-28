@@ -191,7 +191,12 @@ fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin
         .output()
         .unwrap();
     assert!(cancelled.status.success());
+    let unaccepted = home
+        .0
+        .join("migration/tasks/018ec73f-0000-7000-8000-000000000099/results");
+    fs::create_dir_all(&unaccepted).unwrap();
     let listed = home.command().args(["migration", "list"]).output().unwrap();
+    assert!(listed.status.success());
     assert_eq!(
         serde_json::from_slice::<Value>(&listed.stdout)
             .unwrap()
@@ -200,6 +205,14 @@ fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin
             .len(),
         2
     );
+    fs::write(unaccepted.join("orphan.json"), b"{}").unwrap();
+    let damaged = home.command().args(["migration", "list"]).output().unwrap();
+    assert_eq!(
+        damaged.status.code(),
+        Some(1),
+        "Results without state must remain a visible integrity error"
+    );
+    fs::remove_dir_all(unaccepted.parent().unwrap()).unwrap();
     fs::write(
         source.0.join("permissions.json"),
         json!({"version":1,"execCommandPermissions":{"rules":{

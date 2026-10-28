@@ -141,7 +141,29 @@ impl Ledger {
                 .name
                 .to_str()
                 .ok_or_else(|| Error::Source("Migration task path is not UTF-8".into()))?;
-            tasks.push(self.state(id).await?);
+            match self.state(id).await {
+                Ok(task) => tasks.push(task),
+                Err(Error::Storage(FileStorageError::Io(error)))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    let results = self
+                        .files
+                        .list(&self.path(id, "results")?, &CancellationToken::new())
+                        .await;
+                    match results {
+                        Ok(entries) if entries.is_empty() => {}
+                        Err(FileStorageError::Io(error))
+                            if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Ok(_) => {
+                            return Err(Error::Source(
+                                "Migration task results lack their durable task state".into(),
+                            ));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
         tasks.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(tasks)

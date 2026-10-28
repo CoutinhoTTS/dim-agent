@@ -53,8 +53,8 @@ sets an isolated target with `--home`; it must be outside `OLD_HOME`. The stoppe
 acknowledgement is required on inspect, run and retry. Source/target overlap is
 rejected before starting the target daemon. Run and retry mount Migration for the
 invocation and use the ordinary daemon profile; metadata commands mount it without
-a target connection. Disposal drains accepted work before command exit. No long-term
-plugin selection or automatic migration trigger is changed.
+a target connection. Disposal drains accepted work before command exit. Migration
+has no persistent enablement selection or automatic trigger. Imported business configuration uses each owner's ordinary enablement and execution rules.
 
 ```text
 $ dim migration inspect --home /tmp/dim-new --source /tmp/dim-old --source-stopped

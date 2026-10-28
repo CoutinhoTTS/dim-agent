@@ -4445,6 +4445,28 @@
       ]
     },
     {
+      "id": "dim_migration::settings::skills",
+      "crate": "dim_migration",
+      "parent": "dim_migration::settings",
+      "file": "crates/dim-migration/src/settings/skills.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_migration::settings::web",
+      "crate": "dim_migration",
+      "parent": "dim_migration::settings",
+      "file": "crates/dim-migration/src/settings/web.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches"
+      ]
+    },
+    {
       "id": "dim_migration::source",
       "crate": "dim_migration",
       "parent": "dim_migration",
@@ -17333,7 +17355,6 @@
       "references": [
         "mod record",
         "path Choice",
-        "path Choice::default",
         "path Defaults",
         "path Defaults::default",
         "path Defaults::read",
@@ -19888,6 +19909,7 @@
         "path ConversationFileReceipt",
         "path ConversationReceipt",
         "path ConversationStatus::Committed",
+        "path ConversationStatus::Conflict",
         "path ConversationStatus::Deleted",
         "path ConversationStatus::Preparing",
         "use dim_agent_types::ConversationBegin",
@@ -28713,6 +28735,7 @@
         "path Outcome::AlreadyImported",
         "path Outcome::Conflict",
         "path Outcome::Deferred",
+        "path Outcome::Failed",
         "path Outcome::Imported",
         "path Outcome::Unsupported",
         "path Result",
@@ -28797,6 +28820,7 @@
         "path ConversationKey",
         "path ConversationReceipt",
         "path ConversationStatus::Committed",
+        "path ConversationStatus::Conflict",
         "path ConversationStatus::Deleted",
         "path ConversationStatus::Preparing"
       ]
@@ -28834,6 +28858,7 @@
         "path ObjectResult",
         "path Outcome",
         "path Outcome::AlreadyImported",
+        "path Outcome::Conflict",
         "path Outcome::Deferred",
         "path Outcome::Deleted",
         "path Outcome::Failed",
@@ -29080,6 +29105,7 @@
         "path Outcome::AlreadyImported",
         "path Outcome::Conflict",
         "path Outcome::Deferred",
+        "path Outcome::Failed",
         "path Outcome::Imported",
         "path Outcome::Unsupported",
         "path Result",
@@ -29108,6 +29134,23 @@
         "mod permissions",
         "path permissions",
         "path permissions::import"
+      ]
+    },
+    {
+      "from": "dim_migration::settings",
+      "to": "dim_migration::settings::skills",
+      "references": [
+        "mod skills",
+        "path skills",
+        "path skills::import"
+      ]
+    },
+    {
+      "from": "dim_migration::settings",
+      "to": "dim_migration::settings::web",
+      "references": [
+        "mod web",
+        "path web::import"
       ]
     },
     {
@@ -29171,6 +29214,98 @@
       "to": "dim_migration::source",
       "references": [
         "use crate::source::fingerprint"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::skills",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use dim_client::Client"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::skills",
+      "to": "dim_migration",
+      "references": [
+        "path Migration",
+        "path Outcome::Deferred",
+        "path Outcome::Unsupported",
+        "path Result",
+        "path TaskState",
+        "use crate::Migration",
+        "use crate::Outcome",
+        "use crate::Result",
+        "use crate::TaskState"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::skills",
+      "to": "dim_migration::settings",
+      "references": [
+        "path fill",
+        "path record",
+        "use super::fill",
+        "use super::record"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::web",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use dim_client::Client"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::web",
+      "to": "dim_migration",
+      "references": [
+        "path Error::Deferred",
+        "path Error::Object",
+        "path Error::Target",
+        "path Error::Unsupported",
+        "path Migration",
+        "path Outcome::AlreadyImported",
+        "path Outcome::Conflict",
+        "path Outcome::Deferred",
+        "path Outcome::Failed",
+        "path Outcome::Imported",
+        "path Outcome::Unsupported",
+        "path Result",
+        "path TaskState",
+        "use crate::Error",
+        "use crate::Migration",
+        "use crate::Outcome",
+        "use crate::Result",
+        "use crate::TaskState"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::web",
+      "to": "dim_migration::engine",
+      "references": [
+        "path crate::engine::document",
+        "path request",
+        "use crate::engine::request"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::web",
+      "to": "dim_migration::settings",
+      "references": [
+        "path fill",
+        "path record",
+        "use super::fill",
+        "use super::record"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::web",
+      "to": "dim_migration::source",
+      "references": [
+        "path Source",
+        "use crate::source::Source"
       ]
     },
     {

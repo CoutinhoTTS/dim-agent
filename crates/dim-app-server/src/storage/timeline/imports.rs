@@ -121,9 +121,11 @@ impl SessionStore {
                 if present {
                     let import = read(&tx, &request.key)?;
                     if import.request != request || import.agent != agent {
-                        return Err(invalid(
-                            "Conversation import conflicts with its existing source or request",
-                        ));
+                        let mut result = receipt(&tx, &import)?;
+                        if result.status != ConversationStatus::Deleted {
+                            result.status = ConversationStatus::Conflict;
+                        }
+                        return Ok(result);
                     }
                     return receipt(&tx, &import);
                 }

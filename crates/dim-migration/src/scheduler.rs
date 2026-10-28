@@ -46,7 +46,34 @@ pub(crate) async fn import(
         .filter(|result| result.kind == "session")
         .map(|result| (result.id.clone(), result))
         .collect::<BTreeMap<_, _>>();
-    let jobs = source.job_ids()?;
+    let mut jobs = Vec::new();
+    for terminal in [false, true] {
+        match source.job_ids(terminal) {
+            Ok(ids) => jobs.extend(ids.into_iter().map(|id| (terminal, id))),
+            Err(Error::Object(reason)) => {
+                owner
+                    .ledger
+                    .object(
+                        &task.id,
+                        &ObjectResult {
+                            kind: "scheduled_jobs".into(),
+                            id: if terminal {
+                                "legacy-cli"
+                            } else {
+                                "legacy-desktop"
+                            }
+                            .into(),
+                            outcome: Outcome::Failed,
+                            target_id: None,
+                            reason: Some(reason),
+                            omitted: Vec::new(),
+                        },
+                    )
+                    .await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
     task.total = Some(jobs.len() as u64);
     task.processed = 0;
     for (terminal, id) in jobs {

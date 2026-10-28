@@ -413,35 +413,29 @@ impl Source {
             .map_err(object_error)
     }
 
-    pub fn job_ids(&self) -> Result<Vec<(bool, String)>> {
-        let mut result = Vec::new();
-        for terminal in [false, true] {
-            let table = if terminal {
-                "terminal.scheduled_jobs"
-            } else {
-                "scheduled_jobs"
-            };
-            if !self.inventory.tables.contains_key(table) {
-                continue;
-            }
-            let locked = if terminal {
-                self.terminal.lock().unwrap()
-            } else {
-                self.db.lock().unwrap()
-            };
-            let db = locked
-                .as_ref()
-                .ok_or_else(|| Error::Source("Legacy schedule snapshot is closed".into()))?;
-            let ids = db
-                .prepare("SELECT jobId FROM scheduled_jobs ORDER BY jobId")
-                .map_err(object_error)?
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(object_error)?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(object_error)?;
-            result.extend(ids.into_iter().map(|id| (terminal, id)));
+    pub fn job_ids(&self, terminal: bool) -> Result<Vec<String>> {
+        let table = if terminal {
+            "terminal.scheduled_jobs"
+        } else {
+            "scheduled_jobs"
+        };
+        if !self.inventory.tables.contains_key(table) {
+            return Ok(Vec::new());
         }
-        Ok(result)
+        let locked = if terminal {
+            self.terminal.lock().unwrap()
+        } else {
+            self.db.lock().unwrap()
+        };
+        let db = locked
+            .as_ref()
+            .ok_or_else(|| Error::Source("Legacy schedule snapshot is closed".into()))?;
+        db.prepare("SELECT jobId FROM scheduled_jobs ORDER BY jobId")
+            .map_err(object_error)?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(object_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(object_error)
     }
 
     pub fn job(&self, terminal: bool, id: &str) -> Result<ScheduledJob> {

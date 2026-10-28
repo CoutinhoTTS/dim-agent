@@ -13,10 +13,10 @@ WebSocket and earlier protocol connections cannot call it.
 | `session.import.finish` | `key` | final conversation receipt |
 
 The receipt has `agentId`, `sessionId`, `status` (`preparing`, `committed`,
-`deleted`), `nextChunk` and completed file receipts (`id`, `fileId`, `path`, `bytes`).
+`deleted`, `conflict`), `nextChunk` and completed file receipts (`id`, `fileId`, `path`, `bytes`).
 Keys are nonempty caller-owned identities of at most 512 bytes; fingerprints are
 64-character SHA-256 digests covering the source object. Reusing a key with
-different source content or request conflicts. Identity never derives from path.
+different source content or request returns `conflict` with the existing identity and changes no data. A deleted target returns `deleted` even if the source changed. Identity never derives from path.
 The target default Agent owns the reservation and caps its policy as for launch.
 Explicit model references are stored without resolution or availability checks.
 Historical cwd need only be absolute; normal client use determines usability.

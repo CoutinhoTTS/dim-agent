@@ -1401,3 +1401,66 @@ async fn plugin_content_follows_the_record_over_restarts() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_fill_retains_explicit_enablement_across_restart() {
+    let home = home();
+    let config = config(&home);
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for (enabled, expected) in [
+        (false, "imported"),
+        (false, "unchanged"),
+        (true, "conflict"),
+    ] {
+        let reply = call(
+            &mut client,
+            "plugin.fill",
+            json!({"name":"PermissionRules","enabled":enabled}),
+        )
+        .await;
+        assert_eq!(reply["result"]["status"], expected, "{reply}");
+    }
+    let enabled = call(
+        &mut client,
+        "plugin.enable",
+        json!({"name":"PermissionRules"}),
+    )
+    .await;
+    assert!(enabled.get("error").is_none(), "{enabled}");
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(home.join("plugins.json")).unwrap()).unwrap();
+    assert!(record["names"].get("PermissionRules").is_some());
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    for (enabled, expected) in [(true, "unchanged"), (false, "conflict")] {
+        let reply = call(
+            &mut client,
+            "plugin.fill",
+            json!({"name":"PermissionRules","enabled":enabled}),
+        )
+        .await;
+        assert_eq!(reply["result"]["status"], expected, "{reply}");
+    }
+    let locked = call(
+        &mut client,
+        "plugin.fill",
+        json!({"name":"PluginManager","enabled":false}),
+    )
+    .await;
+    assert_eq!(app_error(&locked), "plugin_locked");
+    let missing = call(
+        &mut client,
+        "plugin.fill",
+        json!({"name":"missing","enabled":true}),
+    )
+    .await;
+    assert_eq!(app_error(&missing), "plugin_not_found");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

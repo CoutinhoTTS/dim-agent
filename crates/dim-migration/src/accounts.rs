@@ -59,43 +59,57 @@ pub(crate) async fn import(
 ) -> Result<()> {
     if let Some(auth) = crate::engine::document(owner, task, source, "auth.json").await? {
         if !auth.is_object() {
-            return Err(Error::Object("Legacy auth.json must be an object".into()));
-        }
-        for (id, key, state, method) in [
-            (
-                "dimcode-api-oauth",
-                "nextApiOauth",
-                "dimAccountState",
-                "account.import_legacy",
-            ),
-            (
-                "openai-codex",
-                "openaiCodex",
-                "openaiCodexAccountState",
-                "account.codex.import_legacy",
-            ),
-            (
-                "xai-grok",
-                "xaiGrokBuild",
-                "xaiGrokBuildAccountState",
-                "account.grok.import_legacy",
-            ),
-        ] {
-            if auth.get(key).is_none() {
-                continue;
-            }
-            let mut document = serde_json::Map::new();
-            for field in [key, state] {
-                if let Some(value) = auth.get(field) {
-                    document.insert(field.into(), value.clone());
+            owner
+                .ledger
+                .object(
+                    &task.id,
+                    &ObjectResult {
+                        kind: "file".into(),
+                        id: "auth.json".into(),
+                        outcome: Outcome::Failed,
+                        target_id: None,
+                        reason: Some("Legacy auth.json must be an object".into()),
+                        omitted: Vec::new(),
+                    },
+                )
+                .await?;
+        } else {
+            for (id, key, state, method) in [
+                (
+                    "dimcode-api-oauth",
+                    "nextApiOauth",
+                    "dimAccountState",
+                    "account.import_legacy",
+                ),
+                (
+                    "openai-codex",
+                    "openaiCodex",
+                    "openaiCodexAccountState",
+                    "account.codex.import_legacy",
+                ),
+                (
+                    "xai-grok",
+                    "xaiGrokBuild",
+                    "xaiGrokBuildAccountState",
+                    "account.grok.import_legacy",
+                ),
+            ] {
+                if auth.get(key).is_none() {
+                    continue;
                 }
+                let mut document = serde_json::Map::new();
+                for field in [key, state] {
+                    if let Some(value) = auth.get(field) {
+                        document.insert(field.into(), value.clone());
+                    }
+                }
+                let params = if method == "account.import_legacy" {
+                    json!({"providerId":id,"document":document})
+                } else {
+                    json!({"document":document})
+                };
+                account(owner, task, client, id, method, params).await?;
             }
-            let params = if method == "account.import_legacy" {
-                json!({"providerId":id,"document":document})
-            } else {
-                json!({"document":document})
-            };
-            account(owner, task, client, id, method, params).await?;
         }
     }
     if let Some(mcp) = crate::engine::document(owner, task, source, "mcp-oauth.json").await? {

@@ -43,6 +43,11 @@ pub(crate) async fn request<T: DeserializeOwned>(
                         "Target owner of {method} is unavailable"
                     )));
                 }
+                if matches!(code, "plugin_not_found" | "plugin_locked") {
+                    return Err(Error::Unsupported(
+                        "Target plugin selection cannot be imported".into(),
+                    ));
+                }
                 if code == "schedule_import_unsupported" {
                     return Err(Error::Unsupported(
                         "Legacy recurrence has no equivalent native schedule".into(),
@@ -52,12 +57,14 @@ pub(crate) async fn request<T: DeserializeOwned>(
                     || matches!(
                         code,
                         "provider_invalid"
+                            | "session_invalid_input"
                             | "settings_conflict"
                             | "provider_import_rejected"
                             | "settings_unknown_source"
                             | "account_provider_unavailable"
                             | "account_unsupported_schema"
                             | "account_invalid_store"
+                            | "account_invalid_input"
                             | "account_recovery_required"
                             | "account_required"
                             | "account_identity_rejected"
@@ -66,7 +73,8 @@ pub(crate) async fn request<T: DeserializeOwned>(
                             | "account_unavailable"
                             | "account_failed"
                             | "mcp_auth_unsupported"
-                            | "mcp_not_found"
+                            | "mcp_unknown_server"
+                            | "mcp_invalid_config"
                             | "schedule_invalid"
                             | "schedule_conflict"
                             | "schedule_not_found"
@@ -529,10 +537,8 @@ async fn session(
     }
     let mut paths = BTreeMap::new();
     let marker = format!(
-        "Imported history from legacy Session {}. Earlier messages and tool results are imported records, not newly executed actions. Historical relations: {}",
+        "Imported history from legacy Session {}. Earlier messages and tool results are imported records, not newly executed actions.",
         data.id,
-        serde_json::to_string(&data.relations)
-            .map_err(|_| Error::Object("Legacy relations cannot be encoded".into()))?
     );
     let note_index = data.records.len();
     let mut note_id = "legacy-import-metadata".to_owned();
@@ -577,13 +583,20 @@ async fn session(
         return Ok(ObjectResult {
             kind: "session".into(),
             id: data.id,
-            outcome: if receipt.status == ConversationStatus::Deleted {
-                Outcome::Deleted
-            } else {
-                Outcome::AlreadyImported
+            outcome: match receipt.status {
+                ConversationStatus::Deleted => Outcome::Deleted,
+                ConversationStatus::Conflict => Outcome::Conflict,
+                _ => Outcome::AlreadyImported,
             },
             target_id: Some(receipt.session_id),
-            reason: data.context_error,
+            reason: if receipt.status == ConversationStatus::Conflict {
+                Some(
+                    "Legacy content changed for an existing import identity; target retained"
+                        .into(),
+                )
+            } else {
+                data.context_error
+            },
             omitted,
         });
     }
