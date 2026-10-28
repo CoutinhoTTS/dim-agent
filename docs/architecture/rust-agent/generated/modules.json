@@ -2474,6 +2474,28 @@
       ]
     },
     {
+      "id": "dim_cli::clipboard::terminal",
+      "crate": "dim_cli",
+      "parent": "dim_cli::clipboard",
+      "file": "crates/dim-cli/src/clipboard/terminal.rs",
+      "unexpandedMacros": [
+        "cfg",
+        "format"
+      ]
+    },
+    {
+      "id": "dim_cli::clipboard::terminal::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::clipboard::terminal",
+      "file": "crates/dim-cli/src/clipboard/terminal.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "panic"
+      ]
+    },
+    {
       "id": "dim_cli::clipboard::windows_flow",
       "crate": "dim_cli",
       "parent": "dim_cli::clipboard",
@@ -3825,7 +3847,9 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::terminal",
       "file": "crates/dim-cli/src/ui/terminal/keyboard.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "matches"
+      ]
     },
     {
       "id": "dim_cli::ui::terminal::keyboard::tests",
@@ -20431,6 +20455,13 @@
     },
     {
       "from": "dim_cli::clipboard",
+      "to": "dim_cli::clipboard::terminal",
+      "references": [
+        "mod terminal"
+      ]
+    },
+    {
+      "from": "dim_cli::clipboard",
       "to": "dim_cli::clipboard::windows_flow",
       "references": [
         "mod windows_flow"
@@ -20460,6 +20491,58 @@
         "path Source::Image",
         "path Source::Text",
         "path read_board"
+      ]
+    },
+    {
+      "from": "dim_cli::clipboard::terminal",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::clipboard::terminal",
+      "to": "dim_cli::clipboard",
+      "references": [
+        "path Source",
+        "path Source::Image",
+        "path Source::Text",
+        "use super::Source"
+      ]
+    },
+    {
+      "from": "dim_cli::clipboard::terminal",
+      "to": "dim_cli::clipboard::terminal::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::clipboard::terminal",
+      "to": "dim_cli::images",
+      "references": [
+        "path images::encoded",
+        "use crate::images"
+      ]
+    },
+    {
+      "from": "dim_cli::clipboard::terminal::tests",
+      "to": "dim_cli::clipboard",
+      "references": [
+        "path Source::Image",
+        "path Source::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::clipboard::terminal::tests",
+      "to": "dim_cli::clipboard::terminal",
+      "references": [
+        "path Read::start",
+        "path Reply",
+        "path Step::Done",
+        "path Step::Send",
+        "path parse"
       ]
     },
     {
@@ -26208,6 +26291,14 @@
     },
     {
       "from": "dim_cli::ui::terminal::input",
+      "to": "dim_cli::clipboard::terminal",
+      "references": [
+        "path crate::clipboard::terminal::Reply",
+        "path crate::clipboard::terminal::parse"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::terminal::input",
       "to": "dim_cli::ui::terminal::input::tests",
       "references": [
         "mod tests"
@@ -27076,6 +27167,15 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::clipboard::terminal",
+      "references": [
+        "path crate::clipboard::terminal::Read",
+        "path crate::clipboard::terminal::Read::start",
+        "path crate::clipboard::terminal::native_unreachable"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::login",
       "references": [
         "path crate::login::open_browser"
@@ -27580,6 +27680,7 @@
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path InputEvent",
+        "path InputEvent::Clipboard",
         "path InputEvent::Key",
         "path InputEvent::Mouse",
         "path InputEvent::Paste",
@@ -28985,6 +29086,18 @@
     {
       "module": "dim_cli::ui::tui",
       "path": "Source::Text"
+    },
+    {
+      "module": "dim_cli::ui::tui",
+      "path": "Step::Done"
+    },
+    {
+      "module": "dim_cli::ui::tui",
+      "path": "Step::Pending"
+    },
+    {
+      "module": "dim_cli::ui::tui",
+      "path": "Step::Send"
     },
     {
       "module": "dim_cli::ui::tui",
