@@ -43,7 +43,7 @@ L0  Session ............ 主体：身份、工作区、交互面
 
 ### 4.1 点
 
-fullscreen 的 Tab 选取本来就停在用户消息上。被选消息的点是它之前的那个序号，即"这条消息还没说出口的时候"。它是原子批次的结尾，通常满足 `validate_context_boundary`，在 `main` 上通常也是 rest point；在这里换一种说法分支，正是 S3 的重问与对比。
+fullscreen 的 Tab 选取本来就停在用户消息上。被选消息的点是它之前的那个序号，即"这条消息还没说出口的时候"。它是原子批次的结尾，通常满足 `validate_context_boundary`，在 `main` 上通常也是 rest point；在这里换一种说法分支，正是 S3 的重问与对比。回合运行中排队的消息切在它提交之前，而不是它进入 transcript 的位置；这个切点落在运行中的回合里，所以在那里 fork 会被拒绝，开线也只在上下文边界允许时可行。
 
 当前线的末尾也是一个点：它最近结束的回合，供 `/branch`、`/fork` 使用。还没有结束的回合时没有点（`No finished turn to cut at yet`）。
 

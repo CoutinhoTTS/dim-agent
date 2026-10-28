@@ -43,7 +43,7 @@ An action that does not apply says why in a notice (`A fork copies main; b opens
 
 ### 4.1 Point
 
-The fullscreen pick (Tab) already stops on user messages. A picked message's point is the sequence just before it: "before this message was said". It ends an atomic batch, usually passes `validate_context_boundary`, and on `main` is usually a rest point; branching there with a reworded message is S3's retry-and-compare.
+The fullscreen pick (Tab) already stops on user messages. A picked message's point is the sequence just before it: "before this message was said". It ends an atomic batch, usually passes `validate_context_boundary`, and on `main` is usually a rest point; branching there with a reworded message is S3's retry-and-compare. A message queued while a turn ran cuts before its submission, not where it entered the transcript; that cut lies inside the running turn, so a fork there is refused, and a line only where the context boundary allows.
 
 The end of the shown line is a point as well: its newest turn end, used by `/branch` and `/fork`. With no finished turn there is no point (`No finished turn to cut at yet`).
 

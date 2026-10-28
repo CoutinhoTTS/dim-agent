@@ -36,6 +36,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Fork the session before this message? (y/N)" => "在這則訊息之前派生會話？(y/N)",
         "⑂ new line from {id} · Esc cancel" => "⑂ 從 {id} 開新分支線 · Esc 取消",
         "A fork copies main; b opens a line here" => "派生只複製 main；按 b 在這裡開分支線",
+        "A line opens from text; images and files were not included" => {
+            "分支線只用文字開場；圖片和檔案未包含在內"
+        }
         "No finished turn to cut at yet" => "還沒有已結束的回合可以切分",
         "forked {id} · {count} messages" => "已派生 {id} · {count} 則訊息",
         "after message {count}" => "第 {count} 則訊息之後",

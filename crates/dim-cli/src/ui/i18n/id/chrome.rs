@@ -46,6 +46,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "A fork copies main; b opens a line here" => {
             "Fork hanya menyalin main; b membuka jalur di sini"
         }
+        "A line opens from text; images and files were not included" => {
+            "Jalur dibuka dengan teks; gambar dan file tidak disertakan"
+        }
         "No finished turn to cut at yet" => "Belum ada giliran selesai untuk dipotong",
         "forked {id} · {count} messages" => "fork {id} · {count} pesan",
         "after message {count}" => "setelah pesan {count}",

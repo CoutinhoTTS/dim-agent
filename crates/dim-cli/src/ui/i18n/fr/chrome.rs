@@ -46,6 +46,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ nouvelle ligne depuis {id} · Échap annuler",
         "A fork copies main; b opens a line here" => "Un fork copie main ; b ouvre une ligne ici",
+        "A line opens from text; images and files were not included" => {
+            "Une ligne s'ouvre avec du texte ; images et fichiers non inclus"
+        }
         "No finished turn to cut at yet" => "Aucun tour terminé où couper pour l'instant",
         "forked {id} · {count} messages" => "{id} forkée · {count} messages",
         "after message {count}" => "après le message {count}",

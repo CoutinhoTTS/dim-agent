@@ -42,6 +42,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "A fork copies main; b opens a line here" => {
             "フォークは main のみ複製します。b でここにラインを開けます"
         }
+        "A line opens from text; images and files were not included" => {
+            "ラインはテキストで開きます。画像とファイルは含まれません"
+        }
         "No finished turn to cut at yet" => "切り出せる終了済みのターンがまだありません",
         "forked {id} · {count} messages" => "{id} をフォーク · {count} 件",
         "after message {count}" => "{count} 件目のメッセージの後",

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::model::session::{Command, SessionPort, SwitchKind, Update};
+use crate::model::session::{Command, DraftPart, SessionPort, SwitchKind, Update};
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
 use crate::model::shell::ShellRun;
@@ -1538,20 +1538,16 @@ impl App {
             _ => {}
         }
         match self.composer.handle_key(key) {
-            ComposerOutcome::Submit(text) | ComposerOutcome::SubmitDraft { text, .. }
-                if self.line_draft.is_some() =>
-            {
-                let text = text.trim().to_owned();
-                let _ = history::append(&self.home, &self.cwd_key, &text);
-                self.composer.push_history(&text);
-                let draft = self.line_draft.take().expect("guarded");
-                self.host.send(Command::OpenLine {
-                    session_id: draft.session_id,
-                    projection_id: draft.projection_id,
-                    parent: draft.parent,
-                    at: draft.at,
-                    prompt: text,
-                });
+            ComposerOutcome::Submit(text) if self.line_draft.is_some() => {
+                self.open_line(&text);
+            }
+            ComposerOutcome::SubmitDraft { text, parts } if self.line_draft.is_some() => {
+                if parts.iter().any(|part| matches!(part, DraftPart::Block(_))) {
+                    self.set_notice(t(
+                        "A line opens from text; images and files were not included",
+                    ));
+                }
+                self.open_line(&text);
             }
             ComposerOutcome::Submit(text) => {
                 let text = text.trim().to_owned();
@@ -1777,6 +1773,23 @@ impl App {
             }
             _ => workspace,
         }
+    }
+
+    /// Opens the drafted line with `text` as its opening input.
+    fn open_line(&mut self, text: &str) {
+        let Some(draft) = self.line_draft.take() else {
+            return;
+        };
+        let text = text.trim().to_owned();
+        let _ = history::append(&self.home, &self.cwd_key, &text);
+        self.composer.push_history(&text);
+        self.host.send(Command::OpenLine {
+            session_id: draft.session_id,
+            projection_id: draft.projection_id,
+            parent: draft.parent,
+            at: draft.at,
+            prompt: text,
+        });
     }
 
     /// `b` on a picked message, or `/branch`: the next submit opens a line
@@ -4193,9 +4206,14 @@ mod tests {
                 at,
                 prompt,
             }) => assert_eq!(
-                (session_id.as_str(), *projection_id, parent.as_str(), *at),
-                ("s1", 7, "main", 4),
-                "{prompt}"
+                (
+                    session_id.as_str(),
+                    *projection_id,
+                    parent.as_str(),
+                    *at,
+                    prompt.as_str()
+                ),
+                ("s1", 7, "main", 4, "try RwLock!")
             ),
             _ => panic!("the submit opens the line"),
         }

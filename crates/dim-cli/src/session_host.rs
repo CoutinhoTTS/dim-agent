@@ -1327,7 +1327,6 @@ impl Worker {
         ))
     }
 
-    /// Reports a failed command as a notice; the session itself keeps going.
     /// Whether a request made from a snapshot still addresses this
     /// attachment.
     fn attached(&self, session_id: &str, projection_id: u64) -> bool {
@@ -1336,6 +1335,7 @@ impl Worker {
             && projection_id == self.projection_id
     }
 
+    /// Reports a failed command as a notice; the session itself keeps going.
     fn report_failure<T>(&self, result: crate::Result<T>) -> bool {
         match result {
             Ok(_) => true,

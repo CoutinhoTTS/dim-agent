@@ -50,6 +50,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "A fork copies main; b opens a line here" => {
             "Una bifurcación copia main; b abre una línea aquí"
         }
+        "A line opens from text; images and files were not included" => {
+            "Una línea se abre con texto; no se incluyeron imágenes ni archivos"
+        }
         "No finished turn to cut at yet" => "Aún no hay un turno terminado donde cortar",
         "forked {id} · {count} messages" => "bifurcada {id} · {count} mensajes",
         "after message {count}" => "después del mensaje {count}",

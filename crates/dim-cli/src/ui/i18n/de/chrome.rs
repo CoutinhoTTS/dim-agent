@@ -48,6 +48,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "A fork copies main; b opens a line here" => {
             "Ein Fork kopiert main; b öffnet hier einen Zweig"
         }
+        "A line opens from text; images and files were not included" => {
+            "Ein Zweig startet mit Text; Bilder und Dateien wurden nicht übernommen"
+        }
         "No finished turn to cut at yet" => "Noch kein beendeter Zug zum Abzweigen",
         "forked {id} · {count} messages" => "{id} geforkt · {count} Nachrichten",
         "after message {count}" => "nach Nachricht {count}",
