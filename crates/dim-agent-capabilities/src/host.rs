@@ -248,6 +248,9 @@ pub fn reasoning_config(
     protocol: ModelProtocol,
     effort: &str,
 ) -> Result<ModelConfig, &'static str> {
+    if protocol == ModelProtocol::Bedrock {
+        return Err("Model preferences are not supported by Bedrock");
+    }
     let mut config = base.clone();
     let reasoning = snapshot
         .reasoning
@@ -292,9 +295,8 @@ pub fn reasoning_config(
                     options.reasoning_effort = None;
                 }
             }
-            ModelProtocol::Bedrock => {
-                return Err("Model preferences are not supported by Bedrock");
-            }
+            // Bedrock is rejected above, before the configuration is copied.
+            ModelProtocol::Bedrock => {}
             ModelProtocol::Xai | ModelProtocol::XaiResponses => {
                 if let Some(options) = &mut options.xai {
                     options.reasoning_effort = None;
