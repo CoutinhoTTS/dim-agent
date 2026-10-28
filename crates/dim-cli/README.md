@@ -660,7 +660,30 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | `Esc` | Interrupt the run |
 | `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
 
-The composer box: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
+The composer box: no prompt mark or placeholder, the model at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`), the main branch's context reading (`1.8K / 256K`) and a non-default approvals mode at the left, the working directory and git branch at the right. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
+
+The context reading is the estimate the next request sends against its window, and a compaction threshold the server returned with it. It is read when a session is entered, after a model switch, when a run on `main` ends, and when a compaction result arrives on `main`, so a compaction outside a run does not leave it stale. At or above 90% of that threshold — the interface's `CONTEXT_WARNING_PERCENT`, applied to the returned `thresholdTokens` — the reading is drawn as a warning and says `near the compaction threshold`. The client never computes the threshold itself; the formula belongs to compaction.
+
+A context compaction has a row of its own in the transcript. `context/compaction-start` opens it in the running state, and the `context/compaction` whose `start` names it settles that row; a result without a start, a manual compaction that failed before a strategy ran, gets its own row. The row shows what the record holds:
+
+```text
+ › try the RwLock for the cache lock
+ … reply …
+ · Compacting context…
+ ✓ Context compacted ▾
+ ▎ <dim-summary>
+ ▎ The cache lock moved into a RwLock; the parser race is next.
+ ▎ …
+ ▎ Kept verbatim
+ ▎ Try the RwLock before touching the parser.
+ › carry on
+ ✗ Context compaction failed · the summarizer returned nothing
+ ◦ Context compaction skipped · nothing to cut
+ ◦ Context compaction cancelled · the capability was reloading
+ ✓ Context compacted · insufficient space: summary 3.2K, pinned inputs 1.1K ▸
+```
+
+`✓` is a completed compaction, `✗` a failed one, `◦` one that did not apply, and the skipped, failed and cancelled rows carry the reason or error of their record. The text a completed compaction wrote in place of the cut history is the row's detail, opened and closed the way a tool group's body is: a click on the row, or `/tools` with the other details (`▸` closed, `▾` open). The detail is split where the record says it is: with `replacement_parts`, the strategy's messages are the summary and the inputs the compaction pinned follow under `Kept verbatim`; a record without the field shows the whole replacement as the summary and keeps no second section. The digest has no view of its own until it can hold content. A record whose parts cannot meet the bound carries `insufficientSpace`, and the completed row's header names its parts largest first, with the token counts the gauge's formatter gives them — `insufficient space: summary 3.2K, pinned inputs 1.1K`. The part names are localized labels and the mark is read from the record; the client never decides it. The transcript keeps every earlier row and the compaction adds no boundary of its own; a resume rebuilds the rows from history as they were drawn live. [Compaction requirements](../../docs/design/compaction-quality.md#4-what-users-see-and-control) say what a compaction row must show.
 
 `/models` uses Ctrl+X to clear the highlighted model's saved reasoning/tier preferences with the displayed record version; Enter adopts it separately. For noninteractive recovery, run `dimcode models PROVIDER --clear-preferences MODEL`. A concurrent change fails and requires a reread/retry; preferences are never silently discarded.
 
@@ -681,7 +704,7 @@ Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/l
 
 The palette lists what the interface runs: each row reads category, the action (a `/command` and its description, or an action a key reaches), and at the right edge the key that runs it (`Esc` interrupt, `Ctrl+S` steer, `Home` / `End` scroll, `Tab` pick a message, `Ctrl+C Ctrl+C` exit). An action that cannot run now (no session yet, nothing running, no queued message) is faint and marked `(unavailable)`; fullscreen-only actions are left out of the scrollback palette. Typing ranks the matches: the exact name, a name prefix, an alias prefix, a prefix of a name part (`reload-skills` for `sk`), a name containing the query, a description word starting with it, then three or more letters in order through the name (`stg` for `settings`); a match inside a description word does not count.
 
-`/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetailsExpanded`: expanded by default in both modes; collapsed shows each tool group as its header and folds thoughts, and `/tools` flips it too), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), tool approvals and the model. Switches flip with `Enter`, `←`/`→` or `Space` and are saved to `config.json` at once.
+`/settings` gathers the interface settings: theme and language (each opens its picker and comes back), the startup form (`tuiMode`), tool details (`tuiToolDetailsExpanded`: expanded by default in both modes; collapsed shows each tool group as its header, folds thoughts and closes a compaction row's summary and kept input, and `/tools` flips it too), the fullscreen mouse (`tuiMouseMode`: off hands selection and the wheel to the terminal), notifications (`tuiNotifyOnComplete`, on by default), tool approvals and the model. Switches flip with `Enter`, `←`/`→` or `Space` and are saved to `config.json` at once.
 
 Notifications reach a user who switched windows when the run finishes or waits on a permission or a question (each request once): iTerm2 gets `OSC 9`, kitty `OSC 99`, Ghostty, WezTerm and foot `OSC 777`; tmux and any other terminal get a bell, which tmux forwards and terminals turn into a Dock bounce, a taskbar flash or a tab badge.
 
@@ -910,6 +933,7 @@ The terminal UI reaches the same Session methods as the line client:
 | `/timeline` | Lists the shown line's user messages, oldest first, numbered, each with the first text of its answer, the newest selected. Typing does not filter: `e`, `q`, `b` and `f` act on the selected message as on a pick. `Enter` jumps: fullscreen picks the message (drawing from it first when it is earlier history), so the pick keys apply; scrollback draws a message it has not drawn yet, and everything after it up to what is drawn, as an earlier-history page, and otherwise says `/tui` can jump to it ([timeline UI §4.6](../../docs/design/timeline-ui.md#46-timeline-jumping-to-a-message)) |
 | `/branch [TEXT]`, `/fork [TEXT]` | As `b` and `f` on a picked message, at the shown line's newest turn end: `/branch` puts `TEXT` in the composer as the new line's opening input; `/fork` asks, then forks `main` there with `TEXT` in the fork's composer |
 | `/usage` | Reports the branch's context window from `session.context.usage`: estimated input tokens against the window, the output allowance and the compaction threshold; before a model has answered it says so |
+| `/compact` | Asks the shown line to compact its context with `session.context.compact`, during a run too. The transcript row shows the work and its outcome; the reply is reported when the method answers — `completed`, `skipped` with its reason, or the method's failure (`compaction_failed`, `compaction_cancelled`). A daemon without the method says it does not support context compaction |
 | `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |
 | Paste of local file paths | An image becomes an `[Image: name]` token sent as an image block; another file is inserted as its path. At most 20 images, a group all or nothing |
 | `Ctrl+V` | Reads the native clipboard off the interface thread: files, then an image, then text. `Enter` waits until the read is in |
