@@ -972,7 +972,8 @@
         "json",
         "matches",
         "tokio::select",
-        "unreachable"
+        "unreachable",
+        "vec"
       ]
     },
     {
@@ -10683,6 +10684,7 @@
         "path Sandbox::Network",
         "path Sandbox::Workspace",
         "path ShellKind::Posix",
+        "path TemporaryDirectory",
         "use crate::host_platform::EXEC_SHELL_CONFIG_INVALID",
         "use crate::host_platform::EXEC_SHELL_UNAVAILABLE",
         "use crate::host_platform::HostPlatform",
@@ -10691,7 +10693,8 @@
         "use crate::host_platform::Os",
         "use crate::host_platform::ProcessTree",
         "use crate::host_platform::Sandbox",
-        "use crate::host_platform::ShellKind"
+        "use crate::host_platform::ShellKind",
+        "use crate::host_platform::TemporaryDirectory"
       ]
     },
     {
@@ -10892,6 +10895,7 @@
         "path ToolResult::text",
         "use dim_agent_types::ToolCall",
         "use dim_agent_types::ToolDefinition",
+        "use dim_agent_types::ToolEffect",
         "use dim_agent_types::ToolResult"
       ]
     },
@@ -10983,8 +10987,8 @@
         "path open_regular",
         "path resolve_path",
         "path revision",
-        "path succeeded",
         "path super::CommitHook",
+        "path wrote",
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
@@ -10999,7 +11003,7 @@
         "use super::open_regular",
         "use super::resolve_path",
         "use super::revision",
-        "use super::succeeded"
+        "use super::wrote"
       ]
     },
     {
@@ -11294,8 +11298,8 @@
         "path open_regular",
         "path resolve_path",
         "path revision",
-        "path succeeded",
         "path super::CommitHook",
+        "path wrote",
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
@@ -11310,7 +11314,7 @@
         "use super::open_regular",
         "use super::resolve_path",
         "use super::revision",
-        "use super::succeeded"
+        "use super::wrote"
       ]
     },
     {
@@ -11336,6 +11340,7 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolResult",
+        "use dim_agent_types::ToolEffect",
         "use dim_agent_types::ToolResult"
       ]
     },

@@ -1860,16 +1860,11 @@ async fn timeout_and_cancellation_release_the_whole_tree_before_the_result() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
     let pid_file = harness.cwd.join("timeout.pid");
+    let command = format!("sh -c 'sleep 100 & echo $! > {}; wait'", pid_file.display());
     harness
         .run(
             &session,
-            &[(
-                "exec",
-                json!({
-                    "command": format!("sh -c 'sleep 100 & echo $! > {}; wait'", pid_file.display()),
-                    "timeoutMs": 1000
-                }),
-            )],
+            &[("exec", json!({ "command": command, "timeoutMs": 1000 }))],
         )
         .await;
     let pid = pid_in(&pid_file).await;
@@ -1880,6 +1875,15 @@ async fn timeout_and_cancellation_release_the_whole_tree_before_the_result() {
         text(result).ends_with("Command timed out."),
         "{}",
         text(result)
+    );
+    assert_eq!(
+        result.effects,
+        Some(vec![ToolEffect::CommandRun {
+            command: command.clone(),
+            exit_code: None,
+            signal: None,
+        }]),
+        "the tool stopped the command and observed no exit"
     );
     assert!(gone(&pid).await);
 
@@ -1899,6 +1903,65 @@ async fn timeout_and_cancellation_release_the_whole_tree_before_the_result() {
     let events = until(&session, "cancel", |events| tool_results(events) == 2).await;
     assert!(!alive(&pid) || gone(&pid).await);
     assert!(text(&results(&events)[1]).contains("Command cancelled."));
+    assert_eq!(
+        results(&events)[1].effects,
+        None,
+        "ToolExecutor settles a cancelled call, so it carries no declaration"
+    );
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exec_results_declare_the_command_they_started() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[
+                ("exec", json!({ "command": "echo declared" })),
+                ("exec", json!({ "command": "exit 7" })),
+            ],
+        )
+        .await;
+    let events = until(&session, "effects", |events| tool_results(events) == 1).await;
+    let declared = results(&events);
+    assert_eq!(
+        declared[0].effects,
+        Some(vec![ToolEffect::CommandRun {
+            command: "echo declared".into(),
+            exit_code: Some(0),
+            signal: None,
+        }])
+    );
+    assert_eq!(
+        declared[1].effects,
+        Some(vec![ToolEffect::CommandRun {
+            command: "exit 7".into(),
+            exit_code: Some(7),
+            signal: None,
+        }]),
+        "a non-zero exit is an error result that still declares the exit"
+    );
+    assert_eq!(declared[1].is_error, Some(true));
+
+    harness
+        .run(
+            &session,
+            &[("exec", json!({ "command": "sleep 1 & wait" }))],
+        )
+        .await;
+    let events = until(&session, "refused", |events| tool_results(events) == 2).await;
+    let refused = &results(&events)[2];
+    assert_eq!(
+        refused.structured_content.as_ref().unwrap()["code"],
+        "exec_invalid_request"
+    );
+    assert_eq!(
+        refused.effects, None,
+        "a command that never started declares nothing"
+    );
     session.close().await.unwrap();
     harness.shutdown().await;
 }
@@ -1907,15 +1970,14 @@ async fn timeout_and_cancellation_release_the_whole_tree_before_the_result() {
 async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
+    let command =
+        "sleep 1; awk 'BEGIN { for (i=0; i<200000; i++) printf \"z\" }'; echo tail-marker";
     harness
         .run(
             &session,
             &[(
                 "exec",
-                json!({
-                    "command": "sleep 1; awk 'BEGIN { for (i=0; i<200000; i++) printf \"z\" }'; echo tail-marker",
-                    "runInBackground": true
-                }),
+                json!({ "command": command, "runInBackground": true }),
             )],
         )
         .await;
@@ -1935,6 +1997,15 @@ async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice(
         .unwrap()
         .sequence;
     assert!(*started_at < result_at);
+    assert_eq!(
+        results(&events)[0].effects,
+        Some(vec![ToolEffect::CommandRun {
+            command: command.into(),
+            exit_code: None,
+            signal: None,
+        }]),
+        "the handoff observed that the command started and nothing more"
+    );
     let running = text(&results(&events)[0]).to_owned();
     assert!(running.starts_with("Command started in background.\nTask ID: "));
     assert!(running.contains(&format!("Task ID: {}", data.task_id)));
