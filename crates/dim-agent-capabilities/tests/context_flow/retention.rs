@@ -568,3 +568,102 @@ async fn a_summary_that_overshoots_the_budget_fails_the_recovery_request() {
     assert!(facts.input_tokens > budget, "{facts:?}");
     agent.close().await.unwrap();
 }
+
+/// A child branch forked after the parent's completed compaction counts the
+/// history it writes as new, although its local sequences are smaller than
+/// the inherited attempt's `through`: the attempt's boundary is read in the
+/// context's own order (ContextCompaction §5.6, acceptance 11).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_branch_regrows_from_its_own_history() {
+    let agent = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(3_000.),
+            summary: Some(Box::leak("s".repeat(1_100).into_boxed_str())),
+            ..Context::default()
+        },
+    )
+    .build();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    for text in ["p".repeat(1_500), "q".repeat(1_500)] {
+        session
+            .submit(text, InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    let events = session.history("main", None).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                EventKind::ContextCompaction(ContextCompactionData {
+                    outcome: ContextCompactionResult::Completed { .. },
+                    ..
+                })
+            ))
+            .count(),
+        1,
+        "the parent compacts once"
+    );
+    let at = session.sequence("main").unwrap();
+    let child = session
+        .branch(
+            "main".into(),
+            at,
+            BranchOptions {
+                prompt: "child".into(),
+                source: BranchSource::Host {
+                    operation_id: "test-branch".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+    session
+        .submit("c".repeat(1_500), InputMode::Queue, &child)
+        .await
+        .unwrap();
+    session.idle(&child).await.unwrap();
+    let child_events = session.history(&child, None).await.unwrap();
+    let inherited = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::ContextCompactionStart(_)))
+        .count();
+    let starts: Vec<_> = child_events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ContextCompactionStart(data) => Some(data.trigger),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts.len(),
+        inherited + 1,
+        "the child compacts on the history it wrote: {starts:?}"
+    );
+    assert_eq!(
+        starts.last(),
+        Some(&CompactionTrigger::Threshold),
+        "at the threshold, without overflow recovery"
+    );
+    let budget = child_events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextBudget(data) => Some(data.estimated_input_tokens),
+            _ => None,
+        })
+        .expect("the child's preparation");
+    assert!(
+        budget >= 3_000.,
+        "the estimate reaches the threshold: {budget}"
+    );
+    agent.close().await.unwrap();
+}

@@ -1024,24 +1024,33 @@ fn truncate_pin(id: Option<&str>, text: &str, share: f64, model: &dyn ContextMod
 /// attempt's start `through`, counted with `count_tokens` each and summed. A
 /// branch with no start has all its history new. Automatic compaction runs
 /// only when this holds; budget recovery is exempt.
+///
+/// `through` is a sequence of the branch that wrote the start, so it is
+/// mapped through `positions` to that branch's last event at or before it,
+/// and an entry is new when its own event follows that one in the context's
+/// order: a child branch's smaller local sequences are still new after an
+/// inherited attempt.
 fn regrown(view: &View, model: &dyn ContextModel) -> bool {
-    let Some(through) = view
-        .context
+    let context = &view.context;
+    let Some(start) = context
         .events
         .iter()
-        .rev()
-        .find_map(|event| match &event.kind {
-            EventKind::ContextCompactionStart(data) => Some(data.through),
-            _ => None,
-        })
+        .rposition(|event| matches!(&event.kind, EventKind::ContextCompactionStart(_)))
     else {
         return true;
     };
-    let sequences: HashMap<&str, u64> = view
-        .context
+    let EventKind::ContextCompactionStart(data) = &context.events[start].kind else {
+        unreachable!("matched a start")
+    };
+    let branch = &context.positions[start].branch_id;
+    let boundary = context.positions[..start]
+        .iter()
+        .rposition(|position| position.branch_id == *branch && position.sequence <= data.through);
+    let order: HashMap<&str, usize> = context
         .events
         .iter()
-        .map(|event| (event.id.as_str(), event.sequence))
+        .enumerate()
+        .map(|(index, event)| (event.id.as_str(), index))
         .collect();
     let count = |messages: Vec<Message>| model.count_tokens(&ModelRequest::new("", "", messages));
     let empty = count(Vec::new());
@@ -1049,9 +1058,12 @@ fn regrown(view: &View, model: &dyn ContextModel) -> bool {
         .history
         .iter()
         .filter(|entry| {
-            sequences
+            order
                 .get(entry.source.as_str())
-                .is_some_and(|sequence| *sequence > through)
+                .is_some_and(|index| match boundary {
+                    Some(boundary) => *index > boundary,
+                    None => true,
+                })
         })
         .map(|entry| count(vec![entry.message.clone()]) - empty)
         .sum();
