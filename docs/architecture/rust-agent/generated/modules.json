@@ -3582,6 +3582,7 @@
       "file": "crates/dim-cli/src/ui/render/fullscreen.rs",
       "unexpandedMacros": [
         "format",
+        "matches",
         "vec",
         "write"
       ]
@@ -25199,8 +25200,10 @@
       "to": "dim_cli::ui::render::panel",
       "references": [
         "path clip",
+        "path escape_len",
         "path strip_escapes",
         "use crate::ui::render::panel::clip",
+        "use crate::ui::render::panel::escape_len",
         "use crate::ui::render::panel::strip_escapes"
       ]
     },
@@ -25234,7 +25237,9 @@
       "to": "dim_cli::ui::text",
       "references": [
         "path display_width",
-        "use crate::ui::text::display_width"
+        "path gutter_width",
+        "use crate::ui::text::display_width",
+        "use crate::ui::text::gutter_width"
       ]
     },
     {
@@ -26794,9 +26799,11 @@
       "to": "dim_cli::ui::text",
       "references": [
         "path display_width",
+        "path gutter_width",
         "path truncate_cells",
         "path wrap_cells",
         "use crate::ui::text::display_width",
+        "use crate::ui::text::gutter_width",
         "use crate::ui::text::truncate_cells",
         "use crate::ui::text::wrap_cells"
       ]
@@ -27420,6 +27427,7 @@
         "path Document",
         "path FullScreen::focused",
         "path FullScreen::new",
+        "path FullScreen::selecting",
         "path MouseOutcome::Click",
         "path MouseOutcome::Copy",
         "path MouseOutcome::Ignored",
