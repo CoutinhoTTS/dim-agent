@@ -5,7 +5,7 @@ use crate::model::shell::Outcome as ShellOutcome;
 use crate::ui::i18n::{t, tf};
 use crate::ui::render::markdown::MarkdownRenderer;
 use crate::ui::render::panel::{clip, wrap};
-use crate::ui::text::{display_width, truncate_cells, wrap_cells};
+use crate::ui::text::{display_width, gutter_width, truncate_cells, wrap_cells};
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
 use crate::ui::transcript::block::{Block, Tone};
@@ -18,11 +18,6 @@ const BOUNDARY_MAX_WIDTH: usize = 60;
 pub const ASSISTANT_MARK: &str = "\u{25c6}";
 /// The bar in front of every row of a user message, as Amp draws it.
 pub const USER_MARK: &str = "\u{2503}";
-
-/// Gutter columns for a terminal of `width` (narrow terminals get one).
-pub fn gutter_width(width: usize) -> usize {
-    if width < 40 { 1 } else { 2 }
-}
 
 /// The mark cell(s) of a gutter.
 pub fn gutter_mark(mark: &str, gutter: usize) -> String {
@@ -418,7 +413,7 @@ pub(crate) fn render_block(
 ) -> Vec<String> {
     match block {
         Block::Banner => Vec::new(),
-        Block::User(text) => render_user(
+        Block::User { text, .. } => render_user(
             &crate::sanitize::safe(text),
             width,
             &UserStyle {
@@ -487,6 +482,9 @@ pub(crate) fn render_block(
         Block::Failure(message) => vec![tf("Error: {message}", &[("message", message)])],
         Block::Boundary(label) => vec![fg(&boundary_line(label, width), &p.muted)],
         Block::Note(text) => vec![fg(&truncate_cells(text, width), &p.muted)],
+        Block::Line { text, .. } => {
+            gutter_text("⑂", &crate::sanitize::safe(text), width, &p.accent)
+        }
     }
 }
 

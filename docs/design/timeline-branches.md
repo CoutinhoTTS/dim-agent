@@ -401,7 +401,7 @@ These are run locally on real models, and the results are reported in the implem
 
 ## 14. Clients
 
-**TUI.** Lines get their own panel, view and controls:
+**TUI.** Lines get their own panel, view and controls. Opening a line or a fork from a point of the shown Timeline, and where each line was cut, are in [Timeline-first TUI](timeline-ui.md):
 
 - `/lines` (alias `/branches`) lists every line of the Session, each indented under the line that opened it, with its state: working, waiting, ended itself, ended by an operation, ended with X, or creation failed.
 - Enter shows the selected line's conversation. The composer submits to the line shown, and the composer's bottom border names it, with the first eight characters of its id.

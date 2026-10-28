@@ -33,6 +33,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main はセッション自体です。ラインは終了できますが main は終了しません"
         }
         "Line has ended:" => "ラインは終了しました:",
+        "e edit · b branch · f fork" => "e 編集 · b ブランチ · f フォーク",
+        "e edit" => "e 編集",
+        "Fork the session before this message? (y/N)" => {
+            "このメッセージの前でセッションをフォークしますか？(y/N)"
+        }
+        "⑂ new line from {id} · Esc cancel" => "⑂ {id} から新しいライン · Esc キャンセル",
+        "A fork copies main; b opens a line here" => {
+            "フォークは main のみ複製します。b でここにラインを開けます"
+        }
+        "A line opens from text; images and files were not included" => {
+            "ラインはテキストで開きます。画像とファイルは含まれません"
+        }
+        "No finished turn to cut at yet" => "切り出せる終了済みのターンがまだありません",
+        "forked {id} · {count} messages" => "{id} をフォーク · {count} 件",
+        "after message {count}" => "{count} 件目のメッセージの後",
+        "open a line from the end of the shown line" => "表示中のラインの末尾からラインを開く",
+        "fork the session at its last finished turn" => {
+            "最後に終了したターンでセッションをフォーク"
+        }
         "Starting" => "起動中",
         "Delegation result" => "委任結果",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {

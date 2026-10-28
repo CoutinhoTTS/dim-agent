@@ -5,6 +5,11 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// Gutter columns for a terminal of `width` (narrow terminals get one).
+pub fn gutter_width(width: usize) -> usize {
+    if width < 40 { 1 } else { 2 }
+}
+
 pub fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }

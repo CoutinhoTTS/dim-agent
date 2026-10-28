@@ -8,15 +8,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dim_agent_types::{
-    BranchCreateFailedData, BranchSource, CollaborationDelivery, CollaborationOutcome,
-    CollaborationTarget, ContentBlock, ExecStatus, InputMode, JsonObject, ModelOutputOutcome,
-    ToolContent, ToolResult, TurnOutcome, UserInput,
+    BranchCreateAt, BranchCreateFailedData, BranchSource, CollaborationDelivery,
+    CollaborationOutcome, CollaborationTarget, ContentBlock, ExecStatus, InputMode, JsonObject,
+    ModelOutputOutcome, ToolContent, ToolResult, TurnOutcome, UserInput,
 };
 use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, LineState, LineView, MemberCard, MemberConversationState, MemberTarget,
+    ApprovalView, LineCut, LineState, LineView, MemberCard, MemberConversationState, MemberTarget,
     QueuedInput, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd, ViewRow,
     ViewSnapshot, WorkflowView,
 };
@@ -35,6 +35,10 @@ pub struct Projection {
     owner: String,
     /// The lines of the Session, as `main` recorded them (design §14).
     lines: Vec<LineView>,
+    /// Each line's own user messages, by input id and submission sequence,
+    /// to count where a line was cut (timeline UI §6); a withdrawn one is
+    /// dropped.
+    messages: HashMap<String, Vec<(String, u64)>>,
     /// Shared with the published snapshots: a snapshot copies pointers, and
     /// a row is copied only when it changes while a snapshot still holds it
     /// (in practice the one that is streaming).
@@ -54,7 +58,8 @@ pub struct Projection {
     /// applied yet. Shown in the queue strip; each enters the transcript
     /// when its `input/applied` comes, so the transcript keeps the order
     /// the model sees. Withdrawal re-submits the kept `UserInput` as Steer.
-    held: Vec<(String, UserInput)>,
+    /// Each keeps its input id and the sequence it was submitted at.
+    held: Vec<(String, u64, UserInput)>,
     /// Unfinished tasks and the latest 50 terminal results.
     tasks: Vec<TaskView>,
     /// The `exec` call each background task came from, until it ends.
@@ -93,6 +98,17 @@ impl Projection {
     /// (design §14).
     fn lines(&mut self, parent: &str, event: &Event) {
         match &event.content {
+            EventContent::Input(data) if data.user.is_some() => {
+                self.messages
+                    .entry(parent.to_owned())
+                    .or_default()
+                    .push((event.id.clone(), event.sequence));
+            }
+            EventContent::InputDeleted(data) => {
+                if let Some(messages) = self.messages.get_mut(parent) {
+                    messages.retain(|(id, _)| *id != data.input_id);
+                }
+            }
             EventContent::BranchCreate(data) => {
                 let purpose = data
                     .prompt
@@ -102,11 +118,31 @@ impl Projection {
                     .trim()
                     .to_owned();
                 if !self.lines.iter().any(|line| line.id == data.branch) {
+                    let sequence = match data.at {
+                        BranchCreateAt::Sequence { sequence } => sequence,
+                        BranchCreateAt::Create {} => event.sequence,
+                    };
+                    let inherited = self
+                        .lines
+                        .iter()
+                        .find(|line| line.id == parent)
+                        .and_then(|line| line.cut)
+                        .map_or(0, |cut| cut.messages);
+                    let own = self.messages.get(parent).map_or(0, |messages| {
+                        messages
+                            .iter()
+                            .take_while(|(_, at)| *at <= sequence)
+                            .count()
+                    });
                     self.lines.push(LineView {
                         id: data.branch.clone(),
                         parent: Some(parent.to_owned()),
                         purpose,
                         state: LineState::Waiting,
+                        cut: Some(LineCut {
+                            sequence,
+                            messages: inherited + own,
+                        }),
                     });
                 }
             }
@@ -173,9 +209,9 @@ impl Projection {
                 if let Some(user) = &data.user {
                     let held = self.running && data.mode != Some(InputMode::Append);
                     if held {
-                        self.held.push((event.id.clone(), user.clone()));
+                        self.held.push((event.id.clone(), sequence, user.clone()));
                     } else {
-                        self.push_user(sequence, user);
+                        self.push_user(sequence, sequence, user);
                     }
                 } else if let Some(text) = data.blocks.iter().find_map(|block| {
                     let dim_agent_types::InputBlock::Raw { text, .. } = block;
@@ -190,13 +226,34 @@ impl Projection {
                 }
             }
             EventContent::InputApplied(data) => {
-                if let Some(index) = self.held.iter().position(|(id, _)| *id == data.input_id) {
-                    let (_, user) = self.held.remove(index);
-                    self.push_user(sequence, &user);
+                if let Some(index) = self.held.iter().position(|(id, _, _)| *id == data.input_id) {
+                    let (_, submitted, user) = self.held.remove(index);
+                    self.push_user(sequence, submitted, &user);
                 }
             }
             EventContent::InputDeleted(data) => {
-                self.held.retain(|(id, _)| *id != data.input_id);
+                self.held.retain(|(id, _, _)| *id != data.input_id);
+            }
+            EventContent::BranchCreate(data) => {
+                let mut text = format!("line {}", data.branch.get(..8).unwrap_or(&data.branch));
+                let at = match data.at {
+                    BranchCreateAt::Sequence { sequence } => sequence,
+                    BranchCreateAt::Create {} => sequence,
+                };
+                if let Some(message) = self.rows.iter().find(|row| row.cut == Some(at)) {
+                    let first = message.text.lines().next().unwrap_or_default();
+                    let mut quoted: String = first.chars().take(40).collect();
+                    if quoted.len() < first.len() {
+                        quoted.push('…');
+                    }
+                    text.push_str(&format!(" · before “{quoted}”"));
+                }
+                let purpose = data.prompt.lines().next().unwrap_or_default().trim();
+                if !purpose.is_empty() {
+                    text.push_str(&format!(" · {purpose}"));
+                }
+                let index = self.push(format!("opened-{sequence}"), RowKind::Status, text);
+                self.row(index).line = Some(data.branch.clone());
             }
             EventContent::BranchEnd(data) => {
                 let issuer = match (&data.source, &data.ancestor) {
@@ -498,7 +555,6 @@ impl Projection {
             EventContent::Configuration(_)
             | EventContent::ToolCall(_)
             | EventContent::BranchStart(_)
-            | EventContent::BranchCreate(_)
             | EventContent::BranchCreateFailed(_)
             | EventContent::BranchEnded(_)
             | EventContent::PermissionChanged(_)
@@ -548,22 +604,25 @@ impl Projection {
     }
 
     /// A user message as a transcript row: a shell run's record draws as one.
-    fn push_user(&mut self, sequence: u64, user: &UserInput) {
+    /// It cuts just before `submitted`, where its input was written, even
+    /// when it enters the transcript later (timeline UI §4.1).
+    fn push_user(&mut self, sequence: u64, submitted: u64, user: &UserInput) {
         let text = text_of(&user.content);
         let kind = if ShellRun::parse(&text).is_some() {
             RowKind::Shell
         } else {
             RowKind::UserMessage
         };
-        self.push(format!("user-{sequence}"), kind, text);
+        let index = self.push(format!("user-{sequence}"), kind, text);
+        self.row(index).cut = Some(submitted.saturating_sub(1));
     }
 
     /// The content of a held message, to re-submit it as Steer.
     pub fn held_input(&self, input_id: &str) -> Option<&UserInput> {
         self.held
             .iter()
-            .find(|(id, _)| id == input_id)
-            .map(|(_, user)| user)
+            .find(|(id, _, _)| id == input_id)
+            .map(|(_, _, user)| user)
     }
 
     pub fn add_approval(
@@ -611,7 +670,7 @@ impl Projection {
             queued: self
                 .held
                 .iter()
-                .map(|(id, user)| QueuedInput {
+                .map(|(id, _, user)| QueuedInput {
                     id: id.clone(),
                     text: text_of(&user.content),
                 })
@@ -898,6 +957,8 @@ impl Projection {
             diff: None,
             exit_code: None,
             member: None,
+            cut: None,
+            line: None,
         }));
         self.rows.len() - 1
     }
@@ -1227,9 +1288,19 @@ mod tests {
                 }),
             )
         };
+        let said = |sequence: u64, text: &str| {
+            serde_json::json!({
+                "sequence": sequence, "create_at": sequence * 1000, "type": "input", "name": "message",
+                "data": {"user": {"content": [{"type": "text", "text": text}]}},
+            })
+        };
         apply(
             &mut main,
-            &[create(4, "b-7c", "parser race hypothesis\nrest")],
+            &[
+                said(1, "find the leak"),
+                said(2, "try the parser"),
+                create(4, "b-7c", "parser race hypothesis\nrest"),
+            ],
         );
         assert_eq!(
             main.line_views(),
@@ -1238,7 +1309,46 @@ mod tests {
                 parent: Some("main".into()),
                 purpose: "parser race hypothesis".into(),
                 state: LineState::Waiting,
+                cut: Some(LineCut {
+                    sequence: 3,
+                    messages: 2,
+                }),
             }]
+        );
+        let rows = main.snapshot().rows;
+        assert_eq!(
+            rows.iter().map(|row| row.cut).collect::<Vec<_>>(),
+            [Some(0), Some(1), None],
+            "a message cuts just before itself"
+        );
+        assert_eq!(rows[2].text, "line b-7c · parser race hypothesis");
+        let mut picked = Projection::default();
+        apply(
+            &mut picked,
+            &[
+                said(1, "find the leak"),
+                said(2, "try the parser"),
+                line_event(
+                    5,
+                    "create",
+                    serde_json::json!({
+                        "at": {"kind": "sequence", "sequence": 1},
+                        "source": {"kind": "host", "operation_id": "op-0"},
+                        "branch": "70560552-954d-4dd2",
+                        "prompt": "try the cache",
+                    }),
+                ),
+            ],
+        );
+        assert_eq!(
+            picked.snapshot().rows[2].text,
+            "line 70560552 · before “try the parser” · try the cache",
+            "a line cut before a message names it, wherever its marker lands"
+        );
+        assert_eq!(
+            rows[2].line.as_deref(),
+            Some("b-7c"),
+            "the marker enters the line it opened"
         );
         apply(
             &mut main,
@@ -1267,6 +1377,10 @@ mod tests {
             )],
         );
         assert_eq!(main.line_views()[1].state, LineState::EndedByOperation);
+        main.apply(
+            "b-7c",
+            &serde_json::from_value(said(10, "check it")).unwrap(),
+        );
         let nested: Event =
             serde_json::from_value(create(13, "b-90", "review the change")).unwrap();
         main.apply("b-7c", &nested);
@@ -1277,6 +1391,10 @@ mod tests {
                 parent: Some("b-7c".into()),
                 purpose: "review the change".into(),
                 state: LineState::Waiting,
+                cut: Some(LineCut {
+                    sequence: 12,
+                    messages: 3,
+                }),
             }),
             "a line a line opened is still a line of the Session"
         );
@@ -1329,6 +1447,60 @@ mod tests {
                 .iter()
                 .any(|row| row.text == "This line ended (with b-7c)"),
             "a cascaded line's own transcript names its ancestor"
+        );
+    }
+
+    #[test]
+    fn a_queued_message_cuts_at_its_submission_and_a_withdrawn_one_is_not_counted() {
+        let input = |sequence: u64, id: &str, text: &str, mode: &str| {
+            serde_json::json!({
+                "id": id, "sequence": sequence, "create_at": sequence * 1000,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": [{"type": "text", "text": text}]}, "mode": mode},
+            })
+        };
+        let control = |sequence: u64, name: &str, id: &str| {
+            serde_json::json!({
+                "id": format!("ev-{sequence}"), "sequence": sequence, "create_at": sequence * 1000,
+                "type": "input", "name": name, "data": {"input_id": id},
+            })
+        };
+        let mut main = Projection::default();
+        apply(&mut main, &[input(1, "in-1", "find the leak", "queue")]);
+        main.set_running(true);
+        apply(
+            &mut main,
+            &[
+                input(2, "in-2", "withdrawn", "queue"),
+                control(3, "deleted", "in-2"),
+                input(4, "in-4", "later", "queue"),
+                control(6, "applied", "in-4"),
+            ],
+        );
+        let rows = main.snapshot().rows;
+        let later = rows.iter().find(|row| row.text == "later").unwrap();
+        assert_eq!(
+            later.cut,
+            Some(3),
+            "a message that waited in the queue cuts before its submission"
+        );
+        apply(
+            &mut main,
+            &[line_event(
+                7,
+                "create",
+                serde_json::json!({
+                    "at": {"kind": "sequence", "sequence": 3},
+                    "source": {"kind": "host", "operation_id": "op-1"},
+                    "branch": "b-1",
+                    "prompt": "retry",
+                }),
+            )],
+        );
+        assert_eq!(
+            main.line_views()[0].cut.map(|cut| cut.messages),
+            Some(1),
+            "a withdrawn message is not counted"
         );
     }
 

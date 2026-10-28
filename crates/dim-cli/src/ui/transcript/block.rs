@@ -25,7 +25,11 @@ pub enum Tone {
 pub enum Block {
     /// The startup banner. Drawn at the terminal's full width, not from a row.
     Banner,
-    User(String),
+    /// A user message; `cut` is where a line or fork opened from it cuts.
+    User {
+        text: String,
+        cut: Option<u64>,
+    },
     /// A shell-mode run: recorded (`!`) from the transcript, private (`!!`)
     /// from the terminal alone.
     Shell(ShellRun),
@@ -48,6 +52,11 @@ pub enum Block {
     Boundary(String),
     /// One muted line (earlier-history page header).
     Note(String),
+    /// Where a line opened on the shown line; a pick enters it.
+    Line {
+        id: String,
+        text: String,
+    },
 }
 
 /// The block the settled view row at `index` draws as. A tool call draws
@@ -57,11 +66,24 @@ pub enum Block {
 /// laid out by the stream planner, which the caller decides.
 pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block {
     let row = &rows[index];
+    if let Some(id) = &row.line {
+        return Block::Line {
+            id: id.clone(),
+            text: row.text.clone(),
+        };
+    }
     match row.kind {
-        RowKind::UserMessage => Block::User(row.text.clone()),
-        RowKind::Shell => {
-            ShellRun::parse(&row.text).map_or_else(|| Block::User(row.text.clone()), Block::Shell)
-        }
+        RowKind::UserMessage => Block::User {
+            text: row.text.clone(),
+            cut: row.cut,
+        },
+        RowKind::Shell => ShellRun::parse(&row.text).map_or_else(
+            || Block::User {
+                text: row.text.clone(),
+                cut: row.cut,
+            },
+            Block::Shell,
+        ),
         RowKind::AssistantMessage => Block::Assistant(row.text.clone()),
         RowKind::Thinking => Block::Thinking {
             text: row.text.clone(),
@@ -130,6 +152,8 @@ mod tests {
             diff: None,
             exit_code: None,
             member: None,
+            cut: None,
+            line: None,
         }
     }
 

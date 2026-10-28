@@ -39,6 +39,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main ist die Sitzung selbst; ein Zweig endet, main nicht"
         }
         "Line has ended:" => "Zweig wurde beendet:",
+        "e edit · b branch · f fork" => "e bearbeiten · b Zweig · f Fork",
+        "e edit" => "e bearbeiten",
+        "Fork the session before this message? (y/N)" => {
+            "Sitzung vor dieser Nachricht forken? (y/N)"
+        }
+        "⑂ new line from {id} · Esc cancel" => "⑂ neuer Zweig von {id} · Esc abbrechen",
+        "A fork copies main; b opens a line here" => {
+            "Ein Fork kopiert main; b öffnet hier einen Zweig"
+        }
+        "A line opens from text; images and files were not included" => {
+            "Ein Zweig startet mit Text; Bilder und Dateien wurden nicht übernommen"
+        }
+        "No finished turn to cut at yet" => "Noch kein beendeter Zug zum Abzweigen",
+        "forked {id} · {count} messages" => "{id} geforkt · {count} Nachrichten",
+        "after message {count}" => "nach Nachricht {count}",
+        "open a line from the end of the shown line" => {
+            "einen Zweig am Ende des angezeigten Zweigs öffnen"
+        }
+        "fork the session at its last finished turn" => {
+            "die Sitzung am letzten beendeten Zug forken"
+        }
         "Starting" => "Startet",
         "Delegation result" => "Delegationsergebnis",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {

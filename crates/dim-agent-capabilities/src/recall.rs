@@ -330,7 +330,7 @@ fn string(field: &str, value: &Value, limit: Option<usize>) -> Result<String, St
     let Some(text) = value.as_str() else {
         return Err(format!("recall: {field} must be a string."));
     };
-    if text.is_empty() {
+    if text.trim().is_empty() {
         return Err(format!("recall: {field} must be a non-empty string."));
     }
     if let Some(limit) = limit
@@ -851,6 +851,9 @@ impl<'a> Narrative<'a> {
             .filter(|(_, owner)| **owner == Some(index))
             .map(|(thing, _)| self.thing_line(thing))
             .collect();
+        if lines.is_empty() && offset == 0 {
+            return page("turn", vec!["Nothing in this turn.".into()], &[], None);
+        }
         if offset >= lines.len() {
             return ToolResult::error(format!("Turn {} has {} lines.", turn.id, lines.len()));
         }
@@ -964,31 +967,38 @@ impl<'a> Narrative<'a> {
     fn turn_line(&self, index: usize, calling_turn: &str) -> String {
         let turn = &self.turns[index];
         let mut parts = Vec::new();
-        match self
+        // The inputs that opened the turn: the ones it consumed before its
+        // first model request, so a steer read later does not open it (§3.6).
+        let opening: Vec<(&InputMessageData, &[bool])> = self
             .things
             .iter()
             .zip(&self.owners)
-            .find(|(_, owner)| **owner == Some(index))
-            .map(|(thing, _)| thing)
+            .filter(|(_, owner)| **owner == Some(index))
+            .filter_map(|(thing, _)| match &thing.kind {
+                Kind::Input {
+                    input,
+                    live,
+                    working: false,
+                } => Some((*input, live.as_slice())),
+                _ => None,
+            })
+            .collect();
+        match opening
+            .iter()
+            .find(|(input, _)| input.user.is_some())
+            .or_else(|| {
+                opening
+                    .iter()
+                    .find(|(input, _)| line_write(input).is_some())
+            })
+            .or_else(|| opening.first())
         {
-            Some(Thing {
-                kind:
-                    Kind::Input {
-                        input,
-                        live,
-                        working,
-                    },
-                ..
-            }) => parts.push(match (line_write(input), &input.user, *working) {
-                (Some(write), _, _) => format!("turn: {}", write_line(&write, *working)),
-                (None, Some(user), true) => format!(
-                    "turn: user (while you were working) \"{}\"",
-                    part(&user_text(user))
-                ),
-                (None, Some(user), false) => format!("turn: user \"{}\"", part(&user_text(user))),
-                (None, None, _) => format!("turn: {}", part(&blocks_name(&input.blocks, live))),
+            Some((input, live)) => parts.push(match (line_write(input), &input.user) {
+                (Some(write), _) => format!("turn: {}", write_line(&write, false)),
+                (None, Some(user)) => format!("turn: user \"{}\"", part(&user_text(user))),
+                (None, None) => format!("turn: {}", part(&blocks_name(&input.blocks, live))),
             }),
-            _ => parts.push("turn:".into()),
+            None => parts.push("turn: no opening input".into()),
         }
         let summary = self.tool_summary(index);
         if !summary.is_empty() {

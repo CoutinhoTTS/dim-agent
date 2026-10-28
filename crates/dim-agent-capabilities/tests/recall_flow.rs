@@ -133,6 +133,35 @@ async fn tool_results(session: &Session, branch: &str) -> Vec<ToolResult> {
         .collect()
 }
 
+/// Waits until `holds` reads true of the branch's events, waking on the
+/// branch's dispatch progress instead of polling, and fails with the event
+/// kinds seen last.
+async fn wait_for_events(
+    session: &Session,
+    branch: &str,
+    what: &str,
+    mut holds: impl FnMut(&[Arc<AgentEvent>]) -> bool,
+) {
+    let mut dispatch = session.dispatch_watch(branch).unwrap();
+    let mut seen = String::new();
+    let waited = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let events = session.history(branch, None).await.unwrap();
+            seen = events
+                .iter()
+                .map(|event| event.kind.key().to_owned())
+                .collect::<Vec<_>>()
+                .join(",");
+            if holds(&events) {
+                return;
+            }
+            dispatch.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert!(waited.is_ok(), "waiting until {what}: {seen}");
+}
+
 /// The id of the branch's newest `turn/start` line.
 fn last_turn(events: &[Arc<AgentEvent>]) -> String {
     events
@@ -229,6 +258,72 @@ async fn the_turn_index_lists_turns_latest_first_and_pages_back_to_nothing_earli
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// §14 1.
+async fn a_turn_is_indexed_by_its_first_user_text_not_by_the_block_that_came_first() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let agent = agent();
+        let session = open(&agent).await;
+        // A Prompt source writes a rule as an Append input between turns; it
+        // waits as pending until the next driven input consumes it (§3.6).
+        session
+            .input(
+                InputMessageData {
+                    blocks: vec![context_block::raw(
+                        context_block::element(
+                            "dim-rule",
+                            &[
+                                ("source", "AGENTS.md"),
+                                ("scope", "branch"),
+                                ("op", "replace"),
+                            ],
+                            "Use pnpm, not npm.",
+                        ),
+                        Some("rule".into()),
+                    )],
+                    mode: Some(InputMode::Append),
+                    ..InputMessageData::default()
+                },
+                "main",
+            )
+            .await
+            .unwrap();
+        session
+            .submit("please deploy to staging".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = session.history("main", None).await.unwrap();
+        let turn = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .expect("a turn")
+            .id
+            .clone();
+
+        let (page, error) = recall(&session, "main", json!({})).await;
+        assert!(!error, "{page}");
+        let line = line_of(&page, &turn);
+        assert!(
+            line.contains("turn: user \"please deploy to staging\""),
+            "{line}"
+        );
+        assert!(!line.contains("dim-rule"), "{line}");
+
+        // The rule is still told as its own line inside the turn.
+        let (page, error) = recall(&session, "main", json!({ "open": turn })).await;
+        assert!(!error, "{page}");
+        assert!(
+            page.contains("dim-rule source=AGENTS.md scope=branch op=replace (current)"),
+            "{page}"
+        );
+        assert!(page.contains("user: please deploy to staging"), "{page}");
+        agent.close().await.unwrap();
+    })
+    .await
+    .expect("turn index input flow");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // §14 2.
 async fn a_turn_tells_its_input_its_replies_its_calls_with_results_and_an_interrupt_in_order() {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -298,15 +393,12 @@ async fn a_turn_tells_its_input_its_replies_its_calls_with_results_and_an_interr
             )
             .await
             .unwrap();
-        loop {
-            let events = session.local("main", ..).await.unwrap();
-            if events.iter().any(
+        wait_for_events(&session, "main", "the wait call starts", |events| {
+            events.iter().any(
                 |event| matches!(&event.kind, EventKind::ToolUseStart(data) if data.name == "wait"),
-            ) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+            )
+        })
+        .await;
         session.stop("main", "user stop".into()).await.unwrap();
         session.idle("main").await.unwrap();
         let events = session.history("main", None).await.unwrap();
@@ -744,26 +836,19 @@ async fn a_child_branch_opens_inherited_ids_and_tells_its_fork_and_the_cut_paren
             )
             .await
             .unwrap();
-        let mut arrived = false;
-        let mut seen = String::new();
-        for _ in 0..300 {
-            let events = session.history("main", None).await.unwrap();
-            seen = events
-                .iter()
-                .map(|event| event.kind.key().to_owned())
-                .collect::<Vec<_>>()
-                .join(",");
-            arrived = events.iter().any(|event| {
-                matches!(&event.kind, EventKind::InputMessage(data)
-                    if data.blocks.iter().any(|block| format!("{block:?}").contains("the logs are clean")))
-            });
-            if arrived {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_for_events(
+            &session,
+            "main",
+            "main receives the line's final message",
+            |events| {
+                events.iter().any(|event| {
+                    matches!(&event.kind, EventKind::InputMessage(data)
+                        if data.blocks.iter().any(|block| format!("{block:?}").contains("the logs are clean")))
+                })
+            },
+        )
+        .await;
         session.idle("main").await.unwrap();
-        assert!(arrived, "main receives the line's final message: {seen}");
         // Both writes land on main as its last turn is running or after it, so
         // a search tells each line wherever it falls (§3.6).
         let (page, error) = recall(&session, "main", json!({ "about": "the logs are clean" })).await;
@@ -2109,6 +2194,100 @@ fn a_childs_identity_and_its_parents_messages_are_told_on_the_child() {
 }
 
 #[test]
+// §14 1.
+fn a_turn_opened_by_a_line_message_is_indexed_by_that_write_not_by_a_pending_block() {
+    let mut recorded = Recorded::new();
+    recorded.at(16, 0);
+    // A rule written between turns waits as an Append input; the message the
+    // line receives consumes it and opens the turn (§3.6).
+    let rule = recorded.push(EventKind::InputMessage(InputMessageData {
+        blocks: vec![context_block::raw(
+            context_block::element(
+                "dim-rule",
+                &[
+                    ("source", "AGENTS.md"),
+                    ("scope", "branch"),
+                    ("op", "replace"),
+                ],
+                "Use pnpm, not npm.",
+            ),
+            Some("rule".into()),
+        )],
+        mode: Some(InputMode::Append),
+        ..InputMessageData::default()
+    }));
+    let message = recorded.push(line_message(
+        "main",
+        "C",
+        "start now",
+        InputMode::Steer,
+        false,
+    ));
+    let turn = recorded.push(turn_start("t1"));
+    recorded.push(consumed(&rule));
+    recorded.push(consumed(&message));
+    recorded.push(model_start("t1", "r1"));
+    recorded.push(text_delta("t1", "r1", "on it"));
+    recorded.push(model_end("t1", "r1", output_completed()));
+    recorded.push(turn_ends("t1", completed_turn()));
+
+    let (page, error) = recorded.answer("t1", json!({}));
+    assert!(!error, "{page}");
+    let line = line_of(&page, &turn);
+    assert!(line.contains("turn: line main: \"start now\""), "{line}");
+    assert!(!line.contains("dim-rule"), "{line}");
+
+    // The rule is still a line of the turn.
+    let (page, error) = recorded.answer("t1", json!({ "open": turn }));
+    assert!(!error, "{page}");
+    assert!(
+        line_of(&page, &rule)
+            .contains("dim-rule source=AGENTS.md scope=branch op=replace (current)"),
+        "{page}"
+    );
+    assert!(
+        line_of(&page, &message).contains("line main: \"start now\""),
+        "{page}"
+    );
+}
+
+#[test]
+// §14 1.
+fn a_turn_that_ended_before_it_started_is_listed_and_opens_empty() {
+    let mut recorded = Recorded::new();
+    recorded.at(17, 0);
+    // A reload lands between `turn/start` and `start_request`, and the
+    // rebuilt Loop ends the turn it never filled.
+    let empty = recorded.push(turn_start("t1"));
+    recorded.push(turn_ends(
+        "t1",
+        TurnOutcome::Failed {
+            error: "reloaded before the first request".into(),
+        },
+    ));
+    recorded.at(17, 10);
+    simple_turn(&mut recorded, "t2", "next task", "next answer");
+
+    let (page, error) = recorded.answer("t2", json!({}));
+    assert!(!error, "{page}");
+    assert_eq!(
+        line_of(&page, &empty),
+        format!("17:00 {empty} turn: no opening input — failed"),
+        "{page}"
+    );
+
+    let (page, error) = recorded.answer("t2", json!({ "open": empty }));
+    assert!(!error, "{page}");
+    assert_eq!(page, "Nothing in this turn.");
+
+    // Only the first page of an empty turn is a page; a later offset is past
+    // its end.
+    let (page, error) = recorded.answer("t2", json!({ "open": empty, "offset": 1 }));
+    assert!(error, "{page}");
+    assert_eq!(page, format!("Turn {empty} has 0 lines."));
+}
+
+#[test]
 // §14 9.
 fn every_line_stays_bounded_whatever_the_arguments_and_the_blocks() {
     let mut recorded = Recorded::new();
@@ -2537,6 +2716,14 @@ fn the_arguments_and_the_paginations_say_how_to_fix_the_call() {
         (
             json!({ "tool": "" }),
             "recall: tool must be a non-empty string.",
+        ),
+        (
+            json!({ "about": " \t " }),
+            "recall: about must be a non-empty string.",
+        ),
+        (
+            json!({ "open": " " }),
+            "recall: open must be a non-empty string.",
         ),
         (
             json!({ "about": "x".repeat(201) }),
