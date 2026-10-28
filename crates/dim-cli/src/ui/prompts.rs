@@ -63,6 +63,11 @@ pub enum Effect {
     },
     /// Show this line's conversation and submit to it.
     FocusLine(String),
+    /// A `/timeline` key on the user message `row_id` of the shown line.
+    Timeline {
+        row_id: String,
+        action: crate::ui::timeline_panel::TimelineAction,
+    },
     /// End this line, once the user confirmed it.
     EndLine {
         session_id: String,

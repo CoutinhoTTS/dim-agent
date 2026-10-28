@@ -11,10 +11,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Branch history failed; reopen to retry" => "讀取分支歷程失敗；重新開啟以重試",
         "Branch history is incomplete; stop-all unavailable" => "分支歷程尚未讀完，暫無法全部停止",
         "Running" => "執行中",
-        "Lines" => "分支線",
+        "Lines" => "線",
         "Enter show the line · x end it · Esc close" => "Enter 查看該線 · x 結束 · Esc 關閉",
-        "This session has no lines." => "這個工作階段還沒有分支線。",
-        "No matching lines." => "沒有符合的分支線。",
+        "This session has no lines." => "這個工作階段還沒有線。",
+        "No matching lines." => "沒有符合的線。",
         "the session itself" => "工作階段本身",
         "working" => "工作中",
         "ended itself" => "自行結束",
@@ -22,27 +22,37 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "ended with {id}" => "隨 {id} 結束",
         "creation failed" => "建立失敗",
         "shown" => "目前顯示",
-        "line" => "分支線",
-        "line {id}" => "分支線 {id}",
-        "follow, talk to and end this session's lines" => "查看、對話並結束此工作階段的分支線",
-        "End line" => "結束分支線",
+        "line" => "線",
+        "line {id}" => "線 {id}",
+        "jump to a message of the shown line" => "跳到目前線的某則訊息",
+        "Timeline" => "時間線",
+        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
+            "Enter 跳轉 · e 編輯 · q 引用 · b 分支 · f 派生 · Esc 關閉"
+        }
+        "No messages yet." => "還沒有訊息。",
+        "Already on screen above; /tui jumps to it" => "已在上方；/tui 可直接跳轉",
+        "{count} earlier messages · Enter or click to load" => {
+            "較早的 {count} 則訊息 · Enter 或點擊載入"
+        }
+        "follow, talk to and end this session's lines" => "查看、對話並結束此工作階段的線",
+        "End line" => "結束線",
         "y/N" => "y/N",
         "main is the session itself; a line ends, main does not" => {
-            "main 就是工作階段本身；分支線可以結束，main 不能"
+            "main 就是工作階段本身；線可以結束，main 不能"
         }
-        "Line has ended:" => "該分支線已結束：",
+        "Line has ended:" => "該線已結束：",
         "e edit · b branch · f fork" => "e 編輯 · b 分支 · f 派生",
         "e edit" => "e 編輯",
         "Fork the session before this message? (y/N)" => "在這則訊息之前派生會話？(y/N)",
-        "⑂ new line from {id} · Esc cancel" => "⑂ 從 {id} 開新分支線 · Esc 取消",
-        "A fork copies main; b opens a line here" => "派生只複製 main；按 b 在這裡開分支線",
+        "⑂ new line from {id} · Esc cancel" => "⑂ 從 {id} 開新線 · Esc 取消",
+        "A fork copies main; b opens a line here" => "派生只複製 main；按 b 在這裡開線",
         "A line opens from text; images and files were not included" => {
-            "分支線只用文字開場；圖片和檔案未包含在內"
+            "線只用文字開場；圖片和檔案未包含在內"
         }
         "No finished turn to cut at yet" => "還沒有已結束的回合可以切分",
         "forked {id} · {count} messages" => "已派生 {id} · {count} 則訊息",
         "after message {count}" => "第 {count} 則訊息之後",
-        "open a line from the end of the shown line" => "從目前線的末尾開一條分支線",
+        "open a line from the end of the shown line" => "從目前線的末尾開一條線",
         "fork the session at its last finished turn" => "在最近結束的回合處派生會話",
         "Starting" => "啟動中",
         "Delegation result" => "委派結果",
@@ -186,16 +196,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/{name} is not yet available" => "/{name} 尚未提供",
         "new session" => "新工作階段",
         "resumed {id} · {count} messages" => "已繼續 {id} · {count} 則訊息",
-        " · earlier history: /history" => " · 較早歷程：/history",
+        " · earlier history: /timeline" => " · 較早歷程：/timeline",
         "Error: {message}" => "錯誤：{message}",
         "working…  {elapsed}" => "處理中…  {elapsed}",
         "thinking…  {elapsed}" => "思考中…  {elapsed}",
         "Ask anything..." => "問點什麼…",
-        "Earlier history · {id} · {count} messages · /history for the previous page" => {
-            "較早歷程 · {id} · {count} 則訊息 · /history 檢視上一頁"
-        }
+        "Earlier history · {id} · {count} messages" => "較早歷程 · {id} · {count} 則訊息",
         "No active session" => "無目前工作階段",
-        "No earlier messages." => "沒有更早的訊息。",
         "answer required" => "需要回答",
         "permission required" => "需要授權",
         "esc interrupt" => "esc 中斷",
@@ -238,7 +245,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "resume a previous session" => "繼續先前工作階段",
         "open this session in the browser" => "在瀏覽器中開啟此工作階段",
-        "load the previous page of messages" => "載入上一頁訊息",
         "show the context window usage" => "顯示上下文視窗用量",
         "interrupt the run" => "中斷執行",
         "steer with the next queued message" => "以下一則佇列訊息 steer",

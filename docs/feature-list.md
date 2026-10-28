@@ -22,8 +22,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - `/new`: create a Session.
 - `/resume`: view and resume historical Sessions; alias `/sessions`.
 - `/export`: export conversation history as Markdown or JSON.
-- `/timeline`: view the message timeline and message actions.
-- `/history`: load earlier messages; scrollback only.
+- `/timeline`: list the shown line's user messages, jump to one, and edit, quote, branch or fork from it.
 - Session list: view Sessions for the current project or all projects.
 - Session titles: generate titles automatically; support manual renaming through the scrollback panel and CLI commands.
 - Session forks: create a new Session from a historical message.
@@ -73,7 +72,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - Message copying: copy message text to the clipboard through message actions.
 - Selection copying: fullscreen TUI supports mouse selection and copies selected text on release; scrollback uses the terminal's native selection and copying.
 - Clipboard compatibility: copy text through the system clipboard and OSC 52 for local and SSH use. Over SSH, terminals with the kitty clipboard protocol (OSC 5522, e.g. kitty, Ghostty 1.4+) also serve `Ctrl+V` image (PNG, JPEG, WebP, GIF) and text reads from the local clipboard; other terminals keep the native readers. Image/file reads and remote copying depend on platform components and terminal support.
-- History browsing and navigation: use `/timeline` to locate messages. Fullscreen TUI can load earlier records; scrollback can use `/history` and continue browsing terminal scrollback.
+- History browsing and navigation: use `/timeline` to locate messages. Fullscreen TUI loads earlier records from a row at the top of the transcript; in scrollback a `/timeline` jump to an earlier message draws history from it, and the terminal's own scrollback does the rest.
 - Open links: click web and local-file links in fullscreen TUI output to open them with the system's default browser or application.
 - Tool groups: each group of tool calls is collapsed by default (`▸`); click its header in fullscreen TUI to expand or collapse that group. `/tools` expands or collapses every group.
 

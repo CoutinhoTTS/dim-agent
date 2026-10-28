@@ -79,8 +79,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 | --- | --- | --- | --- |
 | 新建、恢复、Session 列表 | 已实现；按项目/全部切换：无 | 已实现（按目录分组） | |
 | 导出对话 | 行模式客户端和 `dimcode session export` 已实现；终端界面内：无 | — | [CLI 命令](cli-commands.md) |
-| `/timeline` 与消息操作 | 无 | — | 总体设计附录 D 只把它归给 CLI |
-| `/history` | 已实现 | — | |
+| `/timeline` 与消息操作 | TUI 已实现；它同时取代了 `/history` 的翻页 | — | [Timeline UI §4.6](timeline-ui.md#46-timeline跳到某条消息) |
 | 标题 | 自动生成：已实现（可选的 SessionTitle 包）；手动重命名：已设计 | — | [SessionTitle](plugins/SessionTitle.md) |
 | Fork | CLI 中已设计（服务端 `session.fork` 已实现） | 后续阶段 | [Session 删除与 fork](appserver/session-deletion-and-fork.md) |
 | 删除与清理 | CLI 中已设计（服务端 `session.delete` 已实现） | 后续阶段 | 同上 |
@@ -127,7 +126,7 @@ CLI 要求协议 v3，以及 `session.create` 和 `session.history` 两项功能
 
 §3 中没有设计的能力，按功能清单顺序：
 
-1. `/timeline` 与消息操作，包括复制消息。
+1. 复制消息（`/timeline` 及其他消息操作见 [Timeline UI §4.6](timeline-ui.md#46-timeline跳到某条消息)）。
 2. `/queue` 面板与删除排队消息（服务端契约已有）。
 3. 通过 `$`、`/`、`@` 引用 Skill（选单代码已有，但没有数据来源）。
 4. 取回带附件的排队消息：`QueuedInput` 只保存文本，附件会丢失。要么像功能清单写的那样由客户端拒绝取回，要么让队列保留附件。

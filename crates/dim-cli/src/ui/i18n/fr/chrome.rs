@@ -30,6 +30,16 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "shown" => "affichée",
         "line" => "ligne",
         "line {id}" => "ligne {id}",
+        "jump to a message of the shown line" => "aller à un message de la ligne affichée",
+        "Timeline" => "Chronologie",
+        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
+            "Enter aller · e modifier · q citer · b branche · f fork · Esc fermer"
+        }
+        "No messages yet." => "Aucun message pour l'instant.",
+        "Already on screen above; /tui jumps to it" => "Déjà plus haut ; /tui y va directement",
+        "{count} earlier messages · Enter or click to load" => {
+            "{count} messages antérieurs · Enter ou clic pour charger"
+        }
         "follow, talk to and end this session's lines" => {
             "suivre, dialoguer et terminer les lignes de cette session"
         }
@@ -220,16 +230,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/{name} is not yet available" => "/{name} pas encore disponible",
         "new session" => "nouvelle session",
         "resumed {id} · {count} messages" => "{id} repris · {count} messages",
-        " · earlier history: /history" => " · historique antérieur: /history",
+        " · earlier history: /timeline" => " · historique antérieur: /timeline",
         "Error: {message}" => "Erreur: {message}",
         "working…  {elapsed}" => "travail…  {elapsed}",
         "thinking…  {elapsed}" => "réflexion…  {elapsed}",
         "Ask anything..." => "Posez une question…",
-        "Earlier history · {id} · {count} messages · /history for the previous page" => {
-            "Historique antérieur · {id} · {count} messages · /history page précédente"
+        "Earlier history · {id} · {count} messages" => {
+            "Historique antérieur · {id} · {count} messages"
         }
         "No active session" => "Aucune session active",
-        "No earlier messages." => "Aucun message antérieur.",
         "answer required" => "réponse requise",
         "permission required" => "autorisation requise",
         "esc interrupt" => "esc interrompre",
@@ -276,7 +285,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "resume a previous session" => "reprendre une session",
         "open this session in the browser" => "ouvrir la session dans le navigateur",
-        "load the previous page of messages" => "charger la page précédente",
         "show the context window usage" => "voir l'usage du contexte",
         "interrupt the run" => "interrompre l'exécution",
         "steer with the next queued message" => "orienter avec le message en file",

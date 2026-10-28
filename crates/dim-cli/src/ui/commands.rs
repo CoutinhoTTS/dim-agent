@@ -135,10 +135,17 @@ pub const COMMANDS: &[Command] = &[
         Needs::Session,
     ),
     slash(
+        "timeline",
+        "session",
+        "jump to a message of the shown line",
+        &[],
+        Needs::Session,
+    ),
+    slash(
         "lines",
         "session",
         "follow, talk to and end this session's lines",
-        &["branches"],
+        &[],
         Needs::Session,
     ),
     slash(
@@ -152,13 +159,6 @@ pub const COMMANDS: &[Command] = &[
         "fork",
         "session",
         "fork the session at its last finished turn",
-        &[],
-        Needs::Session,
-    ),
-    slash(
-        "history",
-        "session",
-        "load the previous page of messages",
         &[],
         Needs::Session,
     ),

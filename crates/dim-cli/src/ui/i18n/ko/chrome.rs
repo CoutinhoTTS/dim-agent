@@ -28,6 +28,16 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "shown" => "표시 중",
         "line" => "라인",
         "line {id}" => "라인 {id}",
+        "jump to a message of the shown line" => "표시 중인 라인의 메시지로 이동",
+        "Timeline" => "타임라인",
+        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
+            "Enter 이동 · e 편집 · q 인용 · b 브랜치 · f 포크 · Esc 닫기"
+        }
+        "No messages yet." => "아직 메시지가 없습니다.",
+        "Already on screen above; /tui jumps to it" => "이미 위에 있음. /tui 에서 바로 이동",
+        "{count} earlier messages · Enter or click to load" => {
+            "이전 메시지 {count}개 · Enter 또는 클릭으로 불러오기"
+        }
         "follow, talk to and end this session's lines" => "이 세션의 라인을 보고, 대화하고, 종료",
         "End line" => "라인 종료",
         "y/N" => "y/N",
@@ -198,16 +208,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/{name} is not yet available" => "/{name} 아직 사용 불가",
         "new session" => "새 세션",
         "resumed {id} · {count} messages" => "{id} 재개됨 · 메시지 {count}개",
-        " · earlier history: /history" => " · 이전 기록: /history",
+        " · earlier history: /timeline" => " · 이전 기록: /timeline",
         "Error: {message}" => "오류: {message}",
         "working…  {elapsed}" => "작업 중…  {elapsed}",
         "thinking…  {elapsed}" => "생각 중…  {elapsed}",
         "Ask anything..." => "무엇이든 물어보세요…",
-        "Earlier history · {id} · {count} messages · /history for the previous page" => {
-            "이전 기록 · {id} · 메시지 {count}개 · /history 이전 페이지"
-        }
+        "Earlier history · {id} · {count} messages" => "이전 기록 · {id} · 메시지 {count}개",
         "No active session" => "활성 세션 없음",
-        "No earlier messages." => "이전 메시지 없음",
         "answer required" => "답변 필요",
         "permission required" => "권한 필요",
         "esc interrupt" => "esc 중단",
@@ -250,7 +257,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "resume a previous session" => "이전 세션 재개",
         "open this session in the browser" => "브라우저에서 이 세션 열기",
-        "load the previous page of messages" => "이전 페이지 메시지 불러오기",
         "show the context window usage" => "컨텍스트 창 사용량 보기",
         "interrupt the run" => "실행 중단",
         "steer with the next queued message" => "다음 대기 메시지로 steer",

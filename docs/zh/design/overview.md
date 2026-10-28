@@ -423,7 +423,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | Provider | OAuth / API-key Provider、`/connect`、`/models` | 现有：Provider、ManagedProviders、OAuth 插件、Aimux |
 | Provider | `/effort`、`/fast` | 扩展：Prompt、Provider |
 | Provider | 子 Agent 与辅助模型 | 扩展：Provider（`AuxiliaryModel`） |
-| Session | `/new`、`/resume`、Session 列表、`/history` | 现有：Agents、SessionStore |
+| Session | `/new`、`/resume`、Session 列表 | 现有：Agents、SessionStore |
 | Session | `/timeline`、`/export` | CLI |
 | Session | Session 标题 | 新增：SessionTitle |
 | Session | fork、删除、清理 | 扩展：SessionStore、Agents |

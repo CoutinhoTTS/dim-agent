@@ -17,7 +17,8 @@ L0  Session ............ 主体：身份、工作区、交互面
      │   ├ e 编辑 / q 引用         （已有）
      │   ├ b 从这里分支 → 本 Session 的一条线
      │   └ f 从这里 fork → 一个新 Session（仅 main）
-     └ 标记 ............ ⑂ 在这里打开了一条线（可选中）
+     ├ 标记 ............ ⑂ 在这里打开了一条线（可选中）
+     └ /timeline ....... 当前线的所有点，可跳转（§4.6）
  L3  Lines（/lines）.... 每条线挂在它被切出的父线下
 ```
 
@@ -95,6 +96,23 @@ fullscreen 的 Tab 选取本来就停在用户消息上。被选消息的点是�
 
 `after message N` 是切点时父线历史中的用户消息数，包括它继承的部分。
 
+### 4.6 `/timeline`：跳到某条消息
+
+Timeline 的点就是它的用户消息。Tab 从最新一条起逐条走；`/timeline` 把它们一次列出，与桌面端的消息导航条一样：每行是这条消息和它回答的第一段文字。
+
+```
+┌ Timeline ────────────────────────────────────────────────────────┐
+│   #1  weather in Shanghai      Cloudy, 20°C, light wind …        │
+│   #2  try RwLock for the cache The lock moves into …             │
+│ › #3  adsa                                                       │
+└──── Enter jump · e edit · q quote · b branch · f fork · Esc close ┘
+```
+
+- 默认选中最新一条。输入不做过滤：字母键作用于选中的消息，与选取上的按键相同（§4.1–4.3）。
+- `Enter` 跳转。全屏选中这条消息，与 Tab 选中一样，之后可用选取的按键。scrollback 不能往上走：还没画出的消息从它开始作为一页更早历史画出；已经画出的给出提示，`/tui` 可直接跳到它。
+
+恢复会话时只画最新 100 条。全屏在 transcript 顶部放一行加载按钮（`↑ 130 earlier messages · Enter or click to load`）：点击，或用 Tab 走到它再按 `Enter`，就在上方画出前 100 条，并让原来最早的那条消息留在视图顶部。scrollback 没有这一行，更早的历史由 `/timeline` 跳转画出。它取代了 `/history`：后者把更早的消息接在最新消息之后翻页画出。
+
 ## 5. 切线
 
 与 #427 §14 相同：切换时写一行 `line ID` 边界，然后是该线的 transcript，只含它自己的事件（每个分支各自编号，[sessions service D11](appserver/sessions-service.md)）。它继承的历史属于父线，离它只有一个标记的距离。
@@ -131,7 +149,7 @@ fork 是别的 Session，归 `/resume`。按键保持 #427 §14 的定义。
 
 ## 9. 消融检查
 
-- 没有新面板或模式：点沿用 Tab 选取，线标记沿用卡片选取，切线沿用 #427，fork 后的 attach 沿用 `/resume`。
+- 没有新模式：点沿用 Tab 选取，线标记和加载按钮沿用卡片选取，切线沿用 #427，fork 后的 attach 沿用 `/resume`。唯一的新面板 `/timeline` 列出选取所走的点，按键与选取相同。
 - 新增的交互：选取上的 `b`/`f`、composer 的分支草稿与 fork 询问、路径式底边、`/branch` 与 `/fork`，各自对应 §2 的一条规则。
 - 考虑过但去掉的：lines 面板里的 `b`（需要每条线的末尾；当前线上的 `/branch` 已覆盖）、按点置灰的提示（按键时的 notice 说的是同一件事，状态更少）、结束标记（§4.4）、继承前缀的一行摘要与 `Esc Esc` 回父线（§5 和标记已经通向那里）。
 

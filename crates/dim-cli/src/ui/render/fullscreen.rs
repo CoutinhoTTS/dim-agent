@@ -467,6 +467,30 @@ impl FullScreen {
         self.focus_card = None;
     }
 
+    /// Picks the user message drawn as block `id`, as Tab would.
+    pub fn pick_block(&mut self, id: usize, doc: &dyn Document) {
+        let Some(index) = id.checked_sub(doc.dropped()).filter(|i| *i < doc.len()) else {
+            return;
+        };
+        if doc.message(index).is_none() {
+            return;
+        }
+        self.focus = Some(id);
+        self.focus_card = None;
+        self.reveal_focus(doc);
+    }
+
+    /// Scrolls so block `id` starts at the top of the view.
+    pub fn show_block(&mut self, id: usize, doc: &dyn Document) {
+        self.sync(doc);
+        if let Some(start) = id
+            .checked_sub(self.base)
+            .and_then(|index| self.starts.get(index))
+        {
+            self.pin((*start).min(self.max_top()));
+        }
+    }
+
     /// The picked message's text.
     pub fn focused_text(&self, doc: &dyn Document) -> Option<String> {
         if self.focus_card.is_some() {

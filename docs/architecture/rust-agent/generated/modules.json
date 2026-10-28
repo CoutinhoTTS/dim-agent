@@ -4030,6 +4030,26 @@
       ]
     },
     {
+      "id": "dim_cli::ui::timeline_panel",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/timeline_panel.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::timeline_panel::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::timeline_panel",
+      "file": "crates/dim-cli/src/ui/timeline_panel.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_cli::ui::title",
       "crate": "dim_cli",
       "parent": "dim_cli::ui",
@@ -4203,6 +4223,7 @@
         "assert",
         "assert_eq",
         "format",
+        "matches",
         "panic",
         "vec"
       ]
@@ -22728,6 +22749,13 @@
     },
     {
       "from": "dim_cli::ui",
+      "to": "dim_cli::ui::timeline_panel",
+      "references": [
+        "mod timeline_panel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
       "to": "dim_cli::ui::title",
       "references": [
         "mod title"
@@ -24944,6 +24972,13 @@
     },
     {
       "from": "dim_cli::ui::prompts",
+      "to": "dim_cli::ui::timeline_panel",
+      "references": [
+        "path crate::ui::timeline_panel::TimelineAction"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
       "to": "dim_cli::update",
       "references": [
         "path crate::update::Install"
@@ -26671,6 +26706,114 @@
       ]
     },
     {
+      "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path RowKind::AssistantMessage",
+        "path RowKind::UserMessage",
+        "path ViewRow",
+        "path ViewSnapshot",
+        "use crate::model::view::RowKind",
+        "use crate::model::view::ViewRow",
+        "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path safe",
+        "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::ui::list_panel",
+      "references": [
+        "path Event::Close",
+        "path Event::None",
+        "path Event::Pick",
+        "path Event::Refresh",
+        "path Item::new",
+        "path ListPanel",
+        "path ListPanel::new",
+        "use crate::ui::list_panel::Event",
+        "use crate::ui::list_panel::Item",
+        "use crate::ui::list_panel::ListPanel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::ui::prompts",
+      "references": [
+        "path Effect",
+        "path Effect::Close",
+        "path Effect::None",
+        "path Effect::Timeline",
+        "use crate::ui::prompts::Effect"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode::Char",
+        "path KeyEvent",
+        "path Modifiers::NONE",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent",
+        "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette",
+        "use crate::ui::theme::Palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel",
+      "to": "dim_cli::ui::timeline_panel::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel::tests",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path RowKind",
+        "path ViewRow",
+        "path ViewSnapshot",
+        "path ViewSnapshot::default"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel::tests",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode",
+        "path KeyCode::Up",
+        "path KeyEvent",
+        "path KeyEvent::new",
+        "path Modifiers::NONE"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::timeline_panel::tests",
+      "to": "dim_cli::ui::timeline_panel",
+      "references": [
+        "path TimelineAction::Branch",
+        "path TimelineAction::Edit",
+        "path TimelineAction::Fork",
+        "path TimelineAction::Quote",
+        "path TimelinePanel::new",
+        "path messages"
+      ]
+    },
+    {
       "from": "dim_cli::ui::title",
       "to": "dim_cli::ui::status",
       "references": [
@@ -26944,6 +27087,7 @@
         "path Block::Error",
         "path Block::Failure",
         "path Block::Line",
+        "path Block::LoadMore",
         "path Block::Note",
         "path Block::Shell",
         "path Block::Status",
@@ -27512,6 +27656,7 @@
         "path Effect::ThemeApply",
         "path Effect::ThemePreview",
         "path Effect::ThemeRestore",
+        "path Effect::Timeline",
         "path Effect::UpgradeInstall",
         "path Effect::UpgradeSkip",
         "path ExitConfirm",
@@ -27544,6 +27689,7 @@
       "to": "dim_cli::ui::render::fullscreen",
       "references": [
         "path Document",
+        "path FullScreen",
         "path FullScreen::focused",
         "path FullScreen::new",
         "path FullScreen::selecting",
@@ -27764,6 +27910,22 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::timeline_panel",
+      "references": [
+        "path TimelineAction",
+        "path TimelineAction::Branch",
+        "path TimelineAction::Edit",
+        "path TimelineAction::Fork",
+        "path TimelineAction::Jump",
+        "path TimelineAction::Quote",
+        "path TimelinePanel",
+        "path TimelinePanel::new",
+        "use crate::ui::timeline_panel::TimelineAction",
+        "use crate::ui::timeline_panel::TimelinePanel"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::title",
       "references": [
         "path WindowTitle::new",
@@ -27782,6 +27944,7 @@
         "path Block::Boundary",
         "path Block::Failure",
         "path Block::Line",
+        "path Block::LoadMore",
         "path Block::Note",
         "path Block::Shell",
         "path Block::Status",
@@ -27948,6 +28111,7 @@
       "to": "dim_cli::model::view",
       "references": [
         "path RowKind::AssistantMessage",
+        "path RowKind::UserMessage",
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default"
@@ -28001,7 +28165,9 @@
         "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
+        "path KeyCode::Home",
         "path KeyCode::Tab",
+        "path KeyCode::Up",
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "path crate::ui::terminal::KeyEvent::new"
@@ -28038,6 +28204,7 @@
       "references": [
         "path App",
         "path App::new",
+        "path LOAD_MORE",
         "path Prompt::Ask",
         "path WebOpened",
         "path banner",
@@ -29016,6 +29183,18 @@
     {
       "module": "dim_cli::ui::theme::ansi",
       "path": "Color::Rgb"
+    },
+    {
+      "module": "dim_cli::ui::timeline_panel::tests",
+      "path": "Appearance::Dark"
+    },
+    {
+      "module": "dim_cli::ui::timeline_panel::tests",
+      "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::timeline_panel::tests",
+      "path": "Theme::system"
     },
     {
       "module": "dim_cli::ui::transcript::blocks",
