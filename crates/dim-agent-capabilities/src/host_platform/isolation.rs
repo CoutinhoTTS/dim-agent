@@ -1,21 +1,119 @@
 //! Node-local policy at the model process boundary, before ordinary spawn/PTY.
-use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, TemporaryDirectory};
+use super::{HostPlatform, Isolation, ProcessSpec, ProcessSpecError, Sandbox, TemporaryDirectory};
 use crate::file_storage::FileStorageError;
 use serde::Deserialize;
 use std::path::Path;
 use std::{ffi::OsString, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Default, Deserialize)]
+/// One decoded file. `version` decides which fields are legal: version 1 names
+/// the boundary with `enabled` and `network`, and version 2 names it with
+/// `sandbox` and decides whether a call may request a wider one.
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Policy {
+struct PolicyFile {
     version: u8,
     enabled: Option<bool>,
-    #[serde(default)]
-    network: bool,
+    network: Option<bool>,
+    sandbox: Option<Sandbox>,
+    escalation: Option<Escalation>,
     read_only_paths: Option<Vec<PathBuf>>,
     writable_paths: Option<Vec<PathBuf>>,
     environment: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Escalation {
+    Deny,
+    Ask,
+}
+
+struct Policy {
+    sandbox: Sandbox,
+    escalation: Escalation,
+    read_only_paths: Option<Vec<PathBuf>>,
+    writable_paths: Option<Vec<PathBuf>>,
+    environment: Option<Vec<String>>,
+}
+
+impl Policy {
+    fn default_policy() -> Self {
+        Self {
+            sandbox: Sandbox::Workspace,
+            escalation: Escalation::Deny,
+            read_only_paths: None,
+            writable_paths: None,
+            environment: None,
+        }
+    }
+
+    /// Decodes the file's own version; a malformed file names the line and
+    /// column of the failure.
+    fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let invalid = |error: serde_json::Error| {
+            format!(
+                "Invalid host-isolation.json at line {}, column {}",
+                error.line(),
+                error.column()
+            )
+        };
+        let file: PolicyFile = serde_json::from_slice(bytes).map_err(invalid)?;
+        match file.version {
+            1 if file.sandbox.is_some() || file.escalation.is_some() => Err(
+                "host-isolation.json version 1 does not accept sandbox or escalation; use version 2"
+                    .into(),
+            ),
+            1 => Ok(Self {
+                sandbox: if file.enabled == Some(false) {
+                    Sandbox::Host
+                } else if file.network == Some(true) {
+                    Sandbox::Network
+                } else {
+                    Sandbox::Workspace
+                },
+                escalation: Escalation::Deny,
+                read_only_paths: file.read_only_paths,
+                writable_paths: file.writable_paths,
+                environment: file.environment,
+            }),
+            2 if file.enabled.is_some() || file.network.is_some() => Err(
+                "host-isolation.json version 2 names the tier with sandbox, not enabled or network"
+                    .into(),
+            ),
+            2 => Ok(Self {
+                sandbox: file.sandbox.unwrap_or(Sandbox::Workspace),
+                escalation: file.escalation.unwrap_or(Escalation::Deny),
+                read_only_paths: file.read_only_paths,
+                writable_paths: file.writable_paths,
+                environment: file.environment,
+            }),
+            _ => Err("host-isolation.json version must be 1 or 2".into()),
+        }
+    }
+
+    /// A call may narrow the node's tier freely. Widening it is the node's
+    /// decision, so a wider request needs `escalation: "ask"`.
+    fn resolve(
+        &self,
+        requested: Option<Sandbox>,
+        location: &str,
+    ) -> Result<Sandbox, ProcessSpecError> {
+        let Some(requested) = requested else {
+            return Ok(self.sandbox);
+        };
+        if requested <= self.sandbox || self.escalation == Escalation::Ask {
+            return Ok(requested);
+        }
+        Err(ProcessSpecError {
+            code: "isolation_denied",
+            reason: format!(
+                "sandbox \"{}\" is wider than this node's \"{}\" isolation policy; set \"escalation\": \"ask\" in {location} to let a command request it.",
+                requested.name(),
+                self.sandbox.name(),
+            ),
+        })
+    }
 }
 
 /// Resolves declared roots once at the policy boundary, each with its
@@ -67,6 +165,7 @@ impl HostPlatform {
         mut spec: ProcessSpec,
         workspace: &Path,
         output_dir: Option<&Path>,
+        requested: Option<Sandbox>,
     ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
     {
         let invalid = |reason| ProcessSpecError {
@@ -90,23 +189,13 @@ impl HostPlatform {
             }
             None => None,
         };
-        let policy: Policy = match bytes {
-            Some(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
-                invalid(format!(
-                    "Invalid host-isolation.json at line {}, column {}",
-                    error.line(),
-                    error.column()
-                ))
-            })?,
-            None => Policy {
-                version: 1,
-                ..Policy::default()
-            },
+        let policy = match bytes {
+            Some(bytes) => Policy::decode(&bytes).map_err(invalid)?,
+            None => Policy::default_policy(),
         };
-        if policy.version != 1 {
-            return Err(invalid("host-isolation.json version must be 1".into()));
-        }
-        let enabled = policy.enabled != Some(false);
+        let location = self.isolation_location();
+        let sandbox = policy.resolve(requested, &location)?;
+        let enabled = sandbox != Sandbox::Host;
         let environment = policy.environment.unwrap_or_else(|| {
             [
                 "PATH",
@@ -237,10 +326,9 @@ impl HostPlatform {
             &read_only,
             &read_only_files,
             &writable,
-            policy.network,
+            sandbox == Sandbox::Network,
         )?;
-        let policy = self.isolation_location();
-        Ok((spec, temporary, Some(Isolation { policy })))
+        Ok((spec, temporary, Some(Isolation { policy: location })))
     }
 
     /// Where the user changes this node's policy, for messages: the configured
@@ -414,7 +502,7 @@ fn prepare(
         .ok_or_else(|| ProcessSpecError {
             code: "isolation_unavailable",
             reason: format!(
-                "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or set \"enabled\": false in {} to run commands without isolation.",
+                "bubblewrap (bwrap) is not installed on the captured host PATH. Install bubblewrap, or set \"sandbox\": \"host\" in {} to run commands without isolation.",
                 host.isolation_location()
             ),
         })?;
@@ -530,4 +618,54 @@ async fn bubblewrap_binds_file_roots_after_the_directories_that_contain_them() {
     .collect();
     assert_eq!(binds(&read_only, &read_only_files, &writable), expected);
     std::fs::remove_dir_all(base).unwrap();
+}
+
+#[cfg(test)]
+#[test]
+fn policy_versions_name_the_sandbox_and_the_escalation() {
+    let network = Policy::decode(br#"{"version":1,"network":true}"#).unwrap();
+    assert_eq!(network.sandbox, Sandbox::Network);
+    assert_eq!(network.escalation, Escalation::Deny);
+
+    let disabled = Policy::decode(br#"{"version":1,"enabled":false}"#).unwrap();
+    assert_eq!(disabled.sandbox, Sandbox::Host);
+
+    let ask = Policy::decode(br#"{"version":2,"sandbox":"network","escalation":"ask"}"#).unwrap();
+    assert_eq!(ask.sandbox, Sandbox::Network);
+    assert_eq!(ask.escalation, Escalation::Ask);
+
+    let defaults = Policy::decode(br#"{"version":2}"#).unwrap();
+    assert_eq!(defaults.sandbox, Sandbox::Workspace);
+    assert_eq!(defaults.escalation, Escalation::Deny);
+
+    assert!(Policy::decode(br#"{"version":1,"sandbox":"host"}"#).is_err());
+    assert!(Policy::decode(br#"{"version":2,"enabled":false}"#).is_err());
+    assert!(Policy::decode(br#"{"version":3}"#).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn a_call_narrows_the_sandbox_and_needs_escalation_to_widen_it() {
+    let deny = Policy::decode(br#"{"version":2}"#).unwrap();
+    assert_eq!(deny.resolve(None, "policy").unwrap(), Sandbox::Workspace);
+    assert_eq!(
+        deny.resolve(Some(Sandbox::Workspace), "policy").unwrap(),
+        Sandbox::Workspace
+    );
+    let denied = deny.resolve(Some(Sandbox::Host), "policy").unwrap_err();
+    assert_eq!(denied.code, "isolation_denied");
+    assert!(denied.reason.contains("escalation"), "{}", denied.reason);
+
+    let ask = Policy::decode(br#"{"version":2,"escalation":"ask"}"#).unwrap();
+    assert_eq!(
+        ask.resolve(Some(Sandbox::Host), "policy").unwrap(),
+        Sandbox::Host
+    );
+
+    let node = Policy::decode(br#"{"version":2,"sandbox":"network","escalation":"ask"}"#).unwrap();
+    assert_eq!(node.resolve(None, "policy").unwrap(), Sandbox::Network);
+    assert_eq!(
+        node.resolve(Some(Sandbox::Workspace), "policy").unwrap(),
+        Sandbox::Workspace
+    );
 }

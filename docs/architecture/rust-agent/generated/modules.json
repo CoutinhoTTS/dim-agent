@@ -499,6 +499,7 @@
       "parent": "dim_agent_capabilities::host_platform",
       "file": "crates/dim-agent-capabilities/src/host_platform/isolation.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq",
         "cfg",
         "format",
@@ -3243,7 +3244,8 @@
       "file": "crates/dim-cli/src/ui/i18n/mod.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "panic"
       ]
     },
     {
@@ -7349,12 +7351,17 @@
         "path Isolation",
         "path ProcessSpec",
         "path ProcessSpecError",
+        "path Sandbox",
+        "path Sandbox::Host",
+        "path Sandbox::Network",
+        "path Sandbox::Workspace",
         "path TemporaryDirectory",
         "path super::path_entries",
         "use super::HostPlatform",
         "use super::Isolation",
         "use super::ProcessSpec",
         "use super::ProcessSpecError",
+        "use super::Sandbox",
         "use super::TemporaryDirectory"
       ]
     },
@@ -10294,6 +10301,10 @@
         "path Isolation",
         "path Os::Windows",
         "path ProcessTree",
+        "path Sandbox",
+        "path Sandbox::Host",
+        "path Sandbox::Network",
+        "path Sandbox::Workspace",
         "path ShellKind::Posix",
         "use crate::host_platform::EXEC_SHELL_CONFIG_INVALID",
         "use crate::host_platform::EXEC_SHELL_UNAVAILABLE",
@@ -10302,6 +10313,7 @@
         "use crate::host_platform::Isolation",
         "use crate::host_platform::Os",
         "use crate::host_platform::ProcessTree",
+        "use crate::host_platform::Sandbox",
         "use crate::host_platform::ShellKind"
       ]
     },

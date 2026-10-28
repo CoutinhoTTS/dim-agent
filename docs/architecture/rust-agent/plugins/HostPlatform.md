@@ -60,18 +60,21 @@ commands remain ordinary spawn. BackgroundExec retains its existing live process
 namespace PID registry is introduced. Unsupported Windows preserves ordinary execution.
 
 `HostPlatformConfig.isolation_file` identifies node-local `host-isolation.json` through
-FileStorage. Version 1 accepts enabled, network, readOnlyPaths, writablePaths and environment;
-the product design defines defaults and empty-list semantics. readOnlyPaths names existing
-absolute directories or regular files, writablePaths only directories. Unknown fields/versions,
-invalid roots or environment names and unreadable files return isolation_config_invalid.
-Missing files use defaults without writing a file. Windows does not load this unsupported
-source. Local edits affect the next model process, retaining the policy of an existing shell.
+FileStorage. Version 2 accepts sandbox, escalation, readOnlyPaths, writablePaths and environment;
+version 1 keeps enabled and network. The product design defines defaults, tiers and empty-list
+semantics. readOnlyPaths names existing absolute directories or regular files, writablePaths only
+directories. Unknown fields/versions, invalid roots or environment names and unreadable files
+return isolation_config_invalid. Missing files use defaults without writing a file. Windows does
+not load this unsupported source. Local edits affect the next model process, retaining the policy
+of an existing shell.
 Linux without bwrap on the captured PATH returns isolation_unavailable; its reason says to
-install bubblewrap or set `"enabled": false` in the policy file, named at its location.
+install bubblewrap or set `"sandbox": "host"` in the policy file, named at its location.
 
-The crate-local `prepare_isolated_process(spec, workspace, output_dir)` operation reads and validates the
-external file once, selects existing environment values and wraps the argv in Seatbelt or
-bubblewrap. A file root becomes a Seatbelt `literal` rule, or a read-only bubblewrap bind after
+The crate-local `prepare_isolated_process(spec, workspace, output_dir, requested)` operation reads and validates the
+external file once, resolves the tier from the node policy and the call's optional `sandbox`
+request, selects existing environment values and wraps the argv in Seatbelt or
+bubblewrap. A request above the node tier without `escalation: "ask"` returns
+`isolation_denied` before any payload starts; a narrower one always applies. A file root becomes a Seatbelt `literal` rule, or a read-only bubblewrap bind after
 the read-only directories and before the writable ones. The immutable Session workspace, not
 the command cwd, supplies default writes.
 ShellSession also supplies its owned output directory; WorkspaceTools supplies none. On macOS,
@@ -173,7 +176,7 @@ the identity and alias of a plain or symlinked `~/.gitconfig`, honors the XDG ex
 HOME or a moved XDG_CONFIG_HOME, and keeps credential files, `~/.ssh` and the home listing
 denied. `an_unavailable_shell_or_backend_refuses_the_payload` also verifies refusal before
 admission when Linux has no bubblewrap on the captured PATH, with a reason that says to install
-bubblewrap or set `"enabled": false`. `local_isolation_policy_controls_native_sockets` covers
+bubblewrap or set `"sandbox": "host"`. `local_isolation_policy_controls_native_sockets` covers
 live IP and UNIX listeners under the local policy.
 `isolated_exec_failures_point_to_the_local_policy` checks the failure note for a denied write
 in the foreground and background, a resolver failure and an explicit read-only workspace, and

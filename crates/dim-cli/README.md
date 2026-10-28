@@ -363,7 +363,9 @@ bubblewrap on Linux. Without a policy file, a command can write only inside the 
 workspace, read only the workspace and system directories, and has no network access. The
 [defaults table](../../docs/design/host-platform-isolation.md#scope-and-policy) lists each
 platform's directories and the environment variables passed through. Approving a command or
-choosing `full-access` does not widen the sandbox; only the policy file does.
+choosing `full-access` does not widen the sandbox; only the policy file does. The model can also
+ask for a wider one with the `exec` `sandbox` argument, and the policy file decides whether that
+request runs.
 
 On macOS only, the default also lets common developer tools run:
 
@@ -399,15 +401,26 @@ dimcode never creates the file. It is read each time a command starts, so an edi
 next command without restarting the daemon; a running command keeps the policy it started with.
 An invalid file makes every command fail with `isolation_config_invalid` until it is fixed.
 
-Only `version` is required, and it must be `1`. Each other field replaces its default:
+Only `version` is required. Version 2 is current; an existing version 1 file keeps working.
+Each other field replaces its default:
 
 | Field | Meaning | Default |
 | --- | --- | --- |
-| `enabled` | `false` runs commands as ordinary processes | `true` |
-| `network` | `true` allows network access | `false` |
+| `sandbox` | `workspace`, `network` or `host`: the boundary commands run in | `workspace` |
+| `escalation` | `ask` lets a command request a wider `sandbox`; `deny` refuses it | `deny` |
 | `readOnlyPaths` | Directories and files commands can read | The platform's system directories; on macOS also the developer directory and git's configuration files |
 | `writablePaths` | Directories commands can read and write | The session workspace; on macOS also each command's `TMPDIR` |
 | `environment` | Names of daemon environment variables passed to commands | The list in the defaults table |
+
+`workspace` writes only inside the session workspace and has no network; `network` adds host
+networking; `host` runs commands as your user with no sandbox at all. A model command names a
+tier with its `sandbox` argument. A tier at or below the file's runs directly; a wider one runs
+only when the file sets `"escalation": "ask"`, and otherwise fails with `isolation_denied`. The
+approval prompt shows the requested boundary; under `full-access`, for a tool in `allowedTools`
+or for a command you allowed always, a wider tier runs without a prompt. An approval never widens
+the boundary by itself. Version 1 spelled the tier as `enabled` and
+`network` (`false` runs commands as ordinary processes, `true` allows networking) and never
+allowed escalation.
 
 Paths must be absolute and must exist; `~` is not expanded. `readOnlyPaths` takes directories
 and regular files: a file entry grants that file alone, not the directory around it, and an
@@ -430,11 +443,11 @@ also exposes every other file in it, including a `credentials` file if git keeps
 To turn isolation off:
 
 ```json
-{"version": 1, "enabled": false}
+{"version": 2, "sandbox": "host"}
 ```
 
 Commands then have your user's ordinary access. On Linux without bubblewrap, every command fails
-with `isolation_unavailable` until bubblewrap is installed or isolation is turned off.
+with `isolation_unavailable` until bubblewrap is installed or the file names the `host` tier.
 
 ### Toolchains outside system directories
 
@@ -445,7 +458,7 @@ paths that exist. On macOS with the Command Line Tools, git's configuration in `
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "readOnlyPaths": [
     "/System", "/usr", "/bin", "/sbin", "/Library/Apple", "/private/etc", "/etc",
     "/var/select", "/Library/Developer/CommandLineTools",
@@ -463,7 +476,7 @@ not exist, and add directories such as `/home/linuxbrew/.linuxbrew` or `/home/yo
 reads no global configuration there by default; add `/home/you/.gitconfig` and the other files
 above to let it. A tool
 that writes caches or locks in its directory needs it in `writablePaths` instead, next to the
-workspace, and downloads need `"network": true`. A granted directory exposes everything in it; `~/.cargo`, for example,
+workspace, and downloads need the `network` tier. A granted directory exposes everything in it; `~/.cargo`, for example,
 can hold registry tokens.
 
 ### Not covered

@@ -34,15 +34,35 @@ pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
 /// macOS default gives each process tree a writable TMPDIR.
 pub(crate) const ISOLATION_SUMMARY: Option<&str> = if cfg!(target_os = "macos") {
     Some(
-        "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace and $TMPDIR, read only there and in system directories, and have no network access. Approving a command does not lift these limits; only the user can change them, in host-isolation.json.",
+        "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace and $TMPDIR, read only there and in system directories, and have no network access. exec accepts a \"sandbox\" argument to request a wider boundary; the node's host-isolation.json decides whether that request is allowed, and approving a command does not widen anything by itself.",
     )
 } else if cfg!(unix) {
     Some(
-        "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace, read only there and in system directories, and have no network access. Approving a command does not lift these limits; only the user can change them, in host-isolation.json.",
+        "Isolation: unless the user disabled it, commands are sandboxed. They can write only inside the session workspace, read only there and in system directories, and have no network access. exec accepts a \"sandbox\" argument to request a wider boundary; the node's host-isolation.json decides whether that request is allowed, and approving a command does not widen anything by itself.",
     )
 } else {
     None
 };
+
+/// The process boundary a command runs under. Wider tiers expose more of the
+/// host, and a request for one is only honored where the node's policy allows
+/// escalation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sandbox {
+    Workspace,
+    Network,
+    Host,
+}
+impl Sandbox {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Network => "network",
+            Self::Host => "host",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
@@ -319,6 +339,7 @@ impl HostPlatform {
         spec: ProcessSpec,
         _workspace: &Path,
         _output_dir: Option<&Path>,
+        _requested: Option<Sandbox>,
     ) -> Result<(ProcessSpec, Option<TemporaryDirectory>, Option<Isolation>), ProcessSpecError>
     {
         Ok((spec, None, None))
