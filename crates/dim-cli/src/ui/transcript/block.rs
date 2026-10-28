@@ -320,16 +320,24 @@ mod tests {
             Some(&output.join("\n")),
         )];
         let lines = drawn(&rows, Detail::Expanded, 80);
-        let shown: Vec<&str> = lines[2..]
-            .iter()
-            .map(|l| l.trim_end_matches([' ', '█']))
-            .collect();
+        assert_eq!(lines[2], "    … +99985 lines");
         let expected: Vec<String> = (99_986..=100_000)
             .map(|i| format!("    line {i}"))
             .collect();
-        assert_eq!(shown, expected);
-        assert!(lines[2..].iter().all(|l| l.chars().count() == 80));
-        assert!(lines[16].ends_with('█') && lines[2].ends_with(' '));
+        assert_eq!(lines[3..], expected);
+    }
+
+    #[test]
+    fn an_output_that_fits_has_no_more_lines_note() {
+        let output: Vec<String> = (1..=15).map(|i| format!("line {i}")).collect();
+        let rows = [call(
+            "exec",
+            json!({ "command": "seq" }),
+            Some(&output.join("\n")),
+        )];
+        let lines = drawn(&rows, Detail::Expanded, 80);
+        assert_eq!(lines[2], "    line 1");
+        assert_eq!(lines.len(), 17);
     }
 
     #[test]

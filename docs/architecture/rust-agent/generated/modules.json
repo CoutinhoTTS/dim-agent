@@ -27094,13 +27094,6 @@
     },
     {
       "from": "dim_cli::ui::transcript::tool_group",
-      "to": "dim_cli::ui::render::fullscreen",
-      "references": [
-        "path crate::ui::render::fullscreen::scrollbar"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::transcript::tool_group",
       "to": "dim_cli::ui::text",
       "references": [
         "path crate::ui::text::expand_tabs",
