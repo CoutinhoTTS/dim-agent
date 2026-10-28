@@ -91,7 +91,7 @@ sequenceDiagram
     Note over D,C: handler 返回，不等待构建
     T->>B: 按固定前缀构建并等待就绪
     T->>B: branch/start，等它分发完（Prompt 写入常驻内容）
-    T->>B: 首条 input/message：模型创建的分支是 dim-branch-task 块，宿主创建的是用户原文
+    T->>B: 首条 input/message（Queue）：第一个块是 dim-branch-line 身份块；工具创建的目的与协议在该块内，宿主创建时创建者的原文作为 user 紧随其后
     T-->>E: 返回就绪句柄或构建错误
 ```
 
@@ -99,7 +99,7 @@ sequenceDiagram
 | --- | --- |
 | TreeTimeline | 新增独立 Timeline 级 rutis 插件，订阅本分支 `branch/create`；依赖 Dispatcher、TimelineTree/TreeCommands |
 | TimelineTree | 拥有所有分支实例、分支身份预留、构建任务、就绪结果和关闭；不限制分支数量 |
-| 首条输入 | `branch` 工具创建的子分支，首条输入是 raw 块 `<dim-branch-task parent>`，写明它是从哪个分支派生、由该分支委派的任务；宿主（RPC）创建的分支，首条输入是操作者原文。上下文经输入注入，不另设注入通道 |
+| 首条输入 | 两种来源的子分支，首条输入都是一条 Queue 输入，第一个块是 raw 块 `<dim-branch-line branch="C" parent="P" source="tool">`（宿主来源时为 `source="host"`），写明它是同一 Session 的一条线、由哪条线在其历史的何处开启。工具创建的块内还写目的和该线对父线的协议，没有操作者原文；宿主（RPC `session.branch_create`）创建的块只写身份，创建者的 prompt 作为同一输入的 `user` 原文紧随其后。两者都经输入注入，不另设注入通道 |
 | 创建准入 | 模型的 `branch` 工具与其他工具一样由 ToolExecutor 经 [Approval](plugins/Permission.md#approval) 准入（risk `session`）；宿主 RPC `session.branch_create` 属于外部控制，不经准入，但要求 Session 挂载 `branch`（没有挂载列表即挂载全部工具），否则返回 `Branch tool is not enabled` |
 | 提交 | before 不持树锁；按最终事件登记继承位置和分支身份，检查关闭状态与身份占用，原子提交事件并预留该分支身份；失败不留创建锚点，不要求最终身份等于原草稿 |
 | 构建 | 只采用最终事件的分支 id、prompt、at 和关联信息；从事件位置取得固定前缀；登记后转入树拥有的异步任务 |
