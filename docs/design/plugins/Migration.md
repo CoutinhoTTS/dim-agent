@@ -54,6 +54,7 @@
 ### 2.1 路径不是一个数据库文件
 
 - CN 默认旧 home 为 `~/.dimcode/v2`，Global 默认旧 home 为 `~/.dim/v2`；数据库名分别为 `dimcode.sqlite` 和 `dimglobal.sqlite`。
+- 两个来源各自迁移，Global 目标保持在 `~/.dim`，CN 目标保持在 `~/.dimcode`，不把两边的数据或配置合并进一个 home。CLI 批量入口的结果与查询路由见[命令合同](../cli-commands.md#migration-interaction)；插件每次只处理调用方传入的一对来源和目标。
 - 旧 home 内还包括 `data/`、配置和插件状态。Desktop 可使用自定义容器根，其 `v2` 解析由旧客户端拥有。
 - Desktop 的 `<userData>/storage-root.json` 是定位旧根的配置，不是会话数据本身。插件接收客户端已解析的旧 home，不读取或猜测此配置当前指向哪里；CLI 的默认目录选择和显式覆盖由[命令合同](../cli-commands.md#migration-interaction)定义。
 - CLI 的调度记录还可能在 `schedule-tui.sqlite`；仅迁移主库会漏掉它。

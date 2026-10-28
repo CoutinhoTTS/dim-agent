@@ -1,5 +1,35 @@
 use super::*;
 
+fn legacy_home(home: &std::path::Path, database: &str, content: &str) {
+    fs::create_dir_all(home).unwrap();
+    let db = rusqlite::Connection::open(home.join(database)).unwrap();
+    db.execute_batch("CREATE TABLE sessions(sessionId TEXT PRIMARY KEY,cwd TEXT,title TEXT,status TEXT,tags TEXT,createdAt TEXT,updatedAt TEXT,version INTEGER);
+        CREATE TABLE session_states(sessionId TEXT PRIMARY KEY,selectedProviderId TEXT,selectedModelId TEXT,settings TEXT,permissionSettings TEXT,currentMode TEXT);
+        CREATE TABLE messages(messageId TEXT PRIMARY KEY,sessionId TEXT,role TEXT,parts TEXT,attachments TEXT,metadata TEXT,orderKey TEXT,createdAt TEXT);
+        CREATE TABLE compaction_states(sessionId TEXT PRIMARY KEY,cursor TEXT,compactionSegments TEXT);").unwrap();
+    db.execute("INSERT INTO sessions VALUES ('old',?1,'Legacy session','active','[]','2026-01-01','2026-01-01',1)",[home.canonicalize().unwrap().to_str().unwrap()]).unwrap();
+    db.execute(
+        "INSERT INTO session_states VALUES ('old','local','diagram-model','{}','{}','agent')",
+        [],
+    )
+    .unwrap();
+    db.execute("INSERT INTO messages VALUES ('old-message','old','user',?1,'[]','{}','a','2026-01-01T00:00:00Z')",[json!([{ "type":"text", "text":content }]).to_string()]).unwrap();
+    drop(db);
+}
+
+struct Daemon<'a>(&'a Home, &'a std::path::Path);
+impl Drop for Daemon<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .command()
+            .arg("--model-config")
+            .arg(self.1)
+            .args(["daemon", "stop"])
+            .output();
+    }
+}
+
 #[test]
 fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin() {
     let home = Home::new();
@@ -10,19 +40,7 @@ fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin
         include_str!("../../../dim-agent-aimux/examples/offline.json"),
     )
     .unwrap();
-    let db = rusqlite::Connection::open(source.0.join("dimcode.sqlite")).unwrap();
-    db.execute_batch("CREATE TABLE sessions(sessionId TEXT PRIMARY KEY,cwd TEXT,title TEXT,status TEXT,tags TEXT,createdAt TEXT,updatedAt TEXT,version INTEGER);
-        CREATE TABLE session_states(sessionId TEXT PRIMARY KEY,selectedProviderId TEXT,selectedModelId TEXT,settings TEXT,permissionSettings TEXT,currentMode TEXT);
-        CREATE TABLE messages(messageId TEXT PRIMARY KEY,sessionId TEXT,role TEXT,parts TEXT,attachments TEXT,metadata TEXT,orderKey TEXT,createdAt TEXT);
-        CREATE TABLE compaction_states(sessionId TEXT PRIMARY KEY,cursor TEXT,compactionSegments TEXT);").unwrap();
-    db.execute("INSERT INTO sessions VALUES ('old',?1,'Legacy session','active','[]','2026-01-01','2026-01-01',1)",[source.0.canonicalize().unwrap().to_str().unwrap()]).unwrap();
-    db.execute(
-        "INSERT INTO session_states VALUES ('old','local','diagram-model','{}','{}','agent')",
-        [],
-    )
-    .unwrap();
-    db.execute("INSERT INTO messages VALUES ('old-message','old','user','[{\"type\":\"text\",\"text\":\"legacy user message\"}]','[]','{}','a','2026-01-01T00:00:00Z')",[]).unwrap();
-    drop(db);
+    legacy_home(&source.0, "dimcode.sqlite", "legacy user message");
     fs::write(source.0.join("permissions.json"),json!({"version":1,"execCommandPermissions":{"rules":{"cargo test *":"allow","git push *":"deny"}}}).to_string()).unwrap();
     let before = fs::read(source.0.join("dimcode.sqlite")).unwrap();
     for args in [
@@ -60,67 +78,8 @@ fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin
         .unwrap();
     assert_eq!(stopped.status.code(), Some(1));
     assert!(!home.0.join("migration").exists());
-    let user_home = Home::new();
-    let missing = home
-        .command()
-        .env("HOME", &user_home.0)
-        .args(["migration", "--source-stopped"])
-        .output()
-        .unwrap();
-    assert_eq!(missing.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("No default legacy v2 database"));
-    assert!(!home.0.join("migration").exists());
-    let default_source = user_home.0.join(".dimcode/v2");
-    fs::create_dir_all(&default_source).unwrap();
-    fs::copy(
-        source.0.join("dimcode.sqlite"),
-        default_source.join("dimcode.sqlite"),
-    )
-    .unwrap();
-    fs::copy(
-        source.0.join("permissions.json"),
-        default_source.join("permissions.json"),
-    )
-    .unwrap();
-    let command = || {
-        let mut command = home.command();
-        command
-            .env("HOME", &user_home.0)
-            .arg("--model-config")
-            .arg(&model);
-        command
-    };
-    let mut decline = command();
-    decline.arg("migration");
-    let mut terminal = Terminal::launch(decline);
-    terminal.until("Continue? [y/N]");
-    assert!(
-        terminal
-            .transcript
-            .contains(default_source.to_str().unwrap())
-    );
-    assert!(terminal.transcript.contains(home.0.to_str().unwrap()));
-    terminal.write(b"n\n");
-    assert_eq!(terminal.wait().code(), Some(130));
-    assert!(!home.0.join("migration").exists());
-    assert!(!home.0.join("rust/daemon.sock").exists());
-    let global = user_home.0.join(".dim/v2");
-    fs::create_dir_all(&global).unwrap();
-    fs::copy(
-        source.0.join("dimcode.sqlite"),
-        global.join("dimglobal.sqlite"),
-    )
-    .unwrap();
-    let ambiguous = command()
-        .args(["migration", "--source-stopped"])
-        .output()
-        .unwrap();
-    assert_eq!(ambiguous.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("Both legacy v2 homes exist"));
-    assert!(!home.0.join("migration").exists());
     let inspected = home
         .command()
-        .env("HOME", &user_home.0)
         .args([
             "migration",
             "inspect",
@@ -138,49 +97,22 @@ fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin
     let inventory: Value = serde_json::from_slice(&inspected.stdout).unwrap();
     assert_eq!(inventory["tables"]["messages"], 1);
     assert!(!home.0.join("rust/daemon.sock").exists());
-    let cn_database = default_source.join("dimcode.sqlite");
-    let parked = default_source.join("parked.sqlite");
-    fs::rename(&cn_database, &parked).unwrap();
-    let global_inspection = command()
-        .args(["migration", "inspect", "--source-stopped"])
-        .output()
-        .unwrap();
-    assert!(
-        global_inspection.status.success(),
-        "{}",
-        String::from_utf8_lossy(&global_inspection.stderr)
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&global_inspection.stdout).unwrap()["database"],
-        "dimglobal.sqlite"
-    );
-    fs::rename(parked, cn_database).unwrap();
-    fs::remove_dir_all(global).unwrap();
-    let run = |args: &[&str]| command().args(args).output().unwrap();
-    struct Daemon<'a>(&'a Home, &'a std::path::Path);
-    impl Drop for Daemon<'_> {
-        fn drop(&mut self) {
-            let _ = self
-                .0
-                .command()
-                .arg("--model-config")
-                .arg(self.1)
-                .args(["daemon", "stop"])
-                .output();
-        }
-    }
+    let run = |args: &[&str]| {
+        home.command()
+            .args(["--model-config", model.to_str().unwrap()])
+            .args(args)
+            .output()
+            .unwrap()
+    };
     let _daemon = Daemon(&home, &model);
-    let mut import = command();
-    import.arg("migration");
-    let mut terminal = Terminal::launch(import);
-    terminal.until("Continue? [y/N]");
-    terminal.write(b"y\n");
-    assert!(terminal.wait().success(), "{}", terminal.transcript);
-    let tasks = run(&["migration", "list"]);
-    assert!(tasks.status.success());
-    let tasks: Value = serde_json::from_slice(&tasks.stdout).unwrap();
-    assert_eq!(tasks.as_array().unwrap().len(), 1);
-    let first = run(&["migration", "show", tasks[0]["id"].as_str().unwrap()]);
+    let first = run(&[
+        "migration",
+        "run",
+        "--source",
+        source.0.to_str().unwrap(),
+        "--source-stopped",
+        "--json",
+    ]);
     assert!(
         first.status.success(),
         "{}\n{}\n{}",
@@ -350,8 +282,300 @@ fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin
         5
     );
     assert_eq!(fs::read(source.0.join("dimcode.sqlite")).unwrap(), before);
+}
+
+#[test]
+fn default_migration_keeps_global_and_cn_in_their_own_homes() {
+    let user = Home::new();
+    let model = user.0.join("offline.json");
+    fs::write(
+        &model,
+        include_str!("../../../dim-agent-aimux/examples/offline.json"),
+    )
+    .unwrap();
+    let unrelated = user.0.join("development-home");
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dimcode"));
+        command
+            .env("HOME", &user.0)
+            .env("DIMCODE_HOME", &unrelated)
+            .env("DIMCODE_UPDATE_CHECK", "0")
+            .arg("--model-config")
+            .arg(&model);
+        command
+    };
+    let missing = command()
+        .args(["migration", "--source-stopped"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("No default legacy v2 database"));
+    let empty = command().args(["migration", "list"]).output().unwrap();
+    assert!(empty.status.success());
     assert_eq!(
-        fs::read(default_source.join("dimcode.sqlite")).unwrap(),
-        before
+        serde_json::from_slice::<Value>(&empty.stdout).unwrap(),
+        json!({})
     );
+    assert!(!unrelated.exists());
+    let global = Home(user.0.join(".dim"));
+    let cn = Home(user.0.join(".dimcode"));
+    let global_source = global.0.join("v2");
+    let cn_source = cn.0.join("v2");
+    legacy_home(&global_source, "dimglobal.sqlite", "Global conversation");
+    let single = command()
+        .args(["migration", "inspect", "--source-stopped"])
+        .output()
+        .unwrap();
+    assert!(single.status.success());
+    let single: Value = serde_json::from_slice(&single.stdout).unwrap();
+    assert_eq!(single.as_object().unwrap().len(), 1);
+    assert_eq!(single["global"]["home"], global.0.to_str().unwrap());
+    assert!(!cn.0.exists());
+    legacy_home(&cn_source, "dimcode.sqlite", "CN conversation");
+    for (source, rule) in [
+        (&global_source, "git status *"),
+        (&cn_source, "cargo test *"),
+    ] {
+        fs::write(
+            source.join("permissions.json"),
+            json!({"version":1,"execCommandPermissions":{"rules":{rule:"allow"}}}).to_string(),
+        )
+        .unwrap();
+    }
+    let global_bytes = fs::read(global_source.join("dimglobal.sqlite")).unwrap();
+    let cn_bytes = fs::read(cn_source.join("dimcode.sqlite")).unwrap();
+    let mut decline = command();
+    decline.arg("migration");
+    let mut terminal = Terminal::launch(decline);
+    terminal.until("Continue? [y/N]");
+    for expected in [&global_source, &global.0, &cn_source, &cn.0] {
+        assert!(
+            terminal.transcript.contains(expected.to_str().unwrap()),
+            "{}",
+            terminal.transcript
+        );
+    }
+    terminal.write(b"n\n");
+    assert_eq!(terminal.wait().code(), Some(130));
+    assert!(!global.0.join("rust").exists());
+    assert!(!cn.0.join("migration").exists());
+    let inspect = command()
+        .args(["migration", "inspect", "--source-stopped"])
+        .output()
+        .unwrap();
+    assert!(
+        inspect.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let inspect: Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    assert_eq!(inspect["global"]["home"], global.0.to_str().unwrap());
+    assert_eq!(inspect["global"]["result"]["database"], "dimglobal.sqlite");
+    assert_eq!(inspect["cn"]["home"], cn.0.to_str().unwrap());
+    assert_eq!(inspect["cn"]["result"]["database"], "dimcode.sqlite");
+    let scoped = global
+        .command()
+        .args(["migration", "inspect", "--source-stopped"])
+        .output()
+        .unwrap();
+    assert!(scoped.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&scoped.stdout).unwrap()["database"],
+        "dimglobal.sqlite"
+    );
+    assert!(!global.0.join("rust").exists());
+    assert!(!cn.0.join("rust").exists());
+    let _global_daemon = Daemon(&global, &model);
+    let _cn_daemon = Daemon(&cn, &model);
+    let mut import = command();
+    import.arg("migration");
+    let mut terminal = Terminal::launch(import);
+    terminal.until("Continue? [y/N]");
+    terminal.write(b"y\n");
+    assert!(terminal.wait().success(), "{}", terminal.transcript);
+    let listed = command().args(["migration", "list"]).output().unwrap();
+    assert!(listed.status.success());
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["global"]["result"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["cn"]["result"].as_array().unwrap().len(), 1);
+    let mut identities = Vec::new();
+    for (name, home, text, other, rule) in [
+        (
+            "global",
+            &global,
+            "Global conversation",
+            "CN conversation",
+            "git status",
+        ),
+        (
+            "cn",
+            &cn,
+            "CN conversation",
+            "Global conversation",
+            "cargo test",
+        ),
+    ] {
+        let id = listed[name]["result"][0]["id"].as_str().unwrap();
+        let shown = command().args(["migration", "show", id]).output().unwrap();
+        assert!(
+            shown.status.success(),
+            "{}",
+            String::from_utf8_lossy(&shown.stderr)
+        );
+        let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+        assert_eq!(shown.as_object().unwrap().len(), 1);
+        let report = &shown[name]["result"];
+        assert_eq!(report["task"]["status"], "completed");
+        let session = report["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["kind"] == "session")
+            .unwrap()["targetId"]
+            .as_str()
+            .unwrap();
+        let exported = home
+            .command()
+            .arg("--model-config")
+            .arg(&model)
+            .args(["session", "export", session, "--format", "json"])
+            .output()
+            .unwrap();
+        assert!(
+            exported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&exported.stderr)
+        );
+        let history = String::from_utf8_lossy(&exported.stdout);
+        assert!(history.contains(text), "{history}");
+        assert!(!history.contains(other), "{history}");
+        let native = rusqlite::Connection::open_with_flags(
+            home.0.join("rust/dimcode.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let settings: String = native
+            .query_row(
+                "SELECT document FROM settings_documents WHERE source='user/permission'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&settings).unwrap()["commandRules"],
+            json!([{"command":rule,"match":"prefix","decision":"allow"}])
+        );
+        identities.push((name, id.to_owned(), session.to_owned()));
+    }
+    let repeated = command()
+        .args(["migration", "--source-stopped", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    for (name, _, session) in &identities {
+        assert!(
+            repeated[*name]["result"]["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["kind"] == "session"
+                    && item["outcome"] == "alreadyImported"
+                    && item["targetId"] == *session)
+        );
+    }
+    let cn_task = &identities
+        .iter()
+        .find(|(name, _, _)| *name == "cn")
+        .unwrap()
+        .1;
+    let retry = command()
+        .args(["migration", "retry", cn_task, "--source-stopped"])
+        .output()
+        .unwrap();
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let retry: Value = serde_json::from_slice(&retry.stdout).unwrap();
+    assert_eq!(retry.as_object().unwrap().len(), 1);
+    assert_eq!(retry["cn"]["result"]["task"]["retryOf"], *cn_task);
+    assert_eq!(
+        fs::read(global_source.join("dimglobal.sqlite")).unwrap(),
+        global_bytes
+    );
+    assert_eq!(
+        fs::read(cn_source.join("dimcode.sqlite")).unwrap(),
+        cn_bytes
+    );
+    let selected = command()
+        .current_dir(&global.0)
+        .args(["migration", "inspect", "--source", "v2", "--source-stopped"])
+        .output()
+        .unwrap();
+    assert!(selected.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&selected.stdout).unwrap()["database"],
+        "dimglobal.sqlite"
+    );
+    assert!(!unrelated.exists());
+    fs::write(
+        global_source.join("dimglobal.sqlite"),
+        b"unreadable legacy database",
+    )
+    .unwrap();
+    let isolated = command()
+        .args(["migration", "--source-stopped"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        isolated.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&isolated.stdout)
+    );
+    let isolated: Value = serde_json::from_slice(&isolated.stdout).unwrap();
+    assert!(
+        isolated["global"].get("error").is_some()
+            || isolated["global"]["result"]["task"]["status"] == "failed",
+        "{isolated}"
+    );
+    assert_eq!(isolated["cn"]["result"]["task"]["status"], "completed");
+    for home in [&global, &cn] {
+        assert!(
+            home.command()
+                .arg("--model-config")
+                .arg(&model)
+                .args(["daemon", "stop"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        fs::rename(home.0.join("v2"), home.0.join("old-source-retained")).unwrap();
+    }
+    for (name, task, _) in &identities {
+        let shown = command()
+            .args(["migration", "show", task])
+            .output()
+            .unwrap();
+        assert!(shown.status.success());
+        let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+        assert_eq!(shown[*name]["result"]["task"]["id"], *task);
+        let cancelled = command()
+            .args(["migration", "cancel", task])
+            .output()
+            .unwrap();
+        assert!(cancelled.status.success());
+        let cancelled: Value = serde_json::from_slice(&cancelled.stdout).unwrap();
+        assert_eq!(cancelled[*name]["result"]["task"]["id"], *task);
+    }
+    assert!(!global.0.join("rust/daemon.sock").exists());
+    assert!(!cn.0.join("rust/daemon.sock").exists());
+    assert!(!unrelated.exists());
 }

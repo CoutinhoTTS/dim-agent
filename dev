@@ -35,7 +35,8 @@ Usage: ./dev [CLI arguments]
 With DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL set, dimcode is
 built as the account build; otherwise as the API-key build.
 Use --model-config PATH for independent API-key development.
-Migration imports the stopped legacy v2 home into the development home.
+Migration imports Global .dim/v2 into .dim and CN .dimcode/v2 into .dimcode.
+Other commands use the isolated development home.
 Optional local configuration: .env.dev (see .env.example).
 A new development home runs commands without OS isolation: a new
 host-isolation.json with {"version": 2, "sandbox": "host"} is written to the
@@ -60,6 +61,7 @@ explicit_model_config=false
 explicit_selection=false
 chat=true
 migration=false
+explicit_home=false
 native_help=false
 resumed=false
 while [[ $# -gt 0 ]]; do
@@ -71,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         explicit_model_config=true
       else
         product_home=$2
+        explicit_home=true
       fi
       shift
       ;;
@@ -84,7 +87,11 @@ while [[ $# -gt 0 ]]; do
       resumed=true
       shift
       ;;
-    --prompt|-p|--cwd|--server|--directory|--redirect-uri|--source)
+    --source)
+      [[ $# -ge 2 ]] || { echo "$1 requires a path." >&2; exit 1; }
+      shift
+      ;;
+    --prompt|-p|--cwd|--server|--directory|--redirect-uri)
       [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 1; }
       shift
       ;;
@@ -114,7 +121,10 @@ if [[ "$action" == stop ]]; then
   exec "$binary" --home "$product_home" daemon stop
 fi
 
-options=(--home "$product_home")
+options=()
+if [[ "$migration" == false || "$explicit_home" == true ]]; then
+  options+=(--home "$product_home")
+fi
 if [[ "$native_help" == false && -n "$model_config" && "$explicit_model_config" == false ]]; then
   options+=(--model-config "$model_config")
 fi
@@ -143,4 +153,4 @@ if [[ "$native_help" == false && "$migration" == false ]]; then
   "$binary" --home "$product_home" daemon stop >&2
 fi
 # Bash 3.2 (macOS) treats an empty array as unset under `set -u`.
-exec "$binary" "${options[@]}" ${caller_args[@]+"${caller_args[@]}"}
+exec "$binary" ${options[@]+"${options[@]}"} ${caller_args[@]+"${caller_args[@]}"}

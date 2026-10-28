@@ -49,17 +49,41 @@ Subcommands do not create a plugin command registry.
 ### Migration interaction
 
 `dim` and the alpha package's `dima` invoke these same native commands. Bare
-`migration` runs an import. The CLI finds the legacy home at `~/.dimcode/v2`
-(containing `dimcode.sqlite`) or `~/.dim/v2` (containing `dimglobal.sqlite`).
-If both or neither are present, it asks for `--source OLD_HOME` instead of choosing
-an ambiguous source. An explicit source also supports custom Desktop storage roots.
-The target uses the ordinary client home; `--home` overrides it. `./dev migration`
-uses the existing isolated development home and never restarts its daemon merely
-to inspect, query, cancel or retry Migration.
+`migration` imports each existing distribution independently:
+
+| Distribution | Legacy source | Native target home |
+| --- | --- | --- |
+| Global | `~/.dim/v2` containing `dimglobal.sqlite` | `~/.dim` |
+| CN | `~/.dimcode/v2` containing `dimcode.sqlite` | `~/.dimcode` |
+
+When both exist, both are imported. Sessions, Providers, Settings and task ledgers
+remain in their own target home. The default migration command uses these paths
+independently of the chat client's alpha/development home or `DIMCODE_HOME`.
+`./dev migration` invokes the same routing without injecting its development home
+or restarting a daemon. Development verification uses disposable user homes.
+
+An explicit `--home TARGET` scopes the command to that one home, reading
+`TARGET/v2` when `--source` is absent. `--source OLD_HOME` selects just that
+source; when it names a `v2` directory its parent is the target. Other custom
+source layouts require `--home TARGET` to make the destination explicit.
+The shared Migration plugin still receives one resolved source/target pair per
+invocation and knows no distribution directory convention.
+
+Default `list` reads both target homes. Default `show`, `retry` and `cancel`
+locate the task through the owners' task lists, including when its old source
+has been removed. Batch output is one JSON object keyed by `global` and `cn`;
+each entry contains `home` and `result`, or `home` and `error`. An absent
+distribution is omitted. No matching source is an error; a task query with no
+matching task is an error; listing with neither target home present returns `{}`.
+A failure in one
+distribution is reported while the other is attempted. Cancellation stops the
+remaining imports. Overall exit is 1 for any failed distribution, otherwise 2
+for any partial result, 0 for success, or 130 when cancelled. Explicitly scoped
+commands retain their single-home JSON result.
 
 Inspect, run and retry require the old clients to have stopped writing. Without
 `--source-stopped`, an interactive terminal shows the resolved source and target
-and asks for confirmation. Declining exits 130 without starting an import;
+and asks once for confirmation of all selected sources. Declining exits 130 without starting an import;
 noninteractive callers must pass `--source-stopped`. Source/target overlap is
 rejected before starting the target daemon. Run and retry mount Migration for the
 invocation and use the ordinary daemon profile; metadata commands mount it without
@@ -68,11 +92,13 @@ has no persistent enablement selection or automatic trigger. Imported business c
 
 ```text
 $ ./dev migration
+Source: /Users/me/.dim/v2
+Target: /Users/me/.dim
 Source: /Users/me/.dimcode/v2
-Target: /Users/me/.dimcode-dev/<repository>
-Close legacy CLI and Desktop using this source. Continue? [y/N] y
+Target: /Users/me/.dimcode
+Close legacy CLI and Desktop using these sources. Continue? [y/N] y
 <task-id>  sessions        0/12      <legacy-session>
-{ "task": { "id": "...", "status": "partial", ... }, "objects": [ ... ] }
+{ "global": { "home": ".../.dim", "result": { ... } }, "cn": { "home": ".../.dimcode", "result": { ... } } }
 
 $ dim migration inspect --home /tmp/dim-new --source /tmp/dim-old --source-stopped
 { "database": "dimcode.sqlite", "tables": { ... }, "issues": [] }

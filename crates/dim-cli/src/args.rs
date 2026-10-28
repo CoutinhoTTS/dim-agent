@@ -39,7 +39,8 @@ Commands:\n\
   runtime install node|python      Turn a plugin runtime on and acquire it\n\
   daemon stop                      Gracefully stop an existing daemon\n\
   migration [run|inspect] [--source OLD_HOME]\n\
-                                   Import the default legacy v2 home or inspect it;\n\
+                                   Import or inspect Global and CN separately;\n\
+                                   Global stays in ~/.dim, CN in ~/.dimcode;\n\
                                    confirm stopped clients or use --source-stopped\n\
   migration list|show TASK|cancel TASK\n\
                                    Read tasks or request cancellation\n\
@@ -158,6 +159,7 @@ pub struct Options {
     pub json: bool,
     pub resume: Option<String>,
     pub home: PathBuf,
+    pub home_explicit: bool,
     pub cwd: PathBuf,
     pub server: Option<PathBuf>,
     pub model_config: Option<PathBuf>,
@@ -191,6 +193,7 @@ impl Options {
             json: false,
             resume: None,
             home: default_home(),
+            home_explicit: false,
             cwd: std::env::current_dir()?,
             server: None,
             model_config: None,
@@ -283,7 +286,10 @@ impl Options {
                         return Err("Supply the database path only once".into());
                     }
                 }
-                "--home" => options.home = PathBuf::from(value(&mut args)?),
+                "--home" => {
+                    options.home = PathBuf::from(value(&mut args)?);
+                    options.home_explicit = true;
+                }
                 "--cwd" => options.cwd = PathBuf::from(value(&mut args)?),
                 "--server" => options.server = Some(PathBuf::from(value(&mut args)?)),
                 "--model-config" => options.model_config = Some(PathBuf::from(value(&mut args)?)),

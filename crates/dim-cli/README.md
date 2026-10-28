@@ -2,10 +2,12 @@
 
 `dimcode` is a thin Rust client for the local App Server. It owns command-line input, scrollback output, approvals, questions and account prompts. The App Server owns model execution, tools, session state and persistence. The npm wrapper exposes the same program as `dim` and `dimcode`; the alpha wrapper exposes `dima`.
 
-`migration` imports the default legacy `v2` home into the ordinary client home;
-`./dev migration` uses the isolated development home. A terminal asks once to
-confirm the old clients have stopped. `--source` overrides the legacy home and
-`--source-stopped` supplies the acknowledgement for scripts.
+`migration` and `./dev migration` import Global `.dim/v2` into `.dim` and CN
+`.dimcode/v2` into `.dimcode` independently, processing both when present. Default
+task queries search both homes. A terminal asks once to confirm the old clients
+have stopped. `--home` scopes the command to one target (`HOME/v2` by default),
+`--source` overrides its source, and `--source-stopped` acknowledges stopped
+writers for scripts. Development verification uses disposable user homes.
 `migration inspect/run/list/show/retry/cancel` mounts the shared Migration plugin
 only for that invocation. Source checks, stopped-source acknowledgement, progress,
 JSON reports, cancellation and exit codes follow the [migration command contract](../../docs/design/cli-commands.md#migration-interaction).
