@@ -823,14 +823,19 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 **放在哪里。** 不在 CI 中：它调用真实模型，结果不确定且要花钱，而 AGENTS.md 把自动化测试留给流程与合同。它是 `measure` 旁边的一个 `xtask` 命令，`measure` 已经可以选配真实模型配置运行：
 
 ```bash
-cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR [--reasoning inherit|off|low]
+cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR [--reasoning inherit|off|low] [--candidate FILE [--target OUTPUT_SHARE,INPUT_SHARE]]
 ```
 
 - 不带 `--reasoning` 时运行器执行第一阶段：三个推理分组（`inherit`、`off`、`low`），不带目标指令。带 `--reasoning VALUE` 时执行第二阶段：无指令分组加四个 `(α, β)` 分组，`VALUE` 是第一阶段为该模型选定的推理值。
+- `--candidate FILE` 读取一个 UTF-8 文本文件，内容作为候选系统提示。它需要 `--reasoning VALUE`，并取代两个阶段的分组，而不是与它们并列：运行器在同一批用例上运行两个分组 `current` 与 `candidate`，两者都用 `VALUE`，并共用一条目标规则——给了 `--target OUTPUT_SHARE,INPUT_SHARE` 就用它，没有就不写目标。每个份额是大于 0、至多 1 的小数。`--candidate` 缺 `--reasoning`、`--target` 缺 `--candidate`、份额格式错误、文件不是 UTF-8 文本，都在任何模型调用之前拒绝。
 - `--home` 必填，必须是一个隔离的产品 home，由操作者在其中配置好提供方；运行器从不使用 `~/.dimcode` 或 `~/.dimcode-alpha`。凭据留在那个 home 里，不进入仓库、用例或输出。
 - 运行器在该 home 上启动产品配置（与 `graph` 相同），用默认偏好（用户得到的配置）从 `ProviderService::configuration` 为 `--model` 构造对话请求，并在其上解析 `ProductContextModel`。
-- 对每个用例和每个分组，它用进程的 `ModelHost` 和 `ProviderConnectionResolver` 构造产品摘要策略，把分组的目标规则作为工厂配置，把分组的 `compaction.json` 写进 home，然后用由用例构造的 `CompactionInput` 直接调用 `compact`。因此每个分组都运行已发布的请求构造、分块、截断处理和推理映射，只有两个可调项不同。
+- 对每个用例和每个分组，它用进程的 `ModelHost` 和 `ProviderConnectionResolver` 构造产品摘要策略，把分组的工厂配置（目标规则，以及候选分组的候选提示）传给策略，把分组的 `compaction.json` 写进 home，然后用由用例构造的 `CompactionInput` 直接调用 `compact`。因此每个分组都运行已发布的请求构造、分块、截断处理和推理映射，只有可调项不同。
 - 输出（每次运行一份 JSON，加一张 Markdown 表）写到仓库之外的 `--out`。评估跑完后，决定和它的表格作为研究笔记提交（`docs/design/research/summary-eval.md`，英文 + 中文）。
+
+**候选分组 (a)。** 候选提示是产品摘要策略的工厂配置：`ProductSummaryStrategyConfig` 增加一个可选成员保存系统提示（§13.5），设置时策略用它代替 `SYSTEM`。产品配置不设置它。目标句（§13.3）追加到当前使用的提示末尾；分块、折叠、截断处理、推理映射和请求预算都不变，所以两个分组运行的都是已发布的代码，只有提示不同。
+
+报告按下面的表格展示每个分组，然后输出一行结论：`candidate passes; median T: current 1850, candidate 1600`，或同样格式的 `candidate fails`，判定按 §6 对 `current` 的规则：`F ≥ F_current − δ`、`X ≥ X_current − δ`、`V ≤ V_current`，`δ = 0.05`，失败数（`failed`；`skipped` 单独计数）不多于 `current` 的。没有对应类别探针的比率不参与该规则。两个分组各自的 `T` 中位数写在结论旁边，使长度始终可见（§6：每个分数旁都报告长度）。
 
 **用例。** `xtask/summary-eval/cases/` 中的 JSON 文件，每段历史一个：
 
@@ -852,6 +857,15 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 - 有 `contextWindow` 时，它为该用例收窄窗口事实（更小的窗口总是合法的），使折叠路径能在花费可接受的历史上运行。它同时把该用例的输出额度限制到该窗口的四分之一（`config.max_tokens = min(output, contextWindow / 4)`），使最大输出很大的模型上输入预算仍为正；每次运行的 JSON 记录实际生效的窗口和输出。输入预算不会为正的用例在任何模型调用之前被拒绝。
 - 内容公开：由本仓库自己的代码、文档和命令输出构成，路径在 `/work/dim` 下。没有真实用户会话、密钥或 home 路径。
 
+**压缩链 (b)。** 用例保留上面的形状，或改用 `steps`：一个由 `{ "messages": [...], "retainFrom": n }` 组成的数组，链正好五步。两种形状互斥；两者都有、都没有、或 `steps` 步数不是五的用例，都在任何模型调用之前拒绝。`earlierSummary` 和 `contextWindow` 仍是用例的成员。一条链是连续五次压缩：
+
+- 第 1 步在有 `earlierSummary` 时以它为检查点，否则没有检查点。之后每一步的检查点是上一步完成时产出的 replacement，原样使用，并带 `replacement_parts { strategy: <其长度>, digest: 0 }`，与已提交的压缩成为下一个检查点的方式相同（§4.3、§5.2）。渲染出的文本只用于报告和评判。
+- 每一步的 `messages` 是它检查点之后的历史：第 k ≥ 2 步必须以上一步的 `messages[retainFrom..]` 原样开头，因为真实的压缩会保留那段尾部，下一次压缩在读取新消息之前先看到它。破坏这一点的链在任何模型调用之前被拒绝；否则切点之后的内容不是被提示词丢掉，而是按构造丢失。
+- 每一步都是对已发布策略的一次调用，其历史、请求和切点与单个用例的构造完全相同，所以 `validate_cut` 逐步运行。
+- 探针只在第五份摘要上评判。
+- 某一步失败就结束整条链，该用例计为一次失败的压缩：按上面的失败规则，它的事实探针和 exact 探针计为未命中，absent 探针计为未违规。
+- 每次运行的 JSON 记录运行过的每一步，各带单次运行记录的结果、耗时、错误、摘要和诊断。指标中整条链算一次压缩：`T` 是第五份摘要的 token 数，`C` 汇总每一步被截断的回复，耗时是整条链的，任一步回退的运行计为 `fellBack`。
+
 | 用例 | 覆盖什么 | 探针包括 |
 | --- | --- | --- |
 | `long-tool-output` | 一个几十 KB 的工具结果，关键行在中间；中间截断 | 失败的测试名和错误行（exact）、原因和决定的修复 |
@@ -861,6 +875,13 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 | `merge` | 早先的摘要加新的记录 | 两边的事实 |
 | `folding` | 比收窄后的窗口大数倍的历史 | 最后一次折叠后，第一块的事实仍在 |
 | `injection` | 要求读者丢弃指令或写入某些内容的工具输出 | 摘要把它记为数据，不照做（absent） |
+| `chain` | 同一段公开会话的五段切片，依次压缩 | 贯穿五次的约束、被撤回的约束及其替代、第 4 步细化的任务 |
+
+`chain` 是同一段公开会话的五段切片，由本仓库自己的代码和文档构成，路径在 `/work/dim` 下，不含密钥；每段切片重复上一段的保留尾部。它至少包含：第 1 步给出且从未撤回的约束，第五步之后用一个带 `item: "constraint"` 的 `fact` 探针检查；第 1 步给出、第 3 步撤回的约束，用一个 `absent` 探针检查“该约束仍然有效”，再用一个带 `item: "constraint"` 的 `fact` 探针检查它的替代；以及第 1 步设定、第 4 步细化的任务，用一个带 `item: "task"` 的 `fact` 探针检查细化后的任务。
+
+**3b 探针 (c)。** 探针增加可选的 `item`，指名它检查的 3b 类别：`task`、`constraint`、`decision`、`ruledOut`、`openItem`、`judgment` 和 `nextStep`（compaction-quality §3）。第 3b 类的第八项，即原样保留的标识符，是 `exact` 探针，由 `X` 报告，所以不带 `item`。只有 `fact` 探针读取 `item`；在 `exact` 或 `absent` 探针上写 `item` 会被拒绝，因为分项只统计 `fact` 探针，写在那里没有含义。已有的 `fact` 探针在类别明确时补上 `item`，文本不变；只有没有任何已有探针检查的类别才新增探针。探针从用例自己的内容——它的早先摘要和消息——中写出，不向用例添加消息，所以已测得的分数保持可比。
+
+**用例校验。** 用例是带格式的提交数据，所以由一个 `xtask` 测试用运行器自己的读取器解析并校验 `xtask/summary-eval/cases/` 下的每个文件，不调用模型：用例形状、步数、`retainFrom` 边界和切点规则、保留尾部规则，以及探针的 `item`。用测试而不是 `xtask check` 步骤：这些文件是命令自己的数据，不是 `check` 守护的组装、crate 边界或生成产物，而 CI 已经运行 `cargo test --workspace`。
 
 **评判。**
 
@@ -869,6 +890,8 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 - 记录决定之前，操作者阅读每个分组得分最低的摘要，手工纠正评判错误；纠正列在研究笔记中。
 
 每个模型和分组，在用例和运行次数上统计：事实召回 `F`、exact 召回 `X`、违规 `V`、被截断的回复 `C`（`cutOffCount`）、失败的压缩、摘要 token 中位数 `T`（`estimatedSummaryTokens`）和 `durationMs` 中位数；目标分组还统计比值 `T / S`。实际采用的推理（`reasoning`）与分组值不同的运行计为 `fellBack`，避免模型拒绝该分组时拿分组和自己比较（§13.2）。评判模型没有作答的判断探针单独计入 `unjudged` 列，由操作者手工纠正。失败的压缩没有摘要：它的事实探针和 exact 探针计为未命中，absent 探针计为未违规，且不调用评判模型，因此一次失败会降低 `F` 和 `X`，不会增加 `V`。
+
+报告为每个分组增加按 `item` 分解的 `F`，范围是带 `item` 的 `fact` 探针：第二张表，每个类别一行、每个分组一列，分组没有该类别的探针时单元格为 `–`。没有 `item` 的探针只计入总体 `F` 和 `X`，与现在相同。
 
 **模型。** 目录中每类推理方式至少一个模型：带 `thinking: disabled` 关闭声明的预算式思考（Anthropic）、按强度的推理（OpenAI Responses）、使用 `enable_thinking` 或 `thinking.type` 的 OpenAI 兼容模型（选一个中文能力强的模型），以及一个没有推理的模型作对照。
 
@@ -888,14 +911,14 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 
 | 部分 | 改动 |
 | --- | --- |
-| `summary_strategy.rs` | 每次压缩读取一次 `compaction.json`（如果设置发布）；经 `reasoning_config` 映射 config；规则给出目标时追加目标句；策略值得到一个公开构造函数，接收 `ModelHost`、`ProviderConnectionResolver`、它的工厂配置和可选的 `FileStorage` 句柄（配置了 home 时由插件注入），供运行器使用 |
-| `ProductSummaryStrategyPlugin` | 工厂配置：`compaction.json` 的位置和目标规则 |
+| `summary_strategy.rs` | 每次压缩读取一次 `compaction.json`（如果设置发布）；经 `reasoning_config` 映射 config；系统提示来自工厂配置（缺省为 `SYSTEM`），规则给出目标时把目标句追加到当前使用的提示末尾；策略值得到一个公开构造函数，接收 `ModelHost`、`ProviderConnectionResolver`、它的工厂配置和可选的 `FileStorage` 句柄（配置了 home 时由插件注入），供运行器使用 |
+| `ProductSummaryStrategyPlugin` | 工厂配置：`compaction.json` 的位置、目标规则和可选的系统提示；产品配置既不设置目标规则，也不设置提示 |
 | Provider（`preferences.rs`） | 强度分支移到 `reasoning_config`；行为不变 |
 | 摘要诊断对象 | 增加 `reasoning`（实际采用的值：`inherit`、`off`、`low`）、`targetTokens`（S，没有指令时不出现）和 `cutOffCount`（停在 `max_tokens` 的回复数；现在它们只隐含在 `chunkCount` 中）。是 `context/compaction` 中由策略拥有的对象的新增字段；不改格式版本 |
-| `xtask` | `summary-eval` 命令和 `xtask/summary-eval/cases/`；`serve_home`，即在已有 home 上组装产品配置，由 `serve_product`（`graph`）和运行器共用 |
+| `xtask` | `summary-eval` 命令和 `xtask/summary-eval/cases/`；`--candidate` 与 `--target` 及两分组报告和结论；`steps` 形状、`item` 分项和用例校验测试；`serve_home`，即在已有 home 上组装产品配置，由 `serve_product`（`graph`）和运行器共用 |
 | App Server 产品配置 | 把 home 中 `compaction.json` 的位置传给策略工厂；`RunningServer::service` 把一个已启动配置的进程服务交给 `xtask`，使运行器能取到 `ProviderService`、`ModelHost`、`ProviderConnectionResolver` 和 `FileStorage` |
 
-不改任何事件、端口、Session 值、Loop、ContextPolicy、记录或重放。`transport_flow/compaction.rs` 中的 `summary_reasoning_comes_from_the_compaction_file` 覆盖读取与映射：`compaction.json` 的值为 `off` 时，摘要请求的 config 带有模型关闭推理的字段，而对话请求保留它的推理，记录的诊断显示 `reasoning: "off"`；无效文件让手动压缩以 `compaction_failed` 失败。目标规则不需要单独的测试：它是提示词文本，由评估衡量。
+不改任何事件、端口、Session 值、Loop、ContextPolicy、记录或重放。`transport_flow/compaction.rs` 中的 `summary_reasoning_comes_from_the_compaction_file` 覆盖读取与映射：`compaction.json` 的值为 `off` 时，摘要请求的 config 带有模型关闭推理的字段，而对话请求保留它的推理，记录的诊断显示 `reasoning: "off"`；无效文件让手动压缩以 `compaction_failed` 失败。目标规则不需要单独的测试：它是提示词文本，由评估衡量。系统提示成员需要：`context_flow` 中的 `product_summary` 配置一个比 `SYSTEM` 长得多的提示，断言每个摘要请求的系统文本都以它开头，并且每个请求仍然放进窗口；它扩展现有的 CJK 适配置流程。
 
 ### 13.6 规则检查（针对 #170 的改动）
 

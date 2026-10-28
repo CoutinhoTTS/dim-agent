@@ -82,7 +82,8 @@
     {
       "id": "language",
       "kind": "fact",
-      "text": "助手用中文回复，并且只修改了中文文档。"
+      "text": "助手用中文回复，并且只修改了中文文档。",
+      "item": "constraint"
     },
     {
       "id": "identifier",
@@ -92,12 +93,19 @@
     {
       "id": "constraint",
       "kind": "fact",
-      "text": "标识符保持原样，中文文件里不添加注释。"
+      "text": "标识符保持原样，中文文件里不添加注释。",
+      "item": "constraint"
     },
     {
       "id": "english",
       "kind": "absent",
       "text": "助手也修改了英文版的设计文档。"
+    },
+    {
+      "id": "task",
+      "kind": "fact",
+      "item": "task",
+      "text": "任务是把中文文档 §13.5 表格的行顺序对齐英文版，并且只修改中文文档。"
     }
   ]
 }

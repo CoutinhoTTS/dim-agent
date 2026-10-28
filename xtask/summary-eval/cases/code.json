@@ -115,12 +115,25 @@
     {
       "id": "remaining",
       "kind": "fact",
-      "text": "The next step is to run the capabilities tests."
+      "text": "The next step is to run the capabilities tests.",
+      "item": "nextStep"
     },
     {
       "id": "chunking",
       "kind": "absent",
       "text": "The refactor changes the chunking rule or the cut-off retry rule."
+    },
+    {
+      "id": "task",
+      "kind": "fact",
+      "item": "task",
+      "text": "The task was to move the compaction counters into a Stats struct and keep the diagnostics builder, without touching chunking."
+    },
+    {
+      "id": "plan",
+      "kind": "fact",
+      "item": "decision",
+      "text": "The plan is to add a Stats struct, pass it through fold and summarize, and have diagnostics take it by reference."
     }
   ]
 }

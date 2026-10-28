@@ -77,6 +77,7 @@ pub async fn serve_home(
                         ProductSummaryStrategyConfig {
                             home: Some(home.clone()),
                             target: None,
+                            system_prompt: None,
                         },
                     )?))
                 })

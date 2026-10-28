@@ -60,9 +60,20 @@ async fn compact_now(session: &dim_agent_runtime::Session) -> (u64, Vec<Arc<Agen
     (command, events)
 }
 
-/// Records summarizer requests; answers every request with short text.
-#[derive(Default)]
-struct Recorder(std::sync::Mutex<Vec<Arc<ModelRequest>>>);
+/// Records summarizer requests, recognised by the prefix of the system prompt
+/// in use; answers every request with short text.
+struct Recorder {
+    prefix: Arc<str>,
+    requests: std::sync::Mutex<Vec<Arc<ModelRequest>>>,
+}
+impl Default for Recorder {
+    fn default() -> Self {
+        Self {
+            prefix: "You summarize a coding session".into(),
+            requests: Default::default(),
+        }
+    }
+}
 impl ModelDriver for Recorder {
     fn invoke(
         &self,
@@ -71,9 +82,9 @@ impl ModelDriver for Recorder {
         _: CancellationToken,
     ) -> HostFuture<'_, ModelStream> {
         let summarizer = matches!(request.system.as_deref(),
-            Some(SystemPrompt::Text(text)) if text.starts_with("You summarize a coding session"));
+            Some(SystemPrompt::Text(text)) if text.starts_with(self.prefix.as_ref()));
         if summarizer {
-            self.0.lock().unwrap().push(request);
+            self.requests.lock().unwrap().push(request);
         }
         let text = if summarizer { "摘要" } else { "好" };
         Box::pin(async move {
@@ -118,6 +129,16 @@ async fn product_session(
     driver: Arc<dyn ModelDriver>,
     output: u64,
 ) -> (Ctx, dim_agent_runtime::Agent, dim_agent_runtime::Session) {
+    product_session_with(driver, output, ProductSummaryStrategyConfig::default()).await
+}
+
+/// A Session whose summary strategy is configured by `config`: the product
+/// home is not set, so the factory configuration is the prompt and target.
+async fn product_session_with(
+    driver: Arc<dyn ModelDriver>,
+    output: u64,
+    config: ProductSummaryStrategyConfig,
+) -> (Ctx, dim_agent_runtime::Agent, dim_agent_runtime::Session) {
     let root = Ctx::root().unwrap();
     root.provide(ModelHost(driver.clone())).unwrap();
     root.provide(ProviderConnectionResolver(Arc::new(Local)))
@@ -132,10 +153,10 @@ async fn product_session(
         )))))
         .require_feature(Feature::new("ProductSummaryStrategy").session(
             "ProductSummaryStrategy",
-            |names| {
+            move |names| {
                 Ok(Box::new(ProductSummaryStrategyPlugin::new(
                     names,
-                    ProductSummaryStrategyConfig::default(),
+                    config.clone(),
                 )?))
             },
         ))
@@ -203,7 +224,7 @@ async fn every_summary_request_fits_the_window_for_cjk_history() {
     })
     .await
     .unwrap();
-    let requests = recorder.0.lock().unwrap().clone();
+    let requests = recorder.requests.lock().unwrap().clone();
     assert!(!requests.is_empty());
     for request in &requests {
         let model = ProductContextModel
@@ -221,6 +242,68 @@ async fn every_summary_request_fits_the_window_for_cjk_history() {
         EventKind::ContextCompaction(ContextCompactionData {
             outcome: ContextCompactionResult::Completed { diagnostics, .. }, ..
         }) if diagnostics.strategy.details["compactedToolPayloadCount"] == 1)));
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+/// A prompt much longer than `SYSTEM`, configured on the factory, reaches
+/// every summarizer request, and the request budget counts it
+/// (ContextCompaction §13.5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_summary_request_uses_the_configured_prompt_and_fits_the_window() {
+    let prompt: Arc<str> = Arc::from(
+        "Keep the summary factual and complete, and preserve the constraints in force. ".repeat(40),
+    );
+    let recorder = Arc::new(Recorder {
+        prefix: prompt.clone(),
+        ..Default::default()
+    });
+    let (root, agent, session) = product_session_with(
+        recorder.clone(),
+        OUTPUT,
+        ProductSummaryStrategyConfig {
+            system_prompt: Some(prompt.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    for text in [cjk(6_000), cjk(1_800), cjk(1_800), cjk(1_800)] {
+        session
+            .submit(text, InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    let (command, events) = compact_now(&session).await;
+    assert!(
+        events.iter().any(|event| matches!(&event.kind,
+            EventKind::ContextCompaction(ContextCompactionData {
+                command: Some(fact),
+                outcome: ContextCompactionResult::Completed { .. },
+                ..
+            }) if *fact == command)),
+        "the compaction completed"
+    );
+    let requests = recorder.requests.lock().unwrap().clone();
+    assert!(!requests.is_empty());
+    for request in &requests {
+        let Some(SystemPrompt::Text(system)) = request.system.as_deref() else {
+            panic!("a summarizer request has no system prompt")
+        };
+        assert!(
+            system.starts_with(prompt.as_ref()),
+            "a summarizer request does not use the configured prompt"
+        );
+        let model = ProductContextModel
+            .resolve(request.clone(), CancellationToken::new())
+            .await
+            .unwrap();
+        let tokens = model.count_tokens(request);
+        assert!(
+            tokens <= (WINDOW - OUTPUT) as f64,
+            "summary request of {tokens} tokens exceeds the input budget"
+        );
+    }
     agent.close().await.unwrap();
     root.shutdown().await.unwrap();
 }
@@ -397,7 +480,7 @@ async fn a_completed_compaction_reports_its_usage_and_cost() {
             _ => None,
         })
         .expect("the manual compaction completed");
-    assert_eq!(recorder.0.lock().unwrap().len(), 1, "one chunk");
+    assert_eq!(recorder.requests.lock().unwrap().len(), 1, "one chunk");
     assert_eq!(diagnostics.model_call_count, 1);
     let usage = diagnostics.model_usage.as_ref().expect("usage");
     assert_eq!(usage.prompt_tokens, 1_000.);
@@ -566,7 +649,7 @@ async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
             .count()
     };
     assert_eq!(completed(&events), 1, "the first turn compacts");
-    let first = recorder.0.lock().unwrap().len();
+    let first = recorder.requests.lock().unwrap().len();
     assert!(first > 0, "the first compaction summarized");
     // The second turn regrows the quarter of the budget the trigger needs
     // and is compacted on its own preparation.
@@ -581,7 +664,7 @@ async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
     session.idle("main").await.unwrap();
     let events = session.history("main", None).await.unwrap();
     assert_eq!(completed(&events), 2, "the second turn compacts");
-    let requests = recorder.0.lock().unwrap().clone();
+    let requests = recorder.requests.lock().unwrap().clone();
     assert!(requests.len() > first, "the second compaction summarized");
     let second: String = requests[first..]
         .iter()

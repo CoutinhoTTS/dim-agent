@@ -81,12 +81,14 @@ impl TargetRule {
 }
 
 /// Factory configuration of the summary strategy (ContextCompaction §13.5):
-/// the product home holding `compaction.json`, when the profile has one, and
-/// the target rule in force.
+/// the product home holding `compaction.json`, when the profile has one, the
+/// target rule in force, and the system prompt in place of [`SYSTEM`] when a
+/// candidate is evaluated.
 #[derive(Clone, Debug, Default)]
 pub struct ProductSummaryStrategyConfig {
     pub home: Option<PathBuf>,
     pub target: Option<TargetRule>,
+    pub system_prompt: Option<Arc<str>>,
 }
 
 pub struct ProductSummaryStrategyPlugin {
@@ -152,8 +154,13 @@ pub struct SummaryStrategy {
     /// as.
     file: Option<(Arc<FileStorage>, usize)>,
     target: Option<TargetRule>,
+    system_prompt: Option<Arc<str>>,
 }
 impl SummaryStrategy {
+    /// The system prompt in use: the factory's candidate, or [`SYSTEM`].
+    fn system(&self) -> &str {
+        self.system_prompt.as_deref().unwrap_or(SYSTEM)
+    }
     async fn compact_inner(
         &self,
         input: CompactionInput,
@@ -215,7 +222,7 @@ impl SummaryStrategy {
             } else {
                 format!("{chunk}\n\n{line}")
             };
-            if fits(&input, summary.as_deref(), &joined, target) {
+            if fits(&input, self.system(), summary.as_deref(), &joined, target) {
                 chunk = joined;
                 continue;
             }
@@ -226,11 +233,11 @@ impl SummaryStrategy {
                         .await?,
                 );
             }
-            chunk = if fits(&input, summary.as_deref(), &line, target) {
+            chunk = if fits(&input, self.system(), summary.as_deref(), &line, target) {
                 line
             } else {
                 stats.truncated += 1;
-                truncate_to_fit(&input, summary.as_deref(), &line, target)?
+                truncate_to_fit(&input, self.system(), summary.as_deref(), &line, target)?
             };
         }
         if !chunk.is_empty() {
@@ -279,6 +286,7 @@ impl SummaryStrategy {
             resolver,
             file,
             target: config.target,
+            system_prompt: config.system_prompt,
         })
     }
 }
@@ -361,11 +369,17 @@ impl SummaryStrategy {
     ) -> Result<String, HostError> {
         let mut pending = vec![chunk];
         while let Some(piece) = pending.pop() {
-            if !fits(input, summary.as_deref(), &piece, stats.target) {
+            if !fits(
+                input,
+                self.system(),
+                summary.as_deref(),
+                &piece,
+                stats.target,
+            ) {
                 let (first, second) = split_half(&piece);
                 if first.is_empty()
                     || second.is_empty()
-                    || !fits(input, summary.as_deref(), "", stats.target)
+                    || !fits(input, self.system(), summary.as_deref(), "", stats.target)
                 {
                     return Err(no_fit());
                 }
@@ -403,7 +417,13 @@ impl SummaryStrategy {
         stats: &mut Stats,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, HostError> {
-        let request = Arc::new(summary_request(input, earlier, chunk, stats.target));
+        let request = Arc::new(summary_request(
+            input,
+            self.system(),
+            earlier,
+            chunk,
+            stats.target,
+        ));
         let resolved = self
             .resolver
             .0
@@ -557,10 +577,11 @@ impl Stats {
 }
 
 /// The summarizer request for one chunk: the request's own model, snapshot
-/// and config with the output allowance as `maxTokens`, the fixed system
-/// prompt, and one user message with the carried summary and the chunk.
+/// and config with the output allowance as `maxTokens`, the system prompt in
+/// use, and one user message with the carried summary and the chunk.
 fn summary_request(
     input: &CompactionInput,
+    system_prompt: &str,
     earlier: Option<&str>,
     chunk: &str,
     target: Option<f64>,
@@ -575,9 +596,9 @@ fn summary_request(
     };
     let system = match target {
         Some(target) => format!(
-            "{SYSTEM} Keep the summary under about {target:.0} tokens; write less when the transcript needs less."
+            "{system_prompt} Keep the summary under about {target:.0} tokens; write less when the transcript needs less."
         ),
-        None => SYSTEM.to_owned(),
+        None => system_prompt.to_owned(),
     };
     let mut request = ModelRequest::new(
         &input.request.provider_id,
@@ -592,11 +613,20 @@ fn summary_request(
 
 /// Whether the whole summarizer request fits the model's input budget,
 /// counted as the window facts count every request.
-fn fits(input: &CompactionInput, earlier: Option<&str>, chunk: &str, target: Option<f64>) -> bool {
-    input
-        .model
-        .count_tokens(&summary_request(input, earlier, chunk, target))
-        <= input.model.context_window() - input.model.output_tokens()
+fn fits(
+    input: &CompactionInput,
+    system_prompt: &str,
+    earlier: Option<&str>,
+    chunk: &str,
+    target: Option<f64>,
+) -> bool {
+    input.model.count_tokens(&summary_request(
+        input,
+        system_prompt,
+        earlier,
+        chunk,
+        target,
+    )) <= input.model.context_window() - input.model.output_tokens()
 }
 
 fn no_fit() -> HostError {
@@ -607,17 +637,30 @@ fn no_fit() -> HostError {
 /// the end are kept on UTF-8 character boundaries around a marker.
 fn truncate_to_fit(
     input: &CompactionInput,
+    system_prompt: &str,
     earlier: Option<&str>,
     line: &str,
     target: Option<f64>,
 ) -> Result<String, HostError> {
     let (mut low, mut high) = (0, line.len());
-    if !fits(input, earlier, &truncate_middle(line, 0), target) {
+    if !fits(
+        input,
+        system_prompt,
+        earlier,
+        &truncate_middle(line, 0),
+        target,
+    ) {
         return Err(no_fit());
     }
     while low < high {
         let keep = (low + high).div_ceil(2);
-        if fits(input, earlier, &truncate_middle(line, keep), target) {
+        if fits(
+            input,
+            system_prompt,
+            earlier,
+            &truncate_middle(line, keep),
+            target,
+        ) {
             low = keep;
         } else {
             high = keep - 1;
