@@ -334,8 +334,10 @@ the tool name exactly; a name nothing called gives `Nothing matches …`.
 
 `open` with `about`, `tool` or `before`, and `offset` without `open`, are argument errors.
 ToolExecutor does not check input against the schema, so the handler checks its own arguments, as
-`wait` does, and returns `ToolResult::error` for a wrong type, an empty string, an `about` longer
-than 200 characters or an unknown field.
+`wait` does, and returns `ToolResult::error` for a wrong type, a string that is empty or only
+whitespace, an `about` longer than 200 characters or an unknown field. Every string argument is
+a set of words, a tool name or an id, so a value with no non-whitespace character is empty for
+each of them.
 
 ### 5.3 Paging
 
@@ -397,7 +399,7 @@ Errors (`ToolResult::error`) say how to fix the call:
 | --- | --- |
 | `open` with `about`, `tool` or `before` | `recall: open shows one turn or thing; drop about, tool and before.` |
 | `offset` without `open` | `recall: offset needs open.` |
-| Wrong type, empty string, `about` over 200 characters, unknown field | `recall: <field> must be <what>.` |
+| Wrong type, empty or whitespace-only string, `about` over 200 characters, unknown field | `recall: <field> must be <what>.` |
 | `open` or `before` is not the id of a line | `No turn or line has id <id>.` |
 | `offset` past the end of a turn or a thing | `Turn <id> has <n> lines.` / `<id> has <len> characters.` |
 

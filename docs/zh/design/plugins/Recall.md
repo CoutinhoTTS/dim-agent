@@ -211,7 +211,7 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 
 `before` 是固定历史中的一个位置：结果从事件位于该 id 的事件之前的最新条目开始。它接受任何一行的 id，所以结果返回的 `before=` 无论指向一轮、轮次之间的一行还是命中的一行都能用。`tool` 精确比较工具名；没有被调用过的名字给出 `Nothing matches …`。
 
-`open` 与 `about`、`tool` 或 `before` 同时出现，或没有 `open` 却给了 `offset`，都是参数错误。ToolExecutor 不按 schema 检查输入，所以处理函数像 `wait` 一样自己检查参数，对类型错误、空字符串、超过 200 字符的 `about` 或未知字段返回 `ToolResult::error`。
+`open` 与 `about`、`tool` 或 `before` 同时出现，或没有 `open` 却给了 `offset`，都是参数错误。ToolExecutor 不按 schema 检查输入，所以处理函数像 `wait` 一样自己检查参数，对类型错误、空字符串或只有空白的字符串、超过 200 字符的 `about` 或未知字段返回 `ToolResult::error`。
 
 ### 5.3 分页
 
@@ -267,7 +267,7 @@ End of turn. Open one: open=<id>.
 | --- | --- |
 | `open` 与 `about`、`tool` 或 `before` 同时出现 | `recall: open shows one turn or thing; drop about, tool and before.` |
 | 没有 `open` 却给了 `offset` | `recall: offset needs open.` |
-| 类型错误、空字符串、`about` 超过 200 字符、未知字段 | `recall: <field> must be <what>.` |
+| 类型错误、空字符串或只有空白、`about` 超过 200 字符、未知字段 | `recall: <field> must be <what>.` |
 | `open` 或 `before` 不是某一行的 id | `No turn or line has id <id>.` |
 | `offset` 超出一轮或一件事的末尾 | `Turn <id> has <n> lines.` / `<id> has <len> characters.` |
 

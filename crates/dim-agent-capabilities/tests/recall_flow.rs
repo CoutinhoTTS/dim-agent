@@ -2663,6 +2663,14 @@ fn the_arguments_and_the_paginations_say_how_to_fix_the_call() {
             "recall: tool must be a non-empty string.",
         ),
         (
+            json!({ "about": " \t " }),
+            "recall: about must be a non-empty string.",
+        ),
+        (
+            json!({ "open": " " }),
+            "recall: open must be a non-empty string.",
+        ),
+        (
             json!({ "about": "x".repeat(201) }),
             "recall: about must be at most 200 characters.",
         ),

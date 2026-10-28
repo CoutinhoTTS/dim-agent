@@ -330,7 +330,7 @@ fn string(field: &str, value: &Value, limit: Option<usize>) -> Result<String, St
     let Some(text) = value.as_str() else {
         return Err(format!("recall: {field} must be a string."));
     };
-    if text.is_empty() {
+    if text.trim().is_empty() {
         return Err(format!("recall: {field} must be a non-empty string."));
     }
     if let Some(limit) = limit
