@@ -4983,14 +4983,6 @@
     },
     {
       "from": "dim_agent_aimux::plugin",
-      "to": "dim_agent_capabilities::tool_registry",
-      "references": [
-        "path ToolRegistry",
-        "use dim_agent_capabilities::tool_registry::ToolRegistry"
-      ]
-    },
-    {
-      "from": "dim_agent_aimux::plugin",
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
@@ -5038,6 +5030,14 @@
       "to": "dim_agent_types::prompt",
       "references": [
         "path dim_agent_types::ModelSelection"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::plugin",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolDefinition",
+        "use dim_agent_types::ToolDefinition"
       ]
     },
     {
@@ -5845,8 +5845,6 @@
       "from": "dim_agent_capabilities::adapters",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
-        "path ToolRegistry",
-        "use crate::tool_registry::ToolRegistry",
         "use crate::tool_registry::definition"
       ]
     },
@@ -9568,6 +9566,14 @@
     },
     {
       "from": "dim_agent_capabilities::tool_binding",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModelSettings",
+        "use crate::host::ModelSettings"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_binding",
       "to": "dim_agent_capabilities::prompt",
       "references": [
         "path Prompt",
@@ -9620,6 +9626,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError::Closed",
+        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path crate::host::panic_message",
         "path dim_agent_runtime::Result",

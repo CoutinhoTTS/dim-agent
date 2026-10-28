@@ -362,7 +362,7 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 能力 | 作用域 | 重载来源 | 卸载 | 装载 |
 | --- | --- | --- | --- | --- |
 | `ToolRegistry` | Session | `ToolHost` | — | 按 Session 配置重新读取宿主工具；注册到它的部件随之重载并重新注册 |
-| `PrepareModelHost` 提供者（当前开发接线：`DefaultPrepareModelPlugin`、`ConfiguredModelPlugin`） | Session | 当前 `ToolRegistry`，无 Provider resolver | — | 重新提供；产品请求准备归 Loop，不由底层 Aimux 提供 |
+| `PrepareModelHost` 提供者（当前开发接线：`DefaultPrepareModelPlugin`、`ConfiguredModelPlugin`） | Session | 各自声明的配置与模型服务 | — | 重新提供；产品请求准备归 Loop，不由底层 Aimux 提供 |
 | `Loop` | 分支 | `PrepareModelHost` | — | 重建当前 turn、请求阶段、待收工具结果与中断状态；未结束的 turn 待在途操作有终态后提交 `turn/end`（`Failed`）；尚未交给上下文准备的请求由 Loop 提交 `Failed` 模型终态；没有未结束的 turn 时，已采用、未消费的驱动输入照常开始新 turn |
 | `ToolExecutor` | 分支 | `ToolRegistry` | 执行中的批次提交错误结果 | 重建中断状态；已提交而未派发、无结果的 `step/tool-call` 批次提交错误结果 |
 | `ContextPreparation` | 分支 | `PrepareContextHost`、`ContextModelHost` | 取消并等待准备任务，以 `capability reloading` 结算取消 | 重建中断状态；没有后继 `model/call` 或模型终态的 `context/prepare` 补写 `Failed`，不重放准备或压缩；被同一 turn 后续 `step/model-start` 取代的请求不补终态；已交接的请求归 ModelProvider |

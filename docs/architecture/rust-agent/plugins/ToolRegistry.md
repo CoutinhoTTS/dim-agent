@@ -71,8 +71,10 @@ source validation reserves the mount list's names, host tool names and every
 registered tool's name; only a registered tool's own set may offer that name.
 Already bound requests retain their handlers. A refresh is neither a durable
 configuration save nor permission authorization; a new tool is not
-model-visible until adoption, or until the next `bind_current` request of a
-branch whose configuration has no tool part.
+model-visible until adoption, or until ToolBinding takes the next request's
+snapshot when there is no adopted configuration or its configuration has no tool
+part. The [ToolBinding contract](ToolExecution.md#toolbinding) owns request
+preparation and binding.
 
 A part depends on ToolRegistry to register with it, so a reloaded registry
 reloads the parts registered with it, and they register again. A native tool
@@ -93,7 +95,7 @@ Initial attachment and adoption satisfy
 through ToolBinding initialization and the existing Prompt / BranchOpening path,
 before Session publication and input admission. A branch whose configuration
 has no tool part declares the registry's current host and registered tools
-through PrepareModelHost / `bind_current` on each request; a registration change
+through [ToolBinding request preparation](ToolExecution.md#toolbinding) on each request; a registration change
 needs no adoption there.
 
 ## Tests
@@ -145,5 +147,5 @@ owned by Dim and built on existing rutis effects and the bridge's calling row.
 | 作用域 | Session |
 | 注入 | `S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:ToolHost` |
 | 提供 | `S:ToolRegistry`、`S:ToolSourcesView`、`S:dyn HostDispatch#toolRegistry` |
-| 被注入于 | `BranchTool`、`PrepareModelHost`、`Questions`、`Skills`、`ToolBinding`、`Wait` |
+| 被注入于 | `BranchTool`、`Questions`、`Skills`、`ToolBinding`、`Wait` |
 <!-- /generated -->

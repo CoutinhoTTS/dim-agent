@@ -30,12 +30,19 @@ existing BranchLifecycle opens. The forwarding task ends with its context or the
 registry. Reload reconciles the
 already adopted configuration. Initialization reads the registry even without
 initial model configuration, fixing the tools registered then before the first
-input. Every registry read, `bind_current` and the adoption task's included,
+input. Every registry read, request preparation, `bind_current` and the adoption task's included,
 takes in what is registered at that moment, so a tool registered later is
 adopted for the next request. With a model configuration, opening reconciles its tools through Prompt before
 the existing BranchOpening receipt completes. Failed adoption retains pins and the prefix;
 a later change retries. Pins are runtime handles, not persistent executable
 identities; missing tools cannot be recovered by replaying their old definitions.
+
+For a request without adopted configuration, `prepare` retains one registry
+snapshot while the caller selects the declaration. Binding validates that
+selection against the retained handlers, even if a provider retires or registers
+a replacement during preparation. A retired handler follows its own stopping
+contract; it is not replaced by a current handler of the same name. Failed
+preparation drops its source references without registering a request.
 
 ### Rule check
 
@@ -69,6 +76,8 @@ task, mutex, lifecycle phase or protocol field is needed.
 `a_call_runs_the_version_its_request_declared_and_old_versions_are_released`,
 `a_restored_branch_adopts_the_new_versions_before_its_first_request`,
 `contributors_are_current_for_the_first_request_without_initial_configuration`,
+`a_preparing_request_keeps_its_contributor_generation`,
+`custom_preparation_keeps_none_empty_and_filtered_declarations`,
 `tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_assembly`.
 
 <!-- generated:plugin ToolBinding — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->

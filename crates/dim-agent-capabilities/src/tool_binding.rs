@@ -9,6 +9,7 @@
 use crate::{
     context_preparation::ToolSetAdoption,
     history::context_configuration,
+    host::ModelSettings,
     prompt::{Prompt, ToolAdoptOutcome},
     tool_registry::{ToolContribution, ToolRegistry, ToolSourceSet},
 };
@@ -115,43 +116,57 @@ impl ToolBinding {
     }
 
     /// Binds a request whose configuration declares no tool part: declares
-    /// the registry's current tools, or checks `declared` (from
-    /// `PrepareModelHost`) against them. Returns the declaration.
+    /// the registry's current tools, or checks `declared` against them.
+    /// Returns the declaration.
     pub fn bind_current(
         &self,
         request_id: &str,
         declared: Option<&[ToolDefinition]>,
     ) -> Result<Vec<ToolDefinition>, String> {
         let (definitions, sets) = self.registry.snapshot();
-        let available: Vec<Arc<ToolContribution>> = definitions
-            .iter()
-            .filter_map(|definition| {
-                self.registry.fixed(&definition.name).or_else(|| {
+        let tools = declared.unwrap_or(&definitions);
+        self.bind_snapshot(request_id, tools, sets)?;
+        Ok(tools.to_vec())
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        request_id: &str,
+        prepare: impl FnOnce(&[ToolDefinition]) -> dim_agent_runtime::Result<ModelSettings>,
+    ) -> dim_agent_runtime::Result<ModelSettings> {
+        let (definitions, sets) = self.registry.snapshot();
+        let settings = prepare(&definitions)?;
+        self.bind_snapshot(
+            request_id,
+            settings.tools.as_deref().unwrap_or_default(),
+            sets,
+        )
+        .map_err(AgentError::InvalidInput)?;
+        Ok(settings)
+    }
+
+    fn bind_snapshot(
+        &self,
+        request_id: &str,
+        tools: &[ToolDefinition],
+        sets: Vec<Arc<ToolSourceSet>>,
+    ) -> Result<(), String> {
+        let mut bound = HashMap::new();
+        for tool in tools {
+            let handler = self
+                .registry
+                .fixed(&tool.name)
+                .filter(|candidate| candidate.definition == *tool)
+                .or_else(|| {
                     sets.iter()
                         .flat_map(|set| set.tools.iter())
-                        .find(|tool| tool.definition.name == definition.name)
+                        .find(|candidate| candidate.definition == *tool)
                         .cloned()
                 })
-            })
-            .collect();
-        let tools: Vec<ToolDefinition> = match declared {
-            None => available
-                .iter()
-                .map(|tool| tool.definition.clone())
-                .collect(),
-            Some(declared) => declared.to_vec(),
-        };
-        let mut bound = HashMap::new();
-        for tool in &tools {
-            let handler = available
-                .iter()
-                .find(|candidate| candidate.definition == *tool)
-                .cloned()
                 .ok_or_else(|| format!("tool {} has no handler", tool.name))?;
             bound.insert(tool.name.clone(), handler);
         }
-        register(&mut self.state.lock().unwrap(), request_id, bound, sets)?;
-        Ok(tools)
+        register(&mut self.state.lock().unwrap(), request_id, bound, sets)
     }
 
     /// The tool a call of `request_id` runs: its definition (for admission)
