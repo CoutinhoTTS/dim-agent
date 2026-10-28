@@ -670,6 +670,8 @@ async fn node_plugin_manager_installs_reloads_and_replaces_typescript_plugins() 
     assert!(!tools.contains(&"my_echo".into()), "{tools:?}");
     let enabled = call(&mut client, "plugin.enable", json!({"name":"my-tool"})).await;
     assert_eq!(enabled["result"]["status"], "running", "{enabled}");
+    let tools = offered(&mut client, &mut requests, &session).await;
+    assert!(tools.contains(&"my_echo".into()), "{tools:?}");
 
     let list = call(&mut client, "plugin.list", json!({})).await;
     assert_eq!(item(&list, "my-tool")["status"], "running", "{list}");
@@ -892,6 +894,87 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     }
     let stored = call(&mut client, "settings.read", read).await;
     assert_eq!(stored["result"]["document"], document, "{stored}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A server on `home` that loads the default plugins.
+fn defaults_config(home: &Path) -> ServerConfig {
+    let mut config = config(home);
+    let mut parts = fixture();
+    parts.rows.clear();
+    config.plugin_defaults = Some(parts.anchor.with_file_name("default-plugins.json"));
+    config.session_typescript = Some(parts);
+    config
+}
+
+/// The tools offered to the model in a new turn of `session`.
+async fn offered(
+    client: &mut Client,
+    requests: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<String>>,
+    session: &str,
+) -> Vec<String> {
+    while requests.try_recv().is_ok() {}
+    submit(client, session, "plain").await;
+    requests.recv().await.unwrap()
+}
+
+async fn web_session(client: &mut Client) -> String {
+    let created = client
+        .rpc("session.create", create(json!(["web_fetch", "echo"])))
+        .await;
+    assert_ok(&created);
+    created["result"]["sessionId"].as_str().unwrap().to_owned()
+}
+
+/// Acceptance 5: `disable web` removes web's tools from the next turn of an
+/// open Session; `enable web` offers them again there and in a new Session,
+/// and the state survives a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_web_tools_follow_disable_enable_and_restart() {
+    let home = home();
+    let (server, mut requests, _) = start(defaults_config(&home)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    running(&mut client, &["web"]).await;
+    select_fixture_model(&mut client).await;
+    let open = web_session(&mut client).await;
+    let web = "web_fetch".to_owned();
+    let tools = offered(&mut client, &mut requests, &open).await;
+    assert!(tools.contains(&web), "{tools:?}");
+
+    assert_ok(&call(&mut client, "plugin.disable", json!({"name": "web"})).await);
+    let tools = offered(&mut client, &mut requests, &open).await;
+    assert!(!tools.contains(&web), "{tools:?}");
+    let enabled = call(&mut client, "plugin.enable", json!({"name": "web"})).await;
+    assert_eq!(enabled["result"]["status"], "running", "{enabled}");
+    let tools = offered(&mut client, &mut requests, &open).await;
+    assert!(tools.contains(&web), "the open Session: {tools:?}");
+    let new = web_session(&mut client).await;
+    let tools = offered(&mut client, &mut requests, &new).await;
+    assert!(tools.contains(&web), "a new Session: {tools:?}");
+    let reloaded = call(&mut client, "plugin.reload", json!({"name": "web"})).await;
+    assert_eq!(reloaded["result"]["status"], "running", "{reloaded}");
+    let tools = offered(&mut client, &mut requests, &open).await;
+    assert!(tools.contains(&web), "reloaded unchanged: {tools:?}");
+
+    assert_ok(&call(&mut client, "plugin.disable", json!({"name": "web"})).await);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    let (server, mut requests, _) = start(defaults_config(&home)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "web")["status"], "off", "{list}");
+    let session = web_session(&mut client).await;
+    let tools = offered(&mut client, &mut requests, &session).await;
+    assert!(!tools.contains(&web), "after a restart: {tools:?}");
+    let enabled = call(&mut client, "plugin.enable", json!({"name": "web"})).await;
+    assert_eq!(enabled["result"]["status"], "running", "{enabled}");
+    let tools = offered(&mut client, &mut requests, &session).await;
+    assert!(tools.contains(&web), "enabled after a restart: {tools:?}");
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
