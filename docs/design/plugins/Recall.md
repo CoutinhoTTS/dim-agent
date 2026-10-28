@@ -296,7 +296,7 @@ Registered with the Session's `toolRegistry` under the name `recall`
 | `name` | `recall` |
 | `risk` | `session` |
 | `source` | `extension` |
-| `description` | "Recall what happened earlier in this conversation: what the user said, what you did and what came back. With no arguments it lists past turns; open a turn or anything in it by its id, or search with about." |
+| `description` | "Recall what happened earlier in this conversation, including what a compaction summarized: what the user said, what you did and what came back. With no arguments it lists past turns; open a turn or anything in it by its id, or search with about. A shortened input that ends in [input <id>] is read in full by opening that id." |
 
 The declaration is the only prompt. The summary, the replacement and the system prompt do not
 mention the tool (§7).
