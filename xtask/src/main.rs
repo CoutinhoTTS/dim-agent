@@ -3,6 +3,7 @@ mod app_server;
 mod catalog;
 mod modules;
 mod plugins;
+mod summary_eval;
 mod types;
 #[global_allocator]
 static ALLOCATOR: allocation::MeasuredAllocator = allocation::MeasuredAllocator;
@@ -17,6 +18,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         Some("graph") => graph().await?,
         Some("measure") => measure().await?,
+        Some("summary-eval") => summary_eval::run().await?,
         Some("check") => {
             boundaries(false)?;
             catalog::check(&root()).await?;
@@ -25,7 +27,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("types") => types::write(&root())?,
         _ => {
             return Err(
-                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|check|types"
+                "usage: cargo run -p xtask -- graph|measure [--model-config PATH]|summary-eval [OPTIONS]|check|types"
                     .into(),
             );
         }

@@ -1068,8 +1068,15 @@ impl AgentIndex {
             .ok_or_else(|| AgentError::InvalidInput("a fork needs the native store".into()))?;
         let usage = self.acquire(source).await?;
         let session = &usage.session;
-        session.local_page("main", at, 1, at).await?;
-        let prefix = session.context("main", at).await?;
+        let prefix = async {
+            session.local_page("main", at, 1, at).await?;
+            session.context("main", at).await
+        }
+        .await;
+        if session.is_closing() {
+            return Err(AgentError::Closed(source.into()));
+        }
+        let prefix = prefix?;
         dim_agent_capabilities::history::validate_context_boundary(&prefix)
             .and_then(|()| rest_point(&prefix.events))
             .map_err(AgentError::InvalidInput)?;
