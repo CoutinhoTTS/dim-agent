@@ -2,7 +2,7 @@
 
 状态：已在 F1 分支实现（设计已批准；实现说明见 §12）。路线图项 F1（[#72](https://github.com/arcships/dim/issues/72)）。
 总体设计：[附录 B.1 ContextPreparation 行](../overview.md#b1-session-与分支-capability)。
-作用域：[ADR 002](../../adr/002-plugin-scope.md)：若干 Session 部件，加上对现有分支 Capability Loop 与 ContextPreparation 的补充。§12 记录实现对本文的细化。触发点、保留与恢复规则遵循 [#128](https://github.com/arcships/dim/issues/128) 的研究（[compaction-trigger](../research/compaction-trigger.md)）；其中的余量和保留份额是暂定的经验值。§13 是摘要评估、摘要器推理与目标长度的提案（[#170](https://github.com/arcships/dim/issues/170)），尚未实现。英文版：[ContextCompaction](../../../design/plugins/ContextCompaction.md)。
+作用域：[ADR 002](../../adr/002-plugin-scope.md)：若干 Session 部件，加上对现有分支 Capability Loop 与 ContextPreparation 的补充。§12 记录实现对本文的细化。触发点、保留与恢复规则遵循 [#128](https://github.com/arcships/dim/issues/128) 的研究（[compaction-trigger](../research/compaction-trigger.md)）；其中的余量和保留份额是暂定的经验值。§13 是摘要评估、摘要器推理与目标长度的已批准设计（[#170](https://github.com/arcships/dim/issues/170)）；默认值由运行该评估决定（§13.4）。英文版：[ContextCompaction](../../../design/plugins/ContextCompaction.md)。
 
 ## 1. 概要
 
@@ -324,7 +324,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 - **记录文本。** 按角色标注的文本：工具调用写名称和输入，工具结果写文本，图片写 `[image]`。
 - **分块。** 一次调用的输入预算为 `context_window − output_tokens`，用 `count_tokens` 对整个摘要请求（系统提示、携带的摘要、外层格式和本块）计数，与其他所有请求的计数方式相同，不另设按字符计的规则。更长的记录分块折叠：每次调用拿到当前摘要和能放下的条目。单条放不下的，按字节在 UTF-8 字符边界上从中间截断，截断标记计入预算，并计入 `compactedToolPayloadCount`。
 - **被截断的回复。** 停在 `max_tokens` 的回复（思考可能用掉大部分额度）不算摘要。该块在最接近中间的条目分隔处（或字符边界）一分为二，逐半折叠；小于 2 KiB 仍被截断时压缩失败，任何记录都不会保留被截断的文本（#169）。每一半都携带前一半的摘要，所以调用前会再次按预算检查它的整个请求；不再放得下的一半继续一分为二，文本全部保留；携带的摘要与包装在没有任何转录内容时也放不下，则压缩失败，不发送该请求。
-- **诊断。** 摘要对象（`kind: "summary"`、`summaryChars`、`estimatedSummaryTokens`、`chunkCount`、`compactedToolPayloadCount`、`droppedMessageCount`）；公共部分由 ContextPolicy 填写。
+- **诊断。** 摘要对象（`kind: "summary"`、`summaryChars`、`estimatedSummaryTokens`、`chunkCount`、`compactedToolPayloadCount`、`droppedMessageCount`、`reasoning`、`targetTokens`（没有指令时不出现）、`cutOffCount`）；公共部分由 ContextPolicy 填写。
 
 ### 5.3 一条压缩路径（ContextPolicy）
 
@@ -625,7 +625,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 
 ## 13. 摘要质量：推理与目标长度（#170）
 
-状态：[#170](https://github.com/arcships/dim/issues/170) 的提案，尚未实现。本节设计评估方法和两个可调项；默认值由运行评估（§13.4）决定，评估跑完后记入 §10。在此之前，已发布的行为（§5.2）不变：摘要器沿用对话的推理设置，提示词不写长度。
+状态：[#170](https://github.com/arcships/dim/issues/170) 的已批准设计。本节设计评估方法和两个可调项；默认值由运行评估（§13.4）决定，评估跑完后记入 §10。在此之前，§5.2 的默认行为不变：摘要器沿用对话的推理设置，提示词不写长度。
 
 ### 13.1 这里决定什么、不决定什么
 
@@ -651,7 +651,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 - 该值作用于一次压缩的所有摘要请求，在压缩开始时读取一次。所有情况下 `maxTokens = output_tokens` 都不变。
 - `off` 和 `low` 在模型允许时生效。Provider 的映射对该模型和协议拒绝这个强度时（不支持推理、该协议没有关闭推理的声明、`low` 不在模型的强度选项中、Bedrock、本地开发连接），请求使用 `inherit`。这就是该设置的业务含义：它是对摘要器的偏好，不是会让压缩失败的要求。没有推理能力的模型在 `inherit` 下本来就等同于 `off`。
 - `low` 不看对话自己的推理设置：即使对话关闭了推理，它也请求强度 `low`。要跨协议比较一个请求的实际推理状态，需要第二套对提供方选项的解读，而只有 Provider 有这套解读。
-- 实际采用的值写入摘要诊断对象的 `reasoning`（§13.5），记录里能看到摘要器实际怎样运行。
+- 实际采用的值写入摘要诊断对象的 `reasoning`（§13.5），记录里能看到摘要器实际怎样运行。没有发出摘要请求的压缩记录的是请求的值。
 
 **放在哪里。** 摘要策略的业务配置（ADR 002 D4）：产品 home 中的用户文件 `compaction.json`，`{"summaryReasoning": "inherit" | "off" | "low"}`，拒绝未知成员。
 
@@ -742,7 +742,7 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 - `fact` 和 `absent` 探针由 `--judge` 评判；评判模型尽量与摘要模型不同家族，模型接受时用温度 0。评判模型只看摘要和探针列表，不看记录，对每个探针回答 `present`、`absent` 或 `contradicted`，并附引文。`fact` 为 `present` 时得分；`absent` 探针为 `present` 时算一次违规。评判提示是运行器的一部分。
 - 记录决定之前，操作者阅读每个分组得分最低的摘要，手工纠正评判错误；纠正列在研究笔记中。
 
-每个模型和分组，在用例和运行次数上统计：事实召回 `F`、exact 召回 `X`、违规 `V`、被截断的回复 `C`（`cutOffCount`）、失败的压缩、摘要 token 中位数 `T`（`estimatedSummaryTokens`）和 `durationMs` 中位数；目标分组还统计比值 `T / S`。评判模型没有作答的判断探针单独计入 `unjudged` 列，由操作者手工纠正。失败的压缩没有摘要：它的事实探针和 exact 探针计为未命中，absent 探针计为未违规，且不调用评判模型，因此一次失败会降低 `F` 和 `X`，不会增加 `V`。
+每个模型和分组，在用例和运行次数上统计：事实召回 `F`、exact 召回 `X`、违规 `V`、被截断的回复 `C`（`cutOffCount`）、失败的压缩、摘要 token 中位数 `T`（`estimatedSummaryTokens`）和 `durationMs` 中位数；目标分组还统计比值 `T / S`。实际采用的推理（`reasoning`）与分组值不同的运行计为 `fellBack`，避免模型拒绝该分组时拿分组和自己比较（§13.2）。评判模型没有作答的判断探针单独计入 `unjudged` 列，由操作者手工纠正。失败的压缩没有摘要：它的事实探针和 exact 探针计为未命中，absent 探针计为未违规，且不调用评判模型，因此一次失败会降低 `F` 和 `X`，不会增加 `V`。
 
 **模型。** 目录中每类推理方式至少一个模型：带 `thinking: disabled` 关闭声明的预算式思考（Anthropic）、按强度的推理（OpenAI Responses）、使用 `enable_thinking` 或 `thinking.type` 的 OpenAI 兼容模型（选一个中文能力强的模型），以及一个没有推理的模型作对照。
 
@@ -769,7 +769,7 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 | `xtask` | `summary-eval` 命令和 `xtask/summary-eval/cases/`；`serve_home`，即在已有 home 上组装产品配置，由 `serve_product`（`graph`）和运行器共用 |
 | App Server 产品配置 | 把 home 中 `compaction.json` 的位置传给策略工厂；`RunningServer::service` 把一个已启动配置的进程服务交给 `xtask`，使运行器能取到 `ProviderService`、`ModelHost`、`ProviderConnectionResolver` 和 `FileStorage` |
 
-不改任何事件、端口、Session 值、Loop、ContextPolicy、记录或重放。设置发布后的流程测试：在 `transport_flow/compaction.rs` 中，对 mock 提供方使用值为 `off` 的 `compaction.json`，摘要请求的 config 带有模型关闭推理的字段，而对话请求保留它的推理，记录的诊断显示 `reasoning: "off"`；无效文件让手动压缩以 `compaction_failed` 失败。目标规则不需要单独的测试：它是提示词文本，由评估衡量。
+不改任何事件、端口、Session 值、Loop、ContextPolicy、记录或重放。`transport_flow/compaction.rs` 中的 `summary_reasoning_comes_from_the_compaction_file` 覆盖读取与映射：`compaction.json` 的值为 `off` 时，摘要请求的 config 带有模型关闭推理的字段，而对话请求保留它的推理，记录的诊断显示 `reasoning: "off"`；无效文件让手动压缩以 `compaction_failed` 失败。目标规则不需要单独的测试：它是提示词文本，由评估衡量。
 
 ### 13.6 规则检查（针对 #170 的改动）
 

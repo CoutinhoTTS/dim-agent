@@ -7,9 +7,9 @@ branch capabilities Loop and ContextPreparation. §12 records where the implemen
 The trigger, retention and recovery rules follow the
 [#128](https://github.com/arcships/dim/issues/128) research
 ([compaction-trigger](../research/compaction-trigger.md)); its reserve and retention share are
-provisional heuristics. §13 is the proposal for the summary evaluation, the summarizer's
-reasoning and a target length ([#170](https://github.com/arcships/dim/issues/170)); it is not
-implemented.
+provisional heuristics. §13 is the approved design for the summary evaluation, the summarizer's
+reasoning and a target length ([#170](https://github.com/arcships/dim/issues/170)); the defaults
+are decided by running the evaluation (§13.4).
 
 ## 1. Summary
 
@@ -469,8 +469,9 @@ How the summary is produced:
   that no longer fits is halved too, keeping all of its text, and when the carried summary and
   envelope do not fit without any transcript the compaction fails without sending the request.
 - **Diagnostics.** The summary object (`kind: "summary"`, `summaryChars`,
-  `estimatedSummaryTokens`, `chunkCount`, `compactedToolPayloadCount`, `droppedMessageCount`);
-  ContextPolicy fills the common part.
+  `estimatedSummaryTokens`, `chunkCount`, `compactedToolPayloadCount`, `droppedMessageCount`,
+  `reasoning`, `targetTokens` (absent without an instruction), `cutOffCount`); ContextPolicy fills
+  the common part.
 
 ### 5.3 One compaction path (ContextPolicy)
 
@@ -888,10 +889,10 @@ fix, the smallest choice was made and is recorded here.
 
 ## 13. Summary quality: reasoning and target length (#170)
 
-Status: proposal for [#170](https://github.com/arcships/dim/issues/170), not implemented. It
-designs the evaluation and the two knobs; the defaults are decided by running the evaluation
-(§13.4) and are recorded in §10 when it has run. Until then the shipped behaviour (§5.2) is
-unchanged: the summarizer inherits the conversation's reasoning and its prompt states no length.
+Status: approved design for [#170](https://github.com/arcships/dim/issues/170). It designs the
+evaluation and the two knobs; the defaults are decided by running the evaluation (§13.4) and are
+recorded in §10 when it has run. Until then the default behaviour (§5.2) is unchanged: the
+summarizer inherits the conversation's reasoning and its prompt states no length.
 
 ### 13.1 What is decided here and what is not
 
@@ -929,7 +930,8 @@ Out of scope: a separate summarizer model (§10), summarizer prefix reuse and ca
   conversation runs with reasoning off. Comparing a request's effective reasoning across protocols
   would need a second interpretation of provider options, which only Provider has.
 - The value applied is written into the summary diagnostics object as `reasoning` (§13.5), so a
-  record shows what the summarizer actually did.
+  record shows what the summarizer actually did. A compaction that sends no summarizer request
+  records the requested value.
 
 **Where it lives.** Business configuration of the summary strategy (ADR 002 D4): the user file
 `compaction.json` in the product home, `{"summaryReasoning": "inherit" | "off" | "low"}`, unknown
@@ -1089,11 +1091,13 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 
 Metrics per model and arm, over cases and runs: fact recall `F`, exact recall `X`, violations `V`,
 cut-off replies `C` (`cutOffCount`), failed compactions, median summary tokens `T`
-(`estimatedSummaryTokens`) and median `durationMs`; for target arms also the ratio `T / S`. A
-probe the judge did not answer is counted as `unjudged`, in a column of its own for the operator
-to correct by hand. A failed compaction has no summary: its `fact` and `exact` probes count as
-missed and its `absent` probes count as not violated, without a judge call, so a failure lowers
-`F` and `X` and adds nothing to `V`.
+(`estimatedSummaryTokens`) and median `durationMs`; for target arms also the ratio `T / S`. Runs
+whose applied reasoning (`reasoning`) differs from the arm's value are counted as `fellBack`, so
+an arm the model rejects is not compared against itself (§13.2). A probe the judge did not answer
+is counted as `unjudged`, in a column of its own for the operator to correct by hand. A failed
+compaction has no summary: its `fact` and `exact` probes count as missed and its `absent` probes
+count as not violated, without a judge call, so a failure lowers `F` and `X` and adds nothing to
+`V`.
 
 **Models.** At least one model per reasoning class the catalog offers: budget thinking with a
 `thinking: disabled` off declaration (Anthropic), effort-based reasoning (OpenAI Responses),
@@ -1136,12 +1140,13 @@ and one model without reasoning as a control.
 | `xtask` | `summary-eval` command and `xtask/summary-eval/cases/`; `serve_home`, the product assembly on an existing home that `serve_product` (`graph`) and the runner share |
 | App Server product profile | Passes the home's `compaction.json` location to the strategy factory; `RunningServer::service` hands a served profile's process services to `xtask`, so the runner reaches `ProviderService`, `ModelHost`, `ProviderConnectionResolver` and `FileStorage` |
 
-No event, port, Session value, Loop, ContextPolicy, record or replay change. Flow test, once the
-setting ships: in `transport_flow/compaction.rs`, a `compaction.json` with `off` against the mock
-provider sends a summarizer request whose config carries the model's reasoning-off fields while
-the conversation's request keeps its reasoning, and the record's diagnostics show
-`reasoning: "off"`; an invalid file fails a manual compaction with `compaction_failed`. The target
-rule needs no test of its own: it is prompt text, measured by the evaluation.
+No event, port, Session value, Loop, ContextPolicy, record or replay change.
+`summary_reasoning_comes_from_the_compaction_file` in `transport_flow/compaction.rs` covers the
+reader and the mapping: with `compaction.json` holding `off`, the summarizer request's config
+carries the model's reasoning-off fields while the conversation's request keeps its reasoning,
+and the record's diagnostics show `reasoning: "off"`; an invalid file fails a manual compaction
+with `compaction_failed`. The target rule needs no test of its own: it is prompt text, measured
+by the evaluation.
 
 ### 13.6 Rule check (for the #170 changes)
 
