@@ -156,6 +156,7 @@ fn isolated_home(path: &Path) -> Result<PathBuf> {
         .map_err(|error| format!("--home {}: {error}", path.display()))?;
     let mut products = Vec::new();
     if let Some(user) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+        products.push(PathBuf::from(&user).join(".dimcode-alpha"));
         products.push(PathBuf::from(user).join(".dimcode"));
     }
     if let Some(path) = std::env::var_os("DIMCODE_HOME") {

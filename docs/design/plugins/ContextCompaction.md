@@ -1024,7 +1024,7 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
   arm plus the four `(α, β)` arms, with `VALUE` being the reasoning value phase 1 chose for the
   model.
 - `--home` is required and must be an isolated product home in which the operator has configured
-  the providers; the runner never uses `~/.dimcode`. Credentials stay in that home and never enter
+  the providers; the runner never uses `~/.dimcode` or `~/.dimcode-alpha`. Credentials stay in that home and never enter
   the repository, the cases or the output.
 - The runner serves the product profile on that home (as `graph` does), builds the conversation
   request from `ProviderService::configuration` for `--model` with default preferences (what a
