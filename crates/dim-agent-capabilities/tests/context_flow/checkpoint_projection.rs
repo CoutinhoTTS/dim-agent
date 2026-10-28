@@ -152,8 +152,58 @@ pub(crate) fn completed(
             strategy: "test".into(),
             diagnostics: diagnostics(),
             context_baseline,
+            replacement_parts: None,
         },
     })
+}
+
+/// A record written before `replacement_parts` existed still deserializes
+/// and replays: with the field absent, the whole replacement is the
+/// strategy part (ContextCompaction §4.3).
+#[test]
+fn a_record_without_replacement_parts_deserializes_and_replays() {
+    use dim_agent_capabilities::history::{context_messages, summary_message};
+    let record = completed("event-2", "recorded", 3, Vec::new());
+    let EventKind::ContextCompaction(data) = &record else {
+        unreachable!("completed builds a compaction record")
+    };
+    let data = data.clone();
+    let json = serde_json::to_value(&data).unwrap();
+    assert!(
+        json["outcome"].get("replacementParts").is_none(),
+        "the field is absent, as a record written before it has it"
+    );
+    let data: ContextCompactionData = serde_json::from_value(json).unwrap();
+    let ContextCompactionResult::Completed {
+        replacement,
+        replacement_parts,
+        ..
+    } = &data.outcome
+    else {
+        panic!("a completed record")
+    };
+    assert_eq!(*replacement_parts, None);
+    assert_eq!(replacement, &vec![summary_message("recorded")]);
+    let context = fixed(vec![
+        EventKind::InputMessage(InputMessageData::text("first", None)),
+        EventKind::TurnStart(TurnStartData {
+            turn_id: "turn".into(),
+        }),
+        EventKind::ContextCompaction(data),
+        EventKind::InputMessage(InputMessageData::text("second", None)),
+        EventKind::InputConsumed(InputConsumedData {
+            input_id: "event-3".into(),
+        }),
+    ]);
+    let history = project_context_history(&context).unwrap();
+    assert_eq!(
+        context_messages(&context, &history),
+        vec![
+            summary_message("recorded"),
+            Message::text(Role::User, "second")
+        ],
+        "the replacement replays unchanged, then the kept entry"
+    );
 }
 
 #[tokio::test]

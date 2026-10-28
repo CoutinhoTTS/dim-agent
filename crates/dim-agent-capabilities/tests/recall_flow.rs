@@ -1385,6 +1385,7 @@ fn compaction(through: u64) -> EventKind {
                 .unwrap(),
             ),
             context_baseline: Vec::new(),
+            replacement_parts: None,
         },
     })
 }

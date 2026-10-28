@@ -608,8 +608,9 @@ pub struct CompactionCut {
 impl CompactionInput {
     /// The latest cut within the retention limit or, when none is within it
     /// (a single long turn), the latest cut that keeps something, so the
-    /// branch compacts instead of skipping until overflow. Only budget
-    /// recovery may replace everything, the latest input included.
+    /// branch compacts instead of skipping until overflow. The cut that
+    /// replaces everything is within the limit whenever no kept tail fits the
+    /// bound (ContextCompaction §5.3).
     pub fn cut(&self) -> Option<&CompactionCut> {
         self.cuts
             .iter()
@@ -633,6 +634,9 @@ pub struct CompactionCheckpoint {
     pub retain_from: String,
     pub replacement: Arc<[Message]>,
     pub context_baseline: Arc<[ContextBaselineEntry]>,
+    /// The parts of `replacement`: the strategy's messages, then the digest;
+    /// the rest are the pinned inputs (ContextCompaction §4.3).
+    pub replacement_parts: Option<ReplacementParts>,
 }
 /// Window facts of the model whose context is prepared.
 pub trait ContextModel: Send + Sync + 'static {
@@ -664,6 +668,11 @@ pub enum StrategyOutcome {
 pub trait CompactionStrategy: Send + Sync + 'static {
     /// Written into `context/compaction-start` and the result.
     fn name(&self) -> &str;
+    /// The planned token count of the messages `compact` returns: the summary's
+    /// target plus its wrapper (ContextCompaction §4.2). The retention rule
+    /// reserves it before the strategy runs; a reply that overshoots it is
+    /// kept and reported (ContextCompaction §5.2).
+    fn replacement_size(&self, model: &dyn ContextModel) -> f64;
     fn compact(
         &self,
         input: CompactionInput,

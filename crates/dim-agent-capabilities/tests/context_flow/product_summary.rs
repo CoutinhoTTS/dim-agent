@@ -405,3 +405,98 @@ async fn the_trigger_reserves_a_bounded_share_of_the_input_budget() {
         assert_eq!(model.threshold_tokens(), threshold, "{window}/{output}");
     }
 }
+
+/// The transcript of a summarizer request: the text between the strategy's
+/// `<transcript>` tags.
+fn transcript(request: &ModelRequest) -> String {
+    request
+        .messages
+        .iter()
+        .map(|message| match &message.content {
+            MessageContent::Text(text) => text.clone(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A compaction reads the previous replacement's summary and pinned parts
+/// and the newly cut entries, and nothing earlier (ContextCompaction §5.2,
+/// acceptance 14).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
+    let recorder = Arc::new(Recorder::default());
+    let (root, agent, session) = product_session(recorder.clone(), OUTPUT).await;
+    // The first turn alone passes the threshold: it is compacted inside
+    // itself, so its own input is pinned, truncated around its middle.
+    let old = format!(
+        "OLD-START-{}-MIDDLE-MARKER-{}-OLD-END",
+        cjk(5_000),
+        cjk(5_000)
+    );
+    session.submit(old, InputMode::Queue, "main").await.unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    let completed = |events: &[Arc<AgentEvent>]| {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::ContextCompaction(ContextCompactionData {
+                        outcome: ContextCompactionResult::Completed { .. },
+                        ..
+                    })
+                )
+            })
+            .count()
+    };
+    assert_eq!(completed(&events), 1, "the first turn compacts");
+    let first = recorder.0.lock().unwrap().len();
+    assert!(first > 0, "the first compaction summarized");
+    // The second turn regrows the quarter of the budget the trigger needs
+    // and is compacted on its own preparation.
+    session
+        .submit(
+            format!("NEW-MARKER-{}", cjk(3_900)),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    assert_eq!(completed(&events), 2, "the second turn compacts");
+    let requests = recorder.0.lock().unwrap().clone();
+    assert!(requests.len() > first, "the second compaction summarized");
+    let second: String = requests[first..]
+        .iter()
+        .map(|request| transcript(request))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        second.contains("摘要"),
+        "the previous replacement's summary is carried"
+    );
+    assert!(
+        second.contains("[input "),
+        "the previous replacement's pinned part is carried"
+    );
+    assert!(
+        second.contains("NEW-MARKER"),
+        "the newly cut entries are summarized"
+    );
+    assert!(
+        !second.contains("MIDDLE-MARKER"),
+        "no entry placed before the previous cut is sent"
+    );
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}

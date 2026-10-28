@@ -490,6 +490,7 @@ impl Prepared {
                     retain_from: "m0".into(),
                     replacement: Arc::from([summary_message(summary)]),
                     context_baseline: Arc::from([]),
+                    replacement_parts: None,
                 }),
             history,
             retain_from: case.retain_from,

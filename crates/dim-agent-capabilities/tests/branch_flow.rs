@@ -3520,6 +3520,13 @@ impl CompactionStrategy for Compact {
     fn name(&self) -> &str {
         "test"
     }
+    fn replacement_size(&self, model: &dyn ContextModel) -> f64 {
+        model.count_tokens(&ModelRequest::new(
+            "",
+            "",
+            vec![dim_agent_capabilities::history::summary_message("short")],
+        ))
+    }
     fn compact(
         &self,
         input: CompactionInput,

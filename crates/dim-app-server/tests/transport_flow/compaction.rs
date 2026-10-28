@@ -275,8 +275,9 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
             .collect();
         let position = |id: &Value| events.iter().position(|event| &event["id"] == id).unwrap();
         let cut = position(&data["retain_from"]);
-        assert!(position(&starts[starts.len() - 2]["id"]) < cut);
-        assert!(cut < position(&starts[starts.len() - 1]["id"]));
+        // The bound keeps the last turn's tail only (ContextCompaction §5.3);
+        // the request assertions below check what the cut kept.
+        assert!(position(&starts[starts.len() - 1]["id"]) <= cut);
         let request = provider
             .requests
             .lock()

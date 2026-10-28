@@ -4,7 +4,7 @@
 //! content (ContextCompaction §13).
 use crate::{
     file_storage::{FileStorage, FileStorageError},
-    history::summary_message,
+    history::{summary_message, truncate_middle},
     host::*,
     model_provider::invoke_with_recovery,
 };
@@ -181,6 +181,17 @@ impl CompactionStrategy for SummaryStrategy {
     fn name(&self) -> &str {
         "summary"
     }
+    /// The target `S` plus the wrapper (ContextCompaction §4.2). `target` is
+    /// the factory configuration; until the §13.4 evaluation chooses it, the
+    /// provisional `S = min(0.5 × O, 0.10 × B)` plans the replacement (§13.3).
+    fn replacement_size(&self, model: &dyn ContextModel) -> f64 {
+        let target = self.target.unwrap_or(TargetRule {
+            output_share: 0.5,
+            input_share: 0.10,
+        });
+        let wrapper = summary_message("");
+        target.tokens(model) + model.count_tokens(&ModelRequest::new("", "", vec![wrapper]))
+    }
     fn compact(
         &self,
         input: CompactionInput,
@@ -204,21 +215,47 @@ impl CompactionStrategy for SummaryStrategy {
                 target,
                 ..Default::default()
             };
-            let mut summary = input.checkpoint.as_ref().map(|checkpoint| {
-                checkpoint
-                    .replacement
+            // The previous replacement holds the summary, the digest and the
+            // pinned inputs; only the summary is carried and only the pins
+            // join the transcript, so the digest rolls forward separately
+            // (ContextCompaction §5.2, §5.10).
+            let (carried, pinned): (Vec<&Message>, Vec<&Message>) = match &input.checkpoint {
+                Some(checkpoint) => {
+                    let len = checkpoint.replacement.len();
+                    let (strategy, digest) =
+                        checkpoint.replacement_parts.map_or((len, 0), |parts| {
+                            (parts.strategy as usize, parts.digest as usize)
+                        });
+                    let split = strategy.min(len);
+                    let after_digest = (strategy + digest).min(len);
+                    (
+                        checkpoint.replacement[..split].iter().collect(),
+                        checkpoint.replacement[after_digest..].iter().collect(),
+                    )
+                }
+                None => (Vec::new(), Vec::new()),
+            };
+            let mut summary = (!carried.is_empty()).then(|| {
+                carried
                     .iter()
-                    .map(render)
+                    .map(|message| render(message))
                     .collect::<Vec<_>>()
                     .join("\n\n")
             });
             let mut chunk = String::new();
-            for entry in &input.history[..cut.entry] {
-                let line = render(&entry.message);
+            let mut lines = Vec::new();
+            for line in pinned.iter().map(|message| render(message)).chain(
+                input.history[..cut.entry]
+                    .iter()
+                    .map(|entry| render(&entry.message)),
+            ) {
                 if line.is_empty() {
                     stats.dropped += 1;
                     continue;
                 }
+                lines.push(line);
+            }
+            for line in lines {
                 let joined = if chunk.is_empty() {
                     line.clone()
                 } else {
@@ -582,21 +619,6 @@ fn render(message: &Message) -> String {
     } else {
         format!("{role}: {text}")
     }
-}
-
-/// Keeps about `keep` bytes of `text`, half from the start and half from
-/// the end, cut on UTF-8 character boundaries around a marker.
-fn truncate_middle(text: &str, keep: usize) -> String {
-    let half = keep / 2;
-    let mut head = half.min(text.len());
-    while !text.is_char_boundary(head) {
-        head -= 1;
-    }
-    let mut tail = text.len().saturating_sub(half).max(head);
-    while !text.is_char_boundary(tail) {
-        tail += 1;
-    }
-    format!("{}\n[... truncated ...]\n{}", &text[..head], &text[tail..])
 }
 
 /// The strategy-owned diagnostics object: one chunk per call, so `calls` is

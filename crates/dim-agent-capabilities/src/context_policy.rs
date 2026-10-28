@@ -1,7 +1,7 @@
 use crate::{
     history::{
         HistoryEntry, HistoryRenderer, context_compaction, context_configuration, context_messages,
-        retained_entry,
+        retained_entry, truncate_middle, user_message,
     },
     host::*,
 };
@@ -15,8 +15,16 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 /// Share of the input budget a compaction keeps verbatim, the keyed baseline
-/// included; provisional (#128).
+/// included; provisional (#128, #428).
 const RETAINED_SHARE: f64 = 0.25;
+
+/// Share of the input budget the running turn's pinned inputs may take
+/// (ContextCompaction §5.9); provisional (#428).
+const PINNED_SHARE: f64 = 0.1;
+
+/// Share of the input budget the whole context after a compaction is held
+/// to at most (ContextCompaction §5.3); provisional (#428).
+const BOUND_SHARE: f64 = 0.5;
 
 pub(crate) struct ContextPolicy {
     pub timeline: Arc<Timeline>,
@@ -74,11 +82,13 @@ fn checkpoint(data: &ContextCompactionData) -> Option<CompactionCheckpoint> {
             retain_from,
             replacement,
             context_baseline,
+            replacement_parts,
             ..
         } => Some(CompactionCheckpoint {
             retain_from: retain_from.clone(),
             replacement: replacement.clone().into(),
             context_baseline: context_baseline.clone().into(),
+            replacement_parts: *replacement_parts,
         }),
         _ => None,
     }
@@ -225,10 +235,6 @@ impl ContextPolicy {
             .await?;
         check_cancel(&cancel)?;
         let estimate = self.estimate(&view.prepared, model.as_ref(), &view.events)?;
-        let checked = view.events.iter().any(|event| {
-            matches!(&event.kind, EventKind::ContextBudget(data)
-            if data.boundary == boundary && data.turn_id == source.turn_id)
-        });
         self.timeline
             .append(
                 EventKind::ContextBudget(ContextBudgetData {
@@ -245,7 +251,9 @@ impl ContextPolicy {
                 .into(),
             )
             .map_err(|e| HostError::failed(e.to_string()))?;
-        if source.recovery.is_none() && (checked || estimate.input < model.threshold_tokens()) {
+        if source.recovery.is_none()
+            && (estimate.input < model.threshold_tokens() || !regrown(&view, model.as_ref()))
+        {
             return Ok((view.prepared, estimate.input));
         }
         let step = CompactionStep {
@@ -309,11 +317,14 @@ impl ContextPolicy {
     ) -> Result<Compacted, HostError> {
         let started = Instant::now();
         let mut cuts = legal_cuts(&view.context, &view.history);
+        let replacement_size = self.strategy.replacement_size(model.as_ref());
         let limit = retain_limit(
             view,
             model.as_ref(),
+            step.turn_id.as_deref(),
             &cuts,
             step.trigger == CompactionTrigger::Manual,
+            replacement_size,
         );
         if let Some(limit) = limit {
             for cut in &mut cuts[..=limit] {
@@ -379,7 +390,7 @@ impl ContextPolicy {
         let outcome = match result {
             Ok(StrategyOutcome::Completed {
                 retain_from,
-                replacement,
+                replacement: strategy_messages,
                 diagnostics,
             }) => {
                 let within = cuts.iter().any(|cut| cut.within_limit);
@@ -409,18 +420,40 @@ impl ContextPolicy {
                         }
                     })
                     .and_then(|cut| {
+                        let pinned = pinned_inputs(
+                            view,
+                            step.turn_id.as_deref(),
+                            &retain_from,
+                            model.as_ref(),
+                        );
+                        let replacement_parts = (!pinned.is_empty()).then_some(ReplacementParts {
+                            strategy: strategy_messages.len() as u64,
+                            digest: 0,
+                        });
+                        let mut replacement = strategy_messages;
+                        replacement.extend(pinned);
                         let baseline = view.history[cut.entry - 1].baseline.clone();
                         view.compacted(model.as_ref(), cut.entry, &replacement, &baseline)
-                            .map(|(_, tokens)| (cut.entry, baseline, tokens))
+                            .map(|(_, tokens)| {
+                                (cut.entry, baseline, tokens, replacement, replacement_parts)
+                            })
                     });
                 match checked {
-                    Ok((replaced, baseline, tokens)) => ContextCompactionResult::Completed {
-                        retain_from: retain_from.clone(),
-                        replacement,
-                        strategy: name,
-                        diagnostics: record(Some(retain_from), Some(tokens), replaced, diagnostics),
-                        context_baseline: baseline.to_vec(),
-                    },
+                    Ok((replaced, baseline, tokens, replacement, replacement_parts)) => {
+                        ContextCompactionResult::Completed {
+                            retain_from: retain_from.clone(),
+                            replacement,
+                            strategy: name,
+                            diagnostics: record(
+                                Some(retain_from),
+                                Some(tokens),
+                                replaced,
+                                diagnostics,
+                            ),
+                            context_baseline: baseline.to_vec(),
+                            replacement_parts,
+                        }
+                    }
                     Err(error) => ContextCompactionResult::Failed {
                         error: error.into(),
                         diagnostics: Some(record(Some(retain_from), None, 0, diagnostics)),
@@ -665,20 +698,227 @@ fn project(
     Arc::new(result)
 }
 
+/// The running turn's inputs the cut replaces, as the model saw them
+/// (ContextCompaction §5.9): the user content and every keyless raw block of
+/// each input the turn consumed before `retain_from`, in event order. Keyed
+/// blocks are excluded; the keyed baseline replays them. The messages take at
+/// most `PINNED_SHARE` of the input budget, beyond which each input keeps its
+/// head and tail with a marker naming its `input/message` event id.
+fn pinned_inputs(
+    view: &View,
+    turn_id: Option<&str>,
+    retain_from: &str,
+    model: &dyn ContextModel,
+) -> Vec<Message> {
+    let Some(turn_id) = turn_id else {
+        return Vec::new();
+    };
+    let events = &view.context.events;
+    let Some(cut) = events.iter().position(|event| event.id == retain_from) else {
+        return Vec::new();
+    };
+    let Some(start) = events[..cut].iter().rposition(
+        |event| matches!(&event.kind, EventKind::TurnStart(data) if data.turn_id == turn_id),
+    ) else {
+        return Vec::new();
+    };
+    let messages: HashMap<&str, &InputMessageData> = events[..cut]
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::InputMessage(data) => Some((event.id.as_str(), data)),
+            _ => None,
+        })
+        .collect();
+    let checkpointed = view
+        .context
+        .checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.state.inputs.as_slice())
+        .unwrap_or_default();
+    let mut inputs: Vec<(&str, Vec<Message>)> = Vec::new();
+    for event in &events[start + 1..cut] {
+        let EventKind::InputConsumed(data) = &event.kind else {
+            continue;
+        };
+        let input = messages.get(data.input_id.as_str()).copied().or_else(|| {
+            checkpointed
+                .iter()
+                .find(|(id, _)| id == &data.input_id)
+                .map(|(_, input)| input)
+        });
+        let Some(input) = input else {
+            continue;
+        };
+        let mut rendered = Vec::new();
+        for block in &input.blocks {
+            if let InputBlock::Raw {
+                text, key: None, ..
+            } = block
+            {
+                rendered.push(Message::text(Role::User, text));
+            }
+        }
+        if let Some(user) = &input.user {
+            rendered.push(user_message(user));
+        }
+        if !rendered.is_empty() {
+            inputs.push((data.input_id.as_str(), rendered));
+        }
+    }
+    if inputs.is_empty() {
+        return Vec::new();
+    }
+    let count = |messages: &[Message]| {
+        model.count_tokens(&ModelRequest::new("", "", messages.to_vec()))
+            - model.count_tokens(&ModelRequest::new("", "", Vec::new()))
+    };
+    let limit = PINNED_SHARE * input_budget(model);
+    let total: f64 = inputs.iter().map(|(_, messages)| count(messages)).sum();
+    if total <= limit {
+        return inputs
+            .into_iter()
+            .flat_map(|(_, messages)| messages)
+            .collect();
+    }
+    let share = limit / inputs.len() as f64;
+    let mut pinned = Vec::new();
+    for (id, messages) in inputs {
+        if count(&messages) <= share {
+            pinned.extend(messages);
+            continue;
+        }
+        let text = messages
+            .iter()
+            .map(|message| match &message.content {
+                MessageContent::Text(text) => text.clone(),
+                MessageContent::Parts(parts) => parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        MessagePart::Text { text, .. } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        pinned.push(truncate_pin(id, &text, share, model));
+    }
+    pinned
+}
+
+/// One input's head and tail within `share`, with a marker naming the
+/// `input/message` event id Recall opens; a share too small for the marker
+/// keeps the marker alone.
+fn truncate_pin(id: &str, text: &str, share: f64, model: &dyn ContextModel) -> Message {
+    let build = |keep: usize| {
+        Message::text(
+            Role::User,
+            format!("{}\n[input {id}]", truncate_middle(text, keep)),
+        )
+    };
+    let count = |message: &Message| {
+        model.count_tokens(&ModelRequest::new("", "", vec![message.clone()]))
+            - model.count_tokens(&ModelRequest::new("", "", Vec::new()))
+    };
+    if count(&build(0)) > share {
+        return Message::text(Role::User, format!("[input {id}]"));
+    }
+    let (mut low, mut high) = (0, text.len());
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if count(&build(middle)) <= share {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    build(low)
+}
+
+/// Whether at least `RETAINED_SHARE × B` of new history has accumulated
+/// since the branch's latest compaction attempt, of any trigger and any
+/// outcome (ContextCompaction §5.6): the entries placed by events after that
+/// attempt's start `through`, counted with `count_tokens` each and summed. A
+/// branch with no start has all its history new. Automatic compaction runs
+/// only when this holds; budget recovery is exempt.
+fn regrown(view: &View, model: &dyn ContextModel) -> bool {
+    let Some(through) = view
+        .context
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompactionStart(data) => Some(data.through),
+            _ => None,
+        })
+    else {
+        return true;
+    };
+    let sequences: HashMap<&str, u64> = view
+        .context
+        .events
+        .iter()
+        .map(|event| (event.id.as_str(), event.sequence))
+        .collect();
+    let count = |messages: Vec<Message>| model.count_tokens(&ModelRequest::new("", "", messages));
+    let empty = count(Vec::new());
+    let new: f64 = view
+        .history
+        .iter()
+        .filter(|entry| {
+            sequences
+                .get(entry.source.as_str())
+                .is_some_and(|sequence| *sequence > through)
+        })
+        .map(|entry| count(vec![entry.message.clone()]) - empty)
+        .sum();
+    new >= RETAINED_SHARE * input_budget(model)
+}
+
 /// The input budget `context_window − output_tokens`.
 fn input_budget(model: &dyn ContextModel) -> f64 {
     (model.context_window() - model.output_tokens()).max(0.)
 }
 
-/// The index in `cuts` of the earliest cut that keeps something and whose
-/// kept tail, the keyed baseline at the cut included, fits `RETAINED_SHARE`
-/// of the input budget; for a manual step, the latest turn's start when it
-/// keeps less. None when no cut qualifies.
+/// The tokens a compaction at `cut` cannot shrink (ContextCompaction §5.3):
+/// the request frame — the system prompt, the tool declarations and the
+/// messages the preparation appended — the keyed baseline at the cut, the
+/// pinned inputs at the cut's own size (§5.9; a digest has no content yet,
+/// §5.10) and the strategy's planned replacement.
+fn resident(
+    view: &View,
+    model: &dyn ContextModel,
+    empty: f64,
+    frame: f64,
+    turn_id: Option<&str>,
+    cut: &CompactionCut,
+    replacement_size: f64,
+) -> f64 {
+    let count = |messages: Vec<Message>| model.count_tokens(&ModelRequest::new("", "", messages));
+    let baseline = count(
+        view.history[cut.entry - 1]
+            .baseline
+            .iter()
+            .map(|entry| entry.message.clone())
+            .collect(),
+    ) - empty;
+    let pins = count(pinned_inputs(view, turn_id, &cut.retain_from, model)) - empty;
+    frame + baseline + pins + replacement_size
+}
+
+/// The index in `cuts` of the earliest cut whose kept tail fits
+/// `min(RETAINED_SHARE × B, BOUND_SHARE × B − resident)`; for a manual step, the
+/// latest turn's start when it keeps less. The cut that replaces everything
+/// fits whenever the resident parts fit half the budget, so the compaction
+/// reaches the bound by keeping no tail (§5.3). None when no cut qualifies.
 fn retain_limit(
     view: &View,
     model: &dyn ContextModel,
+    turn_id: Option<&str>,
     cuts: &[CompactionCut],
     manual: bool,
+    replacement_size: f64,
 ) -> Option<usize> {
     let count = |messages: Vec<Message>| model.count_tokens(&ModelRequest::new("", "", messages));
     let empty = count(Vec::new());
@@ -686,19 +926,20 @@ fn retain_limit(
     for (index, entry) in view.history.iter().enumerate().rev() {
         tail[index] = tail[index + 1] + count(vec![entry.message.clone()]) - empty;
     }
-    let budget = RETAINED_SHARE * input_budget(model);
+    // The frame is the same at every cut: the system prompt, the tool
+    // declarations and the preparation's appended messages.
+    let mut frame = (*view.request).clone();
+    frame.messages = view
+        .request
+        .messages
+        .get(view.prefix_len..)
+        .unwrap_or_default()
+        .to_vec();
+    let frame = model.count_tokens(&frame);
+    let budget = input_budget(model);
     let fits = cuts.iter().position(|cut| {
-        cut.entry < view.history.len()
-            && tail[cut.entry] <= budget
-            && tail[cut.entry]
-                + count(
-                    view.history[cut.entry - 1]
-                        .baseline
-                        .iter()
-                        .map(|entry| entry.message.clone())
-                        .collect(),
-                )
-                <= budget
+        let resident_tokens = resident(view, model, empty, frame, turn_id, cut, replacement_size);
+        tail[cut.entry] <= (RETAINED_SHARE * budget).min(BOUND_SHARE * budget - resident_tokens)
     });
     let latest_turn = manual
         .then(|| {

@@ -209,7 +209,22 @@ fn render_input(event: &AgentEvent, input: &InputMessageData) -> Vec<ProjectionE
     entries
 }
 
-fn user_message(user: &UserInput) -> Message {
+/// Keeps about `keep` bytes of `text`, half from the start and half from
+/// the end, cut on UTF-8 character boundaries around a marker.
+pub(crate) fn truncate_middle(text: &str, keep: usize) -> String {
+    let half = keep / 2;
+    let mut head = half.min(text.len());
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len().saturating_sub(half).max(head);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}\n[... truncated ...]\n{}", &text[..head], &text[tail..])
+}
+
+pub(crate) fn user_message(user: &UserInput) -> Message {
     if let [ContentBlock::Text { text }] = user.content.as_slice() {
         return Message::text(Role::User, text);
     }
