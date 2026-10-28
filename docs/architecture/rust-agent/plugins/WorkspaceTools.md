@@ -82,6 +82,41 @@ decoder into an `OutputSink` (exec's sink also offloads to the output file) and
 keeps reading for the 100 ms grace after the root exits. These are the existing
 output rules, exposed without changing their behavior.
 
+### Declared effects
+
+`write`, `edit` and `exec` declare the effect of each call on its result, through
+the tool contract's `effects` field
+([session boundary A.6](../../../design/contracts/session-boundary.md#a6-tool-effects)).
+A declaration states what the call did, not what it was asked to do, and rides on
+the result the executor records on `step/tool-result`, the only fact a declaration
+is written to.
+
+- `write` and `edit` declare `fileWritten` with the resolved path once the
+  replacement is published, including the parent-sync failure whose result warns
+  that the file may have been partially written: the file changed either way.
+  They declare nothing when the call fails before the publish or is cancelled
+  before it.
+- `exec` declares `commandRun` for every command whose process started:
+  - the exit status the result observed, `exitCode` for a code and `signal` for a
+    name, a non-zero exit included although its result is an error;
+  - no exit status when the command is handed to the background, at once or
+    after the foreground wait: the call observed that the command started and
+    nothing more, and its later outcome reaches the model as BackgroundExec's
+    wake notice, not as a declaration;
+  - no exit status when the result observed none: the command was stopped by the
+    tool, its output was lost, or its handoff to the background failed.
+
+  A command that never started — refused input, a refused high-cost scan, a
+  denied isolation tier, an unavailable shell — declares nothing.
+- A cancelled call's result is settled by ToolExecutor, not by these tools, so
+  it carries no declaration.
+- The tools declare the files they change in the workspace. Their own temporary
+  and output files — the staging file `write` and `edit` install, the file a
+  large `read` result spills to, and the output log an `exec` command writes —
+  are the call's delivery, not its effect, and are not declared.
+- `read`, `glob` and `grep` declare nothing else: they neither change a
+  workspace file nor run a command.
+
 ### Rule check
 
 The read-only [`session.exec.output`](../../../design/background-task-output.md)
