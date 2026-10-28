@@ -402,12 +402,14 @@ pub struct ProductSummaryStrategyPlugin { host: DepKey<CompactionStrategyHost> }
 pub struct ContextMethodsPlugin;
 //   Deps = (Keyed<TreeCommands>, Keyed<SessionMethods>); methods.register(ctx, "session.context", ..)
 
-// dim-app-server/src/main.rs, product profile only (no --models file):
-builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextModel)))))
+// dim-app-server/src/cli.rs, defaults::install_compaction, the one install of every profile
+// that compacts; the product profile passes ProductContextModel and its product home,
+// the --models profile passes AimuxModels and its --home:
+builder.session_value(Arc::new(ContextModelHost(Some(model))))
        .require_feature(Feature::new("ContextCompaction")
            .session("ProductSummaryStrategy", |names| names.part(ProductSummaryStrategyPlugin::new(names)?))
            .session("ContextMethods", |names| names.part(ContextMethodsPlugin)));
-// --models and mock profiles bind ContextModelHost(None) and CompactionStrategyHost(None)
+// The mock profile binds ContextModelHost(None) and CompactionStrategyHost(None).
 ```
 
 ## 5. Flows
@@ -427,6 +429,10 @@ builder.session_value(Arc::new(ContextModelHost(Some(Arc::new(ProductContextMode
 | `output_tokens` | `request.config.maxTokens` if set, else `snapshot.capabilities.maxOutputTokens`; never above the latter |
 | `threshold_tokens` | `B − reserve`, where `B = context_window − output_tokens` (the input budget) and `reserve = min(max(0.10 × B, 16,000), 0.20 × B)`. The reserve absorbs the estimation error of the next request; it is a provisional heuristic that does not cover every request without a provider baseline ([research §3.3, §6.4](../research/compaction-trigger.md#33-recommendation)) |
 | `count_tokens` | UTF-8 bytes of the serialized system prompt, messages and tool declarations divided by 4; each image part counts a fixed 1,600 tokens. Provisional (#128). Used for deltas over the provider's `prompt_tokens`, the first request, `validate` and the reduction check |
+
+The `--models` profile resolves the same facts from its model file: `AimuxModels` reads the entry
+the request names, by provider and model id, and the request's capability snapshot stays unset, so
+images are sent while the capability is unknown.
 
 ### 5.2 ProductSummaryStrategy
 
@@ -718,7 +724,8 @@ request continues uncompacted; under recovery it fails the request.
 | Rpc `ProductEvent` (`tree_protocol.rs`) | Makes `context/compact`, `context/compaction-start` and `context/compaction` visible to v3 connections |
 | Turn consumers (clients, future Goal, Hooks) | Unaffected. A manual compaction outside a turn writes no `turn/*` |
 | #2 dynamic events | No change: both events stay `EventKind` variants with the same wire form |
-| `--models` profile, mock profile | Both hosts `None`: no compaction, and `session.context` is not recorded |
+| `--models` profile | The same strategy and `session.context` methods; window facts come from the model entry, and the request's capability snapshot stays unset |
+| Mock profile | Both hosts `None`: no compaction, and `session.context` is not recorded |
 | ManagedProviders plan usage, CLI `/compact` and `/usage` | Not part of F1's acceptance |
 
 ## 9. Rule check
@@ -783,7 +790,7 @@ Internal Rust changes:
 | Ports | `ContextModel` (window facts) and `CompactionStrategy` (replacement), each from its own Session value |
 | Other strategies, composition | Not done in F1 |
 | New event kinds | `context/compact` and `context/compaction-start` as `EventKind` variants |
-| `--models` profile | No capability snapshot, no compaction: accepted |
+| `--models` profile | Window facts from the model entry; the capability snapshot stays unset |
 | Provider-reported overflow | Separate Aimux issue, outside F1 |
 | Diagnostics | Strategy-neutral now: common counts plus a strategy-owned object (breaking) |
 | Compaction state | Facts: pending = command without start, running = start without result, done = result (§5.7) |
@@ -798,7 +805,8 @@ summary evaluation of #170 (§13), whose results set the two rows above.
 ## 11. Acceptance (flow tests)
 
 The tests run a product-profile App Server against a mock HTTP provider with a small context
-window (`crates/dim-app-server/tests`), plus Loop and policy flow tests in
+window, and the same App Server on a `--models` file whose entry declares a small window
+(`crates/dim-app-server/tests`), plus Loop and policy flow tests in
 `crates/dim-agent-capabilities/tests`.
 
 1. **Automatic.** Past the threshold, the next preparation writes `context/budget`, then
@@ -952,7 +960,9 @@ members rejected.
 - It is not a declared Settings source (those are for owners not written in Rust) and not a
   `BusinessDocument` with management methods: no client edits it in #170. When a client needs to,
   it becomes a `BusinessDocument` with its owner's methods, with the same document.
-- The `--models` and mock profiles do not install the strategy, so they have no file.
+- The mock profile does not install the strategy, so it has no file. The `--models` profile
+  installs it with its `--home`, the home its storage already uses, so its `compaction.json` sits
+  there.
 
 **How it maps through Provider.** The effort mapping already exists:
 `ModelPreferences::configure` ([preferences.rs](../../../crates/dim-app-server/src/provider/preferences.rs))

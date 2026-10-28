@@ -55,8 +55,13 @@ pub struct CompatibleConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelEntry {
     pub id: String,
+    /// The model's context window: the input and output tokens one request may
+    /// occupy.
+    pub context_window: Option<u64>,
+    /// The model's output limit; a request's own `maxTokens` never sends more.
+    pub max_output_tokens: Option<u64>,
     pub config: ModelConfig,
 }

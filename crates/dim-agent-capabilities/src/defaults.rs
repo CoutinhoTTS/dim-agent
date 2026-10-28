@@ -2,6 +2,7 @@ use crate::{
     adapters::*,
     agent_loop::LoopPlugin,
     approval::ApprovalPlugin,
+    context_methods::ContextMethodsPlugin,
     context_preparation::ContextPreparationPlugin,
     history::HistoryRenderer,
     host::*,
@@ -10,6 +11,7 @@ use crate::{
     permission::{CommandRulesHost, NoCommandRules, PermissionPlugin},
     prompt::{InitialPromptConfiguration, PromptPlugin},
     session_broadcast::{SessionBroadcastEndPlugin, SessionBroadcastPlugin},
+    summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
     timeline_tree::{TimelineTreePlugin, TreeTimelinePlugin},
     tool_binding::ToolBindingPlugin,
     tool_executor::ToolExecutorPlugin,
@@ -17,7 +19,7 @@ use crate::{
 };
 use dim_agent_runtime::{AgentBuilder, Feature, Names};
 use rutis::Error;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 /// The same timeline factories apply to main and every future branch.
 pub fn install(builder: &mut AgentBuilder) {
@@ -208,6 +210,33 @@ pub fn install_local_execution(
     crate::shell_input::install(builder);
     crate::prompt_sources::install(builder);
     crate::skills::install(builder);
+}
+
+/// Installs ContextCompaction for a model that compacts: window facts from
+/// `model`, the summary strategy whose `compaction.json` lives under `home`,
+/// and the `session.context` methods (ContextCompaction §4).
+pub fn install_compaction(
+    builder: &mut AgentBuilder,
+    model: Arc<dyn ResolveContextModel>,
+    home: Option<PathBuf>,
+) {
+    builder
+        .session_value(Arc::new(ContextModelHost(Some(model))))
+        .require_feature(
+            Feature::new("ContextCompaction")
+                .session("ProductSummaryStrategy", move |names| {
+                    Ok(Box::new(ProductSummaryStrategyPlugin::new(
+                        names,
+                        ProductSummaryStrategyConfig {
+                            home: home.clone(),
+                            target: None,
+                        },
+                    )?))
+                })
+                .session("ContextMethods", |names| {
+                    Ok(Box::new(ContextMethodsPlugin::new(names)?))
+                }),
+        );
 }
 
 /// Installs `driver` as the Session `ToolHost`.

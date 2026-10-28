@@ -152,7 +152,7 @@ async fn both_profiles_declare_recall() {
         let configuration = directory.join("models.json");
         std::fs::write(
             &configuration,
-            json!({"defaultModel":{"providerId":"fixture","modelId":"fixture"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"models":[{"id":"fixture","config":{"maxTokens":4096}}]}]}).to_string(),
+            json!({"defaultModel":{"providerId":"fixture","modelId":"fixture"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"models":[{"id":"fixture","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":4096}}]}]}).to_string(),
         )
         .unwrap();
         let mut models = launch(

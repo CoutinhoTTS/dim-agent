@@ -6,7 +6,7 @@
       "kind": "openai-compatible",
       "baseUrl": "http://127.0.0.1:1/v1",
       "models": [
-        { "id": "diagram-model", "config": { "maxTokens": 4096 } }
+        { "id": "diagram-model", "contextWindow": 128000, "maxOutputTokens": 4096, "config": { "maxTokens": 4096 } }
       ]
     }
   ]

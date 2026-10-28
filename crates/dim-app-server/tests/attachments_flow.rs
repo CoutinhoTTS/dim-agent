@@ -102,7 +102,7 @@ async fn launch(home: &Home, native: bool) -> RunningServer {
         let models = AimuxModels::from_config(
             serde_json::from_value::<ModelConfigFile>(json!({
                 "defaultModel": {"providerId": "local", "modelId": "scripted"},
-                "providers": [{"id": "local", "kind": "openai-compatible", "baseUrl": "http://127.0.0.1:1/v1", "models": [{"id": "scripted", "config": {"maxTokens": 64}}]}]
+                "providers": [{"id": "local", "kind": "openai-compatible", "baseUrl": "http://127.0.0.1:1/v1", "models": [{"id": "scripted", "contextWindow": 128000, "maxOutputTokens": 4096, "config": {"maxTokens": 64}}]}]
             }))
             .unwrap(),
         )
