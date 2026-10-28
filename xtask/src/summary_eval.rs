@@ -803,6 +803,26 @@ impl RunStep {
             _ => None,
         }
     }
+    /// The next chain step's checkpoint: the completed replacement itself, as
+    /// a committed compaction becomes the next checkpoint (ContextCompaction
+    /// §13.4).
+    fn checkpoint(&self) -> Option<CompactionCheckpoint> {
+        match &self.outcome {
+            Ok(StrategyOutcome::Completed { replacement, .. }) => {
+                let replacement: Arc<[Message]> = replacement.as_slice().into();
+                Some(CompactionCheckpoint {
+                    retain_from: "m0".into(),
+                    replacement_parts: Some(ReplacementParts {
+                        strategy: replacement.len() as u64,
+                        digest: 0,
+                    }),
+                    replacement,
+                    context_baseline: Arc::from([]),
+                })
+            }
+            _ => None,
+        }
+    }
     fn details(&self) -> BTreeMap<String, Value> {
         let record = match &self.outcome {
             Ok(StrategyOutcome::Completed { diagnostics, .. })
@@ -915,15 +935,7 @@ async fn run_case(strategy: &SummaryStrategy, case: &Prepared, cancel: &Cancella
             duration: step_started.elapsed(),
             outcome,
         };
-        let next = step.summary().map(|summary| CompactionCheckpoint {
-            retain_from: "m0".into(),
-            replacement: Arc::from([summary_message(&summary)]),
-            context_baseline: Arc::from([]),
-            replacement_parts: Some(ReplacementParts {
-                strategy: 1,
-                digest: 0,
-            }),
-        });
+        let next = step.checkpoint();
         let done = step.label() != "completed";
         steps.push(step);
         if done {
@@ -1411,6 +1423,12 @@ fn item_table(rows: &[Value]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dim_agent_capabilities::host::{
+        HostFuture, ModelConnection, ModelDriver, ModelStopReason, ResolveModelConnection,
+        ResolvedModelConnection,
+    };
+    use dim_agent_types::ModelCapabilitySnapshot;
+    use std::sync::Mutex;
 
     /// Every committed case parses and validates without a model call.
     #[test]
@@ -1420,5 +1438,136 @@ mod tests {
             cases.iter().any(|case| case.id == "chain"),
             "the chain case is present"
         );
+    }
+
+    /// Answers each summarizer request with `summary-of-step-N`, N being the
+    /// request's position, and keeps every request.
+    #[derive(Default)]
+    struct Markers {
+        requests: Mutex<Vec<Arc<ModelRequest>>>,
+    }
+    impl ModelDriver for Markers {
+        fn invoke(
+            &self,
+            request: Arc<ModelRequest>,
+            _: ModelConnection,
+            _: CancellationToken,
+        ) -> HostFuture<'_, ModelStream> {
+            let text = {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push(request);
+                format!("summary-of-step-{}", requests.len())
+            };
+            Box::pin(async move {
+                Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(ModelChunk::MessageStart {
+                        message_id: "reply".into(),
+                    }),
+                    Ok(ModelChunk::Text(text)),
+                    Ok(ModelChunk::MessageStop {
+                        message_id: "reply".into(),
+                        reason: ModelStopReason::EndTurn,
+                    }),
+                ])) as ModelStream)
+            })
+        }
+    }
+    struct Local;
+    impl ResolveModelConnection for Local {
+        fn resolve(
+            &self,
+            _: Arc<ModelRequest>,
+            _: CancellationToken,
+        ) -> HostFuture<'_, ResolvedModelConnection> {
+            Box::pin(async {
+                Ok(ResolvedModelConnection {
+                    connection: ModelConnection::Local,
+                    failure_policy: None,
+                    recovery: None,
+                })
+            })
+        }
+    }
+
+    /// A chain hands each step the previous step's completed replacement
+    /// unchanged — one summary envelope around one marker, the way a
+    /// committed compaction becomes the next checkpoint (ContextCompaction
+    /// §13.4).
+    #[tokio::test]
+    async fn a_chain_carries_each_completed_replacement_unchanged() {
+        let cases = read_cases(&cases_directory()).unwrap();
+        let case = cases
+            .iter()
+            .find(|case| case.id == "chain")
+            .expect("the chain case");
+        let driver = Arc::new(Markers::default());
+        let strategy = SummaryStrategy::new(
+            Arc::new(ModelHost(driver.clone())),
+            Arc::new(ProviderConnectionResolver(Arc::new(Local))),
+            None,
+            ProductSummaryStrategyConfig::default(),
+        )
+        .await
+        .unwrap();
+        let snapshot: ModelCapabilitySnapshot = serde_json::from_value(json!({
+            "target": {"providerId": "fake", "modelId": "fake"},
+            "capabilities": {"modalities": ["text"], "toolCalling": true, "streaming": true,
+                "structuredOutput": false, "vision": false, "audio": false, "reasoning": false,
+                "contextWindow": 128_000, "maxOutputTokens": 16_384}
+        }))
+        .unwrap();
+        let selection = ModelSelection {
+            provider_id: "fake".into(),
+            model_id: "fake".into(),
+            capability_snapshot: Some(snapshot),
+            config: None,
+            metadata: None,
+        };
+        let cancel = CancellationToken::new();
+        let prepared = Prepared::new(case, &selection, &cancel).await.unwrap();
+        let run = run_case(&strategy, &prepared, &cancel).await;
+        assert_eq!(run.steps.len(), CHAIN_STEPS, "every step completed");
+        assert!(
+            run.steps.iter().all(|step| step.label() == "completed"),
+            "{:?}",
+            run.steps.iter().map(RunStep::label).collect::<Vec<_>>()
+        );
+        let requests = driver.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), CHAIN_STEPS, "one chunk per step");
+        for (index, request) in requests.iter().enumerate().skip(1) {
+            let text = request
+                .messages
+                .iter()
+                .map(|message| render(std::slice::from_ref(message.as_ref())))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let marker = format!("summary-of-step-{index}");
+            assert_eq!(
+                text.matches(&marker).count(),
+                1,
+                "step {} does not carry {marker} exactly once:\n{text}",
+                index + 1
+            );
+            assert_eq!(
+                text.matches("<dim-summary>").count(),
+                1,
+                "step {} does not carry one summary envelope:\n{text}",
+                index + 1
+            );
+            assert_eq!(
+                text.matches("&lt;dim-summary&gt;").count(),
+                0,
+                "step {} carries an escaped summary envelope:\n{text}",
+                index + 1
+            );
+        }
+        for (index, step) in run.steps.iter().enumerate() {
+            let marker = summary_message(&format!("summary-of-step-{}", index + 1));
+            assert_eq!(
+                step.summary(),
+                Some(render(&[marker])),
+                "the report and the judge read the completed replacement"
+            );
+        }
     }
 }
