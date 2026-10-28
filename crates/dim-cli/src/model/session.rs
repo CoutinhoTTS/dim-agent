@@ -507,6 +507,9 @@ pub enum Update {
     Login(Result<Option<Account>, String>),
     /// The usage of the `/login` panel's account.
     Usage(Result<Usage, String>),
+    /// The main branch's estimated input and context window, in tokens;
+    /// none while the session's usage is unknown.
+    Context(Option<(u64, u64)>),
     /// Progress of the sign-in tagged `attempt`.
     Oauth {
         attempt: u64,

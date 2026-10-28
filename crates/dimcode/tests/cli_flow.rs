@@ -5855,6 +5855,80 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
     daemon.join().unwrap();
 }
 
+/// The composer's status corner shows the main branch's context use against
+/// its window once attached, and reads it again when a run on main ends, in
+/// both interface modes.
+#[test]
+fn tui_composer_shows_context_use_and_refreshes_it_when_a_run_ends() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["session.context.usage"]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            let usage = |input: f64| {
+                json!({"contextWindow":256000.0,"outputTokens":32000.0,
+                "thresholdTokens":200000.0,"estimatedInputTokens":input,
+                "baselineSource":"estimate"})
+            };
+            for _ in 0..2 {
+                let request = wire.read_any();
+                match request["method"].as_str() {
+                    Some("account.providers") => wire.reply(&request, json!([])),
+                    Some("session.context.usage") => {
+                        assert_eq!(
+                            request["params"],
+                            json!({"sessionId":"session","branchId":"main"})
+                        );
+                        wire.reply(&request, usage(1849.0));
+                    }
+                    method => panic!("unexpected request {method:?}"),
+                }
+            }
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            wire.notice(
+                "session.state",
+                json!({"sessionId":"session","branchId":"main","running":true}),
+            );
+            wire.notice(
+                "session.state",
+                json!({"sessionId":"session","branchId":"main","running":false}),
+            );
+            let refresh = wire.read("session.context.usage");
+            wire.reply(&refresh, usage(64000.0));
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                assert!(
+                    !line.contains("session.context.usage"),
+                    "extra read: {line}"
+                );
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("1.8K / 256K");
+        shown.send(()).unwrap();
+        terminal.until("64K / 256K");
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
 /// `dimcode export` (Timeline export design §7, §13 item 6): the sibling
 /// App Server's read-only export, live and after stop, without a daemon.
 #[test]

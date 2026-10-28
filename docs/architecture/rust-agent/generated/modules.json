@@ -22094,6 +22094,7 @@
         "path SwitchKind::Resumed",
         "path Update",
         "path Update::Approvals",
+        "path Update::Context",
         "path Update::Failed",
         "path Update::Login",
         "path Update::ModelFeatures",
@@ -27228,6 +27229,7 @@
         "path SwitchKind::Resumed",
         "path Update",
         "path Update::Approvals",
+        "path Update::Context",
         "path Update::Failed",
         "path Update::FilesChanged",
         "path Update::Login",
@@ -27896,6 +27898,13 @@
       "to": "dim_cli::update",
       "references": [
         "path crate::update::skip"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::usage",
+      "references": [
+        "use crate::usage::format_tokens"
       ]
     },
     {

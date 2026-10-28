@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-/// `Context  ~12.3K / 200.0K` plus one bar per bucket, then the Dim plan
+/// `Context  ~12.3K / 200K` plus one bar per bucket, then the Dim plan
 /// when the session runs on it.
 pub fn format_report(context: &Value, plan: Option<&Result<Value, String>>, now_ms: u64) -> String {
     let number = |key: &str| context[key].as_f64().unwrap_or(0.0);
@@ -150,13 +150,20 @@ fn window_label(hours: f64) -> String {
     }
 }
 
+/// `999`, `1.8K`, `256K`, `1.2M`: rounded down to one decimal, a zero
+/// decimal left out.
 pub fn format_tokens(value: f64) -> String {
-    if value >= 1_000_000.0 {
-        format!("{:.1}M", (value / 100_000.0).floor() / 10.0)
+    let (scaled, unit) = if value >= 1_000_000.0 {
+        ((value / 100_000.0).floor() / 10.0, "M")
     } else if value >= 1_000.0 {
-        format!("{:.1}K", (value / 100.0).floor() / 10.0)
+        ((value / 100.0).floor() / 10.0, "K")
     } else {
-        format!("{}", value as u64)
+        return format!("{}", value as u64);
+    };
+    if scaled.fract() == 0.0 {
+        format!("{scaled:.0}{unit}")
+    } else {
+        format!("{scaled:.1}{unit}")
     }
 }
 
@@ -252,8 +259,8 @@ mod tests {
         });
         let text = format_report(&context, None, 0);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "Context  ~12.3K / 200.0K");
-        assert_eq!(lines[1], "Messages        10.0K / 200.0K 5.0%");
+        assert_eq!(lines[0], "Context  ~12.3K / 200K");
+        assert_eq!(lines[1], "Messages            10K / 200K 5.0%");
         assert_eq!(lines[2], format!("  {}{}", "█".repeat(2), "░".repeat(40)));
         assert!(lines.iter().any(|l| l.starts_with("Free ")));
     }

@@ -110,6 +110,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
   - Agent prompt language.
   - Web access settings.
 - `/usage`: view context usage; also display plan quota and usage when supplied by an optional account Provider.
+- Context use in the composer's bottom border, after the approvals mode (`1.8K / 256K`); refreshed when a run on the main branch ends.
 - `/stats`: view Session statistics and activity; fullscreen TUI only; alias `/state`.
 - `/language`: switch interface language; aliases `/lang` and `/locale`.
 - `/theme`: switch themes.
