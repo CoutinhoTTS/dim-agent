@@ -57,6 +57,13 @@ impl CompactionStrategy for Cuts {
     fn name(&self) -> &str {
         "cuts"
     }
+    fn replacement_size(&self, model: &dyn ContextModel) -> f64 {
+        model.count_tokens(&ModelRequest::new(
+            "",
+            "",
+            vec![summary_message("compacted")],
+        ))
+    }
     fn compact(
         &self,
         input: CompactionInput,

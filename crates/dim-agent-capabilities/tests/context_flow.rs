@@ -22,6 +22,16 @@ use tokio_util::sync::CancellationToken;
 struct Context {
     foreign_cursor: bool,
     threshold: Option<f64>,
+    /// The planned replacement size reported to the retention rule; `None`
+    /// reports the size of the replacement this strategy returns.
+    replacement: Option<f64>,
+    /// The text of the summary message this strategy returns; `None` returns
+    /// `"short"`. It can overshoot the planned size, which stays planned
+    /// (ContextCompaction §5.2).
+    summary: Option<&'static str>,
+    /// Window facts override the default 4096 / 64 when nonzero.
+    window: f64,
+    output: f64,
 }
 impl ResolveContextModel for Context {
     fn resolve(
@@ -35,10 +45,14 @@ impl ResolveContextModel for Context {
 }
 impl ContextModel for Context {
     fn context_window(&self) -> f64 {
-        4096.
+        if self.window == 0. {
+            4096.
+        } else {
+            self.window
+        }
     }
     fn output_tokens(&self) -> f64 {
-        64.
+        if self.output == 0. { 64. } else { self.output }
     }
     fn threshold_tokens(&self) -> f64 {
         self.threshold.unwrap_or(10_000.)
@@ -49,6 +63,7 @@ impl ContextModel for Context {
 }
 fn test_diagnostics() -> StrategyDiagnostics {
     StrategyDiagnostics {
+        model_usage: None,
         model_call_count: 1,
         record: CompactionStrategyRecord {
             kind: "test".into(),
@@ -62,6 +77,15 @@ fn test_diagnostics() -> StrategyDiagnostics {
 impl CompactionStrategy for Context {
     fn name(&self) -> &str {
         "test"
+    }
+    fn replacement_size(&self, model: &dyn ContextModel) -> f64 {
+        self.replacement.unwrap_or_else(|| {
+            model.count_tokens(&ModelRequest::new(
+                "",
+                "",
+                vec![dim_agent_capabilities::history::summary_message("short")],
+            ))
+        })
     }
     fn compact(
         &self,
@@ -96,7 +120,9 @@ impl CompactionStrategy for Context {
             };
             Ok(StrategyOutcome::Completed {
                 retain_from,
-                replacement: vec![dim_agent_capabilities::history::summary_message("short")],
+                replacement: vec![dim_agent_capabilities::history::summary_message(
+                    self.summary.unwrap_or("short"),
+                )],
                 diagnostics: test_diagnostics(),
             })
         })
@@ -380,8 +406,10 @@ async fn provider_budget_recovery_uses_one_fixed_source_and_retries_only_once() 
             .create_session(SessionConfig::default())
             .await
             .unwrap();
+        // The turn's input is larger than the summary wrapper plus the
+        // pinned share, so the recovery compaction reduces the request.
         session
-            .submit("x".repeat(500), InputMode::Queue, "main")
+            .submit("x".repeat(4_000), InputMode::Queue, "main")
             .await
             .unwrap();
         session.idle("main").await.unwrap();
@@ -398,7 +426,23 @@ async fn provider_budget_recovery_uses_one_fixed_source_and_retries_only_once() 
         assert!(sources[1].recovery.is_some());
         assert_eq!(sources[0].through, sources[1].through);
         assert_ne!(sources[0].request_id, sources[1].request_id);
-        assert_eq!(sources[0].request.messages, sources[1].request.messages);
+        // The retry is prepared from the compacted context: the summary, then
+        // the running turn's pinned input (ContextCompaction §5.9).
+        // The retry is prepared from the compacted context: the summary, then
+        // the running turn's pinned input (ContextCompaction §5.3, §5.9).
+        let sent: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => Some(&data.request),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].messages.len(), 2, "{:?}", sent[1].messages);
+        assert_eq!(
+            *sent[1].messages[0],
+            dim_agent_capabilities::history::summary_message("short")
+        );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             events
@@ -492,6 +536,7 @@ async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() 
             Context {
                 foreign_cursor: true,
                 threshold: Some(10_000.),
+                ..Context::default()
             },
         )
         .build();
@@ -573,7 +618,7 @@ impl DynPlugin for RewriteBaseline {
 #[tokio::test]
 async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
     let context_input = || InputMessageData {
-        user: InputMessageData::text("x".repeat(500), None).user,
+        user: InputMessageData::text("x".repeat(1_200), None).user,
         blocks: vec![dim_agent_capabilities::context_block::raw(
             "<dim-state source=\"host/selection\">selected text</dim-state>".into(),
             Some("selection".into()),
@@ -650,7 +695,7 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
         .unwrap();
     assert_eq!(budget.baseline_source, BaselineSource::FullEstimate);
     assert_eq!(
-        budget.estimated_input_tokens, 1219.,
+        budget.estimated_input_tokens, 1321.,
         "budget is measured before the hook rewrites the committed baseline"
     );
     agent.close().await.unwrap();
@@ -715,8 +760,12 @@ mod compaction_events;
 mod context_reads;
 #[path = "context_flow/manual_compaction.rs"]
 mod manual_compaction;
+#[path = "context_flow/pinning.rs"]
+mod pinning;
 #[path = "context_flow/product_summary.rs"]
 mod product_summary;
+#[path = "context_flow/replan.rs"]
+mod replan;
 #[path = "context_flow/retention.rs"]
 mod retention;
 
@@ -1205,6 +1254,9 @@ impl CompactionStrategy for GatedContext {
     fn name(&self) -> &str {
         "test"
     }
+    fn replacement_size(&self, model: &dyn ContextModel) -> f64 {
+        self.0.replacement_size(model)
+    }
     fn compact(
         &self,
         input: CompactionInput,
@@ -1257,13 +1309,15 @@ async fn a_compaction_completed_after_a_stop_is_committed_not_discarded() {
         session.idle("main").await.unwrap();
     }
     gate.armed.store(true, Ordering::SeqCst);
+    // Enough new history to regrow the 0.25 × B the automatic trigger needs
+    // after the turn's compaction (ContextCompaction §5.6).
     session
-        .submit("next".into(), InputMode::Queue, "main")
+        .submit("z".repeat(800), InputMode::Queue, "main")
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
         .await
-        .expect("the second request compacts");
+        .expect("the next request compacts");
     let stopping = session.clone();
     let stop = tokio::spawn(async move { stopping.stop("main", "user stop".into()).await });
     let mut dispatch = session.dispatch_watch("main").unwrap();

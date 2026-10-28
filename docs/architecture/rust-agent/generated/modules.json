@@ -6473,12 +6473,16 @@
         "path context_configuration",
         "path context_messages",
         "path retained_entry",
+        "path truncate_middle",
+        "path user_message",
         "use crate::history::HistoryEntry",
         "use crate::history::HistoryRenderer",
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
         "use crate::history::context_messages",
-        "use crate::history::retained_entry"
+        "use crate::history::retained_entry",
+        "use crate::history::truncate_middle",
+        "use crate::history::user_message"
       ]
     },
     {
@@ -6500,6 +6504,7 @@
         "path ResolveContextModel",
         "path StrategyDiagnostics",
         "path StrategyOutcome::Completed",
+        "path StrategyOutcome::Failed",
         "path StrategyOutcome::Skipped",
         "path crate::host::HostErrorKind::Other"
       ]
@@ -6519,9 +6524,12 @@
       "to": "dim_agent_types::content",
       "references": [
         "path Message",
+        "path Message::text",
         "path MessageContent::Parts",
         "path MessageContent::Text",
-        "path MessagePart::ToolUse"
+        "path MessagePart::Text",
+        "path MessagePart::ToolUse",
+        "path Role::User"
       ]
     },
     {
@@ -6531,6 +6539,7 @@
         "path AgentEvent",
         "path ContextBudgetData",
         "path ContextCompactionData",
+        "path ContextCompactionResult",
         "path ContextCompactionResult::Cancelled",
         "path ContextCompactionResult::Completed",
         "path ContextCompactionResult::Failed",
@@ -6540,9 +6549,14 @@
         "path EventKind::ContextBudget",
         "path EventKind::ContextCompaction",
         "path EventKind::ContextCompactionStart",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputMessage",
         "path EventKind::ModelCall",
         "path EventKind::ModelUsage",
+        "path InputBlock::Raw",
+        "path InputMessageData",
         "path ModelUsageData",
+        "path ReplacementParts",
         "path events"
       ]
     },
@@ -6560,9 +6574,13 @@
         "path CompactionTrigger::Manual",
         "path CompactionTrigger::ProviderOutputBudgetExhausted",
         "path CompactionTrigger::Threshold",
+        "path InsufficientSpace",
+        "path InsufficientSpacePart",
+        "path InsufficientSpacePartName",
         "path ModelRequest",
         "path ModelRequest::new",
         "path ProviderOutputBudgetFacts",
+        "path SystemPrompt",
         "path model"
       ]
     },
@@ -6571,6 +6589,13 @@
       "to": "dim_agent_types::prompt",
       "references": [
         "path ContextBaselineEntry"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_policy",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolDefinition"
       ]
     },
     {
@@ -7347,7 +7372,8 @@
       "from": "dim_agent_capabilities::host",
       "to": "dim_agent_types::events",
       "references": [
-        "path ProviderPresentation"
+        "path ProviderPresentation",
+        "path ReplacementParts"
       ]
     },
     {
@@ -9559,7 +9585,9 @@
       "to": "dim_agent_capabilities::history",
       "references": [
         "path summary_message",
-        "use crate::history::summary_message"
+        "path truncate_middle",
+        "use crate::history::summary_message",
+        "use crate::history::truncate_middle"
       ]
     },
     {
@@ -9571,12 +9599,15 @@
         "path CompactionStrategyHost",
         "path ContextModel",
         "path HostError",
+        "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
         "path ModelChunk::MessageStop",
         "path ModelChunk::Text",
+        "path ModelChunk::Usage",
         "path ModelConnection",
         "path ModelConnection::Http",
+        "path ModelDriver",
         "path ModelHost",
         "path ModelStopReason::MaxTokens",
         "path ModelStopReason::ToolUse",
@@ -9585,7 +9616,9 @@
         "path StrategyDiagnostics",
         "path StrategyOutcome",
         "path StrategyOutcome::Completed",
+        "path StrategyOutcome::Failed",
         "path StrategyOutcome::Skipped",
+        "path add_usage",
         "path reasoning_config"
       ]
     },
@@ -9642,6 +9675,7 @@
         "path ModelRequest",
         "path ModelRequest::new",
         "path SystemPrompt::Text",
+        "path Usage",
         "path model"
       ]
     },

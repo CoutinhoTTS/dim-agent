@@ -596,6 +596,11 @@ pub struct CompactionInput {
     pub baseline_prompt_tokens: Option<f64>,
     pub delta_tokens: Option<f64>,
     pub provider_budget: Option<ProviderOutputBudgetFacts>,
+    /// The earlier pass of a compaction ContextPolicy re-planned (§5.3), as
+    /// it reported it: a pass given it continues the same request budget and
+    /// its own counts, and the policy adds its model calls and usage to the
+    /// earlier pass's.
+    pub prior: Option<StrategyDiagnostics>,
 }
 /// A legal cut: `history[..entry]` is replaced, `history[entry..]` is kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -608,8 +613,9 @@ pub struct CompactionCut {
 impl CompactionInput {
     /// The latest cut within the retention limit or, when none is within it
     /// (a single long turn), the latest cut that keeps something, so the
-    /// branch compacts instead of skipping until overflow. Only budget
-    /// recovery may replace everything, the latest input included.
+    /// branch compacts instead of skipping until overflow. The cut that
+    /// replaces everything is within the limit whenever no kept tail fits the
+    /// bound (ContextCompaction §5.3).
     pub fn cut(&self) -> Option<&CompactionCut> {
         self.cuts
             .iter()
@@ -633,6 +639,9 @@ pub struct CompactionCheckpoint {
     pub retain_from: String,
     pub replacement: Arc<[Message]>,
     pub context_baseline: Arc<[ContextBaselineEntry]>,
+    /// The parts of `replacement`: the strategy's messages, then the digest;
+    /// the rest are the pinned inputs (ContextCompaction §4.3).
+    pub replacement_parts: Option<ReplacementParts>,
 }
 /// Window facts of the model whose context is prepared.
 pub trait ContextModel: Send + Sync + 'static {
@@ -641,11 +650,47 @@ pub trait ContextModel: Send + Sync + 'static {
     fn threshold_tokens(&self) -> f64;
     fn count_tokens(&self, request: &ModelRequest) -> f64;
 }
-/// A strategy's diagnostics: its model calls and its own record.
+/// A strategy's diagnostics: its model calls, their summed usage and its own
+/// record.
 #[derive(Debug, Clone)]
 pub struct StrategyDiagnostics {
     pub model_call_count: u64,
+    pub model_usage: Option<Usage>,
     pub record: CompactionStrategyRecord,
+}
+impl StrategyDiagnostics {
+    /// Two passes of one compaction: the model calls and the usage summed,
+    /// and the later pass's own record, which a strategy continues from
+    /// `prior` (ContextCompaction §5.3).
+    pub fn sum(&self, next: &Self) -> Self {
+        let mut model_usage = self.model_usage.clone();
+        if let Some(next) = next.model_usage.clone() {
+            add_usage(&mut model_usage, next);
+        }
+        Self {
+            model_call_count: self.model_call_count + next.model_call_count,
+            model_usage,
+            record: next.record.clone(),
+        }
+    }
+}
+
+/// Adds one reply's usage into a compaction's running sum.
+pub(crate) fn add_usage(total: &mut Option<Usage>, usage: Usage) {
+    match total {
+        None => *total = Some(usage),
+        Some(sum) => {
+            sum.prompt_tokens += usage.prompt_tokens;
+            sum.completion_tokens += usage.completion_tokens;
+            sum.total_tokens += usage.total_tokens;
+            let cache = |a: Option<f64>, b: Option<f64>| match (a, b) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0.) + b.unwrap_or(0.)),
+            };
+            sum.cache_read_tokens = cache(sum.cache_read_tokens, usage.cache_read_tokens);
+            sum.cache_write_tokens = cache(sum.cache_write_tokens, usage.cache_write_tokens);
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub enum StrategyOutcome {
@@ -658,12 +703,23 @@ pub enum StrategyOutcome {
         reason: String,
         diagnostics: StrategyDiagnostics,
     },
+    /// The strategy failed after it ran; the diagnostics carry its calls,
+    /// usage and duration (ContextCompaction §4.2).
+    Failed {
+        error: String,
+        diagnostics: StrategyDiagnostics,
+    },
 }
 /// Produces the replacement of the history before a cut. Replay never calls
 /// it: a committed result is replayed by its record alone.
 pub trait CompactionStrategy: Send + Sync + 'static {
     /// Written into `context/compaction-start` and the result.
     fn name(&self) -> &str;
+    /// The planned token count of the messages `compact` returns: the summary's
+    /// target plus its wrapper (ContextCompaction §4.2). The retention rule
+    /// reserves it before the strategy runs; a reply that overshoots it is
+    /// kept and reported (ContextCompaction §5.2).
+    fn replacement_size(&self, model: &dyn ContextModel) -> f64;
     fn compact(
         &self,
         input: CompactionInput,

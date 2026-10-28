@@ -490,6 +490,7 @@ impl Prepared {
                     retain_from: "m0".into(),
                     replacement: Arc::from([summary_message(summary)]),
                     context_baseline: Arc::from([]),
+                    replacement_parts: None,
                 }),
             history,
             retain_from: case.retain_from,
@@ -518,6 +519,7 @@ impl Prepared {
             baseline_prompt_tokens: None,
             delta_tokens: None,
             provider_budget: None,
+            prior: None,
         }
     }
 }
@@ -532,11 +534,13 @@ impl Run {
         match &self.outcome {
             Ok(StrategyOutcome::Completed { .. }) => "completed",
             Ok(StrategyOutcome::Skipped { .. }) => "skipped",
+            Ok(StrategyOutcome::Failed { .. }) => "failed",
             Err(_) => "failed",
         }
     }
     fn error(&self) -> Option<String> {
         match &self.outcome {
+            Ok(StrategyOutcome::Failed { error, .. }) => Some(error.clone()),
             Err(HostError::Failed { message, .. }) => Some(message.clone()),
             Err(HostError::Cancelled(reason)) => Some(reason.clone()),
             Ok(_) => None,
@@ -551,7 +555,8 @@ impl Run {
     fn details(&self) -> BTreeMap<String, Value> {
         let record = match &self.outcome {
             Ok(StrategyOutcome::Completed { diagnostics, .. })
-            | Ok(StrategyOutcome::Skipped { diagnostics, .. }) => Some(&diagnostics.record),
+            | Ok(StrategyOutcome::Skipped { diagnostics, .. })
+            | Ok(StrategyOutcome::Failed { diagnostics, .. }) => Some(&diagnostics.record),
             Err(_) => None,
         };
         match record.map(|record| serde_json::to_value(&record.details)) {
@@ -562,7 +567,8 @@ impl Run {
     fn diagnostics(&self) -> Option<Value> {
         let record = match &self.outcome {
             Ok(StrategyOutcome::Completed { diagnostics, .. })
-            | Ok(StrategyOutcome::Skipped { diagnostics, .. }) => Some(&diagnostics.record),
+            | Ok(StrategyOutcome::Skipped { diagnostics, .. })
+            | Ok(StrategyOutcome::Failed { diagnostics, .. }) => Some(&diagnostics.record),
             Err(_) => None,
         };
         record.and_then(|record| serde_json::to_value(record).ok())
