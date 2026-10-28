@@ -243,10 +243,13 @@ failures before any model work.
 `outcome` is one of:
 
 - `completed {retain_from, replacement: Message[], strategy: string, diagnostics,
-  context_baseline, replacement_parts?}`. `retain_from` (a Timeline event id) replaces the
-  renderer-level `cursor`, `replacement` replaces `summary: String`, and `strategy` names the
-  producer, for example `"summary"`. `replacement_parts` (`{strategy, digest}` message counts)
-  locates the parts of `replacement`; absent means one part, the strategy's messages (§4.3).
+  context_baseline, replacement_parts?, pinned_inputs?}`. `retain_from` (a Timeline event id)
+  replaces the renderer-level `cursor`, `replacement` replaces `summary: String`, and `strategy`
+  names the producer, for example `"summary"`. `replacement_parts` (`{strategy, digest}`
+  message counts) locates the parts of `replacement`; absent means one part, the strategy's
+  messages (§4.3). `pinned_inputs` is the `input/message` id of each message of the pinned part,
+  in order, so consecutive equal ids are one input; absent reads as no ids, which every record
+  written before this field did (§5.9).
 - `skipped {reason, diagnostics}`.
 - `failed {error, diagnostics?}`; the diagnostics are present whenever the strategy ran (§4.2).
 - `cancelled {reason}` (new), so every manual step ends with exactly one fact.
@@ -330,7 +333,11 @@ The completed outcome records `replacement_parts: {strategy, digest}` — the co
 leading messages; the rest are the pinned inputs. A record without it reads as one part, the
 strategy's messages. That is how a later compaction finds the previous summary, digest and pins
 without parsing any content (§5.2, §5.10); replay is unaffected, and a reader that ignores the
-field projects the same messages.
+field projects the same messages. `pinned_inputs`, when written, names those pins' own
+`input/message` ids in the same order, so a later compaction can carry a pin it must truncate
+together with the handle that still opens the input it came from (§5.9). It is absent when the
+writer could not name every pinned message: a record written before the field, or one carrying
+pins from such a record. Such a pin still travels; it just cannot be named if it must shrink.
 
 **Snapshot anchoring without business content (#130).** Today, Timeline core and both stores
 read the content of `context/compaction` to anchor projection snapshots:
@@ -396,13 +403,15 @@ its own retries and the shared failure policy's attempts (§5.2). `durationMs` i
 so it is the summarizer's duration; the policy's own work is local. `modelUsage` is the `Usage`
 the strategy's replies reported, summed over them — `promptTokens`, `completionTokens`,
 `totalTokens` and the cache read and write tokens; `cost` and `currency` stay absent, and a
-strategy that sent no request reports none. `insufficientSpace` is present only on a completed
-compaction whose parts that compaction cannot shrink exceed `0.5 × B` on their own; `parts`
-names the parts that are too large, largest first, each with its `count_tokens` size, and the
-part names are `systemPrompt`, `tools`, `appendedMessages`, `keyedBaseline`, `pinnedInputs`,
-`digest` and `summary` (§5.3). Both fields are descriptive: no later decision reads them — the
-trigger compares the committed history with the latest start's `through`, and recovery compares
-its estimate with `B` — so they are content a reader shows (§9, rule 9).
+strategy that sent no request reports none. `insufficientSpace` is present exactly on a
+completed compaction whose total — the projected request's size, which the record reports as
+`estimatedOutputTokens` — exceeds `0.5 × B`; its excess is that total minus `0.5 × B`, and
+`parts` names the resident parts that cover it, largest first, each with its `count_tokens`
+size. The part names are `systemPrompt`, `tools`, `appendedMessages`, `keyedBaseline`,
+`pinnedInputs`, `digest` and `summary`; the kept tail is never named (§5.3). Both fields are
+descriptive: no later decision reads them — the trigger compares the committed history with the
+latest start's `through`, and recovery compares its estimate with `B` — so they are content a
+reader shows (§9, rule 9).
 
 Every compaction that reached the strategy carries this common record. One that failed
 validation carries the strategy's record with no after-size. One whose strategy failed carries
@@ -437,7 +446,8 @@ pub enum ContextCompactionResult {
     Completed { retain_from: String, replacement: Vec<Message>, strategy: String,
                 diagnostics: Box<CompactionDiagnosticsRecord>,
                 context_baseline: Vec<ContextBaselineEntry>,
-                replacement_parts: Option<ReplacementParts> },
+                replacement_parts: Option<ReplacementParts>,
+                pinned_inputs: Option<Vec<String>> },
     Skipped { .. }, Failed { .. }, Cancelled { reason: String } }
 
 // dim-agent-capabilities/src/host.rs
@@ -583,6 +593,15 @@ How the summary is produced:
   before it reaches the provider, with a non-transient error so the policy does not retry it; the
   result is `failed` and nothing is applied. `modelCallCount` is the number of requests sent
   (§4.3).
+- **Bounded work over a re-plan.** §5.3 step 4 may call the strategy a second time for the same
+  compaction. A pass given the earlier pass's diagnostics (`CompactionInput.prior`) continues the
+  same budget instead of starting a new one: its counters start from that pass's `chunkCount`,
+  `compactedToolPayloadCount`, `droppedMessageCount` and `cutOffCount`, and its allowance is
+  `chunkCount + SUMMARY_RETRY_LIMIT` minus the requests the earlier pass sent, so one compaction
+  sends at most `chunkCount + SUMMARY_RETRY_LIMIT` summarizer requests however many passes it
+  runs. Its `chunkCount` and the other counts then describe the whole compaction, while its
+  `modelCallCount` counts only its own requests; ContextPolicy sums the two passes' counts and
+  usage in the one committed result (§5.3).
 - **Substantive summary.** Non-empty is enforced on every reply: `summarize` fails the
   compaction when a reply holds no text after trimming (`failed`, reply `compaction_failed`, not
   a skip: a skip means there is nothing to compact). The folded summary is always the last reply,
@@ -610,7 +629,8 @@ How the summary is produced:
    - the keyed baseline at the cut;
    - the pinned inputs of the running turn before the cut (§5.9), at that cut's own size;
    - the digest at its bound; it has no content today, so its bound is zero (§5.10);
-   - the strategy's replacement at `replacement_size(model)` (§4.2).
+   - the strategy's replacement at `replacement_size(model)` (§4.2); a re-plan measures the
+     replacement the first pass actually produced instead (step 4).
 
    `resident(cut)` is the sum of those parts with `count_tokens`, and the tail budget at that
    cut is `min(RETAINED_SHARE × B, 0.5 × B − resident(cut))`, with `RETAINED_SHARE = 0.25`
@@ -647,23 +667,59 @@ How the summary is produced:
    `failed` result with its diagnostics. It then composes the record's replacement — the
    strategy's messages, the digest when it has content (§5.10), and the pinned inputs (§5.9),
    in that order — and records `replacement_parts` (§4.3).
-4. **Validation.** For any strategy, it checks that:
+4. **Validation and the one re-plan.** For any strategy, it checks that:
    - `retain_from` is an event of the fixed context and passes the event-based validity rule
      (§4.3);
    - `retain_from` is at or before `retain_limit`; or, when no cut is within a limit, it keeps
      something, or replaces everything under budget recovery;
    - the projected request is smaller than before and below the window.
 
-   The bound is reached by the cut: the second check holds every strategy to the limit, and a
-   completed compaction stays completed whatever size its summary actually has. A failed check
-   turns the outcome into `failed`.
+   The bound is reached by the cut: the second check holds every strategy to the limit, and
+   step 1 measured the replacement at the strategy's planned size, so a reply that overshoots
+   that plan still passes. A failed check turns the outcome into `failed`.
+
+   **The re-plan.** A completed result is measured where it lands, before anything is committed.
+   When its projected request exceeds `0.5 × B`, the policy — not the strategy — re-plans it
+   once, the same way for every strategy:
+
+   - It recomputes the retention limit over the entries from the first result's `retain_from`
+     on, with `replacement_size` set to the size the first replacement's strategy part actually
+     has.
+   - Only a limit that is a cut later than the first result's in event order is a re-plan. With
+     no such cut the overshoot cannot be cured by cutting later, the first result is kept, and
+     step 5 marks it when the parts it cannot shrink exceed the bound.
+   - It calls the strategy once more, as a rolling continuation of the same compaction: the pass
+     carries the uncommitted first result as its `checkpoint`, so the summary continues that one;
+     the history from the first `retain_from` on; the legal cuts marked against the new limit;
+     and the first pass's diagnostics as `prior`, so the request budget is shared (§5.2). The
+     result it returns is validated by the checks above and composed with §5.9's pins, which
+     carry the first result's pinned part.
+   - The second outcome is final; there is no third pass.
+     - `completed`: it is the one result of the one start. The common diagnostics sum both
+       passes — `modelCallCount` and `modelUsage` added, `durationMs` for the whole step — and
+       the strategy's own object continues its counts, so it describes the whole compaction
+       (§4.3). `replacement_parts` and `pinned_inputs` are this composition's. The mark is
+       measured on this result, and after the re-plan the summary's actual size is a part the
+       compaction cannot shrink, so the mark may name `summary`.
+     - `skipped`: the first result stands (§12): a strategy that skips a continuation has
+       nothing to add, and the first result is already validated and composed.
+     - `failed`: the whole compaction is `failed`, with the summed diagnostics.
+     - `cancelled`: the whole compaction is `cancelled`, with the caller's reason.
 5. **Result and mark.** It appends `context/compaction` with the caller's ids, `command` and
-   `start`, then saves the optional snapshot. A completed result whose resident parts — the parts
-   of step 1, measured on the result, with the summary at the size it actually has — exceed
-   `0.5 × B` carries the insufficient-space mark: each part's `count_tokens` size, and, from the
-   parts named `systemPrompt`, `tools`, `appendedMessages`, `keyedBaseline`, `pinnedInputs`,
-   `digest` and `summary`, the largest first until their sizes cover the excess over `0.5 × B`.
-   The mark is a field of the common diagnostics (§4.3) and no decision reads it.
+   `start`, then saves the optional snapshot. A completed result carries the insufficient-space
+   mark exactly when its total — the projected request's size, which the record reports as
+   `estimatedOutputTokens` — exceeds `0.5 × B`. The excess is that total minus `0.5 × B`, and
+   the mark names the resident parts — the parts of step 1, measured on the result, with the
+   summary at the size it actually has — each with its `count_tokens` size, from the parts named
+   `systemPrompt`, `tools`, `appendedMessages`, `keyedBaseline`, `pinnedInputs`, `digest` and
+   `summary`, the largest first until their sizes cover the excess. The kept tail is never
+   named: it is not one of the mark's parts. The resident parts cover the excess whenever the
+   kept tail fits the rule's budget, which is every cut the retention limit allows
+   (`tail ≤ 0.5 × B − resident`); a fallback cut that keeps more names every part. Wherever the
+   parts alone exceed the bound there is no kept tail, so the rule reduces to naming them; it
+   also covers a summary beyond its planned size whose re-planned result is still above the
+   bound (step 4), where the summary is normally the largest part. The mark is a field of the
+   common diagnostics (§4.3) and no decision reads it.
 
 Callers:
 
@@ -802,6 +858,15 @@ requests, budget recovery, `LoopSnapshot` and `context/prepare`.
     attempt is the latest start of any trigger and any outcome; a branch with no start has all
     its history new.
 
+    "After `through`" is decided in the context's own branch-aware order, never by comparing
+    raw sequences: `through` is a sequence of the branch that wrote the start, so it maps
+    through `ContextHistory.positions` to that branch's last committed event at or before it,
+    and an entry is new when its own event follows that one in the context's order. A child
+    branch restarts its local numbering at 1 while inheriting its parent's events, so a
+    child's smaller sequences are still new after an inherited attempt: a branch forked right
+    after the parent compacted regrows from its own history, and a same-branch history behaves
+    exactly as the plain sequence comparison did.
+
   This replaces the `context/budget` once-per-boundary check: at the same boundary no new
   history has accumulated, so the second rule already stops a repeat. A skipped or failed
   automatic compaction therefore never runs again on the same history, and a manual compaction
@@ -874,6 +939,25 @@ rest of the replaced range. The replacement carries them verbatim.
   projection checkpoint still held unconsumed, and that state supplies it; without a checkpoint
   the fixed context holds every event, so a missing snapshot costs an unread prefix, not the
   content.
+- **A later compaction in the same turn.** The pins are part of the previous replacement (§4.3),
+  not of `history`, so a later cut that replaces them would drop them. When the latest completed
+  compaction in the fixed context ran in the turn still running — its `context/compaction`
+  carries that `turn_id` — the new pins are:
+  - that result's pinned part, carried as-is: located by `replacement_parts` at the end of its
+    `replacement`, copied without re-reading the events it replaced, and named by its
+    `pinned_inputs` ids where the record has them;
+  - then the turn's inputs consumed at or after that result's `retain_from` and before the new
+    cut, in event order. The scan starts at the cut event itself: an input consumed exactly
+    there was kept by that cut's tail, so the same cut pins nothing new and a later cut that
+    replaces it pins it once.
+
+  This is the linear rolling rule applied to the pins: nothing before the previous cut is read
+  again, and the carried pins are copied rather than re-derived. Without such a compaction the
+  pins are the turn's inputs consumed since its `turn/start`, as above.
+- **No snapshot is involved.** The carried pins come from the committed `context/compaction` and
+  the events of the fixed context, which are facts; a projection snapshot is only a cache
+  (§5.8). A snapshot that resumes after the turn's `turn/start`, or one that cannot be decoded,
+  therefore changes no pin: the replacements are the same whether the snapshot was saved or not.
 - **Which parts.** The input's user content and every `InputBlock::Raw` that declares no `key`,
   each as the message the renderer places for it. That rendering is the projection's own rule,
   shared with the renderer, so the pinned text is exactly what the model saw. A block that
@@ -881,21 +965,25 @@ rest of the replaced range. The replacement carries them verbatim.
   value, and a retirement is the key's absence. An input is told apart by its events and these
   public fields only; no marker inside an input's text is parsed, so a plugin that writes keyed
   content (TimelineTree's branch context, for example) is excluded by its key and never by its
-  text.
-- **Budget.** The pinned messages total at most `0.1 × B`, counted with `count_tokens`. When all of
-  them fit they are pinned verbatim; when they do not, each input keeps its head and tail within
-  an equal share of the budget, with a marker naming its `input/message` event id — the handle
-  Recall opens for that input ([Recall §4](Recall.md#4-handles-time-and-event-id)) — and a share
-  too small for the marker keeps the marker alone. Beyond the limit a single input therefore keeps
-  its head and tail plus its event id.
+  text. A pin a previous record wrote is already a rendered message and is carried unchanged.
+- **Budget.** The pinned messages total at most `0.1 × B`, counted with `count_tokens` over the
+  whole list — the carried pins and the turn's new inputs together. When all of them fit they
+  are pinned verbatim; when they do not, each input keeps its head and tail within an equal
+  share of the budget, with a marker naming its `input/message` event id — the handle Recall
+  opens for that input ([Recall §4](Recall.md#4-handles-time-and-event-id)) — and a share too
+  small for the marker keeps the marker alone. A carried pin keeps its own input's handle: a
+  previous truncation's marker is dropped before the text is measured again, and the input keeps
+  its head and tail plus the handle naming its original `input/message` id. A carried pin whose
+  record named no id keeps head and tail with no handle, and the record carrying it then has no
+  `pinned_inputs` either (§4.3).
 - **Placement.** The last messages of the replacement (§4.3), after the strategy's messages and the
-  digest, so the running turn's words directly precede the kept tail.
+  digest, so the running turn's words directly precede the kept tail. The carried pins keep their
+  order ahead of the inputs consumed since, so the replacement reads in event order.
 - **Bound.** The pinned messages are resident in the `0.5 × B` bound (§5.3), and they are stored in
   the record's `replacement`, so replay needs no rule of its own.
-- **A later compaction.** The pins are part of the previous replacement (§4.3), so they are not
-  in `history`; the next compaction passes them to the summarizer as entries and pins only the
-  running turn again. Pins of a turn that has since ended are summarized like any other entry
-  and never re-pinned.
+- **A turn that ended.** Pins belong to the running turn only. A completed compaction whose
+  `turn_id` is not the running turn's is not carried: its pins are summarized like any other
+  entry and never re-pinned.
 
 ### 5.10 Class 3a: the digest
 
@@ -1054,13 +1142,13 @@ Internal Rust changes:
 | Summarizer reasoning (#170) | Decided by the evaluation (§13.4): `summaryReasoning: inherit \| off \| low` in `compaction.json`, or a constant if one value wins on every model class. Until then `inherit` (today's behaviour) |
 | Target summary length (#170) | Decided by the evaluation (§13.4): `S = min(α × O, β × B)` stated in the prompt, or no instruction. Until then no instruction, and the planning size uses α = 0.5 and β = 0.10 (provisional) |
 | Window limits | None of compaction's own: the window facts are the model's catalog values with their overrides, and `B`, the threshold, `0.5 × B`, `0.25 × B` and `S` scale with the declared window. A smaller useful window is declared smaller in the catalog (Provider) or by the `contextWindow` override (§5.1) |
-| The `0.5 × B` bound | The tail budget is `min(0.25 × B, 0.5 × B − resident)` with the replacement planned at `replacement_size` (§13.3's `S` at the provisional α = 0.5, β = 0.10); when no kept tail fits, the limit is the cut that replaces everything; the bound is reached by the cut, so an overshooting summary still completes (§5.3). The `0.5` share is provisional (#428) |
-| Insufficient space | A descriptive `insufficientSpace` object in the common diagnostics of a completed compaction, naming the largest resident parts; no decision reads it (§4.3, §5.3) |
-| Regrowth | Automatic threshold compaction needs `0.25 × B` of entries after the latest compaction attempt's `through`; recovery is exempt and runs once per request (§5.6, §5.3) |
+| The `0.5 × B` bound | The tail budget is `min(0.25 × B, 0.5 × B − resident)` with the replacement planned at `replacement_size` (§13.3's `S` at the provisional α = 0.5, β = 0.10); when no kept tail fits, the limit is the cut that replaces everything; a completed result still above the bound is re-planned once at the replacement's actual size before anything is committed, and only that re-plan's outcome is written; the mark is measured from the written result's total, so a result above the bound always carries it (§5.3). The `0.5` share is provisional (#428) |
+| Insufficient space | A descriptive `insufficientSpace` object present exactly when a completed compaction's total exceeds `0.5 × B`, naming the resident parts that cover the excess, largest first, and never the kept tail; no decision reads it (§4.3, §5.3) |
+| Regrowth | Automatic threshold compaction needs `0.25 × B` of entries after the latest compaction attempt's `through`, decided in the context's branch-aware order: `through` maps to the writing branch's last committed event at or before it, so a forked child regrows from its own history; recovery is exempt and runs once per request (§5.6, §5.3) |
 | Recovery failure | A request still over `B` after its recovery compaction fails with an error naming what keeps it there — the resident parts, or the entries the last event placed — and is not compacted again (§5.3, §6) |
-| Class 2(a) pinning | In ContextPolicy, not the strategy: the running turn's inputs before the cut, keyed blocks excluded, at most `0.1 × B` (provisional, #428), head and tail with the `input/message` id (§5.9) |
+| Class 2(a) pinning | In ContextPolicy, not the strategy: the running turn's inputs before the cut, keyed blocks excluded, at most `0.1 × B` (provisional, #428), head and tail with the `input/message` id; a compaction later in the same turn carries the previous result's pinned part as-is, merged with the inputs consumed at or after its cut under the same share, and reads both from committed facts so a missing snapshot changes nothing (§5.9) |
 | Class 3a digest | One data message in the replacement, after the strategy's messages and before the pinned inputs; empty until ToolRegistry declares effects (§5.10) |
-| Summarizer work | At most `chunkCount + 8` requests per compaction, each counted when sent; `modelCallCount` and `durationMs` report them, and `modelUsage` sums their usage (§5.2, §4.3) |
+| Summarizer work | At most `chunkCount + 8` requests per compaction, each counted when sent, over both passes of a re-plan; `modelCallCount` and `durationMs` report them, and `modelUsage` sums their usage (§5.2, §4.3) |
 | Substantive summary | Non-empty is enforced on every reply, so a committed summary is never empty; the parts are checked when [#429's prompt](../compaction-quality.md#77-model-facing-prompts-429) declares them, added with it (§5.2) |
 
 Open: the #128 follow-ups outside F1 (a summarizer request that reuses the conversation prefix,
@@ -1151,7 +1239,12 @@ window, and the same App Server on a `--models` file whose entry declares a smal
     its planned size, already exceeds `0.5 × B`: the compaction completes and its diagnostics
     carry `insufficientSpace` naming the frame's parts and the summary, and not a small one. On
     200,000 / 64,000 with the same frame the compaction stays below the bound and carries no
-    mark.
+    mark. A result that lands above `0.5 × B` although its resident parts fit — a summary beyond
+    its planned size whose one re-plan still leaves a tail, or a second pass that reports
+    nothing to add so the first result stands — is marked too, and the mark names the parts that
+    cover the excess from the total, the summary first when it is the largest. Every marked
+    result's `estimatedOutputTokens` is above `0.5 × B`, and every completed result without a
+    mark is at most `0.5 × B`.
 11. **Regrowth.** After a completed automatic compaction, a preparation at the threshold with
     less than `0.25 × B` of new history writes no `context/compaction-start`; once `0.25 × B` of
     new history has accumulated it does. Because no new history has accumulated, a skipped or
@@ -1188,6 +1281,31 @@ window, and the same App Server on a `--models` file whose entry declares a smal
     declares them lands.
 18. **The digest.** A completed replacement carries no digest message while no tool declares
     effects, and a record written before the digest exists still replays unchanged.
+19. **Pins across the compactions of one turn.** A turn that compacts twice pins its input in
+    both replacements, and the two runs — one saving the projection snapshot, one with snapshot
+    encoding disabled — produce identical replacements: the pins come from the committed record,
+    not from a snapshot. A steer the turn consumes between the two compactions is pinned after
+    the carried pin, in event order. An input consumed exactly at the first cut stays in that
+    cut's tail and is not duplicated; a later cut that replaces it pins it. When the merged pins
+    exceed `0.1 × B`, each keeps its head and tail with the handle naming its own `input/message`
+    id, the carried one included; a carried pin whose record named no id keeps head and tail
+    with no handle, and the new record names no ids either.
+20. **Regrowth after a fork.** A child branch forked right after its parent's first completed
+    compaction compacts at the threshold once `0.25 × B` of its own new history has accumulated:
+    the parent's `through` maps to the parent's last event at or before it in the context's
+    order, so the child's smaller local sequences are not mistaken for old history. On the flow
+    test's numbers — `B = 4,032`, threshold 3,000, an estimated 3,602 and a 1,500-character
+    input — the child writes a `threshold` start and no recovery. Same-branch regrowth behaves
+    exactly as before.
+21. **One re-plan.** A summary twice its planned size that leaves a removable tail makes the
+    compaction cut later: one start, one result, a later `retain_from`, `modelCallCount` summing
+    both passes, no mark, and a request after it at most `0.5 × B`. A second summary that
+    overshoots again completes with the mark naming `summary`, and no third strategy call runs.
+    A first pass that replaced everything is not re-planned, and its mark applies. Under
+    recovery the re-plan is a second pass of the one compaction, not a second compaction, and
+    recovery still runs once per request. The two passes share one request budget: at most
+    `chunkCount + SUMMARY_RETRY_LIMIT` requests over both, with the one result counting both
+    passes' calls and usage.
 
 ## 12. Implementation notes
 
@@ -1204,6 +1322,7 @@ fix, the smallest choice was made and is recorded here.
 | Loop subscription | The Loop subscribes to `context/compact` and `context/compaction`; starts are folded only at rebuild, where they tell a running step from a pending command. |
 | One outstanding command | Maintainer's decision during review: repeated requests are deduplicated at the interaction boundary. `AgentLoop::compact` joins an outstanding command instead of writing another, the slot holds at most one command, a command consumed while another is outstanding is skipped, and the waiter matches its own command id (§4.1, §5.4, acceptance 7). This replaces an earlier active/pending split, so commands can no longer interleave with a running step. |
 | Snapshot anchor | Timeline keeps the structural checks of §4.3. The old `resume ≤ through` check needed the anchor's content; it is replaced by the structural "resume precedes the anchor on the anchor's branch", and the owner's decode checks `through` before the anchor. |
+| A skipped re-plan | When the second pass of §5.3 step 4 returns `skipped`, the first result is committed: a strategy that skips a continuation has nothing to add, and the first result is already validated and composed. Its diagnostics stay the first pass's. |
 | Native storage example | The record example in [native-storage-format](../appserver/native-storage-format.md) uses the changed record and the v3 interpreter. |
 | Summarizer budget | Review fix: chunk packing and truncation count the whole summarizer request with the window facts' `count_tokens` against `context_window − output_tokens` (§5.2), so CJK-heavy history no longer exceeds the window; `product_summary.rs` checks every summarizer request. |
 | Acceptance | Acceptance 1, 3, 6 (crash and restart) and 8 run in the binary flow test `transport_flow/compaction.rs`. Acceptance 2, 4, 5 and the reload, interrupt and failure cases of 6 run in `dim-agent-capabilities/tests/context_flow` (`manual_compaction.rs` and the existing compaction tests). The crash between fact and snapshot is covered by the snapshot-failure test in `compaction_events.rs`. |
@@ -1526,13 +1645,13 @@ the sections that own each rule; this section is the map and states no rule of i
 
 | Requirement | Design |
 | --- | --- |
-| The `0.5 × B` bound, and the tail cut later when the bound needs it | §5.3 steps 1 and 4, §4.2 `replacement_size` |
+| The `0.5 × B` bound, and the tail cut later when the bound needs it | §5.3 steps 1 and 4 (the one re-plan at the replacement's actual size), §4.2 `replacement_size` |
 | The insufficient-space mark | §5.3 step 5, §4.3 diagnostics |
-| Regrowth; that a skipped or failed automatic compaction never runs again on the same history follows from it | §5.6, §5.3 |
+| Regrowth; that a skipped or failed automatic compaction never runs again on the same history follows from it | §5.6 (branch-aware), §5.3 |
 | One recovery compaction, then an error naming the resident part | §5.3 budget recovery, §5.8, §6 |
-| Class 2(a) pinning | §5.9, §4.3 composition |
-| Linear rolling | §5.2: the summarizer reads the previous replacement and the newly cut entries, unchanged |
-| Bounded work | §5.2 bounded work |
+| Class 2(a) pinning | §5.9 (carried as-is by a later compaction in the turn), §4.3 composition |
+| Linear rolling | §5.2: the summarizer reads the previous replacement and the newly cut entries, unchanged; §5.9: the pins are carried, and nothing before the previous cut is read again |
+| Bounded work | §5.2 bounded work, over both passes of a re-plan |
 | Self-reported cost | §4.1, §4.3, §5.2 cost |
 | The substantive summary: non-empty on every reply, the parts checked with their prompt | §5.2 substantive summary |
 | The class 3b state summary, the task or goal in force first | §5.2 substantive summary; the prompt and its declared parts stay [#429/#170's](../compaction-quality.md#77-model-facing-prompts-429) |
