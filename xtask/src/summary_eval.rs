@@ -22,7 +22,7 @@ use dim_agent_types::{
     BaselineSource, CompactionTrigger, Message, MessageContent, MessagePart, ModelId, ModelRequest,
     ModelSelection, ReplacementParts, Role,
 };
-use dim_app_server::provider::{ModelPreferences, ProviderService};
+use dim_app_server::provider::ProviderService;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
@@ -68,24 +68,8 @@ pub async fn run() -> Result<()> {
     let storage = server
         .service::<FileStorage>()
         .ok_or("the product profile serves no file storage")?;
-    let model = providers
-        .configuration(
-            Some(options.model.clone()),
-            None,
-            ModelPreferences::default(),
-            &cancel,
-        )
-        .await
-        .map_err(|error| format!("{}: {error}", options.model.provider_id))?;
-    let judge = providers
-        .configuration(
-            Some(options.judge.clone()),
-            None,
-            ModelPreferences::default(),
-            &cancel,
-        )
-        .await
-        .map_err(|error| format!("{}: {error}", options.judge.provider_id))?;
+    let model = selection_with_preferences(&providers, &options.model, &cancel).await?;
+    let judge = selection_with_preferences(&providers, &options.judge, &cancel).await?;
     let mut prepared = Vec::new();
     for case in &cases {
         prepared.push(Prepared::new(case, &model, &cancel).await?);
@@ -166,6 +150,31 @@ pub async fn run() -> Result<()> {
     }
     println!("wrote {}", options.out.join("summary.md").display());
     Ok(())
+}
+
+/// The model's conversation selection with its saved preferences, built the
+/// way the bundled client builds one: it reads them from
+/// `provider.management` and passes them at `session.create`
+/// (ContextCompaction §13.4), so `inherit` inherits what the user chose. A
+/// model with no saved preferences keeps the model config alone.
+async fn selection_with_preferences(
+    providers: &Arc<ProviderService>,
+    target: &ModelId,
+    cancel: &CancellationToken,
+) -> Result<ModelSelection> {
+    let preferences = providers
+        .management(Some(target.provider_id.clone()), cancel)
+        .await
+        .map_err(|error| format!("{}: {error}", target.provider_id))?
+        .providers
+        .into_iter()
+        .next()
+        .and_then(|provider| provider.preferences.get(&target.model_id).cloned())
+        .unwrap_or_default();
+    Ok(providers
+        .configuration(Some(target.clone()), None, preferences, cancel)
+        .await
+        .map_err(|error| format!("{}: {error}", target.provider_id))?)
 }
 
 /// `--home` must be an isolated product home: the evaluation writes its arms'
@@ -1428,7 +1437,94 @@ mod tests {
         ResolvedModelConnection,
     };
     use dim_agent_types::ModelCapabilitySnapshot;
+    use dim_app_server::model_catalog::FieldUpdate;
+    use dim_app_server::provider::{CreateProvider, PreferencesPatch};
     use std::sync::Mutex;
+
+    /// The conversation request carries the model's saved preferences, as the
+    /// bundled client's `session.create` does; without saved preferences it
+    /// stays the model config alone (ContextCompaction §13.4).
+    #[tokio::test]
+    async fn summary_eval_selection_carries_saved_model_preferences() {
+        let dir = crate::app_server::scratch("summary-eval-preferences").unwrap();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let server = crate::app_server::serve_home(&home, &dir, dir.join("command-output"), |_| {})
+            .await
+            .unwrap();
+        let providers = server
+            .service::<ProviderService>()
+            .expect("the product profile serves a provider catalog");
+        let cancel = CancellationToken::new();
+        let provider_id = "00000000-0000-4000-8000-0000000000aa";
+        let created = providers
+            .create(
+                serde_json::from_value::<CreateProvider>(json!({
+                    "providerId": provider_id,
+                    "displayName": "local",
+                    "connection": {
+                        "driverKind": "openai-compatible",
+                        "auth": {"type": "anonymous"},
+                        "baseUrl": "http://127.0.0.1:1"
+                    },
+                    "models": [{
+                        "modelId": "deepseek",
+                        "displayName": "DeepSeek",
+                        "status": "active",
+                        "capabilities": {
+                            "modalities": ["text"], "toolCalling": true, "streaming": true,
+                            "structuredOutput": true, "vision": false, "audio": false,
+                            "reasoning": true, "contextWindow": 128000, "maxOutputTokens": 321
+                        },
+                        "metadata": {"reasoning": {"supported": true, "effortOptions": ["low", "high", "max"]}}
+                    }],
+                    "enabled": true
+                }))
+                .unwrap(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let target = ModelId {
+            provider_id: provider_id.into(),
+            model_id: "deepseek".into(),
+        };
+        let plain = selection_with_preferences(&providers, &target, &cancel)
+            .await
+            .unwrap()
+            .config
+            .expect("a conversation config");
+        assert_eq!(plain.max_tokens, Some(321.));
+        assert_eq!(plain.reasoning, None);
+        providers
+            .update_preferences(
+                provider_id.into(),
+                created.version.expect("a provider version"),
+                "deepseek".into(),
+                PreferencesPatch {
+                    reasoning_effort: Some(FieldUpdate::Set {
+                        value: "max".into(),
+                    }),
+                    service_tier: None,
+                },
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let saved = selection_with_preferences(&providers, &target, &cancel)
+            .await
+            .unwrap()
+            .config
+            .expect("a conversation config");
+        assert_eq!(saved.max_tokens, Some(321.));
+        assert_eq!(
+            saved.reasoning.and_then(|reasoning| reasoning.effort),
+            Some("max".into())
+        );
+        server.shutdown();
+        server.join().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Every committed case parses and validates without a model call.
     #[test]
