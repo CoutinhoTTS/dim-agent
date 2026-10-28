@@ -71,17 +71,18 @@ impl Terminal {
                     migration.cancel_current();
                 }
                 _ = timer.tick(), if self.interactive && output_error.is_none() => {
-                    let snapshot = progress.borrow();
+                    let snapshot = progress.borrow().clone();
                     if let Err(error) = screen.draw(snapshot.as_ref(), &source, &target, started, migration.stopping.is_cancelled()) {
                         output_error = Some(error);
                         migration.cancel_current();
                     }
                 }
                 changed = progress.changed(), if !self.interactive && !self.json && output_error.is_none() => {
-                    if changed.is_ok() && let Some(progress) = progress.borrow().as_ref()
-                        && progress.task.stage != last_stage
+                    let next_stage = progress.borrow().as_ref().map(|progress| progress.task.stage.clone());
+                    if changed.is_ok() && let Some(next_stage) = next_stage
+                        && next_stage != last_stage
                     {
-                        last_stage.clone_from(&progress.task.stage);
+                        last_stage = next_stage;
                         if let Err(error) = writeln!(io::stderr(), "Migration: {}", stage(&last_stage).1) {
                             output_error = Some(error);
                             migration.cancel_current();
