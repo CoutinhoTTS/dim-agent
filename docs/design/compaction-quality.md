@@ -13,7 +13,7 @@ A task can outlast the context window. Compaction exists so the agent keeps work
 | 1 | What must survive compaction, and what may be lost because Recall can bring it back | Standing state, the running turn's inputs verbatim, a deterministic digest of the effects tools declare, and a model-written state summary survive. Exact past words, tool output and exploration may leave the context, because [Recall](plugins/Recall.md) reads the original events back (§3) |
 | 2 | Do users need to know that compaction happened, or to trigger or control it | Users see it: a row with its state and outcome — completed, skipped, failed or cancelled — the insufficient-space mark of a completed one that could not reach the §5 bound, the summary, a standing usage gauge, a warning near the threshold, and `/compact`. Changing the threshold or turning automatic compaction off comes later (§4, §9) |
 | 3 | What the cost bounds are | Linear in the session's total tokens, at most `0.5 × B` of context after a compaction, bounded summarizer work, and every compaction reports its own cost. Absolute seconds and prices are deliberately not set (§5) |
-| 4 | How we judge that compaction works | Three checks: deterministic mechanism tests in CI, a relative summary evaluation at the same budget, and promise probes on a real model forced through at least five compactions (§6) |
+| 4 | How we judge that compaction works | Two checks: deterministic mechanism tests in CI, and a relative summary evaluation at the same budget (§6) |
 
 ## 2. Basis
 
@@ -75,10 +75,11 @@ Seconds and prices depend on the scenario, the model, the window and the cache s
 | Check | What it verifies | Pass | Where |
 | --- | --- | --- | --- |
 | Mechanism tests | Class 1 replay. Class 2: the running turn's inputs present verbatim, keyed blocks not duplicated, the `0.1 × B` limit, head and tail with the handle, and the tail, up to `0.25 × B` and shorter when §5 needs it. Class 3a matches the declared effects. Every cut entry the model had in its context is readable verbatim through Recall ([Recall §14](plugins/Recall.md#14-acceptance-flow-tests), flow 4). The §5 bounds: linear reads, the `0.5 × B` bound with the mark only on the unshrinkable parts, the `0.25 × B` regrowth rule, the recovery limit, bounded requests, a failed or cancelled compaction not applied, deterministic replay. A substantive summary: non-empty, with its required parts present | All pass, deterministic, with a mock model | CI |
-| Relative summary evaluation | Class 3b: each required item kept and nothing invented. Includes the **compaction chain**: a constraint given early survives five consecutive compactions, and a constraint withdrawn midway is gone | Same cases, same model, **same budget**: either the summary length is fixed, or the length is reported beside every score. The candidate is no worse than the current strategy by more than `δ = 0.05` ([ContextCompaction §13.4](plugins/ContextCompaction.md#134-evaluation)), with zero inventions. Run when the summary prompt, model or strategy changes | Locally, with `xtask summary-eval` ([#170](https://github.com/arcships/dim/issues/170)) |
-| Promise probes | A real-model session forced through at least five compactions on a small window, then four questions. (1) What task is it on? (2) Does a constraint the user gave at the start still hold? (3) Does its next step match the state? (4) A datum that appeared only in a cut tool output: it either reads it back through Recall or says it does not know, and never invents it | Each probe passes, and the results are reported in the implementing PR | Locally |
+| Relative summary evaluation | Class 3b: each required item kept, and nothing that a case's `absent` probe names presented as current. Includes the **compaction chain**: a `fact` probe for an early constraint after the fifth compaction, and an `absent` probe for a constraint withdrawn midway | Same cases, same model, **same budget**, against the current strategy: `F ≥ F_current − δ`, `X ≥ X_current − δ`, `V ≤ V_current`, with `δ = 0.05` and the metrics as [ContextCompaction §13.4](plugins/ContextCompaction.md#134-evaluation) defines them. Either the summary length is fixed, or the length is reported beside every score. Run when the summary prompt, model or strategy changes | Locally, with `xtask summary-eval` ([#170](https://github.com/arcships/dim/issues/170)) |
 
 Absolute pass lines are not used. A task success rate measured against an uncompacted run varies by scenario and model and needs many runs to separate a difference from noise. A relative comparison at the same budget holds across scenarios, so the summary evaluation is what gates a change to the summary prompt, the model or the strategy.
+
+A session-level check on a real model is not used. One run of a nondeterministic model would be an absolute pass line, which the paragraph above rejects. What it would ask is covered elsewhere. The task, a constraint given at the start and the next step are 3b `fact` probes, and the chain carries the constraint; that is consistent with [ContextCompaction §13.7](plugins/ContextCompaction.md#137-ablation-review), which removed the continuation probe. A datum that appeared only in a cut tool output is readable verbatim through Recall ([Recall §14](plugins/Recall.md#14-acceptance-flow-tests), flows 4–5), and a case's `absent` probe catches a summary that gives it a value the output did not contain.
 
 ## 7. Requirements to owners
 
@@ -113,7 +114,11 @@ The list in §4, and nothing else. The gap this item closes: the projection drop
 
 ### 7.6 Summary evaluation (#170)
 
-Criteria aligned with class 3b, the compaction-chain cases, the same-budget comparison and the promise probes, in the runner of [ContextCompaction §13.4](plugins/ContextCompaction.md#134-evaluation).
+[#170](https://github.com/arcships/dim/issues/170) adds, in the runner of [ContextCompaction §13.4](plugins/ContextCompaction.md#134-evaluation):
+
+- **(a) Candidate arms.** A candidate summary prompt or strategy runs beside the current one on the same cases, through the shipped strategy and not an evaluation-only path. How, for example as factory configuration like the target rule, is #170's design.
+- **(b) Chained cases.** A case compacts five times in sequence. Each summary becomes the next compaction's earlier summary, with the next slice of messages.
+- **(c) The 3b probes** of §6, including the task in force (§3).
 
 ### 7.7 Model-facing prompts (#429)
 
