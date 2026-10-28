@@ -509,13 +509,15 @@ Namespace `schedule`, registered with `managementMethods`: its declarations list
 | `schedule.set_enabled` | `{job_id, enabled}` | Pause/resume |
 | `schedule.run_now` | `{job_id}` | `run_id` or the skip reason |
 | `schedule.history` | `{job_id, limit?}` | Runs, newest first |
-| `schedule.import_legacy` | `{source_id, fingerprint, job, enabled_at?}` | `{status, job_id}`; final native job fields without a caller-supplied id/cap/origin/revision |
+| `schedule.import_legacy` | `{source_id, fingerprint, job, recurrence}` | `{status, job_id}`; job fields without id/schedule/cap/origin/revision; recurrence is `{rrule, created_at, next_run_at?}` |
 
 The process row's `schedule` namespace (§1.3) uses existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent.
 
 ### A.3.1 Configuration import
 
-A protected local operator can import a final native job through `schedule.import_legacy`. Migration converts the old schedule and Session reference before calling it. The owner captures the same default permission cap and user origin as management save, validates the job, and preserves its supplied enabled flag. `enabled_at` supplies the established minute anchor of an imported repeating job; it is present only for an enabled job.
+A protected local operator imports through `schedule.import_legacy`. Migration maps the Session reference; Scheduler maps the legacy recurrence at the control node, using the same local clock as normal scheduling. The owner captures the default permission cap and user origin as management save, validates the job and preserves its enabled flag. Enabled jobs retain the minute-rounded creation anchor.
+
+The accepted legacy RRULE dialect has MINUTELY/HOURLY/DAILY/WEEKLY/MONTHLY/YEARLY, INTERVAL 1–999, scalar BYHOUR/BYMINUTE/BYMONTH/BYMONTHDAY and distinct named BYDAY values; required/rejected fields follow the legacy frequency contract. Minute/hour/month intervals that divide the containing calendar period map to cron slots with the established local phase. Daily/weekly/yearly map at unit interval. COUNT=1 requires the persisted occurrence and maps to `at`. Other intervals or one-shots without their occurrence return `schedule_import_unsupported`, without a receipt or an approximate replacement.
 
 A single Settings CAS stores the job and `legacy_imports[source_id]` source fingerprint and final-request digest together. Matching source and final-request digests return `already_imported`; a changed request, changed source or an existing target identity returns `conflict`. Receipt coverage belongs to configuration only, never run history. Job deletion retains the receipt, so repeat cannot recreate the job. Source data without a compatible mapping does not receive a receipt. An enabled imported job follows ordinary Scheduler timing and policy checks. Import never restores a prior running execution or sends its historical notifications.
 

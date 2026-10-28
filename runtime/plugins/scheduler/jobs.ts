@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { JsonObject, SessionPermissions, Settings } from '../../../npm/plugin.js'
 import { authority, jobSchema, ScheduleError, validateJob, type Caller, type Job, type JobPatch, type ScheduleSettings } from './data.ts'
+import { legacySchedule, type LegacyRecurrence } from './legacy.ts'
 
 export class SettingsReadError extends ScheduleError {}
 
@@ -54,16 +55,16 @@ export class Jobs {
     return job
   }
 
-  async importLegacy(sourceId: string, fingerprint: string, patch: JobPatch, enabledAt?: string) {
+  async importLegacy(sourceId: string, fingerprint: string, patch: JobPatch, recurrence: LegacyRecurrence) {
     const snapshot = await this.read()
     const previous = snapshot.document.legacy_imports?.[sourceId]
-    const requestDigest = createHash('sha256').update(JSON.stringify([patch, enabledAt ?? null])).digest('hex')
+    const requestDigest = createHash('sha256').update(JSON.stringify([patch, recurrence])).digest('hex')
     if (previous !== undefined) return { status: previous.fingerprint === fingerprint && previous.request_digest === requestDigest ? 'already_imported' : 'conflict', job_id: sourceId }
     if (snapshot.document.jobs.some(job => job.id === sourceId)) return { status: 'conflict', job_id: sourceId }
-    if ((patch.enabled === true) !== (enabledAt !== undefined)) throw new ScheduleError('schedule_invalid', 'Enabled import needs its time anchor')
+    const { schedule, anchor } = legacySchedule(recurrence)
     const bound = await this.permissions.permissionDefaults({})
-    const job = jobSchema.parse({ ...patch, id: sourceId, max_run_minutes: patch.max_run_minutes ?? 60,
-      policy_cap: bound, created_by: 'user', revision: 1, ...(enabledAt === undefined ? {} : { enabled_at: enabledAt }),
+    const job = jobSchema.parse({ ...patch, schedule, id: sourceId, max_run_minutes: patch.max_run_minutes ?? 60,
+      policy_cap: bound, created_by: 'user', revision: 1, ...(patch.enabled ? { enabled_at: anchor } : {}),
     })
     validateJob(job)
     const reply = await this.settings.update({ source: 'schedule', scope: 'user', expectedRevision: snapshot.revision,
