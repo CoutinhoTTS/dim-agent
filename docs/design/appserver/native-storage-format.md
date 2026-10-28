@@ -15,7 +15,10 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19 or v20. No
 migration API or startup option is provided. S5c (Session deletion and fork) kept
 v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain valid in
-v20, and v16 request rows stay readable as written.
+v20, and v16 request rows stay readable as written. #527 decided v21 for its
+tool-effect field and the digest entries a completed `context/compaction`
+records; that step takes effect with #527's implementation, and until then the
+current format stays v20 ([#527 v21 decision](#527-v21-格式决定)).
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
@@ -228,7 +231,7 @@ ProjectionCheckpoint = {
 
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
-首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件、#364 的挂载列表与 #427 的分支结束事件各自为下一版本作出的决定见下文。
+首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件、#364 的挂载列表、#427 的分支结束事件与 #527 的工具效果和清单条目各自为下一版本作出的决定见下文。
 
 ### S5a v15 格式决定
 
@@ -382,6 +385,27 @@ ProjectionCheckpoint = {
 
   对应 `storage_flow.rs` 的 `a_v19_store_upgrades_in_place_once` 及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与 `branch_end_events_restore_unchanged_and_the_line_stays_ended`。
 
+### #527 v21 格式决定
+
+[工具效果](../contracts/session-boundary.md#a6-tool-effects)与[压缩清单](../plugins/ContextCompaction.md#510-class-3a-the-digest)（#527）的格式决定：升级到 **v21**，从 v20 原地升级。
+
+- **状态**：由 #527 决定，随其实现生效。在那之前当前格式仍是 v20，本文其余部分描述的都是 v20。
+- **只增两处可选字段**：SQL 结构、表、列、索引、内容寻址与其他记录的字节都不变。
+  - `ToolResult.effects`：`step/tool-result` 的 `result` 上一个可选的效果声明数组；不声明任何效果的工具不写它，此前写下的事件也都没有它。
+  - 已完成 `context/compaction` 的 `digest_entries`：清单条目（按顺序）与 `dropped`；没有清单消息的压缩不写它。
+- **不能留在 v20**：
+  - `ToolResult` 与 `ContextCompactionResult` 都拒绝未知字段，v20 读取器解不了这两个值。
+  - 自 #193 的 v17 起，能打开某版本库的守护进程都能解码其中每一行；打开 Session 时还会解码每条已存事件（`validate_session`），所以留在 v20 会让含这两种值的 Session 打不开。
+  - #2 的 v18 决定要求不兼容的已存值各自做格式决定。
+- **SQL 不变**：表、列与索引不变，`agent_store_format` 的约束改为 `CHECK (version = 21)`。
+- **读取或转换路径**：在现有的启动准入事务内处理：
+  - 空库直接建 v21。
+  - 结构恰为 v20 且标记为 20 的库，在同一事务内只重建 `agent_store_format` 并写入 21，不读取、不改写任何业务行；失败则回滚，原 v20 库保持不变。
+  - 结构恰为 v19、v18、v17、v16、v15 或 v13 且标记相符的库，在同一事务内先走已有各步，再走本步，直接成为 v21。
+  - 恰为 v21 的库直接打开。
+  - 其他库（标记不符的结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
+- **旧版本的失败方式**：v20 守护进程以现有的"unsupported SQLite schema … preserved"错误在启动时拒绝整个 v21 库，因为其启动门禁比较精确的 SQL 结构，而 `agent_store_format` 的 `CHECK (version = 21)` 已不同。它不会等到恢复含这两种值的 Session 时才失败。
+- **单向**：不做备份，与之前各步相同。升级日志沿用同一行：`Upgraded native store <path> from format v20 to v21; earlier dimcode versions cannot open it.`
 
 ## 索引与实际查询
 
