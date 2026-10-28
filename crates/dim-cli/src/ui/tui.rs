@@ -11,7 +11,7 @@ use crate::model::session::{Command, SessionPort, SwitchKind, Update};
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
 use crate::model::shell::ShellRun;
-use crate::model::view::{LineState, RowKind, TaskTarget, ViewRow, ViewSnapshot};
+use crate::model::view::{LineState, LineView, RowKind, TaskTarget, ViewRow, ViewSnapshot};
 use crate::ui::Env;
 use crate::ui::approvals_panel::{ApprovalsPanel, status_label};
 use crate::ui::commands::{COMMANDS, Context as CommandContext, Needs};
@@ -476,6 +476,19 @@ fn run_terminal(
                         full.clear_focus();
                         full.follow();
                     }
+                    KeyCode::Char(pressed @ ('b' | 'f')) if key.mods.0 == 0 => {
+                        if let (Some(text), Some(at)) =
+                            (full.focused_text(&app), full.focused_cut(&app))
+                        {
+                            if pressed == 'b' {
+                                app.draft_line(at, &text);
+                            } else {
+                                app.ask_fork(at, text);
+                            }
+                        }
+                        full.clear_focus();
+                        full.follow();
+                    }
                     KeyCode::Char('q') if key.mods.0 == 0 => {
                         if let Some(text) = full.focused_text(&app)
                             && !app.composer.quote(&text)
@@ -758,6 +771,22 @@ struct App {
     /// The update dialog while another prompt has the screen; it comes
     /// back once that one closes.
     upgrade: Option<UpgradeDialog>,
+    /// A line about to open on the shown line: the next submit is its
+    /// opening input (timeline UI §4.2).
+    line_draft: Option<LineDraft>,
+    /// A fork the user picked, until they answer: its cut and the picked
+    /// message (timeline UI §4.3).
+    fork_confirm: Option<(u64, String)>,
+    /// The picked message, set in the fork's composer once it is attached.
+    fork_draft: Option<String>,
+}
+
+/// Where a line the user is drafting opens.
+struct LineDraft {
+    session_id: String,
+    projection_id: u64,
+    parent: String,
+    at: u64,
 }
 
 /// Widest the fullscreen command palette is drawn.
@@ -870,6 +899,9 @@ impl App {
             output_target: None,
             member_target: None,
             upgrade: None,
+            line_draft: None,
+            fork_confirm: None,
+            fork_draft: None,
         }
     }
 
@@ -1410,6 +1442,12 @@ impl App {
         if ctrl && key.code == KeyCode::Char('c') {
             return self.ctrl_c();
         }
+        if let Some((at, text)) = self.fork_confirm.take() {
+            if matches!(key.code, KeyCode::Char('y' | 'Y')) && key.mods == Modifiers::NONE {
+                self.fork(at, text);
+            }
+            return Outcome::Continue;
+        }
         if let Some(prompt) = &mut self.prompt {
             let effect = match prompt {
                 Prompt::Sessions(p) => p.handle_key(key),
@@ -1465,7 +1503,9 @@ impl App {
                 return Outcome::Continue;
             }
             KeyCode::Esc if !self.composer.palette_open() && !self.composer.mention_open() => {
-                if self.shell.is_some() {
+                if self.line_draft.take().is_some() {
+                    self.composer.clear();
+                } else if self.shell.is_some() {
                     self.stop_shell();
                 } else if self.running() {
                     self.interrupt();
@@ -1498,6 +1538,21 @@ impl App {
             _ => {}
         }
         match self.composer.handle_key(key) {
+            ComposerOutcome::Submit(text) | ComposerOutcome::SubmitDraft { text, .. }
+                if self.line_draft.is_some() =>
+            {
+                let text = text.trim().to_owned();
+                let _ = history::append(&self.home, &self.cwd_key, &text);
+                self.composer.push_history(&text);
+                let draft = self.line_draft.take().expect("guarded");
+                self.host.send(Command::OpenLine {
+                    session_id: draft.session_id,
+                    projection_id: draft.projection_id,
+                    parent: draft.parent,
+                    at: draft.at,
+                    prompt: text,
+                });
+            }
             ComposerOutcome::Submit(text) => {
                 let text = text.trim().to_owned();
                 let _ = history::append(&self.home, &self.cwd_key, &text);
@@ -1702,13 +1757,84 @@ impl App {
     }
 
     fn place_label(&self) -> String {
+        if self.fork_confirm.is_some() {
+            return t("Fork the session before this message? (y/N)").to_owned();
+        }
+        if let Some(draft) = &self.line_draft {
+            return tf(
+                "⑂ new line from {id} · Esc cancel",
+                &[("id", short_id(&draft.parent))],
+            );
+        }
         let workspace = workspace_label(&self.branch);
         match &self.snapshot {
             Some(snapshot) if !snapshot.focus.is_empty() && snapshot.focus != "main" => {
-                format!("{workspace} · {} {}", t("line"), short_id(&snapshot.focus))
+                format!(
+                    "{workspace} · {} {}",
+                    t("line"),
+                    line_path(&snapshot.lines, &snapshot.focus)
+                )
             }
             _ => workspace,
         }
+    }
+
+    /// `b` on a picked message, or `/branch`: the next submit opens a line
+    /// of the shown line at `at` (timeline UI §4.2).
+    fn draft_line(&mut self, at: u64, text: &str) {
+        let Some(snapshot) = &self.snapshot else {
+            self.set_notice(t("No active session"));
+            return;
+        };
+        if let Some(line) = snapshot.lines.iter().find(|line| line.id == snapshot.focus)
+            && !matches!(
+                line.state,
+                LineState::Main | LineState::Working | LineState::Waiting
+            )
+        {
+            self.set_notice(format!("{} {}", t("Line has ended:"), line.id));
+            return;
+        }
+        self.line_draft = Some(LineDraft {
+            session_id: snapshot.session_id.clone(),
+            projection_id: snapshot.projection_id,
+            parent: snapshot.focus.clone(),
+            at,
+        });
+        self.composer.set_draft(text);
+    }
+
+    /// `f` on a picked message, or `/fork`: asks before forking `main` at
+    /// `at` (timeline UI §4.3).
+    fn ask_fork(&mut self, at: u64, text: String) {
+        match &self.snapshot {
+            None => self.set_notice(t("No active session")),
+            Some(snapshot) if snapshot.focus != "main" => {
+                self.set_notice(t("A fork copies main; b opens a line here"));
+            }
+            Some(_) => self.fork_confirm = Some((at, text)),
+        }
+    }
+
+    fn fork(&mut self, at: u64, text: String) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        self.host.send(Command::Fork {
+            session_id: snapshot.session_id.clone(),
+            projection_id: snapshot.projection_id,
+            at,
+        });
+        self.fork_draft = Some(text);
+    }
+
+    /// The cut at the end of the shown line: its newest turn end.
+    fn head_cut(&mut self) -> Option<u64> {
+        let cut = self.snapshot.as_ref()?.ended.map(|(sequence, _)| sequence);
+        if cut.is_none() {
+            self.set_notice(t("No finished turn to cut at yet"));
+        }
+        cut
     }
 
     fn apply_effect(&mut self, effect: Effect) -> Outcome {
@@ -2262,6 +2388,18 @@ impl App {
                 }
                 Outcome::Continue
             }
+            "branch" => {
+                if let Some(at) = self.head_cut() {
+                    self.draft_line(at, args);
+                }
+                Outcome::Continue
+            }
+            "fork" => {
+                if let Some(at) = self.head_cut() {
+                    self.ask_fork(at, args.to_owned());
+                }
+                Outcome::Continue
+            }
             "tasks" => {
                 if let Some(snapshot) = &self.snapshot {
                     self.prompt = Some(Prompt::Tasks(TasksPanel::new(snapshot)));
@@ -2432,6 +2570,13 @@ impl App {
         {
             let label = match kind {
                 SwitchKind::New => t("new session").to_owned(),
+                SwitchKind::Forked => {
+                    let sid = self.session_id.get(..8).unwrap_or(&self.session_id);
+                    tf(
+                        "forked {id} · {count} messages",
+                        &[("id", sid), ("count", &self.window_info.0.to_string())],
+                    )
+                }
                 SwitchKind::Resumed => {
                     let (count, hidden) = self.window_info;
                     let sid = self.session_id.get(..8).unwrap_or(&self.session_id);
@@ -3056,6 +3201,8 @@ impl App {
         self.history_request = None;
         self.awaiting_window = true;
         self.pending_line = Some(line);
+        self.line_draft = None;
+        self.fork_confirm = None;
         self.card_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
@@ -3085,6 +3232,13 @@ impl App {
             kind => Some(kind),
         };
         self.composer.clear();
+        self.line_draft = None;
+        self.fork_confirm = None;
+        if let Some(text) = self.fork_draft.take()
+            && kind == SwitchKind::Forked
+        {
+            self.composer.set_draft(&text);
+        }
         self.card_blocks.clear();
         if self.fullscreen {
             self.dropped += self.history.len();
@@ -3226,10 +3380,21 @@ impl App {
 
     /// Opens a delegation card's member: its read-only conversation, or its
     /// result when there is no member Session to read.
+    /// Opens what a picked or clicked card stands for: a delegation's
+    /// member, or the line a marker opened.
     fn open_card(&mut self, request_event_id: &str) {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
+        if snapshot
+            .lines
+            .iter()
+            .any(|line| line.id == request_event_id)
+        {
+            self.host
+                .send(Command::FocusLine(request_event_id.to_owned()));
+            return;
+        }
         let Some(card) = snapshot.rows.iter().find_map(|row| {
             row.member
                 .as_ref()
@@ -3382,13 +3547,16 @@ impl Document for App {
     fn cards(&self, index: usize) -> Vec<String> {
         match &self.history[index] {
             Block::ToolGroup(group) => card_actions(group).into_iter().map(str::to_owned).collect(),
+            Block::Line { id, .. } => vec![id.clone()],
             _ => Vec::new(),
         }
     }
 
     fn card_rows(&self, index: usize, cols: usize, card: &str) -> Option<(usize, usize)> {
-        let Block::ToolGroup(group) = &self.history[index] else {
-            return None;
+        let group = match &self.history[index] {
+            Block::ToolGroup(group) => group,
+            Block::Line { .. } => return Some((1, self.rows(index, cols).len())),
+            _ => return None,
         };
         let width = cols.saturating_sub(2 + MARGIN).max(1);
         let (start, end) = card_rows(group, width, &self.palette, card)?;
@@ -3396,8 +3564,10 @@ impl Document for App {
     }
 
     fn card_at(&self, index: usize, cols: usize, row: usize) -> Option<String> {
-        let Block::ToolGroup(group) = &self.history[index] else {
-            return None;
+        let group = match &self.history[index] {
+            Block::ToolGroup(group) => group,
+            Block::Line { id, .. } => return (row > 0).then(|| id.clone()),
+            _ => return None,
         };
         let width = cols.saturating_sub(2 + MARGIN).max(1);
         action_at(group, width, &self.palette, row.checked_sub(1)?).map(str::to_owned)
@@ -3430,7 +3600,14 @@ impl Document for App {
 
     fn message(&self, index: usize) -> Option<&str> {
         match &self.history[index] {
-            Block::User(text) => Some(text),
+            Block::User { text, .. } => Some(text),
+            _ => None,
+        }
+    }
+
+    fn cut(&self, index: usize) -> Option<u64> {
+        match &self.history[index] {
+            Block::User { cut, .. } => *cut,
             _ => None,
         }
     }
@@ -3648,6 +3825,30 @@ fn fit_place(place: String, status: Option<&str>, outer: usize) -> String {
 
 fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
+}
+
+/// `main ▸ b-91 ▸ b-c3 · after message 4`: the lines from `main` down to
+/// `line`, and where `line` was cut (timeline UI §4.5).
+fn line_path(lines: &[LineView], line: &str) -> String {
+    let mut path = vec![short_id(line)];
+    let mut at = lines.iter().find(|view| view.id == line);
+    let cut = at.and_then(|view| view.cut);
+    while let Some(parent) = at.and_then(|view| view.parent.as_deref()) {
+        path.push(short_id(parent));
+        at = lines.iter().find(|view| view.id == parent);
+    }
+    path.reverse();
+    let path = path.join(" ▸ ");
+    match cut {
+        Some(cut) => format!(
+            "{path} · {}",
+            tf(
+                "after message {count}",
+                &[("count", &cut.messages.to_string())]
+            )
+        ),
+        None => path,
+    }
 }
 
 /// The working directory, `~` for the home, and the git branch: what the
@@ -3955,6 +4156,79 @@ mod tests {
         fn shutdown(self: Box<Self>) {}
     }
 
+    /// A picked message opens a line of the shown line with the submitted
+    /// text, and forks only `main`, after a confirmation, carrying the text
+    /// into the fork (timeline UI §4.2, §4.3).
+    #[test]
+    fn a_picked_message_opens_a_line_or_forks_main() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let snapshot = |focus: &str| {
+            Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                projection_id: 7,
+                focus: focus.into(),
+                ..ViewSnapshot::default()
+            }))
+        };
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        app.apply(snapshot("main"));
+        app.draft_line(4, "try RwLock");
+        assert!(app.place_label().contains("new line from main"));
+        app.handle_input(key(KeyCode::Char('!')));
+        app.handle_input(key(KeyCode::Enter));
+        match sent.borrow().last() {
+            Some(Command::OpenLine {
+                session_id,
+                projection_id,
+                parent,
+                at,
+                prompt,
+            }) => assert_eq!(
+                (session_id.as_str(), *projection_id, parent.as_str(), *at),
+                ("s1", 7, "main", 4),
+                "{prompt}"
+            ),
+            _ => panic!("the submit opens the line"),
+        }
+        assert!(app.line_draft.is_none(), "one submit opens one line");
+        app.draft_line(4, "again");
+        app.handle_input(key(KeyCode::Esc));
+        assert!(app.line_draft.is_none() && app.composer.is_empty());
+
+        app.apply(snapshot("b-7c"));
+        app.ask_fork(4, "from a line".into());
+        assert!(app.fork_confirm.is_none(), "a fork copies main only");
+        app.apply(snapshot("main"));
+        app.ask_fork(4, "try RwLock".into());
+        app.handle_input(key(KeyCode::Char('n')));
+        assert!(app.fork_confirm.is_none());
+        let count = sent.borrow().len();
+        app.ask_fork(4, "try RwLock".into());
+        app.handle_input(key(KeyCode::Char('y')));
+        assert!(matches!(
+            sent.borrow()[count..],
+            [Command::Fork {
+                projection_id: 7,
+                at: 4,
+                ..
+            }]
+        ));
+        app.apply(Update::Switched {
+            session_id: "s2".into(),
+            kind: SwitchKind::Forked,
+        });
+        assert_eq!(app.composer.text(), "try RwLock");
+    }
+
     /// `/plugins` lists through the worker, the panel's changes reach it as
     /// plugin commands, and `/plugins install PATH` installs the directory
     /// relative to the workspace.
@@ -4130,6 +4404,8 @@ mod tests {
                         diff: None,
                         exit_code: None,
                         member: None,
+                        cut: None,
+                        line: None,
                     })
                 })
                 .collect();
@@ -4224,12 +4500,17 @@ mod tests {
                     parent: None,
                     purpose: String::new(),
                     state: LineState::Main,
+                    cut: None,
                 },
                 crate::model::view::LineView {
                     id: "b-91".into(),
                     parent: Some("main".into()),
                     purpose: "review".into(),
                     state: LineState::Working,
+                    cut: Some(crate::model::view::LineCut {
+                        sequence: 1,
+                        messages: 0,
+                    }),
                 },
             ],
             ..ViewSnapshot::default()
@@ -4259,6 +4540,8 @@ mod tests {
                 diff: None,
                 exit_code: None,
                 member: None,
+                cut: None,
+                line: None,
             })],
             focus: "b-7c".into(),
             main_topic: Some("fix the login bug".into()),

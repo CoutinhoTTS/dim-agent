@@ -142,6 +142,20 @@ pub const COMMANDS: &[Command] = &[
         Needs::Session,
     ),
     slash(
+        "branch",
+        "session",
+        "open a line from the end of the shown line",
+        &[],
+        Needs::Session,
+    ),
+    slash(
+        "fork",
+        "session",
+        "fork the session at its last finished turn",
+        &[],
+        Needs::Session,
+    ),
+    slash(
         "history",
         "session",
         "load the previous page of messages",

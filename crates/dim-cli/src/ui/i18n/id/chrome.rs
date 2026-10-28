@@ -39,6 +39,22 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main adalah sesi itu sendiri; jalur bisa berakhir, main tidak"
         }
         "Line has ended:" => "Jalur sudah berakhir:",
+        "e edit · b branch · f fork" => "e ubah · b cabang · f fork",
+        "e edit" => "e ubah",
+        "Fork the session before this message? (y/N)" => "Fork sesi sebelum pesan ini? (y/N)",
+        "⑂ new line from {id} · Esc cancel" => "⑂ jalur baru dari {id} · Esc batal",
+        "A fork copies main; b opens a line here" => {
+            "Fork hanya menyalin main; b membuka jalur di sini"
+        }
+        "No finished turn to cut at yet" => "Belum ada giliran selesai untuk dipotong",
+        "forked {id} · {count} messages" => "fork {id} · {count} pesan",
+        "after message {count}" => "setelah pesan {count}",
+        "open a line from the end of the shown line" => {
+            "buka jalur dari akhir jalur yang ditampilkan"
+        }
+        "fork the session at its last finished turn" => {
+            "fork sesi pada giliran terakhir yang selesai"
+        }
         "Starting" => "Memulai",
         "Delegation result" => "Hasil delegasi",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {

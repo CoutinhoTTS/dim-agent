@@ -72,6 +72,22 @@ pub enum Command {
         projection_id: u64,
         branch_id: String,
     },
+    /// Open a line of the displayed attachment at `at` of `parent`, with
+    /// its opening input, and show it (timeline UI §4.2).
+    OpenLine {
+        session_id: String,
+        projection_id: u64,
+        parent: String,
+        at: u64,
+        prompt: String,
+    },
+    /// Fork the displayed Session's `main` through `at` and attach to the
+    /// fork (timeline UI §4.3).
+    Fork {
+        session_id: String,
+        projection_id: u64,
+        at: u64,
+    },
     /// Observe one delivered member without selecting its Session for editing.
     WatchMember {
         projection_id: u64,
@@ -411,6 +427,8 @@ pub struct SessionItem {
 pub enum SwitchKind {
     New,
     Resumed,
+    /// A fork of the Session shown before.
+    Forked,
 }
 
 #[allow(dead_code)]

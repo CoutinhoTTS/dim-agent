@@ -437,6 +437,7 @@ mod tests {
                 "new",
                 "web",
                 "lines",
+                "fork",
                 "models",
                 "effort",
                 "fast",

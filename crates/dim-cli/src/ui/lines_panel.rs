@@ -11,7 +11,8 @@ use crate::ui::theme::ansi::fg;
 const HINT: &str = "Enter show the line · x end it · Esc close";
 
 /// The rows in tree order: the session itself, then each line under the line
-/// that opened it, children in the order the snapshot lists them (design §14).
+/// that opened it, children by where they were cut from it and then in the
+/// order the snapshot lists them (design §14, timeline UI §6).
 fn tree_order(lines: &[LineView]) -> Vec<(usize, usize)> {
     fn walk(
         lines: &[LineView],
@@ -20,8 +21,14 @@ fn tree_order(lines: &[LineView]) -> Vec<(usize, usize)> {
         seen: &mut [bool],
         out: &mut Vec<(usize, usize)>,
     ) {
-        for (index, line) in lines.iter().enumerate() {
-            if seen[index] || line.parent.as_deref() != Some(lines[parent].id.as_str()) {
+        let mut children: Vec<usize> = (0..lines.len())
+            .filter(|index| {
+                !seen[*index] && lines[*index].parent.as_deref() == Some(lines[parent].id.as_str())
+            })
+            .collect();
+        children.sort_by_key(|index| lines[*index].cut.map(|cut| cut.sequence));
+        for index in children {
+            if seen[index] {
                 continue;
             }
             seen[index] = true;
@@ -105,11 +112,20 @@ impl LinesPanel {
                 } else {
                     String::new()
                 };
-                let detail = if line.purpose.is_empty() {
-                    format!("{state}{viewed}")
-                } else {
-                    format!("{} · {state}{viewed}", safe(&line.purpose))
-                };
+                let mut detail = String::new();
+                if let Some(cut) = line.cut {
+                    detail = tf(
+                        "after message {count}",
+                        &[("count", &cut.messages.to_string())],
+                    );
+                    detail.push_str(" · ");
+                }
+                if !line.purpose.is_empty() {
+                    detail.push_str(&safe(&line.purpose));
+                    detail.push_str(" · ");
+                }
+                detail.push_str(&state);
+                detail.push_str(&viewed);
                 Item::new(
                     line.id.clone(),
                     format!("{}{}", "  ".repeat(depth), safe(&line.id)),
@@ -222,24 +238,37 @@ mod tests {
                     parent: None,
                     purpose: String::new(),
                     state: LineState::Main,
+                    cut: None,
                 },
                 LineView {
                     id: "b-7c".into(),
                     parent: Some("main".into()),
                     purpose: "parser race".into(),
                     state: LineState::Working,
+                    cut: Some(crate::model::view::LineCut {
+                        sequence: 1,
+                        messages: 0,
+                    }),
                 },
                 LineView {
                     id: "b-02".into(),
                     parent: Some("main".into()),
                     purpose: "docs pass".into(),
                     state: LineState::EndedItself,
+                    cut: Some(crate::model::view::LineCut {
+                        sequence: 1,
+                        messages: 0,
+                    }),
                 },
                 LineView {
                     id: "b-91".into(),
                     parent: Some("b-7c".into()),
                     purpose: "review".into(),
                     state: LineState::Waiting,
+                    cut: Some(crate::model::view::LineCut {
+                        sequence: 1,
+                        messages: 0,
+                    }),
                 },
             ],
             ..ViewSnapshot::default()
@@ -342,6 +371,33 @@ mod tests {
             Effect::EndLine { branch_id, .. } => assert_eq!(branch_id, "b-91"),
             _ => panic!("a line below a line can be ended"),
         }
+    }
+
+    #[test]
+    fn lines_are_listed_where_they_were_cut_from_their_parent() {
+        let mut snapshot = snapshot("main");
+        snapshot.lines[2].cut = Some(crate::model::view::LineCut {
+            sequence: 0,
+            messages: 0,
+        });
+        snapshot.lines[1].cut = Some(crate::model::view::LineCut {
+            sequence: 9,
+            messages: 3,
+        });
+        let rows = LinesPanel::new(&snapshot)
+            .render(100, 20, &palette(), &markdown())
+            .into_iter()
+            .map(|row| crate::ui::render::panel::strip_escapes(&row))
+            .collect::<Vec<_>>();
+        let position = |id: &str| rows.iter().position(|row| row.contains(id)).unwrap();
+        assert!(
+            position("b-02") < position("b-7c"),
+            "the earlier cut comes first, whatever opened first: {rows:#?}"
+        );
+        assert!(
+            rows[position("b-7c")].contains("after message 3"),
+            "{rows:#?}"
+        );
     }
 
     #[test]
