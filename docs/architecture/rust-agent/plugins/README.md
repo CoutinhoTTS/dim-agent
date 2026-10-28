@@ -28,6 +28,7 @@ dependency is not necessarily a plugin with the same name.
 | [PromptSources](PromptSources.md) | — | PromptRegistry, PromptSources | PromptSourcesBranch |
 | [WorkspaceTools](WorkspaceTools.md) | — | WorkspaceTools | FileReads, BackgroundExec |
 | [Wait](Wait.md) | — | Wait | WaitBranch |
+| [Recall](Recall.md) | — | Recall | — |
 | [TimelineTree](TimelineTree.md) | — | TimelineTree | TreeTimeline |
 | [InputQueue](InputQueue.md) | — | InputMethods | InputQueue |
 | [Permission](Permission.md) | — | — | Permission, Approval |
