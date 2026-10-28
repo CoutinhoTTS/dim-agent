@@ -9,6 +9,7 @@ use dim_agent_capabilities::{
     history::{context_messages, project_context_history},
     summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
 };
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const WINDOW: u64 = 4_000;
 const OUTPUT: u64 = 100;
@@ -603,6 +604,122 @@ async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
         !second.contains("MIDDLE-MARKER"),
         "no entry placed before the previous cut is sent"
     );
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+/// Fails summarizer requests before any stream: every one while `blocked`,
+/// then the first two of every three, so a summarize call succeeds on its
+/// third attempt. Counts every request it is sent.
+struct FailingBeforeStream {
+    blocked: AtomicBool,
+    seen: AtomicUsize,
+}
+impl ModelDriver for FailingBeforeStream {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        _: ModelConnection,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        let summarizer = matches!(request.system.as_deref(),
+            Some(SystemPrompt::Text(text)) if text.starts_with("You summarize a coding session"));
+        if summarizer {
+            let seen = self.seen.fetch_add(1, Ordering::SeqCst);
+            if self.blocked.load(Ordering::SeqCst) || seen % 3 != 2 {
+                return Box::pin(async {
+                    Err(HostError::Failed {
+                        message: "The summarizer is unavailable".into(),
+                        budget: None,
+                        kind: HostErrorKind::Transport,
+                        model: Some(Box::new(ModelFailureFacts {
+                            origin: ModelFailureOrigin::Transport,
+                            error_type: Some("overloaded".into()),
+                            message: Some("The summarizer is unavailable".into()),
+                            request_id: None,
+                            transient: true,
+                            retry_after: Some(Duration::ZERO),
+                        })),
+                        presentation: None,
+                    })
+                });
+            }
+        }
+        let text = if summarizer { "摘要" } else { "好" };
+        Box::pin(async move {
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "reply".into(),
+                }),
+                Ok(ModelChunk::Text(text.into())),
+                Ok(ModelChunk::Usage(reply_usage())),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "reply".into(),
+                    reason: ModelStopReason::EndTurn,
+                }),
+            ])) as ModelStream)
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retryable_failure_before_a_stream_spends_the_request_budget() {
+    // The bound counts every request at the point it is sent, so the failure
+    // policy's pre-stream retries count too; once the chunks folded so far
+    // plus SUMMARY_RETRY_LIMIT is spent, the next request is refused before
+    // it reaches the provider (ContextCompaction §5.2, acceptance 15). The
+    // facts' zero `retry_after` keeps the backoff out of the test.
+    let driver = Arc::new(FailingBeforeStream {
+        blocked: AtomicBool::new(true),
+        seen: AtomicUsize::new(0),
+    });
+    let (root, agent, session) = product_session(driver.clone(), OUTPUT).await;
+    // Six over-budget turns whose compactions cannot apply, so the history
+    // accumulates six entries, one chunk each.
+    for _ in 0..6 {
+        session
+            .submit(cjk(6_000), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    let before = projected(&session, "main").await;
+    assert_eq!(before.len(), 6, "six entries accumulated uncompacted");
+    driver.blocked.store(false, Ordering::SeqCst);
+    driver.seen.store(0, Ordering::SeqCst);
+    let (command, events) = compact_now(&session).await;
+    let fact = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data) if data.command == Some(command) => Some(data),
+            _ => None,
+        })
+        .unwrap();
+    let ContextCompactionResult::Failed { error, diagnostics } = &fact.outcome else {
+        panic!("expected a failure, got {:?}", fact.outcome)
+    };
+    assert!(error.contains("request budget"), "{error}");
+    let diagnostics = diagnostics
+        .as_ref()
+        .expect("the failure carries its diagnostics");
+    let chunks = diagnostics.strategy.details["chunkCount"]
+        .as_u64()
+        .expect("the chunk count");
+    assert!(
+        chunks >= 5,
+        "the budget ended it, not the retry cap: {chunks}"
+    );
+    assert_eq!(
+        diagnostics.model_call_count,
+        chunks + 8,
+        "sent requests are the chunks plus the retry limit"
+    );
+    assert_eq!(
+        driver.seen.load(Ordering::SeqCst) as u64,
+        chunks + 8,
+        "the mock saw exactly the counted requests"
+    );
+    assert_eq!(projected(&session, "main").await, before, "not applied");
     agent.close().await.unwrap();
     root.shutdown().await.unwrap();
 }

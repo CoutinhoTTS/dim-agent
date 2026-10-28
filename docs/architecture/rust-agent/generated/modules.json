@@ -9605,6 +9605,7 @@
         "path ModelChunk::Usage",
         "path ModelConnection",
         "path ModelConnection::Http",
+        "path ModelDriver",
         "path ModelHost",
         "path ModelStopReason::MaxTokens",
         "path ModelStopReason::ToolUse",
