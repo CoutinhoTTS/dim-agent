@@ -2045,9 +2045,7 @@
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
       "file": "crates/dim-app-server/src/provider/preferences.rs",
-      "unexpandedMacros": [
-        "unreachable"
-      ]
+      "unexpandedMacros": []
     },
     {
       "id": "dim_app_server::provider::remote",
@@ -2366,6 +2364,7 @@
       "file": "crates/dim-cli/src/args.rs",
       "unexpandedMacros": [
         "cfg",
+        "env",
         "format",
         "matches"
       ]
@@ -4197,6 +4196,7 @@
       "file": "crates/dim-cli/src/update.rs",
       "unexpandedMacros": [
         "cfg",
+        "env",
         "format",
         "vec"
       ]
@@ -5003,14 +5003,6 @@
     },
     {
       "from": "dim_agent_aimux::plugin",
-      "to": "dim_agent_capabilities::tool_registry",
-      "references": [
-        "path ToolRegistry",
-        "use dim_agent_capabilities::tool_registry::ToolRegistry"
-      ]
-    },
-    {
-      "from": "dim_agent_aimux::plugin",
       "to": "dim_agent_runtime::config",
       "references": [
         "path SessionConfig",
@@ -5058,6 +5050,14 @@
       "to": "dim_agent_types::prompt",
       "references": [
         "path dim_agent_types::ModelSelection"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::plugin",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolDefinition",
+        "use dim_agent_types::ToolDefinition"
       ]
     },
     {
@@ -5872,8 +5872,6 @@
       "from": "dim_agent_capabilities::adapters",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
-        "path ToolRegistry",
-        "use crate::tool_registry::ToolRegistry",
         "use crate::tool_registry::definition"
       ]
     },
@@ -7270,15 +7268,23 @@
       "from": "dim_agent_capabilities::host",
       "to": "dim_agent_types::model",
       "references": [
+        "path AnthropicThinking",
+        "path AnthropicThinkingType::Disabled",
         "path BaselineSource",
         "path CompactionStrategyRecord",
         "path CompactionTrigger",
+        "path CompatibleThinking",
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
         "path ModelRequest",
         "path ProviderOutputBudgetFacts",
+        "path ProviderReasoningConfig::default",
+        "path ReasoningOff::EnableThinking",
+        "path ReasoningOff::ThinkingBudget",
+        "path ReasoningOff::ThinkingType",
         "path RequestMetadata",
         "path SystemPrompt",
+        "path ThinkingType::Disabled",
         "path Usage"
       ]
     },
@@ -9448,6 +9454,16 @@
     },
     {
       "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "path FileStorageError::Io",
+        "use crate::file_storage::FileStorage",
+        "use crate::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
       "to": "dim_agent_capabilities::history",
       "references": [
         "path summary_message",
@@ -9461,11 +9477,14 @@
         "path CompactionInput",
         "path CompactionStrategy",
         "path CompactionStrategyHost",
+        "path ContextModel",
         "path HostError",
         "path HostError::failed",
         "path HostFuture",
         "path ModelChunk::MessageStop",
         "path ModelChunk::Text",
+        "path ModelConnection",
+        "path ModelConnection::Http",
         "path ModelHost",
         "path ModelStopReason::MaxTokens",
         "path ModelStopReason::ToolUse",
@@ -9474,7 +9493,8 @@
         "path StrategyDiagnostics",
         "path StrategyOutcome",
         "path StrategyOutcome::Completed",
-        "path StrategyOutcome::Skipped"
+        "path StrategyOutcome::Skipped",
+        "path reasoning_config"
       ]
     },
     {
@@ -9529,7 +9549,8 @@
         "path CompactionStrategyRecord",
         "path ModelRequest",
         "path ModelRequest::new",
-        "path SystemPrompt::Text"
+        "path SystemPrompt::Text",
+        "path model"
       ]
     },
     {
@@ -9825,6 +9846,14 @@
     },
     {
       "from": "dim_agent_capabilities::tool_binding",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ModelSettings",
+        "use crate::host::ModelSettings"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_binding",
       "to": "dim_agent_capabilities::prompt",
       "references": [
         "path Prompt",
@@ -9877,6 +9906,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError::Closed",
+        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path crate::host::panic_message",
         "path dim_agent_runtime::Result",
@@ -14082,7 +14112,9 @@
       "from": "dim_app_server::cli",
       "to": "dim_agent_capabilities::summary_strategy",
       "references": [
+        "path ProductSummaryStrategyConfig",
         "path ProductSummaryStrategyPlugin::new",
+        "use dim_agent_capabilities::summary_strategy::ProductSummaryStrategyConfig",
         "use dim_agent_capabilities::summary_strategy::ProductSummaryStrategyPlugin"
       ]
     },
@@ -18074,6 +18106,13 @@
     },
     {
       "from": "dim_app_server::provider::models",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::models",
       "to": "dim_app_server::model_catalog",
       "references": [
         "path FieldUpdate",
@@ -18102,6 +18141,7 @@
         "path ProviderService",
         "path StaticAuth::Anonymous",
         "path StaticProviderRecord",
+        "path capability_snapshot",
         "path read_catalog",
         "path read_static",
         "path same_account",
@@ -18170,39 +18210,21 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path ModelProtocol",
-        "path ModelProtocol::Anthropic",
         "path ModelProtocol::Bedrock",
-        "path ModelProtocol::Gemini",
         "path ModelProtocol::OpenaiChat",
         "path ModelProtocol::OpenaiCompatible",
         "path ModelProtocol::OpenaiResponses",
-        "path ModelProtocol::Xai",
-        "path ModelProtocol::XaiResponses",
-        "use dim_agent_capabilities::host::ModelProtocol"
+        "path reasoning_config",
+        "use dim_agent_capabilities::host::ModelProtocol",
+        "use dim_agent_capabilities::host::reasoning_config"
       ]
     },
     {
       "from": "dim_app_server::provider::preferences",
       "to": "dim_agent_types::model",
       "references": [
-        "path AnthropicThinking",
-        "path AnthropicThinkingType::Disabled",
-        "path CompatibleThinking",
-        "path ModelConfig",
-        "path ProviderReasoningConfig::default",
-        "path ReasoningOff::EnableThinking",
-        "path ReasoningOff::ThinkingBudget",
-        "path ReasoningOff::ThinkingType",
-        "path ThinkingType::Disabled",
-        "path model"
-      ]
-    },
-    {
-      "from": "dim_app_server::provider::preferences",
-      "to": "dim_app_server::provider",
-      "references": [
-        "path ProviderModel",
-        "use super::ProviderModel"
+        "path ModelCapabilitySnapshot",
+        "path ModelConfig"
       ]
     },
     {
@@ -20279,6 +20301,13 @@
       "to": "dim_cli::plugin_command",
       "references": [
         "path crate::plugin_command::parse"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
+      "to": "dim_cli::update",
+      "references": [
+        "path crate::update::channel"
       ]
     },
     {
@@ -27949,6 +27978,7 @@
       "from": "dim_cli::update::tests",
       "to": "dim_cli::update",
       "references": [
+        "path ALPHA_PACKAGE",
         "path installer"
       ]
     },

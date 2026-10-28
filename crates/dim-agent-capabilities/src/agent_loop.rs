@@ -687,16 +687,15 @@ impl AgentLoop {
                     },
                     None => {
                         let mut settings = owner
-                            .prepare
-                            .0
-                            .prepare(&turn_id, &request_id, &history)
-                            .map_err(|error| AgentError::fault("Loop", error.to_string()))?;
-                        settings.system = Some(crate::history::with_input_guide(settings.system));
-                        let declared = settings.tools.clone().unwrap_or_default();
-                        owner
                             .binding
-                            .bind_current(&request_id, Some(&declared))
-                            .map_err(AgentError::InvalidInput)?;
+                            .prepare(&request_id, |tools| {
+                                owner
+                                    .prepare
+                                    .0
+                                    .prepare(&turn_id, &request_id, &history, tools)
+                                    .map_err(|error| AgentError::fault("Loop", error.to_string()))
+                            })?;
+                        settings.system = Some(crate::history::with_input_guide(settings.system));
                         settings
                     }
                 };

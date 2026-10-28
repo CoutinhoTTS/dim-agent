@@ -207,16 +207,20 @@ test('collects exact platform packages, installs wrapper offline and rejects inc
   const collected=run('collect-release.mjs',[temporary,complete]);
   assert.equal(collected.status,0,collected.stderr);
   assert.equal(run('check-native.mjs',[path.join(complete,'native'),version,commit]).status,0);
-  const wrapper=JSON.parse(spawnSync('tar',['-xOzf',path.join(complete,'npm',`dimcode-${version}.tgz`),'package/package.json'],{encoding:'utf8'}).stdout);
+  const alpha=version.includes('-alpha.');
+  const wrapperName=alpha?'dimcode-alpha':'dimcode';
+  const wrapper=JSON.parse(spawnSync('tar',['-xOzf',path.join(complete,'npm',`${wrapperName}-${version}.tgz`),'package/package.json'],{encoding:'utf8'}).stdout);
+  assert.equal(wrapper.name,wrapperName);
+  assert.deepEqual(Object.keys(wrapper.bin),alpha?['dima']:['dim','dimcode']);
   assert.equal(wrapper.optionalDependencies['dimcode-web'],version);
   if(process.platform!=='win32') {
     const current=`dimcode-${process.platform}-${process.arch}`;
     const installed=path.join(temporary,'installation');
     mkdirSync(installed);
     const npmCli=path.join(path.dirname(process.execPath),'../lib/node_modules/npm/bin/npm-cli.js');
-    const install=spawnSync(process.execPath,[npmCli,'install','--prefix',installed,'--offline','--ignore-scripts','--omit=optional','--no-audit','--no-fund',path.join(complete,'npm',`${current}-${version}.tgz`),path.join(complete,'npm',`dimcode-web-${version}.tgz`),path.join(complete,'npm',`dimcode-${version}.tgz`)],{encoding:'utf8'});
+    const install=spawnSync(process.execPath,[npmCli,'install','--prefix',installed,'--offline','--ignore-scripts','--omit=optional','--no-audit','--no-fund',path.join(complete,'npm',`${current}-${version}.tgz`),path.join(complete,'npm',`dimcode-web-${version}.tgz`),path.join(complete,'npm',`${wrapperName}-${version}.tgz`)],{encoding:'utf8'});
     assert.equal(install.status,0,install.stderr);
-    const smoke=spawnSync(process.execPath,[path.join(installed,'node_modules/dimcode/bin/dimcode.mjs'),'--version'],{encoding:'utf8'});
+    const smoke=spawnSync(process.execPath,[path.join(installed,'node_modules',wrapperName,'bin/dimcode.mjs'),'--version'],{encoding:'utf8'});
     assert.equal(smoke.status,0,smoke.stderr);
     assert.equal(smoke.stdout.trim(),`dimcode ${version}`);
     assert.equal(existsSync(path.join(installed,'node_modules/dimcode-web/web/index.html')),true);

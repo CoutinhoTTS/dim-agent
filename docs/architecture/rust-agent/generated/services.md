@@ -101,7 +101,6 @@ flowchart LR
   p21 -->|"dim_agent_runtime::config::SessionIdentity@session"| p29
   p21 -->|"dyn dim_agent_runtime::timeline_store::TimelineStore@session"| p29
   p21 -->|"dim_agent_runtime::config::SessionIdentity@session"| p27
-  p30 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p26
   p21 -->|"dim_agent_runtime::config::SessionConfig@session"| p26
   p28 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p25
   p29 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p25

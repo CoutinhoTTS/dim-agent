@@ -437,3 +437,100 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
     .await
     .unwrap();
 }
+
+/// The conversation keeps its own reasoning while the summarizer's comes from
+/// the user's `compaction.json`, and an invalid file fails the compaction
+/// (ContextCompaction §13.2, §13.5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn summary_reasoning_comes_from_the_compaction_file() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let provider = Arc::new(Provider::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(completion))
+            .with_state(provider.clone());
+        let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let directory = std::path::PathBuf::from("/tmp")
+            .join(format!("dim-compaction-{}", uuid::Uuid::new_v4().simple()));
+        let home = directory.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(home.join("compaction.json"), r#"{"summaryReasoning":"off"}"#).unwrap();
+        let mut server = launch_binary(&directory).await;
+        let mut client = connect(&server).await;
+        let capabilities = dim_agent_types::ModelCapabilities {
+            context_window: 4_000,
+            max_output_tokens: 200,
+            reasoning: true,
+            ..Default::default()
+        };
+        assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000005","displayName":"Reasoning","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"thinking","displayName":"thinking","status":"active","capabilities":capabilities,"metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"],"off":{"kind":"thinking_type","value":"disabled"}}}}],"enabled":true})).await);
+        assert_ok(
+            &client
+                .rpc("provider.select", json!({"providerId":"018ec73f-0000-7000-8000-000000000005","modelId":"thinking"}))
+                .await,
+        );
+        let created = client
+            .rpc("session.create", json!({"cwd":directory,"tools":[]}))
+            .await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].clone();
+        assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+        assert_ok(
+            &client
+                .rpc(
+                    "session.model.update",
+                    json!({"sessionId":sid,"branchId":"main","modelPreferences":{"reasoningEffort":"high"}}),
+                )
+                .await,
+        );
+        turn(&mut client, &sid, &big(0, 600.0)).await;
+        turn(&mut client, &sid, &big(1, 600.0)).await;
+        let reply = client
+            .rpc("session.context.compact", json!({"sessionId":sid,"branchId":"main"}))
+            .await;
+        assert_ok(&reply);
+        assert_eq!(reply["result"]["status"], "completed");
+        let (summarizer, conversation) = {
+            let requests = provider.requests.lock().unwrap();
+            let summarizer = requests
+                .iter()
+                .rev()
+                .find(|body| body.to_string().contains(SUMMARIZER))
+                .cloned()
+                .unwrap();
+            let conversation = requests
+                .iter()
+                .rev()
+                .find(|body| !body.to_string().contains(SUMMARIZER))
+                .cloned()
+                .unwrap();
+            (summarizer, conversation)
+        };
+        assert_eq!(summarizer["thinking"]["type"], "disabled", "{summarizer}");
+        assert!(summarizer.get("reasoning_effort").is_none(), "{summarizer}");
+        assert_eq!(conversation["reasoning_effort"], "high", "{conversation}");
+        assert!(conversation.get("thinking").is_none(), "{conversation}");
+        let events = history(&mut client, &sid).await;
+        let completed = events
+            .iter()
+            .find(|event| is(event, "context/compaction") && event["data"]["status"] == "completed")
+            .unwrap();
+        assert_eq!(completed["data"]["diagnostics"]["strategy"]["reasoning"], "off");
+        assert!(completed["data"]["diagnostics"]["strategy"].get("targetTokens").is_none());
+
+        std::fs::write(home.join("compaction.json"), r#"{"summaryReasoning":"sometimes"}"#).unwrap();
+        let failed = client
+            .rpc("session.context.compact", json!({"sessionId":sid,"branchId":"main"}))
+            .await;
+        assert_eq!(failed["error"]["data"]["appError"], "compaction_failed");
+        assert!(failed["error"]["message"].as_str().unwrap().contains("compaction.json"), "{failed}");
+        server.child.kill().await.unwrap();
+        http.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    })
+    .await
+    .unwrap();
+}

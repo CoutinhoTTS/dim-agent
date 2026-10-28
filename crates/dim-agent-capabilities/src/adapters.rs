@@ -1,8 +1,5 @@
 //! Deterministic in-process hosts for prototype and transport tests.
-use crate::{
-    host::*,
-    tool_registry::{ToolRegistry, definition},
-};
+use crate::{host::*, tool_registry::definition};
 use dim_agent_runtime::{Names, SessionConfig};
 use dim_agent_types::*;
 use rutis::Ctx;
@@ -217,16 +214,21 @@ impl ToolDriver for MockTools {
 
 pub struct DefaultPrepareModel {
     pub config: Arc<SessionConfig>,
-    pub registry: Arc<ToolRegistry>,
 }
 impl PrepareModel for DefaultPrepareModel {
-    fn prepare(&self, _: &str, _: &str, _: &[Message]) -> Result<ModelSettings, HostError> {
+    fn prepare(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[Message],
+        available_tools: &[ToolDefinition],
+    ) -> Result<ModelSettings, HostError> {
         let mut settings =
             ModelSettings::new(&self.config.model.provider_id, &self.config.model.model_id);
         settings.capability_snapshot = self.config.model.capability_snapshot.clone();
         settings.system = (!self.config.system_prompt.is_empty())
             .then(|| SystemPrompt::Text(self.config.system_prompt.clone()));
-        settings.tools = Some(self.registry.definitions());
+        settings.tools = Some(available_tools.to_vec());
         settings.config = self.config.model.config.clone();
         settings.metadata = self.config.model.metadata.clone();
         Ok(settings)
@@ -235,14 +237,12 @@ impl PrepareModel for DefaultPrepareModel {
 pub struct DefaultPrepareModelPlugin {
     host: Key<PrepareModelHost>,
     config: Key<SessionConfig>,
-    registry: Key<ToolRegistry>,
 }
 impl DefaultPrepareModelPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             host: names.key()?,
             config: names.key()?,
-            registry: names.key()?,
         })
     }
 }
@@ -251,18 +251,14 @@ impl DynPlugin for DefaultPrepareModelPlugin {
         "PrepareModelHost"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.config.erase(), self.registry.erase()]
+        vec![self.config.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let config = ctx.require_at(&self.config)?;
-            let registry = ctx.require_at(&self.registry)?;
             ctx.provide_at(
                 self.host.clone(),
-                Arc::new(PrepareModelHost(Arc::new(DefaultPrepareModel {
-                    config,
-                    registry,
-                }))),
+                Arc::new(PrepareModelHost(Arc::new(DefaultPrepareModel { config }))),
             )?;
             Ok(Effect::Done)
         })

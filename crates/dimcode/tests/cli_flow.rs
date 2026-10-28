@@ -40,9 +40,7 @@ impl Home {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
+            stream.set_read_timeout(Some(PATIENCE)).unwrap();
             let mut wire = Wire(BufReader::new(stream));
             flow(&mut wire);
         })

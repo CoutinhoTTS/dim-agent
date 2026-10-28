@@ -18,7 +18,9 @@ const platforms = [
 function fixture(t, version = '1.2.3', shipped = platforms) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'dim-npm-release-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const names = [...shipped.map(([platform]) => `dimcode-${platform}`), 'dimcode-web', 'dimcode'];
+  const alpha = version.includes('-alpha.');
+  const wrapper = alpha ? 'dimcode-alpha' : 'dimcode';
+  const names = [...shipped.map(([platform]) => `dimcode-${platform}`), 'dimcode-web', wrapper];
   const manifest = { sourceCommit, version, npmPackages: [] };
   for (const name of names) {
     const directory = path.join(root, name);
@@ -26,9 +28,9 @@ function fixture(t, version = '1.2.3', shipped = platforms) {
     const metadata = {
       name, version, repository: { type: 'git', url: 'git+https://github.com/arcships/dim.git' },
     };
-    if (name === 'dimcode') {
+    if (name === wrapper) {
       metadata.optionalDependencies = Object.fromEntries(names.slice(0, -1).map((name) => [name, version]));
-      metadata.bin = { dim: 'bin/dim.mjs', dimcode: 'bin/dim.mjs' };
+      metadata.bin = alpha ? { dima: 'bin/dim.mjs' } : { dim: 'bin/dim.mjs', dimcode: 'bin/dim.mjs' };
     } else if (name === 'dimcode-web') {
     } else {
       const [, os, cpu] = platforms.find(([platform]) => name === `dimcode-${platform}`);
@@ -108,7 +110,7 @@ test('only an alpha ships a subset of platforms, with a wrapper referencing exac
   const published = alpha.run({ local: true, versions: ['1.2.3-beta.0'] });
   assert.equal(published.status, 0, published.stderr);
   assert.deepEqual(readFileSync(alpha.log, 'utf8').trim().split('\n').map((call) => path.basename(call.split(' ')[1])),
-    ['dimcode-darwin-arm64-1.2.3-alpha.0.tgz', 'dimcode-web-1.2.3-alpha.0.tgz', 'dimcode-1.2.3-alpha.0.tgz']);
+    ['dimcode-darwin-arm64-1.2.3-alpha.0.tgz', 'dimcode-web-1.2.3-alpha.0.tgz', 'dimcode-alpha-1.2.3-alpha.0.tgz']);
   const stable = fixture(t, '1.2.3', darwin);
   assert.notEqual(stable.run().status, 0);
   assert.equal(readFileSync(stable.log, 'utf8'), '');
@@ -138,6 +140,22 @@ test('rejects wrong source commits, missing platforms and mismatched packed vers
   wrapper.sha256 = createHash('sha256').update(readFileSync(archive)).digest('hex');
   assert.notEqual(release.run({ publish: true }).status, 0);
   assert.equal(readFileSync(release.log, 'utf8'), '');
+});
+
+test('an alpha wrapper installs only dima, so it never replaces dim', (t) => {
+  const release = fixture(t, '1.2.3-alpha.1');
+  assert.equal(release.manifest.npmPackages.at(-1).name, 'dimcode-alpha');
+  assert.equal(release.run().status, 0);
+  const packageDirectory = path.join(release.root, 'dimcode-alpha');
+  const metadataPath = path.join(packageDirectory, 'package/package.json');
+  const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
+  metadata.bin.dim = metadata.bin.dima;
+  writeFileSync(metadataPath, JSON.stringify(metadata));
+  const wrapper = release.manifest.npmPackages.at(-1);
+  const archive = path.join(release.root, wrapper.file);
+  assert.equal(spawnSync('tar', ['-czf', archive, '-C', packageDirectory, 'package']).status, 0);
+  wrapper.sha256 = createHash('sha256').update(readFileSync(archive)).digest('hex');
+  assert.notEqual(release.run().status, 0);
 });
 
 test('each channel publishes to its own dist-tag', (t) => {

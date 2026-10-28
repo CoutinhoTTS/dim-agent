@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const PACKAGE: &str = "dimcode";
+/// Alphas ship as their own package with the `dima` command, so they install
+/// beside `dimcode`'s `dim`.
+const ALPHA_PACKAGE: &str = "dimcode-alpha";
+const ALPHA_COMMAND: &str = "dima";
 const REGISTRY: &str = "https://registry.npmjs.org";
 const TIMEOUT: Duration = Duration::from_secs(4);
 /// The version the user chose to skip, shared with the TypeScript CLI.
@@ -64,7 +68,10 @@ pub fn registry() -> String {
 
 /// The npm package this copy was started from; the launcher names it.
 fn package() -> String {
-    std::env::var("DIMCODE_NPM_PACKAGE").unwrap_or_else(|_| PACKAGE.to_owned())
+    std::env::var("DIMCODE_NPM_PACKAGE").unwrap_or_else(|_| {
+        let alpha = channel(env!("CARGO_PKG_VERSION")) == "alpha";
+        (if alpha { ALPHA_PACKAGE } else { PACKAGE }).to_owned()
+    })
 }
 
 /// The dist-tag a version upgrades along: its prerelease identifier, or
@@ -165,7 +172,11 @@ fn installer(exe: &Path, package: &str, version: &str) -> Option<Install> {
 fn relaunch(exe: &Path, package: &str) -> PathBuf {
     let path = exe.to_string_lossy().replace('\\', "/");
     if path.contains("/.pnpm/") || path.contains("/yarn/global/") || path.contains("/.volta/") {
-        PathBuf::from(package)
+        PathBuf::from(if package == ALPHA_PACKAGE {
+            ALPHA_COMMAND
+        } else {
+            package
+        })
     } else {
         exe.to_path_buf()
     }
@@ -265,6 +276,10 @@ mod tests {
         assert!(!newer("0.5.21", "0.5.21-beta.0"));
         assert_eq!(manual("dimcode", "0.1.0-alpha.0"), "npm i -g dimcode@alpha");
         assert_eq!(manual("dimcode", "0.5.21"), "npm i -g dimcode");
+        assert_eq!(
+            manual(ALPHA_PACKAGE, "0.1.0-alpha.0"),
+            "npm i -g dimcode-alpha@alpha"
+        );
     }
 
     #[cfg(unix)]
@@ -307,6 +322,17 @@ mod tests {
         .unwrap();
         assert_eq!(pnpm.command_line(), "pnpm add -g dimcode@0.1.0-alpha.2");
         assert_eq!(pnpm.relaunch, PathBuf::from("dimcode"));
+        let alpha = installer(
+            Path::new("/u/Library/pnpm/global/5/.pnpm/dimcode-darwin-arm64@0.1.0-alpha.2/node_modules/dimcode-darwin-arm64/bin/dimcode"),
+            ALPHA_PACKAGE,
+            spec,
+        )
+        .unwrap();
+        assert_eq!(
+            alpha.command_line(),
+            "pnpm add -g dimcode-alpha@0.1.0-alpha.2"
+        );
+        assert_eq!(alpha.relaunch, PathBuf::from("dima"));
         assert!(installer(Path::new("/u/dim/target/debug/dimcode"), "dimcode", spec).is_none());
     }
 }

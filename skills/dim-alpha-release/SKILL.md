@@ -5,13 +5,13 @@ description: Build and publish the Rust dimcode CLI as an npm alpha (X.Y.Z-alpha
 
 # Dim alpha release
 
-The Rust CLI ships under the npm name `dimcode`, the same name the TypeScript CLI uses. Each channel has its own dist-tag and upgrades only within itself:
+Releases and betas ship as the npm package `dimcode` (command `dim`). Alphas ship as the separate package `dimcode-alpha` (command `dima` only), so the two install side by side. An alpha build also defaults to its own home, `~/.dimcode-alpha`, and never touches `dim`'s `~/.dimcode`. The platform packages (`dimcode-<platform>`) and `dimcode-web` are shared; each wrapper pins their exact version. Each channel has its own dist-tag and upgrades only within itself:
 
 | Version | dist-tag | Install |
 | --- | --- | --- |
 | `X.Y.Z` | `latest` | `npm i -g dimcode` |
 | `X.Y.Z-beta.N` | `beta` | `npm i -g dimcode@beta` (TypeScript) |
-| `X.Y.Z-alpha.N` | `alpha` | `npm i -g dimcode@alpha` (Rust) |
+| `X.Y.Z-alpha.N` | `alpha` | `npm i -g dimcode-alpha@alpha`, run `dima` (Rust) |
 
 Alphas are built and published from the maintainer's Mac in one command, like the TypeScript CLI's `publish:bin`. Beta and stable releases come only from a published GitHub Release ([dim-release](../../.agents/skills/dim-release/SKILL.md)); `publish-npm.mjs --publish-local` refuses them. The human-readable walkthrough is [docs/release/alpha.html](../../docs/release/alpha.html); keep both in step.
 
@@ -26,11 +26,11 @@ node scripts/publish-alpha.mjs --platform darwin-arm64  # only these platforms (
 
 In order, it:
 
-1. Reads the registry and picks the version: an unpublished alpha already in `Cargo.toml` (resume), else the highest published alpha plus one, else `<Cargo version>-alpha.0`.
+1. Reads the registry and picks the version: an unpublished alpha already in `Cargo.toml` (resume), else the highest alpha published under `dimcode-alpha` or the older `dimcode` plus one, else `<Cargo version>-alpha.0`.
 2. Refuses an alpha above the newest beta (see below), a version already on npm, local changes (except in a dry run) and less than 8 GiB free disk.
 3. Sets every version field (`Cargo.toml`, `Cargo.lock`, `npm/package.json` and its optional dependencies, `runtime/package.json`, `runtime/package-lock.json`) and commits `chore: release vVERSION` on the current branch. A dry run restores them instead.
 4. Builds all six platforms: macOS with cargo, Linux (glibc 2.28) and Windows (`*-windows-gnu`/`gnullvm`) with cargo-zigbuild. With `DIM_OAUTH_CLIENT_ID_CN` and `DIM_OAUTH_CLIENT_ID_GLOBAL` set, each target is the account build; each platform package holds one executable. Each is staged and packed with `stage-release.mjs` / `pack-release.mjs`, then collected and validated with `collect-release.mjs`.
-5. Publishes with `publish-npm.mjs --publish-local`: platform packages first, `dimcode` last, all on `alpha`. It then prints the dist-tags.
+5. Publishes with `publish-npm.mjs --publish-local`: platform packages first, `dimcode-alpha` last, all on `alpha`. It then prints the dist-tags of `dimcode-alpha`.
 
 ## Running it for the user
 

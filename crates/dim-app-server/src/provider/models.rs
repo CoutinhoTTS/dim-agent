@@ -12,15 +12,22 @@ pub struct PreferencesPatch {
 }
 
 impl PreferencesPatch {
-    fn validate(&self, model: &ProviderModel) -> Result<(), ProviderError> {
+    fn validate(&self, model: &ProviderModel, provider_id: &str) -> Result<(), ProviderError> {
         let mut requested = ModelPreferences::default();
         self.clone().apply(&mut requested);
         if requested != ModelPreferences::default() {
             let protocol = model.endpoint.ok_or_else(|| {
                 ProviderError::Unsupported("Model has no executable endpoint".into())
             })?;
+            let snapshot = capability_snapshot(
+                model,
+                ModelId {
+                    provider_id: provider_id.to_owned(),
+                    model_id: model.id.clone(),
+                },
+            );
             requested
-                .configure(model, protocol, &model.config)
+                .configure(&snapshot, protocol, &model.config)
                 .map_err(|message| ProviderError::InvalidConfig(message.into()))?;
         }
         Ok(())
@@ -118,7 +125,7 @@ impl ProviderService {
                             .into_iter()
                             .find(|model| model.id == model_id)
                             .ok_or(ProviderError::NotFound)?;
-                        patch.validate(&model)?;
+                        patch.validate(&model, &id)?;
                         let mut preferences = record
                             .model_preferences
                             .get(&model_id)
@@ -171,7 +178,7 @@ impl ProviderService {
                                     .into_iter()
                                     .find(|model| model.id == model_id)
                                     .ok_or(ProviderError::NotFound)?;
-                                patch.validate(&model)?;
+                                patch.validate(&model, &provider_id)?;
                                 let mut preferences = record
                                     .model_preferences
                                     .get(&model_id)

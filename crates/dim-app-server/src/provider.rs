@@ -162,6 +162,17 @@ pub struct ProviderModel {
     pub metadata: Option<ModelMetadata>,
 }
 
+/// The adopted capability snapshot of `model`: exactly the catalog fields a
+/// selection carries (ContextCompaction §13.2).
+fn capability_snapshot(model: &ProviderModel, target: ModelId) -> ModelCapabilitySnapshot {
+    ModelCapabilitySnapshot {
+        target,
+        capabilities: model.capabilities.clone(),
+        reasoning: model.metadata.as_ref().and_then(|m| m.reasoning.clone()),
+        service_tier: model.metadata.as_ref().and_then(|m| m.service_tier.clone()),
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProviderRecord {
@@ -1512,21 +1523,20 @@ impl ProviderService {
             let protocol = model
                 .endpoint
                 .ok_or_else(|| failure("Missing model protocol"))?;
+            let snapshot = capability_snapshot(
+                model,
+                ModelId {
+                    provider_id: id.clone(),
+                    model_id: model.id.clone(),
+                },
+            );
             let config = preferences
-                .configure(model, protocol, &model.config)
+                .configure(&snapshot, protocol, &model.config)
                 .map_err(failure)?;
             return Ok(ModelSelection {
                 provider_id: id.clone(),
                 model_id: model.id.clone(),
-                capability_snapshot: Some(ModelCapabilitySnapshot {
-                    target: ModelId {
-                        provider_id: id,
-                        model_id: model.id.clone(),
-                    },
-                    capabilities: model.capabilities.clone(),
-                    reasoning: model.metadata.as_ref().and_then(|m| m.reasoning.clone()),
-                    service_tier: model.metadata.as_ref().and_then(|m| m.service_tier.clone()),
-                }),
+                capability_snapshot: Some(snapshot),
                 config: Some(config),
                 metadata: Some(dim_agent_types::RequestMetadata {
                     extensions: serde_json::Map::from_iter([(
@@ -1574,8 +1584,15 @@ impl ProviderService {
             ));
         }
         let base = current.config.clone().unwrap_or_default();
+        let snapshot = capability_snapshot(
+            model,
+            ModelId {
+                provider_id: current.provider_id.clone(),
+                model_id: current.model_id.clone(),
+            },
+        );
         let config = preferences
-            .configure(model, protocol, &base)
+            .configure(&snapshot, protocol, &base)
             .map_err(failure)?;
         Ok(ModelSelection {
             provider_id: current.provider_id.clone(),

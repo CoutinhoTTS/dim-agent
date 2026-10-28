@@ -1,0 +1,57 @@
+{
+  "id": "merge",
+  "description": "An earlier summary plus a new transcript",
+  "contextWindow": null,
+  "earlierSummary": "The user is adding the compaction.json setting to the product summary strategy. Agreed: the file lives in the product home, is read through FileStorage at the start of each compaction, and unknown members are rejected. The provider's effort mapping moves into reasoning_config in dim-agent-capabilities, and the summarizer applies it after resolving the chunk's connection. Decided earlier: the target summary length is not shipped until the evaluation runs.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Continue: now the flow test for the setting."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "The flow test goes into transport_flow/compaction.rs: it seeds the mock provider with a model that declares a reasoning-off setting for openai-compatible, writes {\"summaryReasoning\":\"off\"} into the home, then compacts and asserts the summarizer request carries thinking type disabled while the conversation request keeps its own reasoning. A file with an unknown member or an unknown value must fail the manual compaction with compaction_failed, naming compaction.json in the message."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "And the storage root for the file?"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "The strategy resolves the home's storage root when it loads, so the read goes through FileStorage like exec-shell.json."
+        }
+      ]
+    }
+  ],
+  "retainFrom": 2,
+  "probes": [
+    {
+      "id": "earlier",
+      "kind": "fact",
+      "text": "The setting is read through FileStorage at the start of each compaction."
+    },
+    {
+      "id": "new",
+      "kind": "fact",
+      "text": "An invalid compaction.json fails the compaction with compaction_failed."
+    },
+    {
+      "id": "test-file",
+      "kind": "exact",
+      "text": "transport_flow/compaction.rs"
+    },
+    {
+      "id": "target",
+      "kind": "fact",
+      "text": "The target summary length is not shipped until the evaluation has run."
+    }
+  ]
+}

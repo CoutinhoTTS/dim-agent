@@ -165,7 +165,6 @@ flowchart LR
   p39 -->|"dim_agent_capabilities::prompt_registry::PromptRegistry@session"| p40
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p40
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p39
-  p48 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p38
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p38
   p44 -->|"dim_agent_capabilities::methods::SessionMethods@session"| p37
   p47 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p37

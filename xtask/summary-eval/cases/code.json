@@ -1,0 +1,126 @@
+{
+  "id": "code",
+  "description": "A refactor of the summary strategy with file contents and diffs",
+  "contextWindow": null,
+  "earlierSummary": null,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Move the compaction counters in crates/dim-agent-capabilities/src/summary_strategy.rs into a Stats struct and keep the diagnostics(&Stats) builder. Do not touch chunking."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call-1",
+          "name": "read",
+          "input": {
+            "command": "read crates/dim-agent-capabilities/src/summary_strategy.rs"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool_result",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call-1",
+          "content": "//! The product compaction strategy: summarizes the history before the cut\n//! with the request's own model (ContextCompaction §5.2).\nconst SYSTEM: &str = \"You summarize a coding session so that it can continue without its earlier messages.\";\n\nimpl CompactionStrategy for SummaryStrategy {\n    fn name(&self) -> &str {\n        \"summary\"\n    }\n    fn compact(&self, input: CompactionInput, cancel: CancellationToken) -> HostFuture<'_, StrategyOutcome> {\n        Box::pin(async move {\n            let Some(cut) = input.cut().cloned() else {\n                return Ok(StrategyOutcome::Skipped { reason: \"nothing_to_compact\".into(), diagnostics: diagnostics(0, 0, 0., 0, 0) });\n            };\n            let mut truncated = 0;\n            let mut dropped = 0;\n            let mut calls = 0;\n            // ... chunking, folding ...\n            let record = diagnostics(calls, summary.chars().count(), tokens, truncated, dropped);\n            Ok(StrategyOutcome::Completed { retain_from: cut.retain_from, replacement: vec![replacement], diagnostics: record })\n        })\n    }\n}\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Plan: add struct Stats { calls, summary_chars, summary_tokens, truncated, dropped }, pass &mut Stats through fold and summarize, and replace diagnostics(calls, chars, tokens, truncated, dropped) with diagnostics(&Stats). Chunking, the cut-off rule and render stay as they are. Next step after the edit: run the capabilities tests."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call-2",
+          "name": "write",
+          "input": {
+            "command": "write crates/dim-agent-capabilities/src/summary_strategy.rs"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool_result",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call-2",
+          "content": "Wrote 402 lines to /work/dim/crates/dim-agent-capabilities/src/summary_strategy.rs"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Looks right. Now also record the number of replies the model cut off at max_tokens."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "call-3",
+          "name": "edit",
+          "input": {
+            "command": "add cut_offs to Stats and cutOffCount to the diagnostics object"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool_result",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "call-3",
+          "content": "Edited /work/dim/crates/dim-agent-capabilities/src/summary_strategy.rs"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Added cut_offs to Stats, incremented where summarize returns incomplete, and cutOffCount to the strategy diagnostics. Next step: run the capabilities tests."
+        }
+      ]
+    }
+  ],
+  "retainFrom": 6,
+  "probes": [
+    {
+      "id": "path",
+      "kind": "exact",
+      "text": "crates/dim-agent-capabilities/src/summary_strategy.rs"
+    },
+    {
+      "id": "builder",
+      "kind": "exact",
+      "text": "diagnostics(&Stats)"
+    },
+    {
+      "id": "remaining",
+      "kind": "fact",
+      "text": "The next step is to run the capabilities tests."
+    },
+    {
+      "id": "chunking",
+      "kind": "absent",
+      "text": "The refactor changes the chunking rule or the cut-off retry rule."
+    }
+  ]
+}
