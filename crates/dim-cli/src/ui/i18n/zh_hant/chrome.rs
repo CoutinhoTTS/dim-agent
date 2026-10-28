@@ -401,6 +401,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Context compaction skipped" => "上下文壓縮已跳過",
         "Context compaction failed" => "上下文壓縮失敗",
         "Context compaction cancelled" => "上下文壓縮已取消",
+        "near the compaction threshold" => "接近壓縮閾值",
         "This daemon does not support context compaction" => "此守護進程不支援上下文壓縮",
         "compact the context of the shown line" => "壓縮目前顯示線的上下文",
         "Kept verbatim" => "原文保留",

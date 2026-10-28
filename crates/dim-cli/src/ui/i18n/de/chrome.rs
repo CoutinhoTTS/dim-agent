@@ -457,6 +457,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Context compaction skipped" => "Kontextkomprimierung übersprungen",
         "Context compaction failed" => "Kontextkomprimierung fehlgeschlagen",
         "Context compaction cancelled" => "Kontextkomprimierung abgebrochen",
+        "near the compaction threshold" => "nahe der Komprimierungsschwelle",
         "This daemon does not support context compaction" => {
             "Dieser Daemon unterstützt keine Kontextkomprimierung"
         }

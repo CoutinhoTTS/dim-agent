@@ -21,9 +21,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, CompactReply, DraftPart, ModelItem, ModelList, ModelPolicyUpdate,
-    OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem,
-    SessionPort, SubagentModelPolicy, SwitchKind, Update,
+    Account, Command, CompactReply, ContextReading, DraftPart, ModelItem, ModelList,
+    ModelPolicyUpdate, OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction,
+    ProviderEntry, SessionItem, SessionPort, SubagentModelPolicy, SwitchKind, Update,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -241,8 +241,9 @@ struct Worker {
     login: Option<Login>,
     /// Browser callbacks its local listener captured.
     login_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
-    /// The composer's context reading is out of date: a run on main ended,
-    /// or the session or its model changed.
+    /// The composer's context reading is out of date: a run on main ended, a
+    /// compaction result arrived on main, or the session or its model
+    /// changed.
     context_stale: bool,
     /// The outstanding `session.context.compact` requests (`/compact`).
     compact_requests: Vec<u64>,
@@ -1405,11 +1406,11 @@ impl Worker {
         {
             return;
         }
-        let reading = self
-            .context_usage()
-            .await
-            .ok()
-            .map(|usage| (usage.input(), usage.window()));
+        let reading = self.context_usage().await.ok().map(|usage| ContextReading {
+            input: usage.input(),
+            window: usage.window(),
+            threshold: tokens(usage.threshold_tokens),
+        });
         self.send(Update::Context(reading));
     }
 
@@ -2651,6 +2652,9 @@ impl Worker {
             self.send(Update::Approvals(Ok(
                 permission::name(data.policy.preset).to_owned()
             )));
+        }
+        if branch_id == "main" && matches!(event.content, EventContent::Compaction(_)) {
+            self.context_stale = true;
         }
         self.projection.apply(branch_id, &event);
         if let EventContent::ExecEnded(data) = &event.content

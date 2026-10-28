@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::model::session::{
-    Command, CompactReply, DraftPart, SessionPort, SwitchKind, Update,
+    Command, CompactReply, ContextReading, DraftPart, SessionPort, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -67,6 +67,10 @@ const COMPOSER_PLACEHOLDER: &str = "Ask anything...";
 const SHELL_PLACEHOLDER: &str = "Run a shell command · Esc to exit";
 /// `config.json` key of the tool detail toggle, shared with the TS CLI.
 const TOOL_DETAILS_KEY: &str = "tuiToolDetailsExpanded";
+/// Share of the compaction threshold the context reading warns at. Set by
+/// the interface; the threshold itself is the one `session.context.usage`
+/// returns (compaction requirements §4).
+const CONTEXT_WARNING_PERCENT: u64 = 90;
 /// Frames are coalesced to roughly 60 Hz.
 /// A resize waits this long after the last size change before it is applied.
 const RESIZE_DEBOUNCE: Duration = Duration::from_millis(100);
@@ -748,8 +752,8 @@ struct App {
     approvals: String,
     /// The next approvals reading is the answer to a change: say so.
     approvals_toast: bool,
-    /// The main branch's estimated input and context window, in tokens.
-    context: Option<(u64, u64)>,
+    /// The main branch's context use.
+    context: Option<ContextReading>,
     /// The first attempt tag of the next `/login` panel, so a closed panel's
     /// late sign-in updates never reach a newer one.
     login_attempts: u64,
@@ -3865,15 +3869,31 @@ impl App {
         }
     }
 
-    /// `1.8K / 256K`: the main branch's context use against its window.
+    /// `1.8K / 256K`: the main branch's context use against its window, with
+    /// a note once it nears the automatic compaction threshold.
     fn context_label(&self) -> Option<String> {
-        self.context.map(|(input, window)| {
-            format!(
-                "{} / {}",
-                format_tokens(input as f64),
-                format_tokens(window as f64)
-            )
-        })
+        let reading = self.context?;
+        let mut label = format!(
+            "{} / {}",
+            format_tokens(reading.input as f64),
+            format_tokens(reading.window as f64)
+        );
+        if self.context_near() {
+            label.push_str(" · ");
+            label.push_str(t("near the compaction threshold"));
+        }
+        Some(label)
+    }
+
+    /// Whether the context use is at or above [`CONTEXT_WARNING_PERCENT`] of
+    /// the threshold the server returned.
+    fn context_near(&self) -> bool {
+        let Some(reading) = self.context else {
+            return false;
+        };
+        reading.threshold > 0
+            && u128::from(reading.input) * 100
+                >= u128::from(reading.threshold) * u128::from(CONTEXT_WARNING_PERCENT)
     }
 
     /// Fullscreen's bottom border label, the status corner: the run
@@ -3898,7 +3918,12 @@ impl App {
             parts.push(fg(&format!("\u{23f5}\u{23f5} {mode}"), &p.muted));
         }
         if let Some(context) = self.context_label() {
-            parts.push(fg(&context, &p.muted));
+            let color = if self.context_near() {
+                &p.warning
+            } else {
+                &p.muted
+            };
+            parts.push(fg(&context, color));
         }
         (!parts.is_empty()).then(|| parts.join("  "))
     }
@@ -3935,6 +3960,19 @@ impl App {
                 "{}{}{}",
                 fg(before, &self.palette.muted),
                 fg(notice, &self.palette.highlight),
+                fg(after, &self.palette.muted)
+            );
+        }
+        if self.context_near()
+            && let Some(context) = self.context_label()
+            && let Some(at) = line.find(&context)
+        {
+            let (before, rest) = line.split_at(at);
+            let (context, after) = rest.split_at(context.len().min(rest.len()));
+            return format!(
+                "{}{}{}",
+                fg(before, &self.palette.muted),
+                fg(context, &self.palette.warning),
                 fg(after, &self.palette.muted)
             );
         }

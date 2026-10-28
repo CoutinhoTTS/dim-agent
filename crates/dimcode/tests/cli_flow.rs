@@ -6075,6 +6075,77 @@ fn tui_compact_calls_the_context_method_and_reports_its_reply() {
     daemon.join().unwrap();
 }
 
+/// The gauge warns at 90% of the threshold the server returned — not below —
+/// and a compaction result outside a run reads the gauge again (§7.5).
+#[test]
+fn tui_context_warning_starts_at_the_threshold_share_and_a_compaction_refreshes_it() {
+    let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["session.context.usage"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let usage = |input: f64| {
+            json!({"contextWindow":256000.0,"outputTokens":32000.0,
+                "thresholdTokens":200000.0,"estimatedInputTokens":input,
+                "baselineSource":"estimate"})
+        };
+        for _ in 0..2 {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("account.providers") => wire.reply(&request, json!([])),
+                Some("session.context.usage") => {
+                    assert_eq!(
+                        request["params"],
+                        json!({"sessionId":"session","branchId":"main"})
+                    );
+                    wire.reply(&request, usage(179_999.0));
+                }
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+        wait_shown.recv_timeout(PATIENCE).unwrap();
+        wire.notice(
+            "session.event",
+            json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction","sequence":12,"create_at":1,"type":"context","name":"compaction",
+             "data":{"through":11,"status":"failed","error":"the summarizer returned nothing"}}}),
+        );
+        let refresh = wire.read("session.context.usage");
+        wire.reply(&refresh, usage(180_000.0));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            assert!(
+                !line.contains("session.context.usage"),
+                "extra read: {line}"
+            );
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("179.9K / 256K");
+    assert!(
+        !terminal
+            .transcript
+            .contains("near the compaction threshold"),
+        "{}",
+        terminal.transcript
+    );
+    shown.send(()).unwrap();
+    terminal.until("the summarizer returned nothing");
+    terminal.until("180K / 256K · near the compaction threshold");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// A resumed session rebuilds its compaction rows from history.
 #[test]
 fn tui_rebuilds_compaction_rows_from_history_on_resume() {

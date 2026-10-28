@@ -467,6 +467,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Context compaction skipped" => "Compactação do contexto ignorada",
         "Context compaction failed" => "Falha na compactação do contexto",
         "Context compaction cancelled" => "Compactação do contexto cancelada",
+        "near the compaction threshold" => "perto do limite de compactação",
         "This daemon does not support context compaction" => {
             "Este daemon não suporta a compactação do contexto"
         }

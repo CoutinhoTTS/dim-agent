@@ -217,6 +217,7 @@ mod tests {
                 "Context compaction skipped",
                 "Context compaction failed",
                 "Context compaction cancelled",
+                "near the compaction threshold",
                 "This daemon does not support context compaction",
                 "compact the context of the shown line",
                 "Kept verbatim",

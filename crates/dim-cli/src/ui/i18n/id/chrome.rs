@@ -449,6 +449,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Context compaction skipped" => "Kompresi konteks dilewati",
         "Context compaction failed" => "Kompresi konteks gagal",
         "Context compaction cancelled" => "Kompresi konteks dibatalkan",
+        "near the compaction threshold" => "mendekati ambang kompresi",
         "This daemon does not support context compaction" => {
             "Daemon ini tidak mendukung kompresi konteks"
         }

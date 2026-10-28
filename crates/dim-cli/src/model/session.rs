@@ -435,6 +435,16 @@ pub enum SwitchKind {
     Forked,
 }
 
+/// The main branch's context use, in tokens: what the next request is
+/// estimated to send, the window it must fit, and the compaction threshold
+/// the server returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextReading {
+    pub input: u64,
+    pub window: u64,
+    pub threshold: u64,
+}
+
 /// A `session.context.compact` reply as `/compact` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactReply {
@@ -523,9 +533,9 @@ pub enum Update {
     Login(Result<Option<Account>, String>),
     /// The usage of the `/login` panel's account.
     Usage(Result<Usage, String>),
-    /// The main branch's estimated input and context window, in tokens;
-    /// none while the session's usage is unknown.
-    Context(Option<(u64, u64)>),
+    /// The main branch's context use; none while the session's usage is
+    /// unknown.
+    Context(Option<ContextReading>),
     /// What a `/compact` came to, localized by the interface.
     Compacted(CompactReply),
     /// Progress of the sign-in tagged `attempt`.
