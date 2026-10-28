@@ -10,21 +10,78 @@
 //! tool runs ([`Narrative`]). Each recorded history must be one context
 //! assembly projects, and every entry it places must be told (§14 flow 4).
 use dim_agent_capabilities::{
+    adapters::EchoModel,
     context_block, defaults,
-    history::project_history,
+    history::{HistoryRenderer, project_history},
+    host::{HostFuture, ModelConnection, ModelDriver, ModelStream},
     recall::{self, RECALL_TOOL, testing::Narrative},
 };
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
 
 fn agent() -> Agent {
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    defaults::mock_hosts(&mut builder);
+    defaults::mock_hosts_with_model(
+        &mut builder,
+        HistoryRenderer::default(),
+        Arc::new(LineModel),
+    );
     defaults::install(&mut builder);
     recall::install(&mut builder);
     builder.build()
+}
+
+/// The echo model, still answering a `tool:` command when a line write of
+/// another line ([timeline-branches §7.1, §12.1]) arrives in the same request.
+/// The echo model answers the request's last message, which such a write
+/// replaces when it is applied between the command and the model step; the
+/// command is then sent alone, as the model reads it when the write arrives a
+/// step later.
+struct LineModel;
+impl ModelDriver for LineModel {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        let messages = &request.messages;
+        let mut end = messages.len();
+        while end > 0 && said(&messages[end - 1]).starts_with("<dim-branch-") {
+            end -= 1;
+        }
+        let command = end < messages.len()
+            && end > 0
+            && messages[end - 1].role == Role::User
+            && said(&messages[end - 1]).starts_with("tool:");
+        if !command {
+            return EchoModel.invoke(request, connection, cancel);
+        }
+        let mut answered = (*request).clone();
+        answered.messages.truncate(end);
+        EchoModel.invoke(Arc::new(answered), connection, cancel)
+    }
+}
+
+fn said(message: &Message) -> String {
+    let parts: Vec<String> = match &message.content {
+        MessageContent::Text(text) => vec![text.clone()],
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Text { text, .. } => Some(text.clone()),
+                MessagePart::ToolResult { content, .. } => match content {
+                    ToolContent::Text(text) => Some(text.clone()),
+                    ToolContent::Blocks(_) => None,
+                },
+                _ => None,
+            })
+            .collect(),
+    };
+    parts.join("\n")
 }
 
 async fn open(agent: &Agent) -> Session {
@@ -43,25 +100,37 @@ async fn recall(session: &Session, branch: &str, arguments: Value) -> (String, b
         Value::Object(map) if map.is_empty() => format!("tool:{RECALL_TOOL}"),
         other => format!("tool:{RECALL_TOOL} {other}"),
     };
+    let before = tool_results(session, branch).await.len();
     session
         .submit(text, InputMode::Queue, branch)
         .await
         .unwrap();
     session.idle(branch).await.unwrap();
-    let events = session.history(branch, None).await.unwrap();
-    let result = events
-        .iter()
-        .rev()
-        .find_map(|event| match &event.kind {
-            EventKind::ToolResult(data) => data.results.last(),
-            _ => None,
-        })
-        .expect("the recall call's result");
-    let text = match &result.result.content {
+    let results = tool_results(session, branch).await;
+    assert!(
+        results.len() > before,
+        "the {} call wrote no result",
+        RECALL_TOOL
+    );
+    let result = results.last().expect("the recall call's result");
+    let text = match &result.content {
         ToolContent::Text(text) => text.clone(),
         other => panic!("expected text, got {other:?}"),
     };
-    (text, result.result.is_error.unwrap_or(false))
+    (text, result.is_error.unwrap_or(false))
+}
+
+async fn tool_results(session: &Session, branch: &str) -> Vec<ToolResult> {
+    session
+        .history(branch, None)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => data.results.last().map(|item| item.result.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The id of the branch's newest `turn/start` line.
@@ -646,7 +715,9 @@ async fn a_child_branch_opens_inherited_ids_and_tells_its_fork_and_the_cut_paren
             "{page}"
         );
 
-        // A message from main reaches the child as a line write.
+        // A message from main reaches the child as a line write. Which turn
+        // reads it depends on when it is applied, so a search tells its line
+        // wherever it falls (§3.6).
         session
             .submit(
                 format!(
@@ -659,9 +730,10 @@ async fn a_child_branch_opens_inherited_ids_and_tells_its_fork_and_the_cut_paren
             .unwrap();
         session.idle("main").await.unwrap();
         session.idle(&child).await.unwrap();
-        let (page, error) = recall(&session, &child, json!({})).await;
+        let (page, error) = recall(&session, &child, json!({ "about": "status please" })).await;
         assert!(!error, "{page}");
-        assert!(page.contains("line main: \"status please\""), "{page}");
+        assert!(page.contains(" line main: \"status please\""), "{page}");
+        assert_eq!(page.lines().last(), Some("No more."), "{page}");
 
         // The child ends itself, and main hears its final message.
         session
@@ -692,12 +764,21 @@ async fn a_child_branch_opens_inherited_ids_and_tells_its_fork_and_the_cut_paren
         }
         session.idle("main").await.unwrap();
         assert!(arrived, "main receives the line's final message: {seen}");
-        let (page, error) = recall(&session, "main", json!({})).await;
+        // Both writes land on main as its last turn is running or after it, so
+        // a search tells each line wherever it falls (§3.6).
+        let (page, error) = recall(&session, "main", json!({ "about": "the logs are clean" })).await;
         assert!(!error, "{page}");
-        let last = format!("line {child}'s final message: \"the logs are clean\"");
+        let last = format!(" line {child}'s final message: \"the logs are clean\"");
         assert!(page.contains(&last), "{page}");
+        let (page, error) = recall(
+            &session,
+            "main",
+            json!({ "about": "without a message to you" }),
+        )
+        .await;
+        assert!(!error, "{page}");
         assert!(
-            page.contains(&format!("line {child}'s turn ended")),
+            page.contains(&format!(" line {child}'s turn ended")),
             "{page}"
         );
         agent.close().await.unwrap();
