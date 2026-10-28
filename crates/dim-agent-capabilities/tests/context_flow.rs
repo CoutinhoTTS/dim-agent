@@ -764,6 +764,8 @@ mod manual_compaction;
 mod pinning;
 #[path = "context_flow/product_summary.rs"]
 mod product_summary;
+#[path = "context_flow/replan.rs"]
+mod replan;
 #[path = "context_flow/retention.rs"]
 mod retention;
 

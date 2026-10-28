@@ -162,11 +162,8 @@ impl SummaryStrategy {
     ) -> Result<StrategyOutcome, HostError> {
         let requested = self.summary_reasoning(cancel).await?;
         let target = self.target.map(|rule| rule.tokens(input.model.as_ref()));
-        *stats = Stats {
-            reasoning: requested,
-            target,
-            ..Default::default()
-        };
+        stats.reasoning = requested;
+        stats.target = target;
         let Some(cut) = input.cut().cloned() else {
             return Ok(StrategyOutcome::Skipped {
                 reason: "nothing_to_compact".into(),
@@ -307,7 +304,7 @@ impl CompactionStrategy for SummaryStrategy {
         cancel: CancellationToken,
     ) -> HostFuture<'_, StrategyOutcome> {
         Box::pin(async move {
-            let mut stats = Stats::default();
+            let mut stats = Stats::carried(input.prior.as_ref());
             match self.compact_inner(input, &mut stats, &cancel).await {
                 Ok(outcome) => Ok(outcome),
                 Err(HostError::Cancelled(reason)) => Err(HostError::Cancelled(reason)),
@@ -413,10 +410,10 @@ impl SummaryStrategy {
             .resolve(request.clone(), cancel.clone())
             .await?;
         let request = stats.apply_reasoning(request, &resolved.connection);
-        stats
-            .budget
-            .limit
-            .store(stats.calls + SUMMARY_RETRY_LIMIT, Ordering::SeqCst);
+        stats.budget.limit.store(
+            (stats.calls + SUMMARY_RETRY_LIMIT).saturating_sub(stats.carried),
+            Ordering::SeqCst,
+        );
         let host = ModelHost(Arc::new(BudgetedDriver {
             inner: self.host.0.clone(),
             budget: stats.budget.clone(),
@@ -459,6 +456,9 @@ struct Stats {
     /// Requests sent and the current allowance; the wrapper counts at the
     /// point of sending (ContextCompaction §5.2).
     budget: Arc<Budget>,
+    /// The requests an earlier pass of this compaction already sent, which
+    /// the allowance is shared with (§5.3).
+    carried: u64,
     /// The usage the replies reported, summed; absent when none did.
     usage: Option<Usage>,
 }
@@ -502,25 +502,31 @@ impl ModelDriver for BudgetedDriver {
     }
 }
 
-/// Adds one reply's usage into the compaction's running sum.
-fn add_usage(total: &mut Option<Usage>, usage: Usage) {
-    match total {
-        None => *total = Some(usage),
-        Some(sum) => {
-            sum.prompt_tokens += usage.prompt_tokens;
-            sum.completion_tokens += usage.completion_tokens;
-            sum.total_tokens += usage.total_tokens;
-            let cache = |a: Option<f64>, b: Option<f64>| match (a, b) {
-                (None, None) => None,
-                (a, b) => Some(a.unwrap_or(0.) + b.unwrap_or(0.)),
-            };
-            sum.cache_read_tokens = cache(sum.cache_read_tokens, usage.cache_read_tokens);
-            sum.cache_write_tokens = cache(sum.cache_write_tokens, usage.cache_write_tokens);
-        }
-    }
-}
-
 impl Stats {
+    /// The counters a pass continuing this compaction's earlier one starts
+    /// from (ContextCompaction §5.3): the chunks it folded, its retry
+    /// allowance and the counts that describe the whole compaction.
+    fn carried(prior: Option<&StrategyDiagnostics>) -> Self {
+        let mut stats = Self::default();
+        let Some(prior) = prior else {
+            return stats;
+        };
+        let count = |key: &str| {
+            prior
+                .record
+                .details
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        };
+        stats.calls = count("chunkCount");
+        stats.truncated = count("compactedToolPayloadCount") as usize;
+        stats.dropped = count("droppedMessageCount") as usize;
+        stats.cut_offs = count("cutOffCount");
+        stats.carried = prior.model_call_count;
+        stats
+    }
+
     /// The request with the summarizer's reasoning applied to its copied
     /// configuration, or the request unchanged where Provider's mapping
     /// rejects the effort; afterwards `reasoning` is the value the summaries

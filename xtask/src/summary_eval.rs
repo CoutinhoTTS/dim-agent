@@ -519,6 +519,7 @@ impl Prepared {
             baseline_prompt_tokens: None,
             delta_tokens: None,
             provider_budget: None,
+            prior: None,
         }
     }
 }

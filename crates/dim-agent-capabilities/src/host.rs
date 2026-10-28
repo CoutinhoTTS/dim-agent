@@ -596,6 +596,11 @@ pub struct CompactionInput {
     pub baseline_prompt_tokens: Option<f64>,
     pub delta_tokens: Option<f64>,
     pub provider_budget: Option<ProviderOutputBudgetFacts>,
+    /// The earlier pass of a compaction ContextPolicy re-planned (§5.3), as
+    /// it reported it: a pass given it continues the same request budget and
+    /// its own counts, and the policy adds its model calls and usage to the
+    /// earlier pass's.
+    pub prior: Option<StrategyDiagnostics>,
 }
 /// A legal cut: `history[..entry]` is replaced, `history[entry..]` is kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -652,6 +657,40 @@ pub struct StrategyDiagnostics {
     pub model_call_count: u64,
     pub model_usage: Option<Usage>,
     pub record: CompactionStrategyRecord,
+}
+impl StrategyDiagnostics {
+    /// Two passes of one compaction: the model calls and the usage summed,
+    /// and the later pass's own record, which a strategy continues from
+    /// `prior` (ContextCompaction §5.3).
+    pub fn sum(&self, next: &Self) -> Self {
+        let mut model_usage = self.model_usage.clone();
+        if let Some(next) = next.model_usage.clone() {
+            add_usage(&mut model_usage, next);
+        }
+        Self {
+            model_call_count: self.model_call_count + next.model_call_count,
+            model_usage,
+            record: next.record.clone(),
+        }
+    }
+}
+
+/// Adds one reply's usage into a compaction's running sum.
+pub(crate) fn add_usage(total: &mut Option<Usage>, usage: Usage) {
+    match total {
+        None => *total = Some(usage),
+        Some(sum) => {
+            sum.prompt_tokens += usage.prompt_tokens;
+            sum.completion_tokens += usage.completion_tokens;
+            sum.total_tokens += usage.total_tokens;
+            let cache = |a: Option<f64>, b: Option<f64>| match (a, b) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0.) + b.unwrap_or(0.)),
+            };
+            sum.cache_read_tokens = cache(sum.cache_read_tokens, usage.cache_read_tokens);
+            sum.cache_write_tokens = cache(sum.cache_write_tokens, usage.cache_write_tokens);
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub enum StrategyOutcome {
