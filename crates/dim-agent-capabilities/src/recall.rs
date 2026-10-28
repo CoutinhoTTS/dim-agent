@@ -851,6 +851,9 @@ impl<'a> Narrative<'a> {
             .filter(|(_, owner)| **owner == Some(index))
             .map(|(thing, _)| self.thing_line(thing))
             .collect();
+        if lines.is_empty() && offset == 0 {
+            return page("turn", vec!["Nothing in this turn.".into()], &[], None);
+        }
         if offset >= lines.len() {
             return ToolResult::error(format!("Turn {} has {} lines.", turn.id, lines.len()));
         }
@@ -995,7 +998,7 @@ impl<'a> Narrative<'a> {
                 (None, Some(user)) => format!("turn: user \"{}\"", part(&user_text(user))),
                 (None, None) => format!("turn: {}", part(&blocks_name(&input.blocks, live))),
             }),
-            None => parts.push("turn:".into()),
+            None => parts.push("turn: no opening input".into()),
         }
         let summary = self.tool_summary(index);
         if !summary.is_empty() {

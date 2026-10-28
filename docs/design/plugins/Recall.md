@@ -242,7 +242,8 @@ The inputs that open a turn are the ones it consumed before its first model requ
 later, such as a steer while it works, does not open it. The line gives the first user text among
 the opening inputs; when none of them carries user text (a Goal continuation, a message from
 another line), the first of them that carries a line write (§3.4), or else the first one's
-`<blocks>`.
+`<blocks>`. A turn with no opening input has none of these: its line reads
+`turn: no opening input`.
 
 A turn without `turn/end` in the pinned history is `in progress` when it is the calling turn, and
 `continued on the parent line` when it is the parent's turn that a child's inherited prefix cuts
@@ -390,7 +391,7 @@ input, then the full result; then `Continue: open=3f9a2c1b-6e4d-4f80-b2a9-0c7e5d
 | --- | --- |
 | Turn index | `Earlier: before=<id>. Open one: open=<id>.` or `Nothing earlier.` |
 | Search | `More: before=<id>.` or `No more.`; nothing at all: `Nothing matches <the filters, restated>.` |
-| A turn | `End of turn. Open one: open=<id>.` or `More of this turn: open=<id> offset=<next>.` |
+| A turn | `End of turn. Open one: open=<id>.`, `More of this turn: open=<id> offset=<next>.`, or `Nothing in this turn.` for a turn with no lines |
 | One thing | `Continue: open=<id> offset=<next>.` or `End.` |
 
 Errors (`ToolResult::error`) say how to fix the call:

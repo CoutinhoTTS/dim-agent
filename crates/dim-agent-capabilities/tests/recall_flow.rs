@@ -2233,6 +2233,42 @@ fn a_turn_opened_by_a_line_message_is_indexed_by_that_write_not_by_a_pending_blo
 }
 
 #[test]
+// §14 1.
+fn a_turn_that_ended_before_it_started_is_listed_and_opens_empty() {
+    let mut recorded = Recorded::new();
+    recorded.at(17, 0);
+    // A reload lands between `turn/start` and `start_request`, and the
+    // rebuilt Loop ends the turn it never filled.
+    let empty = recorded.push(turn_start("t1"));
+    recorded.push(turn_ends(
+        "t1",
+        TurnOutcome::Failed {
+            error: "reloaded before the first request".into(),
+        },
+    ));
+    recorded.at(17, 10);
+    simple_turn(&mut recorded, "t2", "next task", "next answer");
+
+    let (page, error) = recorded.answer("t2", json!({}));
+    assert!(!error, "{page}");
+    assert_eq!(
+        line_of(&page, &empty),
+        format!("17:00 {empty} turn: no opening input — failed"),
+        "{page}"
+    );
+
+    let (page, error) = recorded.answer("t2", json!({ "open": empty }));
+    assert!(!error, "{page}");
+    assert_eq!(page, "Nothing in this turn.");
+
+    // Only the first page of an empty turn is a page; a later offset is past
+    // its end.
+    let (page, error) = recorded.answer("t2", json!({ "open": empty, "offset": 1 }));
+    assert!(error, "{page}");
+    assert_eq!(page, format!("Turn {empty} has 0 lines."));
+}
+
+#[test]
 // §14 9.
 fn every_line_stays_bounded_whatever_the_arguments_and_the_blocks() {
     let mut recorded = Recorded::new();
