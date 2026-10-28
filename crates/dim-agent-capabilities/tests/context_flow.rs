@@ -63,6 +63,7 @@ impl ContextModel for Context {
 }
 fn test_diagnostics() -> StrategyDiagnostics {
     StrategyDiagnostics {
+        model_usage: None,
         model_call_count: 1,
         record: CompactionStrategyRecord {
             kind: "test".into(),

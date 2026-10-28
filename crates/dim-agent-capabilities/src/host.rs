@@ -645,10 +645,12 @@ pub trait ContextModel: Send + Sync + 'static {
     fn threshold_tokens(&self) -> f64;
     fn count_tokens(&self, request: &ModelRequest) -> f64;
 }
-/// A strategy's diagnostics: its model calls and its own record.
+/// A strategy's diagnostics: its model calls, their summed usage and its own
+/// record.
 #[derive(Debug, Clone)]
 pub struct StrategyDiagnostics {
     pub model_call_count: u64,
+    pub model_usage: Option<Usage>,
     pub record: CompactionStrategyRecord,
 }
 #[derive(Debug, Clone)]
@@ -660,6 +662,12 @@ pub enum StrategyOutcome {
     },
     Skipped {
         reason: String,
+        diagnostics: StrategyDiagnostics,
+    },
+    /// The strategy failed after it ran; the diagnostics carry its calls,
+    /// usage and duration (ContextCompaction §4.2).
+    Failed {
+        error: String,
         diagnostics: StrategyDiagnostics,
     },
 }

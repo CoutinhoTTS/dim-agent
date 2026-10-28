@@ -147,6 +147,108 @@ pub struct SummaryStrategy {
     target: Option<TargetRule>,
 }
 impl SummaryStrategy {
+    async fn compact_inner(
+        &self,
+        input: CompactionInput,
+        stats: &mut Stats,
+        cancel: &CancellationToken,
+    ) -> Result<StrategyOutcome, HostError> {
+        let requested = self.summary_reasoning(cancel).await?;
+        let target = self.target.map(|rule| rule.tokens(input.model.as_ref()));
+        *stats = Stats {
+            reasoning: requested,
+            target,
+            ..Default::default()
+        };
+        let Some(cut) = input.cut().cloned() else {
+            return Ok(StrategyOutcome::Skipped {
+                reason: "nothing_to_compact".into(),
+                diagnostics: diagnostics(stats),
+            });
+        };
+        // The previous replacement holds the summary, the digest and the
+        // pinned inputs; only the summary is carried and only the pins
+        // join the transcript, so the digest rolls forward separately
+        // (ContextCompaction §5.2, §5.10).
+        let (carried, pinned): (Vec<&Message>, Vec<&Message>) = match &input.checkpoint {
+            Some(checkpoint) => {
+                let len = checkpoint.replacement.len();
+                let (strategy, digest) = checkpoint.replacement_parts.map_or((len, 0), |parts| {
+                    (parts.strategy as usize, parts.digest as usize)
+                });
+                let split = strategy.min(len);
+                let after_digest = (strategy + digest).min(len);
+                (
+                    checkpoint.replacement[..split].iter().collect(),
+                    checkpoint.replacement[after_digest..].iter().collect(),
+                )
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut summary = (!carried.is_empty()).then(|| {
+            carried
+                .iter()
+                .map(|message| render(message))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        });
+        let mut chunk = String::new();
+        let mut lines = Vec::new();
+        for line in pinned.iter().map(|message| render(message)).chain(
+            input.history[..cut.entry]
+                .iter()
+                .map(|entry| render(&entry.message)),
+        ) {
+            if line.is_empty() {
+                stats.dropped += 1;
+                continue;
+            }
+            lines.push(line);
+        }
+        for line in lines {
+            let joined = if chunk.is_empty() {
+                line.clone()
+            } else {
+                format!("{chunk}\n\n{line}")
+            };
+            if fits(&input, summary.as_deref(), &joined, target) {
+                chunk = joined;
+                continue;
+            }
+            if !chunk.is_empty() {
+                let piece = std::mem::take(&mut chunk);
+                summary = Some(
+                    self.fold(&input, summary.take(), piece, stats, cancel)
+                        .await?,
+                );
+            }
+            chunk = if fits(&input, summary.as_deref(), &line, target) {
+                line
+            } else {
+                stats.truncated += 1;
+                truncate_to_fit(&input, summary.as_deref(), &line, target)?
+            };
+        }
+        if !chunk.is_empty() {
+            summary = Some(
+                self.fold(&input, summary.take(), chunk, stats, cancel)
+                    .await?,
+            );
+        }
+        let summary = summary.unwrap_or_default();
+        let replacement = summary_message(&summary);
+        stats.summary_chars = summary.chars().count();
+        stats.summary_tokens = input.model.count_tokens(&ModelRequest::new(
+            &input.request.provider_id,
+            &input.request.model_id,
+            vec![replacement.clone()],
+        ));
+        Ok(StrategyOutcome::Completed {
+            retain_from: cut.retain_from,
+            replacement: vec![replacement],
+            diagnostics: diagnostics(stats),
+        })
+    }
     /// The strategy over the process's model host and connection resolver.
     /// `home` keeps `compaction.json`, read at the start of every compaction;
     /// without one the strategy uses the defaults.
@@ -198,106 +300,15 @@ impl CompactionStrategy for SummaryStrategy {
         cancel: CancellationToken,
     ) -> HostFuture<'_, StrategyOutcome> {
         Box::pin(async move {
-            let requested = self.summary_reasoning(&cancel).await?;
-            let target = self.target.map(|rule| rule.tokens(input.model.as_ref()));
-            let Some(cut) = input.cut().cloned() else {
-                return Ok(StrategyOutcome::Skipped {
-                    reason: "nothing_to_compact".into(),
-                    diagnostics: diagnostics(&Stats {
-                        reasoning: requested,
-                        target,
-                        ..Default::default()
-                    }),
-                });
-            };
-            let mut stats = Stats {
-                reasoning: requested,
-                target,
-                ..Default::default()
-            };
-            // The previous replacement holds the summary, the digest and the
-            // pinned inputs; only the summary is carried and only the pins
-            // join the transcript, so the digest rolls forward separately
-            // (ContextCompaction §5.2, §5.10).
-            let (carried, pinned): (Vec<&Message>, Vec<&Message>) = match &input.checkpoint {
-                Some(checkpoint) => {
-                    let len = checkpoint.replacement.len();
-                    let (strategy, digest) =
-                        checkpoint.replacement_parts.map_or((len, 0), |parts| {
-                            (parts.strategy as usize, parts.digest as usize)
-                        });
-                    let split = strategy.min(len);
-                    let after_digest = (strategy + digest).min(len);
-                    (
-                        checkpoint.replacement[..split].iter().collect(),
-                        checkpoint.replacement[after_digest..].iter().collect(),
-                    )
-                }
-                None => (Vec::new(), Vec::new()),
-            };
-            let mut summary = (!carried.is_empty()).then(|| {
-                carried
-                    .iter()
-                    .map(|message| render(message))
-                    .collect::<Vec<_>>()
-                    .join("\n\n")
-            });
-            let mut chunk = String::new();
-            let mut lines = Vec::new();
-            for line in pinned.iter().map(|message| render(message)).chain(
-                input.history[..cut.entry]
-                    .iter()
-                    .map(|entry| render(&entry.message)),
-            ) {
-                if line.is_empty() {
-                    stats.dropped += 1;
-                    continue;
-                }
-                lines.push(line);
+            let mut stats = Stats::default();
+            match self.compact_inner(input, &mut stats, &cancel).await {
+                Ok(outcome) => Ok(outcome),
+                Err(HostError::Cancelled(reason)) => Err(HostError::Cancelled(reason)),
+                Err(error) => Ok(StrategyOutcome::Failed {
+                    error: error.to_string(),
+                    diagnostics: diagnostics(&stats),
+                }),
             }
-            for line in lines {
-                let joined = if chunk.is_empty() {
-                    line.clone()
-                } else {
-                    format!("{chunk}\n\n{line}")
-                };
-                if fits(&input, summary.as_deref(), &joined, target) {
-                    chunk = joined;
-                    continue;
-                }
-                if !chunk.is_empty() {
-                    let piece = std::mem::take(&mut chunk);
-                    summary = Some(
-                        self.fold(&input, summary.take(), piece, &mut stats, &cancel)
-                            .await?,
-                    );
-                }
-                chunk = if fits(&input, summary.as_deref(), &line, target) {
-                    line
-                } else {
-                    stats.truncated += 1;
-                    truncate_to_fit(&input, summary.as_deref(), &line, target)?
-                };
-            }
-            if !chunk.is_empty() {
-                summary = Some(
-                    self.fold(&input, summary.take(), chunk, &mut stats, &cancel)
-                        .await?,
-                );
-            }
-            let summary = summary.unwrap_or_default();
-            let replacement = summary_message(&summary);
-            stats.summary_chars = summary.chars().count();
-            stats.summary_tokens = input.model.count_tokens(&ModelRequest::new(
-                &input.request.provider_id,
-                &input.request.model_id,
-                vec![replacement.clone()],
-            ));
-            Ok(StrategyOutcome::Completed {
-                retain_from: cut.retain_from,
-                replacement: vec![replacement],
-                diagnostics: diagnostics(&stats),
-            })
         })
     }
 }
@@ -400,8 +411,8 @@ impl SummaryStrategy {
             &request,
             resolved,
             cancel,
-            &mut (),
-            |stream, _, _, _| Box::pin(collect(stream)),
+            stats,
+            |stream, stats, _, _| Box::pin(collect(stream, stats)),
         )
         .await?;
         if !complete {
@@ -430,6 +441,26 @@ struct Stats {
     target: Option<f64>,
     /// Replies the model stopped at `max_tokens`.
     cut_offs: u64,
+    /// The usage the replies reported, summed; absent when none did.
+    usage: Option<Usage>,
+}
+
+/// Adds one reply's usage into the compaction's running sum.
+fn add_usage(total: &mut Option<Usage>, usage: Usage) {
+    match total {
+        None => *total = Some(usage),
+        Some(sum) => {
+            sum.prompt_tokens += usage.prompt_tokens;
+            sum.completion_tokens += usage.completion_tokens;
+            sum.total_tokens += usage.total_tokens;
+            let cache = |a: Option<f64>, b: Option<f64>| match (a, b) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0.) + b.unwrap_or(0.)),
+            };
+            sum.cache_read_tokens = cache(sum.cache_read_tokens, usage.cache_read_tokens);
+            sum.cache_write_tokens = cache(sum.cache_write_tokens, usage.cache_write_tokens);
+        }
+    }
 }
 
 impl Stats {
@@ -534,13 +565,14 @@ fn truncate_to_fit(
 
 /// The text blocks of one reply and whether it completed; thinking is
 /// dropped, a tool stop fails, a `max_tokens` stop is incomplete.
-async fn collect(mut stream: ModelStream) -> Result<(String, bool), HostError> {
+async fn collect(mut stream: ModelStream, stats: &mut Stats) -> Result<(String, bool), HostError> {
     let mut text = String::new();
     let mut stop = None;
     while let Some(chunk) = stream.next().await {
         match chunk? {
             ModelChunk::Text(delta) => text.push_str(&delta),
             ModelChunk::MessageStop { reason, .. } => stop = Some(reason),
+            ModelChunk::Usage(usage) => add_usage(&mut stats.usage, usage),
             _ => {}
         }
     }
@@ -638,6 +670,7 @@ fn diagnostics(stats: &Stats) -> StrategyDiagnostics {
     }
     StrategyDiagnostics {
         model_call_count: stats.calls,
+        model_usage: stats.usage.clone(),
         record: CompactionStrategyRecord {
             kind: "summary".into(),
             details: match record {

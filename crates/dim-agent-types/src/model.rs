@@ -793,6 +793,14 @@ pub struct CompactionDiagnosticsRecord {
     pub model_call_count: u64,
     #[serde(with = "crate::safe_integer")]
     pub duration_ms: u64,
+    /// The usage the strategy's replies reported, summed; absent when it sent
+    /// no request.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub model_usage: Option<Usage>,
     /// Present on a completed compaction whose parts it cannot shrink exceed
     /// `0.5 × B` on their own; descriptive, and no decision reads it.
     #[serde(

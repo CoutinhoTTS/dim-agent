@@ -6,11 +6,58 @@ use super::*;
 use dim_agent_capabilities::{
     agent_loop::AgentLoop,
     context_model::ProductContextModel,
+    history::{context_messages, project_context_history},
     summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
 };
 
 const WINDOW: u64 = 4_000;
 const OUTPUT: u64 = 100;
+
+/// The usage every mock reply reports, so a compaction's sum is its reply
+/// count times these values: one cache field present and one absent.
+fn reply_usage() -> Usage {
+    Usage {
+        prompt_tokens: 1_000.,
+        completion_tokens: 20.,
+        total_tokens: 1_020.,
+        cache_read_tokens: Some(600.),
+        cache_write_tokens: None,
+        cost: None,
+        currency: None,
+    }
+}
+
+/// The messages a preparation at the head would start from.
+async fn projected(session: &dim_agent_runtime::Session, branch: &str) -> Vec<Message> {
+    let through = session.sequence(branch).unwrap();
+    let context = session.context(branch, through).await.unwrap();
+    let history = project_context_history(&context).unwrap();
+    context_messages(&context, &history)
+}
+
+/// Asks the branch to compact and waits for that command's fact.
+async fn compact_now(session: &dim_agent_runtime::Session) -> (u64, Vec<Arc<AgentEvent>>) {
+    let command = session
+        .service::<AgentLoop>("main")
+        .unwrap()
+        .compact()
+        .unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let events = session.history("main", None).await.unwrap();
+            if events.iter().any(|event| {
+                matches!(&event.kind,
+                EventKind::ContextCompaction(data) if data.command == Some(command))
+            }) {
+                break events;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    (command, events)
+}
 
 /// Records summarizer requests; answers every request with short text.
 #[derive(Default)]
@@ -34,6 +81,7 @@ impl ModelDriver for Recorder {
                     message_id: "reply".into(),
                 }),
                 Ok(ModelChunk::Text(text.into())),
+                Ok(ModelChunk::Usage(reply_usage())),
                 Ok(ModelChunk::MessageStop {
                     message_id: "reply".into(),
                     reason: ModelStopReason::EndTurn,
@@ -217,6 +265,7 @@ impl ModelDriver for Truncating {
                     message_id: "reply".into(),
                 }),
                 Ok(ModelChunk::Text(text.into())),
+                Ok(ModelChunk::Usage(reply_usage())),
                 Ok(ModelChunk::MessageStop {
                     message_id: "reply".into(),
                     reason,
@@ -298,10 +347,66 @@ async fn a_summary_still_cut_off_at_the_smallest_chunk_fails_the_compaction() {
             ..
         })
     )));
-    assert!(events.iter().any(|event| matches!(&event.kind,
-        EventKind::ContextCompaction(ContextCompactionData {
-            outcome: ContextCompactionResult::Failed { error, .. }, ..
-        }) if error.contains("cut off by the output limit"))));
+    let failed = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                outcome: ContextCompactionResult::Failed { error, diagnostics },
+                ..
+            }) if error.contains("cut off by the output limit") => Some(diagnostics),
+            _ => None,
+        })
+        .expect("the compaction failed")
+        .as_ref()
+        .expect("the failure carries its diagnostics");
+    // Every reply reported usage, so the failed fact carries the same cost
+    // fields a completion does (ContextCompaction §4.3, acceptance 16).
+    assert!(failed.model_call_count > 0);
+    let replies = failed.model_call_count as f64;
+    let usage = failed.model_usage.as_ref().expect("usage from its replies");
+    assert_eq!(usage.prompt_tokens, 1_000. * replies);
+    assert_eq!(usage.completion_tokens, 20. * replies);
+    assert_eq!(usage.total_tokens, 1_020. * replies);
+    assert_eq!(usage.cache_read_tokens, Some(600. * replies));
+    assert_eq!(usage.cache_write_tokens, None);
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_completed_compaction_reports_its_usage_and_cost() {
+    // One short turn stays under the trigger, so the manual compaction is
+    // the only one: one chunk, one reply, and its usage sums to one reply's.
+    let recorder = Arc::new(Recorder::default());
+    let (root, agent, session) = product_session(recorder.clone(), OUTPUT).await;
+    session
+        .submit(cjk(1_500), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let (command, events) = compact_now(&session).await;
+    let diagnostics = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                command: Some(fact),
+                outcome: ContextCompactionResult::Completed { diagnostics, .. },
+                ..
+            }) if *fact == command => Some(diagnostics),
+            _ => None,
+        })
+        .expect("the manual compaction completed");
+    assert_eq!(recorder.0.lock().unwrap().len(), 1, "one chunk");
+    assert_eq!(diagnostics.model_call_count, 1);
+    let usage = diagnostics.model_usage.as_ref().expect("usage");
+    assert_eq!(usage.prompt_tokens, 1_000.);
+    assert_eq!(usage.completion_tokens, 20.);
+    assert_eq!(usage.total_tokens, 1_020.);
+    assert_eq!(usage.cache_read_tokens, Some(600.));
+    assert_eq!(usage.cache_write_tokens, None);
+    let fact = serde_json::to_value(diagnostics).unwrap();
+    assert!(fact["modelCallCount"].as_u64() == Some(1), "{fact}");
+    assert!(fact["durationMs"].as_u64().is_some(), "{fact}");
     agent.close().await.unwrap();
     root.shutdown().await.unwrap();
 }
@@ -339,6 +444,7 @@ impl ModelDriver for CutOffThenLong {
                     message_id: "reply".into(),
                 }),
                 Ok(ModelChunk::Text(text)),
+                Ok(ModelChunk::Usage(reply_usage())),
                 Ok(ModelChunk::MessageStop {
                     message_id: "reply".into(),
                     reason,
@@ -497,6 +603,51 @@ async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
         !second.contains("MIDDLE-MARKER"),
         "no entry placed before the previous cut is sent"
     );
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blank_summary_fails_the_compaction_without_applying_it() {
+    // A whitespace-only reply is not a summary: `summarize` refuses it before
+    // the folded-summary check, the compaction fails with its diagnostics
+    // instead of skipping, and nothing is replaced (ContextCompaction §5.2).
+    let driver = Arc::new(CutOffThenLong {
+        cut_off: 0,
+        summary: "   ".into(),
+        requests: Default::default(),
+    });
+    let (root, agent, session) = product_session(driver.clone(), OUTPUT).await;
+    for text in [cjk(1_500), "next".into(), "third".into()] {
+        session
+            .submit(text, InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    let before = projected(&session, "main").await;
+    let (command, events) = compact_now(&session).await;
+    let fact = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data) if data.command == Some(command) => Some(data),
+            _ => None,
+        })
+        .unwrap();
+    let ContextCompactionResult::Failed { error, diagnostics } = &fact.outcome else {
+        panic!("expected a failure, got {:?}", fact.outcome)
+    };
+    assert!(error.contains("no text"), "{error}");
+    let diagnostics = diagnostics
+        .as_ref()
+        .expect("the failure carries its diagnostics");
+    assert_eq!(diagnostics.model_call_count, 1);
+    assert!(
+        diagnostics.model_usage.is_some(),
+        "the reply reported usage"
+    );
+    assert_eq!(diagnostics.strategy.kind, "summary");
+    assert_eq!(projected(&session, "main").await, before, "not applied");
     agent.close().await.unwrap();
     root.shutdown().await.unwrap();
 }

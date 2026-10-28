@@ -389,6 +389,7 @@ impl ContextPolicy {
                 entries_replaced: replaced as u64,
                 model_call_count: diagnostics.model_call_count,
                 duration_ms: started.elapsed().as_millis() as u64,
+                model_usage: diagnostics.model_usage,
                 insufficient_space,
                 strategy: diagnostics.record,
             })
@@ -483,6 +484,10 @@ impl ContextPolicy {
             }) => ContextCompactionResult::Skipped {
                 reason,
                 diagnostics: record(None, None, 0, diagnostics, None),
+            },
+            Ok(StrategyOutcome::Failed { error, diagnostics }) => ContextCompactionResult::Failed {
+                error,
+                diagnostics: Some(record(None, None, 0, diagnostics, None)),
             },
             Err(_) if cancel.is_cancelled() => ContextCompactionResult::Cancelled {
                 reason: cancelled(),
