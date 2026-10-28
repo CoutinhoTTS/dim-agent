@@ -39,6 +39,7 @@ use crate::ui::text::{display_width, truncate_cells};
 use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::theme::{Palette, Theme, detect};
 use crate::ui::theme_panel::ThemePanel;
+use crate::ui::timeline_panel::{TimelineAction, TimelinePanel};
 use crate::ui::title::WindowTitle;
 use crate::ui::transcript::block::{Block, Tone, group_rows, opens_group, project_row};
 use crate::ui::transcript::blocks::{
@@ -101,6 +102,23 @@ enum Jump {
     Bottom,
     /// Pick the newest user message, as Tab does.
     Pick,
+    /// Pick the user message drawn as this block id (`/timeline`).
+    Block(usize),
+    /// Scroll so this block id is at the top (after a page loads above it).
+    Show(usize),
+}
+
+/// The card id of fullscreen's load-more row: no line or delegation id.
+const LOAD_MORE: &str = "\u{1}load-more";
+
+fn apply_jump(full: &mut FullScreen, app: &App, jump: Jump) {
+    match jump {
+        Jump::Bottom => full.follow(),
+        Jump::Top => full.scroll_to_top(),
+        Jump::Pick => full.focus_older(app),
+        Jump::Block(id) => full.pick_block(id, app),
+        Jump::Show(id) => full.show_block(id, app),
+    }
 }
 
 /// How long a transient notice stays in the status row.
@@ -380,6 +398,14 @@ fn run_terminal(
             }
             dirty = false;
             last_frame = Some(Instant::now());
+            // A jump the frame itself landed (a `/timeline` target or a
+            // loaded page) moves the view once its blocks are laid out.
+            if let Some(full) = &mut full
+                && let Some(jump) = app.jump.take()
+            {
+                apply_jump(full, &app, jump);
+                dirty = true;
+            }
         }
         let wait = match (dirty, last_frame) {
             (true, Some(at)) => FRAME_INTERVAL.saturating_sub(now.duration_since(at)),
@@ -541,13 +567,10 @@ fn run_terminal(
             }
             Wait::Event(event) => match app.handle(event) {
                 Outcome::Continue => {
-                    if let Some(full) = &mut full {
-                        match app.jump.take() {
-                            Some(Jump::Bottom) => full.follow(),
-                            Some(Jump::Top) => full.scroll_to_top(),
-                            Some(Jump::Pick) => full.focus_older(&app),
-                            None => {}
-                        }
+                    if let Some(full) = &mut full
+                        && let Some(jump) = app.jump.take()
+                    {
+                        apply_jump(full, &app, jump);
                     }
                     dirty = true;
                 }
@@ -570,6 +593,9 @@ fn run_terminal(
                         screen = Screen::new(terminal.size(), synchronized);
                     }
                     app.fullscreen = entering;
+                    if entering {
+                        app.redraw_window();
+                    }
                     app.request_reflow();
                     dirty = true;
                 }
@@ -724,10 +750,15 @@ struct App {
     /// The palette changed: the visible rows are laid out again.
     reflow_requested: bool,
     /// Rows of the snapshot before this index are earlier history: not
-    /// drawn until `/history` asks for them.
+    /// drawn until a `/timeline` jump or fullscreen's load-more row asks.
     window_floor: usize,
-    /// How far `/history` has paged back; never above `window_floor`.
+    /// How far scrollback has drawn back; never above `window_floor`.
     history_floor: usize,
+    /// Fullscreen owes its load-more row before the next transcript commit.
+    load_more: bool,
+    /// The user message a `/timeline` jump or a loaded page lands on, once
+    /// drawn: `(row id, pick it)`.
+    landing: Option<(String, bool)>,
     /// A session was just switched; the next snapshot decides the window.
     awaiting_window: bool,
     /// What to write once the switched-to history is out.
@@ -816,7 +847,7 @@ const OVERLAY_MAX_ROWS: usize = 30;
 /// Least rows inside the fullscreen composer box.
 const FULLSCREEN_COMPOSER_ROWS: usize = 3;
 
-/// Messages a resume shows at first, and per `/history` page.
+/// Messages a resume shows at first, and per load-more page.
 const HISTORY_WINDOW: usize = 100;
 
 enum ClipboardRead {
@@ -828,6 +859,7 @@ enum Prompt {
     Sessions(SessionsPanel),
     Tasks(TasksPanel),
     Lines(Box<LinesPanel>),
+    Timeline(Box<TimelinePanel>),
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
     Plugins(PluginsPanel),
@@ -899,6 +931,8 @@ impl App {
             reflow_requested: false,
             window_floor: 0,
             history_floor: 0,
+            load_more: false,
+            landing: None,
             awaiting_window: false,
             pending_boundary: None,
             pending_line: None,
@@ -1059,7 +1093,8 @@ impl App {
             | Some(Prompt::Theme(_))
             | Some(Prompt::Language(_))
             | Some(Prompt::Settings(_))
-            | Some(Prompt::Lines(_)) => {}
+            | Some(Prompt::Lines(_))
+            | Some(Prompt::Timeline(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Permission(p))
@@ -1200,6 +1235,13 @@ impl App {
                 if let Some(Prompt::Lines(panel)) = &mut self.prompt {
                     if panel.current(&snapshot) {
                         panel.set_lines(&snapshot);
+                    } else {
+                        self.prompt = None;
+                    }
+                }
+                if let Some(Prompt::Timeline(panel)) = &mut self.prompt {
+                    if panel.current(&snapshot) {
+                        panel.set_rows(&snapshot);
                     } else {
                         self.prompt = None;
                     }
@@ -1501,6 +1543,7 @@ impl App {
                 Prompt::Sessions(p) => p.handle_key(key),
                 Prompt::Tasks(p) => p.handle_key(key),
                 Prompt::Lines(p) => p.handle_key(key),
+                Prompt::Timeline(p) => p.handle_key(key),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
                 Prompt::Plugins(p) => p.handle_key(key),
@@ -1979,6 +2022,10 @@ impl App {
             Effect::FocusLine(line) => {
                 self.prompt = None;
                 self.host.send(Command::FocusLine(line));
+            }
+            Effect::Timeline { row_id, action } => {
+                self.prompt = None;
+                self.timeline(&row_id, action);
             }
             Effect::EndLine {
                 session_id,
@@ -2461,6 +2508,12 @@ impl App {
                 }
                 Outcome::Continue
             }
+            "timeline" => {
+                if let Some(snapshot) = &self.snapshot {
+                    self.prompt = Some(Prompt::Timeline(Box::new(TimelinePanel::new(snapshot))));
+                }
+                Outcome::Continue
+            }
             "branch" => {
                 if let Some(at) = self.head_cut() {
                     self.draft_line(at, args);
@@ -2518,10 +2571,6 @@ impl App {
             "models" => {
                 self.prompt = Some(Prompt::Models(ModelsPanel::new()));
                 self.host.send(Command::ListModels);
-                Outcome::Continue
-            }
-            "history" => {
-                self.request_history();
                 Outcome::Continue
             }
             "tools" => {
@@ -2620,6 +2669,20 @@ impl App {
             self.record(Block::Boundary(label));
             frame.commits.push(text);
         }
+        if ready && std::mem::take(&mut self.load_more) && self.fullscreen {
+            let hidden = self.snapshot.as_ref().map_or(0, |snapshot| {
+                snapshot.rows[..self.window_floor.min(snapshot.rows.len())]
+                    .iter()
+                    .filter(|row| row.kind.is_message())
+                    .count()
+            });
+            if hidden > 0 {
+                let block = Block::LoadMore(hidden);
+                let text = chunk(&render_block(&block, width, &self.palette, &self.markdown));
+                self.record(block);
+                frame.commits.push(text);
+            }
+        }
         let (commits, sources, tail) = self.transcript(width);
         for (text, (source, placement)) in commits.into_iter().zip(sources) {
             if let Block::ToolGroup(group) = &source
@@ -2658,7 +2721,7 @@ impl App {
                         &[("id", sid), ("count", &count.to_string())],
                     );
                     if hidden > 0 {
-                        label.push_str(t(" · earlier history: /history"));
+                        label.push_str(t(" · earlier history: /timeline"));
                     }
                     label
                 }
@@ -2667,6 +2730,19 @@ impl App {
             let text = chunk(&[fg(&line, &self.palette.muted)]);
             self.record(Block::Boundary(label));
             frame.commits.push(text);
+        }
+        if ready && let Some((row_id, pick)) = self.landing.take() {
+            let block = self.snapshot.as_ref().and_then(|snapshot| {
+                let row = snapshot.rows.iter().find(|row| row.row_id == row_id)?;
+                self.block_of(row)
+            });
+            if let Some(id) = block {
+                self.jump = Some(if pick {
+                    Jump::Block(id)
+                } else {
+                    Jump::Show(id)
+                });
+            }
         }
         for notice in std::mem::take(&mut self.notices) {
             let interrupted = notice == t(INTERRUPT_REASON);
@@ -2905,6 +2981,7 @@ impl App {
             Some(Prompt::Sessions(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Tasks(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Lines(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Timeline(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Login(prompt)) => Some(prompt.cursor(width)),
@@ -2934,6 +3011,7 @@ impl App {
                 Some(Prompt::Lines(prompt)) => {
                     list(prompt.render(list_width, budget, p, &self.markdown))
                 }
+                Some(Prompt::Timeline(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Models(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Providers(prompt)) => list(prompt.render(list_width, budget, p)),
                 Some(Prompt::Plugins(prompt)) => list(prompt.render(list_width, budget, p)),
@@ -2964,6 +3042,7 @@ impl App {
             Some(Prompt::Lines(prompt)) => {
                 Some(prompt.render(outer, panel_rows, p, &self.markdown))
             }
+            Some(Prompt::Timeline(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Plugins(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -3027,6 +3106,7 @@ impl App {
         let hidden = messages.len().saturating_sub(HISTORY_WINDOW);
         self.window_floor = if hidden > 0 { messages[hidden] } else { 0 };
         self.history_floor = self.window_floor;
+        self.load_more = true;
         self.window_info = (messages.len() - hidden, hidden);
         true
     }
@@ -3166,7 +3246,7 @@ impl App {
                 .filter(|r| is_message(r))
                 .count();
             let header = tf(
-                "Earlier history · {id} · {count} messages · /history for the previous page",
+                "Earlier history · {id} · {count} messages",
                 &[
                     ("id", self.session_id.get(..8).unwrap_or(&self.session_id)),
                     ("count", &count.to_string()),
@@ -3270,6 +3350,8 @@ impl App {
         self.runs = Runs::default();
         self.window_floor = 0;
         self.history_floor = 0;
+        self.load_more = false;
+        self.landing = None;
         self.window_info = (0, 0);
         self.history_request = None;
         self.awaiting_window = true;
@@ -3296,6 +3378,8 @@ impl App {
         self.runs = Runs::default();
         self.window_floor = 0;
         self.history_floor = 0;
+        self.load_more = false;
+        self.landing = None;
         self.window_info = (0, 0);
         self.history_request = None;
         self.awaiting_window = true;
@@ -3322,13 +3406,66 @@ impl App {
         }
     }
 
-    /// `/history`: queue the next older page of the loaded session.
-    fn request_history(&mut self) {
+    /// A `/timeline` key on the user message `row_id` of the shown line:
+    /// the actions of a picked message, or a jump to it.
+    fn timeline(&mut self, row_id: &str, action: TimelineAction) {
         let Some(snapshot) = &self.snapshot else {
             self.set_notice(t("No active session"));
             return;
         };
-        let floor = self.history_floor.min(snapshot.rows.len());
+        let Some(index) = snapshot.rows.iter().position(|row| row.row_id == row_id) else {
+            return;
+        };
+        let (text, cut) = (snapshot.rows[index].text.clone(), snapshot.rows[index].cut);
+        match action {
+            TimelineAction::Jump => self.jump_to(index),
+            TimelineAction::Edit => self.composer.set_draft(&text),
+            TimelineAction::Quote => {
+                if !self.composer.quote(&text) && self.composer.shell().is_some() {
+                    self.set_notice(t("Leave shell mode to quote a message"));
+                }
+            }
+            TimelineAction::Branch => {
+                if let Some(at) = cut {
+                    self.draft_line(at, &text);
+                }
+            }
+            TimelineAction::Fork => {
+                if let Some(at) = cut {
+                    self.ask_fork(at, text);
+                }
+            }
+        }
+    }
+
+    /// Fullscreen picks the message at row `index`, drawing from it first
+    /// when it is earlier history; scrollback can only draw what it has not
+    /// drawn yet, from that message on.
+    fn jump_to(&mut self, index: usize) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let row_id = snapshot.rows[index].row_id.clone();
+        if self.fullscreen {
+            if index < self.window_floor {
+                self.rebuild_window(index);
+            }
+            self.landing = Some((row_id, true));
+        } else if index < self.history_floor {
+            self.history_request = Some((index, self.history_floor));
+            self.history_floor = index;
+        } else {
+            self.set_notice(t("Already on screen above; /tui jumps to it"));
+        }
+    }
+
+    /// Fullscreen's load-more row: draws the previous page above the drawn
+    /// messages and keeps the oldest drawn message at the top of the view.
+    fn load_earlier(&mut self) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let floor = self.window_floor.min(snapshot.rows.len());
         let messages: Vec<usize> = snapshot.rows[..floor]
             .iter()
             .enumerate()
@@ -3336,16 +3473,48 @@ impl App {
             .map(|(i, _)| i)
             .collect();
         if messages.is_empty() {
-            self.set_notice(t("No earlier messages."));
             return;
         }
-        let start = if messages.len() > HISTORY_WINDOW {
-            messages[messages.len() - HISTORY_WINDOW]
-        } else {
-            0
-        };
-        self.history_request = Some((start, floor));
-        self.history_floor = start;
+        let start = messages[messages.len().saturating_sub(HISTORY_WINDOW)];
+        self.landing = snapshot.rows[floor..]
+            .iter()
+            .find(|row| row.kind == RowKind::UserMessage && row.line.is_none())
+            .map(|row| (row.row_id.clone(), false));
+        self.rebuild_window(start);
+    }
+
+    /// Entering fullscreen: earlier history scrollback drew page by page is
+    /// drawn again in order, under the load-more row.
+    fn redraw_window(&mut self) {
+        let floor = self.history_floor.min(self.window_floor);
+        if floor > 0 && !self.awaiting_window {
+            self.rebuild_window(floor);
+        }
+    }
+
+    /// Draws the fullscreen transcript again from row `floor`, the way a
+    /// line switch draws a line's.
+    fn rebuild_window(&mut self, floor: usize) {
+        self.planner.reset();
+        self.commits = CommitState::default();
+        self.window_floor = floor;
+        self.history_floor = floor;
+        self.history_request = None;
+        self.load_more = true;
+        self.card_blocks.clear();
+        self.dropped += self.history.len();
+        self.history.clear();
+        self.stream_block = None;
+    }
+
+    /// The block id a drawn user message `row` became.
+    fn block_of(&self, row: &ViewRow) -> Option<usize> {
+        self.history
+            .iter()
+            .rposition(|block| {
+                matches!(block, Block::User { text, cut } if *cut == row.cut && *text == row.text)
+            })
+            .map(|index| self.dropped + index)
     }
 
     /// Remembers a committed block (bounded, newest last).
@@ -3456,6 +3625,10 @@ impl App {
     /// Opens what a picked or clicked card stands for: a delegation's
     /// member, or the line a marker opened.
     fn open_card(&mut self, request_event_id: &str) {
+        if request_event_id == LOAD_MORE {
+            self.load_earlier();
+            return;
+        }
         let Some(snapshot) = &self.snapshot else {
             return;
         };
@@ -3639,6 +3812,7 @@ impl Document for App {
         match &self.history[index] {
             Block::ToolGroup(group) => card_actions(group).into_iter().map(str::to_owned).collect(),
             Block::Line { id, .. } => vec![id.clone()],
+            Block::LoadMore(_) => vec![LOAD_MORE.to_owned()],
             _ => Vec::new(),
         }
     }
@@ -3646,7 +3820,9 @@ impl Document for App {
     fn card_rows(&self, index: usize, cols: usize, card: &str) -> Option<(usize, usize)> {
         let group = match &self.history[index] {
             Block::ToolGroup(group) => group,
-            Block::Line { .. } => return Some((1, self.rows(index, cols).len())),
+            Block::Line { .. } | Block::LoadMore(_) => {
+                return Some((1, self.rows(index, cols).len()));
+            }
             _ => return None,
         };
         let width = cols.saturating_sub(2 + MARGIN).max(1);
@@ -3658,6 +3834,7 @@ impl Document for App {
         let group = match &self.history[index] {
             Block::ToolGroup(group) => group,
             Block::Line { id, .. } => return (row > 0).then(|| id.clone()),
+            Block::LoadMore(_) => return (row > 0).then(|| LOAD_MORE.to_owned()),
             _ => return None,
         };
         let width = cols.saturating_sub(2 + MARGIN).max(1);
@@ -4676,6 +4853,152 @@ mod tests {
         for row in ["line first", "line second", "line third"] {
             assert!(text.contains(row), "{row} is drawn: {text}");
         }
+    }
+
+    /// A resumed session of `count` user messages `ask N`, each cut at `N`.
+    fn resume_asks(drawn: &mut Drawn, count: usize) {
+        drawn
+            .app
+            .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
+        let rows = (0..count)
+            .map(|n| {
+                std::sync::Arc::new(ViewRow {
+                    row_id: format!("u{n}"),
+                    kind: RowKind::UserMessage,
+                    text: format!("ask {n}"),
+                    streaming: false,
+                    elapsed_ms: None,
+                    tone: None,
+                    tool_name: None,
+                    tool_input: None,
+                    batch: None,
+                    pending: false,
+                    parked: false,
+                    result_text: None,
+                    result_is_error: false,
+                    diff: None,
+                    exit_code: None,
+                    member: None,
+                    cut: Some(n as u64),
+                    line: None,
+                })
+            })
+            .collect();
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            rows,
+            focus: "main".into(),
+            main_history_complete: true,
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+    }
+
+    #[test]
+    fn a_timeline_jump_in_scrollback_draws_earlier_history_from_the_message() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        resume_asks(&mut drawn, 120);
+        let text = drawn.transcript();
+        assert!(
+            !text.contains("ask 19\n") && text.contains("ask 20"),
+            "{text}"
+        );
+        assert!(text.contains("earlier history: /timeline"), "{text}");
+        drawn.app.run_command("timeline", "");
+        assert!(matches!(drawn.app.prompt, Some(Prompt::Timeline(_))));
+        drawn.key(KeyCode::Home);
+        drawn.key(KeyCode::Down);
+        drawn.key(KeyCode::Down);
+        drawn.key(KeyCode::Enter);
+        assert!(drawn.app.prompt.is_none(), "a jump closes the panel");
+        let text = drawn.transcript();
+        let page = text.find("Earlier history").expect("the page is drawn");
+        assert!(text[page..].contains("ask 2"), "{text}");
+        assert!(!text[page..].contains("ask 1\n"), "{text}");
+        drawn.app.run_command("timeline", "");
+        drawn.key(KeyCode::Enter);
+        assert_eq!(
+            drawn.app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some(t("Already on screen above; /tui jumps to it"))
+        );
+    }
+
+    #[test]
+    fn fullscreen_tops_earlier_history_with_a_load_more_row() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn.app.fullscreen = true;
+        resume_asks(&mut drawn, 230);
+        let first = |app: &App| {
+            app.history
+                .iter()
+                .position(|block| matches!(block, Block::LoadMore(_)))
+        };
+        let at = first(&drawn.app).expect("the load-more row");
+        assert!(matches!(drawn.app.history[at], Block::LoadMore(130)));
+        assert!(
+            matches!(&drawn.app.history[at + 1], Block::User { text, .. } if text == "ask 130")
+        );
+        assert_eq!(drawn.app.cards(at), [LOAD_MORE]);
+        drawn.app.open_card(LOAD_MORE);
+        drawn.draw();
+        let at = first(&drawn.app).expect("still earlier history");
+        assert!(matches!(drawn.app.history[at], Block::LoadMore(30)));
+        let kept = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { text, .. } if text == "ask 130"))
+            .expect("the old top is drawn again");
+        assert_eq!(drawn.app.jump, Some(Jump::Show(drawn.app.dropped + kept)));
+        drawn.app.jump = None;
+        drawn.app.open_card(LOAD_MORE);
+        drawn.draw();
+        assert_eq!(first(&drawn.app), None, "everything is drawn");
+        assert!(
+            drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { text, .. } if text == "ask 0"))
+        );
+    }
+
+    #[test]
+    fn a_fullscreen_timeline_jump_picks_the_message_drawing_it_first() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn.app.fullscreen = true;
+        resume_asks(&mut drawn, 120);
+        drawn.app.run_command("timeline", "");
+        drawn.key(KeyCode::Home);
+        drawn.key(KeyCode::Down);
+        drawn.key(KeyCode::Enter);
+        let picked = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { text, .. } if text == "ask 1"))
+            .expect("the message is drawn");
+        assert_eq!(
+            drawn.app.jump,
+            Some(Jump::Block(drawn.app.dropped + picked))
+        );
+    }
+
+    #[test]
+    fn timeline_letters_edit_quote_and_branch_the_message() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        resume_asks(&mut drawn, 3);
+        drawn.app.run_command("timeline", "");
+        drawn.key(KeyCode::Up);
+        drawn.key(KeyCode::Char('e'));
+        assert!(drawn.app.prompt.is_none());
+        assert_eq!(drawn.app.composer.text(), "ask 1");
+        drawn.app.composer.clear();
+        drawn.app.run_command("timeline", "");
+        drawn.key(KeyCode::Char('b'));
+        let draft = drawn.app.line_draft.as_ref().expect("a line draft");
+        assert_eq!((draft.parent.as_str(), draft.at), ("main", 2));
+        assert_eq!(drawn.app.composer.text(), "ask 2");
     }
 
     #[test]

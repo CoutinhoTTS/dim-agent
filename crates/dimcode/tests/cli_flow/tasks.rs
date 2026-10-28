@@ -421,7 +421,7 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
         terminal.until("paged-message-150");
         terminal.until("resumed paged");
         terminal.until("100 messages");
-        terminal.until("earlier history: /history");
+        terminal.until("earlier history: /");
         // The window title names the session's first message; only the
         // screen is windowed.
         let screen = terminal
@@ -431,7 +431,10 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
         assert!(!screen.contains("paged-message-050"));
         assert!(!screen.contains("paged-message-001"));
         assert!(!terminal.transcript.contains("· 0 messages"));
-        terminal.write(b"\r/history\r");
+        // A `/timeline` jump to the first message draws the earlier history.
+        terminal.write(b"\r/timeline\r");
+        terminal.until("#150");
+        terminal.write(b"\x1b[H\r");
         terminal.until("paged-message-001");
         terminal.signal(libc::SIGKILL);
         terminal.wait();

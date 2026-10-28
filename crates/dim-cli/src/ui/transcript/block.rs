@@ -52,6 +52,9 @@ pub enum Block {
     Boundary(String),
     /// One muted line (earlier-history page header).
     Note(String),
+    /// Fullscreen's first block while this many messages before it are not
+    /// drawn; a pick or a click draws the previous page.
+    LoadMore(usize),
     /// Where a line opened on the shown line; a pick enters it.
     Line {
         id: String,

@@ -79,8 +79,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | --- | --- | --- | --- |
 | New, resume, Session list | done; project/all switch: none | done (grouped by directory) | |
 | Export conversation | done in the line client and `dimcode session export`; inside the terminal UIs: none | — | [CLI commands](cli-commands.md) |
-| `/timeline` and message actions | none | — | overview App. D assigns it to the CLI only |
-| `/history` | done | — | |
+| `/timeline` and message actions | done in the TUI; it also replaces `/history`'s paging | — | [Timeline UI §4.6](timeline-ui.md#46-timeline-jumping-to-a-message) |
 | Titles | automatic: done (optional SessionTitle package); manual rename: designed | — | [SessionTitle](plugins/SessionTitle.md) |
 | Fork | designed in the CLI (server `session.fork` done) | later phase | [Session deletion and fork](appserver/session-deletion-and-fork.md) |
 | Deletion and cleanup | designed in the CLI (server `session.delete` done) | later phase | same |
@@ -127,7 +126,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 
 Undesigned capabilities from §3, in feature-list order:
 
-1. `/timeline` and message actions, including message copying.
+1. Message copying (`/timeline` and its other message actions: [Timeline UI §4.6](timeline-ui.md#46-timeline-jumping-to-a-message)).
 2. The `/queue` panel and queue deletion (the server contract exists).
 3. Skill references through `$`, `/`, `@` (the palette code exists, nothing feeds it).
 4. Retrieving a queued message that has attachments: `QueuedInput` keeps only text, so the attachments are lost. Either the client refuses it, as the feature list says, or the queue keeps the attachments.

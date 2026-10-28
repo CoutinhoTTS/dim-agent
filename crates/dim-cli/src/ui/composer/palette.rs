@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(&names("/re", SCROLLBACK)[..2], ["resume", "effort"]);
         assert!(names("/ss", SCROLLBACK).contains(&"resume"));
         assert!(names("/quit", SCROLLBACK).contains(&"exit"));
-        assert_eq!(names("/hist", SCROLLBACK), ["history"]);
+        assert_eq!(names("/tim", SCROLLBACK), ["timeline"]);
     }
 
     /// A non-ASCII description has no spaces between words, so a non-ASCII
@@ -465,8 +465,8 @@ mod tests {
     #[test]
     fn rows_that_cannot_run_now_are_marked_unavailable() {
         let none = Context::default();
-        assert!(rows_for("/hist", none, &[])[0].unavailable);
-        assert!(!rows_for("/hist", SCROLLBACK, &[])[0].unavailable);
+        assert!(rows_for("/timeline", none, &[])[0].unavailable);
+        assert!(!rows_for("/timeline", SCROLLBACK, &[])[0].unavailable);
         let interrupt = &rows_for("/interrupt", SCROLLBACK, &[])[0];
         assert!(interrupt.unavailable);
         assert_eq!(interrupt.key.as_deref(), Some("Esc"));
@@ -541,13 +541,13 @@ mod tests {
         vec![
             Skill {
                 name: "claude-code-import".into(),
-                description: "Import Claude Code session history".into(),
+                description: "Import Claude Code session timeline".into(),
                 display_name: None,
                 display_description: None,
             },
             Skill {
                 name: "codex-import".into(),
-                description: "Import Codex history".into(),
+                description: "Import Codex timeline".into(),
                 display_name: None,
                 display_description: None,
             },
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn skills_share_the_list_under_their_own_category() {
         let skills = sample_skills();
-        let rows = rows_for("hist", SCROLLBACK, &skills);
+        let rows = rows_for("timeline", SCROLLBACK, &skills);
         let categories: Vec<&str> = rows.iter().map(|r| r.category.as_str()).collect();
         assert_eq!(categories, ["session", "skill", "skill"]);
         assert_eq!(panel_title(&rows), "Suggestions");
