@@ -559,12 +559,23 @@ Nothing is left open.
 ```rust
 // dim-agent-capabilities/src/recall.rs (new)
 pub const RECALL_TOOL: &str = "recall";
-pub struct RecallPlugin;
-//   Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>)
-//   apply: tools.register(ctx, ToolContribution { definition, handler: RecallTool(tree) })
+pub fn feature() -> Feature {
+    Feature::new("Recall").session("Recall", |names| Ok(Box::new(RecallPlugin::new(names)?)))
+}
+pub struct RecallPlugin {
+    tree: Key<TreeCommands>,
+    tools: Key<ToolRegistry>,
+}
+impl RecallPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> { /* both: names.key()? */ }
+}
+impl DynPlugin for RecallPlugin {
+    // injects: [tree.erase(), tools.erase()]
+    // apply: tools.register(ctx, ToolContribution { definition, handler: RecallTool(tree) })
+}
 struct RecallTool(Arc<TreeCommands>);
 impl ToolHandler for RecallTool { /* §3–§6 */ }
 
 // dim-agent-capabilities/src/defaults.rs, install_local_execution, beside wait::install
-builder.require_feature(Feature::new("Recall").session("Recall", |names| names.part(RecallPlugin)));
+crate::recall::install(builder);   // builder.require_feature(recall::feature())
 ```
