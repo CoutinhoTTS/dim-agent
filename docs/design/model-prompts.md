@@ -6,7 +6,7 @@ The model works the way the product intends when what it reads is true about the
 
 ## 1. Answers
 
-**Policy and contract.** Read a text as the model reads it and edit only the words: if a sentence becomes false about the runtime, or a mechanism can no longer be used as it is written, the text is **contract**; otherwise it is **policy**. Contract is the model-facing protocol — channel and marker names and their attribute values, handles such as `[input <id>]`, refusal codes, tool schemas and result formats, and the sentences that state a runtime guarantee. Protocol text is recorded in facts, in history and in the adopted configuration, so a change to it keeps a history resumed with the older form understandable, or it is a record-format change for the text's owner; and it lands with the behaviour and the flow test that assert it. Policy is guidance about how to work: it is replaceable, and every change to it is evaluated (§8). A text may hold both, such as a declaration with a schema and a description; the class is per sentence (§4).
+**Policy and protocol.** Read a text as the model reads it and edit only the words: if a sentence becomes false about the runtime, or a mechanism can no longer be used as it is written, the text is **protocol**; otherwise it is **policy**. Protocol is the model-facing side of a mechanism — channel and marker names and their attribute values, handles such as `[input <id>]`, refusal codes, tool schemas and result formats, and the sentences that state a runtime guarantee. Protocol text is recorded in facts, in history and in the adopted configuration, so a change to it keeps a history resumed with the older form understandable, or it is a record-format change for the text's owner; and it lands with the behaviour and the flow test that assert it. Policy is guidance about how to work: it is replaceable, and every change to it is evaluated (§8). A text may hold both, such as a declaration with a schema and a description; the class is per sentence (§4).
 
 **Who may change what.** A scope reaches the model only through a channel it owns: the product through its built-in capabilities; the host or the profile through the Session system prompt and the trusted sources it loads; the project through its `AGENTS.md` and its skills; the user through their messages, their `AGENTS.md` and the settings that select values; a plugin through what it registers or writes, on the same channels as the built-ins. No central repository takes wording away from its author: Prompt, PromptRegistry and ToolRegistry carry and never own (principles §1, §5; ADR 002). No scope changes the protocol or another author's text, a tag never grants permission, the guide's frame is removable by none, and System holds only static text (§5).
 
@@ -49,7 +49,7 @@ Every model-visible text fits one channel below. The table names the carrier, th
 
 **The test.** Read the text as the model reads it and edit only the words.
 
-- If the edited sentence becomes false about the runtime, or a mechanism stops working — a marker the model cannot place, a call with the wrong shape, a code the model cannot act on — the text is **protocol** (contract).
+- If the edited sentence becomes false about the runtime, or a mechanism stops working — a marker the model cannot place, a call with the wrong shape, a code the model cannot act on — the text is **protocol**.
 - If the runtime behaves exactly as before and only the model's choice of how to work changes, the text is **policy**.
 - If the text is the operator's, the project's or a profile's own words, it is **content**: the product carries it, escaped, and never edits it.
 
@@ -61,7 +61,7 @@ Every model-visible text fits one channel below. The table names the carrier, th
 - tool schemas and result formats;
 - sentences that state a runtime guarantee.
 
-Three requirements follow. It changes only with the behaviour it describes, in the same change as that behaviour's flow test. Because it is recorded in facts — in history and in the adopted configuration — a change keeps a history resumed with the older form understandable; where it cannot, it is a record-format change for the text's owner. And an owner that changes it states the compatibility it keeps.
+Three requirements follow. Protocol changes only with the behaviour it describes, in the same change as that behaviour's flow test. Because it is recorded in facts — in history and in the adopted configuration — a change keeps a history resumed with the older form understandable; where it cannot, it is a record-format change for the text's owner. And an owner that changes it states the compatibility it keeps.
 
 **Policy** is guidance about how to work: the base prompt's rules, the shell guidance, the usage guidance in tool declarations, the coordination text of the branch and collaboration tools, the Goal wording, the summary prompt's wording. It is replaceable, and every change to it is evaluated (§8).
 
@@ -79,7 +79,7 @@ Three requirements follow. It changes only with the behaviour it describes, in t
 
 Three limits hold for every scope:
 
-1. **No scope changes the protocol or another author's text.** The protocol changes with its behaviour (§4), and a text belongs to its author (§2.2).
+1. **No scope changes the protocol or another author's text.** The protocol changes with its behaviour (§4), and a text belongs to its author (§2, item 2).
 2. **The guide's frame is not removable.** The frame — channels, trust, escaping, the channel rule, the restatement — is Prompt's, and no operator, project, plugin or profile removes or replaces it (§6).
 3. **System holds only static text.** Text that changes during a Session arrives as a rule or state input, so the cached prefix stays one for the Session (§7).
 
@@ -121,7 +121,7 @@ The input guide is the text the model reads about its own input, on every reques
 
 **"Agent prompt language"** is the language the model writes to the operator in. It settles the case where the operator's environment language and the language of their messages differ — English logs or code pasted into a Chinese session, or a first message that is material rather than a request — so the answer language is an explicit choice instead of an inference from the last message. The requirements:
 
-- The value reaches the model as one state source, a `<dim-state>` entry naming the language the model writes to the operator in.
+- The value reaches the model as one state source naming the language the model writes to the operator in; the block's form is PromptSources' design (§9.1).
 - Without it, the base sentence's rule stands: the model answers in the user's language.
 - It is the operator's setting; a project states its language in its own rules, which are content.
 
@@ -158,8 +158,8 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 - The frame states the channel rule with the `[input <id>]` exception (§6.1).
 - Prompt provides the means by which a capability contributes its markers' entries: registered from the contributor's own `apply` and withdrawn on unload; the entries in force reproducible from facts; adding or removing one never rewrites an adopted System mid-Session (§6.2). The mechanism is Prompt's design.
 - PromptSources keeps `dim/base` and the shell guidance as policy, replaceable at its factory configuration so a candidate can run (§8.1); the environment and date sources state facts only; an instruction body is the user's or the project's words, carried escaped and never edited.
-- PromptSources provides the "Agent prompt language" state source (§7).
-- Prompt and PromptRegistry carry text and own none of it (§2.2).
+- PromptSources provides the "Agent prompt language" state source, and the block's form is its design (§7).
+- Prompt and PromptRegistry carry text and own none of it (§2, item 2).
 
 ### 9.2 Every capability that writes model-facing text
 
@@ -183,14 +183,14 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 **Owner:** TimelineTree.
 
 - **Protocol.** The marker names and attributes, the identity blocks' factual sentences, the branch tool's actions and modes, and its refusal codes change only with the branch mechanism, in the same change as the flow tests that assert them (§4).
-- **The coordination text for `main` covers**: how to brief a line — its purpose, what `main` knows that the line needs, which files or area are the line's own, and when it should report or end; assigning those areas; answering a line's steers; ending its own wait when what it waited for is settled; and not redoing a line's work ([Timeline branches §12.2](timeline-branches.md#122-items-for-the-prompt-layer-429)).
+- **The coordination text for `main` covers the items of [Timeline branches §12.2](timeline-branches.md#122-items-for-the-prompt-layer-429).**
 - **Evaluation.** These texts are policy: a change is evaluated with the scenarios of [Timeline branches §12.3](timeline-branches.md#123-evaluation-scenarios) — redone work, over-splitting, flooding, never ending, sibling relay, ping-pong, identity after compaction, asking the user — current against candidate (§8).
 
 ### 9.5 Goal
 
 **Owner:** Goal.
 
-- **The wording.** Goal's own design page describes work on another line as delegated work: the objective block's and the continuation block's "delegated sub-task", and "delegated work" in §3.4 and in §5's row for child branches ([Goal §A.5](plugins/Goal.md#a5-model-visible-texts), [§3.4](plugins/Goal.md#34-a-new-branch-clears-the-inherited-goal)). A line is not delegated work: it is the same agent on another line of the Session ([Timeline branches §1](timeline-branches.md#1-what-branches-are-for)). The requirement: each of those texts says "on another line of this Session", and the meaning stays — the goal belongs to another line, and this line neither continues it nor calls `goal_update` for it.
+- **The wording.** Goal's own design page describes work on another line as delegated work: the objective block's and the continuation block's "delegated sub-task", and "delegated work" in [Goal §3.4](plugins/Goal.md#34-a-new-branch-clears-the-inherited-goal) and in [Goal §5](plugins/Goal.md#5-context-mapping)'s row for child branches ([Goal §A.5](plugins/Goal.md#a5-model-visible-texts)). A line is not delegated work: it is the same agent on another line of the Session ([Timeline branches §1](timeline-branches.md#1-what-branches-are-for)). The requirement: each of those texts says "on another line of this Session", and the meaning stays — the goal belongs to another line, and this line neither continues it nor calls `goal_update` for it.
 - **The classes.** The marker name, its `kind` values and its keys are protocol; the sentences above are policy.
 - **The guide.** Goal contributes the entry for its marker when it writes it (§6.2, §9.2).
 - **Evaluation.** A goal scenario set — a goal set on `main` continues; a line does not continue the goal it inherited; a completed or blocked goal stops — current against candidate (§8).
@@ -199,7 +199,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 **Owner:** ContextCompaction.
 
-- **The declared parts.** The summary prompt declares the parts of a substantive summary in its own words — the task or goal in force first; constraints and preferences still in force; standing decisions and their reasons; approaches ruled out and why; open items with the user; the current judgment; the next step; the exact identifiers in use ([Compaction requirements §3](compaction-quality.md#3-what-compaction-keeps)) — and the substantive-summary check verifies that those parts are present ([ContextCompaction §5.2](plugins/ContextCompaction.md#52-productsummarystrategy)).
+- **The declared parts** are [Compaction requirements §7.1](compaction-quality.md#71-contextcompaction)'s, which carries the required parts of [§3](compaction-quality.md#3-what-compaction-keeps) and is implemented under [#528](https://github.com/arcships/dim/issues/528): the summary prompt declares them in its own words, and the substantive-summary check verifies that they are present ([ContextCompaction §5.2](plugins/ContextCompaction.md#52-productsummarystrategy)).
 - **Language.** The prompt is English, and the summary it asks for keeps the conversation's language, identifiers verbatim (§7).
 - **Policy.** The prompt and its length sentence are policy: a change is evaluated with `summary-eval --candidate` (§8.2).
 - **The guide.** Each marker it writes has its entry: the summary envelope, the `[input <id>]` handle, and the digest message (§6.2, §9.2).
