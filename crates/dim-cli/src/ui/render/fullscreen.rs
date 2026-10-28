@@ -1393,7 +1393,7 @@ fn cells(text: &str, start: usize, end: usize) -> String {
 /// The scrollbar column for a viewport of `view` rows over `content` rows
 /// starting at `top`, one cell per row, in eighths of a row; `None` when
 /// everything fits.
-pub(crate) fn scrollbar(
+fn scrollbar(
     view: usize,
     content: usize,
     top: usize,
