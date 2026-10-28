@@ -526,10 +526,8 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             through,
             dim_agent_runtime::BranchOptions {
                 prompt: "child branch observation".into(),
-                source: dim_agent_types::BranchSource::Tool {
-                    turn_id: "turn".into(),
-                    request_id: "request".into(),
-                    call_id: "call".into(),
+                source: dim_agent_types::BranchSource::Host {
+                    operation_id: "observation".into(),
                 },
             },
         )
