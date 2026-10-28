@@ -320,12 +320,17 @@ impl ContextPolicy {
         cancelled: &(dyn Fn() -> String + Sync),
     ) -> Result<Compacted, HostError> {
         let started = Instant::now();
+        let carried = step
+            .turn_id
+            .as_deref()
+            .and_then(|turn| carried_pins(view, turn));
+        let turn = step.turn_id.as_deref().map(|turn| (turn, carried.as_ref()));
         let mut cuts = legal_cuts(&view.context, &view.history);
         let replacement_size = self.strategy.replacement_size(model.as_ref());
         let limit = retain_limit(
             view,
             model.as_ref(),
-            step.turn_id.as_deref(),
+            turn,
             &cuts,
             step.trigger == CompactionTrigger::Manual,
             replacement_size,
@@ -427,26 +432,37 @@ impl ContextPolicy {
                         }
                     })
                     .and_then(|cut| {
-                        let pinned = pinned_inputs(
-                            view,
-                            step.turn_id.as_deref(),
-                            &retain_from,
-                            model.as_ref(),
-                        );
-                        let replacement_parts = (!pinned.is_empty()).then_some(ReplacementParts {
-                            strategy: strategy_messages.len() as u64,
-                            digest: 0,
-                        });
+                        let pinned = pinned_inputs(view, turn, &retain_from, model.as_ref());
+                        let replacement_parts =
+                            (!pinned.messages.is_empty()).then_some(ReplacementParts {
+                                strategy: strategy_messages.len() as u64,
+                                digest: 0,
+                            });
                         let mut replacement = strategy_messages;
-                        replacement.extend(pinned);
+                        replacement.extend(pinned.messages);
+                        let pinned_inputs = pinned.ids;
                         let baseline = view.history[cut.entry - 1].baseline.clone();
                         view.compacted(model.as_ref(), cut.entry, &replacement, &baseline)
                             .map(|(_, tokens)| {
-                                (cut.entry, baseline, tokens, replacement, replacement_parts)
+                                (
+                                    cut.entry,
+                                    baseline,
+                                    tokens,
+                                    replacement,
+                                    replacement_parts,
+                                    pinned_inputs,
+                                )
                             })
                     });
                 match checked {
-                    Ok((replaced, baseline, tokens, replacement, replacement_parts)) => {
+                    Ok((
+                        replaced,
+                        baseline,
+                        tokens,
+                        replacement,
+                        replacement_parts,
+                        pinned_inputs,
+                    )) => {
                         let mark = insufficient_space(
                             resident_parts(
                                 view,
@@ -470,6 +486,7 @@ impl ContextPolicy {
                             ),
                             context_baseline: baseline.to_vec(),
                             replacement_parts,
+                            pinned_inputs,
                         }
                     }
                     Err(error) => ContextCompactionResult::Failed {
@@ -720,29 +737,144 @@ fn project(
     Arc::new(result)
 }
 
+/// One input the running turn consumed, as the model saw it: its
+/// `input/message` id when the record that carried it names it, and the
+/// messages the renderer placed for it (ContextCompaction §5.9).
+#[derive(Clone)]
+struct Pin {
+    id: Option<String>,
+    messages: Vec<Message>,
+}
+
+/// The running turn's pinned messages and, per message, the `input/message`
+/// id it came from; absent ids mean the arriving record could not name them
+/// (ContextCompaction §5.9).
+#[derive(Default)]
+struct Pinned {
+    messages: Vec<Message>,
+    ids: Option<Vec<String>>,
+}
+
+/// The pins of the compaction in effect, when it ran in the turn still
+/// running: its replacement's pinned part, the ids its record names, and the
+/// event index the turn's new inputs are read from — its cut, so nothing
+/// before it is read again. An input consumed at the cut itself was kept by
+/// that compaction's tail, so a later cut may still replace it and pin it
+/// (ContextCompaction §5.3, §5.9).
+struct CarriedPins {
+    pins: Vec<Pin>,
+    from: usize,
+}
+
+impl CarriedPins {
+    fn new(
+        view: &View,
+        retain_from: &str,
+        replacement: &[Message],
+        parts: Option<&ReplacementParts>,
+        ids: Option<&[String]>,
+    ) -> Self {
+        let pinned = parts.map_or(&[][..], |parts| {
+            let from = ((parts.strategy + parts.digest) as usize).min(replacement.len());
+            &replacement[from..]
+        });
+        let ids = ids.filter(|ids| ids.len() == pinned.len());
+        let pins = group_pins(pinned, ids);
+        let from = view
+            .context
+            .events
+            .iter()
+            .position(|event| event.id == retain_from)
+            .unwrap_or(0);
+        Self { pins, from }
+    }
+}
+
+/// Pins grouped from stored messages and their per-message ids: consecutive
+/// messages with the same id are one input; without ids each message stands
+/// alone, and a truncation of it has no handle to name.
+fn group_pins(messages: &[Message], ids: Option<&[String]>) -> Vec<Pin> {
+    let mut pins: Vec<Pin> = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        let id = ids.map(|ids| ids[index].clone());
+        match pins.last_mut() {
+            Some(last) if id.is_some() && last.id == id => last.messages.push(message.clone()),
+            _ => pins.push(Pin {
+                id,
+                messages: vec![message.clone()],
+            }),
+        }
+    }
+    pins
+}
+
+/// The pins of the latest completed compaction in the view, when it ran in
+/// the turn still running; otherwise the turn's pins start at its own
+/// `turn/start` (ContextCompaction §5.9). A snapshot is only a cache, so
+/// this lookup does not depend on one.
+fn carried_pins(view: &View, turn_id: &str) -> Option<CarriedPins> {
+    let data = view
+        .events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data)
+                if data.turn_id.as_deref() == Some(turn_id)
+                    && matches!(data.outcome, ContextCompactionResult::Completed { .. }) =>
+            {
+                Some(data)
+            }
+            _ => None,
+        })?;
+    let ContextCompactionResult::Completed {
+        retain_from,
+        replacement,
+        replacement_parts,
+        pinned_inputs,
+        ..
+    } = &data.outcome
+    else {
+        unreachable!("matched a completed compaction")
+    };
+    Some(CarriedPins::new(
+        view,
+        retain_from,
+        replacement,
+        replacement_parts.as_ref(),
+        pinned_inputs.as_deref(),
+    ))
+}
+
 /// The running turn's inputs the cut replaces, as the model saw them
-/// (ContextCompaction §5.9): the user content and every keyless raw block of
-/// each input the turn consumed before `retain_from`, in event order. Keyed
-/// blocks are excluded; the keyed baseline replays them. The messages take at
-/// most `PINNED_SHARE` of the input budget, beyond which each input keeps its
-/// head and tail with a marker naming its `input/message` event id.
+/// (ContextCompaction §5.9): the pins the compaction in effect already
+/// carries, then the inputs the turn consumed at or after that compaction's
+/// cut and before `retain_from`, in event order. Without one, they are every
+/// input the turn consumed since its `turn/start`. The user content and every
+/// keyless raw block of each input, as the renderer places it; keyed blocks
+/// are excluded, because the keyed baseline replays them. The messages take
+/// at most `PINNED_SHARE` of the input budget, beyond which each input keeps
+/// its head and tail with a marker naming its `input/message` event id.
 fn pinned_inputs(
     view: &View,
-    turn_id: Option<&str>,
+    turn: Option<(&str, Option<&CarriedPins>)>,
     retain_from: &str,
     model: &dyn ContextModel,
-) -> Vec<Message> {
-    let Some(turn_id) = turn_id else {
-        return Vec::new();
+) -> Pinned {
+    let Some((turn_id, carried)) = turn else {
+        return Pinned::default();
     };
     let events = &view.context.events;
     let Some(cut) = events.iter().position(|event| event.id == retain_from) else {
-        return Vec::new();
+        return Pinned::default();
     };
-    let Some(start) = events[..cut].iter().rposition(
+    let start = events[..cut].iter().rposition(
         |event| matches!(&event.kind, EventKind::TurnStart(data) if data.turn_id == turn_id),
-    ) else {
-        return Vec::new();
+    );
+    let from = match (carried, start) {
+        (Some(carried), Some(start)) => carried.from.max(start + 1),
+        (Some(carried), None) => carried.from,
+        (None, Some(start)) => start + 1,
+        (None, None) => return Pinned::default(),
     };
     let messages: HashMap<&str, &InputMessageData> = events[..cut]
         .iter()
@@ -757,8 +889,10 @@ fn pinned_inputs(
         .as_ref()
         .map(|checkpoint| checkpoint.state.inputs.as_slice())
         .unwrap_or_default();
-    let mut inputs: Vec<(&str, Vec<Message>)> = Vec::new();
-    for event in &events[start + 1..cut] {
+    let mut pins = carried
+        .map(|carried| carried.pins.clone())
+        .unwrap_or_default();
+    for event in &events[from.min(cut)..cut] {
         let EventKind::InputConsumed(data) = &event.kind else {
             continue;
         };
@@ -784,59 +918,82 @@ fn pinned_inputs(
             rendered.push(user_message(user));
         }
         if !rendered.is_empty() {
-            inputs.push((data.input_id.as_str(), rendered));
+            pins.push(Pin {
+                id: Some(data.input_id.clone()),
+                messages: rendered,
+            });
         }
     }
-    if inputs.is_empty() {
-        return Vec::new();
+    if pins.is_empty() {
+        return Pinned::default();
     }
     let count = |messages: &[Message]| {
         model.count_tokens(&ModelRequest::new("", "", messages.to_vec()))
             - model.count_tokens(&ModelRequest::new("", "", Vec::new()))
     };
     let limit = PINNED_SHARE * input_budget(model);
-    let total: f64 = inputs.iter().map(|(_, messages)| count(messages)).sum();
-    if total <= limit {
-        return inputs
-            .into_iter()
-            .flat_map(|(_, messages)| messages)
-            .collect();
-    }
-    let share = limit / inputs.len() as f64;
-    let mut pinned = Vec::new();
-    for (id, messages) in inputs {
-        if count(&messages) <= share {
-            pinned.extend(messages);
-            continue;
+    let total: f64 = pins.iter().map(|pin| count(&pin.messages)).sum();
+    let share = if total <= limit {
+        limit
+    } else {
+        limit / pins.len() as f64
+    };
+    let mut messages = Vec::new();
+    let mut ids = Vec::new();
+    for pin in pins {
+        if count(&pin.messages) <= share {
+            ids.extend(std::iter::repeat_n(pin.id.clone(), pin.messages.len()));
+            messages.extend(pin.messages);
+        } else {
+            let text = pin_text(&pin.messages);
+            messages.push(truncate_pin(pin.id.as_deref(), &text, share, model));
+            ids.push(pin.id);
         }
-        let text = messages
-            .iter()
-            .map(|message| match &message.content {
-                MessageContent::Text(text) => text.clone(),
-                MessageContent::Parts(parts) => parts
-                    .iter()
-                    .filter_map(|part| match part {
-                        MessagePart::Text { text, .. } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        pinned.push(truncate_pin(id, &text, share, model));
     }
-    pinned
+    Pinned {
+        messages,
+        ids: ids.into_iter().collect(),
+    }
+}
+
+/// The text of one input's messages, without the handle a previous
+/// truncation appended: the truncation here adds its own.
+fn pin_text(messages: &[Message]) -> String {
+    let text = messages
+        .iter()
+        .map(|message| match &message.content {
+            MessageContent::Text(text) => text.clone(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    match text.rfind("\n[input ") {
+        Some(index) if text[index + 1..].ends_with(']') && !text[index + 1..].contains('\n') => {
+            text[..index].to_owned()
+        }
+        _ => text,
+    }
 }
 
 /// One input's head and tail within `share`, with a marker naming the
-/// `input/message` event id Recall opens; a share too small for the marker
-/// keeps the marker alone.
-fn truncate_pin(id: &str, text: &str, share: f64, model: &dyn ContextModel) -> Message {
+/// `input/message` event id Recall opens when the input has one; a share too
+/// small for the marker keeps the marker alone.
+fn truncate_pin(id: Option<&str>, text: &str, share: f64, model: &dyn ContextModel) -> Message {
     let build = |keep: usize| {
+        let body = truncate_middle(text, keep);
         Message::text(
             Role::User,
-            format!("{}\n[input {id}]", truncate_middle(text, keep)),
+            match id {
+                Some(id) => format!("{body}\n[input {id}]"),
+                None => body,
+            },
         )
     };
     let count = |message: &Message| {
@@ -844,7 +1001,10 @@ fn truncate_pin(id: &str, text: &str, share: f64, model: &dyn ContextModel) -> M
             - model.count_tokens(&ModelRequest::new("", "", Vec::new()))
     };
     if count(&build(0)) > share {
-        return Message::text(Role::User, format!("[input {id}]"));
+        return match id {
+            Some(id) => Message::text(Role::User, format!("[input {id}]")),
+            None => build(0),
+        };
     }
     let (mut low, mut high) = (0, text.len());
     while low < high {
@@ -913,7 +1073,7 @@ fn resident(
     model: &dyn ContextModel,
     empty: f64,
     frame: f64,
-    turn_id: Option<&str>,
+    turn: Option<(&str, Option<&CarriedPins>)>,
     cut: &CompactionCut,
     replacement_size: f64,
 ) -> f64 {
@@ -925,7 +1085,7 @@ fn resident(
             .map(|entry| entry.message.clone())
             .collect(),
     ) - empty;
-    let pins = count(pinned_inputs(view, turn_id, &cut.retain_from, model)) - empty;
+    let pins = count(pinned_inputs(view, turn, &cut.retain_from, model).messages) - empty;
     frame + baseline + pins + replacement_size
 }
 
@@ -1065,7 +1225,7 @@ fn recovery_overflow(
 fn retain_limit(
     view: &View,
     model: &dyn ContextModel,
-    turn_id: Option<&str>,
+    turn: Option<(&str, Option<&CarriedPins>)>,
     cuts: &[CompactionCut],
     manual: bool,
     replacement_size: f64,
@@ -1088,7 +1248,7 @@ fn retain_limit(
     let frame = model.count_tokens(&frame);
     let budget = input_budget(model);
     let fits = cuts.iter().position(|cut| {
-        let resident_tokens = resident(view, model, empty, frame, turn_id, cut, replacement_size);
+        let resident_tokens = resident(view, model, empty, frame, turn, cut, replacement_size);
         tail[cut.entry] <= (RETAINED_SHARE * budget).min(BOUND_SHARE * budget - resident_tokens)
     });
     let latest_turn = manual

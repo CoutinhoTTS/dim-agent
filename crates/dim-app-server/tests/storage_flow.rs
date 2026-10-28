@@ -61,6 +61,7 @@ fn completed(retain_from: &str, summary: &str, through: u64) -> ContextCompactio
             .unwrap(),
             context_baseline: vec![],
             replacement_parts: None,
+            pinned_inputs: None,
         },
     }
 }

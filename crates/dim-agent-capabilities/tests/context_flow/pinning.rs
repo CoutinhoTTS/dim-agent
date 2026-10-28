@@ -4,12 +4,14 @@
 use super::*;
 use dim_agent_capabilities::history::summary_message;
 
-/// Emits one `wait` call carrying `text` when the last message asks for the
-/// tool; the wait holds the turn long enough for a steer to arrive while the
-/// tool runs. Echoes otherwise.
+/// Emits a `wait` call carrying `text` when the last message asks for the
+/// tool, at most twice: the wait holds the turn long enough for a steer to
+/// arrive while the tool runs. Echoes otherwise, so a compaction that keeps
+/// the pin — the turn's own words — cannot ask for the tool for ever.
 #[derive(Default)]
 struct ToolWait {
     text: std::sync::Mutex<String>,
+    waits: AtomicUsize,
 }
 impl ModelDriver for ToolWait {
     fn invoke(
@@ -19,7 +21,8 @@ impl ModelDriver for ToolWait {
         cancel: CancellationToken,
     ) -> HostFuture<'_, ModelStream> {
         let asks = matches!(&request.messages.last().unwrap().content,
-            MessageContent::Text(text) if text == "use the tool");
+            MessageContent::Text(text) if text == "use the tool")
+            && self.waits.fetch_add(1, Ordering::SeqCst) < 2;
         Box::pin(async move {
             if !asks {
                 return EchoModel.invoke(request, connection, cancel).await;
@@ -354,5 +357,277 @@ async fn a_compaction_with_no_running_turn_pins_nothing() {
     assert_eq!(data.command, Some(command));
     assert_eq!(replacement, vec![summary_message("short")]);
     assert_eq!(parts, None, "no pinned inputs, so no parts field");
+    agent.close().await.unwrap();
+}
+
+/// The marked input of a turn that compacts more than once.
+const MARKED: &str = "MARKED-INPUT-0001";
+
+/// Emits one `wait` call for each of its first `cycles` calls, then echoes:
+/// one turn long enough to compact more than once. The count is the model's
+/// own, so a compaction that drops a tool result from the context does not
+/// start the cycle again.
+struct WaitCycles {
+    cycles: usize,
+    calls: AtomicUsize,
+    text: String,
+}
+impl ModelDriver for WaitCycles {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        let done = self.calls.fetch_add(1, Ordering::SeqCst);
+        let (cycles, text) = (self.cycles, self.text.clone());
+        Box::pin(async move {
+            if done >= cycles {
+                return EchoModel.invoke(request, connection, cancel).await;
+            }
+            Ok(Box::pin(futures_util::stream::iter(vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "tool".into(),
+                }),
+                Ok(ModelChunk::ToolStart {
+                    id: "wait-call".into(),
+                    name: "wait".into(),
+                }),
+                Ok(ModelChunk::ToolUse(ToolCall {
+                    id: "wait-call".into(),
+                    name: "wait".into(),
+                    input: serde_json::from_value(
+                        serde_json::json!({ "millis": 300, "text": text }),
+                    )
+                    .unwrap(),
+                })),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "tool".into(),
+                    reason: ModelStopReason::ToolUse,
+                }),
+            ])) as ModelStream)
+        })
+    }
+}
+
+/// A session with the `wait` tool and full access, whose turns run `cycles`
+/// wait cycles over `700`-character results.
+async fn cycles_session(
+    cycles: usize,
+    planned: Option<f64>,
+    renderer: HistoryRenderer,
+) -> (dim_agent_runtime::Agent, dim_agent_runtime::Session) {
+    let model = Arc::new(WaitCycles {
+        cycles,
+        calls: AtomicUsize::new(0),
+        text: "p".repeat(700),
+    });
+    let agent = builder_with_context(
+        model,
+        renderer,
+        Context {
+            threshold: Some(3_000.),
+            replacement: planned,
+            ..Context::default()
+        },
+    )
+    .build();
+    let session = agent
+        .create_session(SessionConfig {
+            tools: Some(vec!["wait".into()]),
+            permission_policy: dim_agent_runtime::PermissionPolicy {
+                preset: dim_agent_runtime::PermissionPreset::FullAccess,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    (agent, session)
+}
+
+/// Every completed compaction's replacement, in order.
+fn replacements(events: &[Arc<AgentEvent>]) -> Vec<Vec<Message>> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                outcome: ContextCompactionResult::Completed { replacement, .. },
+                ..
+            }) => Some(replacement.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The steer the turn consumes between two compactions.
+fn steer() -> String {
+    format!("STEER-MARKER {}", "s".repeat(260))
+}
+
+/// The replacements as one string, for a containment check.
+fn text(messages: &[Message]) -> String {
+    serde_json::to_string(messages).unwrap()
+}
+
+/// Waits until `done` holds for the branch's committed events.
+async fn until(
+    session: &dim_agent_runtime::Session,
+    done: impl Fn(&[Arc<AgentEvent>]) -> bool,
+) -> Vec<Arc<AgentEvent>> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let events = session.history("main", None).await.unwrap();
+            if done(&events) {
+                return events;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the expected event")
+}
+
+/// The turn's input is pinned by the first compaction, and the next
+/// compaction carries that pin although the recovery snapshot resumes after
+/// the turn's `turn/start`: a snapshot is only a cache, so both runs produce
+/// the same replacements (ContextCompaction §5.9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_running_turns_pins_do_not_depend_on_a_snapshot() {
+    let run = |renderer| async move {
+        let (agent, session) = cycles_session(6, None, renderer).await;
+        session
+            .submit(MARKED.into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = session.history("main", None).await.unwrap();
+        agent.close().await.unwrap();
+        replacements(&events)
+    };
+    let cached = run(HistoryRenderer::default()).await;
+    let replayed = run(HistoryRenderer {
+        encode_checkpoint: |_, _| Err("snapshot encoding disabled".into()),
+        ..HistoryRenderer::default()
+    })
+    .await;
+    assert_eq!(cached, replayed, "a snapshot is only a cache");
+    assert!(cached.len() >= 2, "the turn compacts twice: {cached:?}");
+    assert!(
+        cached.iter().all(
+            |replacement| replacement
+                .iter()
+                .any(|message| serde_json::to_string(message).unwrap().contains(MARKED))
+        ),
+        "the running turn's input is pinned by every compaction: {cached:?}"
+    );
+}
+
+/// A steer the turn consumes between two compactions is pinned after the pin
+/// carried from the first (ContextCompaction §5.9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_steer_after_a_compaction_is_pinned_after_the_carried_pin() {
+    let (agent, session) = cycles_session(8, Some(1_300.), HistoryRenderer::default()).await;
+    session
+        .submit(MARKED.into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let events = until(&session, |events| !replacements(events).is_empty()).await;
+    let at = events.len();
+    until(&session, |events| {
+        events[at..]
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ToolCall(_)))
+    })
+    .await;
+    session
+        .submit(steer(), InputMode::Steer, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    let all = replacements(&events);
+    let second = all
+        .iter()
+        .find(|replacement| text(replacement).contains("STEER-MARKER"))
+        .unwrap_or_else(|| panic!("a compaction after the steer: {all:?}"));
+    assert_eq!(second[0], summary_message("short"));
+    let carried = second
+        .iter()
+        .position(|message| text(std::slice::from_ref(message)).contains(MARKED))
+        .expect("the carried pin");
+    let steer = second
+        .iter()
+        .position(|message| text(std::slice::from_ref(message)).contains("STEER-MARKER"))
+        .expect("the steer's pin");
+    assert_eq!(
+        (carried, steer),
+        (1, 2),
+        "the carried pin comes first, then the steer the turn consumed since: {second:?}"
+    );
+    agent.close().await.unwrap();
+}
+
+/// A merged pin list over `PINNED_SHARE × B` is truncated equally, and each
+/// input keeps the handle naming its own `input/message` id, the carried one
+/// included (ContextCompaction §5.9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_merged_pin_over_the_share_keeps_each_inputs_handle() {
+    // Each of the two inputs fits the share alone, so the first compaction
+    // pins the turn's input verbatim and without a handle; together they
+    // exceed it, and both keep their head and tail with their own id.
+    let (agent, session) = cycles_session(8, Some(1_300.), HistoryRenderer::default()).await;
+    session
+        .submit(
+            format!("{MARKED} {}", "m".repeat(260)),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    let events = until(&session, |events| !replacements(events).is_empty()).await;
+    let at = events.len();
+    until(&session, |events| {
+        events[at..]
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ToolCall(_)))
+    })
+    .await;
+    session
+        .submit(steer(), InputMode::Steer, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = session.history("main", None).await.unwrap();
+    let all = replacements(&events);
+    let second = all
+        .iter()
+        .find(|replacement| text(replacement).contains("STEER-MARKER"))
+        .unwrap_or_else(|| panic!("a compaction after the steer: {all:?}"));
+    let ids: Vec<String> = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::InputMessage(_)))
+        .map(|event| event.id.clone())
+        .collect();
+    assert_eq!(second.len(), 3, "{second:?}");
+    assert_eq!(second[0], summary_message("short"));
+    let carried = serde_json::to_string(&second[1]).unwrap();
+    let steer = serde_json::to_string(&second[2]).unwrap();
+    assert!(
+        carried.contains(MARKED),
+        "the carried pin keeps its head: {carried}"
+    );
+    assert!(
+        carried.contains(&format!("[input {}]", ids[0])),
+        "the carried pin names its own input: {carried}"
+    );
+    assert!(
+        steer.contains("STEER-MARKER"),
+        "the steer keeps its head: {steer}"
+    );
+    assert!(
+        steer.contains(&format!("[input {}]", ids[1])),
+        "the steer names its own input: {steer}"
+    );
     agent.close().await.unwrap();
 }

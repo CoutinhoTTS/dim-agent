@@ -371,6 +371,15 @@ pub enum ContextCompactionResult {
             deserialize_with = "crate::optional_non_null"
         )]
         replacement_parts: Option<ReplacementParts>,
+        /// The `input/message` id of each pinned message, in order, so a
+        /// later compaction can name an input it carries and must truncate
+        /// (§5.9). Absent reads as no carried ids.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::optional_non_null"
+        )]
+        pinned_inputs: Option<Vec<String>>,
     },
     Skipped {
         reason: String,

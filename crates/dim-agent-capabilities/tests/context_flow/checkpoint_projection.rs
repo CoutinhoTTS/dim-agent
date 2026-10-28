@@ -153,6 +153,7 @@ pub(crate) fn completed(
             diagnostics: diagnostics(),
             context_baseline,
             replacement_parts: None,
+            pinned_inputs: None,
         },
     })
 }
