@@ -8682,6 +8682,7 @@
         "path InputBlock",
         "path InputBlock::Raw",
         "path InputMessageData",
+        "path InputMode::Append",
         "path ModelOutputOutcome::Cancelled",
         "path ModelOutputOutcome::Completed",
         "path ModelOutputOutcome::Failed",

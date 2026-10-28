@@ -1193,6 +1193,48 @@ fn steer(text: &str) -> EventKind {
     EventKind::InputMessage(InputMessageData::text(text, Some(InputMode::Steer)))
 }
 
+/// A `dim-state` input Prompt writes as an Append when a turn's end changes
+/// context (`prompt.rs`, `context_changes`).
+fn state_change(source: &str, body: &str) -> EventKind {
+    EventKind::InputMessage(InputMessageData {
+        blocks: vec![context_block::raw(
+            format!(
+                "<dim-state source=\"{}\">{body}</dim-state>",
+                context_block::attr(source)
+            ),
+            Some(format!(
+                "state:{source}:{{\"kind\":\"branch\",\"timeline\":\"main\"}}"
+            )),
+        )],
+        mode: Some(InputMode::Append),
+        ..InputMessageData::default()
+    })
+}
+
+/// Goal's continuation input (`goal.ts`, `writes.continuation`): a queued
+/// `dim-goal` block with no user content and no line write.
+fn continuation() -> EventKind {
+    EventKind::InputMessage(InputMessageData {
+        submission_id: Some("goal:continuation".into()),
+        blocks: vec![context_block::raw(
+            context_block::element(
+                "dim-goal",
+                &[
+                    ("kind", "continuation"),
+                    ("count", "1"),
+                    ("limit", "20"),
+                    ("after", "12"),
+                    ("branch", "main"),
+                ],
+                "Continue working toward the active goal for branch main. If it is completed or blocked, call goal_update. If you are working on a delegated sub-task started from branch main, do not call goal_update.",
+            ),
+            None,
+        )],
+        mode: Some(InputMode::Queue),
+        ..InputMessageData::default()
+    })
+}
+
 fn consumed(input: &str) -> EventKind {
     EventKind::InputConsumed(InputConsumedData {
         input_id: input.into(),
@@ -2247,6 +2289,88 @@ fn a_turn_opened_by_a_line_message_is_indexed_by_that_write_not_by_a_pending_blo
     );
     assert!(
         line_of(&page, &message).contains("line main: \"start now\""),
+        "{page}"
+    );
+}
+
+#[test]
+// §14 1.
+fn a_turn_a_continuation_opened_is_indexed_by_that_block_not_by_the_append_ahead_of_it() {
+    let mut recorded = Recorded::new();
+    recorded.at(18, 0);
+    // The previous turn's end changed context, so Prompt wrote a `dim-state`
+    // Append input, and Goal then queued its continuation. The turn consumes
+    // both, the Append first.
+    let state = recorded.push(state_change("dim/skills/list", "- a: user a"));
+    let continuation = recorded.push(continuation());
+    let turn = recorded.push(turn_start("t1"));
+    recorded.push(consumed(&state));
+    recorded.push(consumed(&continuation));
+    recorded.push(model_start("t1", "r1"));
+    recorded.push(text_delta("t1", "r1", "still on it"));
+    recorded.push(model_end("t1", "r1", output_completed()));
+    recorded.push(turn_ends("t1", completed_turn()));
+
+    let (page, error) = recorded.answer("t1", json!({}));
+    assert!(!error, "{page}");
+    let line = line_of(&page, &turn);
+    assert!(
+        line.contains("turn: dim-goal kind=continuation count=1 limit=20 after=12 branch=main"),
+        "{line}"
+    );
+    assert!(!line.contains("dim-state"), "{line}");
+
+    // The state block is still a line of the turn.
+    let (page, error) = recorded.answer("t1", json!({ "open": turn }));
+    assert!(!error, "{page}");
+    assert!(
+        line_of(&page, &state).contains("dim-state source=dim/skills/list (current)"),
+        "{page}"
+    );
+    assert!(
+        line_of(&page, &continuation)
+            .contains("dim-goal kind=continuation count=1 limit=20 after=12 branch=main"),
+        "{page}"
+    );
+}
+
+#[test]
+// §14 1.
+fn a_steer_read_during_the_turn_does_not_title_it() {
+    let mut recorded = Recorded::new();
+    recorded.at(18, 30);
+    let state = recorded.push(state_change("dim/skills/list", "- a: user a"));
+    let continuation = recorded.push(continuation());
+    let turn = recorded.push(turn_start("t1"));
+    recorded.push(consumed(&state));
+    recorded.push(consumed(&continuation));
+    recorded.push(model_start("t1", "r1"));
+    recorded.push(text_delta("t1", "r1", "working"));
+    recorded.push(model_end("t1", "r1", output_completed()));
+
+    // The user steers after the first model step: the input joins the turn
+    // but does not open it (§3.6).
+    let steered = recorded.push(steer("also check the logs"));
+    recorded.push(consumed(&steered));
+    recorded.push(model_start("t1", "r2"));
+    recorded.push(text_delta("t1", "r2", "on it"));
+    recorded.push(model_end("t1", "r2", output_completed()));
+    recorded.push(turn_ends("t1", completed_turn()));
+
+    let (page, error) = recorded.answer("t1", json!({}));
+    assert!(!error, "{page}");
+    let line = line_of(&page, &turn);
+    assert!(
+        line.contains("turn: dim-goal kind=continuation count=1 limit=20 after=12 branch=main"),
+        "{line}"
+    );
+    assert!(!line.contains("user"), "{line}");
+
+    // The steer is still told as the user speaking while the model worked.
+    let (page, error) = recorded.answer("t1", json!({ "open": turn }));
+    assert!(!error, "{page}");
+    assert!(
+        line_of(&page, &steered).contains("user (while you were working): also check the logs"),
         "{page}"
     );
 }
