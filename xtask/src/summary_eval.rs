@@ -5,6 +5,7 @@
 //! output goes outside the repository.
 use crate::app_server;
 use dim_agent_capabilities::{
+    context_block,
     context_model::ProductContextModel,
     file_storage::FileStorage,
     history::{HistoryEntry, summary_message},
@@ -1022,13 +1023,18 @@ impl Judged {
 
 /// The probe outcomes of one run: `exact` probes are mechanical, `fact` and
 /// `absent` probes are judged on the summary alone (ContextCompaction §13.4).
+/// An `exact` probe is compared in the envelope's escaping, which is what the
+/// summary is stored in: the probe goes through the producer's table
+/// (`context_block::text`) and the summary is left alone, so there is one
+/// escape table rather than an inverse of it here.
 fn probe_records(probes: &[Probe], summary: &str, judged: &Judged) -> Vec<Value> {
     probes
         .iter()
         .map(|probe| {
             let (verdict, quote) = match probe.kind {
                 ProbeKind::Exact => (
-                    if normalize(&unescape(summary)).contains(&normalize(&probe.text)) {
+                    if normalize(summary).contains(&normalize(&context_block::text(&probe.text)))
+                    {
                         "present"
                     } else {
                         "absent"
@@ -1188,30 +1194,6 @@ fn parse_judgements(text: &str) -> Option<Vec<Judgement>> {
 /// Whitespace-normalized text for the exact probes.
 fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// The inverse of the escaping the summary envelope applies to the summary's
-/// text (`context_block::text`), one level: the summary as the model wrote it.
-fn unescape(text: &str) -> String {
-    const ENTITIES: [(&str, char); 3] = [("&lt;", '<'), ("&gt;", '>'), ("&amp;", '&')];
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(index) = rest.find('&') {
-        out.push_str(&rest[..index]);
-        rest = &rest[index..];
-        match ENTITIES.iter().find(|(entity, _)| rest.starts_with(entity)) {
-            Some((entity, value)) => {
-                out.push(*value);
-                rest = &rest[entity.len()..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 /// The arm's metrics over its cases and runs (ContextCompaction §13.4).
@@ -1609,6 +1591,25 @@ mod tests {
         }
     }
 
+    /// The model the strategy tests run on: one target, its capabilities
+    /// known, and no configuration of its own.
+    fn fake_selection() -> ModelSelection {
+        let snapshot: ModelCapabilitySnapshot = serde_json::from_value(json!({
+            "target": {"providerId": "fake", "modelId": "fake"},
+            "capabilities": {"modalities": ["text"], "toolCalling": true, "streaming": true,
+                "structuredOutput": false, "vision": false, "audio": false, "reasoning": false,
+                "contextWindow": 128_000, "maxOutputTokens": 16_384}
+        }))
+        .unwrap();
+        ModelSelection {
+            provider_id: "fake".into(),
+            model_id: "fake".into(),
+            capability_snapshot: Some(snapshot),
+            config: None,
+            metadata: None,
+        }
+    }
+
     /// A chain hands each step the previous step's completed replacement
     /// unchanged — one summary envelope around one marker, the way a
     /// committed compaction becomes the next checkpoint (ContextCompaction
@@ -1629,20 +1630,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let snapshot: ModelCapabilitySnapshot = serde_json::from_value(json!({
-            "target": {"providerId": "fake", "modelId": "fake"},
-            "capabilities": {"modalities": ["text"], "toolCalling": true, "streaming": true,
-                "structuredOutput": false, "vision": false, "audio": false, "reasoning": false,
-                "contextWindow": 128_000, "maxOutputTokens": 16_384}
-        }))
-        .unwrap();
-        let selection = ModelSelection {
-            provider_id: "fake".into(),
-            model_id: "fake".into(),
-            capability_snapshot: Some(snapshot),
-            config: None,
-            metadata: None,
-        };
+        let selection = fake_selection();
         let cancel = CancellationToken::new();
         let prepared = Prepared::new(case, &selection, &cancel).await.unwrap();
         let run = run_case(&strategy, &prepared, &cancel).await;
@@ -1692,8 +1680,9 @@ mod tests {
     }
 
     /// An `exact` probe matches the summary as the model wrote it: the stored
-    /// replacement is the escaped envelope, and a probe that contains `&`,
-    /// `<` or `>` must still match its text (ContextCompaction §13.4).
+    /// replacement is the escaped envelope, so the probe is escaped with the
+    /// producer's table (`&`, `<`, `>`, and no other character) and the
+    /// summary is left alone (ContextCompaction §13.4).
     #[tokio::test]
     async fn exact_probes_match_the_text_the_model_wrote() {
         struct Reply;
@@ -1704,7 +1693,7 @@ mod tests {
                 _: ModelConnection,
                 _: CancellationToken,
             ) -> HostFuture<'_, ModelStream> {
-                let text = "The runner returns Box<dyn Error> and keeps a && b verbatim.";
+                let text = "The runner returns Box<dyn Error>, keeps a && b, and reads \"--flag\" as a quote.";
                 Box::pin(async move {
                     Ok(Box::pin(futures_util::stream::iter(vec![
                         Ok(ModelChunk::MessageStart {
@@ -1733,26 +1722,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let snapshot: ModelCapabilitySnapshot = serde_json::from_value(json!({
-            "target": {"providerId": "fake", "modelId": "fake"},
-            "capabilities": {"modalities": ["text"], "toolCalling": true, "streaming": true,
-                "structuredOutput": false, "vision": false, "audio": false, "reasoning": false,
-                "contextWindow": 128_000, "maxOutputTokens": 16_384}
-        }))
-        .unwrap();
-        let selection = ModelSelection {
-            provider_id: "fake".into(),
-            model_id: "fake".into(),
-            capability_snapshot: Some(snapshot),
-            config: None,
-            metadata: None,
-        };
+        let selection = fake_selection();
         let cancel = CancellationToken::new();
         let prepared = Prepared::new(case, &selection, &cancel).await.unwrap();
         let run = run_case(&strategy, &prepared, &cancel).await;
         let summary = run.summary().expect("the reply is a summary");
         assert!(
-            !summary.contains("Box<dyn Error>"),
+            !summary.contains("Box<dyn Error>") && !summary.contains("a && b"),
             "the envelope escaped the summary: {summary}"
         );
         let probes = vec![
@@ -1768,9 +1744,16 @@ mod tests {
                 text: "a && b".into(),
                 item: None,
             },
+            Probe {
+                id: "quote".into(),
+                kind: ProbeKind::Exact,
+                text: "reads \"--flag\" as a quote".into(),
+                item: None,
+            },
         ];
         let records = probe_records(&probes, &summary, &Judged::NoSummary);
         assert_eq!(records[0]["verdict"], "present", "{records:?}");
         assert_eq!(records[1]["verdict"], "present", "{records:?}");
+        assert_eq!(records[2]["verdict"], "present", "{records:?}");
     }
 }
