@@ -33,7 +33,7 @@
 | --- | --- | --- | --- | --- |
 | 1 常驻状态 | 带 key 的块：规则、Goal、`branch:line` 身份、技能 | 每次压缩后重放带 key 的基线 | 由各自所有者限定；替换，不累积 | 永久 |
 | 2 当前工作（原话） | (a) 正在进行的这一轮已经消费的每个输入，不论由谁产生：任务、中途 steer、其他插件写入的输入。带 key 的块不在此列：带 key 的基线已经会重放它们，再钉住就重复了。(b) 最近的尾部 | (a) 切点落在进行中的轮次里时，压缩把这些输入原样拷进替换内容。(b) 尾部规则：在上限允许的范围内保留最近的轮次 | (a) 总共至多 `0.1 × B`。超出时，单个输入保留头尾加它的 Recall 把手，即事件 id。(b) 至多 `0.25 × B`；为达到 §5 的上限需要时可以更少 | 正在进行的轮次，以及最近的尾部 |
-| 3a 确定性清单 | 工具通过 §7.4 的通用方式声明出来的效果——写过的文件、命令及其退出状态——除此之外没有别的。没有工具声明之前它是空的 | 由压缩从 Timeline 事实生成，不由模型书写 | 有界；其余可通过 Recall 取回 | 逐次滚动 |
+| 3a 确定性清单 | 工具通过 §7.4 的通用方式声明出来的效果——写过的文件、命令及其退出状态——除此之外没有别的。没有工具声明之前它是空的；在那之前，改动过的文件只能以第 3b 类摘要保留的准确标识在压缩后存续 | 由压缩从 Timeline 事实生成，不由模型书写 | 有界；其余可通过 Recall 取回 | 逐次滚动 |
 | 3b 状态摘要 | 只写事实说不出的东西：正在生效的任务或目标；仍然有效的约束和偏好；已经定下的决定及其理由；已排除的做法及原因；与用户之间未决的事项（给过的选项、待回答的问题）；当前的判断；下一步；正在使用的准确标识（路径、符号、命令、错误） | 模型写的摘要。每次压缩把仍然有效的带过来，丢掉已被取代的，把已经做完的工作缩成一行或删掉 | 有界；目标长度由 [#170](https://github.com/arcships/dim/issues/170) 决定（[ContextCompaction §13.3](plugins/ContextCompaction.md#133-目标长度)） | 永久，但取决于模型的判断 |
 | 4 其余一切 | 原话、工具输出、探索过程 | [Recall](plugins/Recall.md) 把原始事件读回来 | 不占上下文 | 永久，按需 |
 
@@ -89,6 +89,8 @@
 
 ### 7.1 ContextCompaction
 
+**所有者：** ContextCompaction；在 [#528](https://github.com/arcships/dim/issues/528) 下实现。
+
 - **第 2 类 (a) 的钉住。** 切点落在进行中的轮次里时，替换内容原样带上这一轮消费过的每个输入，不论由谁产生，总量在 `0.1 × B` 以内。带 key 的块不钉住，因为带 key 的基线会重放它们。超出上限时，单个输入保留头尾和它的事件 id 把手。
 - **第 3a 类的清单。** 用工具通过 §7.4 的通用方式声明出的效果生成，来自 Timeline 事实而不是模型。不读任何工具的输入 schema：工具的效果只能通过它的声明进入清单。需要这种声明方式时，把需求提给它的所有者（§7.4）。
 - **第 3b 类的结构。** 摘要带上 §3 的必要部分，首先是正在生效的任务或目标，丢掉已被取代的内容，把已经做完的工作缩成一行或删掉。
@@ -100,21 +102,31 @@
 
 ### 7.2 Recall
 
+**所有者：** Recall；在 [#529](https://github.com/arcships/dim/issues/529) 下实现。
+
 工具描述要说明：Recall 读的是压缩之前的历史，钉住的输入里带的把手就是它的 id。今天描述只说它回忆本次对话中更早发生的事，没说压缩不是它的边界（[recall.rs](../../../crates/dim-agent-capabilities/src/recall.rs)）；这个行为本来就是 [Recall §1](plugins/Recall.md#1-问题与范围) 的约定。
 
 ### 7.3 WorkspaceTools（FileReads）
 
-当压缩把某个文件的读取结果切出上下文后，这个文件的绑定就不再算数：模型必须重新读这个文件才能覆盖写。绑定是"这条分支上模型看过这个文件的什么"，覆盖写需要绑定，而绑定放在内存里、压缩从不碰它（[file_reads.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/file_reads.rs)）。怎么做由所有者设计，例如折叠 `context/compaction`。
+**所有者：** WorkspaceTools（FileReads）；在 [#524](https://github.com/arcships/dim/issues/524) 下实现。
+
+覆盖写已有文件的 `write` 需要一次仍在上下文里的读取。一次已完成的压缩把绑定该文件的那个操作切出去之后，`write` 会拒绝，直到重新读到这个文件的任意一部分。`edit` 保留它的绑定，因为它用精确的 `oldText` 匹配核对内容本身。留在尾部里的读取仍然算数。绑定是"这条分支上模型看过这个文件的什么"，绑定放在内存里、压缩从不碰它（[file_reads.rs](../../../crates/dim-agent-capabilities/src/workspace_tools/file_reads.rs)）。具体怎么判断由所有者设计，依据是分支自己的事实。
 
 ### 7.4 ToolRegistry（工具合同）
 
-工具想让自己的效果进清单，就通过一种通用的方式声明，例如它写过哪些文件、跑过哪些命令及其退出状态。提供这种方式是这位所有者的设计；ContextCompaction 只提出需求，不设计它。在这种方式出现之前，清单是空的。
+**所有者：** ToolRegistry（工具合同）；在 [#527](https://github.com/arcships/dim/issues/527) 下实现。
+
+工具想让自己的效果进清单，就通过一种通用的方式声明，例如它写过哪些文件、跑过哪些命令及其退出状态。提供这种方式是这位所有者的设计；ContextCompaction 只提出需求，不设计它。在工具通过它声明自己的效果之前，清单是空的。
 
 ### 7.5 CLI 与 TUI
+
+**所有者：** CLI 与 TUI；在 [#530](https://github.com/arcships/dim/issues/530) 下实现。
 
 §4 的清单，仅此而已。这一项补上的缺口是：投影把两个压缩事件都丢掉了，所以行、运行状态、结果和摘要都到不了用户（[projection.rs:511](../../../crates/dim-cli/src/projection.rs)）；`/usage` 只在被问时回答，用量增长过程中没有任何提示（[commands.rs:151](../../../crates/dim-cli/src/ui/commands.rs)、[session_host.rs:1216](../../../crates/dim-cli/src/session_host.rs)）；没有任何客户端调用已经存在的 `session.context.compact` 方法（[context_methods.rs:46](../../../crates/dim-agent-capabilities/src/context_methods.rs)）；用户只能通过导出读到记下的摘要，导出会写入原始的 `context/compaction` 事件及其 `replacement`（[export.rs](../../../crates/dim-cli/src/export.rs)、[storage/export.rs:34](../../../crates/dim-app-server/src/storage/export.rs)）。
 
 ### 7.6 摘要评估（#170）
+
+**所有者：** 摘要评估；在 [#170](https://github.com/arcships/dim/issues/170) 下实现。
 
 [#170](https://github.com/arcships/dim/issues/170) 要在 [ContextCompaction §13.4](plugins/ContextCompaction.md#134-评估) 的运行器里补上：
 
@@ -123,6 +135,8 @@
 - **(c) §6 的 3b 探针**，包括正在生效的任务（§3）。
 
 ### 7.7 面向模型的提示词（#429）
+
+**所有者：** 面向模型的提示词；在 [#429](https://github.com/arcships/dim/issues/429) 下实现。
 
 摘要提示词的措辞是产品策略。改动它要走 §6 的相对评估。提示词就是 [summary_strategy.rs:19](../../../crates/dim-agent-capabilities/src/summary_strategy.rs) 里那份固定的文本。
 
