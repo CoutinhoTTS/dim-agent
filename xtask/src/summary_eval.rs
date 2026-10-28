@@ -1028,7 +1028,7 @@ fn probe_records(probes: &[Probe], summary: &str, judged: &Judged) -> Vec<Value>
         .map(|probe| {
             let (verdict, quote) = match probe.kind {
                 ProbeKind::Exact => (
-                    if normalize(summary).contains(&normalize(&probe.text)) {
+                    if normalize(&unescape(summary)).contains(&normalize(&probe.text)) {
                         "present"
                     } else {
                         "absent"
@@ -1188,6 +1188,30 @@ fn parse_judgements(text: &str) -> Option<Vec<Judgement>> {
 /// Whitespace-normalized text for the exact probes.
 fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The inverse of the escaping the summary envelope applies to the summary's
+/// text (`context_block::text`), one level: the summary as the model wrote it.
+fn unescape(text: &str) -> String {
+    const ENTITIES: [(&str, char); 3] = [("&lt;", '<'), ("&gt;", '>'), ("&amp;", '&')];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find('&') {
+        out.push_str(&rest[..index]);
+        rest = &rest[index..];
+        match ENTITIES.iter().find(|(entity, _)| rest.starts_with(entity)) {
+            Some((entity, value)) => {
+                out.push(*value);
+                rest = &rest[entity.len()..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The arm's metrics over its cases and runs (ContextCompaction §13.4).
@@ -1665,5 +1689,88 @@ mod tests {
                 "the report and the judge read the completed replacement"
             );
         }
+    }
+
+    /// An `exact` probe matches the summary as the model wrote it: the stored
+    /// replacement is the escaped envelope, and a probe that contains `&`,
+    /// `<` or `>` must still match its text (ContextCompaction §13.4).
+    #[tokio::test]
+    async fn exact_probes_match_the_text_the_model_wrote() {
+        struct Reply;
+        impl ModelDriver for Reply {
+            fn invoke(
+                &self,
+                _: Arc<ModelRequest>,
+                _: ModelConnection,
+                _: CancellationToken,
+            ) -> HostFuture<'_, ModelStream> {
+                let text = "The runner returns Box<dyn Error> and keeps a && b verbatim.";
+                Box::pin(async move {
+                    Ok(Box::pin(futures_util::stream::iter(vec![
+                        Ok(ModelChunk::MessageStart {
+                            message_id: "reply".into(),
+                        }),
+                        Ok(ModelChunk::Text(text.into())),
+                        Ok(ModelChunk::MessageStop {
+                            message_id: "reply".into(),
+                            reason: ModelStopReason::EndTurn,
+                        }),
+                    ])) as ModelStream)
+                })
+            }
+        }
+        let cases = read_cases(&cases_directory()).unwrap();
+        let case = cases
+            .iter()
+            .find(|case| case.id == "code")
+            .expect("the code case");
+        let driver = Arc::new(Reply);
+        let strategy = SummaryStrategy::new(
+            Arc::new(ModelHost(driver)),
+            Arc::new(ProviderConnectionResolver(Arc::new(Local))),
+            None,
+            ProductSummaryStrategyConfig::default(),
+        )
+        .await
+        .unwrap();
+        let snapshot: ModelCapabilitySnapshot = serde_json::from_value(json!({
+            "target": {"providerId": "fake", "modelId": "fake"},
+            "capabilities": {"modalities": ["text"], "toolCalling": true, "streaming": true,
+                "structuredOutput": false, "vision": false, "audio": false, "reasoning": false,
+                "contextWindow": 128_000, "maxOutputTokens": 16_384}
+        }))
+        .unwrap();
+        let selection = ModelSelection {
+            provider_id: "fake".into(),
+            model_id: "fake".into(),
+            capability_snapshot: Some(snapshot),
+            config: None,
+            metadata: None,
+        };
+        let cancel = CancellationToken::new();
+        let prepared = Prepared::new(case, &selection, &cancel).await.unwrap();
+        let run = run_case(&strategy, &prepared, &cancel).await;
+        let summary = run.summary().expect("the reply is a summary");
+        assert!(
+            !summary.contains("Box<dyn Error>"),
+            "the envelope escaped the summary: {summary}"
+        );
+        let probes = vec![
+            Probe {
+                id: "error-type".into(),
+                kind: ProbeKind::Exact,
+                text: "Box<dyn Error>".into(),
+                item: None,
+            },
+            Probe {
+                id: "and".into(),
+                kind: ProbeKind::Exact,
+                text: "a && b".into(),
+                item: None,
+            },
+        ];
+        let records = probe_records(&probes, &summary, &Judged::NoSummary);
+        assert_eq!(records[0]["verdict"], "present", "{records:?}");
+        assert_eq!(records[1]["verdict"], "present", "{records:?}");
     }
 }
