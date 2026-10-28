@@ -236,11 +236,16 @@ it:
 
 A turn is the span of one `turn_id` from `turn/start` to `turn/end`; the inputs it consumed belong
 to it. Things outside any turn (a compaction between turns, the line opening, the Session fork)
-are lines of their own between turns. A turn's line in the index gives its first user text (or,
-for a turn opened by an input without user text, such as a Goal continuation or a message from
-another line, that input's `<blocks>` or the line write it carries (§3.4)), the tools it called
-with counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`). A turn
-without `turn/end` in the pinned history is `in progress` when it is the calling turn, and
+are lines of their own between turns. A turn's line in the index gives its first user text, the
+tools it called with counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`).
+The inputs that open a turn are the ones it consumed before its first model request; an input read
+later, such as a steer while it works, does not open it. The line gives the first user text among
+the opening inputs; when none of them carries user text (a Goal continuation, a message from
+another line), the first of them that carries a line write (§3.4), or else the first one's
+`<blocks>`. A turn with no opening input has none of these: its line reads
+`turn: no opening input`.
+
+A turn without `turn/end` in the pinned history is `in progress` when it is the calling turn, and
 `continued on the parent line` when it is the parent's turn that a child's inherited prefix cuts
 into. The calling `recall` call is itself in the calling turn, with the ending `no result yet`.
 
@@ -330,8 +335,10 @@ the tool name exactly; a name nothing called gives `Nothing matches …`.
 
 `open` with `about`, `tool` or `before`, and `offset` without `open`, are argument errors.
 ToolExecutor does not check input against the schema, so the handler checks its own arguments, as
-`wait` does, and returns `ToolResult::error` for a wrong type, an empty string, an `about` longer
-than 200 characters or an unknown field.
+`wait` does, and returns `ToolResult::error` for a wrong type, a string that is empty or only
+whitespace, an `about` longer than 200 characters or an unknown field. Every string argument is
+a set of words, a tool name or an id, so a value with no non-whitespace character is empty for
+each of them.
 
 ### 5.3 Paging
 
@@ -384,7 +391,7 @@ input, then the full result; then `Continue: open=3f9a2c1b-6e4d-4f80-b2a9-0c7e5d
 | --- | --- |
 | Turn index | `Earlier: before=<id>. Open one: open=<id>.` or `Nothing earlier.` |
 | Search | `More: before=<id>.` or `No more.`; nothing at all: `Nothing matches <the filters, restated>.` |
-| A turn | `End of turn. Open one: open=<id>.` or `More of this turn: open=<id> offset=<next>.` |
+| A turn | `End of turn. Open one: open=<id>.`, `More of this turn: open=<id> offset=<next>.`, or `Nothing in this turn.` for a turn with no lines |
 | One thing | `Continue: open=<id> offset=<next>.` or `End.` |
 
 Errors (`ToolResult::error`) say how to fix the call:
@@ -393,7 +400,7 @@ Errors (`ToolResult::error`) say how to fix the call:
 | --- | --- |
 | `open` with `about`, `tool` or `before` | `recall: open shows one turn or thing; drop about, tool and before.` |
 | `offset` without `open` | `recall: offset needs open.` |
-| Wrong type, empty string, `about` over 200 characters, unknown field | `recall: <field> must be <what>.` |
+| Wrong type, empty or whitespace-only string, `about` over 200 characters, unknown field | `recall: <field> must be <what>.` |
 | `open` or `before` is not the id of a line | `No turn or line has id <id>.` |
 | `offset` past the end of a turn or a thing | `Turn <id> has <n> lines.` / `<id> has <len> characters.` |
 

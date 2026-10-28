@@ -140,7 +140,9 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 
 ### 3.6 轮次
 
-一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、开通本行、Session fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本（由没有用户文本的输入开启的一轮，例如 Goal 续行或其他行发来的消息开启的一轮，给出该输入的 `<blocks>` 或它携带的行写（§3.4））、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。固定历史中没有 `turn/end` 的一轮：若是发起调用的这一轮，结局为 `in progress`；若是子分支继承前缀截断的父分支那一轮，结局为 `continued on the parent line`。发起调用的这次 `recall` 本身也在这一轮中，结局为 `no result yet`。
+一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、开通本行、Session fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。开启一轮的输入是它在第一次模型请求之前消费的那些；之后才读到的输入，例如它工作时到达的 steer，不开启这一轮。这一行给出开启它的输入中最先的一段用户文本；这些输入都没有用户文本时（Goal 续行、其他行发来的消息），给出其中第一个携带行写的输入（§3.4），否则给出第一个输入的 `<blocks>`。没有开启输入的轮次没有这些：它的索引行读作 `turn: no opening input`。
+
+固定历史中没有 `turn/end` 的一轮：若是发起调用的这一轮，结局为 `in progress`；若是子分支继承前缀截断的父分支那一轮，结局为 `continued on the parent line`。发起调用的这次 `recall` 本身也在这一轮中，结局为 `no result yet`。
 
 索引按最近在前列出各轮和轮次之间的行。检索按最近在前列出所有轮次中命中的行。
 
@@ -209,7 +211,7 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 
 `before` 是固定历史中的一个位置：结果从事件位于该 id 的事件之前的最新条目开始。它接受任何一行的 id，所以结果返回的 `before=` 无论指向一轮、轮次之间的一行还是命中的一行都能用。`tool` 精确比较工具名；没有被调用过的名字给出 `Nothing matches …`。
 
-`open` 与 `about`、`tool` 或 `before` 同时出现，或没有 `open` 却给了 `offset`，都是参数错误。ToolExecutor 不按 schema 检查输入，所以处理函数像 `wait` 一样自己检查参数，对类型错误、空字符串、超过 200 字符的 `about` 或未知字段返回 `ToolResult::error`。
+`open` 与 `about`、`tool` 或 `before` 同时出现，或没有 `open` 却给了 `offset`，都是参数错误。ToolExecutor 不按 schema 检查输入，所以处理函数像 `wait` 一样自己检查参数，对类型错误、空字符串或只有空白的字符串、超过 200 字符的 `about` 或未知字段返回 `ToolResult::error`。
 
 ### 5.3 分页
 
@@ -256,7 +258,7 @@ End of turn. Open one: open=<id>.
 | --- | --- |
 | 轮次索引 | `Earlier: before=<id>. Open one: open=<id>.` 或 `Nothing earlier.` |
 | 检索 | `More: before=<id>.` 或 `No more.`；完全没有命中：`Nothing matches <复述的过滤条件>.` |
-| 一轮 | `End of turn. Open one: open=<id>.` 或 `More of this turn: open=<id> offset=<next>.` |
+| 一轮 | `End of turn. Open one: open=<id>.`、`More of this turn: open=<id> offset=<next>.`，没有行的一轮为 `Nothing in this turn.` |
 | 一件事 | `Continue: open=<id> offset=<next>.` 或 `End.` |
 
 错误（`ToolResult::error`）说明怎么改正调用：
@@ -265,7 +267,7 @@ End of turn. Open one: open=<id>.
 | --- | --- |
 | `open` 与 `about`、`tool` 或 `before` 同时出现 | `recall: open shows one turn or thing; drop about, tool and before.` |
 | 没有 `open` 却给了 `offset` | `recall: offset needs open.` |
-| 类型错误、空字符串、`about` 超过 200 字符、未知字段 | `recall: <field> must be <what>.` |
+| 类型错误、空字符串或只有空白、`about` 超过 200 字符、未知字段 | `recall: <field> must be <what>.` |
 | `open` 或 `before` 不是某一行的 id | `No turn or line has id <id>.` |
 | `offset` 超出一轮或一件事的末尾 | `Turn <id> has <n> lines.` / `<id> has <len> characters.` |
 
