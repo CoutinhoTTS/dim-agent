@@ -20,14 +20,14 @@ use dim_agent_capabilities::{
     },
 };
 use dim_agent_types::{
-    BaselineSource, CompactionTrigger, Message, MessageContent, MessagePart, ModelId, ModelRequest,
-    ModelSelection, ReplacementParts, Role,
+    BaselineSource, CompactionTrigger, Message, MessageContent, MessagePart, ModelConfig, ModelId,
+    ModelRequest, ModelSelection, ReplacementParts, Role,
 };
 use dim_app_server::provider::ProviderService;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -71,12 +71,15 @@ pub async fn run() -> Result<()> {
         .ok_or("the product profile serves no file storage")?;
     let model = selection_with_preferences(&providers, &options.model, &cancel).await?;
     let judge = selection_with_preferences(&providers, &options.judge, &cancel).await?;
+    let summarizer = Configuration::read(model.config.as_ref());
+    let judge_configuration = Configuration::read(judge.config.as_ref());
     let mut prepared = Vec::new();
     for case in &cases {
         prepared.push(Prepared::new(case, &model, &cancel).await?);
     }
     let file = CompactionFile::open(&home)?;
     let mut results = Vec::new();
+    let mut no_temperature = 0;
     for arm in arms(&options) {
         file.write(arm.reasoning)?;
         let strategy = SummaryStrategy::new(
@@ -95,13 +98,25 @@ pub async fn run() -> Result<()> {
         for case in &prepared {
             for run in 0..options.runs {
                 let outcome = run_case(&strategy, case, &cancel).await;
-                let judged = judge_run(&host, &resolver, &judge, case, &outcome, &cancel).await;
+                let mut retried = false;
+                let judged = judge_run(
+                    &host,
+                    &resolver,
+                    &judge,
+                    case,
+                    &outcome,
+                    &cancel,
+                    &mut retried,
+                )
+                .await;
+                no_temperature += usize::from(retried);
                 let probes = probe_records(
                     &case.probes,
                     outcome.summary().as_deref().unwrap_or_default(),
                     &judged,
                 );
-                metrics.add(&arm, case, &outcome, &probes);
+                let configuration = outcome.configuration(&summarizer);
+                metrics.add(&arm, case, &outcome, &probes, &configuration);
                 let directory = options.out.join(&arm.id);
                 std::fs::create_dir_all(&directory)?;
                 std::fs::write(
@@ -119,6 +134,11 @@ pub async fn run() -> Result<()> {
                         "summary": outcome.summary(),
                         "diagnostics": outcome.diagnostics(),
                         "steps": outcome.steps_json(),
+                        "configuration": configuration.json(),
+                        "judge": {
+                            "configuration": judge_configuration.json(),
+                            "temperatureFallback": retried,
+                        },
                         "judgeError": judged.error(),
                         "probes": probes,
                     }))? + "\n",
@@ -140,6 +160,12 @@ pub async fn run() -> Result<()> {
         _ => None,
     };
     let mut report = table(&rows);
+    report.push_str(&judge_line(
+        &options.judge,
+        &judge_configuration,
+        no_temperature,
+        results.len() * prepared.len() * options.runs,
+    ));
     if let Some(verdict) = &verdict {
         report.push_str(&format!("\n{verdict}\n"));
     }
@@ -157,20 +183,26 @@ pub async fn run() -> Result<()> {
 /// way the bundled client builds one: it reads them from
 /// `provider.management` and passes them at `session.create`
 /// (ContextCompaction §13.4), so `inherit` inherits what the user chose. A
-/// model with no saved preferences keeps the model config alone.
+/// model with no saved preferences keeps the model config alone, and a
+/// provider the catalog does not hold is an error rather than a default
+/// selection.
 async fn selection_with_preferences(
     providers: &Arc<ProviderService>,
     target: &ModelId,
     cancel: &CancellationToken,
 ) -> Result<ModelSelection> {
-    let preferences = providers
+    let provider = providers
         .management(Some(target.provider_id.clone()), cancel)
         .await
         .map_err(|error| format!("{}: {error}", target.provider_id))?
         .providers
         .into_iter()
-        .next()
-        .and_then(|provider| provider.preferences.get(&target.model_id).cloned())
+        .find(|provider| provider.provider_id == target.provider_id)
+        .ok_or_else(|| format!("{}: no such provider in the catalog", target.provider_id))?;
+    let preferences = provider
+        .preferences
+        .get(&target.model_id)
+        .cloned()
         .unwrap_or_default();
     Ok(providers
         .configuration(Some(target.clone()), None, preferences, cancel)
@@ -854,6 +886,15 @@ impl RunStep {
         };
         record.and_then(|record| serde_json::to_value(record).ok())
     }
+    /// The reasoning the summarizer requests carried, as the diagnostics
+    /// record it: the arm's value, or `inherit` once Provider's mapping
+    /// rejected it (ContextCompaction §13.2).
+    fn applied_reasoning(&self) -> Option<String> {
+        self.details()
+            .get("reasoning")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
 }
 
 /// A case's run: one compaction, or a chain whose steps stop at the first
@@ -899,11 +940,16 @@ impl Run {
     /// Whether any step's summarizer fell back from the arm's reasoning value.
     fn fell_back(&self, arm: &Arm) -> bool {
         self.steps.iter().any(|step| {
-            step.details()
-                .get("reasoning")
-                .and_then(Value::as_str)
+            step.applied_reasoning()
                 .is_some_and(|applied| applied != arm.reasoning.name())
         })
+    }
+    /// The configuration the summarizer's requests carried: the built one,
+    /// with the reasoning the last step applied in place of it
+    /// (ContextCompaction §13.4).
+    fn configuration(&self, built: &Configuration) -> Configuration {
+        let applied = self.steps.last().and_then(RunStep::applied_reasoning);
+        built.clone().applied(applied.as_deref())
     }
     fn cut_offs(&self) -> u64 {
         self.steps
@@ -1057,7 +1103,9 @@ fn probe_records(probes: &[Probe], summary: &str, judged: &Judged) -> Vec<Value>
 }
 
 /// Judges one run's `fact` and `absent` probes; a failure is recorded, never
-/// propagated, so one bad answer cannot end the evaluation.
+/// propagated, so one bad answer cannot end the evaluation. `no_temperature`
+/// reports whether the judge had to drop its temperature, which is part of the
+/// instrument's record (ContextCompaction §13.4).
 async fn judge_run(
     host: &Arc<ModelHost>,
     resolver: &Arc<ProviderConnectionResolver>,
@@ -1065,6 +1113,7 @@ async fn judge_run(
     case: &Prepared,
     run: &Run,
     cancel: &CancellationToken,
+    no_temperature: &mut bool,
 ) -> Judged {
     let Some(summary) = run.summary() else {
         return Judged::NoSummary;
@@ -1076,7 +1125,17 @@ async fn judge_run(
     {
         return Judged::Verdicts(BTreeMap::new());
     }
-    match judge_probes(host, resolver, judge, case, &summary, cancel).await {
+    match judge_probes(
+        host,
+        resolver,
+        judge,
+        case,
+        &summary,
+        cancel,
+        no_temperature,
+    )
+    .await
+    {
         Ok(verdicts) => Judged::Verdicts(verdicts),
         Err(error) => Judged::Unavailable(error),
     }
@@ -1089,6 +1148,7 @@ async fn judge_probes(
     case: &Prepared,
     summary: &str,
     cancel: &CancellationToken,
+    no_temperature: &mut bool,
 ) -> std::result::Result<BTreeMap<String, (Verdict, Option<String>)>, String> {
     let statements = case
         .probes
@@ -1125,6 +1185,7 @@ async fn judge_probes(
                 return Err(format!("the judge failed: {error}"));
             }
             retry.config.as_mut().expect("a config").temperature = None;
+            *no_temperature = true;
             match complete(host, resolver, &Arc::new(retry), cancel).await {
                 Ok(reply) => reply,
                 Err(retry) => return Err(format!("the judge failed: {error}, then {retry}")),
@@ -1196,6 +1257,63 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The configuration a summarizer or judge request carried: the reasoning
+/// effort and service tier of the model config it was built with. Saved
+/// preferences enter through `ProviderService::configuration`, and the
+/// strategy's applied reasoning replaces the effort where its mapping took it
+/// (ContextCompaction §13.4). One shape serves the arm and the judge.
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Configuration {
+    effort: Option<String>,
+    tier: Option<String>,
+}
+impl Configuration {
+    /// Reads the configuration a request built from `config` carries. A saved
+    /// service tier lands in the OpenAI protocols' options, the only protocols
+    /// the preferences support (`provider/preferences.rs`).
+    fn read(config: Option<&ModelConfig>) -> Self {
+        let Some(config) = config else {
+            return Self::default();
+        };
+        let options = config.provider_options.as_ref();
+        Self {
+            effort: config
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.effort.clone()),
+            tier: options
+                .and_then(|options| options.openai.as_ref())
+                .and_then(|openai| openai.service_tier.clone())
+                .or_else(|| {
+                    options
+                        .and_then(|options| options.openai_compatible.as_ref())
+                        .and_then(|compatible| compatible.service_tier.clone())
+                }),
+        }
+    }
+    /// The configuration with the reasoning the strategy applied in place of
+    /// the built effort: `low` is carried as low and `off` as no reasoning,
+    /// however the protocol spells that off, while `inherit` — what the
+    /// diagnostics record once Provider's mapping rejected the arm's value —
+    /// keeps the built one (ContextCompaction §13.2).
+    fn applied(self, reasoning: Option<&str>) -> Self {
+        match reasoning {
+            Some("off") => Self {
+                effort: Some("none".into()),
+                ..self
+            },
+            Some("low") => Self {
+                effort: Some("low".into()),
+                ..self
+            },
+            _ => self,
+        }
+    }
+    fn json(&self) -> Value {
+        json!({"reasoningEffort": self.effort, "serviceTier": self.tier})
+    }
+}
+
 /// The arm's metrics over its cases and runs (ContextCompaction §13.4).
 #[derive(Default)]
 struct Metrics {
@@ -1215,15 +1333,27 @@ struct Metrics {
     /// Provider's mapping rejected the effort for this model (ContextCompaction
     /// §13.2).
     fell_back: usize,
+    /// The summarizer configurations the arm's runs carried: one, unless a
+    /// run's reasoning fell back and another did not (ContextCompaction
+    /// §13.4).
+    configurations: BTreeSet<Configuration>,
     tokens: Vec<f64>,
     durations: Vec<f64>,
     ratios: Vec<f64>,
 }
 impl Metrics {
-    fn add(&mut self, arm: &Arm, case: &Prepared, run: &Run, probes: &[Value]) {
+    fn add(
+        &mut self,
+        arm: &Arm,
+        case: &Prepared,
+        run: &Run,
+        probes: &[Value],
+        configuration: &Configuration,
+    ) {
         if run.fell_back(arm) {
             self.fell_back += 1;
         }
+        self.configurations.insert(configuration.clone());
         self.cut_offs += run.cut_offs();
         if let Some(tokens) = run.tokens() {
             self.tokens.push(tokens);
@@ -1277,6 +1407,8 @@ impl Metrics {
         json!({
             "arm": arm.id,
             "reasoning": arm.reasoning.name(),
+            "reasoningEffort": self.carried(|configuration| &configuration.effort),
+            "serviceTier": self.carried(|configuration| &configuration.tier),
             "fellBack": self.fell_back,
             "target": arm.target.map(|target| json!({
                 "outputShare": target.output_share,
@@ -1295,6 +1427,22 @@ impl Metrics {
             "medianTargetRatio": percentile(&self.ratios, 0.5),
             "p90TargetRatio": percentile(&self.ratios, 0.9),
         })
+    }
+    /// The values the arm's configurations carried for one member: `null`
+    /// when none did, else the distinct values.
+    fn carried(&self, member: fn(&Configuration) -> &Option<String>) -> Value {
+        let values: Vec<&str> = self
+            .configurations
+            .iter()
+            .filter_map(|configuration| member(configuration).as_deref())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        match values.as_slice() {
+            [] => Value::Null,
+            [only] => json!(only),
+            _ => json!(values.join(", ")),
+        }
     }
     fn line(&self, arm: &Arm) -> String {
         format!(
@@ -1356,17 +1504,20 @@ fn percentile(values: &[f64], at: f64) -> Option<f64> {
     Some(sorted[index.min(sorted.len() - 1)])
 }
 
-/// The Markdown table of every arm's metrics.
+/// The Markdown table of every arm's metrics, with the configuration each
+/// arm's summarizer requests carried beside its reasoning value
+/// (ContextCompaction §13.4).
 fn table(rows: &[Value]) -> String {
     let mut text = String::from(
-        "| arm | reasoning | fell back | target | fact recall | exact recall | violations | unjudged | cut-offs | failed | skipped | median summary tokens | median duration ms | median T/S | p90 T/S |\n\
-         | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "| arm | reasoning | effort | service tier | fell back | target | fact recall | exact recall | violations | unjudged | cut-offs | failed | skipped | median summary tokens | median duration ms | median T/S | p90 T/S |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     for row in rows {
         let number = |value: &Value| match value.as_f64() {
             Some(value) => format!("{value:.3}"),
             None => "–".to_owned(),
         };
+        let carried = |value: &Value| value.as_str().unwrap_or("–").to_owned();
         let target = match row["target"]["outputShare"].as_f64() {
             Some(output) => format!(
                 "{}/{}",
@@ -1376,9 +1527,11 @@ fn table(rows: &[Value]) -> String {
             None => "none".to_owned(),
         };
         text += &format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             row["arm"].as_str().unwrap_or_default(),
             row["reasoning"].as_str().unwrap_or_default(),
+            carried(&row["reasoningEffort"]),
+            carried(&row["serviceTier"]),
             row["fellBack"],
             target,
             number(&row["factRecall"]),
@@ -1399,6 +1552,24 @@ fn table(rows: &[Value]) -> String {
         text.push_str(&items);
     }
     text
+}
+
+/// The judge the evaluation used. It is the instrument: one configuration per
+/// evaluation, so two evaluations compare only when these match
+/// (ContextCompaction §13.4).
+fn judge_line(
+    judge: &ModelId,
+    configuration: &Configuration,
+    no_temperature: usize,
+    runs: usize,
+) -> String {
+    format!(
+        "\njudge: {}/{}, reasoning effort {}, service tier {}, temperature dropped in {no_temperature} of {runs} runs\n",
+        judge.provider_id,
+        judge.model_id,
+        configuration.effort.as_deref().unwrap_or("none"),
+        configuration.tier.as_deref().unwrap_or("none"),
+    )
 }
 
 /// `F` per 3b class: one row per `item` a `fact` probe names, one column per
@@ -1449,13 +1620,13 @@ mod tests {
 
     /// The conversation request carries the model's saved preferences, as the
     /// bundled client's `session.create` does; without saved preferences it
-    /// stays the model config alone (ContextCompaction §13.4).
+    /// stays the model config alone (ContextCompaction §13.4). The run record
+    /// reports the same reasoning effort and service tier, and a provider the
+    /// catalog does not hold is an error.
     #[tokio::test]
     async fn summary_eval_selection_carries_saved_model_preferences() {
         let dir = crate::app_server::scratch("summary-eval-preferences").unwrap();
-        let home = dir.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        let server = crate::app_server::serve_home(&home, &dir, dir.join("command-output"), |_| {})
+        let server = crate::app_server::serve_product(&dir, |_| {})
             .await
             .unwrap();
         let providers = server
@@ -1482,7 +1653,10 @@ mod tests {
                             "structuredOutput": true, "vision": false, "audio": false,
                             "reasoning": true, "contextWindow": 128000, "maxOutputTokens": 321
                         },
-                        "metadata": {"reasoning": {"supported": true, "effortOptions": ["low", "high", "max"]}}
+                        "metadata": {
+                            "reasoning": {"supported": true, "effortOptions": ["low", "high", "max"]},
+                            "serviceTier": {"supported": true, "options": ["flex"]}
+                        }
                     }],
                     "enabled": true
                 }))
@@ -1502,6 +1676,10 @@ mod tests {
             .expect("a conversation config");
         assert_eq!(plain.max_tokens, Some(321.));
         assert_eq!(plain.reasoning, None);
+        assert_eq!(
+            Configuration::read(Some(&plain)).json(),
+            json!({"reasoningEffort": null, "serviceTier": null})
+        );
         providers
             .update_preferences(
                 provider_id.into(),
@@ -1511,7 +1689,9 @@ mod tests {
                     reasoning_effort: Some(FieldUpdate::Set {
                         value: "max".into(),
                     }),
-                    service_tier: None,
+                    service_tier: Some(FieldUpdate::Set {
+                        value: "flex".into(),
+                    }),
                 },
                 &cancel,
             )
@@ -1524,8 +1704,41 @@ mod tests {
             .expect("a conversation config");
         assert_eq!(saved.max_tokens, Some(321.));
         assert_eq!(
-            saved.reasoning.and_then(|reasoning| reasoning.effort),
+            saved
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.effort.clone()),
             Some("max".into())
+        );
+        assert_eq!(
+            saved
+                .provider_options
+                .as_ref()
+                .and_then(|options| options.openai_compatible.as_ref())
+                .and_then(|compatible| compatible.service_tier.clone()),
+            Some("flex".into())
+        );
+        assert_eq!(
+            Configuration::read(Some(&saved)).json(),
+            json!({"reasoningEffort": "max", "serviceTier": "flex"})
+        );
+        let absent = selection_with_preferences(
+            &providers,
+            &ModelId {
+                provider_id: "00000000-0000-4000-8000-0000000000bb".into(),
+                model_id: "deepseek".into(),
+            },
+            &cancel,
+        )
+        .await;
+        let Err(absent) = absent else {
+            panic!("a provider the catalog lacks is an error, not a default selection");
+        };
+        assert!(
+            absent
+                .to_string()
+                .contains("00000000-0000-4000-8000-0000000000bb"),
+            "the error names the provider: {absent}"
         );
         server.shutdown();
         server.join().await.unwrap();
