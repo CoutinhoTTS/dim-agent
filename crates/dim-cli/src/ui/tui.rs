@@ -3287,6 +3287,18 @@ impl App {
 
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
         let first = self.session_id.is_empty();
+        // Home's first message started this Session: nothing shown to clear.
+        if first
+            && kind == SwitchKind::New
+            && self
+                .snapshot
+                .as_ref()
+                .is_none_or(|shown| shown.session_id.is_empty())
+        {
+            self.session_id = session_id;
+            self.awaiting_window = true;
+            return;
+        }
         self.session_id = session_id;
         self.planner.reset();
         self.commits = CommitState::default();
@@ -3298,7 +3310,8 @@ impl App {
         self.history_floor = 0;
         self.window_info = (0, 0);
         self.history_request = None;
-        self.awaiting_window = true;
+        // Home has no window to wait for.
+        self.awaiting_window = !self.session_id.is_empty();
         self.pending_line = None;
         self.pending_boundary = match kind {
             SwitchKind::New if first => None,

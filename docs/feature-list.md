@@ -19,7 +19,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 
 ## Session management
 
-- `/new`: create a Session.
+- `/new`: start over on an empty screen; the first message creates the Session.
 - `/resume`: view and resume historical Sessions; alias `/sessions`.
 - `/export`: export conversation history as Markdown or JSON.
 - `/timeline`: view the message timeline and message actions.

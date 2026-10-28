@@ -567,18 +567,7 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
         assert_eq!(held["params"]["branchId"], "nested");
         ready.send(()).unwrap();
 
-        let create = wire.read("session.create");
-        wire.reply(
-            &create,
-            json!({"sessionId":"other","sequence":0,
-            "model":{"providerId":"test","modelId":"model"}}),
-        );
-        let detach = wire.read("session.detach");
-        assert_eq!(detach["params"], json!({"sessionId":"session"}));
-        wire.reply(&detach, json!({}));
-        let attach = wire.read("session.attach");
-        assert_eq!(attach["params"]["sessionId"], "other");
-        wire.reply(&attach, json!({}));
+        // `/new` only goes home: no Session until a message.
         wire.quiet(Duration::from_millis(150));
         ready.send(()).unwrap();
         let summaries = json!([
@@ -591,9 +580,6 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
         wire.reply(&picker, summaries.clone());
         let selected = wire.read("session.summaries");
         wire.reply(&selected, summaries);
-        let detach = wire.read("session.detach");
-        assert_eq!(detach["params"], json!({"sessionId":"other"}));
-        wire.reply(&detach, json!({}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"]["sessionId"], "session");
         wire.reply(&attach, json!({}));
@@ -823,78 +809,49 @@ fn tui_task_stop_all_excludes_delayed_discovery_and_settles_failed_branch_reads(
 
 #[test]
 fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
-    for refused in [false, true] {
-        let home = Home::new();
-        let (ready, readiness) = std::sync::mpsc::channel();
-        let (proceed, control) = std::sync::mpsc::channel();
-        let daemon = home.daemon(move |wire| {
-            wire.hello(&[]);
-            wire.created();
-            let attach = wire.read("session.attach");
-            wire.reply(&attach, json!({}));
-            let main = wire.read("session.history");
-            wire.reply(
-                &main,
-                json!({"events":[command("old",1,1000,"old attachment command")],
-                "through":1,"nextAfter":1,"done":true}),
-            );
-            let providers = wire.read("account.providers");
-            wire.reply(&providers, json!([]));
-            let usage = wire.read("session.context.usage");
-            ready.send(()).unwrap();
-            control.recv_timeout(Duration::from_secs(10)).unwrap();
-            wire.reply(
-                &usage,
-                json!({"contextWindow":2000,"outputTokens":100,"thresholdTokens":1500,
-                "estimatedInputTokens":50,"baselineSource":"fixture"}),
-            );
-            let create = wire.read("session.create");
-            if refused {
-                wire.send(json!({"jsonrpc":"2.0","id":create["id"],
-                    "error":{"code":-32000,"message":"new Session unavailable"}}));
-            } else {
-                wire.reply(
-                    &create,
-                    json!({"sessionId":"replacement","sequence":0,
-                    "model":{"providerId":"test","modelId":"model"}}),
-                );
-                let detach = wire.read("session.detach");
-                assert_eq!(detach["params"], json!({"sessionId":"session"}));
-                wire.reply(&detach, json!({}));
-                let attach = wire.read("session.attach");
-                assert_eq!(attach["params"]["sessionId"], "replacement");
-                wire.reply(&attach, json!({}));
-                let history = wire.read("session.history");
-                assert_eq!(history["params"]["sessionId"], "replacement");
-                wire.reply(
-                    &history,
-                    json!({"events":[command("new",1,2000,"replacement command")],
-                    "through":1,"nextAfter":1,"done":true}),
-                );
-            }
-            let mut line = String::new();
-            assert_eq!(
-                wire.0.read_line(&mut line).unwrap(),
-                0,
-                "stale control reached the server: {line}"
-            );
-        });
-        let mut terminal = Terminal::launch_tui(home.command());
-        terminal.until("test / model");
-        terminal.write(b"/usage\r");
-        readiness.recv_timeout(Duration::from_secs(10)).unwrap();
-        terminal.write(b"/new\r/tasks\r\x18queued-proof");
-        terminal.until("No matching tasks.");
-        proceed.send(()).unwrap();
-        terminal.until(if refused {
-            "Disconnected; draft kept"
-        } else {
-            "Task attachment changed; reopen the panel before stopping work"
-        });
-        terminal.signal(libc::SIGKILL);
-        terminal.wait();
-        daemon.join().unwrap();
-    }
+    let home = Home::new();
+    let (ready, readiness) = std::sync::mpsc::channel();
+    let (proceed, control) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let main = wire.read("session.history");
+        wire.reply(
+            &main,
+            json!({"events":[command("old",1,1000,"old attachment command")],
+            "through":1,"nextAfter":1,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let usage = wire.read("session.context.usage");
+        ready.send(()).unwrap();
+        control.recv_timeout(Duration::from_secs(10)).unwrap();
+        wire.reply(
+            &usage,
+            json!({"contextWindow":2000,"outputTokens":100,"thresholdTokens":1500,
+            "estimatedInputTokens":50,"baselineSource":"fixture"}),
+        );
+        // `/new` goes home without a Session; the queued stop reaches nothing.
+        let mut line = String::new();
+        assert_eq!(
+            wire.0.read_line(&mut line).unwrap(),
+            0,
+            "stale control reached the server: {line}"
+        );
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/usage\r");
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    terminal.write(b"/new\r/tasks\r\x18queued-proof");
+    terminal.until("No matching tasks.");
+    proceed.send(()).unwrap();
+    terminal.until("Task attachment changed; reopen the panel before stopping work");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
 }
 
 #[test]
@@ -928,24 +885,6 @@ fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
             json!({"sessionId":"session","branchId":"main","taskId":"main"})
         );
         ready.send(()).unwrap();
-        let create = wire.read("session.create");
-        wire.reply(
-            &create,
-            json!({"sessionId":"replacement","sequence":0,
-            "model":{"providerId":"test","modelId":"model"}}),
-        );
-        let detach = wire.read("session.detach");
-        assert_eq!(detach["params"], json!({"sessionId":"session"}));
-        wire.reply(&detach, json!({}));
-        let attach = wire.read("session.attach");
-        assert_eq!(attach["params"]["sessionId"], "replacement");
-        wire.reply(&attach, json!({}));
-        let history = wire.read("session.history");
-        wire.reply(
-            &history,
-            json!({"events":[command("new",1,3000,"new session command")],
-            "through":1,"nextAfter":1,"done":true}),
-        );
         control.recv_timeout(Duration::from_secs(10)).unwrap();
         wire.reply(&first, json!({}));
         let second = wire.read("session.exec.stop");
@@ -1879,6 +1818,76 @@ fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
     terminal.until("Agent: unlisted-agent");
     daemon.join().unwrap();
     assert!(terminal.transcript.contains("agent_not_found"));
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+}
+
+/// `/new` goes home without a Session; the first message creates one on the
+/// model shown, leaves the old Session and only then submits.
+#[test]
+fn tui_new_creates_the_session_on_the_first_message() {
+    let home = Home::new();
+    let (ready, readiness) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let main = wire.read("session.history");
+        wire.reply(
+            &main,
+            json!({"events":[command("old",1,1000,"old session command")],
+            "through":1,"nextAfter":1,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        ready.send(()).unwrap();
+        wire.quiet(Duration::from_millis(300));
+        ready.send(()).unwrap();
+        let create = wire.read("session.create");
+        assert_eq!(
+            create["params"]["model"],
+            json!({"provider":"test","modelId":"model"})
+        );
+        wire.reply(
+            &create,
+            json!({"sessionId":"fresh","sequence":0,
+            "model":{"providerId":"test","modelId":"model"}}),
+        );
+        let detach = wire.read("session.detach");
+        assert_eq!(detach["params"], json!({"sessionId":"session"}));
+        wire.reply(&detach, json!({}));
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"]["sessionId"], "fresh");
+        wire.reply(&attach, json!({}));
+        loop {
+            let request = wire.read_any();
+            match request["method"].as_str() {
+                Some("session.history") => {
+                    assert_eq!(request["params"]["sessionId"], "fresh");
+                    wire.reply(
+                        &request,
+                        json!({"events":[],"through":0,"nextAfter":0,"done":true}),
+                    );
+                }
+                Some("session.submit") => {
+                    assert_eq!(request["params"]["sessionId"], "fresh");
+                    assert_eq!(request["params"]["text"], "first words");
+                    wire.reply(&request, json!({"event":{}}));
+                    break;
+                }
+                method => panic!("unexpected request {method:?}"),
+            }
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    readiness.recv_timeout(PATIENCE).unwrap();
+    terminal.write(b"/new\r");
+    terminal.until("new session");
+    readiness.recv_timeout(PATIENCE).unwrap();
+    terminal.write(b"first words\r");
+    daemon.join().unwrap();
     terminal.signal(libc::SIGKILL);
     terminal.wait();
 }

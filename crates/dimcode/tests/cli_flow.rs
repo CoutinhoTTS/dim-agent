@@ -5178,6 +5178,9 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["sessionId"], "next");
+        wire.reply(&submit, json!({"event":{}}));
         wire.notice("ui.shutdown", json!({"uiId":"ui-1","reason":"not you"}));
         wire.notice(
             "ui.shutdown",
@@ -5190,7 +5193,10 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
+    // `/new` goes home; the message starts the Session the UI moves to.
     terminal.write(b"/new\r");
+    terminal.until("new session");
+    terminal.write(b"hello\r");
     terminal.until("The App Server closed this interface: another terminal took over");
     terminal.until("Bye!");
     terminal.until("\x1b[?2004l");

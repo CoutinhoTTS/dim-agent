@@ -196,6 +196,8 @@ struct Worker {
     client: Client,
     updates: mpsc::Sender<Update>,
     session_id: String,
+    /// The Session `/new` left: still attached until the next one is entered.
+    parked: String,
     projection: Projection,
     question_responses: Vec<(u64, String, crate::question::Call)>,
     /// Highest event sequence applied; replayed or duplicate events are skipped.
@@ -298,6 +300,7 @@ async fn run(
         client,
         updates: updates.clone(),
         session_id: String::new(),
+        parked: String::new(),
         projection: Projection::default(),
         question_responses: Vec::new(),
         cursors: Default::default(),
@@ -329,11 +332,7 @@ async fn run(
             let _ = updates.send(Update::Failed(error.to_string()));
             return;
         }
-        let notice = match error.downcast_ref::<client::RpcError>().and_then(app_error) {
-            Some("provider_failed") => NO_SESSION.to_owned(),
-            _ => format!("{error}. {NO_SESSION}"),
-        };
-        let _ = updates.send(Update::Notice(notice));
+        let _ = updates.send(Update::Notice(no_session(&error)));
     }
     loop {
         if let Err(error) = worker.poll_member().await {
@@ -563,6 +562,44 @@ impl Worker {
         .await
     }
 
+    /// Creates the Session the first message from home starts, on the model
+    /// the status line shows.
+    async fn start_session(&mut self) -> crate::Result<()> {
+        let attached_session = self.invalidate_projection();
+        let mut params = self.create_params();
+        let mut preferences = None;
+        let result = async {
+            if let Some(model) = &self.model {
+                params["model"] = json!({"provider": model.provider_id, "modelId": model.model_id});
+                let (provider, model) = (model.provider_id.clone(), model.model_id.clone());
+                preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
+                if let Some(preferences) = &preferences {
+                    params["modelPreferences"] = preferences.clone();
+                }
+            }
+            self.client
+                .typed::<Created>("session.create", params)
+                .await
+                .map_err(|error| model_adoption_error(error, preferences.as_ref()))
+        }
+        .await;
+        match result {
+            Ok(created) => {
+                self.enter(
+                    created.session_id,
+                    created.model,
+                    SwitchKind::New,
+                    attached_session,
+                )
+                .await
+            }
+            Err(error) => {
+                self.parked = attached_session;
+                Err(error)
+            }
+        }
+    }
+
     /// `session.create` parameters: the workspace and, when one is chosen,
     /// the permission preset, which the Session's branches and members inherit.
     fn create_params(&self) -> serde_json::Value {
@@ -766,8 +803,9 @@ impl Worker {
     async fn command(&mut self, command: Command) -> crate::Result<()> {
         if self.session_id.is_empty()
             && matches!(command, Command::Submit(_) | Command::SubmitDraft(_))
+            && let Err(error) = self.start_session().await
         {
-            self.send(Update::Notice(NO_SESSION.into()));
+            self.send(Update::Notice(no_session(&error)));
             return Ok(());
         }
         match command {
@@ -919,19 +957,16 @@ impl Worker {
                     self.changed();
                 }
             }
+            // Home, not a Session: the first message creates one.
             Command::NewSession => {
-                let attached_session = self.invalidate_projection();
-                let created: Created = self
-                    .client
-                    .typed("session.create", self.create_params())
-                    .await?;
-                self.enter(
-                    created.session_id,
-                    created.model,
-                    SwitchKind::New,
-                    attached_session,
-                )
-                .await?;
+                if !self.session_id.is_empty() {
+                    self.parked = self.invalidate_projection();
+                    self.send(Update::Context(None));
+                    self.send(Update::Switched {
+                        session_id: String::new(),
+                        kind: SwitchKind::New,
+                    });
+                }
             }
             Command::Resume(session_id) => {
                 self.attach(session_id, SwitchKind::Resumed).await?;
@@ -939,8 +974,10 @@ impl Worker {
             Command::ListSessions => {
                 let sessions = self.list().await.map(|mut sessions| {
                     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+                    // No preview means no user message yet: nothing to resume.
                     sessions
                         .into_iter()
+                        .filter(|session| session.preview.is_some())
                         .map(|session| SessionItem {
                             id: session.session_id,
                             title: None,
@@ -2060,8 +2097,8 @@ impl Worker {
         self.send(Update::ModelPolicy(update));
     }
 
-    /// Switches the session's model, or starts a session on it when there is
-    /// none yet, then makes it the default for new ones.
+    /// Switches the session's model, or at home the one the first message
+    /// starts a session on, then makes it the default for new ones.
     async fn select_model(&mut self, provider_id: String, model_id: String) -> crate::Result<()> {
         #[derive(Deserialize)]
         struct Updated {
@@ -2070,25 +2107,21 @@ impl Worker {
         let preferences =
             saved_model_preferences(&mut self.client, &provider_id, &model_id).await?;
         let model = if self.session_id.is_empty() {
-            let attached_session = self.invalidate_projection();
-            let mut params = self.create_params();
-            if let Some(preferences) = &preferences {
-                params["modelPreferences"] = preferences.clone();
-            }
-            params["model"] = json!({"provider": provider_id, "modelId": model_id});
-            let created: Created = self
-                .client
-                .typed("session.create", params)
-                .await
-                .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
-            self.enter(
-                created.session_id,
-                created.model.clone(),
-                SwitchKind::New,
-                attached_session,
-            )
-            .await?;
-            created.model
+            let model = ModelId {
+                provider_id,
+                model_id,
+            };
+            let features = self.model_features(&model).await;
+            self.model = Some(Configuration {
+                provider_id: model.provider_id.clone(),
+                model_id: model.model_id.clone(),
+            });
+            self.send(Update::Ready {
+                provider: model.provider_id.clone(),
+                model: model.model_id.clone(),
+            });
+            self.send(features);
+            model
         } else {
             let mut params = json!({"sessionId":self.session_id,"branchId":"main","providerId":provider_id,"modelId":model_id});
             if let Some(preferences) = &preferences {
@@ -2817,6 +2850,14 @@ pub(crate) async fn clear_saved_model_preferences(
         .version
         .ok_or("Provider catalog must be refreshed before editing preferences")?;
     clear_model_preferences(client, provider_id, model_id, version).await
+}
+
+/// The notice when no Session could be started.
+fn no_session(error: &crate::Error) -> String {
+    match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+        Some("provider_failed") => NO_SESSION.to_owned(),
+        _ => format!("{error}. {NO_SESSION}"),
+    }
 }
 
 pub(crate) fn model_adoption_error(
