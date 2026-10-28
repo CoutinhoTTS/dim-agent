@@ -10,7 +10,7 @@ The model works the way the product intends when what it reads is true about the
 
 **Who may change what.** A scope reaches the model only through a channel it owns: the product through its built-in capabilities; the host or the profile through the Session system prompt and the trusted sources it loads; the project through its `AGENTS.md` and its skills; the user through their messages, their `AGENTS.md` and the settings that select values; a plugin through what it registers or writes, on the same channels as the built-ins. No central repository takes wording away from its author: Prompt, PromptRegistry and ToolRegistry carry and never own (principles §1, §5; ADR 002). No scope changes the protocol or another author's text, a tag never grants permission, the guide's frame is removable by none, and System holds only static text (§5).
 
-**The input guide.** The input guide is the text that explains the other channels to the model: each channel's trust class, the channel rule, escaping, the restatement after a summary, and, for each marker, what it is, whose words they are, how to treat it, when it stops applying, and its trust rule (§6). Its frame belongs to the prompt layer, which is Prompt. Each marker's entry is contributed by the capability that writes the marker, through the route every contribution uses — registered from the contributor's own `apply` and withdrawn when it unloads — so the entry is in force exactly when its writer is loaded, contributed plugins included; one fixed text can never cover them. The entries in force are reproducible from facts, and adding one never rewrites an adopted System mid-Session; how Prompt meets both properties is Prompt's design. Consistency is by construction: a writer that is not loaded contributes no entry; a loaded writer's own flow asserts that the request carrying its marker carries its entry; removing or changing a marker changes its entry in the same change. There is no central scan and no central marker list.
+**The input guide.** The input guide is the text that explains the other channels to the model: each channel's trust class, the channel rule, escaping, the restatement after a summary, and, for each marker, what it is, whose words they are, how to treat it, when it stops applying, and its trust rule (§6). Its frame belongs to the prompt layer, which is Prompt. Each marker's entry is contributed by the capability that writes the marker, through the route every contribution uses — registered from the contributor's own `apply` and withdrawn when it unloads — so the entry is in force exactly when its writer is loaded, contributed plugins included; one fixed text can never cover them. The entries in force are reproducible from facts, and an entry appears where its writer loads, so no entry forks the cached prefix mid-Session; how Prompt meets both properties is Prompt's design. A request a host prepares with no adopted configuration carries the same composition, and there the guide changes only where a writer loads or unloads (§6.2). Consistency is by construction: a writer that is not loaded contributes no entry; a loaded writer's own flow asserts that a request carrying its marker carries its entry; removing or changing a marker changes its entry in the same change. There is no central scan and no central marker list.
 
 **Language.** Model-facing text, protocol and policy alike, is written in English, in one copy: each policy text carries one evaluation, a second language doubles every text and its evaluation, a text that varies by language forks the Session's cached prefix and its evidence, and the protocol names stay English in any translation. "Agent prompt language" is the language the model writes to the operator in, carried as a runtime state source; it is neither a translation of the prompt texts nor a choice between translated copies, and without it the base sentence — that the model answers in the user's language — is the default. Summaries and marker bodies are data: they keep the conversation's language and its identifiers verbatim (§7).
 
@@ -41,7 +41,7 @@ Every model-visible text fits one channel below. The table names the carrier, th
 | Operator input | the input path | the operator | History | The operator's words |
 | Tool results | Loop | material from outside; the refusals and handles the runtime writes into a result belong to the tool's owner | History | Material, never binding; the skill tool's result is the one exception |
 | Compaction replacement | ContextPolicy | the summary: the strategy; the digest and the pinned inputs with their handles: ContextCompaction | Replaces a range of history | Background; the live conversation wins |
-| The input guide | request assembly | the frame: Prompt; each marker's entry: the capability that writes the marker (§6) | Every request | Instructions about the other channels |
+| The input guide | Prompt: part of the System it composes and the Session adopts, and the same composition on a host-prepared request | the frame: Prompt; each marker's entry: the capability that writes the marker (§6) | Fixed between adoptions, or between loads on a host-prepared request; an entry appears where its writer loads | Instructions about the other channels |
 
 **Verification.** The shipped texts fit the table without a new channel: base, the Session system prompt and the skills instructions in the system prefix; the environment and date state, the user and project instructions and the skills list as rule and state blocks; every built-in tool declaration, and the declarations of MCP servers and contributed plugins, in the configuration's tools part; the branch, goal, exec, collaboration and shell-input markers as runtime-written inputs; the operator's messages; tool results, with the refusals, codes and handles the runtime writes into them; the summary, the digest and the pinned inputs in the compaction replacement; and the guide. A text that fits none of them would need a new channel, which is an infrastructure change (principles §4 rule 8); no text does.
 
@@ -89,6 +89,8 @@ A user's or a project's words shape how the model works within their scope; they
 
 The input guide is the text the model reads about its own input, on every request.
 
+Today it is one fixed text — the frame and the entries of the built-in markers — that request assembly appends to the system field: ContextPreparation appends it to the System it publishes with the adopted configuration, and Loop appends it on the host-prepared path that has no adopted configuration ([Prompt lifecycle](../architecture/rust-agent/prompt.md)). Every request built from the adopted configuration carries it, the summarizer's included.
+
 ### 6.1 What it covers
 
 - **Each channel's trust class**: instructions, rules binding within their scope, state describing a situation, information, material, and the operator's words.
@@ -100,13 +102,16 @@ The input guide is the text the model reads about its own input, on every reques
 ### 6.2 Who owns which part
 
 - **The frame** — the channels, the trust classes, escaping, the channel rule and the restatement — belongs to the prompt layer, which is Prompt.
-- **Each marker's entry** is contributed by the capability that writes the marker. It takes the route every contribution takes: registered from the contributor's own `apply`, withdrawn when that contributor unloads, so the entry is in force exactly when its writer is loaded ([PromptRegistry](../architecture/rust-agent/plugins/PromptSources.md#promptregistry); rutis usage R6). A contributed plugin contributes its entries the same way, which one fixed text can never cover.
-- **Prompt provides the means.** It accepts the entries, composes them with the frame, and keeps two properties of the entries in force: they are reproducible from facts, as the other sources are, and adding or removing one never rewrites an adopted System mid-Session. The mechanism is Prompt's design (§9.1).
+- **Each marker's entry** is contributed by the capability that writes the marker. It takes the route every contribution takes: registered from the contributor's own `apply`, withdrawn when that contributor unloads, so the entry is in force exactly when its writer is loaded ([PromptRegistry](../architecture/rust-agent/plugins/PromptSources.md#promptregistry); [rutis usage R6](../rutis-usage.md#r6-contributions-register-with-their-owner)). The route is a language-neutral contract (§9.1), so a plugin contributed through the plugin bridge contributes its entries the same way; one fixed text can never cover them.
+- **Prompt provides the means.** It accepts the entries and composes them with the frame into the System it publishes; the entries in force are reproducible from facts, as the other sources are. The guide is part of that System: an entry takes effect at the adoption that loads its writer — the same point at which that writer's tool declarations already change the request prefix — and between adoptions the guide is fixed, so no entry forks the cached prefix mid-Session. The mechanism is Prompt's design (§9.1).
+- **The guide arrives with the System.** Loop and ContextPreparation append nothing of their own: a request built from an adopted configuration carries the System Prompt composes, and ContextPolicy reads that System from the adopted configuration for the summarizer's request.
+- **The host-prepared path carries the same composition.** A request a host prepares with no adopted configuration carries the guide Prompt composes for the writers loaded — the frame and their entries — the same composition an adopted System carries, so it loses nothing it carries today. There the guide changes only where a writer loads or unloads — the points at which that path's tool declarations already change the request, since it binds its tools per request through ToolBinding — so no entry forks the cached prefix there either. How both paths read one composition is Prompt's design (§9.1).
 
 ### 6.3 Consistency by construction
 
 - A writer that is not loaded contributes no entry, so no entry outlives its writer.
-- A loaded writer's own flow asserts that a request carrying its marker also carries its entry.
+- An entry appears where its writer loads: at the adoption that loads it for a request built from an adopted configuration, and at the load itself on the host-prepared path; no request assembles a guide of its own.
+- A loaded writer's own flow asserts that a request carrying its marker carries its entry.
 - Removing or changing a marker changes its entry in the same change.
 - There is no central scan and no central marker list.
 
@@ -142,7 +147,7 @@ Rejected: translating the prompt texts per locale. It doubles the policy texts a
 ### 8.2 Harnesses
 
 - **The summary prompt and its length sentence** have `summary-eval --candidate`, which runs the current and the candidate prompt on the same cases, model and target rule ([ContextCompaction §13.4](plugins/ContextCompaction.md#134-evaluation)).
-- **A behavioural text** is evaluated by scenarios in the shape of [Timeline branches §12.3](timeline-branches.md#123-evaluation-scenarios): scripted input, the real tools, probes for what a run must show and must not show, both arms judged by the fixed judge. The requirement to the evaluation tooling is a scenario runner with the same candidate injection and the same relative rule (§9.7).
+- **A behavioural text** is evaluated by scenarios in the shape of [Timeline branches §12.3](timeline-branches.md#123-evaluation-scenarios): scripted input, the real tools, probes for what a run must show and must not show, both arms judged by the fixed judge. The requirement to the evaluation tooling is a scenario runner with the same candidate injection and the same relative rule (§9.8).
 - **Until a text has a harness, a change to it brings its own scenario set**, run locally current against candidate and reported in the pull request. No text is frozen for lack of a harness.
 - **Protocol text is not evaluated.** Its flow test changes with it (§4).
 
@@ -156,7 +161,9 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 - Prompt owns the guide's frame (§6.2) and reviews it; no scope removes or replaces it.
 - The frame states the channel rule with the `[input <id>]` exception (§6.1).
-- Prompt provides the means by which a capability contributes its markers' entries: registered from the contributor's own `apply` and withdrawn on unload; the entries in force reproducible from facts; adding or removing one never rewrites an adopted System mid-Session (§6.2). The mechanism is Prompt's design.
+- Prompt provides the means by which a capability contributes its markers' entries: registered from the contributor's own `apply` and withdrawn on unload; the entries in force reproducible from facts; an entry taking effect at the adoption that loads its writer, with the guide fixed between adoptions (§6.2). The mechanism is Prompt's design.
+- **The contribution route is a contract.** Its form is language-neutral, so a plugin contributed through the plugin bridge contributes its markers' entries too, and Rust is one binding of it (ADR 002 D5, ADR 006). This document raises the contract and does not define it; its form is Prompt's design (§10).
+- **One composition.** The frame and the entries in force are one composition, carried by the adopted System and by a host-prepared request alike; how the host-prepared path reads it is Prompt's design, within ADR 002 D3.
 - PromptSources keeps `dim/base` and the shell guidance as policy, replaceable at its factory configuration so a candidate can run (§8.1); the environment and date sources state facts only; an instruction body is the user's or the project's words, carried escaped and never edited.
 - PromptSources provides the "Agent prompt language" state source, and the block's form is its design (§7).
 - Prompt and PromptRegistry carry text and own none of it (§2, item 2).
@@ -166,7 +173,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 **Owners:** every capability that writes a text — built-in or contributed.
 
 - It lists its model-facing texts on its own design page, each marked protocol or policy, sentence by sentence where mixed. This document does not restate them, as [Timeline branches §12.1](timeline-branches.md#121-context-mapping) does for its own.
-- It contributes the guide entry for each marker it writes, and its own flow asserts that the request carrying the marker carries the entry (§6.3).
+- It contributes the guide entry for each marker it writes, and its own flow asserts that a request carrying the marker carries the entry (§6.3).
 - It exposes its policy texts at its factory configuration, so a candidate can run through the shipped assembly (§8.1).
 - It ships a protocol change with the behaviour, the flow test and the compatibility of histories resumed under the older form (§4).
 
@@ -204,7 +211,15 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 - **Policy.** The prompt and its length sentence are policy: a change is evaluated with `summary-eval --candidate` (§8.2).
 - **The guide.** Each marker it writes has its entry: the summary envelope, the `[input <id>]` handle, and the digest message (§6.2, §9.2).
 
-### 9.7 The evaluation tooling
+### 9.7 Loop and ContextPreparation
+
+**Owner:** Loop and ContextPreparation.
+
+- **No guide of their own.** ContextPreparation publishes for adoption the System Prompt composes, guide and entries included, and Loop carries the System of the request it assembles. Neither appends the fixed text or any entry.
+- **Every request that carries the guide today still carries it**: a request built from an adopted configuration carries the guide its Session adopted, the summarizer's included, and the host-prepared path carries the same composition, so no request loses an entry it carries today (§6.2).
+- **No entry forks the cached prefix.** A request never assembles a guide of its own; an entry appears at the adoption that loads its writer, or where its writer loads on the host-prepared path (§5 limit 3, §6.2).
+
+### 9.8 The evaluation tooling
 
 **Owner:** the evaluation tooling, `xtask`.
 
@@ -218,17 +233,17 @@ Rules: [design rules](../architecture/rust-agent/principles.md) §1, §3, §4 ru
 | Rule | How this document complies |
 | --- | --- |
 | §1 Plugins and capabilities bounded | The guide's frame is the prompt layer's, and each capability contributes its own entries. No part gains another's state |
-| §3 Orthogonality | The text travels on existing contracts — sources, inputs and declarations. Where the guide needs a contribution route, it is raised to Prompt as a generic capability: it carries no text's business meaning and any capability can use it (step 3 of §3's order) |
+| §3 Orthogonality | The text travels on existing contracts — sources, inputs and declarations — and the guide's entries on one more, raised to Prompt as a generic capability: it carries no text's business meaning, and any capability uses it, in any binding (step 3 of §3's order) |
 | §4 rule 4 No business meaning in core | The delivery classes stay generic; the guide's content is the prompt layer's text and the entries are the writers' texts. Timeline and Dispatcher gain nothing |
 | §4 rule 6 Context from consumed events | Every channel is a consumed event or the adopted configuration (§3); the document adds none |
-| §4 rule 7 Public events and services | No new event or service: entries and texts travel on existing sources, inputs and declarations |
+| §4 rule 7 Public events and services | No new event or service: entries and texts travel on existing sources, inputs and declarations, and the guide's entry route is a registration inside Prompt's scope (§9.1) |
 | §4 rule 8 Infrastructure unchanged | None is changed: the contribution route is a Prompt-level capability inside its own scope, not a port, checkpoint or adapter on infrastructure |
 | §5 Ownership | Each text belongs to its author, and each requirement stays inside one owner (§5) |
 | ADR 002 D1 Scope | Each text lives where its state lives; the guide's entries follow their writers' lifetimes |
 | D2 No wiring modules | None is added |
-| D3 Scope dependencies | No dependency is added; entries follow the existing registration direction |
+| D3 Scope dependencies | Entries follow the existing registration direction. How a host-prepared request reads Prompt's composition is Prompt's design, within D3: a dependency stays at the reader's own or an enclosing scope and points from an extension to the core, never the reverse |
 | D4 Configuration | No configuration is added; the candidate injection uses an author's existing factory configuration |
-| D5 Language-neutral contracts | No wire contract is added |
+| D5 Language-neutral contracts | The contribution route is a contract and its form is language-neutral: a plugin contributed through the plugin bridge contributes its entries the same way, and Rust is one binding of it. This document raises the contract; Prompt's design defines it (§9.1) |
 | ADR 008 D2 No delivery status | The document states requirements only |
 | ADR 008 D3 Own scope only | Per-text inventories stay on each owner's design page (§9.2); this document names no per-string list |
 
