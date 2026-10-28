@@ -350,4 +350,27 @@ mod tests {
             ["✗ Edited 1 file ▾", "  ✗ Edit a.ts"]
         );
     }
+
+    #[test]
+    fn an_exec_row_draws_the_boundary_it_requests() {
+        let escalated = drawn(
+            &[call(
+                "exec",
+                json!({ "command": "cargo test", "sandbox": "host" }),
+                Some("ok"),
+            )],
+            Detail::Expanded,
+            120,
+        )
+        .join("\n");
+        assert!(escalated.contains("(boundary: host)"), "{escalated}");
+
+        let plain = drawn(
+            &[call("exec", json!({ "command": "cargo test" }), Some("ok"))],
+            Detail::Expanded,
+            120,
+        )
+        .join("\n");
+        assert!(!plain.contains("(boundary:"), "{plain}");
+    }
 }

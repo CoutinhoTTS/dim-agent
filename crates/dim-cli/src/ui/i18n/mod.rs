@@ -161,12 +161,11 @@ pub fn tf(english: &'static str, args: &[(&str, &str)]) -> String {
 mod tests {
     use super::*;
 
-    /// Every string `/plugins` draws has a translation in every locale.
-    #[test]
-    fn every_locale_translates_the_plugins_strings() {
-        type Lookup = fn(&str) -> Option<&'static str>;
-        let tables: [(&str, Lookup); 10] = [
-            ("zh-CN", zh_cn::lookup),
+    type Lookup = fn(&str) -> Option<&'static str>;
+
+    fn tables() -> [(&'static str, Lookup); 10] {
+        let tables = [
+            ("zh-CN", zh_cn::lookup as Lookup),
             ("ja", ja::lookup),
             ("ko", ko::lookup),
             ("zh-Hant", zh_hant::lookup),
@@ -178,9 +177,31 @@ mod tests {
             ("pt-PT", pt_pt::lookup),
         ];
         assert_eq!(tables.len() + 1, LOCALES.len());
-        for (code, lookup) in tables {
+        tables
+    }
+
+    /// Every string `/plugins` draws has a translation in every locale.
+    #[test]
+    fn every_locale_translates_the_plugins_strings() {
+        for (code, lookup) in tables() {
             for key in crate::ui::plugins_panel::STRINGS {
                 assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+        }
+    }
+
+    /// The approval prompt and the transcript command row name the requested
+    /// boundary; a table that drops the placeholder would print the tier name
+    /// nowhere.
+    #[test]
+    fn every_locale_translates_the_sandbox_boundary_and_keeps_its_placeholder() {
+        for (code, lookup) in tables() {
+            for key in ["boundary: {sandbox}", " (boundary: {sandbox})"] {
+                let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+                assert!(
+                    text.contains("{sandbox}"),
+                    "{code} drops the placeholder in {key:?}: {text:?}"
+                );
             }
         }
     }
