@@ -24,6 +24,16 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "shown" => "表示中",
         "line" => "ライン",
         "line {id}" => "ライン {id}",
+        "jump to a message of the shown line" => "表示中のラインのメッセージへ移動",
+        "Timeline" => "タイムライン",
+        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
+            "Enter 移動 · e 編集 · q 引用 · b ブランチ · f フォーク · Esc 閉じる"
+        }
+        "No messages yet." => "メッセージはまだありません。",
+        "Already on screen above; /tui jumps to it" => "すでに上に表示中。/tui で移動できます",
+        "{count} earlier messages · Enter or click to load" => {
+            "過去のメッセージ {count} 件 · Enter かクリックで読込"
+        }
         "follow, talk to and end this session's lines" => {
             "このセッションのラインを追い、話しかけ、終了"
         }
@@ -206,16 +216,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/{name} is not yet available" => "/{name} はまだ利用不可",
         "new session" => "新規セッション",
         "resumed {id} · {count} messages" => "{id} を再開 · {count} 件",
-        " · earlier history: /history" => " · 過去の履歴：/history",
+        " · earlier history: /timeline" => " · 過去の履歴：/timeline",
         "Error: {message}" => "エラー：{message}",
         "working…  {elapsed}" => "処理中…  {elapsed}",
         "thinking…  {elapsed}" => "思考中…  {elapsed}",
         "Ask anything..." => "何でも質問…",
-        "Earlier history · {id} · {count} messages · /history for the previous page" => {
-            "過去の履歴 · {id} · {count} 件 · /history で前ページ"
-        }
+        "Earlier history · {id} · {count} messages" => "過去の履歴 · {id} · {count} 件",
         "No active session" => "アクティブセッションなし",
-        "No earlier messages." => "以前のメッセージなし。",
         "answer required" => "要回答",
         "permission required" => "要許可",
         "esc interrupt" => "esc 中断",
@@ -260,7 +267,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "resume a previous session" => "過去のセッションを再開",
         "open this session in the browser" => "セッションをブラウザで開く",
-        "load the previous page of messages" => "前のメッセージページを読込",
         "show the context window usage" => "コンテキスト使用量を表示",
         "interrupt the run" => "実行を中断",
         "steer with the next queued message" => "次のキューメッセージで steer",

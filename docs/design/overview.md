@@ -423,7 +423,7 @@ The HostPlatform exec-shell change recorded in ADR 002 (business configuration r
 | Providers | OAuth / API-key Providers, `/connect`, `/models` | Existing: Provider, ManagedProviders, OAuth plugins, Aimux |
 | Providers | `/effort`, `/fast` | Extension: Prompt, Provider |
 | Providers | Sub-agent and auxiliary models | Extension: Provider (`AuxiliaryModel`) |
-| Sessions | `/new`, `/resume`, Session list, `/history` | Existing: Agents, SessionStore |
+| Sessions | `/new`, `/resume`, Session list | Existing: Agents, SessionStore |
 | Sessions | `/timeline`, `/export` | CLI |
 | Sessions | Session titles | New: SessionTitle |
 | Sessions | Fork, deletion, cleanup | Extension: SessionStore, Agents |

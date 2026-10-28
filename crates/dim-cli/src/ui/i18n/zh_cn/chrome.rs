@@ -10,10 +10,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Branch history failed; reopen to retry" => "读取分支历史失败；重新打开重试",
         "Branch history is incomplete; stop-all unavailable" => "分支历史尚未读完，暂不能停止全部",
         "Running" => "运行中",
-        "Lines" => "分支线",
+        "Lines" => "线",
         "Enter show the line · x end it · Esc close" => "Enter 查看该线 · x 结束 · Esc 关闭",
-        "This session has no lines." => "这个会话还没有分支线。",
-        "No matching lines." => "没有匹配的分支线。",
+        "This session has no lines." => "这个会话还没有线。",
+        "No matching lines." => "没有匹配的线。",
         "the session itself" => "会话本身",
         "working" => "工作中",
         "ended itself" => "自行结束",
@@ -21,27 +21,37 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "ended with {id}" => "随 {id} 结束",
         "creation failed" => "创建失败",
         "shown" => "当前显示",
-        "line" => "分支线",
-        "line {id}" => "分支线 {id}",
-        "follow, talk to and end this session's lines" => "查看、对话并结束本会话的分支线",
-        "End line" => "结束分支线",
+        "line" => "线",
+        "line {id}" => "线 {id}",
+        "jump to a message of the shown line" => "跳到当前线的某条消息",
+        "Timeline" => "时间线",
+        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
+            "Enter 跳转 · e 编辑 · q 引用 · b 分支 · f 派生 · Esc 关闭"
+        }
+        "No messages yet." => "还没有消息。",
+        "Already on screen above; /tui jumps to it" => "已在上方；/tui 可直接跳转",
+        "{count} earlier messages · Enter or click to load" => {
+            "更早的 {count} 条消息 · Enter 或点击加载"
+        }
+        "follow, talk to and end this session's lines" => "查看、对话并结束本会话的线",
+        "End line" => "结束线",
         "y/N" => "y/N",
         "main is the session itself; a line ends, main does not" => {
-            "main 就是会话本身；分支线可以结束，main 不能"
+            "main 就是会话本身；线可以结束，main 不能"
         }
-        "Line has ended:" => "该分支线已结束：",
+        "Line has ended:" => "该线已结束：",
         "e edit · b branch · f fork" => "e 编辑 · b 分支 · f 派生",
         "e edit" => "e 编辑",
         "Fork the session before this message? (y/N)" => "在这条消息之前派生会话？(y/N)",
-        "⑂ new line from {id} · Esc cancel" => "⑂ 从 {id} 开新分支线 · Esc 取消",
-        "A fork copies main; b opens a line here" => "派生只复制 main；按 b 在这里开分支线",
+        "⑂ new line from {id} · Esc cancel" => "⑂ 从 {id} 开新线 · Esc 取消",
+        "A fork copies main; b opens a line here" => "派生只复制 main；按 b 在这里开线",
         "A line opens from text; images and files were not included" => {
-            "分支线只用文字开场；图片和文件未包含在内"
+            "线只用文字开场；图片和文件未包含在内"
         }
         "No finished turn to cut at yet" => "还没有已结束的回合可以切分",
         "forked {id} · {count} messages" => "已派生 {id} · {count} 条消息",
         "after message {count}" => "第 {count} 条消息之后",
-        "open a line from the end of the shown line" => "从当前线的末尾开一条分支线",
+        "open a line from the end of the shown line" => "从当前线的末尾开一条线",
         "fork the session at its last finished turn" => "在最近结束的回合处派生会话",
         "Starting" => "启动中",
         "Delegation result" => "委派结果",
@@ -185,16 +195,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/{name} is not yet available" => "/{name} 尚不可用",
         "new session" => "新会话",
         "resumed {id} · {count} messages" => "已恢复 {id} · {count} 条消息",
-        " · earlier history: /history" => " · 更早历史：/history",
+        " · earlier history: /timeline" => " · 更早历史：/timeline",
         "Error: {message}" => "错误：{message}",
         "working…  {elapsed}" => "处理中…  {elapsed}",
         "thinking…  {elapsed}" => "思考中…  {elapsed}",
         "Ask anything..." => "输入任何内容...",
-        "Earlier history · {id} · {count} messages · /history for the previous page" => {
-            "更早历史 · {id} · {count} 条消息 · /history 查看上一页"
-        }
+        "Earlier history · {id} · {count} messages" => "更早历史 · {id} · {count} 条消息",
         "No active session" => "没有活动会话",
-        "No earlier messages." => "没有更早的消息。",
         "answer required" => "需要回答",
         "permission required" => "需要授权",
         "esc interrupt" => "Esc 中断",
@@ -235,7 +242,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "resume a previous session" => "恢复之前的会话",
         "open this session in the browser" => "在浏览器中打开此会话",
-        "load the previous page of messages" => "加载上一页消息",
         "show the context window usage" => "显示上下文窗口用量",
         "interrupt the run" => "中断运行",
         "steer with the next queued message" => "用下一条队列消息 steer",

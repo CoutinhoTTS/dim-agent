@@ -41,7 +41,10 @@ impl Worker {
     pub(super) fn invalidate_projection(&mut self) -> String {
         self.release_members();
         self.projection_id += 1;
-        let attached_session = std::mem::take(&mut self.session_id);
+        let mut attached_session = std::mem::take(&mut self.session_id);
+        if attached_session.is_empty() {
+            attached_session = std::mem::take(&mut self.parked);
+        }
         self.projection = Projection::default();
         self.cursors.clear();
         self.focus = "main".into();

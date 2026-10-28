@@ -45,6 +45,7 @@ pub mod terminal;
 pub mod text;
 pub mod theme;
 pub mod theme_panel;
+pub mod timeline_panel;
 pub mod title;
 pub mod transcript;
 pub mod tui;

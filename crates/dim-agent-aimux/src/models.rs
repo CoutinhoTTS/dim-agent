@@ -1,8 +1,11 @@
 use crate::config::{ModelConfigFile, ProviderKind};
-use dim_agent_capabilities::host::HostError;
+use dim_agent_capabilities::context_model::window_facts;
+use dim_agent_capabilities::host::{ContextModel, HostError, HostFuture, ResolveContextModel};
 use dim_agent_runtime::ModelId;
 use dim_agent_types::{ModelConfig, ModelRequest};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) struct Model {
     pub base_url: String,
@@ -11,6 +14,8 @@ pub(crate) struct Model {
     pub defaults: ModelConfig,
     pub kind: ProviderKind,
     pub preset: Option<String>,
+    pub context_window: u64,
+    pub max_output_tokens: u64,
 }
 
 /// Validated development catalog; credentials are resolved for each request.
@@ -84,6 +89,19 @@ impl AimuxModels {
                         provider.id, entry.id
                     )));
                 }
+                let Some(context_window) = entry.context_window.filter(|value| *value > 0) else {
+                    return Err(HostError::failed(format!(
+                        "{}.{}.contextWindow must be a positive integer",
+                        provider.id, entry.id
+                    )));
+                };
+                let Some(max_output_tokens) = entry.max_output_tokens.filter(|value| *value > 0)
+                else {
+                    return Err(HostError::failed(format!(
+                        "{}.{}.maxOutputTokens must be a positive integer",
+                        provider.id, entry.id
+                    )));
+                };
                 if entry
                     .config
                     .temperature
@@ -116,6 +134,8 @@ impl AimuxModels {
                         defaults: entry.config,
                         kind: provider.kind,
                         preset: preset.clone(),
+                        context_window,
+                        max_output_tokens,
                     },
                 );
             }
@@ -143,5 +163,24 @@ impl AimuxModels {
             .ok_or_else(|| {
                 HostError::failed(format!("Model is not configured: {provider}/{model}"))
             })
+    }
+}
+
+/// The model-file profile's window facts: the entry the request names, by
+/// provider and model id (ContextCompaction §5.1).
+impl ResolveContextModel for AimuxModels {
+    fn resolve(
+        &self,
+        request: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, Arc<dyn ContextModel>> {
+        Box::pin(async move {
+            let model = self.get(&request.provider_id, &request.model_id)?;
+            Ok(window_facts(
+                model.context_window,
+                model.max_output_tokens,
+                &request,
+            ))
+        })
     }
 }

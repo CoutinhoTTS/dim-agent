@@ -9,13 +9,11 @@ use crate::{
 use dim_agent_aimux::{AimuxModels, config::ModelConfigFile};
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, MockTools},
-    context_methods::ContextMethodsPlugin,
     context_model::ProductContextModel,
     defaults,
     history::HistoryRenderer,
-    host::{CompactionStrategyHost, ContextModelHost, IdentityContext, PrepareContextHost},
+    host::{IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
-    summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
@@ -306,38 +304,25 @@ pub fn run_with(
             builder
                 .session_value(Arc::new(HistoryRenderer::default()))
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));
-            if models.is_some() {
-                builder
-                    .session_value(Arc::new(ContextModelHost(None)))
-                    .session_value(Arc::new(CompactionStrategyHost(None)));
+            if let Some(models) = &models {
+                defaults::install_compaction(
+                    &mut builder,
+                    models.clone(),
+                    config.target_home.clone(),
+                );
                 dim_agent_aimux::install(&mut builder);
             } else {
-                let home = product_home.clone();
-                builder
-                    .session_value(Arc::new(ContextModelHost(Some(Arc::new(
-                        ProductContextModel,
-                    )))))
-                    .require_feature(
-                        dim_agent_runtime::Feature::new("ContextCompaction")
-                            .session("ProductSummaryStrategy", move |names| {
-                                Ok(Box::new(ProductSummaryStrategyPlugin::new(
-                                    names,
-                                    ProductSummaryStrategyConfig {
-                                        home: Some(home.clone()),
-                                        target: None,
-                                    },
-                                )?))
-                            })
-                            .session("ContextMethods", |names| {
-                                Ok(Box::new(ContextMethodsPlugin::new(names)?))
-                            }),
-                    )
-                    .require_feature(
-                        dim_agent_runtime::Feature::new("PrepareModelHost")
-                            .session("PrepareModelHost", |names| {
-                                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
-                            }),
-                    );
+                defaults::install_compaction(
+                    &mut builder,
+                    Arc::new(ProductContextModel),
+                    Some(product_home.clone()),
+                );
+                builder.require_feature(
+                    dim_agent_runtime::Feature::new("PrepareModelHost")
+                        .session("PrepareModelHost", |names| {
+                            Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+                        }),
+                );
             }
             collaboration::install(&mut builder);
             dim_agent_questions::install(&mut builder);

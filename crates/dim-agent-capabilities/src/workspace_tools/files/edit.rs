@@ -87,6 +87,7 @@ pub(super) async fn run(
         Ok(input) => input,
         Err(result) => return Ok(result),
     };
+    let established = reads.established();
     let chars = js_len(&input.old_text) + js_len(&input.new_text);
     if chars > EDIT_INPUT_MAX_CHARS {
         return Ok(failed(
@@ -108,7 +109,7 @@ pub(super) async fn run(
         Err(message) => return Ok(invalid_input(message)),
     };
     let _lock = tools.locks.lock(&path, &cancel).await?;
-    let established = reads.get(&path);
+    let binding = reads.get(&path);
     let target = path.clone();
     #[cfg(test)]
     let hook = tools.before_commit.clone();
@@ -116,7 +117,7 @@ pub(super) async fn run(
         let written = edit_locked(
             &target,
             &input,
-            established,
+            binding,
             &cancel,
             #[cfg(test)]
             hook,
@@ -126,7 +127,7 @@ pub(super) async fn run(
     .await?;
     let (result, binding) = written.map_err(|Cancelled| cancelled())?;
     if let Some(binding) = binding {
-        reads.set(path, binding);
+        reads.set(path, binding, established);
     }
     Ok(result)
 }
@@ -134,7 +135,7 @@ pub(super) async fn run(
 fn edit_locked(
     path: &Path,
     input: &Input,
-    established: Option<TextFileBinding>,
+    binding: Option<TextFileBinding>,
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
 ) -> Result<(ToolResult, Option<TextFileBinding>), Cancelled> {
@@ -188,7 +189,7 @@ fn edit_locked(
         Ok(Err(NotRegular)) => return done(not_regular(display)),
         Err(error) => return done(read_failure(error)),
     };
-    let Some(binding) = established else {
+    let Some(binding) = binding else {
         return done(failed(
             "Read the file before editing it so its encoding and line endings can be preserved.",
             json!({ "code": "text_binding_required" }),

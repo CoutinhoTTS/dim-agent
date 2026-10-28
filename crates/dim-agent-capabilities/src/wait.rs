@@ -197,7 +197,7 @@ impl Wait {
 fn wait_definition() -> ToolDefinition {
     let mut definition = definition(
         WAIT_TOOL,
-        "Wait until a background task (like exec or agent) finishes, the user steers, or the timeout elapses. Pass a taskId to wait for one specific task, or omit it to wake on any.",
+        "Wait until a background task (like exec or agent) finishes, the user or a line of this session sends you a steer, or the timeout elapses. Pass a taskId to wait for one specific task, or omit it to wake on any.",
         json!({
             "type": "object",
             "properties": {
@@ -277,7 +277,7 @@ impl WaitTool {
                 json!({"reason": "notification", "taskIds": task_ids, "waitedMs": waited_ms}),
             ),
             WaitResult::UserSteer { waited_ms } => (
-                "wait ended: user steer".into(),
+                "wait ended: steer".into(),
                 json!({"reason": "user_steer", "waitedMs": waited_ms}),
             ),
             WaitResult::Interrupted { waited_ms } => (

@@ -103,11 +103,10 @@ fn configured_agent()
             ..Default::default()
         });
         dim_agent_capabilities::defaults::install_with_process_model(&mut builder);
+        dim_agent_capabilities::defaults::install_compaction(&mut builder, models.clone(), None);
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
-            .session_value(Arc::new(ContextModelHost(None)))
-            .session_value(Arc::new(CompactionStrategyHost(None)))
             .session_value(Arc::new(ToolHost(Arc::new(MockTools))));
         dim_agent_aimux::install(&mut builder);
         let process = rutis::Ctx::root()?;

@@ -6,7 +6,8 @@ The Wait plugin registers Wait in every Session and WaitBranch in every branch.
 
 Owner: [wait.rs](../../../../crates/dim-agent-capabilities/src/wait.rs).
 Registers the Session wait tool, resolving the caller's branch-local Wait
-service to await a matching task notice, user steer, timeout or interruption.
+service to await a matching task notice, a steer from the user or a line, a
+timeout or an interruption.
 
 ### Dependencies
 

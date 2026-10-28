@@ -670,7 +670,7 @@ pub(super) async fn launch_configured(
             serde_json::from_value::<ModelConfigFile>(json!({
                 "defaultModel":{"providerId":"local","modelId":"alpha"},
                 "providers":[{"id":"local","kind":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1",
-                    "models":[{"id":"alpha","config":{"maxTokens":64}},{"id":"beta","config":{"maxTokens":64}}]}]
+                    "models":[{"id":"alpha","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":64}},{"id":"beta","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":64}}]}]
             }))
             .unwrap(),
         )

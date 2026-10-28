@@ -196,6 +196,8 @@ struct Worker {
     client: Client,
     updates: mpsc::Sender<Update>,
     session_id: String,
+    /// The Session `/new` left: still attached until the next one is entered.
+    parked: String,
     projection: Projection,
     question_responses: Vec<(u64, String, crate::question::Call)>,
     /// Highest event sequence applied; replayed or duplicate events are skipped.
@@ -235,6 +237,9 @@ struct Worker {
     login: Option<Login>,
     /// Browser callbacks its local listener captured.
     login_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
+    /// The composer's context reading is out of date: a run on main ended,
+    /// or the session or its model changed.
+    context_stale: bool,
 }
 
 struct OutputWatch {
@@ -295,6 +300,7 @@ async fn run(
         client,
         updates: updates.clone(),
         session_id: String::new(),
+        parked: String::new(),
         projection: Projection::default(),
         question_responses: Vec::new(),
         cursors: Default::default(),
@@ -319,17 +325,14 @@ async fn run(
         mcp_required: Default::default(),
         login: None,
         login_callbacks: unbounded_channel(),
+        context_stale: false,
     };
     if let Err(error) = worker.open().await {
         if worker.options.resume.is_some() {
             let _ = updates.send(Update::Failed(error.to_string()));
             return;
         }
-        let notice = match error.downcast_ref::<client::RpcError>().and_then(app_error) {
-            Some("provider_failed") => NO_SESSION.to_owned(),
-            _ => format!("{error}. {NO_SESSION}"),
-        };
-        let _ = updates.send(Update::Notice(notice));
+        let _ = updates.send(Update::Notice(no_session(&error)));
     }
     loop {
         if let Err(error) = worker.poll_member().await {
@@ -342,6 +345,7 @@ async fn run(
         }
         worker.poll_task_stops().await;
         worker.poll_workflow().await;
+        worker.poll_context().await;
         let workflow_poll = worker
             .workflow
             .next_at
@@ -459,6 +463,47 @@ struct StateNotice {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ContextUsage {
+    context_window: f64,
+    output_tokens: f64,
+    threshold_tokens: f64,
+    estimated_input_tokens: f64,
+    baseline_source: String,
+}
+
+impl ContextUsage {
+    fn input(&self) -> u64 {
+        tokens(self.estimated_input_tokens)
+    }
+
+    fn window(&self) -> u64 {
+        tokens(self.context_window)
+    }
+
+    /// `/usage`'s one line.
+    fn describe(&self) -> String {
+        let (input, window) = (self.input(), self.window());
+        let percent = (input * 100).checked_div(window).unwrap_or(0);
+        let basis = match self.baseline_source.as_str() {
+            "provider_baseline" => "counted by the provider",
+            _ => "estimated",
+        };
+        format!(
+            "Context: {} / {} tokens ({percent}%), {basis} · output up to {} · compacts at {}",
+            group(input),
+            group(window),
+            group(tokens(self.output_tokens)),
+            group(tokens(self.threshold_tokens)),
+        )
+    }
+}
+
+fn tokens(value: f64) -> u64 {
+    value.max(0.0).round() as u64
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ClosedNotice {
     session_id: String,
 }
@@ -515,6 +560,44 @@ impl Worker {
             attached_session,
         )
         .await
+    }
+
+    /// Creates the Session the first message from home starts, on the model
+    /// the status line shows.
+    async fn start_session(&mut self) -> crate::Result<()> {
+        let attached_session = self.invalidate_projection();
+        let mut params = self.create_params();
+        let mut preferences = None;
+        let result = async {
+            if let Some(model) = &self.model {
+                params["model"] = json!({"provider": model.provider_id, "modelId": model.model_id});
+                let (provider, model) = (model.provider_id.clone(), model.model_id.clone());
+                preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
+                if let Some(preferences) = &preferences {
+                    params["modelPreferences"] = preferences.clone();
+                }
+            }
+            self.client
+                .typed::<Created>("session.create", params)
+                .await
+                .map_err(|error| model_adoption_error(error, preferences.as_ref()))
+        }
+        .await;
+        match result {
+            Ok(created) => {
+                self.enter(
+                    created.session_id,
+                    created.model,
+                    SwitchKind::New,
+                    attached_session,
+                )
+                .await
+            }
+            Err(error) => {
+                self.parked = attached_session;
+                Err(error)
+            }
+        }
     }
 
     /// `session.create` parameters: the workspace and, when one is chosen,
@@ -574,6 +657,7 @@ impl Worker {
             self.send(Update::Approvals(preset));
         }
         self.send(Update::Switched { session_id, kind });
+        self.context_stale = true;
         self.publish();
         Ok(())
     }
@@ -719,8 +803,9 @@ impl Worker {
     async fn command(&mut self, command: Command) -> crate::Result<()> {
         if self.session_id.is_empty()
             && matches!(command, Command::Submit(_) | Command::SubmitDraft(_))
+            && let Err(error) = self.start_session().await
         {
-            self.send(Update::Notice(NO_SESSION.into()));
+            self.send(Update::Notice(no_session(&error)));
             return Ok(());
         }
         match command {
@@ -872,19 +957,16 @@ impl Worker {
                     self.changed();
                 }
             }
+            // Home, not a Session: the first message creates one.
             Command::NewSession => {
-                let attached_session = self.invalidate_projection();
-                let created: Created = self
-                    .client
-                    .typed("session.create", self.create_params())
-                    .await?;
-                self.enter(
-                    created.session_id,
-                    created.model,
-                    SwitchKind::New,
-                    attached_session,
-                )
-                .await?;
+                if !self.session_id.is_empty() {
+                    self.parked = self.invalidate_projection();
+                    self.send(Update::Context(None));
+                    self.send(Update::Switched {
+                        session_id: String::new(),
+                        kind: SwitchKind::New,
+                    });
+                }
             }
             Command::Resume(session_id) => {
                 self.attach(session_id, SwitchKind::Resumed).await?;
@@ -892,8 +974,10 @@ impl Worker {
             Command::ListSessions => {
                 let sessions = self.list().await.map(|mut sessions| {
                     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+                    // No preview means no user message yet: nothing to resume.
                     sessions
                         .into_iter()
+                        .filter(|session| session.preview.is_some())
                         .map(|session| SessionItem {
                             id: session.session_id,
                             title: None,
@@ -909,7 +993,7 @@ impl Worker {
                 ));
             }
             Command::Usage => match self.context_usage().await {
-                Ok(text) => self.report(text, false),
+                Ok(usage) => self.report(usage.describe(), false),
                 Err(error) => self.report(error.to_string(), true),
             },
             Command::ToggleWeb => {
@@ -1274,27 +1358,17 @@ impl Worker {
         Ok(())
     }
 
-    /// `/usage`: the branch's context window as `session.context.usage`
-    /// estimates it, one line.
-    async fn context_usage(&mut self) -> crate::Result<String> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct ContextUsage {
-            context_window: f64,
-            output_tokens: f64,
-            threshold_tokens: f64,
-            estimated_input_tokens: f64,
-            baseline_source: String,
-        }
-        let usage: ContextUsage = self
-            .client
+    /// The main branch's context window as `session.context.usage`
+    /// estimates it.
+    async fn context_usage(&mut self) -> crate::Result<ContextUsage> {
+        self.client
             .typed(
                 "session.context.usage",
                 json!({"sessionId": self.session_id, "branchId": "main"}),
             )
             .await
-            .map_err(|error| {
-                match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+            .map_err(
+                |error| match error.downcast_ref::<client::RpcError>().and_then(app_error) {
                     Some("context_not_configured") => {
                         "Context usage is known once a model has answered in this session".into()
                     }
@@ -1302,29 +1376,27 @@ impl Worker {
                         "Context usage needs the model's capabilities; select the model again"
                             .into()
                     }
-                    Some("unknown_method") => {
-                        "Context usage is not tracked for an explicit model configuration".into()
-                    }
+                    Some("unknown_method") => "This daemon does not track context usage".into(),
                     _ => error,
-                }
-            })?;
-        let tokens = |value: f64| value.max(0.0).round() as u64;
-        let (input, window) = (
-            tokens(usage.estimated_input_tokens),
-            tokens(usage.context_window),
-        );
-        let percent = (input * 100).checked_div(window).unwrap_or(0);
-        let basis = match usage.baseline_source.as_str() {
-            "provider_baseline" => "counted by the provider",
-            _ => "estimated",
-        };
-        Ok(format!(
-            "Context: {} / {} tokens ({percent}%), {basis} · output up to {} · compacts at {}",
-            group(input),
-            group(window),
-            group(tokens(usage.output_tokens)),
-            group(tokens(usage.threshold_tokens)),
-        ))
+                },
+            )
+    }
+
+    /// Refreshes the composer's context reading once it is stale; a session
+    /// whose usage is unknown shows none.
+    async fn poll_context(&mut self) {
+        if !std::mem::take(&mut self.context_stale)
+            || self.session_id.is_empty()
+            || !self.client.supports(&["session.context.usage"])
+        {
+            return;
+        }
+        let reading = self
+            .context_usage()
+            .await
+            .ok()
+            .map(|usage| (usage.input(), usage.window()));
+        self.send(Update::Context(reading));
     }
 
     /// Whether a request made from a snapshot still addresses this
@@ -1447,6 +1519,7 @@ impl Worker {
                     {
                         transcript.set_running(notice.running);
                     }
+                    self.context_stale |= notice.branch_id == "main" && !notice.running;
                     self.changed();
                 } else if notice.branch_id == "main" && self.observes_member(&notice.session_id) {
                     self.member_notice(&notice.session_id, member::Notice::State(notice.running));
@@ -2024,8 +2097,8 @@ impl Worker {
         self.send(Update::ModelPolicy(update));
     }
 
-    /// Switches the session's model, or starts a session on it when there is
-    /// none yet, then makes it the default for new ones.
+    /// Switches the session's model, or at home the one the first message
+    /// starts a session on, then makes it the default for new ones.
     async fn select_model(&mut self, provider_id: String, model_id: String) -> crate::Result<()> {
         #[derive(Deserialize)]
         struct Updated {
@@ -2034,25 +2107,21 @@ impl Worker {
         let preferences =
             saved_model_preferences(&mut self.client, &provider_id, &model_id).await?;
         let model = if self.session_id.is_empty() {
-            let attached_session = self.invalidate_projection();
-            let mut params = self.create_params();
-            if let Some(preferences) = &preferences {
-                params["modelPreferences"] = preferences.clone();
-            }
-            params["model"] = json!({"provider": provider_id, "modelId": model_id});
-            let created: Created = self
-                .client
-                .typed("session.create", params)
-                .await
-                .map_err(|error| model_adoption_error(error, preferences.as_ref()))?;
-            self.enter(
-                created.session_id,
-                created.model.clone(),
-                SwitchKind::New,
-                attached_session,
-            )
-            .await?;
-            created.model
+            let model = ModelId {
+                provider_id,
+                model_id,
+            };
+            let features = self.model_features(&model).await;
+            self.model = Some(Configuration {
+                provider_id: model.provider_id.clone(),
+                model_id: model.model_id.clone(),
+            });
+            self.send(Update::Ready {
+                provider: model.provider_id.clone(),
+                model: model.model_id.clone(),
+            });
+            self.send(features);
+            model
         } else {
             let mut params = json!({"sessionId":self.session_id,"branchId":"main","providerId":provider_id,"modelId":model_id});
             if let Some(preferences) = &preferences {
@@ -2069,6 +2138,7 @@ impl Worker {
                 model: updated.model.model_id.clone(),
             });
             self.send(features);
+            self.context_stale = true;
             updated.model
         };
         if let Err(error) = self.make_default(&model).await {
@@ -2780,6 +2850,14 @@ pub(crate) async fn clear_saved_model_preferences(
         .version
         .ok_or("Provider catalog must be refreshed before editing preferences")?;
     clear_model_preferences(client, provider_id, model_id, version).await
+}
+
+/// The notice when no Session could be started.
+fn no_session(error: &crate::Error) -> String {
+    match error.downcast_ref::<client::RpcError>().and_then(app_error) {
+        Some("provider_failed") => NO_SESSION.to_owned(),
+        _ => format!("{error}. {NO_SESSION}"),
+    }
 }
 
 pub(crate) fn model_adoption_error(

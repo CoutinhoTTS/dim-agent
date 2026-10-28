@@ -131,20 +131,30 @@ empty live preview and unavailable historical captures.
 
 Owner: [workspace_tools/file_reads.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/file_reads.rs).
 Records canonical-path bindings for files read on this branch: raw-byte revision,
-encoding, BOM and line endings. Existing-file write/edit admission requires a
-binding established by that branch.
+encoding, BOM and line endings. Existing-file `edit` admission requires a binding
+established by that branch. Existing-file `write` admission requires one whose
+operation — a `read`, `write` or `edit` on this branch — is still in the model's
+context: a completed `context/compaction` on this branch that cut the operation
+out refuses the write with `text_binding_required`, and the model reads the file
+again (a part is enough) or uses `edit`.
 
 ### Dependencies
 
-No injected services (`Deps = ()`). WorkspaceTools resolves this branch service
-per file-tool call, rather than injecting it into the Session plugin.
+| Service | Purpose |
+| --- | --- |
+| `B:Timeline` | The position of the operation that bound a file, and the branch's completed `context/compaction` facts, read at `write` admission. |
+
+WorkspaceTools resolves this branch service per file-tool call, rather than
+injecting it into the Session plugin.
 
 ### Events and lifetime
 
 No events, tasks or external resources. A mutex-protected map is created in each
-`apply`. Reload loses its bindings; it does not reconstruct them from history.
-A fresh read is therefore needed before mutation. The record is not a filesystem
-lock, permission grant or cross-process compare-and-swap.
+`apply`. Each binding records the sequence its operation started at, and `write`
+reads the branch's later facts at admission, so a compaction committed before the
+admission is always seen. Reload loses its bindings; it does not reconstruct them
+from history. A fresh read is therefore needed before mutation. The record is not
+a filesystem lock, permission grant or cross-process compare-and-swap.
 
 ### Tests
 
@@ -152,12 +162,17 @@ lock, permission grant or cross-process compare-and-swap.
 `writes_require_a_fresh_read_on_the_same_branch`,
 `a_failed_offload_does_not_bind_the_file`,
 `edits_and_writes_preserve_bom_and_line_endings`.
+[context_flow/compacted_bindings.rs](../../../../crates/dim-agent-capabilities/tests/context_flow/compacted_bindings.rs):
+`a_write_after_a_compaction_that_cut_its_read_is_refused_until_the_file_is_read_again`,
+`a_compaction_that_keeps_the_read_leaves_the_write_admitted`,
+`an_edit_after_a_compaction_that_cut_its_read_succeeds`,
+`a_compaction_that_cuts_a_written_binding_refuses_the_next_write`.
 
 <!-- generated:plugin FileReads — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | — |
+| 注入 | `B:Timeline` |
 | 提供 | `B:FileReads` |
 | 被注入于 | — |
 <!-- /generated -->

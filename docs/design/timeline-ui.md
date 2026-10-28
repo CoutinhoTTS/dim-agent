@@ -17,7 +17,8 @@ L0  Session ............ the subject: identity, workspace, interaction surface
      │   ├ e edit / q quote        (existing)
      │   ├ b branch here → a line in this Session
      │   └ f fork here   → a new Session (main only)
-     └ marker .......... ⑂ a line opened here (pickable)
+     ├ marker .......... ⑂ a line opened here (pickable)
+     └ /timeline ....... every point of the shown line, to jump to (§4.6)
  L3  Lines (/lines) .... every line under the line it was cut from
 ```
 
@@ -95,6 +96,23 @@ While a line is shown, the composer's bottom border names its path from `main` a
 
 `after message N` counts the user messages in the parent's history, its inherited ones included, at the cut.
 
+### 4.6 `/timeline`: jumping to a message
+
+The Timeline's points are its user messages. Tab walks them one at a time from the newest; `/timeline` lists them all, as the desktop client's message rail does: each row is the message and the first text of its answer.
+
+```
+┌ Timeline ────────────────────────────────────────────────────────┐
+│   #1  weather in Shanghai      Cloudy, 20°C, light wind …        │
+│   #2  try RwLock for the cache The lock moves into …             │
+│ › #3  adsa                                                       │
+└──── Enter jump · e edit · q quote · b branch · f fork · Esc close ┘
+```
+
+- The newest message is selected. Typing does not filter: the letters act on the selected message as they do on a pick (§4.1–4.3).
+- `Enter` jumps. Fullscreen picks the message, as Tab would, and the pick keys apply. Scrollback cannot move up: a message it has not drawn yet is drawn from there on as an earlier-history page; one already drawn gets a notice that `/tui` can jump to it.
+
+A resume draws the newest 100 messages. Fullscreen tops the transcript with a load-more row (`↑ 130 earlier messages · Enter or click to load`): a click, or Tab up to it and `Enter`, draws the previous 100 above and keeps the oldest drawn message at the top of the view. Scrollback has no such row; its earlier history comes from `/timeline` jumps. This replaces `/history`, which paged earlier messages in after the newest ones.
+
 ## 5. Switching lines
 
 Unchanged from #427 §14: a switch writes a `line ID` boundary and the shown line's transcript, which holds its own events only (each branch numbers its own sequences, [sessions service D11](appserver/sessions-service.md)). Its inherited history is its parent's, one marker away.
@@ -131,7 +149,7 @@ Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines
 
 ## 9. Ablation review
 
-- No new panel or mode: points reuse the Tab pick, line markers reuse the card pick, the switch reuses #427's, the fork's attach reuses `/resume`'s.
+- No new mode: points reuse the Tab pick, line markers and the load-more row reuse the card pick, the switch reuses #427's, the fork's attach reuses `/resume`'s. The one new panel, `/timeline`, lists the points the pick walks and takes the pick's keys.
 - New interaction: `b`/`f` on a pick, the composer's line draft and fork question, the path border, `/branch` and `/fork`. Each serves one rule of §2.
 - Considered and dropped: a `b` key in the lines panel (needs each line's head; `/branch` on the shown line covers it), greyed hints per point (a notice on the key says the same with less state), end markers (§4.4), a one-row summary of the inherited prefix and `Esc Esc` back to the parent (§5 and the marker already lead there).
 

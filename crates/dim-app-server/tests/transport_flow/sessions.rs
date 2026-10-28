@@ -1319,7 +1319,7 @@ async fn a_launch_resolves_its_model_through_the_model_selection_host() {
             serde_json::from_value::<ModelConfigFile>(json!({
                 "defaultModel":{"providerId":"local","modelId":"alpha"},
                 "providers":[{"id":"local","kind":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1",
-                    "models":[{"id":"alpha","config":{"maxTokens":64}},{"id":"beta","config":{"maxTokens":32}}]}]
+                    "models":[{"id":"alpha","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":64}},{"id":"beta","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":32}}]}]
             }))
             .unwrap(),
         )

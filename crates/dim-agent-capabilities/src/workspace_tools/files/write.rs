@@ -1,6 +1,8 @@
 //! `write` (TS `write.ts`) and staged replacement shared with `edit`.
 
-use super::super::file_reads::{Bom, EncodingSource, FileReads, TextEncoding, TextFileBinding};
+use super::super::file_reads::{
+    Bom, EncodingSource, FileReads, TextEncoding, TextFileBinding, WriteBinding,
+};
 use super::codec;
 use super::{
     Cancelled, FileTools, NotRegular, blocking, cancelled, failed, field, hex, invalid_input,
@@ -50,13 +52,14 @@ pub(super) async fn run(
     let Some(Value::String(content)) = field(input, "content") else {
         return Ok(invalid_input("write requires a string content."));
     };
+    let established = reads.established();
     let (cwd, home, requested) = (tools.cwd.clone(), tools.home.clone(), display.clone());
     let path = match blocking(move || resolve_path(&cwd, &home, &requested)).await? {
         Ok(path) => path,
         Err(message) => return Ok(invalid_input(message)),
     };
     let _lock = tools.locks.lock(&path, &cancel).await?;
-    let established = reads.get(&path);
+    let binding = reads.write_binding(&path).await?;
     let (display, content, target) = (display.clone(), content.clone(), path.clone());
     #[cfg(test)]
     let hook = tools.before_commit.clone();
@@ -65,7 +68,7 @@ pub(super) async fn run(
             &target,
             &display,
             &content,
-            established,
+            binding,
             &cancel,
             #[cfg(test)]
             hook,
@@ -75,7 +78,7 @@ pub(super) async fn run(
     .await?;
     let (result, binding) = written.map_err(|Cancelled| cancelled())?;
     if let Some(binding) = binding {
-        reads.set(path, binding);
+        reads.set(path, binding, established);
     }
     Ok(result)
 }
@@ -84,7 +87,7 @@ fn write_locked(
     path: &Path,
     display: &str,
     content: &str,
-    established: Option<TextFileBinding>,
+    binding: WriteBinding,
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
 ) -> Result<(ToolResult, Option<TextFileBinding>), Cancelled> {
@@ -117,11 +120,20 @@ fn write_locked(
         None
     };
     let (binding, text) = if exists {
-        let Some(binding) = established else {
-            return done(failed(
-                "Read the existing file before overwriting it so its encoding and line endings can be preserved.",
-                json!({ "code": "text_binding_required" }),
-            ));
+        let binding = match binding {
+            WriteBinding::None => {
+                return done(failed(
+                    "Read the existing file before overwriting it so its encoding and line endings can be preserved.",
+                    json!({ "code": "text_binding_required" }),
+                ));
+            }
+            WriteBinding::Compacted => {
+                return done(failed(
+                    "What you last read or wrote of this file was compacted out of the context. Read the file again (a part is enough) or use edit.",
+                    json!({ "code": "text_binding_required" }),
+                ));
+            }
+            WriteBinding::Text(binding) => binding,
         };
         if let Some(conflict) = revision_conflict(path, &binding.raw_revision, display) {
             return done(conflict);

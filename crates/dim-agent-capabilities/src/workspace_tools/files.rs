@@ -369,6 +369,21 @@ impl Drop for PathLock {
 #[cfg(all(test, unix))]
 mod mutation_tests {
     use super::*;
+    use dim_agent_runtime::{MemoryTimelineStore, Timeline, TimelineKey};
+    use rutis::host::CtxHost;
+
+    /// One branch with its own empty Timeline.
+    fn branch() -> FileReads {
+        FileReads::new(Arc::new(Timeline::new(
+            rutis::Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: "mutation".into(),
+                branch_id: "main".into(),
+            },
+            Vec::new(),
+            Arc::new(MemoryTimelineStore::default()),
+        )))
+    }
 
     async fn call(
         tools: &FileTools,
@@ -412,7 +427,7 @@ mod mutation_tests {
                 let root = root.canonicalize().unwrap();
                 let target = root.join("file");
                 let mut tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
-                let reads = FileReads::default();
+                let reads = branch();
                 if scenario != "absent" {
                     std::fs::write(&target, b"before\r\n").unwrap();
                     call(
@@ -547,7 +562,7 @@ mod mutation_tests {
         );
         let second =
             FileTools::with_coordinator(root.clone(), root.clone(), root.join("out"), coordinator);
-        let (a, b) = (FileReads::default(), FileReads::default());
+        let (a, b) = (branch(), branch());
         for (tools, reads) in [(&first, &a), (&second, &b)] {
             call(
                 tools,

@@ -47,13 +47,13 @@ struct Server {
     child: tokio::process::Child,
     socket: std::path::PathBuf,
 }
-async fn launch_binary(directory: &std::path::Path) -> Server {
-    let home = directory.join("home");
+/// Runs the server on a socket below `directory`, with `profile` as its
+/// model profile.
+async fn launch(directory: &std::path::Path, profile: &[&str]) -> Server {
     let socket = directory.join("ipc/server.sock");
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
+        .args(profile)
         .args([
-            "--product-home",
-            home.to_str().unwrap(),
             "--unix",
             socket.to_str().unwrap(),
             "--no-ws",
@@ -72,6 +72,20 @@ async fn launch_binary(directory: &std::path::Path) -> Server {
     output.read_line(&mut line).await.unwrap();
     assert!(!line.is_empty(), "server startup failed");
     Server { child, socket }
+}
+async fn launch_binary(directory: &std::path::Path) -> Server {
+    launch(
+        directory,
+        &["--product-home", directory.join("home").to_str().unwrap()],
+    )
+    .await
+}
+async fn launch_configured(directory: &std::path::Path, configuration: &std::path::Path) -> Server {
+    launch(
+        directory,
+        &["--model-config", configuration.to_str().unwrap()],
+    )
+    .await
 }
 async fn connect(server: &Server) -> Client {
     let mut client = Client {
@@ -430,6 +444,143 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         assert_eq!(settled["data"]["reason"], "capability reloading");
         assert_eq!(settled["data"]["request_id"], running["data"]["request_id"]);
         assert_paired(&events);
+        server.child.kill().await.unwrap();
+        http.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// The model-file profile compacts like the product profile: the window comes
+/// from the model entry, automatic and requested compaction complete, and
+/// images still go out unchanged with no capability snapshot
+/// (ContextCompaction §4, §5.1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_compaction_uses_the_window_declared_in_the_model_file() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let provider = Arc::new(Provider::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(completion))
+            .with_state(provider.clone());
+        let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let directory = std::path::PathBuf::from("/tmp")
+            .join(format!("dim-configured-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(directory.join("state")).unwrap();
+        let configuration = directory.join("models.json");
+        std::fs::write(
+            &configuration,
+            json!({
+                "defaultModel": {"providerId": "local", "modelId": "small"},
+                "providers": [{"id": "local", "kind": "openai-compatible",
+                    "baseUrl": format!("http://{endpoint}/v1"),
+                    "models": [{"id": "small", "contextWindow": 8000, "maxOutputTokens": 200,
+                        "config": {"maxTokens": 200}}]}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut server = launch_configured(&directory, &configuration).await;
+        let mut client = connect(&server).await;
+        let created = client
+            .rpc("session.create", json!({"cwd":directory,"tools":[]}))
+            .await;
+        assert_ok(&created);
+        let sid = created["result"]["sessionId"].clone();
+        assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+
+        let usage = client
+            .rpc(
+                "session.context.usage",
+                json!({"sessionId":sid,"branchId":"main"}),
+            )
+            .await;
+        assert_ok(&usage);
+        assert_eq!(usage["result"]["contextWindow"], 8000.0);
+        assert_eq!(usage["result"]["outputTokens"], 200.0);
+        assert_eq!(usage["result"]["thresholdTokens"], 7800.0 - 0.2 * 7800.0);
+
+        let size = 1200.;
+        let mut index = 0;
+        let events = loop {
+            turn(&mut client, &sid, &big(index, size)).await;
+            index += 1;
+            let events = history(&mut client, &sid).await;
+            if events.iter().any(|event| {
+                is(event, "context/compaction") && event["data"]["status"] == "completed"
+            }) {
+                break events;
+            }
+            assert!(index < 10, "no automatic compaction");
+        };
+        assert_eq!(provider.summaries(), 1);
+        let result = events
+            .iter()
+            .find(|event| is(event, "context/compaction") && event["data"]["status"] == "completed")
+            .unwrap();
+        assert_eq!(result["data"]["strategy"], "summary");
+        let start = events
+            .iter()
+            .find(|event| event["sequence"] == result["data"]["start"])
+            .unwrap();
+        assert_eq!(start["data"]["trigger"], "threshold");
+        assert_paired(&events);
+
+        turn(&mut client, &sid, "small one").await;
+        let reply = client
+            .rpc(
+                "session.context.compact",
+                json!({"sessionId":sid,"branchId":"main"}),
+            )
+            .await;
+        assert_ok(&reply);
+        assert_eq!(reply["result"]["status"], "completed");
+        assert_eq!(provider.summaries(), 2);
+
+        let mut images = connect(&server).await;
+        let created = images
+            .rpc("session.create", json!({"cwd":directory,"tools":[]}))
+            .await;
+        assert_ok(&created);
+        let image_sid = created["result"]["sessionId"].clone();
+        assert_ok(
+            &images
+                .rpc("session.attach", json!({"sessionId":image_sid}))
+                .await,
+        );
+        assert_ok(
+            &images
+                .rpc(
+                    "session.submit",
+                    json!({"sessionId":image_sid,"branchId":"main","user":{"content":[
+                        {"type": "text", "text": "look"},
+                        {"type": "image", "source": {"type": "base64", "mediaType": "image/png",
+                            "data": "aGVsbG8="}}
+                    ]}}),
+                )
+                .await,
+        );
+        assert_ok(
+            &images
+                .rpc(
+                    "session.idle",
+                    json!({"sessionId":image_sid,"branchId":"main"}),
+                )
+                .await,
+        );
+        let request = provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|body| !body.to_string().contains(SUMMARIZER))
+            .cloned()
+            .unwrap();
+        assert!(request.to_string().contains("aGVsbG8="), "{request}");
+
         server.child.kill().await.unwrap();
         http.abort();
         std::fs::remove_dir_all(directory).unwrap();

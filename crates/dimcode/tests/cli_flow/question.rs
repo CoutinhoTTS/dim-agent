@@ -966,7 +966,7 @@ fn native_tui_question_answer_reaches_the_next_model_request() {
         }
     });
     let config = home.0.join("model.json");
-    fs::write(&config,json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","config":{"maxTokens":128}}]}]}).to_string()).unwrap();
+    fs::write(&config,json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":128}}]}]}).to_string()).unwrap();
     let mut command = home.command();
     command.args([
         "--server",

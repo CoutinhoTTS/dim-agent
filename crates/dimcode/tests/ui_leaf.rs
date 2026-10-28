@@ -410,7 +410,10 @@ fn normal_dimcode_is_the_leaf_until_it_leaves() {
             assert!(Instant::now() < deadline, "Web switch: {status}");
         }
     }
+    // `/new` goes home; the first message starts the Session the leaf moves to.
     pty.write(b"/new\r");
+    pty.read_until("new session");
+    pty.write(b"leaf-switch-proof\r");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pty.drain(Duration::from_millis(25));

@@ -220,7 +220,12 @@ Save this model configuration as `model.json`, replace the model ID, and set the
       "apiKeyEnv": "OPENAI_API_KEY",
       "baseUrl": "https://api.openai.com/v1",
       "models": [
-        { "id": "your-model-id", "config": { "maxTokens": 4096 } }
+        {
+          "id": "your-model-id",
+          "contextWindow": 128000,
+          "maxOutputTokens": 16384,
+          "config": { "maxTokens": 4096 }
+        }
       ]
     }
   ]
@@ -659,7 +664,7 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | Mouse drag | Select transcript text; release copies it (OSC 52, plus `pbcopy` locally on macOS; inside tmux OSC 52 goes through passthrough, which needs `set -g allow-passthrough on`) |
 | Click a link | Opens it in the system browser (OSC 8 links, or a bare `http(s)://` URL); over SSH the status row shows the URL instead |
 | Click a tool group's header or a thought's title | Opens (`▾`) or closes (`▸`) that group, or shows a settled thought whole or as its one-row summary; a running group keeps the form it is given when it settles. A settled block opens in place: the view stops following the bottom so the header stays under the pointer. A press counts as a click only if no drag followed and its row still shows the same text at the release, so output arriving in between cannot redirect it. `/tools` sets every group and thought, settled ones included, and lays the transcript out again from the bottom |
-| `Tab` / `Shift+Tab` | Pick older / newer user messages (`Up` / `Down` while one is picked); past the newest the pick ends. `Esc` ends it, `e` puts the message in the composer to edit and send again; `b` opens a line of the shown line cut just before the message, with the message in the composer as its opening input (`Enter` opens it through `session.branch_create` and shows it, `Esc` cancels); `f`, on `main` only, asks, then forks the Session just before the message (`session.fork`) and attaches to the fork with the message in its composer. A `⑂ line` row, written where a line opened on the shown line, is picked too: `Enter` (or a click) shows that line ([timeline UI](../../docs/design/timeline-ui.md)) |
+| `Tab` / `Shift+Tab` | Pick older / newer user messages (`Up` / `Down` while one is picked); past the newest the pick ends. `Esc` ends it, `e` puts the message in the composer to edit and send again; `b` opens a line of the shown line cut just before the message, with the message in the composer as its opening input (`Enter` opens it through `session.branch_create` and shows it, `Esc` cancels); `f`, on `main` only, asks, then forks the Session just before the message (`session.fork`) and attaches to the fork with the message in its composer. A `⑂ line` row, written where a line opened on the shown line, is picked too: `Enter` (or a click) shows that line ([timeline UI](../../docs/design/timeline-ui.md)); so is the load-more row at the top, which `Enter` loads |
 | `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the palette closes |
 | `Home` / `End` | With an empty composer: scroll to the top / bottom of the transcript |
 | `Esc` | Interrupt the run |
@@ -773,14 +778,16 @@ known individual targets remain usable. A failure reading main history is a visi
 connection failure: submission is disabled and the unsent draft stays in the current UI.
 Recovery requires exiting and resuming the Session.
 Resuming waits for main's complete initial history before drawing the latest
-100 messages and its boundary. Earlier messages remain available through
-`/history`; a draft typed during paging stays editable and survives completion.
+100 messages and its boundary. Fullscreen tops them with a load-more row: a
+click, or `Tab` up to it and `Enter`, draws the previous 100 above and keeps the
+oldest drawn message at the top of the view. Scrollback reaches earlier messages
+through a `/timeline` jump; a draft typed meanwhile stays editable.
 
 ```text
 > paged-message-051
 ...
 > paged-message-150
---- resumed paged · 100 messages · earlier history: /history ---
+--- resumed paged · 100 messages · earlier history: /timeline ---
 [ draft typed while history was loading                         ]
 ```
 
@@ -909,7 +916,8 @@ The terminal UI reaches the same Session methods as the line client:
 | `/login` | Opens the Dim sign-in panel. It shows the account from `account.status` as a status line; signed out, its entries are browser, enterprise-email or device sign-in through `account.login.*` at the entry's account directory (below), each entering its own flow (`Esc` after a failure returns to the entries); signed in, it shows the account's name and email, its plan, credits, token windows and feature meters from `account.usage` (`Ctrl+R` asks again; a plugin without the method shows why), and its entries open `/models`, open the plan page at the account directory's `/console/subscription` in the browser, or sign out with `account.logout`, after which the panel shows the sign-in entries again. Browser sign-in redirects to `http://localhost:54321/auth/callback` (`--redirect-uri` overrides it), catches the callback on a loopback listener when that port is free and opens the authorization URL (neither over SSH); a callback URL pasted in the panel completes it too; device sign-in shows the code and polls the attempt every second. `Esc` closes the panel and cancels a pending attempt. On success the catalog is refreshed with `provider.refresh` and `/models` opens |
 | `/connect` | Reads safe connection snapshots with `provider.management`. `Test + apply` probes the unsaved draft, then updates only changed fields at the form's original version with `provider.update`; unsupported model listing still permits saving and reports that the key was not tested. Other probe failures keep the draft. `Disconnect` atomically clears credentials and disables the record; Enable/Disable update only that flag. `Add custom provider` probes a Name, Base URL and API Key draft, then calls `provider.create` with the form's retained UUID and discovered defaults. IDs never derive from names. Failures retain edits; rereads update the safe status/version and require confirmation before retrying. `Ctrl+R` rereads without discarding the draft. Fields and filters use the composer's line editor. Account sign-in retains its existing owner |
 | `/models` | Lists enabled, executable models from `provider.list`/`provider.catalog`. An explicit pick sends the saved effort/tier preferences for that exact `{providerId, modelId}` with `session.create` or `session.model.update`, then saves the scoped default with `provider.select`. The adopted model stays in effect even when saving the default fails; the failure is reported as a notice. Unsupported saved preferences are reported and retained for the user to edit or clear; there is no silent fallback. When the daemon advertises `collaboration.model_policy`/`collaboration.set_model_policy`, a "Subagent models" row chooses Agent choice, Inherit requesting branch or a fixed model (from the same model list) for new Collaboration members; it writes only `collaboration.set_model_policy` with the revision it read, and after a revision conflict the next choice rereads before saving ([subagent model policy](../../docs/design/subagent-model-policy.md#5-native-cli-interaction)) |
-| `/lines` (alias `/branches`) | Lists `main` and every line under the line it was opened from, ordered by where it was cut and labelled `after message N`, each with its state (working, waiting, ended itself, ended by an operation, creation failed); while a line is shown the composer's bottom border names its path from `main` (`line main ▸ b-91 · after message 4`); Enter shows the selected line's conversation in place of `main`'s, and the composer, `!command` and the interrupt then address that line; `x`, then `y`, ends the selected line through `session.branch_end`, refused on `main` |
+| `/lines` | Lists `main` and every line under the line it was opened from, ordered by where it was cut and labelled `after message N`, each with its state (working, waiting, ended itself, ended by an operation, creation failed); while a line is shown the composer's bottom border names its path from `main` (`line main ▸ b-91 · after message 4`); Enter shows the selected line's conversation in place of `main`'s, and the composer, `!command` and the interrupt then address that line; `x`, then `y`, ends the selected line through `session.branch_end`, refused on `main` |
+| `/timeline` | Lists the shown line's user messages, oldest first, numbered, each with the first text of its answer, the newest selected. Typing does not filter: `e`, `q`, `b` and `f` act on the selected message as on a pick. `Enter` jumps: fullscreen picks the message (drawing from it first when it is earlier history), so the pick keys apply; scrollback draws a message it has not drawn yet, and everything after it up to what is drawn, as an earlier-history page, and otherwise says `/tui` can jump to it ([timeline UI §4.6](../../docs/design/timeline-ui.md#46-timeline-jumping-to-a-message)) |
 | `/branch [TEXT]`, `/fork [TEXT]` | As `b` and `f` on a picked message, at the shown line's newest turn end: `/branch` puts `TEXT` in the composer as the new line's opening input; `/fork` asks, then forks `main` there with `TEXT` in the fork's composer |
 | `/usage` | Reports the branch's context window from `session.context.usage`: estimated input tokens against the window, the output allowance and the compaction threshold; before a model has answered it says so |
 | `/effort VALUE` (`/reasoning`), `/fast on\|off`, `/agent ID` | Change the Session's reasoning effort, service tier or agent; without a value they list the choices for the adopted model. `/fast` is listed in the palette only while the adopted model's catalog entry advertises priority/default service tiers |

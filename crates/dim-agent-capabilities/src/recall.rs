@@ -991,6 +991,14 @@ impl<'a> Narrative<'a> {
                     .iter()
                     .find(|(input, _)| line_write(input).is_some())
             })
+            // An Append input joins the request but does not open the turn
+            // (`AgentLoop::driven`), so it is no title: the driving input is
+            // the first that is not one.
+            .or_else(|| {
+                opening
+                    .iter()
+                    .find(|(input, _)| input.effective_mode() != InputMode::Append)
+            })
             .or_else(|| opening.first())
         {
             Some((input, live)) => parts.push(match (line_write(input), &input.user) {

@@ -30,6 +30,16 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "shown" => "ditampilkan",
         "line" => "jalur",
         "line {id}" => "jalur {id}",
+        "jump to a message of the shown line" => "lompat ke pesan di jalur yang tampil",
+        "Timeline" => "Linimasa",
+        "Enter jump · e edit · q quote · b branch · f fork · Esc close" => {
+            "Enter lompat · e ubah · q kutip · b cabang · f fork · Esc tutup"
+        }
+        "No messages yet." => "Belum ada pesan.",
+        "Already on screen above; /tui jumps to it" => "Sudah ada di atas; /tui langsung lompat",
+        "{count} earlier messages · Enter or click to load" => {
+            "{count} pesan lama · Enter atau klik untuk memuat"
+        }
         "follow, talk to and end this session's lines" => {
             "ikuti, ajak bicara, dan akhiri jalur sesi ini"
         }
@@ -222,16 +232,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/{name} is not yet available" => "/{name} belum tersedia",
         "new session" => "sesi baru",
         "resumed {id} · {count} messages" => "lanjut {id} · {count} pesan",
-        " · earlier history: /history" => " · riwayat lama: /history",
+        " · earlier history: /timeline" => " · riwayat lama: /timeline",
         "Error: {message}" => "Error: {message}",
         "working…  {elapsed}" => "bekerja…  {elapsed}",
         "thinking…  {elapsed}" => "berpikir…  {elapsed}",
         "Ask anything..." => "Tanya apa saja…",
-        "Earlier history · {id} · {count} messages · /history for the previous page" => {
-            "Riwayat lama · {id} · {count} pesan · /history halaman sebelumnya"
-        }
+        "Earlier history · {id} · {count} messages" => "Riwayat lama · {id} · {count} pesan",
         "No active session" => "Tak ada sesi aktif",
-        "No earlier messages." => "Tak ada pesan lama.",
         "answer required" => "perlu jawaban",
         "permission required" => "perlu izin",
         "esc interrupt" => "esc interupsi",
@@ -276,7 +283,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "resume a previous session" => "lanjutkan sesi sebelumnya",
         "open this session in the browser" => "buka sesi ini di browser",
-        "load the previous page of messages" => "muat halaman pesan sebelumnya",
         "show the context window usage" => "lihat pemakaian jendela konteks",
         "interrupt the run" => "interupsi run",
         "steer with the next queued message" => "steer dengan pesan antrean berikutnya",
