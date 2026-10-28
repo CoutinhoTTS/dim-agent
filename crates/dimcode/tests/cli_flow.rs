@@ -6016,6 +6016,65 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     daemon.join().unwrap();
 }
 
+/// `/compact` calls `session.context.compact` for the shown line and reports
+/// what the method answered, including a daemon without the method.
+#[test]
+fn tui_compact_calls_the_context_method_and_reports_its_reply() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        for attempt in 0..3 {
+            let compact = wire.read("session.context.compact");
+            assert_eq!(
+                compact["params"],
+                json!({"sessionId":"session","branchId":"main"})
+            );
+            match attempt {
+                0 => wire.reply(&compact, json!({"status":"completed","sequence":12})),
+                1 => {
+                    wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+                        {"id":"dim-compaction-start","sequence":14,"create_at":1,"type":"context","name":"compaction-start",
+                         "data":{"through":13,"trigger":"manual","strategy":"summary"}}}));
+                    wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+                        {"id":"dim-compaction","sequence":15,"create_at":1,"type":"context","name":"compaction",
+                         "data":{"through":13,"start":14,"status":"skipped","reason":"nothing to cut",
+                                 "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":120.0,
+                                                "entriesReplaced":0,"modelCallCount":0,"durationMs":1,"strategy":{"kind":"summary"}}}}}));
+                    wire.reply(&compact, json!({"status":"skipped","reason":"nothing to cut"}));
+                }
+                _ => wire.send(json!({"jsonrpc":"2.0","id":compact["id"],"error":
+                    {"code":-32601,"message":"Unknown method: session.context.compact","data":{"appError":"unknown_method"}}})),
+            }
+        }
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/compact\r");
+    terminal.until("Context compacted");
+    terminal.write(b"/compact\r");
+    terminal.until("Context compaction skipped · nothing to cut");
+    terminal.write(b"/compact\r");
+    terminal.until("This daemon does not support context compaction");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// A resumed session rebuilds its compaction rows from history.
 #[test]
 fn tui_rebuilds_compaction_rows_from_history_on_resume() {

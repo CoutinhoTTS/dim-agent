@@ -21,9 +21,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::args::Options;
 use crate::client::{self, Client, Message};
 use crate::model::session::{
-    Account, Command, DraftPart, ModelItem, ModelList, ModelPolicyUpdate, OauthEvent, OauthStart,
-    PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
-    SubagentModelPolicy, SwitchKind, Update,
+    Account, Command, CompactReply, DraftPart, ModelItem, ModelList, ModelPolicyUpdate,
+    OauthEvent, OauthStart, PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem,
+    SessionPort, SubagentModelPolicy, SwitchKind, Update,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -244,6 +244,8 @@ struct Worker {
     /// The composer's context reading is out of date: a run on main ended,
     /// or the session or its model changed.
     context_stale: bool,
+    /// The outstanding `session.context.compact` requests (`/compact`).
+    compact_requests: Vec<u64>,
 }
 
 struct OutputWatch {
@@ -331,6 +333,7 @@ async fn run(
         login: None,
         login_callbacks: unbounded_channel(),
         context_stale: false,
+        compact_requests: Vec::new(),
     };
     if let Err(error) = worker.open().await {
         if worker.options.resume.is_some() {
@@ -1006,6 +1009,7 @@ impl Worker {
                 Ok(usage) => self.report(usage.describe(), false),
                 Err(error) => self.report(error.to_string(), true),
             },
+            Command::Compact => self.compact().await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
                     self.client.typed("web.toggle", json!({})).await;
@@ -1407,6 +1411,17 @@ impl Worker {
             .ok()
             .map(|usage| (usage.input(), usage.window()));
         self.send(Update::Context(reading));
+    }
+
+    /// `/compact`: asks the shown line's context to compact. The reply is
+    /// reported; the transcript row comes from the events (compaction
+    /// requirements §4).
+    async fn compact(&mut self) {
+        let params = json!({"sessionId": self.session_id, "branchId": self.focus});
+        match self.client.send("session.context.compact", params).await {
+            Ok(request) => self.compact_requests.push(request),
+            Err(error) => self.send(Update::Compacted(CompactReply::Failed(error.to_string()))),
+        }
     }
 
     /// Whether a request made from a snapshot still addresses this
@@ -2574,6 +2589,15 @@ impl Worker {
             }
             return Ok(());
         }
+        if let Some(index) = self
+            .compact_requests
+            .iter()
+            .position(|request| *request == id)
+        {
+            self.compact_requests.remove(index);
+            self.send(Update::Compacted(compact_reply(result)));
+            return Ok(());
+        }
         if let Some(index) = self.shell_stops.iter().position(|stop| *stop == id) {
             self.shell_stops.remove(index);
             if let Err(error) = result {
@@ -2899,6 +2923,28 @@ fn app_error(error: &client::RpcError) -> Option<&str> {
         .as_ref()
         .and_then(|data| data.get("appError"))
         .and_then(serde_json::Value::as_str)
+}
+
+/// What a `session.context.compact` reply came to.
+fn compact_reply(result: Result<serde_json::Value, client::RpcError>) -> CompactReply {
+    #[derive(Deserialize)]
+    #[serde(tag = "status", rename_all = "snake_case")]
+    enum Reply {
+        Completed {},
+        Skipped { reason: String },
+    }
+    match result {
+        Ok(value) => match serde_json::from_value::<Reply>(value) {
+            Ok(Reply::Completed { .. }) => CompactReply::Completed,
+            Ok(Reply::Skipped { reason }) => CompactReply::Skipped(reason),
+            Err(_) => CompactReply::Failed("Invalid session.context.compact response".into()),
+        },
+        Err(error) => match app_error(&error) {
+            Some("unknown_method") => CompactReply::Unsupported,
+            Some("compaction_cancelled") => CompactReply::Cancelled(error.message),
+            _ => CompactReply::Failed(error.message),
+        },
+    }
 }
 
 #[derive(Deserialize)]

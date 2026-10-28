@@ -217,6 +217,8 @@ mod tests {
                 "Context compaction skipped",
                 "Context compaction failed",
                 "Context compaction cancelled",
+                "This daemon does not support context compaction",
+                "compact the context of the shown line",
                 "Kept verbatim",
             ] {
                 assert!(lookup(key).is_some(), "{code} lacks {key:?}");

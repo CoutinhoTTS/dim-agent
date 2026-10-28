@@ -7,7 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::model::session::{Command, DraftPart, SessionPort, SwitchKind, Update};
+use crate::model::session::{
+    Command, CompactReply, DraftPart, SessionPort, SwitchKind, Update,
+};
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
 use crate::model::shell::ShellRun;
@@ -1410,6 +1412,28 @@ impl App {
                 }
             }
             Update::Context(context) => self.context = context,
+            Update::Compacted(reply) => {
+                let (text, tone) = match reply {
+                    CompactReply::Completed => (t("Context compacted").to_owned(), Tone::Muted),
+                    CompactReply::Skipped(reason) => (
+                        [t("Context compaction skipped"), " · ", reason.as_str()].concat(),
+                        Tone::Muted,
+                    ),
+                    CompactReply::Failed(message) => (
+                        [t("Context compaction failed"), " · ", message.as_str()].concat(),
+                        Tone::Warning,
+                    ),
+                    CompactReply::Cancelled(reason) => (
+                        [t("Context compaction cancelled"), " · ", reason.as_str()].concat(),
+                        Tone::Muted,
+                    ),
+                    CompactReply::Unsupported => (
+                        t("This daemon does not support context compaction").to_owned(),
+                        Tone::Warning,
+                    ),
+                };
+                self.reports.push((text, tone));
+            }
             Update::Oauth { attempt, event } => {
                 let effect = match &mut self.prompt {
                     Some(Prompt::Providers(panel)) => panel.oauth_event(attempt, event),
@@ -2515,6 +2539,10 @@ impl App {
             }
             "usage" => {
                 self.host.send(Command::Usage);
+                Outcome::Continue
+            }
+            "compact" => {
+                self.host.send(Command::Compact);
                 Outcome::Continue
             }
             "mcp" => {

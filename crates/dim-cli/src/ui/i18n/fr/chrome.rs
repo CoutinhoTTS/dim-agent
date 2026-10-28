@@ -453,6 +453,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Context compaction skipped" => "Compression du contexte ignorée",
         "Context compaction failed" => "La compression du contexte a échoué",
         "Context compaction cancelled" => "Compression du contexte annulée",
+        "This daemon does not support context compaction" => {
+            "Ce démon ne prend pas en charge la compression du contexte"
+        }
+        "compact the context of the shown line" => "compresser le contexte de la ligne affichée",
         "Kept verbatim" => "Conservé tel quel",
         _ => return None,
     })

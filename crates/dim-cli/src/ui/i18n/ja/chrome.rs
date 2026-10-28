@@ -431,6 +431,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Context compaction skipped" => "コンテキストの圧縮をスキップしました",
         "Context compaction failed" => "コンテキストの圧縮に失敗しました",
         "Context compaction cancelled" => "コンテキストの圧縮をキャンセルしました",
+        "This daemon does not support context compaction" => {
+            "このデーモンはコンテキストの圧縮に対応していません"
+        }
+        "compact the context of the shown line" => "表示中のラインのコンテキストを圧縮",
         "Kept verbatim" => "原文のまま保持",
         _ => return None,
     })

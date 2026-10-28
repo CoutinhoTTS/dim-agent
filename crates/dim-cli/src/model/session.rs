@@ -131,6 +131,8 @@ pub enum Command {
     },
     /// Produce the `/usage` report.
     Usage,
+    /// `/compact`: ask the shown line to compact its context.
+    Compact,
     /// Set the default tool-approval mode.
     SetApprovals(String),
     /// List the providers of the `/connect` panel.
@@ -433,6 +435,18 @@ pub enum SwitchKind {
     Forked,
 }
 
+/// A `session.context.compact` reply as `/compact` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactReply {
+    Completed,
+    Skipped(String),
+    /// `compaction_failed` or another failure of the call, with its message.
+    Failed(String),
+    Cancelled(String),
+    /// The daemon offers no `session.context.compact`.
+    Unsupported,
+}
+
 #[allow(dead_code)]
 pub enum Update {
     /// The session exists; `provider` / `model` label the status line.
@@ -512,6 +526,8 @@ pub enum Update {
     /// The main branch's estimated input and context window, in tokens;
     /// none while the session's usage is unknown.
     Context(Option<(u64, u64)>),
+    /// What a `/compact` came to, localized by the interface.
+    Compacted(CompactReply),
     /// Progress of the sign-in tagged `attempt`.
     Oauth {
         attempt: u64,

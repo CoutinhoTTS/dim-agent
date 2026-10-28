@@ -419,6 +419,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Context compaction skipped" => "컨텍스트 압축을 건너뜀",
         "Context compaction failed" => "컨텍스트 압축 실패",
         "Context compaction cancelled" => "컨텍스트 압축 취소됨",
+        "This daemon does not support context compaction" => {
+            "이 데몬은 컨텍스트 압축을 지원하지 않습니다"
+        }
+        "compact the context of the shown line" => "표시된 라인의 컨텍스트 압축",
         "Kept verbatim" => "원문 그대로 유지",
         _ => return None,
     })
