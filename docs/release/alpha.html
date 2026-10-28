@@ -59,7 +59,7 @@
 <body>
 <main>
   <h1>Rust 版 dimcode 发布 alpha</h1>
-  <p class="lede">npm 包名仍是 <code>dimcode</code>。按 dist-tag 分三个通道，每个通道只在自己内部升级。</p>
+  <p class="lede">正式版和 beta 是 npm 包 <code>dimcode</code>（命令 <code>dim</code>），alpha 是单独的包 <code>dimcode-alpha</code>（命令 <code>dima</code>）。两个包可以同时装，互不覆盖；每个通道只在自己内部升级。</p>
   <p>让 Claude 代办时，使用项目 skill <code>dim-alpha-release</code>（<a href="../../skills/dim-alpha-release/SKILL.md"><code>skills/dim-alpha-release/SKILL.md</code></a>）。它和本页步骤一致，改动时两边要一起更新。</p>
 
   <h2>通道规则</h2>
@@ -68,10 +68,10 @@
     <tr><th>版本号</th><th>npm dist-tag</th><th>安装 / 升级</th><th>当前用途</th></tr>
     <tr><td><code>X.Y.Z</code></td><td><code>latest</code></td><td><code>npm i -g dimcode</code></td><td>TS 版正式</td></tr>
     <tr><td><code>X.Y.Z-beta.N</code></td><td><code>beta</code></td><td><code>npm i -g dimcode@beta</code></td><td>TS 版 beta</td></tr>
-    <tr><td><code>X.Y.Z-alpha.N</code></td><td><code>alpha</code></td><td><code>npm i -g dimcode@alpha</code></td><td>Rust 版</td></tr>
+    <tr><td><code>X.Y.Z-alpha.N</code></td><td><code>alpha</code></td><td><code>npm i -g dimcode-alpha@alpha</code>，命令 <code>dima</code></td><td>Rust 版</td></tr>
   </table>
   </div>
-  <p><code>scripts/publish-npm.mjs</code> 按版本号自动选 dist-tag，其他预发布标识（例如 <code>rc</code>）直接拒绝。</p>
+  <p><code>scripts/publish-npm.mjs</code> 按版本号自动选 dist-tag 和外壳包：alpha 发 <code>dimcode-alpha</code>，只带 <code>dima</code> 命令；其他预发布标识（例如 <code>rc</code>）直接拒绝。平台包 <code>dimcode-&lt;平台&gt;</code> 和 <code>dimcode-web</code> 两边共用，外壳包锁定精确版本。alpha 构建默认使用独立的数据目录 <code>~/.dimcode-alpha</code>，不读写 <code>dim</code> 的 <code>~/.dimcode</code>。</p>
 
   <div class="note">
     <strong>alpha 版本号必须低于 npm 上最新的 beta。</strong>
@@ -141,10 +141,10 @@ node scripts/publish-alpha.mjs --platform darwin-arm64  # 只发指定平台（�
   </div>
 
   <h2>验证</h2>
-<pre><code>npm view dimcode dist-tags
-npm i -g dimcode@alpha &amp;&amp; dim --version
+<pre><code>npm view dimcode-alpha dist-tags
+npm i -g dimcode-alpha@alpha &amp;&amp; dima --version
 git push   # 推送版本号提交</code></pre>
-  <p>应看到 <code>latest</code> 和 <code>beta</code> 没有变化，<code>alpha</code> 指向新版本。Rust 版还没有自动升级检查，alpha 用户靠重新运行 <code>npm i -g dimcode@alpha</code> 升级。</p>
+  <p>应看到 <code>dimcode-alpha</code> 的 <code>alpha</code> 指向新版本，<code>dimcode</code> 的 dist-tag 没有变化，<code>dim</code> 仍是原来的版本。以前装过 <code>dimcode@alpha</code> 的用户不会再收到 alpha 升级，需要手动装一次 <code>dimcode-alpha@alpha</code>。</p>
 
   <h2>出错时</h2>
   <ul>

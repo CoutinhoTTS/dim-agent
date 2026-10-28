@@ -86,7 +86,7 @@ Allow once? [y/N] _
 
 Output stays in terminal scrollback. During a turn, Ctrl+C requests a stop and waits for settlement. At idle, Ctrl+C or EOF exits the client. Approval defaults to deny; noninteractive approval requirements produce a nonzero exit code. Exiting detaches the client from the persisted session.
 
-The default product home is `~/.dimcode`; first-time development and tests should use a separate `--home`. Existing sessions and account files are not automatically migrated. API-key model configuration and product-provider configuration are separate profiles; see the [CLI contract](crates/dim-cli/README.md) and [App Server](crates/dim-app-server/README.md).
+The default product home is `~/.dimcode` (`~/.dimcode-alpha` for an alpha build); first-time development and tests should use a separate `--home`. Existing sessions and account files are not automatically migrated. API-key model configuration and product-provider configuration are separate profiles; see the [CLI contract](crates/dim-cli/README.md) and [App Server](crates/dim-app-server/README.md).
 
 ## Workspace
 

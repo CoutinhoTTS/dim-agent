@@ -35,7 +35,8 @@ assert(Array.isArray(manifest.npmPackages), 'Missing npm package manifest');
 const shipped = platforms.filter(([platform]) => manifest.npmPackages.some(({ name }) => name === `dimcode-${platform}`));
 assert(shipped.length === platforms.length || (tag === 'alpha' && shipped.length > 0),
   'Release must contain all six platform packages and one wrapper');
-const names = [...shipped.map(([platform]) => `dimcode-${platform}`), 'dimcode-web', 'dimcode'];
+const wrapper = tag === 'alpha' ? 'dimcode-alpha' : 'dimcode';
+const names = [...shipped.map(([platform]) => `dimcode-${platform}`), 'dimcode-web', wrapper];
 assert.deepEqual(manifest.npmPackages.map(({ name }) => name).sort(), [...names].sort(),
   'Release must contain exactly its platform packages, the Web workspace and one wrapper');
 
@@ -67,13 +68,18 @@ for (const name of names) {
   assert.equal(metadata.version, version, 'Packed package version mismatch');
   assert.equal(metadata.repository?.url, 'git+https://github.com/arcships/dim.git',
     'Packed package repository mismatch');
-  if (name === 'dimcode') {
+  if (name === wrapper) {
     assert.deepEqual(metadata.optionalDependencies,
       Object.fromEntries(names.slice(0, -1).map((name) => [name, version])),
       'Wrapper must reference the exact platform package versions');
-    assert.equal(typeof metadata.bin?.dim, 'string', 'Missing dim command');
-    assert(metadata.bin.dim.length > 0 && metadata.bin.dimcode === metadata.bin.dim,
-      'dim and dimcode must use the same wrapper');
+    if (tag === 'alpha') {
+      assert.deepEqual(Object.keys(metadata.bin ?? {}), ['dima'], 'An alpha installs only the dima command');
+      assert(typeof metadata.bin.dima === 'string' && metadata.bin.dima.length > 0, 'Missing dima command');
+    } else {
+      assert.equal(typeof metadata.bin?.dim, 'string', 'Missing dim command');
+      assert(metadata.bin.dim.length > 0 && metadata.bin.dimcode === metadata.bin.dim,
+        'dim and dimcode must use the same wrapper');
+    }
   } else if (name === 'dimcode-web') {
     assert.equal(metadata.os, undefined, 'The Web workspace package is platform-independent');
     assert.equal(metadata.cpu, undefined, 'The Web workspace package is platform-independent');
