@@ -1,5 +1,6 @@
 use super::*;
 use agent_client_protocol_schema::v1 as acp;
+use std::{net::Shutdown, os::fd::OwnedFd};
 
 const METHODS: &[&str] = &[
     "session.attach",
@@ -508,6 +509,7 @@ fn acp_stdio_recovery_deadline_settles_cancel_without_claiming_native_stop() {
         output,
         ..
     } = peer;
+    let _ = input.shutdown(Shutdown::Write);
     drop(input);
     let failed = wait(child);
     drop(output);
@@ -694,22 +696,33 @@ fn acp_stdio_slow_output_fails_explicitly_without_stopping_native_execution() {
 
 struct Peer {
     child: Child,
-    input: std::process::ChildStdin,
+    input: UnixStream,
     output: BufReader<std::process::ChildStdout>,
     updates: Vec<Value>,
 }
 
 impl Peer {
     fn start(home: &Home) -> Self {
-        let mut child = home
-            .command()
-            .arg("acp")
-            .stdin(Stdio::piped())
+        Self::spawn(home.command().arg("acp"))
+    }
+
+    /// Starts an `acp` CLI whose stdin is one end of a socket pair, not a pipe.
+    ///
+    /// A pipe reaches EOF only once every descriptor for its write end is
+    /// closed. On macOS, std creates a pipe and then marks it close-on-exec,
+    /// so a child that another test thread spawns in that window can inherit
+    /// the write end. Such a child outlives this peer, the CLI never reads
+    /// EOF, and it neither detaches nor exits. Closing the write direction on
+    /// the socket itself ends the stream regardless of who else holds a
+    /// descriptor.
+    fn spawn(command: &mut Command) -> Self {
+        let (input, stdin) = UnixStream::pair().unwrap();
+        let mut child = command
+            .stdin(Stdio::from(OwnedFd::from(stdin)))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let input = child.stdin.take().unwrap();
         let output = BufReader::new(child.stdout.take().unwrap());
         Self {
             child,
@@ -801,6 +814,7 @@ impl Peer {
     }
 
     fn close(self) {
+        let _ = self.input.shutdown(Shutdown::Write);
         drop(self.input);
         let output = wait(self.child);
         assert!(
@@ -1123,18 +1137,7 @@ fn acp_terminal_auth_helper_rediscovers_the_method_and_uses_the_same_home() {
         if let Some(directory) = directory {
             command.args(["--directory", directory]);
         }
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut peer = Peer {
-            input: child.stdin.take().unwrap(),
-            output: BufReader::new(child.stdout.take().unwrap()),
-            child,
-            updates: Vec::new(),
-        };
+        let mut peer = Peer::spawn(&mut command);
         peer.send(
             1,
             "initialize",
@@ -1468,20 +1471,9 @@ fn acp_stdio_temporary_mcp_calls_tools_and_settles_the_child_on_eof() {
     });
     let config = home.0.join("model.json");
     fs::write(&config,json!({"defaultModel":{"providerId":"local","modelId":"fixture-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":256}}]}]}).to_string()).unwrap();
-    let mut child = home
-        .command()
-        .args(["acp", "--model-config", config.to_str().unwrap()])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut peer = Peer {
-        input: child.stdin.take().unwrap(),
-        output: BufReader::new(child.stdout.take().unwrap()),
-        child,
-        updates: Vec::new(),
-    };
+    let mut command = home.command();
+    command.args(["acp", "--model-config", config.to_str().unwrap()]);
+    let mut peer = Peer::spawn(&mut command);
     peer.initialize();
     peer.send(2,"session/new",json!({"cwd":home.0,"mcpServers":[{"name":"client","command":node,"args":[fixture,"normal","fixture-argument"],"env":[{"name":"MCP_PID_FILE","value":pid_file},{"name":"MCP_TEST_VALUE","value":"fixture-env"}]}]}));
     let created = peer.response(2);
@@ -1626,21 +1618,11 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     });
     let config = home.0.join("model.json");
     fs::write(&config, json!({"defaultModel":{"providerId":"local","modelId":"fixture-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":256}}]}]}).to_string()).unwrap();
-    let mut child = home
-        .command()
+    let mut command = home.command();
+    command
         .args(["--model-config", config.to_str().unwrap(), "acp"])
-        .env("ACP_STICKY_SESSION", "true")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut peer = Peer {
-        input: child.stdin.take().unwrap(),
-        output: BufReader::new(child.stdout.take().unwrap()),
-        child,
-        updates: Vec::new(),
-    };
+        .env("ACP_STICKY_SESSION", "true");
+    let mut peer = Peer::spawn(&mut command);
     peer.initialize();
     peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
     let created = peer.response(2);
