@@ -51,6 +51,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main é a própria sessão; uma linha termina, main não"
         }
         "Line has ended:" => "A linha terminou:",
+        "Esc close" => "Esc fechar",
+        "/{name} needs {argument}" => "/{name} precisa de {argument}",
         "e edit · b branch · f fork" => "e editar · b ramo · f fork",
         "e edit" => "e editar",
         "Fork the session before this message? (y/N)" => {

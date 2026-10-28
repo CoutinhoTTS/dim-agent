@@ -45,6 +45,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main은 세션 자체입니다. 라인은 종료되지만 main은 그렇지 않습니다"
         }
         "Line has ended:" => "라인이 종료되었습니다:",
+        "Esc close" => "Esc 닫기",
+        "/{name} needs {argument}" => "/{name}에는 {argument}이(가) 필요합니다",
         "e edit · b branch · f fork" => "e 편집 · b 브랜치 · f 포크",
         "e edit" => "e 편집",
         "Fork the session before this message? (y/N)" => {

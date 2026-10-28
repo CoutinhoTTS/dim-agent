@@ -66,6 +66,8 @@ pub enum Command {
         target: Option<TaskTarget>,
     },
     FocusLine(String),
+    /// Stop following the side panel's line; the line keeps running.
+    CloseSide,
     /// End a line of the displayed attachment, as the user asked.
     EndLine {
         session_id: String,
@@ -73,7 +75,7 @@ pub enum Command {
         branch_id: String,
     },
     /// Open a line of the displayed attachment at `at` of `parent`, with
-    /// its opening input, and show it (timeline UI §4.2).
+    /// its opening input, and follow it in the side panel (timeline UI §4.7).
     OpenLine {
         session_id: String,
         projection_id: u64,

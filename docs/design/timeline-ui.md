@@ -24,7 +24,7 @@ L0  Session ............ the subject: identity, workspace, interaction surface
 
 1. **One main surface.** The screen always shows one line's Timeline. Changing lines changes which Timeline is shown, not the screen.
 2. **Derive from a point.** Branching and forking start from a point of the shown Timeline. Its end is a point too (`/branch`, `/fork`).
-3. **Results return to a Timeline.** A branch leaves a `⑂` marker on its parent and the screen follows it; a fork attaches to the new Session's Timeline.
+3. **Results return to a Timeline.** A branch leaves a `⑂` marker on its parent and answers in a side panel while the screen stays on the parent (§4.7); a fork attaches to the new Session's Timeline.
 
 ## 3. Branch versus fork
 
@@ -35,7 +35,7 @@ Both share the point → derive entry. They differ in where the result lives (#4
 | Result | A line of this Session | A new Session |
 | Shares | The workspace and the subject; talks with its parent | History up to the cut only |
 | Points | Any open line, at a valid context boundary | `main` only, at a rest point |
-| After | The screen shows the new line | The TUI attaches to the fork |
+| After | The screen stays; the new line answers in the side panel (§4.7) | The TUI attaches to the fork |
 | Trace on the source | A `⑂` marker | None (§7) |
 
 An action that does not apply says why in a notice (`A fork copies main; b opens a line here`, `Line has ended: X`). The App Server stays the only judge of a valid cut; its refusal is shown as a notice.
@@ -66,7 +66,7 @@ A box too narrow for the hint shows `e edit`.
 ╰───────────────────────────── ⑂ new line from main · Esc cancel ─╯
 ```
 
-`Enter` sends `session.branch_create {parentBranchId: shown line, at, prompt}`, and the screen shows the new line. `Esc` cancels. A session or line switch drops the draft.
+`Enter` sends `session.branch_create {parentBranchId: shown line, at, prompt}` and the new line answers in the side panel (§4.7). `Esc` cancels. A session or line switch drops the draft.
 
 ### 4.3 `f`: fork here
 
@@ -81,17 +81,17 @@ On `main` only. The composer's border asks `Fork the session before this message
  … reply …
  › try the parser
  … reply …
- ⑂ line f7f0a984 · before “try the parser” · try the parser via cache
+ ⑂ try the parser via cache · before “try the parser” · f7f0a984
 ```
 
-`before “…”` appears when the cut is just before a message of this transcript; a line opened at the tail (a `branch` tool call) has none. The marker is a pick stop like a member card: `Enter`, or a click, shows the line. Ends are not marked: the lines panel shows them, and `main` already receives notices for its tool lines.
+A line is named by the first line of its purpose; its short id follows, and names a line opened without one. `before “…”` appears when the cut is just before a message of this transcript; a line opened at the tail (a `branch` tool call) has none. The marker is a pick stop like a member card: `Enter`, or a click, shows the line. Ends are not marked: the lines panel shows them, and `main` already receives notices for its tool lines.
 
 ### 4.5 Where am I
 
-While a line is shown, the composer's bottom border names its path from `main` and its cut:
+While a line is shown, the composer's bottom border names its path from `main`, each line by its name (§4.4), and its cut:
 
 ```
-╰── ~/repo (main) · line main ▸ b-91 ▸ b-c3 · after message 4 ─╯
+╰── ~/repo (main) · ⑂ main ▸ parser race ▸ the guard · after message 4 ─╯
 ```
 
 `after message N` counts the user messages in the parent's history, its inherited ones included, at the cut.
@@ -113,20 +113,61 @@ The Timeline's points are its user messages. Tab walks them one at a time from t
 
 A resume draws the newest 100 messages. Fullscreen tops the transcript with a load-more row (`↑ 130 earlier messages · Enter or click to load`): a click, or Tab up to it and `Enter`, draws the previous 100 above and keeps the oldest drawn message at the top of the view. Scrollback has no such row; its earlier history comes from `/timeline` jumps. This replaces `/history`, which paged earlier messages in after the newest ones.
 
+### 4.7 `/branch <prompt>` and the side panel
+
+`/branch` takes its prompt inline, the way a side question does. The palette lists the argument, and `Tab` or `Enter` on a command that takes one fills the composer instead of running it, leaving the argument as a hint:
+
+```
+╭──────────────────────────────────────────── provider / model ─╮
+│ › /branch <prompt>                                            │
+╰───────────────────────────────────────────────────────────────╯
+```
+
+`Enter` on `/branch try the parser via cache` sends `session.branch_create` at the end of the shown line (§4.1) in one step; there is no second draft. A run on the shown line keeps going: the command is not queued and does not interrupt. `/branch` with no prompt stays in the composer and says `/branch needs <prompt>`.
+
+The new line answers in a panel while the screen stays on the parent. In fullscreen the panel sits above the composer:
+
+```
+ … the parent's transcript keeps streaming …
+
+╭─ ⑂ b-7c · try the parser via cache ─────────────────────────╮
+│ ⑂ working…                                                   │
+╰──────────────────────────────────────────────── Esc close ─╯
+╭──────────────────────────────────────────── provider / model ─╮
+│ ›                                                             │
+╰───────────────────────────────────────────────────────────────╯
+```
+
+```
+╭─ ⑂ b-7c · try the parser via cache ─────────────────────────╮
+│ ✓ Explored 2 files ▸                                         │
+│                                                              │
+│ The lock is held across the await in cache.rs:88; moving the │
+│ parse out of the guard removes the race. Patched and tested. │
+│ ⑂ waiting                                                    │
+╰──────────────────────────────────────────────── Esc close ─╯
+```
+
+1. The panel draws the line's transcript as the screen draws one, without the opening input its title names: thinking, tool calls at the tool detail setting, and replies as they arrive. It shows the tail when longer than a third of the screen, and the line's state (`working`, `waiting`, `ended`) on its last row.
+2. `Esc` closes the panel before it does anything else. The line keeps running; closing it only stops the panel following it. The `⑂` marker (§4.4) is what stays in scrollback, and `Enter` on it, or `/lines`, shows the line.
+3. One panel at a time: another `/branch` or `b` replaces it. Showing a line, switching Session or `/new` closes it.
+4. In fullscreen the panel pushes the transcript up, and closing it brings the transcript back down onto the composer. Scrollback never lifts the composer, so there the panel opens below it, where menus open, and closing it leaves no gap above the composer.
+5. `/branch` that cannot open a line (no finished turn yet, the shown line ended) keeps its draft in the composer and says why.
+
 ## 5. Switching lines
 
-Unchanged from #427 §14: a switch writes a `line ID` boundary and the shown line's transcript, which holds its own events only (each branch numbers its own sequences, [sessions service D11](appserver/sessions-service.md)). Its inherited history is its parent's, one marker away.
+Unchanged from #427 §14: a switch writes a `⑂ name · id` boundary and the shown line's transcript, laid out once that line's history has loaded, which holds its own events only (each branch numbers its own sequences, [sessions service D11](appserver/sessions-service.md)). Its inherited history is its parent's, one marker away.
 
 ## 6. Lines panel
 
-`/lines` is the map of the Timelines. Children are ordered by where they were cut from their parent, then by opening order, and each row says `after message N`:
+`/lines` is the map of the Timelines. Children are ordered by where they were cut from their parent, then by opening order. Each row leads with the line's purpose and says `after message N` and its id:
 
 ```
 ┌ Lines ───────────────────────────────────────────────────────────┐
-│   main        the session itself                                 │
-│     b-02      after message 1 · docs pass · ended itself         │
-│     b-7c      after message 3 · parser race · working · shown    │
-│       b-c3    after message 4 · the guard in cache.rs · working  │
+│   main                  the session itself                       │
+│     docs pass           after message 1 · b-02 · ended itself    │
+│     parser race         after message 3 · b-7c · working · shown │
+│       the guard         after message 4 · b-c3 · working         │
 └──────────────────── Enter show the line · x end it · Esc close ──┘
 ```
 
@@ -151,6 +192,7 @@ Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines
 
 - No new mode: points reuse the Tab pick, line markers and the load-more row reuse the card pick, the switch reuses #427's, the fork's attach reuses `/resume`'s. The one new panel, `/timeline`, lists the points the pick walks and takes the pick's keys.
 - New interaction: `b`/`f` on a pick, the composer's line draft and fork question, the path border, `/branch` and `/fork`. Each serves one rule of §2.
+- The side panel (§4.7) is the one new surface: following a line without leaving the parent needs a view of the line that the parent's Timeline cannot hold. It folds nothing new; the CLI already keeps a transcript per opened line. Its collapsed form is the existing `⑂` marker, so dismissal writes nothing.
 - Considered and dropped: a `b` key in the lines panel (needs each line's head; `/branch` on the shown line covers it), greyed hints per point (a notice on the key says the same with less state), end markers (§4.4), a one-row summary of the inherited prefix and `Esc Esc` back to the parent (§5 and the marker already lead there).
 
 ## 10. Decisions
@@ -158,3 +200,4 @@ Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines
 1. A point is the boundary before a user message, plus the line's end. A boundary after an answer is not offered.
 2. `b` and `f` carry the picked message into the composer, as `e` does.
 3. R4 waits for a format decision.
+4. Opening a line keeps the screen on its parent; the line answers in the side panel (§4.7).

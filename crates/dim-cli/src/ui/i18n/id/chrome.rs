@@ -49,6 +49,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main adalah sesi itu sendiri; jalur bisa berakhir, main tidak"
         }
         "Line has ended:" => "Jalur sudah berakhir:",
+        "Esc close" => "Esc tutup",
+        "/{name} needs {argument}" => "/{name} memerlukan {argument}",
         "e edit · b branch · f fork" => "e ubah · b cabang · f fork",
         "e edit" => "e ubah",
         "Fork the session before this message? (y/N)" => "Fork sesi sebelum pesan ini? (y/N)",

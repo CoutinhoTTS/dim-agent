@@ -352,6 +352,12 @@ impl Composer {
                     return Some(Outcome::Handled);
                 }
                 match &row.kind {
+                    crate::ui::rows::Kind::Command(command) if command.argument.is_some() => {
+                        let filled = format!("/{} ", command.name);
+                        self.clear();
+                        self.area.insert_str(&filled);
+                        Some(Outcome::Handled)
+                    }
                     crate::ui::rows::Kind::Command(command) => {
                         let name = command.name.to_owned();
                         self.clear();
@@ -498,10 +504,17 @@ impl Composer {
             if let Some(command) = crate::ui::commands::COMMANDS
                 .iter()
                 .find(|c| c.slash && (c.name == name || c.aliases.contains(&name)))
-                .map(|c| c.name)
             {
+                if let Some(argument) = command.argument
+                    && args.is_empty()
+                {
+                    return Outcome::Rejected(tf(
+                        "/{name} needs {argument}",
+                        &[("name", command.name), ("argument", argument)],
+                    ));
+                }
                 let outcome = Outcome::Command {
-                    name: command.to_owned(),
+                    name: command.name.to_owned(),
                     args: args.to_owned(),
                 };
                 self.clear();
@@ -854,7 +867,26 @@ impl Composer {
             }
             rows.push(cells_to_ansi(&cells, &[]));
         }
+        if let Some(argument) = self.argument_hint() {
+            rows[0].push_str(&crate::ui::theme::ansi::fg(
+                &format!(" {argument}"),
+                &p.muted,
+            ));
+        }
         (rows, cursor)
+    }
+
+    /// The argument still to type after a command that takes one, as
+    /// `/branch ` leaves it: `<prompt>`.
+    fn argument_hint(&self) -> Option<&'static str> {
+        if self.shell.is_some() {
+            return None;
+        }
+        let name = self.area.text().strip_prefix('/')?.strip_suffix(' ')?;
+        crate::ui::commands::COMMANDS
+            .iter()
+            .find(|c| c.slash && c.name == name)?
+            .argument
     }
 
     /// The palette panel when a command is being typed.

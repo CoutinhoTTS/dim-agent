@@ -14,6 +14,9 @@ pub struct Command {
     pub slash: bool,
     /// The key that runs it, as the palette shows it.
     pub key: Option<&'static str>,
+    /// The argument a slash command takes inline (`<prompt>`): choosing it
+    /// fills the composer instead of running it.
+    pub argument: Option<&'static str>,
     pub needs: Needs,
 }
 
@@ -89,6 +92,7 @@ const fn slash(
         aliases,
         slash: true,
         key: None,
+        argument: None,
         needs,
     }
 }
@@ -107,6 +111,7 @@ const fn action(
         aliases: &[],
         slash: false,
         key: Some(key),
+        argument: None,
         needs,
     }
 }
@@ -148,13 +153,16 @@ pub const COMMANDS: &[Command] = &[
         &[],
         Needs::Session,
     ),
-    slash(
-        "branch",
-        "session",
-        "open a line from the end of the shown line",
-        &[],
-        Needs::Session,
-    ),
+    Command {
+        argument: Some("<prompt>"),
+        ..slash(
+            "branch",
+            "session",
+            "open a line from the end of the shown line",
+            &[],
+            Needs::Session,
+        )
+    },
     slash(
         "fork",
         "session",

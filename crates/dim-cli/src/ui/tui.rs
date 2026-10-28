@@ -11,14 +11,16 @@ use crate::model::session::{Command, DraftPart, SessionPort, SwitchKind, Update}
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
 use crate::model::shell::ShellRun;
-use crate::model::view::{LineState, LineView, RowKind, TaskTarget, ViewRow, ViewSnapshot};
+use crate::model::view::{
+    LineState, LineView, RowKind, SideLine, TaskTarget, ViewRow, ViewSnapshot,
+};
 use crate::ui::Env;
 use crate::ui::approvals_panel::{ApprovalsPanel, status_label};
 use crate::ui::commands::{COMMANDS, Context as CommandContext, Needs};
 use crate::ui::composer::{Composer, Outcome as ComposerOutcome, Shell, history};
 use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
-use crate::ui::lines_panel::LinesPanel;
+use crate::ui::lines_panel::{LinesPanel, short_id};
 use crate::ui::models_panel::ModelsPanel;
 use crate::ui::oauth_view::{DIM_OAUTH_ID, OauthView};
 use crate::ui::plugins_panel::PluginsPanel;
@@ -718,6 +720,9 @@ struct App {
     /// not hop while messages leave; an empty queue or the next run starts
     /// afresh.
     queue_rows: usize,
+    /// The most reply rows the side panel has shown since it opened: it
+    /// keeps that height, so the composer does not hop as the reply wraps.
+    side_rows: usize,
     /// Every committed block, oldest first, as its source: both interfaces
     /// lay it out again from here (a scrollback rewrite, the fullscreen
     /// virtual list). Bounded by `HISTORY_MAX_BLOCKS`.
@@ -914,6 +919,7 @@ impl App {
             exit_armed_until: None,
             run_started: None,
             queue_rows: 0,
+            side_rows: 0,
             last_pulse: 0,
             history: Default::default(),
             dropped: 0,
@@ -1594,7 +1600,9 @@ impl App {
                 return Outcome::Continue;
             }
             KeyCode::Esc if !self.composer.palette_open() && !self.composer.mention_open() => {
-                if self.line_draft.take().is_some() {
+                if self.snapshot.as_mut().and_then(|s| s.side.take()).is_some() {
+                    self.host.send(Command::CloseSide);
+                } else if self.line_draft.take().is_some() {
                     self.composer.clear();
                 } else if self.shell.is_some() {
                     self.stop_shell();
@@ -1860,17 +1868,17 @@ impl App {
             return t("Fork the session before this message? (y/N)").to_owned();
         }
         if let Some(draft) = &self.line_draft {
+            let lines = self.snapshot.as_ref().map_or(&[][..], |s| &s.lines[..]);
             return tf(
                 "⑂ new line from {id} · Esc cancel",
-                &[("id", short_id(&draft.parent))],
+                &[("id", &line_name(lines, &draft.parent))],
             );
         }
         let workspace = workspace_label(&self.branch);
         match &self.snapshot {
             Some(snapshot) if !snapshot.focus.is_empty() && snapshot.focus != "main" => {
                 format!(
-                    "{workspace} · {} {}",
-                    t("line"),
+                    "{workspace} · ⑂ {}",
                     line_path(&snapshot.lines, &snapshot.focus)
                 )
             }
@@ -1895,12 +1903,20 @@ impl App {
         });
     }
 
-    /// `b` on a picked message, or `/branch`: the next submit opens a line
-    /// of the shown line at `at` (timeline UI §4.2).
+    /// `b` on a picked message: the next submit opens a line of the shown
+    /// line at `at` (timeline UI §4.2).
     fn draft_line(&mut self, at: u64, text: &str) {
+        if let Some(draft) = self.line_at(at) {
+            self.line_draft = Some(draft);
+            self.composer.set_draft(text);
+        }
+    }
+
+    /// A line of the shown line cut at `at`, unless the shown line ended.
+    fn line_at(&mut self, at: u64) -> Option<LineDraft> {
         let Some(snapshot) = &self.snapshot else {
             self.set_notice(t("No active session"));
-            return;
+            return None;
         };
         if let Some(line) = snapshot.lines.iter().find(|line| line.id == snapshot.focus)
             && !matches!(
@@ -1909,15 +1925,14 @@ impl App {
             )
         {
             self.set_notice(format!("{} {}", t("Line has ended:"), line.id));
-            return;
+            return None;
         }
-        self.line_draft = Some(LineDraft {
+        Some(LineDraft {
             session_id: snapshot.session_id.clone(),
             projection_id: snapshot.projection_id,
             parent: snapshot.focus.clone(),
             at,
-        });
-        self.composer.set_draft(text);
+        })
     }
 
     /// `f` on a picked message, or `/fork`: asks before forking `main` at
@@ -2514,9 +2529,17 @@ impl App {
                 }
                 Outcome::Continue
             }
+            "branch" if args.is_empty() => {
+                self.composer.set_draft("/branch ");
+                Outcome::Continue
+            }
             "branch" => {
-                if let Some(at) = self.head_cut() {
-                    self.draft_line(at, args);
+                match self.head_cut().and_then(|at| self.line_at(at)) {
+                    Some(draft) => {
+                        self.line_draft = Some(draft);
+                        self.open_line(args);
+                    }
+                    None => self.composer.set_draft(&format!("/branch {args}")),
                 }
                 Outcome::Continue
             }
@@ -2663,7 +2686,11 @@ impl App {
         }
         let ready = self.arm_window();
         if ready && let Some(shown) = self.pending_line.take() {
-            let label = tf("line {id}", &[("id", short_id(&shown))]);
+            let lines = self.snapshot.as_ref().map_or(&[][..], |s| &s.lines[..]);
+            let label = match line_name(lines, &shown) {
+                name if shown == "main" || name == short_id(&shown) => format!("⑂ {name}"),
+                name => format!("⑂ {name} · {}", short_id(&shown)),
+            };
             let row = boundary_line(&label, width);
             let text = chunk(&[fg(&row, &self.palette.muted)]);
             self.record(Block::Boundary(label));
@@ -2838,6 +2865,33 @@ impl App {
             if self.queue_rows > 0 {
                 live.extend(queue_strip(&queued, self.queue_rows, cols, &self.palette));
             }
+        }
+        let side = match self.snapshot.as_ref().and_then(|s| s.side.as_ref()) {
+            Some(side) if self.prompt.is_none() => {
+                let reply = side_reply(side, cols, self.tool_detail, &self.palette, &self.markdown);
+                self.side_rows = self
+                    .side_rows
+                    .max(reply.len())
+                    .min((size.1 as usize / 3).max(1));
+                Some(side_panel(side, reply, self.side_rows, cols, &self.palette))
+            }
+            Some(_) => None,
+            None => {
+                self.side_rows = 0;
+                None
+            }
+        };
+        // Fullscreen lays the transcript out above the dock, so the panel
+        // pushes it up and gives the rows back when it closes; scrollback
+        // never lifts the composer, so the panel opens below it like a menu.
+        let (side_above, side_below) = if self.fullscreen {
+            (side, None)
+        } else {
+            (None, side)
+        };
+        if let Some(panel) = side_above {
+            let margin = " ".repeat(MARGIN);
+            live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));
         }
         frame.anchor = live.len();
         live.push(String::new());
@@ -3058,7 +3112,8 @@ impl App {
             None => self
                 .composer
                 .palette_panel(outer, p)
-                .or_else(|| self.composer.mention_panel(outer, p)),
+                .or_else(|| self.composer.mention_panel(outer, p))
+                .or(side_below),
         };
         let panel_top = live.len();
         if let Some(panel) = panel {
@@ -3092,7 +3147,7 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return false;
         };
-        if !snapshot.main_history_complete {
+        if !snapshot.history_complete {
             return false;
         }
         self.awaiting_window = false;
@@ -3953,6 +4008,77 @@ fn queue_strip(items: &[(String, String)], height: usize, cols: usize, p: &Palet
         .collect()
 }
 
+/// The side panel's line drawn as its transcript, without the opening
+/// input its title already names.
+fn side_reply(
+    side: &SideLine,
+    cols: usize,
+    detail: Detail,
+    p: &Palette,
+    markdown: &MarkdownRenderer,
+) -> Vec<String> {
+    let inner = cols
+        .saturating_sub(2 + MARGIN)
+        .max(4)
+        .saturating_sub(4)
+        .max(1);
+    let mut lines: Vec<String> = Vec::new();
+    for (index, row) in side.rows.iter().enumerate() {
+        if row.kind == RowKind::UserMessage
+            || row.kind == RowKind::ToolCall && !opens_group(&side.rows, index)
+        {
+            continue;
+        }
+        let block = match row.kind {
+            RowKind::StreamingAssistant => Block::Assistant(row.text.clone()),
+            _ => project_row(&side.rows, index, detail),
+        };
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines.extend(render_block(&block, inner, p, markdown));
+    }
+    lines
+}
+
+/// The side panel above the composer (timeline UI §4.7): the line's
+/// transcript, its last `height` rows, over the line's state.
+fn side_panel(
+    side: &SideLine,
+    reply: Vec<String>,
+    height: usize,
+    cols: usize,
+    p: &Palette,
+) -> Vec<String> {
+    use crate::ui::render::panel::bordered;
+    let outer = cols.saturating_sub(2 + MARGIN).max(4);
+    let inner = outer.saturating_sub(4).max(1);
+    let mut rows: Vec<String> = reply[reply.len().saturating_sub(height)..].to_vec();
+    rows.resize_with(height, String::new);
+    let state = match side.state {
+        LineState::Working => format!("{}…", t("working")),
+        _ => crate::ui::lines_panel::state_label(&side.state),
+    };
+    rows.push(fg(&truncate_cells(&format!("⑂ {state}"), inner), &p.muted));
+    let title = paint(
+        &truncate_cells(
+            &format!(
+                "⑂ {} · {}",
+                crate::sanitize::safe(side.purpose.lines().next().unwrap_or_default()),
+                short_id(&side.id)
+            ),
+            inner.saturating_sub(4),
+        ),
+        Paint {
+            fg: Some(&p.accent),
+            bold: true,
+            ..Paint::default()
+        },
+    );
+    let hint = fg(t("Esc close"), &p.muted);
+    bordered(&rows, outer, None, &p.border, Some(&title), Some(&hint))
+}
+
 fn chunk(lines: &[String]) -> String {
     let mut rows = vec![String::new()];
     rows.extend(lines.iter().cloned());
@@ -4098,24 +4224,20 @@ fn fit_place(place: String, status: Option<&str>, outer: usize) -> String {
     if fits(&place) {
         return place;
     }
-    match place.rsplit_once(" · ") {
-        Some((_, line)) if fits(line) => line.to_owned(),
+    match place.split_once(" · ⑂ ") {
+        Some((_, line)) if fits(&format!("⑂ {line}")) => format!("⑂ {line}"),
         _ => place,
     }
 }
 
-fn short_id(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
-}
-
-/// `main ▸ b-91 ▸ b-c3 · after message 4`: the lines from `main` down to
+/// `main ▸ parser race ▸ the guard · after message 4`: the lines from `main` down to
 /// `line`, and where `line` was cut (timeline UI §4.5).
 fn line_path(lines: &[LineView], line: &str) -> String {
-    let mut path = vec![short_id(line)];
+    let mut path = vec![line_name(lines, line)];
     let mut at = lines.iter().find(|view| view.id == line);
     let cut = at.and_then(|view| view.cut);
     while let Some(parent) = at.and_then(|view| view.parent.as_deref()) {
-        path.push(short_id(parent));
+        path.push(line_name(lines, parent));
         at = lines.iter().find(|view| view.id == parent);
     }
     path.reverse();
@@ -4129,6 +4251,19 @@ fn line_path(lines: &[LineView], line: &str) -> String {
             )
         ),
         None => path,
+    }
+}
+
+/// What a line is called on screen: the first line of its purpose, cut to
+/// a few words; its short id when it has none.
+fn line_name(lines: &[LineView], line: &str) -> String {
+    const NAME_COLUMNS: usize = 24;
+    match lines.iter().find(|view| view.id == line) {
+        Some(view) if !view.purpose.is_empty() => {
+            let first = view.purpose.lines().next().unwrap_or_default();
+            truncate_cells(&crate::sanitize::safe(first), NAME_COLUMNS)
+        }
+        _ => short_id(line).to_owned(),
     }
 }
 
@@ -4515,6 +4650,137 @@ mod tests {
         assert_eq!(app.composer.text(), "try RwLock");
     }
 
+    /// `/branch` takes its prompt inline and opens the line in one submit;
+    /// the line answers in the side panel, which `Esc` closes before
+    /// anything else (timeline UI §4.7).
+    #[test]
+    fn branch_takes_its_prompt_inline_and_answers_beside() {
+        use crate::model::view::TurnEnd;
+        use crate::ui::render::panel::strip_escapes;
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let snapshot = |side: Option<SideLine>| {
+            Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                projection_id: 7,
+                focus: "main".into(),
+                ended: Some((9, TurnEnd::Completed)),
+                side,
+                ..ViewSnapshot::default()
+            }))
+        };
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        let typed = |app: &mut App, text: &str| {
+            for c in text.chars() {
+                app.handle_input(key(KeyCode::Char(c)));
+            }
+        };
+        let screen = |app: &mut App| {
+            app.frame((80, 40))
+                .live
+                .iter()
+                .map(|row| strip_escapes(row))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "main".into(),
+            ..ViewSnapshot::default()
+        })));
+        typed(&mut app, "/branch before any turn ends");
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(
+            app.composer.text(),
+            "/branch before any turn ends",
+            "a line that cannot open keeps its prompt"
+        );
+        assert!(sent.borrow().is_empty());
+        app.composer.clear();
+        app.apply(snapshot(None));
+
+        typed(&mut app, "/bra");
+        app.handle_input(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/branch ",
+            "choosing fills the command"
+        );
+        assert!(screen(&mut app).contains("/branch <prompt>"));
+        app.handle_input(key(KeyCode::Enter));
+        assert_eq!(app.composer.text(), "/branch ", "no prompt, nothing sent");
+        assert!(sent.borrow().is_empty());
+
+        typed(&mut app, "try the parser");
+        app.handle_input(key(KeyCode::Enter));
+        assert!(app.composer.is_empty() && app.line_draft.is_none());
+        assert!(
+            matches!(
+                sent.borrow().as_slice(),
+                [Command::OpenLine { parent, at: 9, prompt, .. }]
+                    if parent == "main" && prompt == "try the parser"
+            ),
+            "one submit opens the line at the end of the shown line"
+        );
+
+        let row = |kind, text: &str, tool: Option<&str>| {
+            std::sync::Arc::new(ViewRow {
+                row_id: text.into(),
+                kind,
+                text: text.into(),
+                streaming: false,
+                elapsed_ms: None,
+                tone: None,
+                tool_name: tool.map(Into::into),
+                tool_input: tool.map(|_| serde_json::json!({"path": "cache.rs"})),
+                batch: tool.map(|_| "q1".into()),
+                pending: tool.is_some(),
+                parked: false,
+                result_text: None,
+                result_is_error: false,
+                diff: None,
+                exit_code: None,
+                member: None,
+                cut: None,
+                line: None,
+            })
+        };
+        app.apply(snapshot(Some(SideLine {
+            id: "b-7c".into(),
+            purpose: "try the parser".into(),
+            state: LineState::Working,
+            rows: vec![
+                row(RowKind::UserMessage, "try the parser", None),
+                row(RowKind::ToolCall, "", Some("read")),
+                row(
+                    RowKind::StreamingAssistant,
+                    "The lock is held across the await.",
+                    None,
+                ),
+            ],
+        })));
+        let shown = screen(&mut app);
+        assert!(shown.contains("⑂ try the parser · b-7c"), "{shown}");
+        assert!(shown.contains("Exploring"), "the process shows: {shown}");
+        assert!(shown.contains("The lock is held across the await."));
+        assert!(shown.contains("⑂ working…"));
+
+        app.handle_input(key(KeyCode::Esc));
+        assert!(matches!(sent.borrow().last(), Some(Command::CloseSide)));
+        assert!(!screen(&mut app).contains("b-7c"), "closed at once");
+        let count = sent.borrow().len();
+        app.handle_input(key(KeyCode::Esc));
+        assert_eq!(sent.borrow().len(), count, "one Esc closes one panel");
+    }
+
     /// `/plugins` lists through the worker, the panel's changes reach it as
     /// plugin commands, and `/plugins install PATH` installs the directory
     /// relative to the workspace.
@@ -4699,7 +4965,7 @@ mod tests {
                 session_id: "s1".into(),
                 rows,
                 focus: focus.into(),
-                main_history_complete: complete,
+                history_complete: complete,
                 ..ViewSnapshot::default()
             })));
             self.draw();
@@ -4718,13 +4984,13 @@ mod tests {
         let text = drawn.transcript();
         assert_eq!(text.matches("line one").count(), 1, "{text}");
         assert_eq!(text.matches("line two").count(), 1, "{text}");
-        assert!(text.contains("line b-7c"), "the switch is marked: {text}");
-        let line_switch = text.find("line b-7c").unwrap();
+        assert!(text.contains("⑂ b-7c"), "the switch is marked: {text}");
+        let line_switch = text.find("⑂ b-7c").unwrap();
         let main_one_after = text[line_switch..].matches("main one").count();
         assert_eq!(main_one_after, 0, "main's rows do not print on the line");
         drawn.show(&[("user-1", "main one")], "main", true);
         let text = drawn.transcript();
-        assert!(text.contains("line main"), "the return is marked: {text}");
+        assert!(text.contains("⑂ main"), "the return is marked: {text}");
         assert_eq!(text.matches("main one").count(), 2, "{text}");
         assert_eq!(text.matches("line one").count(), 1, "{text}");
     }
@@ -4740,10 +5006,10 @@ mod tests {
             .rev()
             .find(|row| row.contains('╰'))
             .expect("the composer's bottom border");
-        assert!(border.contains("line b-7c"), "{border}");
+        assert!(border.contains("⑂ b-7c"), "{border}");
         let text = drawn.transcript();
         let boundary = text
-            .rfind("──── line b-7c ────")
+            .rfind("──── ⑂ b-7c ────")
             .expect("the switch's boundary row");
         let replay = text.rfind("line one").expect("the line's row");
         assert!(boundary < replay, "{text}");
@@ -4901,7 +5167,7 @@ mod tests {
             session_id: "s1".into(),
             rows,
             focus: "main".into(),
-            main_history_complete: true,
+            history_complete: true,
             ..ViewSnapshot::default()
         })));
         drawn.draw();
@@ -5023,14 +5289,14 @@ mod tests {
             Update::Snapshot(Box::new(ViewSnapshot {
                 session_id: session.into(),
                 focus: focus.into(),
-                main_history_complete: complete,
+                history_complete: complete,
                 ..ViewSnapshot::default()
             }))
         };
         drawn.app.apply(snapshot("s1", "main", false));
         drawn.draw();
         assert!(
-            !drawn.transcript().contains("line main"),
+            !drawn.transcript().contains("⑂ main"),
             "the boundary of the line shown first is still owed"
         );
         drawn.app.apply(Update::Switched {
@@ -5042,10 +5308,10 @@ mod tests {
         let text = drawn.transcript();
         assert!(text.contains("resumed s2"), "{text}");
         assert!(
-            !text.contains("line main"),
+            !text.contains("⑂ main"),
             "the new session starts at main: {text}"
         );
-        assert_eq!(text.matches("line b-7c").count(), 1, "{text}");
+        assert_eq!(text.matches("⑂ b-7c").count(), 1, "{text}");
     }
 
     fn questions() -> crate::question::Call {

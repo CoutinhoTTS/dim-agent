@@ -25,7 +25,9 @@ use crate::model::session::{
     PluginItem, PluginReply, ProviderAction, ProviderEntry, SessionItem, SessionPort,
     SubagentModelPolicy, SwitchKind, Update,
 };
-use crate::model::view::{LineState, LineView, TaskOutputState, TaskTarget, WorkflowInventory};
+use crate::model::view::{
+    LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
+};
 use crate::projection::Projection;
 use crate::wire::{Configuration, Event, EventContent, Progress};
 use crate::{configure, mcp, permission, update};
@@ -204,6 +206,8 @@ struct Worker {
     cursors: std::collections::HashMap<String, u64>,
     projection_id: u64,
     focus: String,
+    /// The line the side panel follows.
+    side: Option<String>,
     /// One transcript per line the user opened, folded from its events.
     lines: std::collections::BTreeMap<String, LineProjection>,
     task_history: std::collections::HashMap<String, BranchHistory>,
@@ -306,6 +310,7 @@ async fn run(
         cursors: Default::default(),
         projection_id: 0,
         focus: "main".into(),
+        side: None,
         lines: Default::default(),
         task_history: Default::default(),
         task_history_queue: Default::default(),
@@ -812,6 +817,10 @@ impl Worker {
             Command::Submit(text) => self.submit(text, "queue").await,
             Command::SubmitDraft(parts) => self.submit_draft(parts).await,
             Command::FocusLine(line) => self.focus_line(line).await,
+            Command::CloseSide => {
+                self.side = None;
+                self.publish();
+            }
             Command::EndLine {
                 session_id,
                 projection_id,
@@ -870,7 +879,8 @@ impl Worker {
                     .await;
                 if let Ok(opened) = &opened {
                     self.discover_branch(&opened.branch.branch_id);
-                    self.focus_line(opened.branch.branch_id.clone()).await;
+                    self.side = Some(opened.branch.branch_id.clone());
+                    self.publish();
                 }
                 self.report_failure(opened);
             }
@@ -2699,6 +2709,7 @@ impl Worker {
             self.line_projection(&line);
         }
         self.focus = line;
+        self.side = None;
         self.publish();
     }
 
@@ -2723,6 +2734,18 @@ impl Worker {
             None => self.projection.snapshot(),
         };
         snapshot.lines = self.line_views();
+        snapshot.side = self.side.as_ref().and_then(|id| {
+            let line = snapshot.lines.iter().find(|line| &line.id == id)?;
+            Some(SideLine {
+                id: id.clone(),
+                purpose: line.purpose.clone(),
+                state: line.state.clone(),
+                rows: self
+                    .lines
+                    .get(id)
+                    .map_or_else(Vec::new, |line| line.projection.rows().to_vec()),
+            })
+        });
         snapshot.focus = self.focus.clone();
         snapshot.main_running = self.projection.running();
         snapshot.main_topic = self.projection.first_message();
@@ -2733,9 +2756,9 @@ impl Worker {
         }
         snapshot.session_id = self.session_id.clone();
         snapshot.projection_id = self.projection_id;
-        snapshot.main_history_complete = self
+        snapshot.history_complete = self
             .task_history
-            .get("main")
+            .get(&self.focus)
             .is_some_and(|branch| branch.done);
         snapshot.task_history_loading = self
             .task_history

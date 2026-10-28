@@ -49,6 +49,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main ist die Sitzung selbst; ein Zweig endet, main nicht"
         }
         "Line has ended:" => "Zweig wurde beendet:",
+        "Esc close" => "Esc schließen",
+        "/{name} needs {argument}" => "/{name} braucht {argument}",
         "e edit · b branch · f fork" => "e bearbeiten · b Zweig · f Fork",
         "e edit" => "e bearbeiten",
         "Fork the session before this message? (y/N)" => {

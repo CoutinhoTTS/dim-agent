@@ -41,6 +41,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main 就是工作階段本身；線可以結束，main 不能"
         }
         "Line has ended:" => "該線已結束：",
+        "Esc close" => "Esc 關閉",
+        "/{name} needs {argument}" => "/{name} 需要 {argument}",
         "e edit · b branch · f fork" => "e 編輯 · b 分支 · f 派生",
         "e edit" => "e 編輯",
         "Fork the session before this message? (y/N)" => "在這則訊息之前派生會話？(y/N)",
