@@ -98,7 +98,7 @@
 - **线性滚动。** 只读上一次的摘要和新切出来的条目，更早的不读。
 - **§5 的成本诊断信息。**
 - **摘要实质性检查。** 非空，且必要部分齐备。
-- **§1 里过时的那句话。** [ContextCompaction §1](plugins/ContextCompaction.md#1-概要) 说自动压缩"从不在生产环境运行"并引用 `main.rs`。它在生产环境运行：产品档案装配 `ProductContextModel` 和 `ProductSummaryStrategy`（[cli.rs:317](../../../crates/dim-app-server/src/cli.rs)），只有 mock 档案和用显式 `--models` 文件构造请求的档案绑定 `ContextModelHost(None)`。所有者自行更正自己的文字。
+- **§1 里过时的那句话。** [ContextCompaction §1](plugins/ContextCompaction.md#1-概要) 说自动压缩"从不在生产环境运行"并引用 `main.rs`。它在生产环境运行：产品配置和 `--models` 配置都通过 `defaults::install_compaction` 安装压缩（[cli.rs:308](../../../crates/dim-app-server/src/cli.rs)），只有 mock 配置绑定 `ContextModelHost(None)`。所有者自行更正自己的文字。
 
 ### 7.2 Recall
 

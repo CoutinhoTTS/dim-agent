@@ -98,7 +98,7 @@ Each subsection names one owner and what this document requires of it. The owner
 - **Linear rolling.** Read the previous summary and the newly cut entries, and nothing earlier.
 - **The cost diagnostics** of §5.
 - **The substantive-summary check.** Non-empty, with its required parts present.
-- **The stale §1 sentence.** [ContextCompaction §1](plugins/ContextCompaction.md#1-summary) says automatic compaction "never runs in production" and cites `main.rs`. It runs there: the product profile installs `ProductContextModel` and `ProductSummaryStrategy` ([cli.rs:317](../../crates/dim-app-server/src/cli.rs)), and only the mock profile and the profile built from an explicit `--models` file bind `ContextModelHost(None)`. The owner corrects its own text.
+- **The stale §1 sentence.** [ContextCompaction §1](plugins/ContextCompaction.md#1-summary) says automatic compaction "never runs in production" and cites `main.rs`. It runs there: the product and `--models` profiles install compaction through `defaults::install_compaction` ([cli.rs:308](../../crates/dim-app-server/src/cli.rs)), and only the mock profile binds `ContextModelHost(None)`. The owner corrects its own text.
 
 ### 7.2 Recall
 
