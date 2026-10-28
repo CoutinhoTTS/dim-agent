@@ -6474,6 +6474,7 @@
         "path context_compaction",
         "path context_configuration",
         "path context_messages",
+        "path digest_message",
         "path retained_entry",
         "path truncate_middle",
         "path user_message",
@@ -6482,6 +6483,7 @@
         "use crate::history::context_compaction",
         "use crate::history::context_configuration",
         "use crate::history::context_messages",
+        "use crate::history::digest_message",
         "use crate::history::retained_entry",
         "use crate::history::truncate_middle",
         "use crate::history::user_message"
@@ -6548,6 +6550,7 @@
         "path ContextCompactionResult::Skipped",
         "path ContextCompactionStartData",
         "path ContextPrepareData",
+        "path DigestEntries",
         "path EventKind::ContextBudget",
         "path EventKind::ContextCompaction",
         "path EventKind::ContextCompactionStart",
@@ -6555,6 +6558,7 @@
         "path EventKind::InputMessage",
         "path EventKind::ModelCall",
         "path EventKind::ModelUsage",
+        "path EventKind::ToolResult",
         "path InputBlock::Raw",
         "path InputMessageData",
         "path ModelUsageData",
@@ -6597,7 +6601,10 @@
       "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_types::tool",
       "references": [
-        "path ToolDefinition"
+        "path ToolDefinition",
+        "path ToolEffect",
+        "path ToolEffect::CommandRun",
+        "path ToolEffect::FileWritten"
       ]
     },
     {
@@ -7337,6 +7344,15 @@
       "references": [
         "path ContextBaselineEntry",
         "path ContextConfiguredData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolEffect",
+        "path ToolEffect::CommandRun",
+        "path ToolEffect::FileWritten"
       ]
     },
     {
@@ -12804,6 +12820,7 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
+        "path ToolEffect",
         "path ToolResult"
       ]
     },

@@ -8,8 +8,13 @@ use dim_agent_capabilities::{
     context_model::ProductContextModel,
     history::{context_messages, project_context_history},
     summary_strategy::{ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin},
+    tool_registry::definition,
 };
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use serde_json::Value;
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 const WINDOW: u64 = 4_000;
 const OUTPUT: u64 = 100;
@@ -65,12 +70,15 @@ async fn compact_now(session: &dim_agent_runtime::Session) -> (u64, Vec<Arc<Agen
 struct Recorder {
     prefix: Arc<str>,
     requests: std::sync::Mutex<Vec<Arc<ModelRequest>>>,
+    /// Tool batches answered before text, one per non-summarizer request.
+    calls: std::sync::Mutex<VecDeque<Vec<(String, Value)>>>,
 }
 impl Default for Recorder {
     fn default() -> Self {
         Self {
             prefix: "You summarize a coding session".into(),
             requests: Default::default(),
+            calls: Default::default(),
         }
     }
 }
@@ -85,23 +93,93 @@ impl ModelDriver for Recorder {
             Some(SystemPrompt::Text(text)) if text.starts_with(self.prefix.as_ref()));
         if summarizer {
             self.requests.lock().unwrap().push(request);
+            return Box::pin(async {
+                Ok(Box::pin(futures_util::stream::iter(vec![
+                    Ok(ModelChunk::MessageStart {
+                        message_id: "reply".into(),
+                    }),
+                    Ok(ModelChunk::Text("摘要".into())),
+                    Ok(ModelChunk::Usage(reply_usage())),
+                    Ok(ModelChunk::MessageStop {
+                        message_id: "reply".into(),
+                        reason: ModelStopReason::EndTurn,
+                    }),
+                ])) as ModelStream)
+            });
         }
-        let text = if summarizer { "摘要" } else { "好" };
+        let calls = self.calls.lock().unwrap().pop_front().unwrap_or_default();
         Box::pin(async move {
-            Ok(Box::pin(futures_util::stream::iter(vec![
-                Ok(ModelChunk::MessageStart {
-                    message_id: "reply".into(),
-                }),
-                Ok(ModelChunk::Text(text.into())),
-                Ok(ModelChunk::Usage(reply_usage())),
-                Ok(ModelChunk::MessageStop {
-                    message_id: "reply".into(),
-                    reason: ModelStopReason::EndTurn,
-                }),
-            ])) as ModelStream)
+            let mut chunks = vec![Ok(ModelChunk::MessageStart {
+                message_id: "reply".into(),
+            })];
+            for (index, (name, input)) in calls.into_iter().enumerate() {
+                let id = format!("call-{index}");
+                chunks.push(Ok(ModelChunk::ToolStart {
+                    id: id.clone(),
+                    name: name.clone(),
+                }));
+                chunks.push(Ok(ModelChunk::ToolUse(ToolCall {
+                    id,
+                    name,
+                    input: input.as_object().unwrap().clone(),
+                })));
+            }
+            if chunks.len() == 1 {
+                chunks.push(Ok(ModelChunk::Text("好".into())));
+            }
+            chunks.push(Ok(ModelChunk::Usage(reply_usage())));
+            chunks.push(Ok(ModelChunk::MessageStop {
+                message_id: "reply".into(),
+                reason: if chunks.len() == 2 {
+                    ModelStopReason::EndTurn
+                } else {
+                    ModelStopReason::ToolUse
+                },
+            }));
+            Ok(Box::pin(futures_util::stream::iter(chunks)) as ModelStream)
         })
     }
 }
+/// MockTools plus a `declare` tool returning the effects its input names.
+struct Declares;
+impl ToolDriver for Declares {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        let mut definitions = MockTools.definitions();
+        definitions.push(ToolDefinition {
+            risk: Some("session".into()),
+            ..definition(
+                "declare",
+                "Declare the effects its input names.",
+                serde_json::json!({"type":"object","properties":{"effects":{"type":"array"}}}),
+            )
+        });
+        definitions
+    }
+    fn execute(
+        &self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        if call.name != "declare" {
+            return MockTools.execute(call, context, cancel);
+        }
+        Box::pin(async move {
+            let effects: Vec<ToolEffect> = serde_json::from_value(
+                call.input
+                    .get("effects")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            )
+            .map_err(|_| HostError::failed("Invalid effects"))?;
+            Ok(ToolResult {
+                effects: Some(effects),
+                ..ToolResult::text("declared")
+            })
+        })
+    }
+}
+
 struct Local;
 impl ResolveModelConnection for Local {
     fn resolve(
@@ -139,13 +217,33 @@ async fn product_session_with(
     output: u64,
     config: ProductSummaryStrategyConfig,
 ) -> (Ctx, dim_agent_runtime::Agent, dim_agent_runtime::Session) {
+    product_session_on(
+        WINDOW,
+        Arc::new(MockTools),
+        driver,
+        output,
+        config,
+        SessionConfig::default(),
+    )
+    .await
+}
+
+/// The same Session on another window and tool host.
+async fn product_session_on(
+    window: u64,
+    tools: Arc<dyn ToolDriver>,
+    driver: Arc<dyn ModelDriver>,
+    output: u64,
+    config: ProductSummaryStrategyConfig,
+    config_session: SessionConfig,
+) -> (Ctx, dim_agent_runtime::Agent, dim_agent_runtime::Session) {
     let root = Ctx::root().unwrap();
     root.provide(ModelHost(driver.clone())).unwrap();
     root.provide(ProviderConnectionResolver(Arc::new(Local)))
         .unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+        .session_value(Arc::new(ToolHost(tools)))
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(
@@ -169,7 +267,7 @@ async fn product_session_with(
         "target": {"providerId": "local", "modelId": "small"},
         "capabilities": {"modalities": ["text"], "toolCalling": true, "streaming": true,
             "structuredOutput": false, "vision": false, "audio": false, "reasoning": false,
-            "contextWindow": WINDOW, "maxOutputTokens": output}
+            "contextWindow": window, "maxOutputTokens": output}
     }))
     .unwrap();
     defaults::install_with_prompt(
@@ -187,10 +285,7 @@ async fn product_session_with(
         }),
     );
     let agent = builder.build_in(&root);
-    let session = agent
-        .create_session(SessionConfig::default())
-        .await
-        .unwrap();
+    let session = agent.create_session(config_session).await.unwrap();
     (root, agent, session)
 }
 
@@ -848,6 +943,106 @@ async fn a_blank_summary_fails_the_compaction_without_applying_it() {
     );
     assert_eq!(diagnostics.strategy.kind, "summary");
     assert_eq!(projected(&session, "main").await, before, "not applied");
+    agent.close().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+/// The previous digest is never sent to the summarizer: the strategy carries
+/// the previous summary part and the newly cut entries, and the digest part
+/// rolls forward from the record instead (ContextCompaction §5.10).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_previous_digest_never_reaches_the_summarizer() {
+    let recorder = Arc::new(Recorder::default());
+    let (root, agent, session) = product_session_on(
+        40_960,
+        Arc::new(Declares),
+        recorder.clone(),
+        4_096,
+        ProductSummaryStrategyConfig::default(),
+        SessionConfig {
+            tools: Some(vec![
+                "echo".into(),
+                "wait".into(),
+                "branch".into(),
+                "declare".into(),
+            ]),
+            permission_policy: PermissionPolicy {
+                preset: PermissionPreset::FullAccess,
+                ..Default::default()
+            },
+            ..SessionConfig::default()
+        },
+    )
+    .await;
+    // The first turn declares an effect; the second is the one a manual step
+    // cuts at, so the declaration lies in the replaced range.
+    recorder.calls.lock().unwrap().push_back(vec![(
+        "declare".into(),
+        serde_json::json!({"effects": [{"kind": "fileWritten", "path": "/work/a.rs"}]}),
+    )]);
+    session
+        .submit(cjk(9_000), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    session
+        .submit(cjk(9_000), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let (command, events) = compact_now(&session).await;
+    let digest = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(ContextCompactionData {
+                command: Some(served),
+                outcome:
+                    ContextCompactionResult::Completed {
+                        replacement_parts,
+                        digest_entries,
+                        ..
+                    },
+                ..
+            }) if *served == command => Some((*replacement_parts, digest_entries.clone())),
+            _ => None,
+        })
+        .expect("the first compaction completed");
+    assert_eq!(
+        digest.0.map(|parts| parts.digest),
+        Some(1),
+        "the first replacement carries a digest"
+    );
+    assert!(
+        digest.1.is_some_and(|entries| !entries.entries.is_empty()),
+        "the declaration is in it"
+    );
+    let seen = recorder.requests.lock().unwrap().len();
+
+    session
+        .submit(cjk(9_000), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    compact_now(&session).await;
+    let requests = recorder.requests.lock().unwrap().clone();
+    assert!(requests.len() > seen, "the second compaction summarized");
+    let later: String = requests[seen..]
+        .iter()
+        .map(|request| transcript(request))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        later.contains("摘要"),
+        "the previous summary part is carried"
+    );
+    assert!(
+        !later.contains("<dim-digest>"),
+        "the digest part is not sent to the summarizer"
+    );
+    assert!(
+        !later.contains("wrote /work/a.rs"),
+        "no digest entry reaches the summarizer"
+    );
     agent.close().await.unwrap();
     root.shutdown().await.unwrap();
 }

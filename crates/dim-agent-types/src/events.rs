@@ -352,6 +352,15 @@ pub struct ReplacementParts {
     pub digest: u64,
 }
 
+/// The digest's entries as data (ContextCompaction §5.10), written next to
+/// `replacement_parts`; `dropped` says the bound removed earlier entries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DigestEntries {
+    pub entries: Vec<ToolEffect>,
+    pub dropped: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContextCompactionResult {
@@ -380,6 +389,15 @@ pub enum ContextCompactionResult {
             deserialize_with = "crate::optional_non_null"
         )]
         pinned_inputs: Option<Vec<String>>,
+        /// The digest's entries as data, written exactly when the replacement
+        /// carries a digest message; absent from every earlier record
+        /// (§5.10).
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::optional_non_null"
+        )]
+        digest_entries: Option<DigestEntries>,
     },
     Skipped {
         reason: String,

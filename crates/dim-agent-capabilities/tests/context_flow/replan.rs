@@ -101,13 +101,21 @@ async fn replanned_session(
     driver: Arc<dyn ModelDriver>,
     strategy: Arc<Overshoot>,
 ) -> (dim_agent_runtime::Agent, dim_agent_runtime::Session) {
+    replanned_session_with(facts(), driver, strategy).await
+}
+
+async fn replanned_session_with(
+    facts: Context,
+    driver: Arc<dyn ModelDriver>,
+    strategy: Arc<Overshoot>,
+) -> (dim_agent_runtime::Agent, dim_agent_runtime::Session) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .process_value(Arc::new(ModelHost(driver)))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(HistoryRenderer::default()))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
-        .session_value(Arc::new(ContextModelHost(Some(Arc::new(facts())))))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(facts)))))
         .session_value(Arc::new(CompactionStrategyHost(Some(strategy))))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
@@ -261,24 +269,33 @@ async fn a_second_summary_that_overshoots_completes_marked() {
 /// The second summary is larger still, so the re-planned result keeps a
 /// small tail and lands above the bound although the resident parts fit.
 /// The mark is measured from that total, so the record says so and names the
-/// summary (ContextCompaction §5.3 step 5).
+/// summary (ContextCompaction §5.3 step 5). The window and the summaries
+/// leave the digest's planned share (§5.10) room for that tail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_modest_second_overshoot_is_marked() {
     let strategy = Overshoot::new(
         400.,
         vec![
-            Box::leak("d".repeat(2_100).into_boxed_str()),
-            Box::leak("e".repeat(2_600).into_boxed_str()),
+            Box::leak("d".repeat(2_715).into_boxed_str()),
+            Box::leak("e".repeat(3_400).into_boxed_str()),
         ],
     );
-    let (agent, session) = replanned_session(Arc::new(EchoModel), strategy.clone()).await;
-    turns(&session, 6, 400).await;
+    let (agent, session) = replanned_session_with(
+        Context {
+            window: 12_288.,
+            ..facts()
+        },
+        Arc::new(EchoModel),
+        strategy.clone(),
+    )
+    .await;
+    turns(&session, 6, 500).await;
     let (command, events) = compact_now(&session).await;
     let (diagnostics, _) = completed(&events, command);
     assert_eq!(strategy.cuts().len(), 2, "the strategy runs a second pass");
     let after = diagnostics.estimated_output_tokens.expect("the after size");
     assert!(
-        after > 0.5 * 6_144.,
+        after > 0.5 * 8_192.,
         "the result is above the bound: {after}"
     );
     let mark = diagnostics
@@ -287,7 +304,7 @@ async fn a_modest_second_overshoot_is_marked() {
     assert_eq!(mark.parts.len(), 1, "{:?}", mark.parts);
     assert_eq!(mark.parts[0].part, InsufficientSpacePartName::Summary);
     assert!(
-        mark.parts[0].tokens < 0.5 * 6_144.,
+        mark.parts[0].tokens < 0.5 * 8_192.,
         "the resident parts fit on their own: {:?}",
         mark.parts
     );
@@ -385,7 +402,9 @@ impl ModelDriver for BudgetAfter {
 /// (ContextCompaction §5.3, acceptance 12).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_recovery_compaction_is_re_planned_once() {
-    let strategy = Overshoot::new(400., vec![Box::leak("d".repeat(2_100).into_boxed_str())]);
+    // The first summary keeps the digest's planned share inside the bound, so
+    // the re-plan still finds a later cut for the second pass.
+    let strategy = Overshoot::new(400., vec![Box::leak("d".repeat(1_900).into_boxed_str())]);
     let driver = Arc::new(BudgetAfter {
         calls: AtomicUsize::new(0),
         fail_after: 6,
