@@ -16,6 +16,8 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub(crate) const MAX_HISTORY_RECORD_BYTES: usize = 8 * 1024 * 1024;
+
 pub(crate) fn failure(_: impl std::fmt::Display) -> Error {
     Error::Target(
         "Native migration storage operation failed; source and committed objects are preserved"
@@ -408,7 +410,7 @@ impl Native {
         let session = uuid::Uuid::new_v4().to_string();
         let events = history(data)?;
         for event in &events {
-            if serde_json::to_vec(&event.event).map_err(failure)?.len() > 8 * 1024 * 1024 {
+            if serde_json::to_vec(&event.event).map_err(failure)?.len() > MAX_HISTORY_RECORD_BYTES {
                 return Err(Error::Object("Converted history record exceeds the native 8 MiB migration limit; Session retained in source".into()));
             }
         }
@@ -558,7 +560,7 @@ impl Native {
     }
 }
 
-fn history(data: &SessionData) -> Result<Vec<StoredEvent>> {
+pub(crate) fn history(data: &SessionData) -> Result<Vec<StoredEvent>> {
     if let Some(error) = &data.context_error {
         return Err(Error::Deferred(format!(
             "Effective continuation cannot be represented: {error}; Session retained in source"

@@ -1,23 +1,28 @@
-use crate::{Error, ObjectResult, Result, TaskReport, TaskState, TaskStatus};
+use crate::{Error, ObjectResult, Progress, Result, TaskReport, TaskState, TaskStatus};
 use dim_agent_capabilities::file_storage::{FileLease, FilePath, FileStorage, FileStorageError};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub(crate) struct Ledger {
     pub files: Arc<FileStorage>,
+    progress: watch::Sender<Option<Progress>>,
 }
 
 impl Ledger {
-    pub async fn open(files: Arc<FileStorage>) -> Result<Self> {
+    pub async fn open(
+        files: Arc<FileStorage>,
+        progress: watch::Sender<Option<Progress>>,
+    ) -> Result<Self> {
         let cancel = CancellationToken::new();
         for path in ["migration", "migration/tasks", "migration/snapshots"] {
             files
                 .create_directory(&files.path(0, path)?, &cancel)
                 .await?;
         }
-        Ok(Self { files })
+        Ok(Self { files, progress })
     }
 
     fn path(&self, id: &str, name: &str) -> Result<FilePath> {
@@ -100,6 +105,16 @@ impl Ledger {
                 &CancellationToken::new(),
             )
             .await?;
+        self.progress.send_modify(|progress| {
+            if let Some(progress) = progress
+                && progress.task.id == id
+            {
+                progress.recent.push_back(result.clone());
+                if progress.recent.len() > 8 {
+                    progress.recent.pop_front();
+                }
+            }
+        });
         Ok(())
     }
 

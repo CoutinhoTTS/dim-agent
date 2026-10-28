@@ -2656,9 +2656,7 @@
         "eprintln",
         "json",
         "matches",
-        "println",
-        "tokio::pin",
-        "tokio::select"
+        "println"
       ]
     },
     {
@@ -4397,7 +4395,8 @@
       "file": "crates/dim-migration/src/engine.rs",
       "unexpandedMacros": [
         "format",
-        "matches"
+        "matches",
+        "unreachable"
       ]
     },
     {
@@ -4510,6 +4509,23 @@
         "format",
         "matches",
         "serde_json::json"
+      ]
+    },
+    {
+      "id": "dim_migration::terminal",
+      "crate": "dim_migration",
+      "parent": "dim_migration",
+      "file": "crates/dim-migration/src/terminal.rs",
+      "unexpandedMacros": [
+        "cfg",
+        "execute",
+        "format",
+        "queue",
+        "tokio::pin",
+        "tokio::select",
+        "vec",
+        "write",
+        "writeln"
       ]
     }
   ],
@@ -21396,6 +21412,14 @@
       ]
     },
     {
+      "from": "dim_cli::migration_command",
+      "to": "dim_migration::terminal",
+      "references": [
+        "path dim_migration::terminal::Terminal",
+        "path dim_migration::terminal::Terminal::new"
+      ]
+    },
+    {
       "from": "dim_cli::model",
       "to": "dim_cli::model::session",
       "references": [
@@ -28886,6 +28910,13 @@
       ]
     },
     {
+      "from": "dim_migration",
+      "to": "dim_migration::terminal",
+      "references": [
+        "mod terminal"
+      ]
+    },
+    {
       "from": "dim_migration::accounts",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -29023,6 +29054,7 @@
         "path TaskStatus::Interrupted",
         "path TaskStatus::Partial",
         "path TaskStatus::Running",
+        "path crate::Progress",
         "use crate::Error",
         "use crate::Migration",
         "use crate::ObjectResult",
@@ -29060,6 +29092,9 @@
       "references": [
         "path Native",
         "path Native::open",
+        "path crate::native::MAX_HISTORY_RECORD_BYTES",
+        "path crate::native::failure",
+        "path crate::native::history",
         "use crate::native::Native"
       ]
     },
@@ -29167,6 +29202,7 @@
         "path Error::Source",
         "path Error::Storage",
         "path ObjectResult",
+        "path Progress",
         "path Result",
         "path TaskReport",
         "path TaskState",
@@ -29174,6 +29210,7 @@
         "path TaskStatus::Running",
         "use crate::Error",
         "use crate::ObjectResult",
+        "use crate::Progress",
         "use crate::Result",
         "use crate::TaskReport",
         "use crate::TaskState",
@@ -29828,6 +29865,32 @@
         "path Result",
         "use crate::Error",
         "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_migration::terminal",
+      "to": "dim_migration",
+      "references": [
+        "path Error::Terminal",
+        "path Migration",
+        "path Outcome",
+        "path Outcome::AlreadyImported",
+        "path Outcome::Cancelled",
+        "path Outcome::Conflict",
+        "path Outcome::Deferred",
+        "path Outcome::Deleted",
+        "path Outcome::Failed",
+        "path Outcome::Imported",
+        "path Outcome::Unsupported",
+        "path Progress",
+        "path Result",
+        "path TaskReport",
+        "use crate::Error",
+        "use crate::Migration",
+        "use crate::Outcome",
+        "use crate::Progress",
+        "use crate::Result",
+        "use crate::TaskReport"
       ]
     }
   ],

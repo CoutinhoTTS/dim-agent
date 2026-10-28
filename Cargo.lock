@@ -1319,6 +1319,7 @@ version = "0.1.0-alpha.8"
 dependencies = [
  "base64 0.23.1",
  "chrono",
+ "crossterm",
  "dim-agent-capabilities",
  "dim-agent-runtime",
  "dim-agent-types",
@@ -1335,6 +1336,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "unicode-width 0.2.0",
  "uuid",
 ]
 

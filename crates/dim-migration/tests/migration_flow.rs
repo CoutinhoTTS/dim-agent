@@ -146,6 +146,152 @@ fn snapshot(home: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_keeps_large_images_as_files_without_rejecting_session_history() {
+    use base64::Engine;
+    use dim_agent_types::{ContextCompactionResult, MessageContent, MessagePart};
+
+    for (small_size, large_size) in [
+        (1024 * 1024, 7 * 1024 * 1024),
+        (3 * 1024 * 1024, 3 * 1024 * 1024),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            directory.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let source = directory.path().join("source");
+        let db = fixture(&source);
+        let small = vec![b'S'; small_size];
+        let large = vec![b'L'; large_size];
+        for (id, order, bytes) in [("small", "c", &small), ("large", "d", &large)] {
+            db.execute(
+                "INSERT INTO session_blobs VALUES (?1,'old','binary','unused','image/png',?2,NULL)",
+                params![id, i64::try_from(bytes.len()).unwrap()],
+            )
+            .unwrap();
+            db.execute("INSERT INTO blob_data VALUES (?1,?2)", params![id, bytes])
+                .unwrap();
+            db.execute("INSERT INTO messages VALUES (?1,'old','user','[{\"type\":\"text\",\"text\":\"image attachment\"}]',?2,'{}',?3,'2026-01-01T00:00:00Z')", params![
+                id,
+                json!([{"attachmentId":id,"kind":"blob","data":{"blobId":id,"mediaType":"image/png"}}]).to_string(),
+                order,
+            ]).unwrap();
+        }
+        let before = snapshot(&source);
+        let target = directory.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let root = rutis::Ctx::root().unwrap();
+        let plugin = root.plugin(MigrationPlugin::new(
+            target.clone(),
+            "rust".into(),
+            vec!["system".into()],
+        ));
+        (&plugin).await.unwrap();
+        let migration = root.get::<Migration>().unwrap();
+        let report = migration.run(source.clone(), true, None).await.unwrap();
+        {
+            let progress = migration.progress();
+            let progress = progress.borrow();
+            let progress = progress.as_ref().unwrap();
+            assert_eq!(progress.task.id, report.task.id);
+            assert_eq!(progress.recent.len(), report.objects.len().min(8));
+        }
+        let imported = report
+            .objects
+            .iter()
+            .find(|r| r.kind == "session" && r.id == "old")
+            .unwrap();
+        assert_eq!(imported.outcome, Outcome::Imported, "{report:?}");
+        assert!(
+            imported
+                .omitted
+                .iter()
+                .any(|field| field == "attachment.inlineImage.large")
+        );
+        assert!(
+            !imported
+                .omitted
+                .iter()
+                .any(|field| field == "attachment.inlineImage.small")
+        );
+        let id = imported.target_id.clone().unwrap();
+        plugin.dispose().await.unwrap();
+        root.shutdown().await.unwrap();
+
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::install(&mut builder);
+        defaults::mock_hosts(&mut builder);
+        let server = serve(
+            builder,
+            ServerConfig {
+                database_path: Some(target.join("rust/dimcode.sqlite")),
+                product_home: Some(target),
+                unix_path: Some(directory.path().join("native.sock")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let session = server.agent().unwrap().restore_session(id).await.unwrap();
+        let history = session.history("main", None).await.unwrap();
+        let replacement = history
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextCompaction(data) => match &data.outcome {
+                    ContextCompactionResult::Completed { replacement, .. } => Some(replacement),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap();
+        let parts: Vec<_> = replacement
+            .iter()
+            .filter_map(|message| match &message.content {
+                MessageContent::Parts(parts) => Some(parts),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let images: Vec<_> = parts
+            .iter()
+            .filter_map(|part| match part {
+                MessagePart::Image { source } => Some(source),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(images[0].data.as_ref().unwrap())
+                .unwrap(),
+            small
+        );
+        let path = parts
+            .iter()
+            .find_map(|part| match part {
+                MessagePart::Text { text, .. } => {
+                    text.strip_prefix("Attached imported blob large: ")
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), large);
+        assert!(history.iter().any(|event| matches!(&event.kind, EventKind::InputMessage(input) if input.user.as_ref().is_some_and(|user| user.content.iter().any(|part|matches!(part, dim_agent_types::ContentBlock::Text {text} if text.contains("Attached imported blob large: ")))))));
+        assert!(
+            history.iter().all(|event| !matches!(
+                event.kind,
+                EventKind::ModelCall(_) | EventKind::ToolCall(_)
+            ))
+        );
+        assert_eq!(snapshot(&source), before);
+        server.shutdown();
+        server.join().await.unwrap();
+        drop(db);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_continuation() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(

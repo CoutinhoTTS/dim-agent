@@ -8,6 +8,7 @@ mod providers;
 mod scheduler;
 mod settings;
 mod source;
+pub mod terminal;
 
 use dim_agent_capabilities::file_storage::{FileStorage, FileStorageError, FileStoragePlugin};
 use rutis::host::ErrorKind;
@@ -15,6 +16,7 @@ use rutis::{Ctx, Plugin};
 use serde::{Deserialize, Serialize};
 pub use source::{Inventory, validate_source_home};
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -37,6 +39,8 @@ pub enum Error {
     Target(String),
     #[error("{0}")]
     Storage(FileStorageError),
+    #[error("Migration terminal output failed: {0}")]
+    Terminal(std::io::Error),
     #[error("Migration was cancelled after accepted work settled")]
     Cancelled,
 }
@@ -107,6 +111,12 @@ pub struct TaskReport {
     pub objects: Vec<ObjectResult>,
 }
 
+#[derive(Debug, Clone)]
+pub struct Progress {
+    pub task: TaskState,
+    pub recent: VecDeque<ObjectResult>,
+}
+
 pub struct MigrationPlugin {
     home: PathBuf,
     themes: Vec<String>,
@@ -141,10 +151,12 @@ impl Plugin for MigrationPlugin {
                 "Migration FileStorage is unavailable".into(),
             ))
         })?;
-        let ledger = ledger::Ledger::open(files).await.map_err(|error| {
-            rutis::Error::from(ErrorKind::PluginFailed(error.to_string().into()))
-        })?;
         let (progress, _) = watch::channel(None);
+        let ledger = ledger::Ledger::open(files, progress.clone())
+            .await
+            .map_err(|error| {
+                rutis::Error::from(ErrorKind::PluginFailed(error.to_string().into()))
+            })?;
         let service = Arc::new(Migration {
             ledger,
             stopping: CancellationToken::new(),
@@ -173,14 +185,14 @@ pub struct Migration {
     ledger: ledger::Ledger,
     stopping: CancellationToken,
     tasks: TaskTracker,
-    progress: watch::Sender<Option<TaskState>>,
+    progress: watch::Sender<Option<Progress>>,
     themes: Vec<String>,
     native_directory: PathBuf,
     admission: Mutex<()>,
 }
 
 impl Migration {
-    pub fn progress(&self) -> watch::Receiver<Option<TaskState>> {
+    pub fn progress(&self) -> watch::Receiver<Option<Progress>> {
         self.progress.subscribe()
     }
     pub fn cancel_current(&self) {

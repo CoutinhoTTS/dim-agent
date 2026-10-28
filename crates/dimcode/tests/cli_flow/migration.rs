@@ -313,6 +313,76 @@ fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin
 }
 
 #[test]
+fn migration_terminal_resizes_and_restores_the_screen_after_cancellation() {
+    let source = Home::new();
+    legacy_home(
+        &source.0,
+        "dimcode.sqlite",
+        "original history stays private",
+    );
+    let database = rusqlite::Connection::open(source.0.join("dimcode.sqlite")).unwrap();
+    database.execute_batch("WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<1000)
+        INSERT INTO sessions SELECT printf('session-%04d',n),cwd,title,status,tags,createdAt,updatedAt,version FROM numbers,sessions WHERE sessionId='old';
+        INSERT INTO session_states SELECT sessionId,'local','diagram-model','{}','{}','agent' FROM sessions WHERE sessionId!='old';
+        INSERT INTO messages SELECT sessionId||'-message',sessionId,'user','[{\"type\":\"text\",\"text\":\"private conversation body\"}]','[]','{}','a','2026-01-01T00:00:00Z' FROM sessions WHERE sessionId!='old';").unwrap();
+    drop(database);
+    let before = fs::read(source.0.join("dimcode.sqlite")).unwrap();
+    let target = Home::new();
+    let model = target.0.join("model.json");
+    fs::write(
+        &model,
+        include_str!("../../../dim-agent-aimux/examples/offline.json"),
+    )
+    .unwrap();
+    let mut command = target.command();
+    command
+        .env("TERM", "xterm-256color")
+        .arg("--model-config")
+        .arg(&model)
+        .args([
+            "migration",
+            "--source",
+            source.0.to_str().unwrap(),
+            "--source-stopped",
+        ]);
+    let mut terminal = Terminal::launch(command);
+    let resize = |terminal: &Terminal, columns, rows| {
+        let size = libc::winsize {
+            ws_row: rows,
+            ws_col: columns,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            unsafe {
+                libc::ioctl(
+                    terminal.master.as_ref().unwrap().as_raw_fd(),
+                    libc::TIOCSWINSZ,
+                    &size,
+                )
+            },
+            0
+        );
+    };
+    resize(&terminal, 100, 30);
+    terminal.until("Recent results (up to 8)");
+    terminal.until("Imported");
+    resize(&terminal, 60, 22);
+    terminal.until("Recent results (up to 5)");
+    resize(&terminal, 30, 8);
+    terminal.until("Dim Migration [RUNNING]");
+    terminal.signal(libc::SIGINT);
+    assert_eq!(terminal.wait().code(), Some(130), "{}", terminal.transcript);
+    assert!(terminal.transcript.contains("\u{1b}[?1049l"));
+    assert!(terminal.transcript.contains("\u{1b}[?25h"));
+    assert!(terminal.transcript.contains("Migration Cancelled"));
+    assert!(terminal.transcript.contains("Full report:"));
+    assert!(!terminal.transcript.contains("private conversation body"));
+    assert!(!terminal.transcript.contains("\"objects\""));
+    assert_eq!(fs::read(source.0.join("dimcode.sqlite")).unwrap(), before);
+}
+
+#[test]
 fn default_migration_keeps_global_and_cn_in_their_own_homes() {
     let user = Home::new();
     let model = user.0.join("offline.json");
@@ -416,16 +486,54 @@ fn default_migration_keeps_global_and_cn_in_their_own_homes() {
     let _global_daemon = Daemon(&global, &model);
     let _cn_daemon = Daemon(&cn, &model);
     let mut import = command();
+    import.env("TERM", "xterm-256color");
     import.arg("migration");
     let mut terminal = Terminal::launch(import);
     terminal.until("Continue? [y/N]");
+    let size = libc::winsize {
+        ws_row: 30,
+        ws_col: 100,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe {
+            libc::ioctl(
+                terminal.master.as_ref().unwrap().as_raw_fd(),
+                libc::TIOCSWINSZ,
+                &size,
+            )
+        },
+        0
+    );
     terminal.write(b"y\n");
     assert!(terminal.wait().success(), "{}", terminal.transcript);
+    assert!(terminal.transcript.contains("\u{1b}[?1049h"));
+    assert!(terminal.transcript.contains("\u{1b}[?1049l"));
+    assert!(terminal.transcript.contains("Migration Completed"));
+    assert!(terminal.transcript.contains("Full report:"));
+    assert!(!terminal.transcript.contains("Global conversation"));
+    assert!(!terminal.transcript.contains("CN conversation"));
+    assert!(!terminal.transcript.contains("\"objects\""));
     let listed = command().args(["migration", "list"]).output().unwrap();
     assert!(listed.status.success());
     let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
     assert_eq!(listed["global"]["result"].as_array().unwrap().len(), 1);
     assert_eq!(listed["cn"]["result"].as_array().unwrap().len(), 1);
+    let task = listed["global"]["result"][0]["id"].as_str().unwrap();
+    let mut retry = command();
+    retry.args(["migration", "retry", task]);
+    let mut terminal = Terminal::launch(retry);
+    terminal.until("Continue? [y/N]");
+    terminal.write(b"n\n");
+    assert_eq!(terminal.wait().code(), Some(130));
+    assert!(!terminal.transcript.contains("Migration task was not found"));
+    assert!(!terminal.transcript.contains("{}"));
+    let after_decline = command().args(["migration", "list"]).output().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&after_decline.stdout).unwrap(),
+        listed
+    );
     let mut identities = Vec::new();
     for (name, home, text, other, rule) in [
         (

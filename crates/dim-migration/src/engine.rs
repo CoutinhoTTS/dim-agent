@@ -12,7 +12,15 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) async fn publish(owner: &Migration, task: &TaskState) -> Result<()> {
     owner.ledger.save(task).await?;
-    owner.progress.send_replace(Some(task.clone()));
+    owner.progress.send_modify(|progress| match progress {
+        Some(progress) if progress.task.id == task.id => progress.task = task.clone(),
+        progress => {
+            *progress = Some(crate::Progress {
+                task: task.clone(),
+                recent: Default::default(),
+            })
+        }
+    });
     Ok(())
 }
 
@@ -149,6 +157,9 @@ async fn execute_source(
     for stage in ["providers", "settings", "accounts"] {
         check(owner, &task.id).await?;
         task.stage = stage.into();
+        task.processed = 0;
+        task.total = None;
+        task.current = None;
         publish(owner, task).await?;
         let result = match stage {
             "providers" => crate::providers::import(owner, task, source, target).await,
@@ -212,9 +223,16 @@ async fn execute_source(
         publish(owner, task).await?;
     }
     task.stage = "scheduler".into();
+    task.processed = 0;
+    task.total = None;
     task.current = None;
     publish(owner, task).await?;
     crate::scheduler::import(owner, task, source, target).await?;
+    task.stage = "inventory".into();
+    task.processed = 0;
+    task.total = None;
+    task.current = None;
+    publish(owner, task).await?;
     crate::inventory::inspect(owner, task, source).await?;
     Ok(())
 }
@@ -302,7 +320,8 @@ async fn session(
     let metadata=archive.encode(&paths)?;
     let (file,metadata_path)=target.put_file("legacy-history.json",metadata,&owner.stopping).await?;
     files.push(file);
-    for record in &mut data.records {
+    let mut images = Vec::new();
+    for (record_index, record) in data.records.iter_mut().enumerate() {
         let MessageContent::Parts(parts) = &mut record.message.content else {
             continue;
         };
@@ -328,25 +347,14 @@ async fn session(
                         .as_str()
                         .or(blob.mime_type.as_deref());
                     if let Some(media) = media.filter(|media| media.starts_with("image/")) {
-                        parts.push(MessagePart::Image {
-                            source: ImageSource {
-                                source_type: ImageSourceType::Base64,
-                                media_type: media.into(),
-                                data: Some(
-                                    base64::engine::general_purpose::STANDARD
-                                        .encode(&raw_files[id]),
-                                ),
-                                url: None,
-                            },
-                        });
-                    } else {
-                        parts.push(MessagePart::Text {
-                            provider_metadata: None,
-                            text: format!("Attached imported blob {id}: {path}"),
-                            start_time: None,
-                            end_time: None,
-                        });
+                        images.push((record_index, parts.len(), id.to_owned(), media.to_owned()));
                     }
+                    parts.push(MessagePart::Text {
+                        provider_metadata: None,
+                        text: format!("Attached imported blob {id}: {path}"),
+                        start_time: None,
+                        end_time: None,
+                    });
                 }
             }
         }
@@ -372,6 +380,45 @@ async fn session(
     let mut note_id="migration-metadata".to_owned();
     while data.records.iter().any(|record|record.id==note_id){note_id.push('-');}
     data.records.push(RecordedMessage{id:note_id,created_at:None,message:Message::text(Role::User,format!("Imported legacy historical metadata and available artifacts: {}. Execution is not resumed.",metadata_path)),in_context:false});
+    if !images.is_empty() {
+        let mut message_budgets = BTreeMap::new();
+        let mut context_budget = None;
+        for stored in crate::native::history(&data)? {
+            let bytes = serde_json::to_vec(&stored.event).map_err(crate::native::failure)?.len();
+            let remaining = crate::native::MAX_HISTORY_RECORD_BYTES.saturating_sub(bytes);
+            if matches!(stored.event.kind, EventKind::ContextCompaction(_)) {
+                context_budget = Some(remaining);
+            }
+            for tag in stored.event.tags.as_ref().unwrap() {
+                if let Some(id) = tag.strip_prefix("legacy-message:") {
+                    message_budgets.entry(id.to_owned())
+                        .and_modify(|budget: &mut usize| *budget = (*budget).min(remaining))
+                        .or_insert(remaining);
+                }
+            }
+        }
+        let mut context_budget = context_budget.unwrap();
+        for (record_index, part_index, id, media_type) in images {
+            let record = &mut data.records[record_index];
+            let MessageContent::Parts(parts) = &mut record.message.content else { unreachable!() };
+            let image = MessagePart::Image { source: ImageSource {
+                source_type: ImageSourceType::Base64,
+                media_type,
+                data: Some(base64::engine::general_purpose::STANDARD.encode(&raw_files[&id])),
+                url: None,
+            }};
+            let growth = serde_json::to_vec(&image).map_err(crate::native::failure)?.len()
+                .saturating_sub(serde_json::to_vec(&parts[part_index]).map_err(crate::native::failure)?.len());
+            let budget = message_budgets.get_mut(&record.id).unwrap();
+            if growth <= *budget && (!record.in_context || growth <= context_budget) {
+                parts[part_index] = image;
+                *budget -= growth;
+                if record.in_context { context_budget -= growth; }
+            } else {
+                omitted.push(format!("attachment.inlineImage.{id}"));
+            }
+        }
+    }
     check(owner, &task.id).await?;
     let session = target.session(&data, &digest, &files)?;
     record_history(owner, task, &historical, &session, Outcome::Imported).await?;

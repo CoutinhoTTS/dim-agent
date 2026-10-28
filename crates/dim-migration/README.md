@@ -15,7 +15,8 @@ not select Global/CN directories or invent automatic triggers.
 
 - `inspect(source, stopped)` returns an inventory.
 - `run(source, stopped, retry_of)` returns a durable report; `progress()` subscribes
-  to progress, and `cancel_current()` requests cancellation.
+  to `Progress { task, recent }`, and `cancel_current()` requests cancellation.
+  `recent` holds at most eight results, appended only after their durable write.
 - `list()`, `report(task)` and `cancel(task)` work without a daemon.
 
 Close legacy writers and target clients first. The CLI uses normal verified daemon
@@ -75,7 +76,10 @@ Sessions through successful receipts.
 
 Source JSON is limited to 8 MiB, copied blobs and archives to 16 MiB, and each
 converted history record to 8 MiB. Invalid or oversized objects fail before Session
-publication. Source databases and committed WAL are copied through FileStorage;
+publication. Images that fit the message and effective-context record budgets stay
+inline; larger images remain complete managed Session files with readable path
+references and explicit inline-image omissions. Oversized original text is rejected
+without truncation. Source databases and committed WAL are copied through FileStorage;
 only the copy is opened by SQLite. Source files and authorized paths remain intact.
 
 ## Tasks and verification
@@ -85,6 +89,20 @@ Reports hold identities and fixed diagnostics, never tokens or conversation bodi
 A run lease distinguishes live work from interruption. Retry creates a new linked
 task and reconciles native receipts; deferred objects remain eligible for later
 import. Cancellation waits for accepted work and does not roll back committed data.
+
+## Terminal binding
+
+The CLI creates `terminal::Terminal::new(json)` once and calls its
+`run(&migration, source, stopped, retry)` method. It delegates cancellation and all
+progress rendering to that method. `is_interactive()` selects compact human output;
+other modes retain the CLI's full JSON result. Batch errors use `Terminal::error`.
+
+The renderer owns its alternate screen, restores the screen and cursor on exit or
+drop, and refreshes at most ten times per second. It displays the current step,
+step count, elapsed time and the recent bounded result snapshot, without rereading
+the ledger. A small terminal shows five rows or a compact display. Unknown totals
+use an activity indicator. Completion leaves a summary and a report command;
+non-interactive runs emit only stage changes to stderr, and `--json` stays quiet.
 
 See the [design](../../docs/design/plugins/Migration.md),
 [implementation plan](../../docs/plan/analysis/legacy-migration.md) and

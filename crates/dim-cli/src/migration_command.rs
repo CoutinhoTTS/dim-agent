@@ -55,6 +55,9 @@ pub(crate) fn parse(
 }
 
 pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command) -> Result<i32> {
+    let terminal = dim_migration::terminal::Terminal::new(options.json);
+    let json_output = !terminal.is_interactive()
+        || !matches!(command.operation, Operation::Run | Operation::Retry(_));
     if matches!(
         command.operation,
         Operation::Inspect | Operation::Run | Operation::Retry(_)
@@ -84,9 +87,11 @@ pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command)
             let source = std::env::current_dir()?.join(source);
             options.home = std::fs::canonicalize(source.parent().ok_or(USAGE)?)?;
         }
-        let (code, output) = run_home(root, &options, command).await?;
+        let (code, output) = run_home(root, &options, command, &terminal).await?;
         if let Some(output) = output {
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            if json_output {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
         } else if code == 0 {
             return Err("Migration task was not found in the selected home".into());
         }
@@ -138,7 +143,7 @@ pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command)
             command.source_stopped = true;
         }
         let invocation = rutis::Ctx::root()?;
-        let outcome = run_home(&invocation, &options, &command).await;
+        let outcome = run_home(&invocation, &options, &command, &terminal).await;
         let closed = invocation.shutdown().await;
         let outcome = match closed {
             Ok(()) => outcome,
@@ -162,6 +167,9 @@ pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command)
                     error.downcast_ref::<dim_migration::Error>(),
                     Some(dim_migration::Error::Cancelled)
                 );
+                if !json_output {
+                    terminal.error(&home, &error.to_string())?;
+                }
                 results.insert(name.into(), json!({"home":home,"error":error.to_string()}));
                 code = if cancelled { 130 } else { 1 };
                 if cancelled {
@@ -170,10 +178,15 @@ pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command)
             }
         }
     }
+    if results.is_empty() && code == 130 {
+        return Ok(code);
+    }
     if results.is_empty() && !matches!(command.operation, Operation::List) {
         return Err("Migration task was not found in the distribution homes; use --home for a custom target".into());
     }
-    println!("{}", serde_json::to_string_pretty(&results)?);
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    }
     Ok(code)
 }
 
@@ -181,6 +194,7 @@ async fn run_home(
     root: &rutis::Ctx,
     options: &Options,
     command: &Command,
+    terminal: &dim_migration::terminal::Terminal,
 ) -> Result<(i32, Option<Value>)> {
     let mut command = command.clone();
     if matches!(command.operation, Operation::Inspect | Operation::Run) {
@@ -225,7 +239,7 @@ async fn run_home(
         {
             return Ok((0, None));
         }
-        execute(root, &service, options, &command).await
+        execute(root, &service, options, &command, terminal).await
     }
     .await;
     plugin.dispose().await?;
@@ -252,6 +266,7 @@ async fn execute(
     service: &std::sync::Arc<Migration>,
     options: &Options,
     command: &Command,
+    terminal: &dim_migration::terminal::Terminal,
 ) -> Result<(i32, Option<Value>)> {
     match &command.operation {
         Operation::List => Ok((0, Some(serde_json::to_value(service.list().await?)?))),
@@ -290,21 +305,7 @@ async fn execute(
                 crate::client::shutdown(client).await?;
             }
             link.dispose().await?;
-            let mut progress = service.progress();
-            let future = service.run(source, true, retry);
-            tokio::pin!(future);
-            let mut interrupted = false;
-            let report = loop {
-                tokio::select! {
-                    result=&mut future=>break result?,
-                    _=tokio::signal::ctrl_c(),if !interrupted=>{interrupted=true;service.cancel_current();eprintln!("Stopping migration; waiting for accepted work to settle...");},
-                    result=progress.changed()=>{
-                        if result.is_ok() && !options.json && let Some(state)=progress.borrow_and_update().as_ref() {
-                            eprintln!("{}  {}  {}/{}  {}",state.id,safe(&state.stage),state.processed,state.total.map(|total|total.to_string()).unwrap_or_else(||"?".into()),safe(state.current.as_deref().unwrap_or("")));
-                        }
-                    },
-                }
-            };
+            let report = terminal.run(service, source, true, retry).await?;
             let code = match report.task.status {
                 TaskStatus::Completed => 0,
                 TaskStatus::Partial => 2,

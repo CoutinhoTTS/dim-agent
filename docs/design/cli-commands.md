@@ -71,7 +71,7 @@ invocation and knows no distribution directory convention.
 
 Default `list` reads both target homes. Default `show`, `retry` and `cancel`
 locate the task through the owners' task lists, including when its old source
-has been removed. Batch output is one JSON object keyed by `global` and `cn`;
+has been removed. JSON output is one object keyed by `global` and `cn`;
 each entry contains `home` and `result`, or `home` and `error`. An absent
 distribution is omitted. No matching source is an error; a task query with no
 matching task is an error; listing with neither target home present returns `{}`.
@@ -99,15 +99,15 @@ Target: /Users/me/.dim
 Source: /Users/me/.dimcode/v2
 Target: /Users/me/.dimcode
 Close legacy and native clients using these homes. Continue? [y/N] y
-<task-id>  sessions        0/12      <legacy-session>
-{ "global": { "home": ".../.dim", "result": { ... } }, "cn": { "home": ".../.dimcode", "result": { ... } } }
+<fixed progress panel; see Migration terminal presentation>
+Migration completed
+Task: <task-id>
+Full report: dim migration show <task-id> --home /Users/me/.dim
 
 $ dim migration inspect --home /tmp/dim-new --source /tmp/dim-old --source-stopped
 { "database": "dimcode.sqlite", "tables": { ... }, "issues": [] }
 
-$ dim migration run --home /tmp/dim-new --source /tmp/dim-old --source-stopped
-<task-id>  sessions        0/12      <legacy-session>
-<task-id>  scheduler       0/?       <legacy-job>
+$ dim migration run --home /tmp/dim-new --source /tmp/dim-old --source-stopped --json
 { "task": { "id": "...", "status": "partial", ... }, "objects": [ ... ] }
 
 $ dim migration show <task-id> --home /tmp/dim-new
@@ -116,8 +116,11 @@ $ dim migration cancel <running-task-id> --home /tmp/dim-new
 $ dim migration list --home /tmp/dim-new
 ```
 
-Progress goes to stderr; final output is JSON on stdout. `--json` suppresses
-progress. Exit codes are 0 for complete, 2 for partial, 1 for failure and 130 for
+The [Migration plugin](plugins/Migration.md#终端展示) owns the fixed terminal
+progress panel and summary. Interactive run/retry displays that panel and finishes
+with a compact summary and report command. `--json` suppresses progress and prints
+the complete JSON on stdout; non-interactive output also remains JSON, with at most
+one stderr notice per step. Queries keep their JSON results. Exit codes are 0 for complete, 2 for partial, 1 for failure and 130 for
 settled cancellation. A partial report names failed, conflicting, deferred and
 unsupported objects and omitted fields. Ctrl+C requests cancellation and waits
 for accepted writes; a second process can use `cancel TASK`. Retry
