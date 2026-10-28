@@ -115,7 +115,11 @@ contract](Permission.md#workspace-write-targets) decides whether the target asks
 
 Consumes `step/tool-call`, `stop/interrupt`, `turn/start`, `turn/end`; produces
 `step/tool-start`, `step/tool-completed` when progress is enabled and
-`step/tool-result`. Calls in a batch settle before the correlated batch result.
+`step/tool-result`. It records each returned result unchanged, so the effect
+declarations on it travel on that fact
+([session boundary A.6](../../../design/contracts/session-boundary.md#a6-tool-effects));
+a call it settles without a tool result carries none. Calls in a batch settle
+before the correlated batch result.
 Only one batch runs at once. Interrupts cancel current work and suppress late
 host invocation. Cleanup closes admission, cancels, joins tracked work and
 aggregates failures. Reload settles unmatched committed batches as errors rather

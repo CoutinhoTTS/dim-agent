@@ -82,7 +82,10 @@ generation token: once the row starts unloading, a call through it is not made
 is offered again once its provider is active), and a call in flight ends with an
 error warning that it may already have taken effect. Execution maps the native
 call and context and the Session configuration to the neutral A.5 request, then
-decodes `ToolResult` once. Each call's cancellation Promise uses a child of the
+decodes `ToolResult` once, its effect declarations included and unchanged; the
+registry does not interpret them
+([session boundary A.6](../../../design/contracts/session-boundary.md#a6-tool-effects)).
+Each call's cancellation Promise uses a child of the
 batch token, so finishing its lease cannot cancel another call in that batch.
 TypeScript effects still own settlement of the JavaScript work. The host decides
 how Sessions unload and restore; App Server recovery is described in

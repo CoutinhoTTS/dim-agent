@@ -370,3 +370,81 @@ fn bedrock_continuation_metadata_is_strict_and_roundtrips() {
         .is_err()
     );
 }
+
+#[test]
+fn tool_effects_round_trip_and_refuse_an_unknown_kind() {
+    let result = ToolResult {
+        effects: Some(vec![
+            ToolEffect::FileWritten {
+                path: "/work/dim/src/lib.rs".into(),
+            },
+            ToolEffect::CommandRun {
+                command: "cargo test".into(),
+                exit_code: Some(0),
+                signal: None,
+            },
+            ToolEffect::CommandRun {
+                command: "npm run dev".into(),
+                exit_code: None,
+                signal: None,
+            },
+        ]),
+        ..ToolResult::text("done")
+    };
+    let value = serde_json::to_value(&result).unwrap();
+    assert_eq!(
+        value["effects"],
+        json!([
+            {"kind": "fileWritten", "path": "/work/dim/src/lib.rs"},
+            {"kind": "commandRun", "command": "cargo test", "exitCode": 0},
+            {"kind": "commandRun", "command": "npm run dev"},
+        ])
+    );
+    assert_eq!(serde_json::from_value::<ToolResult>(value).unwrap(), result);
+    assert!(
+        serde_json::from_value::<ToolResult>(json!({
+            "content": "x",
+            "effects": [{"kind": "fileDeleted", "path": "/work/dim/src/lib.rs"}]
+        }))
+        .is_err(),
+        "an unknown effect kind is refused at the boundary that decodes it"
+    );
+    assert!(
+        serde_json::from_value::<ToolResult>(json!({
+            "content": "x",
+            "effects": [{"kind": "commandRun", "command": "ls", "cwd": "/"}]
+        }))
+        .is_err(),
+        "an effect with a field outside the vocabulary is refused"
+    );
+}
+
+#[test]
+fn a_v1_connection_receives_a_tool_result_without_its_effects() {
+    let event = AgentEvent {
+        id: "event-1".into(),
+        sequence: 1,
+        create_at: 0,
+        tags: None,
+        kind: EventKind::ToolResult(ToolResultData {
+            turn_id: "turn-1".into(),
+            request_id: "request-1".into(),
+            call_event_id: Some("batch-1".into()),
+            results: vec![ToolCallResult {
+                call_id: "call-1".into(),
+                result: ToolResult {
+                    effects: Some(vec![ToolEffect::FileWritten {
+                        path: "/work/dim/src/lib.rs".into(),
+                    }]),
+                    ..ToolResult::text("Wrote /work/dim/src/lib.rs")
+                },
+            }],
+        }),
+    };
+    let shared = v1::SharedEvent::new(std::sync::Arc::new(event)).expect("a dispatched result");
+    let value = serde_json::to_value(&shared).unwrap();
+    let result = &value["data"]["results"][0]["result"];
+    assert!(result.get("effects").is_none(), "{value}");
+    assert_eq!(result["content"], "Wrote /work/dim/src/lib.rs");
+    assert!(result.get("isError").is_none(), "{value}");
+}
