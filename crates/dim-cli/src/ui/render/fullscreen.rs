@@ -1393,12 +1393,7 @@ fn cells(text: &str, start: usize, end: usize) -> String {
 /// The scrollbar column for a viewport of `view` rows over `content` rows
 /// starting at `top`, one cell per row, in eighths of a row; `None` when
 /// everything fits.
-fn scrollbar(
-    view: usize,
-    content: usize,
-    top: usize,
-    palette: &Palette,
-) -> Option<Vec<String>> {
+fn scrollbar(view: usize, content: usize, top: usize, palette: &Palette) -> Option<Vec<String>> {
     if content <= view || view == 0 {
         return None;
     }
