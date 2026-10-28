@@ -582,7 +582,7 @@ impl Model {
     }
     fn config(&self, home: &Home) -> PathBuf {
         let config = home.0.join("model.json");
-        fs::write(&config, json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","apiKeyEnv":"DIM_CLI_TEST_API_KEY","baseUrl":format!("http://{}/v1", self.address),"models":[{"id":"fixture-model","config":{"maxTokens":128}}]}]}).to_string()).unwrap();
+        fs::write(&config, json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","apiKeyEnv":"DIM_CLI_TEST_API_KEY","baseUrl":format!("http://{}/v1", self.address),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":128}}]}]}).to_string()).unwrap();
         config
     }
 }

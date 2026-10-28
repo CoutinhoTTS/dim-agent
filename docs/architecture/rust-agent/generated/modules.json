@@ -4960,14 +4960,28 @@
     },
     {
       "from": "dim_agent_aimux::models",
+      "to": "dim_agent_capabilities::context_model",
+      "references": [
+        "path window_facts",
+        "use dim_agent_capabilities::context_model::window_facts"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::models",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path ContextModel",
         "path HostError",
         "path HostError::failed",
+        "path HostFuture",
         "path ProviderKind",
         "path ProviderKind::Bedrock",
+        "path ResolveContextModel",
         "use crate::config::ProviderKind",
-        "use dim_agent_capabilities::host::HostError"
+        "use dim_agent_capabilities::host::ContextModel",
+        "use dim_agent_capabilities::host::HostError",
+        "use dim_agent_capabilities::host::HostFuture",
+        "use dim_agent_capabilities::host::ResolveContextModel"
       ]
     },
     {
@@ -4975,6 +4989,7 @@
       "to": "dim_agent_types::model",
       "references": [
         "path ModelConfig",
+        "path ModelRequest",
         "path ModelRequest::new",
         "use dim_agent_types::ModelConfig",
         "use dim_agent_types::ModelRequest"
@@ -6754,6 +6769,14 @@
     },
     {
       "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::context_methods",
+      "references": [
+        "path ContextMethodsPlugin::new",
+        "use crate::context_methods::ContextMethodsPlugin"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::context_preparation",
       "references": [
         "path ContextPreparationPlugin::new",
@@ -6782,6 +6805,7 @@
         "path ModelHost",
         "path PrepareContextHost",
         "path PromptHost",
+        "path ResolveContextModel",
         "path ToolDriver",
         "path ToolHost"
       ]
@@ -6884,6 +6908,16 @@
       "to": "dim_agent_capabilities::skills",
       "references": [
         "path crate::skills::install"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::summary_strategy",
+      "references": [
+        "path ProductSummaryStrategyConfig",
+        "path ProductSummaryStrategyPlugin::new",
+        "use crate::summary_strategy::ProductSummaryStrategyConfig",
+        "use crate::summary_strategy::ProductSummaryStrategyPlugin"
       ]
     },
     {
@@ -14089,14 +14123,6 @@
     },
     {
       "from": "dim_app_server::cli",
-      "to": "dim_agent_capabilities::context_methods",
-      "references": [
-        "path ContextMethodsPlugin::new",
-        "use dim_agent_capabilities::context_methods::ContextMethodsPlugin"
-      ]
-    },
-    {
-      "from": "dim_app_server::cli",
       "to": "dim_agent_capabilities::context_model",
       "references": [
         "path ProductContextModel",
@@ -14109,6 +14135,7 @@
       "references": [
         "path defaults",
         "path defaults::install",
+        "path defaults::install_compaction",
         "path defaults::install_local_execution",
         "path defaults::mock_model_hosts",
         "path defaults::tool_host",
@@ -14127,12 +14154,8 @@
       "from": "dim_app_server::cli",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path CompactionStrategyHost",
-        "path ContextModelHost",
         "path IdentityContext",
         "path PrepareContextHost",
-        "use dim_agent_capabilities::host::CompactionStrategyHost",
-        "use dim_agent_capabilities::host::ContextModelHost",
         "use dim_agent_capabilities::host::IdentityContext",
         "use dim_agent_capabilities::host::PrepareContextHost"
       ]
@@ -14143,16 +14166,6 @@
       "references": [
         "path ModelProviderPlugin::process",
         "use dim_agent_capabilities::model_provider::ModelProviderPlugin"
-      ]
-    },
-    {
-      "from": "dim_app_server::cli",
-      "to": "dim_agent_capabilities::summary_strategy",
-      "references": [
-        "path ProductSummaryStrategyConfig",
-        "path ProductSummaryStrategyPlugin::new",
-        "use dim_agent_capabilities::summary_strategy::ProductSummaryStrategyConfig",
-        "use dim_agent_capabilities::summary_strategy::ProductSummaryStrategyPlugin"
       ]
     },
     {
@@ -22094,6 +22107,7 @@
         "path SwitchKind::Resumed",
         "path Update",
         "path Update::Approvals",
+        "path Update::Context",
         "path Update::Failed",
         "path Update::Login",
         "path Update::ModelFeatures",
@@ -27228,6 +27242,7 @@
         "path SwitchKind::Resumed",
         "path Update",
         "path Update::Approvals",
+        "path Update::Context",
         "path Update::Failed",
         "path Update::FilesChanged",
         "path Update::Login",
@@ -27896,6 +27911,13 @@
       "to": "dim_cli::update",
       "references": [
         "path crate::update::skip"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::usage",
+      "references": [
+        "use crate::usage::format_tokens"
       ]
     },
     {

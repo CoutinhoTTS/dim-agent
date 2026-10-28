@@ -210,7 +210,12 @@ Save this model configuration as `model.json`, replace the model ID, and set the
       "apiKeyEnv": "OPENAI_API_KEY",
       "baseUrl": "https://api.openai.com/v1",
       "models": [
-        { "id": "your-model-id", "config": { "maxTokens": 4096 } }
+        {
+          "id": "your-model-id",
+          "contextWindow": 128000,
+          "maxOutputTokens": 16384,
+          "config": { "maxTokens": 4096 }
+        }
       ]
     }
   ]

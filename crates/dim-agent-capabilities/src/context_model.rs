@@ -1,5 +1,5 @@
-//! Window facts of the product profile, taken from the request's adopted
-//! capability snapshot with a local token estimate (ContextCompaction §5.1).
+//! Window facts of a profile that compacts, from the model's declared limits
+//! with a local token estimate (ContextCompaction §5.1).
 //! The trigger reserve is a provisional heuristic (#128).
 use crate::host::*;
 use dim_agent_types::*;
@@ -35,19 +35,33 @@ impl ResolveContextModel for ProductContextModel {
             snapshot
                 .validate_for(&request.provider_id, &request.model_id)
                 .map_err(|message| HostError::classified(HostErrorKind::InvalidRequest, message))?;
-            let limit = snapshot.capabilities.max_output_tokens as f64;
-            let context_window = snapshot.capabilities.context_window as f64;
-            let output_tokens = request
-                .config
-                .as_ref()
-                .and_then(|config| config.max_tokens)
-                .map_or(limit, |max| max.min(limit));
-            Ok(Arc::new(WindowFacts {
-                context_window,
-                output_tokens,
-            }) as Arc<dyn ContextModel>)
+            Ok(window_facts(
+                snapshot.capabilities.context_window,
+                snapshot.capabilities.max_output_tokens,
+                &request,
+            ))
         })
     }
+}
+
+/// Window facts for a model whose limits are declared: `context_window` and
+/// its `max_output_tokens` limit, which the request's own `maxTokens` never
+/// exceeds.
+pub fn window_facts(
+    context_window: u64,
+    max_output_tokens: u64,
+    request: &ModelRequest,
+) -> Arc<dyn ContextModel> {
+    let limit = max_output_tokens as f64;
+    let output_tokens = request
+        .config
+        .as_ref()
+        .and_then(|config| config.max_tokens)
+        .map_or(limit, |max| max.min(limit));
+    Arc::new(WindowFacts {
+        context_window: context_window as f64,
+        output_tokens,
+    })
 }
 
 struct WindowFacts {

@@ -846,7 +846,7 @@ impl NativeServer {
         } else {
             "native-secret"
         };
-        let mut value = json!({"defaultModel":{"providerId":"local","modelId":self.model_id()},"providers":[{"id":"local","kind":self.endpoint.kind,"baseUrl":self.url,"headers":{header:credential},"models":[{"id":self.model_id(),"config":{"maxTokens":4096}}]}]});
+        let mut value = json!({"defaultModel":{"providerId":"local","modelId":self.model_id()},"providers":[{"id":"local","kind":self.endpoint.kind,"baseUrl":self.url,"headers":{header:credential},"models":[{"id":self.model_id(),"contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":4096}}]}]});
         value["providers"][0]["headers"]["CONTENT-TYPE"] = json!("application/json");
         let config = &mut value["providers"][0]["models"][0]["config"];
         match self.endpoint.kind {

@@ -3276,7 +3276,7 @@ fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
         let home = Home::new();
         let original = home.0.join("original.json");
         let requested = home.0.join("requested.json");
-        let body = json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1","models":[{"id":"fixture-model","config":{"maxTokens":128}}]}]}).to_string();
+        let body = json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1","models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":128}}]}]}).to_string();
         fs::write(&original, &body).unwrap();
         fs::write(&requested, format!("{body}\n")).unwrap();
         let socket = home.0.join("rust/daemon.sock");
@@ -3552,7 +3552,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
         }
     });
     let config = home.0.join("model.json");
-    fs::write(&config,serde_json::to_vec(&json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","apiKeyEnv":"DIM_CLI_TEST_API_KEY","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","config":{"maxTokens":128}}]}]})).unwrap()).unwrap();
+    fs::write(&config,serde_json::to_vec(&json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","apiKeyEnv":"DIM_CLI_TEST_API_KEY","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":128}}]}]})).unwrap()).unwrap();
     let mut first = home.command();
     first
         .args([
@@ -5853,6 +5853,80 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
     terminal.until(&report("state=clear"));
     terminal.wait();
     daemon.join().unwrap();
+}
+
+/// The composer's status corner shows the main branch's context use against
+/// its window once attached, and reads it again when a run on main ends, in
+/// both interface modes.
+#[test]
+fn tui_composer_shows_context_use_and_refreshes_it_when_a_run_ends() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (shown, wait_shown) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["session.context.usage"]);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            let usage = |input: f64| {
+                json!({"contextWindow":256000.0,"outputTokens":32000.0,
+                "thresholdTokens":200000.0,"estimatedInputTokens":input,
+                "baselineSource":"estimate"})
+            };
+            for _ in 0..2 {
+                let request = wire.read_any();
+                match request["method"].as_str() {
+                    Some("account.providers") => wire.reply(&request, json!([])),
+                    Some("session.context.usage") => {
+                        assert_eq!(
+                            request["params"],
+                            json!({"sessionId":"session","branchId":"main"})
+                        );
+                        wire.reply(&request, usage(1849.0));
+                    }
+                    method => panic!("unexpected request {method:?}"),
+                }
+            }
+            wait_shown.recv_timeout(PATIENCE).unwrap();
+            wire.notice(
+                "session.state",
+                json!({"sessionId":"session","branchId":"main","running":true}),
+            );
+            wire.notice(
+                "session.state",
+                json!({"sessionId":"session","branchId":"main","running":false}),
+            );
+            let refresh = wire.read("session.context.usage");
+            wire.reply(&refresh, usage(64000.0));
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                assert!(
+                    !line.contains("session.context.usage"),
+                    "extra read: {line}"
+                );
+                line.clear();
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("1.8K / 256K");
+        shown.send(()).unwrap();
+        terminal.until("64K / 256K");
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
 }
 
 /// `dimcode export` (Timeline export design §7, §13 item 6): the sibling

@@ -1470,7 +1470,7 @@ fn acp_stdio_temporary_mcp_calls_tools_and_settles_the_child_on_eof() {
         }
     });
     let config = home.0.join("model.json");
-    fs::write(&config,json!({"defaultModel":{"providerId":"local","modelId":"fixture-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","config":{"maxTokens":256}}]}]}).to_string()).unwrap();
+    fs::write(&config,json!({"defaultModel":{"providerId":"local","modelId":"fixture-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":256}}]}]}).to_string()).unwrap();
     let mut command = home.command();
     command.args(["acp", "--model-config", config.to_str().unwrap()]);
     let mut peer = Peer::spawn(&mut command);
@@ -1617,7 +1617,7 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
         }
     });
     let config = home.0.join("model.json");
-    fs::write(&config, json!({"defaultModel":{"providerId":"local","modelId":"fixture-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","config":{"maxTokens":256}}]}]}).to_string()).unwrap();
+    fs::write(&config, json!({"defaultModel":{"providerId":"local","modelId":"fixture-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":256}}]}]}).to_string()).unwrap();
     let mut command = home.command();
     command
         .args(["--model-config", config.to_str().unwrap(), "acp"])

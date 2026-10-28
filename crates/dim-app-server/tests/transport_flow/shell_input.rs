@@ -395,7 +395,7 @@ impl Shell {
                 serde_json::from_value::<dim_agent_aimux::config::ModelConfigFile>(json!({
                     "defaultModel": {"providerId": "local", "modelId": "mock"},
                     "providers": [{"id": "local", "kind": "openai-compatible",
-                        "baseUrl": "https://model.example/v1", "models": [{"id": "mock", "config": {"maxTokens": 64}}]}],
+                        "baseUrl": "https://model.example/v1", "models": [{"id": "mock", "contextWindow": 128000, "maxOutputTokens": 4096, "config": {"maxTokens": 64}}]}],
                 }))
                 .unwrap(),
             )

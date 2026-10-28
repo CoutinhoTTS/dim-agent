@@ -54,6 +54,7 @@ use crate::ui::transcript::tool_group::{
     Detail, action_at, card_actions, card_rows, project_group, render_group,
 };
 use crate::ui::upgrade_dialog::UpgradeDialog;
+use crate::usage::format_tokens;
 
 /// The stop reason and the note committed when the user interrupts a run.
 pub const INTERRUPT_REASON: &str = "User interrupted the run.";
@@ -714,6 +715,8 @@ struct App {
     approvals: String,
     /// The next approvals reading is the answer to a change: say so.
     approvals_toast: bool,
+    /// The main branch's estimated input and context window, in tokens.
+    context: Option<(u64, u64)>,
     /// The first attempt tag of the next `/login` panel, so a closed panel's
     /// late sign-in updates never reach a newer one.
     login_attempts: u64,
@@ -889,6 +892,7 @@ impl App {
             card_second: 0,
             session_id: String::new(),
             approvals: "workspace-write".to_owned(),
+            context: None,
             approvals_toast: false,
             login_attempts: 0,
             theme_context: None,
@@ -1348,6 +1352,7 @@ impl App {
                     view.set_usage(usage);
                 }
             }
+            Update::Context(context) => self.context = context,
             Update::Oauth { attempt, event } => {
                 let effect = match &mut self.prompt {
                     Some(Prompt::Providers(panel)) => panel.oauth_event(attempt, event),
@@ -3545,9 +3550,20 @@ impl App {
         }
     }
 
+    /// `1.8K / 256K`: the main branch's context use against its window.
+    fn context_label(&self) -> Option<String> {
+        self.context.map(|(input, window)| {
+            format!(
+                "{} / {}",
+                format_tokens(input as f64),
+                format_tokens(window as f64)
+            )
+        })
+    }
+
     /// Fullscreen's bottom border label, the status corner: the run
-    /// status, the slot (a notice in the highlight colour) and the approvals
-    /// mode when it is not the default one.
+    /// status, the slot (a notice in the highlight colour), the approvals
+    /// mode when it is not the default one and the context use.
     fn dock_status(&self, run: Option<&str>) -> Option<String> {
         let p = &self.palette;
         let mut parts: Vec<String> = Vec::new();
@@ -3566,6 +3582,9 @@ impl App {
             let mode = status_label(&self.approvals);
             parts.push(fg(&format!("\u{23f5}\u{23f5} {mode}"), &p.muted));
         }
+        if let Some(context) = self.context_label() {
+            parts.push(fg(&context, &p.muted));
+        }
         (!parts.is_empty()).then(|| parts.join("  "))
     }
 
@@ -3576,6 +3595,10 @@ impl App {
             " ".repeat(MARGIN),
             t(status_label(&self.approvals))
         );
+        if let Some(context) = self.context_label() {
+            left.push_str("  ");
+            left.push_str(&context);
+        }
         if let Some(slot) = slot {
             left.push_str("  ");
             left.push_str(&slot);
