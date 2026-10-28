@@ -47,6 +47,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Line has ended:" => "라인이 종료되었습니다:",
         "Esc close" => "Esc 닫기",
         "/{name} needs {argument}" => "/{name}에는 {argument}이(가) 필요합니다",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name}은(는) 텍스트만 받습니다. {label}을(를) 지우고 보내세요"
+        }
         "e edit · b branch · f fork" => "e 편집 · b 브랜치 · f 포크",
         "e edit" => "e 편집",
         "Fork the session before “{message}”? (y/N)" => {

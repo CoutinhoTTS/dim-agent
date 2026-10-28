@@ -4228,6 +4228,7 @@
         "format",
         "matches",
         "panic",
+        "serde_json::json",
         "vec"
       ]
     },
@@ -22116,6 +22117,7 @@
         "path Command::AskAnswers",
         "path Command::AskCancel",
         "path Command::ClearModelPreferences",
+        "path Command::CloseSide",
         "path Command::Configure",
         "path Command::EndLine",
         "path Command::FocusLine",
@@ -22240,6 +22242,7 @@
         "path LineState::Waiting",
         "path LineState::Working",
         "path LineView",
+        "path SideLine",
         "path TaskOutputState::Live",
         "path TaskOutputState::ReadError",
         "path TaskOutputState::Unavailable",
@@ -22247,6 +22250,7 @@
         "path TaskTarget",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
+        "use crate::model::view::SideLine",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::WorkflowInventory"
@@ -23110,6 +23114,7 @@
       "from": "dim_cli::ui::composer",
       "to": "dim_cli::ui::theme::ansi",
       "references": [
+        "path crate::ui::theme::ansi::fg",
         "path crate::ui::theme::ansi::tui_color"
       ]
     },
@@ -24043,6 +24048,7 @@
       "from": "dim_cli::ui::lines_panel",
       "to": "dim_cli::model::view",
       "references": [
+        "path LineState",
         "path LineState::CreationFailed",
         "path LineState::EndedByOperation",
         "path LineState::EndedItself",
@@ -27400,6 +27406,7 @@
         "path Command::AskAnswers",
         "path Command::AskCancel",
         "path Command::ClearModelPreferences",
+        "path Command::CloseSide",
         "path Command::Configure",
         "path Command::EndLine",
         "path Command::FocusLine",
@@ -27497,6 +27504,7 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::model::view",
       "references": [
+        "path LineState::Waiting",
         "path LineState::Working",
         "path LineView",
         "path RowKind::AssistantMessage",
@@ -27505,15 +27513,24 @@
         "path RowKind::Thinking",
         "path RowKind::ToolCall",
         "path RowKind::UserMessage",
+        "path SideLine",
         "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
         "use crate::model::view::RowKind",
+        "use crate::model::view::SideLine",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewRow",
         "use crate::model::view::ViewSnapshot"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe"
       ]
     },
     {
@@ -27630,7 +27647,10 @@
       "references": [
         "path LinesPanel",
         "path LinesPanel::new",
-        "use crate::ui::lines_panel::LinesPanel"
+        "path crate::ui::lines_panel::state_label",
+        "path short_id",
+        "use crate::ui::lines_panel::LinesPanel",
+        "use crate::ui::lines_panel::short_id"
       ]
     },
     {
@@ -28183,8 +28203,11 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::model::view",
       "references": [
+        "path LineState::Waiting",
+        "path LineState::Working",
         "path RowKind::AssistantMessage",
         "path RowKind::UserMessage",
+        "path SideLine",
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default"
@@ -28273,6 +28296,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::transcript::tool_group",
+      "references": [
+        "path Detail::Collapsed"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::tui",
       "references": [
         "path App",
@@ -28285,6 +28315,7 @@
         "path chunk",
         "path goodbye_panel",
         "path queue_strip",
+        "path side_reply",
         "path web_panel"
       ]
     },
@@ -29368,6 +29399,10 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "PluginAction::Enable"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "TurnEnd::Completed"
     },
     {
       "module": "dim_cli::usage",

@@ -513,6 +513,14 @@ impl Composer {
                         &[("name", command.name), ("argument", argument)],
                     ));
                 }
+                if command.argument.is_some()
+                    && let Some(image) = self.tokens.iter().find(|token| token.block.is_some())
+                {
+                    return Outcome::Rejected(tf(
+                        "/{name} takes text only; remove {label} to send",
+                        &[("name", command.name), ("label", &image.label)],
+                    ));
+                }
                 let outcome = Outcome::Command {
                     name: command.name.to_owned(),
                     args: args.to_owned(),
@@ -1140,6 +1148,24 @@ mod tests {
             c.handle_key(key(KeyCode::Enter)),
             Outcome::SubmitDraft { parts, .. } if matches!(parts[..], [DraftPart::Block(_)])
         ));
+    }
+
+    /// `/branch` opens a line from text: a clipboard image keeps the draft
+    /// and is named, rather than dropped on the way.
+    #[test]
+    fn an_inline_branch_keeps_a_draft_holding_an_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("shot.png");
+        png(&image);
+        let mut c = Composer::new(Vec::new());
+        typed(&mut c, "/branch look at ");
+        let source = crate::images::encoded(std::fs::read(&image).unwrap()).unwrap();
+        c.attach_image(source).unwrap();
+        assert!(matches!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::Rejected(reason) if reason.contains("[Image #1]")
+        ));
+        assert_eq!(c.text(), "/branch look at [Image #1]");
     }
 
     #[test]

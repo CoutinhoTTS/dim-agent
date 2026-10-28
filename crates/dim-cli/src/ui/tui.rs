@@ -2889,11 +2889,16 @@ impl App {
         }
         let side = match self.snapshot.as_ref().and_then(|s| s.side.as_ref()) {
             Some(side) if self.prompt.is_none() => {
-                let reply = side_reply(side, cols, self.tool_detail, &self.palette, &self.markdown);
-                self.side_rows = self
-                    .side_rows
-                    .max(reply.len())
-                    .min((size.1 as usize / 3).max(1));
+                let most = (size.1 as usize / 3).max(1);
+                let reply = side_reply(
+                    side,
+                    cols,
+                    most,
+                    self.tool_detail,
+                    &self.palette,
+                    &self.markdown,
+                );
+                self.side_rows = self.side_rows.max(reply.len()).min(most);
                 Some(side_panel(side, reply, self.side_rows, cols, &self.palette))
             }
             Some(_) => None,
@@ -4031,10 +4036,13 @@ fn queue_strip(items: &[(String, String)], height: usize, cols: usize, p: &Palet
 }
 
 /// The side panel's line drawn as its transcript, without the opening
-/// input its title already names.
+/// input its title already names: its newest blocks, laid out back to
+/// front until they fill `height` rows, so a long line costs no more than
+/// the panel shows.
 fn side_reply(
     side: &SideLine,
     cols: usize,
+    height: usize,
     detail: Detail,
     p: &Palette,
     markdown: &MarkdownRenderer,
@@ -4044,8 +4052,12 @@ fn side_reply(
         .max(4)
         .saturating_sub(4)
         .max(1);
-    let mut lines: Vec<String> = Vec::new();
-    for (index, row) in side.rows.iter().enumerate() {
+    let mut blocks: Vec<Vec<String>> = Vec::new();
+    let mut rows = 0;
+    for (index, row) in side.rows.iter().enumerate().rev() {
+        if rows >= height {
+            break;
+        }
         if row.kind == RowKind::UserMessage
             || row.kind == RowKind::ToolCall && !opens_group(&side.rows, index)
         {
@@ -4055,10 +4067,17 @@ fn side_reply(
             RowKind::StreamingAssistant => Block::Assistant(row.text.clone()),
             _ => project_row(&side.rows, index, detail),
         };
+        let rendered = render_block(&block, inner, p, markdown);
+        rows += rendered.len() + 1;
+        blocks.push(rendered);
+    }
+    blocks.reverse();
+    let mut lines: Vec<String> = Vec::new();
+    for block in blocks {
         if !lines.is_empty() {
             lines.push(String::new());
         }
-        lines.extend(render_block(&block, inner, p, markdown));
+        lines.extend(block);
     }
     lines
 }
@@ -4802,6 +4821,28 @@ mod tests {
         assert!(shown.contains("Exploring"), "the process shows: {shown}");
         assert!(shown.contains("The lock is held across the await."));
         assert!(shown.contains("⑂ working…"));
+        let long: Vec<_> = (0..200)
+            .map(|n| row(RowKind::AssistantMessage, &format!("reply {n}"), None))
+            .collect();
+        let side = SideLine {
+            id: "b-7c".into(),
+            purpose: "long".into(),
+            state: LineState::Working,
+            rows: long,
+        };
+        let tail = side_reply(
+            &side,
+            80,
+            10,
+            Detail::Collapsed,
+            &app.palette,
+            &app.markdown,
+        );
+        let tail = strip_escapes(&tail.join("\n"));
+        assert!(
+            tail.contains("reply 199") && !tail.contains("reply 150"),
+            "{tail}"
+        );
         if let Some(side) = app.snapshot.as_mut().and_then(|s| s.side.as_mut()) {
             side.state = LineState::Waiting;
         }

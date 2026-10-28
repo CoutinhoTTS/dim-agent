@@ -51,6 +51,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Line has ended:" => "Jalur sudah berakhir:",
         "Esc close" => "Esc tutup",
         "/{name} needs {argument}" => "/{name} memerlukan {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} hanya menerima teks; hapus {label} untuk mengirim"
+        }
         "e edit · b branch · f fork" => "e ubah · b cabang · f fork",
         "e edit" => "e ubah",
         "Fork the session before “{message}”? (y/N)" => "Fork sesi sebelum “{message}”? (y/N)",

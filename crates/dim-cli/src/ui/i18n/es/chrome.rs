@@ -53,6 +53,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Line has ended:" => "La línea ha terminado:",
         "Esc close" => "Esc cerrar",
         "/{name} needs {argument}" => "/{name} necesita {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} solo admite texto; quita {label} para enviar"
+        }
         "e edit · b branch · f fork" => "e editar · b rama · f bifurcar",
         "e edit" => "e editar",
         "Fork the session before “{message}”? (y/N)" => {

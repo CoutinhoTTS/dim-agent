@@ -45,6 +45,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Line has ended:" => "ラインは終了しました:",
         "Esc close" => "Esc 閉じる",
         "/{name} needs {argument}" => "/{name} には {argument} が必要です",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} はテキストのみです。{label} を削除してから送信してください"
+        }
         "e edit · b branch · f fork" => "e 編集 · b ブランチ · f フォーク",
         "e edit" => "e 編集",
         "Fork the session before “{message}”? (y/N)" => {

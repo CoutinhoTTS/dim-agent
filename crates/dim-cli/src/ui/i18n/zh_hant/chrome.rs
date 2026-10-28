@@ -43,6 +43,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Line has ended:" => "該線已結束：",
         "Esc close" => "Esc 關閉",
         "/{name} needs {argument}" => "/{name} 需要 {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} 只接受文字；移除 {label} 後再傳送"
+        }
         "e edit · b branch · f fork" => "e 編輯 · b 分支 · f 派生",
         "e edit" => "e 編輯",
         "Fork the session before “{message}”? (y/N)" => "在「{message}」之前派生會話？(y/N)",
