@@ -49,10 +49,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main est la session elle-même ; une ligne se termine, pas main"
         }
         "Line has ended:" => "La ligne est terminée :",
+        "Esc close" => "Esc fermer",
+        "/{name} needs {argument}" => "/{name} nécessite {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} n’accepte que du texte ; retirez {label} pour envoyer"
+        }
         "e edit · b branch · f fork" => "e modifier · b branche · f fork",
         "e edit" => "e modifier",
-        "Fork the session before this message? (y/N)" => {
-            "Forker la session avant ce message ? (y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "Forker la session avant « {message} » ? (y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "Forker la session après le dernier tour ? (y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ nouvelle ligne depuis {id} · Échap annuler",
         "A fork copies main; b opens a line here" => "Un fork copie main ; b ouvre une ligne ici",

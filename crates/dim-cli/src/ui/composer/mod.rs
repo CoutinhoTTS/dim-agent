@@ -352,6 +352,12 @@ impl Composer {
                     return Some(Outcome::Handled);
                 }
                 match &row.kind {
+                    crate::ui::rows::Kind::Command(command) if command.argument.is_some() => {
+                        let filled = format!("/{} ", command.name);
+                        self.clear();
+                        self.area.insert_str(&filled);
+                        Some(Outcome::Handled)
+                    }
                     crate::ui::rows::Kind::Command(command) => {
                         let name = command.name.to_owned();
                         self.clear();
@@ -498,10 +504,25 @@ impl Composer {
             if let Some(command) = crate::ui::commands::COMMANDS
                 .iter()
                 .find(|c| c.slash && (c.name == name || c.aliases.contains(&name)))
-                .map(|c| c.name)
             {
+                if let Some(argument) = command.argument
+                    && args.is_empty()
+                {
+                    return Outcome::Rejected(tf(
+                        "/{name} needs {argument}",
+                        &[("name", command.name), ("argument", argument)],
+                    ));
+                }
+                if command.argument.is_some()
+                    && let Some(image) = self.tokens.iter().find(|token| token.block.is_some())
+                {
+                    return Outcome::Rejected(tf(
+                        "/{name} takes text only; remove {label} to send",
+                        &[("name", command.name), ("label", &image.label)],
+                    ));
+                }
                 let outcome = Outcome::Command {
-                    name: command.to_owned(),
+                    name: command.name.to_owned(),
                     args: args.to_owned(),
                 };
                 self.clear();
@@ -854,7 +875,26 @@ impl Composer {
             }
             rows.push(cells_to_ansi(&cells, &[]));
         }
+        if let Some(argument) = self.argument_hint() {
+            rows[0].push_str(&crate::ui::theme::ansi::fg(
+                &format!(" {argument}"),
+                &p.muted,
+            ));
+        }
         (rows, cursor)
+    }
+
+    /// The argument still to type after a command that takes one, as
+    /// `/branch ` leaves it: `<prompt>`.
+    fn argument_hint(&self) -> Option<&'static str> {
+        if self.shell.is_some() {
+            return None;
+        }
+        let name = self.area.text().strip_prefix('/')?.strip_suffix(' ')?;
+        crate::ui::commands::COMMANDS
+            .iter()
+            .find(|c| c.slash && c.name == name)?
+            .argument
     }
 
     /// The palette panel when a command is being typed.
@@ -1108,6 +1148,24 @@ mod tests {
             c.handle_key(key(KeyCode::Enter)),
             Outcome::SubmitDraft { parts, .. } if matches!(parts[..], [DraftPart::Block(_)])
         ));
+    }
+
+    /// `/branch` opens a line from text: a clipboard image keeps the draft
+    /// and is named, rather than dropped on the way.
+    #[test]
+    fn an_inline_branch_keeps_a_draft_holding_an_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("shot.png");
+        png(&image);
+        let mut c = Composer::new(Vec::new());
+        typed(&mut c, "/branch look at ");
+        let source = crate::images::encoded(std::fs::read(&image).unwrap()).unwrap();
+        c.attach_image(source).unwrap();
+        assert!(matches!(
+            c.handle_key(key(KeyCode::Enter)),
+            Outcome::Rejected(reason) if reason.contains("[Image #1]")
+        ));
+        assert_eq!(c.text(), "/branch look at [Image #1]");
     }
 
     #[test]

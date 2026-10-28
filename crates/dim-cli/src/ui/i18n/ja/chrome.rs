@@ -43,10 +43,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main はセッション自体です。ラインは終了できますが main は終了しません"
         }
         "Line has ended:" => "ラインは終了しました:",
+        "Esc close" => "Esc 閉じる",
+        "/{name} needs {argument}" => "/{name} には {argument} が必要です",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} はテキストのみです。{label} を削除してから送信してください"
+        }
         "e edit · b branch · f fork" => "e 編集 · b ブランチ · f フォーク",
         "e edit" => "e 編集",
-        "Fork the session before this message? (y/N)" => {
-            "このメッセージの前でセッションをフォークしますか？(y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "「{message}」の前でセッションをフォークしますか？(y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "最後のターンの後でセッションをフォークしますか？(y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ {id} から新しいライン · Esc キャンセル",
         "A fork copies main; b opens a line here" => {

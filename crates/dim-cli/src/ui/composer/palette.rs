@@ -148,7 +148,11 @@ pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
         .map(|command| {
             let description = t(command.describe(context));
             let (label, detail) = if command.slash {
-                (format!("/{}", command.name), description.to_owned())
+                let label = match command.argument {
+                    Some(argument) => format!("/{} {argument}", command.name),
+                    None => format!("/{}", command.name),
+                };
+                (label, description.to_owned())
             } else {
                 (description.to_owned(), String::new())
             };

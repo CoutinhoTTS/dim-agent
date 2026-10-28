@@ -24,7 +24,7 @@ L0  Session ............ 主体：身份、工作区、交互面
 
 1. **只有一个主界面。** 屏幕永远显示一条线的 Timeline。换线 = 换一条 Timeline 看，不换界面。
 2. **派生从点出发。** branch 和 fork 都从当前 Timeline 的某个点开始；它的末尾也是一个点（`/branch`、`/fork`）。
-3. **结果回到 Timeline。** branch 在父线上留下 `⑂` 标记，屏幕跟到新线；fork 进入新 Session 的 Timeline。
+3. **结果回到 Timeline。** branch 在父线上留下 `⑂` 标记，并在侧面板里回答，屏幕留在父线（§4.7）；fork 进入新 Session 的 Timeline。
 
 ## 3. Branch 与 fork
 
@@ -35,7 +35,7 @@ L0  Session ............ 主体：身份、工作区、交互面
 | 结果 | 本 Session 的一条线 | 一个新 Session |
 | 共享 | 工作区与同一个主体；与父线互发消息 | 只共享切点之前的历史 |
 | 可用的点 | 任一未结束的线，合法的上下文边界 | 仅 `main`，且必须是 rest point |
-| 之后 | 屏幕显示新线 | TUI attach 到 fork |
+| 之后 | 屏幕不动；新线在侧面板里回答（§4.7） | TUI attach 到 fork |
 | 在源上的痕迹 | `⑂` 标记 | 无（§7） |
 
 不适用的动作用 notice 说明原因（`A fork copies main; b opens a line here`、`Line has ended: X`）。切点是否合法只由 App Server 判断，拒绝时显示为 notice。
@@ -66,11 +66,11 @@ fullscreen 的 Tab 选取本来就停在用户消息上。被选消息的点是�
 ╰──────────────────────────── ⑂ 从 main 开新分支线 · Esc 取消 ─╯
 ```
 
-`Enter` 发送 `session.branch_create {parentBranchId: 当前线, at, prompt}`，屏幕显示新线；`Esc` 取消；切换会话或线会丢弃草稿。
+`Enter` 发送 `session.branch_create {parentBranchId: 当前线, at, prompt}`，新线在侧面板里回答（§4.7）；`Esc` 取消；切换会话或线会丢弃草稿。
 
 ### 4.3 `f`：从这里 fork
 
-仅 `main`。composer 底边询问 `在这条消息之前派生会话？(y/N)`；`y` 发送 `session.fork {sessionId, at}`，在 `已派生 ID · N 条消息` 边界下 attach 到 fork，并把被选消息放进它的 composer。fork 在用户提交之前不开始任何工作（fork 设计 §6.5）。
+仅 `main`，从 Tab 选取或 `/timeline`（§4.6）发起；scrollback 就是用 `/timeline` 选消息。composer 底边写明派生的位置：选中消息时问 `在“把 cache 的锁换成 RwLock 试试”之前派生会话？(y/N)`，`/fork` 问 `在最近一个回合之后派生会话？(y/N)`。`y` 发送 `session.fork {sessionId, at}`，在 `已派生 ID · N 条消息` 边界下 attach 到 fork，并把被选消息放进它的 composer。fork 在用户提交之前不开始任何工作（fork 设计 §6.5）。
 
 ### 4.4 标记
 
@@ -81,17 +81,17 @@ fullscreen 的 Tab 选取本来就停在用户消息上。被选消息的点是�
  … 回答 …
  › try the parser
  … 回答 …
- ⑂ line f7f0a984 · before “try the parser” · try the parser via cache
+ ⑂ try the parser via cache · before “try the parser” · f7f0a984
 ```
 
-切点恰好在本 transcript 的某条消息之前时才写 `before “…”`；在末尾打开的线（`branch` 工具调用）没有。标记和成员卡片一样是 Tab 的停靠点：`Enter` 或点击显示那条线。结束不做标记：lines 面板会显示，`main` 也会收到它的工具线的通知。
+线以它用途的第一行命名，后面跟短 id；没有用途的线用短 id 命名。切点恰好在本 transcript 的某条消息之前时才写 `before “…”`；在末尾打开的线（`branch` 工具调用）没有。标记和成员卡片一样是 Tab 的停靠点：`Enter` 或点击显示那条线。结束不做标记：lines 面板会显示，`main` 也会收到它的工具线的通知。
 
 ### 4.5 我在哪里
 
-显示一条线时，composer 底边写出从 `main` 到它的路径和切点：
+显示一条线时，composer 底边写出从 `main` 到它的路径（每条线用它的名字，§4.4）和切点：
 
 ```
-╰── ~/repo (main) · line main ▸ b-91 ▸ b-c3 · after message 4 ─╯
+╰── ~/repo (main) · ⑂ main ▸ parser race ▸ the guard · after message 4 ─╯
 ```
 
 `after message N` 是切点时父线历史中的用户消息数，包括它继承的部分。
@@ -113,20 +113,61 @@ Timeline 的点就是它的用户消息。Tab 从最新一条起逐条走；`/ti
 
 恢复会话时只画最新 100 条。全屏在 transcript 顶部放一行加载按钮（`↑ 130 earlier messages · Enter or click to load`）：点击，或用 Tab 走到它再按 `Enter`，就在上方画出前 100 条，并让原来最早的那条消息留在视图顶部。scrollback 没有这一行，更早的历史由 `/timeline` 跳转画出。它取代了 `/history`：后者把更早的消息接在最新消息之后翻页画出。
 
+### 4.7 `/branch <prompt>` 与侧面板
+
+`/branch` 像旁支提问一样把 prompt 直接写在命令后面。面板列出参数；在带参数的命令上按 `Tab` 或 `Enter` 不会立即执行，而是填进 composer，参数位置留一个提示：
+
+```
+╭──────────────────────────────────────────── provider / model ─╮
+│ › /branch <prompt>                                            │
+╰───────────────────────────────────────────────────────────────╯
+```
+
+在 `/branch try the parser via cache` 上按 `Enter`，一步就在当前线末尾（§4.1）发送 `session.branch_create`，没有第二次草稿。当前线上正在跑的回合继续：这条命令不排队，也不打断。不带 prompt 的 `/branch` 留在 composer 里，并提示 `/branch needs <prompt>`。
+
+新线在面板里回答，屏幕留在父线。fullscreen 下面板在 composer 上方：
+
+```
+ … 父线的 transcript 继续输出 …
+
+╭─ ⑂ b-7c · try the parser via cache ─────────────────────────╮
+│ ⑂ working…                                                   │
+╰──────────────────────────────────────────────── Esc close ─╯
+╭──────────────────────────────────────────── provider / model ─╮
+│ ›                                                             │
+╰───────────────────────────────────────────────────────────────╯
+```
+
+```
+╭─ ⑂ b-7c · try the parser via cache ─────────────────────────╮
+│ ✓ Explored 2 files ▸                                         │
+│                                                              │
+│ The lock is held across the await in cache.rs:88; moving the │
+│ parse out of the guard removes the race. Patched and tested. │
+│ ⑂ done                                                       │
+╰──────────────────────────────────────────────── Esc close ─╯
+```
+
+1. 面板像屏幕画 transcript 一样画出这条线的过程（标题里已有的开场输入除外）：思考、按工具详情设置显示的工具调用，以及边到边显示的回答。超过屏幕三分之一时显示末尾，最后一行是线的状态：回合运行时是 `working…`，回合结束、线等待输入时是 `done`，线结束时写明它是怎么结束的。
+2. `Esc` 先关面板，再做别的事。线继续运行，关掉的只是面板对它的跟随。留在 scrollback 里的是 `⑂` 标记（§4.4），在它上面按 `Enter`，或用 `/lines`，可以显示这条线。
+3. 同一时间只有一个面板：再一次 `/branch` 或 `b` 会替换它。显示某条线、切换 Session 或 `/new` 会关闭它。
+4. fullscreen 下面板把 transcript 顶上去，关闭后 transcript 回到 composer 上方贴底。scrollback 不会抬起 composer，所以面板开在 composer 下方，和菜单同一个位置，关闭时 composer 上方不会留空。
+5. 无法开线的 `/branch`（还没有结束的回合、当前线已结束）把草稿留在 composer 里，并说明原因。
+
 ## 5. 切线
 
-与 #427 §14 相同：切换时写一行 `line ID` 边界，然后是该线的 transcript，只含它自己的事件（每个分支各自编号，[sessions service D11](appserver/sessions-service.md)）。它继承的历史属于父线，离它只有一个标记的距离。
+与 #427 §14 相同：切换时写一行 `⑂ 名字 · id` 边界，等该线的历史加载完后接着是它的 transcript，只含它自己的事件（每个分支各自编号，[sessions service D11](appserver/sessions-service.md)）。它继承的历史属于父线，离它只有一个标记的距离。
 
 ## 6. Lines 面板
 
-`/lines` 是 Timeline 的地图。子线先按它在父线上被切出的位置排序，再按打开顺序，每行写 `after message N`：
+`/lines` 是 Timeline 的地图。子线先按它在父线上被切出的位置排序，再按打开顺序。每行以线的用途开头，后面写 `after message N` 和它的 id：
 
 ```
 ┌ Lines ───────────────────────────────────────────────────────────┐
-│   main        the session itself                                 │
-│     b-02      after message 1 · docs pass · ended itself         │
-│     b-7c      after message 3 · parser race · working · shown    │
-│       b-c3    after message 4 · the guard in cache.rs · working  │
+│   main                  the session itself                       │
+│     docs pass           after message 1 · b-02 · ended itself    │
+│     parser race         after message 3 · b-7c · working · shown │
+│       the guard         after message 4 · b-c3 · working         │
 └──────────────────── Enter show the line · x end it · Esc close ──┘
 ```
 
@@ -151,6 +192,7 @@ fork 是别的 Session，归 `/resume`。按键保持 #427 §14 的定义。
 
 - 没有新模式：点沿用 Tab 选取，线标记和加载按钮沿用卡片选取，切线沿用 #427，fork 后的 attach 沿用 `/resume`。唯一的新面板 `/timeline` 列出选取所走的点，按键与选取相同。
 - 新增的交互：选取上的 `b`/`f`、composer 的分支草稿与 fork 询问、路径式底边、`/branch` 与 `/fork`，各自对应 §2 的一条规则。
+- 侧面板（§4.7）是唯一新增的界面：不离开父线就跟随一条线，需要一个父线 Timeline 装不下的视图。它不折叠新数据，CLI 本来就为每条打开的线保留 transcript。它收起后的形态就是已有的 `⑂` 标记，所以关闭时不写任何东西。
 - 考虑过但去掉的：lines 面板里的 `b`（需要每条线的末尾；当前线上的 `/branch` 已覆盖）、按点置灰的提示（按键时的 notice 说的是同一件事，状态更少）、结束标记（§4.4）、继承前缀的一行摘要与 `Esc Esc` 回父线（§5 和标记已经通向那里）。
 
 ## 10. 决定
@@ -158,3 +200,4 @@ fork 是别的 Session，归 `/resume`。按键保持 #427 §14 的定义。
 1. 点是用户消息之前的边界，加上线的末尾；不提供回答之后的边界。
 2. `b` 和 `f` 都像 `e` 一样把被选消息带进 composer。
 3. R4 等待格式决定。
+4. 开线后屏幕留在父线；新线在侧面板里回答（§4.7）。

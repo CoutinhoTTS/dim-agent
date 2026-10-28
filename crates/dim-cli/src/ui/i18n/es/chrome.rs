@@ -51,10 +51,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main es la propia sesión; una línea termina, main no"
         }
         "Line has ended:" => "La línea ha terminado:",
+        "Esc close" => "Esc cerrar",
+        "/{name} needs {argument}" => "/{name} necesita {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} solo admite texto; quita {label} para enviar"
+        }
         "e edit · b branch · f fork" => "e editar · b rama · f bifurcar",
         "e edit" => "e editar",
-        "Fork the session before this message? (y/N)" => {
-            "¿Bifurcar la sesión antes de este mensaje? (y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "¿Bifurcar la sesión antes de «{message}»? (y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "¿Bifurcar la sesión tras el último turno? (y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ nueva línea desde {id} · Esc cancelar",
         "A fork copies main; b opens a line here" => {

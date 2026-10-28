@@ -235,7 +235,13 @@ impl Projection {
                 self.held.retain(|(id, _, _)| *id != data.input_id);
             }
             EventContent::BranchCreate(data) => {
-                let mut text = format!("line {}", data.branch.get(..8).unwrap_or(&data.branch));
+                let id = data.branch.get(..8).unwrap_or(&data.branch);
+                let purpose = data.prompt.lines().next().unwrap_or_default().trim();
+                let mut text = if purpose.is_empty() {
+                    format!("line {id}")
+                } else {
+                    purpose.to_owned()
+                };
                 let at = match data.at {
                     BranchCreateAt::Sequence { sequence } => sequence,
                     BranchCreateAt::Create {} => sequence,
@@ -248,9 +254,8 @@ impl Projection {
                     }
                     text.push_str(&format!(" · before “{quoted}”"));
                 }
-                let purpose = data.prompt.lines().next().unwrap_or_default().trim();
                 if !purpose.is_empty() {
-                    text.push_str(&format!(" · {purpose}"));
+                    text.push_str(&format!(" · {id}"));
                 }
                 let index = self.push(format!("opened-{sequence}"), RowKind::Status, text);
                 self.row(index).line = Some(data.branch.clone());
@@ -696,6 +701,10 @@ impl Projection {
     /// Whether this transcript's turn runs.
     pub fn running(&self) -> bool {
         self.running
+    }
+
+    pub fn rows(&self) -> &[Arc<ViewRow>] {
+        &self.rows
     }
 
     /// The lines `main` recorded, without `main` itself (design §14).
@@ -1321,7 +1330,7 @@ mod tests {
             [Some(0), Some(1), None],
             "a message cuts just before itself"
         );
-        assert_eq!(rows[2].text, "line b-7c · parser race hypothesis");
+        assert_eq!(rows[2].text, "parser race hypothesis · b-7c");
         let mut picked = Projection::default();
         apply(
             &mut picked,
@@ -1342,7 +1351,7 @@ mod tests {
         );
         assert_eq!(
             picked.snapshot().rows[2].text,
-            "line 70560552 · before “try the parser” · try the cache",
+            "try the cache · before “try the parser” · 70560552",
             "a line cut before a message names it, wherever its marker lands"
         );
         assert_eq!(

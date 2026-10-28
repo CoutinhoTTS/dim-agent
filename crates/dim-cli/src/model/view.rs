@@ -267,7 +267,8 @@ pub struct ViewSnapshot {
     pub session_id: String,
     /// Private attachment identity; reopening a panel keeps it.
     pub projection_id: u64,
-    pub main_history_complete: bool,
+    /// The shown line's history has loaded: its transcript can be laid out.
+    pub history_complete: bool,
     /// Shared with the worker's projection: publishing copies pointers.
     pub rows: Vec<std::sync::Arc<ViewRow>>,
     pub running: bool,
@@ -291,4 +292,16 @@ pub struct ViewSnapshot {
     /// `main` followed by this Session's lines, as the lines panel lists them.
     pub lines: Vec<LineView>,
     pub focus: String,
+    /// The line opened beside the shown one, while its panel is open.
+    pub side: Option<SideLine>,
+}
+
+/// A line the side panel follows (timeline UI §4.7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SideLine {
+    pub id: String,
+    pub purpose: String,
+    pub state: LineState,
+    /// Its transcript, shared with the worker's projection.
+    pub rows: Vec<std::sync::Arc<ViewRow>>,
 }

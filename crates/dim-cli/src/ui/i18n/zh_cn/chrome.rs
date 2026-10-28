@@ -40,9 +40,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main 就是会话本身；线可以结束，main 不能"
         }
         "Line has ended:" => "该线已结束：",
+        "Esc close" => "Esc 关闭",
+        "/{name} needs {argument}" => "/{name} 需要 {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} 只接受文字；移除 {label} 后再发送"
+        }
         "e edit · b branch · f fork" => "e 编辑 · b 分支 · f 派生",
         "e edit" => "e 编辑",
-        "Fork the session before this message? (y/N)" => "在这条消息之前派生会话？(y/N)",
+        "Fork the session before “{message}”? (y/N)" => "在“{message}”之前派生会话？(y/N)",
+        "Fork the session after the last turn? (y/N)" => "在最近一个回合之后派生会话？(y/N)",
         "⑂ new line from {id} · Esc cancel" => "⑂ 从 {id} 开新线 · Esc 取消",
         "A fork copies main; b opens a line here" => "派生只复制 main；按 b 在这里开线",
         "A line opens from text; images and files were not included" => {

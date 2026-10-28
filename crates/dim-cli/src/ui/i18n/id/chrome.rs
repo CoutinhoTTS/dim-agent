@@ -49,9 +49,17 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main adalah sesi itu sendiri; jalur bisa berakhir, main tidak"
         }
         "Line has ended:" => "Jalur sudah berakhir:",
+        "Esc close" => "Esc tutup",
+        "/{name} needs {argument}" => "/{name} memerlukan {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} hanya menerima teks; hapus {label} untuk mengirim"
+        }
         "e edit · b branch · f fork" => "e ubah · b cabang · f fork",
         "e edit" => "e ubah",
-        "Fork the session before this message? (y/N)" => "Fork sesi sebelum pesan ini? (y/N)",
+        "Fork the session before “{message}”? (y/N)" => "Fork sesi sebelum “{message}”? (y/N)",
+        "Fork the session after the last turn? (y/N)" => {
+            "Fork sesi setelah giliran terakhir? (y/N)"
+        }
         "⑂ new line from {id} · Esc cancel" => "⑂ jalur baru dari {id} · Esc batal",
         "A fork copies main; b opens a line here" => {
             "Fork hanya menyalin main; b membuka jalur di sini"

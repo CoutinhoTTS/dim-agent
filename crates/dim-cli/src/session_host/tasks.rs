@@ -48,6 +48,7 @@ impl Worker {
         self.projection = Projection::default();
         self.cursors.clear();
         self.focus = "main".into();
+        self.side = None;
         self.lines.clear();
         self.task_history.clear();
         self.task_history_queue.clear();

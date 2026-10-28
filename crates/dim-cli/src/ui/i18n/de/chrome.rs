@@ -49,10 +49,16 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main ist die Sitzung selbst; ein Zweig endet, main nicht"
         }
         "Line has ended:" => "Zweig wurde beendet:",
+        "Esc close" => "Esc schließen",
+        "/{name} needs {argument}" => "/{name} braucht {argument}",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name} nimmt nur Text; entferne {label} zum Senden"
+        }
         "e edit · b branch · f fork" => "e bearbeiten · b Zweig · f Fork",
         "e edit" => "e bearbeiten",
-        "Fork the session before this message? (y/N)" => {
-            "Sitzung vor dieser Nachricht forken? (y/N)"
+        "Fork the session before “{message}”? (y/N)" => "Sitzung vor „{message}“ forken? (y/N)",
+        "Fork the session after the last turn? (y/N)" => {
+            "Sitzung nach dem letzten Zug forken? (y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ neuer Zweig von {id} · Esc abbrechen",
         "A fork copies main; b opens a line here" => {

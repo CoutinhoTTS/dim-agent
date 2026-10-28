@@ -240,8 +240,9 @@ pub struct FullScreen {
     /// The top of the view while the reader has scrolled away from the
     /// bottom; `None` follows new output.
     pinned: Option<Anchor>,
-    /// The lowest top the followed view has reached: it does not move back
-    /// up when the transcript gets shorter.
+    /// The lowest bottom row the followed view has reached: it does not
+    /// move back up when the transcript gets shorter, and a dock that gets
+    /// shorter (a panel closing) brings the rows above back down to it.
     floor: usize,
     /// Transcript viewport height of the last frame.
     view_rows: usize,
@@ -710,7 +711,7 @@ impl FullScreen {
         self.load(doc);
         let top = self.top();
         if self.pinned.is_none() {
-            self.floor = top;
+            self.floor = top + self.view_rows.min(self.content_rows());
         }
 
         let dim = frame.overlay.is_some();
@@ -975,7 +976,8 @@ impl FullScreen {
     fn top(&self) -> usize {
         let max_top = self.max_top();
         let Some(anchor) = self.pinned else {
-            return max_top.max(self.floor.min(self.content_rows().saturating_sub(1)));
+            let floor = self.floor.saturating_sub(self.view_rows);
+            return max_top.max(floor.min(self.content_rows().saturating_sub(1)));
         };
         let start = anchor
             .block
@@ -1819,6 +1821,29 @@ mod tests {
         screen.cursor_visible = false;
         screen.invalidate();
         assert!(screen.cursor_visible);
+    }
+
+    /// A panel opening in the dock pushes the followed transcript up; when
+    /// it closes, the transcript comes back down onto the composer. A
+    /// transcript shorter than the view stays on the dock as well.
+    #[test]
+    fn a_dock_that_grows_or_shrinks_keeps_the_transcript_on_it() {
+        let tall = ["panel", "panel", "> x", "status"];
+        for blocks in [1, 4] {
+            let (mut screen, mut emu) = setup();
+            let mut doc = Doc::new();
+            for n in 0..blocks {
+                doc.say(&[&format!("line {n}")]);
+            }
+            let last = format!("line {}", blocks - 1);
+            for dock in [&DOCK[..], &tall, &DOCK] {
+                draw(&mut screen, &mut emu, &frame(&[], dock), &doc);
+                let rows = emu.rows_text();
+                let above = rows[SIZE.1 as usize - dock.len() - 1]
+                    .trim_end_matches(|c: char| c == ' ' || "▁▂▃▄▅▆▇█".contains(c));
+                assert_eq!(above, last, "{blocks} blocks, dock {}", dock.len());
+            }
+        }
     }
 
     /// Tool details collapsed: the transcript gets much shorter and the

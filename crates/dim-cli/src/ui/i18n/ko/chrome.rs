@@ -45,10 +45,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main은 세션 자체입니다. 라인은 종료되지만 main은 그렇지 않습니다"
         }
         "Line has ended:" => "라인이 종료되었습니다:",
+        "Esc close" => "Esc 닫기",
+        "/{name} needs {argument}" => "/{name}에는 {argument}이(가) 필요합니다",
+        "/{name} takes text only; remove {label} to send" => {
+            "/{name}은(는) 텍스트만 받습니다. {label}을(를) 지우고 보내세요"
+        }
         "e edit · b branch · f fork" => "e 편집 · b 브랜치 · f 포크",
         "e edit" => "e 편집",
-        "Fork the session before this message? (y/N)" => {
-            "이 메시지 앞에서 세션을 포크할까요? (y/N)"
+        "Fork the session before “{message}”? (y/N)" => {
+            "“{message}” 앞에서 세션을 포크할까요? (y/N)"
+        }
+        "Fork the session after the last turn? (y/N)" => {
+            "마지막 턴 뒤에서 세션을 포크할까요? (y/N)"
         }
         "⑂ new line from {id} · Esc cancel" => "⑂ {id}에서 새 라인 · Esc 취소",
         "A fork copies main; b opens a line here" => {
