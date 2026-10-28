@@ -609,7 +609,7 @@ async fn native_web_and_skills_import_keep_disabled_state_secrets_and_source_id_
         .canonicalize()
         .unwrap();
     let defaults_file = target.join("defaults.json");
-    std::fs::write(&defaults_file, json!({"plugins":{"web":repository.join("runtime/plugins/web")},"locked":["PluginManager","Rpc","Transport"]}).to_string()).unwrap();
+    std::fs::write(&defaults_file, json!({"plugins":{"web":repository.join("runtime/plugins/web"),"plugin-authoring":repository.join("runtime/plugins/plugin-authoring")},"locked":["PluginManager","Rpc","Transport"]}).to_string()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts(&mut builder);
@@ -657,6 +657,21 @@ async fn native_web_and_skills_import_keep_disabled_state_secrets_and_source_id_
     })
     .await
     .unwrap();
+    let configured: String = Connection::open_with_flags(
+        target.join("store.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT fields FROM settings_import_fields WHERE source='user/skills'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&configured).unwrap(),
+        json!(["pluginSkills"])
+    );
     let root = rutis::Ctx::root().unwrap();
     let plugin = root.plugin(MigrationPlugin::new(target.clone(), vec!["system".into()]));
     (&plugin).await.unwrap();

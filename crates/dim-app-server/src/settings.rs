@@ -388,6 +388,33 @@ impl SettingsService {
             scope,
             expected,
             document,
+            None,
+            |_, _| Ok(()),
+            cancel,
+        )
+        .await
+    }
+    /// Replaces an owner's document while declaring which top-level fields were configured.
+    /// Native authority preserves the other fields' import provenance. File sources
+    /// retain whole-document replacement semantics and have no import provenance.
+    pub async fn update_with_configured_fields<D: BusinessDocument>(
+        self: &Arc<Self>,
+        scope: SettingsScope,
+        expected: &str,
+        document: D,
+        fields: &[&str],
+        cancel: &CancellationToken,
+    ) -> Result<SettingsSnapshot<D>> {
+        document.validate()?;
+        self.check_open(cancel)?;
+        let path = self.path::<D>(scope)?;
+        self.replace(
+            typed::<D>(),
+            path,
+            scope,
+            expected,
+            document,
+            Some(fields.iter().map(|field| (*field).to_owned()).collect()),
             |_, _| Ok(()),
             cancel,
         )
@@ -415,6 +442,7 @@ impl SettingsService {
         scope: SettingsScope,
         expected: &str,
         document: F::Document,
+        configured_fields: Option<std::collections::BTreeSet<String>>,
         check: impl FnOnce(&F::Document, &F::Document) -> Result<()> + Send + 'static,
         cancel: &CancellationToken,
     ) -> Result<SettingsSnapshot<F::Document>> {
@@ -427,7 +455,15 @@ impl SettingsService {
             self.updates.spawn(async move {
                 if scope == SettingsScope::User && owner.database.is_some() {
                     return owner
-                        .native_replace(format, path, expected, document, check, &cancel)
+                        .native_replace(
+                            format,
+                            path,
+                            expected,
+                            document,
+                            configured_fields,
+                            check,
+                            &cancel,
+                        )
                         .await;
                 }
                 let mut lease = owner.lease(&path, &cancel).await?;
@@ -440,6 +476,9 @@ impl SettingsService {
                     .map_err(|_| SettingsError::Invalid("cannot encode settings"))?;
                 bytes.push(b'\n');
                 let revision = revision(Some(&bytes));
+                if configured_fields.is_some() && revision == current.revision {
+                    return Ok(current);
+                }
                 match lease.replace(bytes, private_permissions(), &cancel).await {
                     Ok(()) => {}
                     Err(FileStorageError::Unsynced(error)) => {

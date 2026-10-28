@@ -239,6 +239,7 @@ impl SettingsService {
             scope,
             expected,
             document,
+            None,
             move |current, next| match writer {
                 Writer::Client => Ok(()),
                 Writer::Owner => rules.user_only(current, next),

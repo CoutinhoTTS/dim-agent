@@ -360,7 +360,9 @@ constraint to `CHECK (version = 22)`. The fields payload is a JSON array of conf
 top-level field names. Settings commits it with its ordinary normalized document,
 so typed readers always receive a complete document while explicit false, null and
 empty values remain configured. A whole-document owner replacement removes the
-presence row and treats the replacement's keys as configured.
+presence row and treats the replacement's keys as configured. An owner replacement
+with explicit configured-field intent instead unions those names into existing
+provenance atomically; unchanged defaults retain their previous presence.
 
 An exact v21 database upgrades by adding this empty table and replacing the marker;
 existing document bytes and all other business rows remain unchanged. Without a

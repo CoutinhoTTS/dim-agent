@@ -96,17 +96,20 @@ impl SkillSettings for SkillStorage {
                 return Err(SkillSettingsError::Conflict);
             }
             let mut document = current.document;
-            if document.disabled_skill_ids.contains(&id) != enabled {
-                return Ok(current.revision);
-            }
             if enabled {
                 document.disabled_skill_ids.retain(|value| value != &id);
-            } else {
+            } else if !document.disabled_skill_ids.contains(&id) {
                 document.disabled_skill_ids.push(id);
             }
             Ok(self
                 .settings
-                .update(SettingsScope::User, &expected, document, &cancel)
+                .update_with_configured_fields(
+                    SettingsScope::User,
+                    &expected,
+                    document,
+                    &["disabledSkillIds"],
+                    &cancel,
+                )
                 .await?
                 .revision)
         })
@@ -146,7 +149,13 @@ impl SkillStorage {
             };
             match self
                 .settings
-                .update(SettingsScope::User, &current.revision, document, &cancel)
+                .update_with_configured_fields(
+                    SettingsScope::User,
+                    &current.revision,
+                    document,
+                    &["pluginSkills"],
+                    &cancel,
+                )
                 .await
             {
                 Ok(snapshot) => return Ok(snapshot.revision),

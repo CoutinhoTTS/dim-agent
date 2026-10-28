@@ -202,12 +202,14 @@ impl SettingsService {
         };
         task.await?
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn native_replace<F: Format>(
         self: &Arc<Self>,
         format: Arc<F>,
         path: FilePath,
         expected: String,
         document: F::Document,
+        configured_fields: Option<BTreeSet<String>>,
         check: impl FnOnce(&F::Document, &F::Document) -> Result<()> + Send + 'static,
         cancel: &CancellationToken,
     ) -> Result<SettingsSnapshot<F::Document>> {
@@ -231,8 +233,31 @@ impl SettingsService {
                         return Err(SettingsError::Conflict);
                     }
                     check(&current.document, &document)?;
+                    let scoped = configured_fields.is_some();
+                    let mut presence_changed = false;
+                    let presence = if let Some(fields) = configured_fields {
+                        let (origin, saved, body): (String, Option<String>, String) = tx.query_row(
+                            "SELECT d.imported_revision,p.fields,d.document FROM settings_documents d LEFT JOIN settings_import_fields p ON p.source=d.source WHERE d.source=?1",
+                            [key(format.source())], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+                        ).map_err(|_|SettingsError::Persistence)?;
+                        let mut configured = match saved {
+                            Some(saved) => serde_json::from_str::<BTreeSet<String>>(&saved).map_err(|_|SettingsError::Invalid("invalid settings field provenance"))?,
+                            None if version==1 && origin=="missing" => BTreeSet::new(),
+                            None => serde_json::from_str::<Value>(&body).map_err(|_|SettingsError::Invalid("invalid persisted document"))?
+                                .as_object().ok_or(SettingsError::Invalid("source document must be an object"))?.keys().cloned().collect(),
+                        };
+                        presence_changed = fields.iter().any(|field| !configured.contains(field));
+                        configured.extend(fields);
+                        Some(configured)
+                    } else { None };
                     let body = serde_json::to_string(&document)
                         .map_err(|_| SettingsError::Invalid("cannot encode settings"))?;
+                    if scoped && !presence_changed
+                        && serde_json::to_value(&current.document).map_err(|_|SettingsError::Invalid("cannot encode settings"))?
+                            == serde_json::to_value(&document).map_err(|_|SettingsError::Invalid("cannot encode settings"))?
+                    {
+                        return Ok(current);
+                    }
                     let version = version
                         .checked_add(1)
                         .ok_or(SettingsError::Invalid("settings revision overflow"))?;
@@ -241,7 +266,12 @@ impl SettingsService {
                         params![version, body, key(format.source())],
                     )
                     .map_err(|_| SettingsError::Persistence)?;
-                    tx.execute("DELETE FROM settings_import_fields WHERE source=?1", [key(format.source())]).map_err(|_| SettingsError::Persistence)?;
+                    if let Some(fields) = presence {
+                        let fields=serde_json::to_string(&fields).map_err(|_|SettingsError::Invalid("cannot encode settings field provenance"))?;
+                        tx.execute("INSERT INTO settings_import_fields(source,fields) VALUES (?1,?2) ON CONFLICT(source) DO UPDATE SET fields=excluded.fields",params![key(format.source()),fields]).map_err(|_|SettingsError::Persistence)?;
+                    } else {
+                        tx.execute("DELETE FROM settings_import_fields WHERE source=?1", [key(format.source())]).map_err(|_| SettingsError::Persistence)?;
+                    }
                     tx.commit().map_err(|_| SettingsError::Persistence)?;
                     let revision = token(format.source(), version);
                     owner.publish(format.source(), SettingsScope::User, &revision);

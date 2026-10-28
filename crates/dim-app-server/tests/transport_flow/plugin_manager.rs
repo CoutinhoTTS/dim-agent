@@ -1405,7 +1405,9 @@ async fn plugin_content_follows_the_record_over_restarts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn plugin_fill_retains_explicit_enablement_across_restart() {
     let home = home();
-    let config = config(&home);
+    let mut config = config(&home);
+    config.target_home = None;
+    config.database_path = Some(home.join("store.sqlite"));
     let (server, _, _) = start(config.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     for (enabled, expected) in [
@@ -1459,6 +1461,50 @@ async fn plugin_fill_retains_explicit_enablement_across_restart() {
     )
     .await;
     assert_eq!(app_error(&missing), "plugin_not_found");
+    let content = home.join("src/explicit-skills");
+    write_content_plugin(&content, "explicit-skills", &["hello"], json!({}));
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source":{"path":content}}),
+        )
+        .await,
+    );
+    let enable = json!({"id":"plugin:explicit-skills:hello","enabled":true});
+    assert_ok(&call(&mut client, "skills.set_enabled", enable.clone()).await);
+    let native = rusqlite::Connection::open_with_flags(
+        home.join("store.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let revision = || {
+        native
+            .query_row(
+                "SELECT version FROM settings_documents WHERE source='user/skills'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    };
+    let configured = revision();
+    assert_ok(&call(&mut client, "skills.set_enabled", enable).await);
+    assert_eq!(
+        revision(),
+        configured,
+        "Repeating an already recorded choice must not write a new revision"
+    );
+    let fill = call(
+        &mut client,
+        "settings.fill",
+        json!({"source":"skills","document":{"disabledSkillIds":["plugin:explicit-skills:hello"]}}),
+    )
+    .await;
+    assert_eq!(
+        fill["result"]["disabledSkillIds"], "conflict",
+        "An explicit enable of a default-enabled Skill must protect the empty list: {fill}"
+    );
+    drop(native);
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

@@ -44,7 +44,10 @@ withdrawn with `withdraw_plugin(plugin)` ([PluginManager §3.7](../../../design/
 The catalog keeps the roots in its settings (`pluginSkills`), so they come back
 after its reload; registering scans the root at once and returns its issues, and
 `plugin_issues(plugin)` reads them later. Its Skills have ids
-`plugin:<plugin id>:<path>`.
+`plugin:<plugin id>:<path>`. The App Server declares `pluginSkills` as the configured
+field for root registration and `disabledSkillIds` for user toggles. Registering a
+shipped root therefore leaves the untouched disabled-list default available to
+[missing-field import](../../../design/appserver/settings-service.md#82-native-missing-field-import).
 
 First use scans roots via blocking work; explicit refresh updates cached
 discovery. Cancellation closes the catalog; cleanup joins its reader. Reload
