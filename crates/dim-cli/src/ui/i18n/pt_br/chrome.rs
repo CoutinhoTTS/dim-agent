@@ -305,8 +305,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pick an earlier message to edit or quote" => {
             "escolher mensagem anterior para editar ou citar"
         }
-        "collapse or expand tool details and thoughts" => {
-            "recolher/expandir detalhes de ferramentas e pensamentos"
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "recolher/expandir detalhes de ferramentas, pensamentos e resumos de compactação"
         }
         "switch between fullscreen and scrollback" => "alternar entre tela cheia e scrollback",
         "switch theme" => "trocar tema",
@@ -454,6 +454,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "cópia do terminal",
         "drag to select" => "arraste para selecionar",
         "drag or {shortcut}" => "arraste ou {shortcut}",
+        "Compacting context…" => "Compactando o contexto…",
+        "Context compacted" => "Contexto compactado",
+        "Context compaction skipped" => "Compactação do contexto ignorada",
+        "Context compaction failed" => "Falha na compactação do contexto",
+        "Context compaction cancelled" => "Compactação do contexto cancelada",
+        "near the compaction threshold" => "perto do limite de compactação",
+        "This daemon does not support context compaction" => {
+            "Este daemon não oferece compactação de contexto"
+        }
+        "compact the context of the shown line" => "compactar o contexto da linha exibida",
+        "Kept verbatim" => "Mantido literalmente",
+        "insufficient space: {parts}" => "espaço insuficiente: {parts}",
+        "system prompt" => "prompt do sistema",
+        "tools" => "ferramentas",
+        "appended messages" => "mensagens anexadas",
+        "keyed baseline" => "linha de base com chaves",
+        "pinned inputs" => "entradas fixadas",
+        "digest" => "compêndio",
+        "summary" => "resumo",
         _ => return None,
     })
 }

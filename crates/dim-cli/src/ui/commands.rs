@@ -177,6 +177,13 @@ pub const COMMANDS: &[Command] = &[
         &[],
         Needs::Session,
     ),
+    slash(
+        "compact",
+        "session",
+        "compact the context of the shown line",
+        &[],
+        Needs::Session,
+    ),
     action("interrupt", "run", "interrupt the run", "Esc", Needs::Run),
     action(
         "steer",
@@ -209,7 +216,7 @@ pub const COMMANDS: &[Command] = &[
     slash(
         "tools",
         "view",
-        "collapse or expand tool details and thoughts",
+        "collapse or expand tool details, thoughts and compaction summaries",
         &[],
         Needs::Nothing,
     ),

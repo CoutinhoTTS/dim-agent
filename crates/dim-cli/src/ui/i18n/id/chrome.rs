@@ -297,7 +297,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "gulir ke atas",
         "scroll to the bottom" => "gulir ke bawah",
         "pick an earlier message to edit or quote" => "pilih pesan lama untuk diedit/dikutip",
-        "collapse or expand tool details and thoughts" => "lipat/buka detail tool dan pikiran",
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "lipat/buka detail tool, pikiran, dan ringkasan kompresi"
+        }
         "switch between fullscreen and scrollback" => "ganti layar penuh/scrollback",
         "switch theme" => "ganti tema",
         "switch language" => "ganti bahasa",
@@ -442,6 +444,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "salin terminal",
         "drag to select" => "seret untuk pilih",
         "drag or {shortcut}" => "seret atau {shortcut}",
+        "Compacting context…" => "Mengompresi konteks…",
+        "Context compacted" => "Konteks dikompresi",
+        "Context compaction skipped" => "Kompresi konteks dilewati",
+        "Context compaction failed" => "Kompresi konteks gagal",
+        "Context compaction cancelled" => "Kompresi konteks dibatalkan",
+        "near the compaction threshold" => "mendekati ambang kompresi",
+        "This daemon does not support context compaction" => {
+            "Daemon ini tidak mendukung kompresi konteks"
+        }
+        "compact the context of the shown line" => "kompresi konteks baris yang ditampilkan",
+        "Kept verbatim" => "Dipertahankan apa adanya",
+        "insufficient space: {parts}" => "ruang tidak cukup: {parts}",
+        "system prompt" => "system prompt",
+        "tools" => "alat",
+        "appended messages" => "pesan tambahan",
+        "keyed baseline" => "baseline ber-kunci",
+        "pinned inputs" => "input yang dipatok",
+        "digest" => "digest",
+        "summary" => "ringkasan",
         _ => return None,
     })
 }

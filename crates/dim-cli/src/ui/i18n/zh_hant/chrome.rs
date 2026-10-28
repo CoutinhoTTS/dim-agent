@@ -257,7 +257,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "捲動到頂端",
         "scroll to the bottom" => "捲動到底端",
         "pick an earlier message to edit or quote" => "選擇較早的訊息來編輯或引用",
-        "collapse or expand tool details and thoughts" => "收合或展開工具詳情與思考",
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "收合或展開工具詳情、思考與壓縮摘要"
+        }
         "switch between fullscreen and scrollback" => "在全螢幕與回捲模式間切換",
         "switch theme" => "切換主題",
         "switch language" => "切換語言",
@@ -394,6 +396,23 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "終端機複製",
         "drag to select" => "拖曳以選取",
         "drag or {shortcut}" => "拖曳或 {shortcut}",
+        "Compacting context…" => "正在壓縮上下文…",
+        "Context compacted" => "上下文已壓縮",
+        "Context compaction skipped" => "上下文壓縮已跳過",
+        "Context compaction failed" => "上下文壓縮失敗",
+        "Context compaction cancelled" => "上下文壓縮已取消",
+        "near the compaction threshold" => "接近壓縮閾值",
+        "This daemon does not support context compaction" => "此守護進程不支援上下文壓縮",
+        "compact the context of the shown line" => "壓縮目前顯示線的上下文",
+        "Kept verbatim" => "原文保留",
+        "insufficient space: {parts}" => "空間不足：{parts}",
+        "system prompt" => "系統提示詞",
+        "tools" => "工具",
+        "appended messages" => "附加訊息",
+        "keyed baseline" => "帶 key 的基線",
+        "pinned inputs" => "釘住的輸入",
+        "digest" => "清單",
+        "summary" => "摘要",
         _ => return None,
     })
 }

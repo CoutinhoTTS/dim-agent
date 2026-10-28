@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use crate::model::shell::ShellRun;
-use crate::model::view::{RowKind, RowTone, ViewRow};
+use crate::model::view::{CompactionPartSize, CompactionState, RowKind, RowTone, ViewRow};
 use crate::ui::transcript::tool_group::{Detail, ToolGroup, project_group};
 
 /// How a status line is coloured.
@@ -42,6 +42,15 @@ pub enum Block {
     },
     /// The calls of one model request.
     ToolGroup(ToolGroup),
+    /// A context compaction: running, then its outcome; a completed one's
+    /// summary and kept inputs sit behind the disclosure.
+    Compaction {
+        state: CompactionState,
+        text: String,
+        kept: Option<String>,
+        insufficient: Vec<CompactionPartSize>,
+        expanded: bool,
+    },
     Error(String),
     Status {
         text: String,
@@ -94,6 +103,19 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
             expanded: detail == Detail::Expanded,
         },
         RowKind::ToolCall => Block::ToolGroup(project_group(&group_rows(rows, index), detail)),
+        RowKind::Compaction => match &row.compaction {
+            Some(compaction) => Block::Compaction {
+                state: compaction.state,
+                text: compaction.text.clone(),
+                kept: compaction.kept.clone(),
+                insufficient: compaction.insufficient.clone(),
+                expanded: detail == Detail::Expanded,
+            },
+            None => Block::Status {
+                text: row.text.clone(),
+                tone: Tone::Muted,
+            },
+        },
         RowKind::Error => Block::Error(row.text.clone()),
         RowKind::StreamingAssistant | RowKind::Status | RowKind::Other => Block::Status {
             text: row.text.clone(),
@@ -157,6 +179,7 @@ mod tests {
             member: None,
             cut: None,
             line: None,
+            compaction: None,
         }
     }
 

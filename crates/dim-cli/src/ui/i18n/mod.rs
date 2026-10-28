@@ -206,6 +206,35 @@ mod tests {
         }
     }
 
+    /// The compaction row, its `/compact` reply and the gauge's warning are
+    /// translated in every locale.
+    #[test]
+    fn every_locale_translates_the_compaction_strings() {
+        for (code, lookup) in tables() {
+            for key in [
+                "Compacting context…",
+                "Context compacted",
+                "Context compaction skipped",
+                "Context compaction failed",
+                "Context compaction cancelled",
+                "near the compaction threshold",
+                "This daemon does not support context compaction",
+                "compact the context of the shown line",
+                "Kept verbatim",
+                "insufficient space: {parts}",
+                "system prompt",
+                "tools",
+                "appended messages",
+                "keyed baseline",
+                "pinned inputs",
+                "digest",
+                "summary",
+            ] {
+                assert!(lookup(key).is_some(), "{code} lacks {key:?}");
+            }
+        }
+    }
+
     #[test]
     fn environment_values_map_as_the_ts_build_does() {
         let of = Locale::from_env_value;
