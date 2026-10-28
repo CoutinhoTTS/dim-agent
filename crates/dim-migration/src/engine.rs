@@ -56,10 +56,9 @@ pub(crate) async fn request<T: DeserializeOwned>(
                 if rpc.code == -32602
                     || matches!(
                         code,
-                        "provider_invalid"
+                        "provider_invalid_config"
                             | "session_invalid_input"
                             | "settings_conflict"
-                            | "provider_import_rejected"
                             | "settings_unknown_source"
                             | "account_provider_unavailable"
                             | "account_unsupported_schema"
@@ -265,52 +264,78 @@ async fn execute_source(
             .is_some_and(|count| *count > 0)
     {
         if client.offers("provider.import_legacy") {
-            let result: Value = request(
+            let result: Result<Value> = request(
                 client,
                 "provider.import_legacy",
                 json!({"sourcePath":source.snapshot}),
             )
-            .await?;
-            let rows = result["items"].as_array().ok_or_else(|| {
-                Error::Target("Provider import returned an invalid result".into())
-            })?;
-            for row in rows {
-                let kind = row["kind"]
-                    .as_str()
-                    .ok_or_else(|| Error::Target("Provider result lacks its kind".into()))?;
-                let id = row["id"]
-                    .as_str()
-                    .ok_or_else(|| Error::Target("Provider result lacks its identity".into()))?;
-                let outcome = match row["status"].as_str() {
-                    Some("imported") => Outcome::Imported,
-                    Some("already_imported") => Outcome::AlreadyImported,
-                    Some("rejected") => Outcome::Unsupported,
-                    _ => {
-                        return Err(Error::Target(
-                            "Provider import returned an unknown status".into(),
-                        ));
+            .await;
+            match result {
+                Ok(result) => {
+                    let rows = result["items"].as_array().ok_or_else(|| {
+                        Error::Target("Provider import returned an invalid result".into())
+                    })?;
+                    for row in rows {
+                        let kind = row["kind"].as_str().ok_or_else(|| {
+                            Error::Target("Provider result lacks its kind".into())
+                        })?;
+                        let id = row["id"].as_str().ok_or_else(|| {
+                            Error::Target("Provider result lacks its identity".into())
+                        })?;
+                        let outcome = match row["status"].as_str() {
+                            Some("imported") => Outcome::Imported,
+                            Some("already_imported") => Outcome::AlreadyImported,
+                            Some("rejected") => Outcome::Unsupported,
+                            _ => {
+                                return Err(Error::Target(
+                                    "Provider import returned an unknown status".into(),
+                                ));
+                            }
+                        };
+                        let omitted = match row.get("omitted") {
+                            Some(value) => serde_json::from_value(value.clone()).map_err(|_| {
+                                Error::Target("Provider omitted-field result is invalid".into())
+                            })?,
+                            None => Vec::new(),
+                        };
+                        owner
+                            .ledger
+                            .object(
+                                &task.id,
+                                &ObjectResult {
+                                    kind: kind.into(),
+                                    id: id.into(),
+                                    outcome,
+                                    target_id: None,
+                                    reason: row["reason"].as_str().map(str::to_owned),
+                                    omitted,
+                                },
+                            )
+                            .await?;
                     }
-                };
-                let omitted = match row.get("omitted") {
-                    Some(value) => serde_json::from_value(value.clone()).map_err(|_| {
-                        Error::Target("Provider omitted-field result is invalid".into())
-                    })?,
-                    None => Vec::new(),
-                };
-                owner
-                    .ledger
-                    .object(
-                        &task.id,
-                        &ObjectResult {
-                            kind: kind.into(),
-                            id: id.into(),
-                            outcome,
-                            target_id: None,
-                            reason: row["reason"].as_str().map(str::to_owned),
-                            omitted,
-                        },
-                    )
-                    .await?;
+                }
+                Err(error) => {
+                    let outcome = match &error {
+                        Error::Object(_) => Outcome::Failed,
+                        Error::Unsupported(_) => Outcome::Unsupported,
+                        Error::Deferred(_) => Outcome::Deferred,
+                        _ => return Err(error),
+                    };
+                    owner
+                        .ledger
+                        .object(
+                            &task.id,
+                            &ObjectResult {
+                                kind: "providers".into(),
+                                id: "providers".into(),
+                                outcome,
+                                target_id: None,
+                                reason: Some(error.to_string()),
+                                omitted: Vec::new(),
+                            },
+                        )
+                        .await?;
+                }
             }
         } else {
             owner

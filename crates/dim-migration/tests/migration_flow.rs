@@ -153,6 +153,7 @@ async fn plugin_imports_wal_history_files_and_settings_then_reconciles_without_d
     let mut source = directory.path().join("source");
     let _db = fixture(&source);
     _db.execute_batch("CREATE TABLE scheduled_jobs(incompatible TEXT); INSERT INTO scheduled_jobs VALUES ('bad schema');").unwrap();
+    _db.execute_batch("CREATE TABLE providers(providerId TEXT); INSERT INTO providers VALUES ('incompatible-provider');").unwrap();
     let terminal = Connection::open(source.join("schedule-tui.sqlite")).unwrap();
     terminal.execute_batch("CREATE TABLE scheduled_jobs(jobId TEXT PRIMARY KEY,name TEXT,prompt TEXT,status TEXT,rrule TEXT,cwd TEXT,providerId TEXT,modelId TEXT,reasoningEffort TEXT,sessionMode TEXT,boundSessionId TEXT,nextRunAt TEXT,lastRunAt TEXT,createdAt TEXT);").unwrap();
     terminal.execute("INSERT INTO scheduled_jobs VALUES ('independent','Independent CLI job','Prompt','paused','FREQ=DAILY;BYHOUR=9;BYMINUTE=0',?1,'mock','deterministic',NULL,'new',NULL,NULL,NULL,'2026-01-01T00:00:00Z')", [source.canonicalize().unwrap().to_str().unwrap()]).unwrap();
@@ -214,6 +215,15 @@ async fn plugin_imports_wal_history_files_and_settings_then_reconciles_without_d
         .await
         .unwrap();
     assert_eq!(report.task.status, TaskStatus::Partial, "{report:?}");
+    assert!(
+        report.objects.iter().any(|item| item.kind == "providers"
+            && item.outcome == Outcome::Failed
+            && item
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("provider_invalid_config"))),
+        "{report:?}"
+    );
     assert!(
         report
             .objects

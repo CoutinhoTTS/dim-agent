@@ -97,16 +97,17 @@ fn covered_fields(source: &SourceRow) -> Result<BTreeMap<String, String>, String
 }
 
 fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, HostError> {
+    let invalid = |message| HostError::classified(HostErrorKind::InvalidRequest, message);
     if !path.is_absolute() || !path.is_file() {
-        return Err(failure("Import source must be an absolute SQLite file"));
+        return Err(invalid("Import source must be an absolute SQLite file"));
     }
     let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|_| failure("Cannot open legacy SQLite source read-only"))?;
+        .map_err(|_| invalid("Cannot open legacy SQLite source read-only"))?;
     db.pragma_update(None, "trusted_schema", false)
-        .map_err(|_| failure("Cannot secure legacy SQLite reader"))?;
+        .map_err(|_| invalid("Cannot secure legacy SQLite reader"))?;
     let tx = db
         .transaction()
-        .map_err(|_| failure("Cannot read legacy snapshot"))?;
+        .map_err(|_| invalid("Cannot read legacy snapshot"))?;
     let mut schema = Vec::new();
     let mut bytes = 0usize;
     let mut read = |table: &str, columns: &str| -> Result<Vec<SourceRow>, HostError> {
@@ -116,14 +117,14 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
                 [table],
                 |row| row.get(0),
             )
-            .map_err(|_| failure("Legacy provider tables are missing"))?;
+            .map_err(|_| invalid("Legacy provider tables are missing"))?;
         if table_type != "table" {
-            return Err(failure("Legacy provider source must use tables"));
+            return Err(invalid("Legacy provider source must use tables"));
         }
         let columns: Vec<_> = columns.split_whitespace().collect();
         let mut statement = tx
             .prepare(&format!("PRAGMA table_xinfo({table})"))
-            .map_err(|_| failure("Cannot inspect legacy schema"))?;
+            .map_err(|_| invalid("Cannot inspect legacy schema"))?;
         let mut actual = statement
             .query_map([], |row| {
                 Ok((
@@ -133,9 +134,9 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
                     row.get::<_, i64>(5)?,
                 ))
             })
-            .map_err(|_| failure("Cannot inspect legacy schema"))?
+            .map_err(|_| invalid("Cannot inspect legacy schema"))?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|_| failure("Cannot inspect legacy schema"))?;
+            .map_err(|_| invalid("Cannot inspect legacy schema"))?;
         if actual.len() != columns.len()
             || columns.iter().any(|expected| {
                 !actual.iter().any(|(name, ty, hidden, primary)| {
@@ -151,7 +152,7 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
                 })
             })
         {
-            return Err(failure(
+            return Err(invalid(
                 "Unsupported legacy provider schema; source preserved",
             ));
         }
@@ -163,56 +164,56 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
                 columns.join(","),
                 columns[0]
             ))
-            .map_err(|_| failure("Cannot read legacy rows"))?;
+            .map_err(|_| invalid("Cannot read legacy rows"))?;
         let mut rows = statement
             .query([])
-            .map_err(|_| failure("Cannot read legacy rows"))?;
+            .map_err(|_| invalid("Cannot read legacy rows"))?;
         let mut result = Vec::new();
-        while let Some(row) = rows.next().map_err(|_| failure("Cannot read legacy row"))? {
+        while let Some(row) = rows.next().map_err(|_| invalid("Cannot read legacy row"))? {
             if cancel.is_cancelled() {
                 return Err(HostError::Cancelled("Provider import cancelled".into()));
             }
             if result.len() == 1024 {
-                return Err(failure("Legacy import exceeds 1024 rows per table"));
+                return Err(invalid("Legacy import exceeds 1024 rows per table"));
             }
             let mut fields = Map::new();
             for (index, name) in columns.iter().enumerate() {
                 let value = row
                     .get_ref(index)
-                    .map_err(|_| failure("Cannot read legacy value"))?;
+                    .map_err(|_| invalid("Cannot read legacy value"))?;
                 bytes += match value {
                     ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.len(),
                     _ => 8,
                 };
                 if bytes > 8 * 1024 * 1024 {
-                    return Err(failure("Legacy import exceeds 8 MiB"));
+                    return Err(invalid("Legacy import exceeds 8 MiB"));
                 }
                 let value = match value {
                     ValueRef::Null => Value::Null,
                     ValueRef::Integer(value) => json!(value),
                     ValueRef::Text(value) => Value::String(
                         std::str::from_utf8(value)
-                            .map_err(|_| failure("Invalid legacy text"))?
+                            .map_err(|_| invalid("Invalid legacy text"))?
                             .to_owned(),
                     ),
-                    _ => return Err(failure("Invalid legacy SQLite value type")),
+                    _ => return Err(invalid("Invalid legacy SQLite value type")),
                 };
                 fields.insert((*name).into(), value);
             }
             let id = fields[columns[0]]
                 .as_str()
                 .filter(|id| !id.trim().is_empty())
-                .ok_or_else(|| failure("Invalid legacy row identity"))?
+                .ok_or_else(|| invalid("Invalid legacy row identity"))?
                 .to_owned();
             let version = fields["version"]
                 .as_i64()
                 .filter(|v| *v > 0 && *v <= dim_agent_types::JS_MAX_SAFE_INTEGER as i64)
-                .ok_or_else(|| failure("Invalid legacy row version"))?;
+                .ok_or_else(|| invalid("Invalid legacy row version"))?;
             let digest = format!(
                 "{:x}",
                 Sha256::digest(
                     serde_json::to_vec(&fields)
-                        .map_err(|_| failure("Cannot fingerprint legacy row"))?
+                        .map_err(|_| invalid("Cannot fingerprint legacy row"))?
                 )
             );
             result.push(SourceRow {
@@ -228,7 +229,9 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
     let selections = read("provider_selections", SELECTION_COLUMNS)?;
     let schema = format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&schema).map_err(failure)?)
+        Sha256::digest(
+            serde_json::to_vec(&schema).map_err(|_| invalid("Cannot fingerprint legacy schema"))?
+        )
     );
     Ok(Snapshot {
         schema,
