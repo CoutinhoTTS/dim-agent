@@ -91,8 +91,8 @@ pub async fn run() -> Result<()> {
         prepared.push(Prepared::new(case, &model, &cancel).await?);
     }
     let file = CompactionFile::open(&home)?;
-    let mut rows = Vec::new();
-    for arm in arms(options.reasoning) {
+    let mut results = Vec::new();
+    for arm in arms(&options) {
         file.write(arm.reasoning)?;
         let strategy = SummaryStrategy::new(
             host.clone(),
@@ -101,7 +101,7 @@ pub async fn run() -> Result<()> {
             ProductSummaryStrategyConfig {
                 home: Some(home.clone()),
                 target: arm.target,
-                system_prompt: None,
+                system_prompt: arm.prompt.clone(),
             },
         )
         .await
@@ -140,12 +140,29 @@ pub async fn run() -> Result<()> {
             }
         }
         println!("{}", metrics.line(&arm));
-        rows.push(metrics.row(&arm));
+        results.push((arm, metrics));
     }
     drop(file);
-    std::fs::write(options.out.join("summary.md"), table(&rows))?;
+    let rows: Vec<Value> = results
+        .iter()
+        .map(|(arm, metrics)| metrics.row(arm))
+        .collect();
+    let verdict = match results.as_slice() {
+        [(_, current), (_, candidate)] if options.candidate.is_some() => {
+            Some(verdict(current, candidate))
+        }
+        _ => None,
+    };
+    let mut report = table(&rows);
+    if let Some(verdict) = &verdict {
+        report.push_str(&format!("\n{verdict}\n"));
+    }
+    std::fs::write(options.out.join("summary.md"), report)?;
     server.shutdown();
     server.join().await?;
+    if let Some(verdict) = &verdict {
+        println!("{verdict}");
+    }
     println!("wrote {}", options.out.join("summary.md").display());
     Ok(())
 }
@@ -178,15 +195,19 @@ struct Options {
     runs: usize,
     out: PathBuf,
     reasoning: Option<SummaryReasoning>,
+    candidate: Option<Arc<str>>,
+    target: Option<TargetRule>,
 }
 impl Options {
     fn parse() -> Result<Self> {
         let usage = "usage: cargo run -p xtask -- summary-eval --home DIR \
                      --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs N --out DIR \
-                     [--reasoning inherit|off|low]";
+                     [--reasoning inherit|off|low] \
+                     [--candidate FILE [--target OUTPUT_SHARE,INPUT_SHARE]]";
         let mut args = std::env::args().skip(2);
         let (mut home, mut model, mut judge, mut runs, mut out, mut reasoning) =
             (None, None, None, None, None, None);
+        let (mut candidate, mut target_rule) = (None, None);
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(format!("{flag} requires a value"))?;
             match flag.as_str() {
@@ -196,18 +217,63 @@ impl Options {
                 "--runs" => runs = Some(value.parse::<usize>()?),
                 "--out" => out = Some(PathBuf::from(value)),
                 "--reasoning" => reasoning = Some(reasoning_value(&value)?),
+                "--candidate" => candidate = Some(candidate_prompt(Path::new(&value))?),
+                "--target" => target_rule = Some(target_share(&value)?),
                 _ => return Err(usage.into()),
             }
         }
-        Ok(Self {
+        let options = Self {
             home: home.ok_or(usage)?,
             model: model.ok_or(usage)?,
             judge: judge.ok_or(usage)?,
             runs: runs.filter(|runs| *runs > 0).ok_or(usage)?,
             out: out.ok_or(usage)?,
             reasoning,
-        })
+            candidate,
+            target: target_rule,
+        };
+        if options.candidate.is_some() && options.reasoning.is_none() {
+            return Err("--candidate requires --reasoning".into());
+        }
+        if options.target.is_some() && options.candidate.is_none() {
+            return Err("--target requires --candidate".into());
+        }
+        Ok(options)
     }
+}
+
+/// The candidate's system prompt, read before any model call.
+fn candidate_prompt(path: &Path) -> Result<Arc<str>> {
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("--candidate {}: {error}", path.display()))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("--candidate {}: not UTF-8 text", path.display()))?;
+    Ok(Arc::from(text))
+}
+
+/// One target rule for both candidate arms: two shares greater than 0 and at
+/// most 1 (ContextCompaction §13.4).
+fn target_share(value: &str) -> Result<TargetRule> {
+    let (output, input) = value
+        .split_once(',')
+        .ok_or_else(|| format!("--target takes OUTPUT_SHARE,INPUT_SHARE, not {value}"))?;
+    let share = |name: &str, value: &str| -> Result<f64> {
+        let share: f64 = value
+            .trim()
+            .parse()
+            .map_err(|_| format!("--target {name} share is not a number: {value}"))?;
+        if !(share > 0. && share <= 1.) {
+            return Err(format!(
+                "--target {name} share must be greater than 0 and at most 1: {value}"
+            )
+            .into());
+        }
+        Ok(share)
+    };
+    Ok(TargetRule {
+        output_share: share("output", output)?,
+        input_share: share("input", input)?,
+    })
 }
 
 fn target(value: &str) -> Result<ModelId> {
@@ -230,15 +296,17 @@ fn reasoning_value(value: &str) -> Result<SummaryReasoning> {
 }
 
 /// One arm of the protocol: a reasoning value with either no target rule
-/// (phase 1) or one of the target rules (phase 2).
+/// (phase 1) or one of the target rules (phase 2); a candidate arm also
+/// carries its prompt (ContextCompaction §13.4).
 struct Arm {
     id: String,
     reasoning: SummaryReasoning,
     target: Option<TargetRule>,
+    prompt: Option<Arc<str>>,
 }
-fn arms(reasoning: Option<SummaryReasoning>) -> Vec<Arm> {
-    match reasoning {
-        None => [
+fn arms(options: &Options) -> Vec<Arm> {
+    let Some(reasoning) = options.reasoning else {
+        return [
             SummaryReasoning::Inherit,
             SummaryReasoning::Off,
             SummaryReasoning::Low,
@@ -248,23 +316,42 @@ fn arms(reasoning: Option<SummaryReasoning>) -> Vec<Arm> {
             id: format!("reasoning-{}", reasoning.name()),
             reasoning,
             target: None,
+            prompt: None,
         })
-        .collect(),
-        Some(reasoning) => std::iter::once(Arm {
-            id: "target-none".into(),
-            reasoning,
-            target: None,
-        })
-        .chain(TARGETS.into_iter().map(|(output_share, input_share)| Arm {
-            id: format!("target-{}-{}", percent(output_share), percent(input_share)),
-            reasoning,
-            target: Some(TargetRule {
-                output_share,
-                input_share,
-            }),
-        }))
-        .collect(),
+        .collect();
+    };
+    if let Some(prompt) = &options.candidate {
+        return vec![
+            Arm {
+                id: "current".into(),
+                reasoning,
+                target: options.target,
+                prompt: None,
+            },
+            Arm {
+                id: "candidate".into(),
+                reasoning,
+                target: options.target,
+                prompt: Some(prompt.clone()),
+            },
+        ];
     }
+    std::iter::once(Arm {
+        id: "target-none".into(),
+        reasoning,
+        target: None,
+        prompt: None,
+    })
+    .chain(TARGETS.into_iter().map(|(output_share, input_share)| Arm {
+        id: format!("target-{}-{}", percent(output_share), percent(input_share)),
+        reasoning,
+        target: Some(TargetRule {
+            output_share,
+            input_share,
+        }),
+        prompt: None,
+    }))
+    .collect()
 }
 fn percent(share: f64) -> String {
     format!("{}", (share * 100.).round() as u64)
@@ -926,6 +1013,33 @@ fn count(counts: (usize, usize), present: bool) -> (usize, usize) {
 }
 fn recall(counts: (usize, usize)) -> Option<f64> {
     (counts.1 > 0).then(|| counts.0 as f64 / counts.1 as f64)
+}
+
+/// The §6 verdict of the candidate arm against the current one
+/// (ContextCompaction §13.4): `δ = 0.05`, a rate with no probe of its kind is
+/// left out, and the failures are the `failed` runs.
+fn verdict(current: &Metrics, candidate: &Metrics) -> String {
+    const DELTA: f64 = 0.05;
+    let rate = |current: (usize, usize), candidate: (usize, usize)| match (
+        recall(current),
+        recall(candidate),
+    ) {
+        (Some(current), Some(candidate)) => candidate >= current - DELTA,
+        _ => true,
+    };
+    let passes = rate(current.facts, candidate.facts)
+        && rate(current.exact, candidate.exact)
+        && candidate.violations <= current.violations
+        && candidate.failed <= current.failed;
+    format!(
+        "candidate {}; median T: current {}, candidate {}",
+        if passes { "passes" } else { "fails" },
+        median_tokens(current),
+        median_tokens(candidate),
+    )
+}
+fn median_tokens(metrics: &Metrics) -> String {
+    percentile(&metrics.tokens, 0.5).map_or_else(|| "–".to_owned(), |tokens| format!("{tokens:.0}"))
 }
 fn percentile(values: &[f64], at: f64) -> Option<f64> {
     if values.is_empty() {
