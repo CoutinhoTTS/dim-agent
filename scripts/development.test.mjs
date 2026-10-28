@@ -54,6 +54,13 @@ if (args.slice(-2).join(' ') === 'daemon stop') {
   const resumed = run(['--model-config', model, '--resume', 'session with spaces'], { TEST_NATIVE_EXIT: '23' });
   assert.equal(resumed.status, 23, resumed.stderr);
   assert.deepEqual(JSON.parse(resumed.stdout).args, ['--home', home, '--model-config', model, '--resume', 'session with spaces']);
+  const migrationHome = path.join(temporary, 'migration target');
+  for (const args of [['migration'], ['migration', 'inspect'], ['migration', 'cancel', 'task'], ['migration', 'retry', 'task']]) {
+    const migration = run(args, { DIMCODE_HOME: migrationHome });
+    assert.equal(migration.status, 0, migration.stderr);
+    assert.deepEqual(JSON.parse(migration.stdout).args, ['--home', migrationHome, ...args]);
+    assert.equal(existsSync(migrationHome), false);
+  }
   const stopped = run(['stop']);
   assert.equal(stopped.status, 0, stopped.stderr);
   assert.equal(stopped.stdout, '');

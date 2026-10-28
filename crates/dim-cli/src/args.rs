@@ -38,11 +38,12 @@ Commands:\n\
   runtime list                     List the plugin runtimes and their state\n\
   runtime install node|python      Turn a plugin runtime on and acquire it\n\
   daemon stop                      Gracefully stop an existing daemon\n\
-  migration inspect|run --source OLD_HOME --source-stopped\n\
-                                   Inspect or import a stopped legacy home\n\
+  migration [run|inspect] [--source OLD_HOME]\n\
+                                   Import the default legacy v2 home or inspect it;\n\
+                                   confirm stopped clients or use --source-stopped\n\
   migration list|show TASK|cancel TASK\n\
                                    Read tasks or request cancellation\n\
-  migration retry TASK --source-stopped [--source OLD_HOME]\n\
+  migration retry TASK [--source OLD_HOME]\n\
                                    Resume a task, reconciling imported objects\n\
   web [--port N] [--no-open]       Hold the Web workspace until Ctrl+C
 web --off                        Turn off the daemon-owned Web switch

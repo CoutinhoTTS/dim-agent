@@ -1,6 +1,9 @@
 use crate::{Result, args::Options, sanitize::safe};
 use dim_migration::{Migration, MigrationPlugin, TaskStatus};
-use std::path::PathBuf;
+use std::{
+    io::{IsTerminal, Write},
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Debug)]
 pub(crate) enum Operation {
@@ -19,14 +22,17 @@ pub(crate) struct Command {
     pub source_stopped: bool,
 }
 
-const USAGE: &str = "Use migration inspect|run --source OLD_HOME --source-stopped, migration retry TASK --source-stopped [--source OLD_HOME], or migration list|show TASK|cancel TASK";
+const USAGE: &str = "Use migration [run|inspect] [--source OLD_HOME], migration retry TASK [--source OLD_HOME], or migration list|show TASK|cancel TASK; scripts must pass --source-stopped";
 
-pub(crate) fn parse(args: &mut impl Iterator<Item = String>) -> Result<crate::args::Action> {
-    let operation = args.next();
-    if matches!(operation.as_deref(), Some("--help" | "-h")) {
-        return Ok(crate::args::Action::Help);
-    }
+pub(crate) fn parse(
+    args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+) -> Result<crate::args::Action> {
+    let operation = match args.peek() {
+        Some(value) if value.starts_with('-') => None,
+        _ => args.next(),
+    };
     let operation = match operation.as_deref() {
+        None => Operation::Run,
         Some("inspect") => Operation::Inspect,
         Some("run") => Operation::Run,
         Some("retry") => Operation::Retry(args.next().ok_or(USAGE)?),
@@ -47,18 +53,16 @@ pub(crate) fn parse(args: &mut impl Iterator<Item = String>) -> Result<crate::ar
 }
 
 pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command) -> Result<i32> {
+    let mut command = command.clone();
     if matches!(
         command.operation,
         Operation::Inspect | Operation::Run | Operation::Retry(_)
     ) && !command.source_stopped
+        && !std::io::stdin().is_terminal()
     {
         return Err(
             "Exit legacy CLI and Desktop using the source home, then pass --source-stopped".into(),
         );
-    }
-    if matches!(command.operation, Operation::Inspect | Operation::Run) && command.source.is_none()
-    {
-        return Err(USAGE.into());
     }
     if matches!(
         command.operation,
@@ -67,8 +71,22 @@ pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command)
     {
         return Err(USAGE.into());
     }
-    if let Some(source) = &command.source {
+    if matches!(command.operation, Operation::Retry(_))
+        && let Some(source) = &command.source
+    {
         dim_migration::validate_source_home(source, &options.home)?;
+    }
+    if matches!(command.operation, Operation::Inspect | Operation::Run) {
+        let source = match command.source.take() {
+            Some(source) => source,
+            None => default_source()?,
+        };
+        let source = dim_migration::validate_source_home(&source, &options.home)?;
+        if !command.source_stopped && !confirm_source(&source, &options.home)? {
+            return Ok(130);
+        }
+        command.source = Some(source);
+        command.source_stopped = true;
     }
     std::fs::create_dir_all(&options.home)?;
     let themes = std::iter::once("system")
@@ -84,9 +102,43 @@ pub(crate) async fn run(root: &rutis::Ctx, options: &Options, command: &Command)
     let service = root
         .get::<Migration>()
         .ok_or("Migration plugin provided no service")?;
-    let result = execute(root, &service, options, command).await;
+    let result = execute(root, &service, options, &command).await;
     plugin.dispose().await?;
     result
+}
+
+fn default_source() -> Result<PathBuf> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .ok_or("Cannot locate the legacy home; pass --source OLD_HOME")?;
+    let mut sources = [
+        (".dimcode/v2", "dimcode.sqlite"),
+        (".dim/v2", "dimglobal.sqlite"),
+    ]
+    .into_iter()
+    .map(|(directory, database)| (home.join(directory), database))
+    .filter(|(path, database)| path.join(database).is_file())
+    .map(|(path, _)| path);
+    let source = sources.next().ok_or(
+        "No default legacy v2 database found; pass --source OLD_HOME for a custom location",
+    )?;
+    if sources.next().is_some() {
+        return Err("Both legacy v2 homes exist; select one with --source OLD_HOME".into());
+    }
+    Ok(source)
+}
+
+fn confirm_source(source: &Path, target: &Path) -> Result<bool> {
+    eprintln!("Source: {}", safe(&source.to_string_lossy()));
+    eprintln!("Target: {}", safe(&target.to_string_lossy()));
+    eprint!("Close legacy CLI and Desktop using this source. Continue? [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 async fn execute(
@@ -138,6 +190,9 @@ async fn execute(
                 }
             };
             let source = dim_migration::validate_source_home(&source, &options.home)?;
+            if !command.source_stopped && !confirm_source(&source, &options.home)? {
+                return Ok(130);
+            }
             let (_, connection) = crate::daemon_link(root, options, true).await?;
             let connection = connection
                 .take()

@@ -55,9 +55,9 @@
 
 - CN 默认旧 home 为 `~/.dimcode/v2`，Global 默认旧 home 为 `~/.dim/v2`；数据库名分别为 `dimcode.sqlite` 和 `dimglobal.sqlite`。
 - 旧 home 内还包括 `data/`、配置和插件状态。Desktop 可使用自定义容器根，其 `v2` 解析由旧客户端拥有。
-- Desktop 的 `<userData>/storage-root.json` 是定位旧根的配置，不是会话数据本身。首版显式接收已解析的旧 home，不猜测它当前指向哪里。
+- Desktop 的 `<userData>/storage-root.json` 是定位旧根的配置，不是会话数据本身。插件接收客户端已解析的旧 home，不读取或猜测此配置当前指向哪里；CLI 的默认目录选择和显式覆盖由[命令合同](../cli-commands.md#migration-interaction)定义。
 - CLI 的调度记录还可能在 `schedule-tui.sqlite`；仅迁移主库会漏掉它。
-- 新 CLI 的产品 home 与旧版版本目录含义不同：原生库位于 `<product-home>/rust/dimcode.sqlite`，见 `crates/dim-cli/src/client.rs`。来源与目标必须分别指定、解析，并拒绝指向同一数据库。
+- 新 CLI 的产品 home 与旧版版本目录含义不同：原生库位于 `<product-home>/rust/dimcode.sqlite`，见 `crates/dim-cli/src/client.rs`。客户端分别解析来源与目标，再交给插件，并拒绝指向同一数据库。
 
 CLI 与 Desktop 可能已经共享同一个旧 home。同一来源通过两个入口迁移不能产生两份会话；来源路径本身也不能充当稳定记录身份。
 
@@ -277,14 +277,14 @@ Migration 不作为正常启动时常驻的迁移执行器。按需装载不改�
 
 ### 6.1 最小任务合同
 
-调用方显式指定旧 home 和目标产品 home。首版要求用户先退出使用该旧 home 的旧 CLI／Desktop，停止相关写入，再启动迁移；入口明确展示此前置条件，迁移过程不主动终止旧进程。共享合同至少支持启动、查询结果和取消；重新执行同一迁移请求即可重试，不先增加一套复杂的 repair 命令。
+调用方将已解析的旧 home 和目标产品 home 交给插件；默认目录、交互确认和路径覆盖由各客户端入口拥有。首版要求用户先退出使用该旧 home 的旧 CLI／Desktop，停止相关写入，再启动迁移；入口明确展示此前置条件，迁移过程不主动终止旧进程。共享合同至少支持启动、查询结果和取消；重新执行同一迁移请求即可重试，不先增加一套复杂的 repair 命令。
 
 进度包括当前阶段、对象类型、已处理/总数、当前对象和已确认结果。总数尚未扫描完时明确表示未知；不显示虚假的整体百分比。明细区分：已迁移、已迁移无需重复、冲突、暂缓（目标功能未实现）、未支持、失败、已取消；暂缓、失败与未支持不能计作成功。
 
 ```text
-$ dimcode --home TARGET migration --from LEGACY_HOME
-Source: LEGACY_HOME
-Target: TARGET
+$ dimcode migration
+Source: <resolved-legacy-home>
+Target: <client-home>
 Stage:  Sessions
 Sessions: 12 / 80    Messages: 1840    Files: 31
 Result:  10 imported | 1 already imported | 1 failed

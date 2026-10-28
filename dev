@@ -30,10 +30,12 @@ if [[ "$action" == help ]]; then
   cat <<'USAGE'
 Usage: ./dev [CLI arguments]
        ./dev restart [CLI arguments] | stop | check
+       ./dev migration
 
 With DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL set, dimcode is
 built as the account build; otherwise as the API-key build.
 Use --model-config PATH for independent API-key development.
+Migration imports the stopped legacy v2 home into the development home.
 Optional local configuration: .env.dev (see .env.example).
 A new development home runs commands without OS isolation: a new
 host-isolation.json with {"version": 2, "sandbox": "host"} is written to the
@@ -57,6 +59,7 @@ product_home=${DIMCODE_HOME:-}
 explicit_model_config=false
 explicit_selection=false
 chat=true
+migration=false
 native_help=false
 resumed=false
 while [[ $# -gt 0 ]]; do
@@ -81,11 +84,12 @@ while [[ $# -gt 0 ]]; do
       resumed=true
       shift
       ;;
-    --prompt|-p|--cwd|--server|--directory|--redirect-uri)
+    --prompt|-p|--cwd|--server|--directory|--redirect-uri|--source)
       [[ $# -ge 2 ]] || { echo "$1 requires a value." >&2; exit 1; }
       shift
       ;;
     login|account|logout|models|daemon|web) chat=false ;;
+    migration) chat=false; migration=true ;;
     --help|-h|--version|-V) native_help=true ;;
   esac
   shift
@@ -125,7 +129,7 @@ if [[ "$chat" == true && "$resumed" == false && "$explicit_selection" == false ]
 fi
 
 (cd -- "$repository" && cargo build --locked -p dimcode) >&2
-if [[ "$native_help" == false ]]; then
+if [[ "$native_help" == false && "$migration" == false ]]; then
   mkdir -p -m 700 -- "$product_home"
   product_home=$(cd -- "$product_home" && pwd)
   policy_root=$product_home

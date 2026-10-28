@@ -23,9 +23,9 @@ contract records the native platform acceptance evidence and outstanding checks.
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
-| `dimcode migration inspect\|run --source OLD_HOME --source-stopped` | Inspect or import a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
+| `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
-| `dimcode migration retry TASK --source-stopped [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
+| `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
@@ -48,15 +48,32 @@ Subcommands do not create a plugin command registry.
 
 ### Migration interaction
 
-`dim` and the alpha package's `dima` invoke these same native commands. The caller
-sets an isolated target with `--home`; it must be outside `OLD_HOME`. The stopped
-acknowledgement is required on inspect, run and retry. Source/target overlap is
+`dim` and the alpha package's `dima` invoke these same native commands. Bare
+`migration` runs an import. The CLI finds the legacy home at `~/.dimcode/v2`
+(containing `dimcode.sqlite`) or `~/.dim/v2` (containing `dimglobal.sqlite`).
+If both or neither are present, it asks for `--source OLD_HOME` instead of choosing
+an ambiguous source. An explicit source also supports custom Desktop storage roots.
+The target uses the ordinary client home; `--home` overrides it. `./dev migration`
+uses the existing isolated development home and never restarts its daemon merely
+to inspect, query, cancel or retry Migration.
+
+Inspect, run and retry require the old clients to have stopped writing. Without
+`--source-stopped`, an interactive terminal shows the resolved source and target
+and asks for confirmation. Declining exits 130 without starting an import;
+noninteractive callers must pass `--source-stopped`. Source/target overlap is
 rejected before starting the target daemon. Run and retry mount Migration for the
 invocation and use the ordinary daemon profile; metadata commands mount it without
 a target connection. Disposal drains accepted work before command exit. Migration
 has no persistent enablement selection or automatic trigger. Imported business configuration uses each owner's ordinary enablement and execution rules.
 
 ```text
+$ ./dev migration
+Source: /Users/me/.dimcode/v2
+Target: /Users/me/.dimcode-dev/<repository>
+Close legacy CLI and Desktop using this source. Continue? [y/N] y
+<task-id>  sessions        0/12      <legacy-session>
+{ "task": { "id": "...", "status": "partial", ... }, "objects": [ ... ] }
+
 $ dim migration inspect --home /tmp/dim-new --source /tmp/dim-old --source-stopped
 { "database": "dimcode.sqlite", "tables": { ... }, "issues": [] }
 
