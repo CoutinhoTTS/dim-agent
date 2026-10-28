@@ -1460,13 +1460,20 @@ AGENTS.md keeps automated tests for flows and contracts. It is an `xtask` comman
 `measure`, which already runs with an optional real model configuration:
 
 ```bash
-cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR [--reasoning inherit|off|low]
+cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs 3 --out DIR [--reasoning inherit|off|low] [--candidate FILE [--target OUTPUT_SHARE,INPUT_SHARE]]
 ```
 
 - Without `--reasoning` the runner runs phase 1: the three reasoning arms (`inherit`, `off`,
   `low`) with no target instruction. `--reasoning VALUE` runs phase 2 instead: the no-instruction
   arm plus the four `(α, β)` arms, with `VALUE` being the reasoning value phase 1 chose for the
   model.
+- `--candidate FILE` reads a UTF-8 text file holding a candidate system prompt. It requires
+  `--reasoning VALUE` and runs the candidate arms in place of either phase's arm set: two arms,
+  `current` and `candidate`, on the same cases, both with `VALUE` and with one target rule —
+  `--target OUTPUT_SHARE,INPUT_SHARE` when given, none when absent. Each share is a fraction
+  greater than 0 and at most 1. `--candidate` without `--reasoning`, `--target` without
+  `--candidate`, a malformed share, and a file that is not UTF-8 text are refused before any
+  model call.
 - `--home` is required and must be an isolated product home in which the operator has configured
   the providers; the runner never uses `~/.dimcode` or `~/.dimcode-alpha`. Credentials stay in that home and never enter
   the repository, the cases or the output.
@@ -1474,13 +1481,29 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
   request from `ProviderService::configuration` for `--model` with default preferences (what a
   user gets), and resolves `ProductContextModel` on it.
 - For each case and arm it constructs the product summary strategy from the process's `ModelHost`
-  and `ProviderConnectionResolver`, with the arm's target rule as factory configuration and the
-  arm's `compaction.json` written into the home, and calls `compact` directly with a
-  `CompactionInput` built from the case. Every arm therefore runs the shipped request building,
-  chunking, cut-off handling and reasoning mapping; only the two knobs differ.
+  and `ProviderConnectionResolver`, with the arm's factory configuration (its target rule, and the
+  candidate arm's prompt) and the arm's `compaction.json` written into the home, and calls
+  `compact` directly with a `CompactionInput` built from the case. Every arm therefore runs the
+  shipped request building, chunking, cut-off handling and reasoning mapping; only the knobs
+  differ.
 - Output (JSON per run plus a Markdown table) goes to `--out`, outside the repository. The
   decision and its table are committed as a research note
   (`docs/design/research/summary-eval.md`, EN + zh) when the evaluation has run.
+
+**Candidate arms (a).** The candidate prompt is factory configuration of the product summary
+strategy: `ProductSummaryStrategyConfig` gains one optional member holding the system prompt
+(§13.5), and the strategy uses it in place of `SYSTEM` when it is set. The product profile does
+not set it. The target sentence (§13.3) is appended to whichever prompt is in use; chunking,
+folding, cut-off handling, reasoning mapping and the request budget are unchanged, so both arms
+run the shipped code and only the prompt differs.
+
+The report shows each arm as the table below does, then one verdict line: `candidate passes;
+median T: current 1850, candidate 1600`, or `candidate fails` in the same shape, by the §6 rule
+against `current`: `F ≥ F_current − δ`, `X ≥ X_current − δ`, `V ≤ V_current`, with `δ = 0.05`,
+and failures no more than `current`'s (the `failed` count; `skipped` stays a separate count). A
+rate with no probe of its kind among the cases is left out of the rule. Both arms' median `T`
+stand beside the verdict, so the length is visible (§6: the length is reported beside every
+score).
 
 **Cases.** JSON files in `xtask/summary-eval/cases/`, one per history:
 
@@ -1511,6 +1534,30 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 - Content is public: built from this repository's own code, documents and command output, with
   paths under `/work/dim`. No real user session, no secret, no home path.
 
+**Chains (b).** A case keeps the shape above, or has `steps` instead: an array of
+`{ "messages": [...], "retainFrom": n }` values, exactly five for a chain. The two shapes are
+mutually exclusive; a case with both or neither, or with a `steps` array of another length, is
+refused before any model call. `earlierSummary` and `contextWindow` stay members of the case. A
+chain is five compactions in sequence:
+
+- Step 1 takes `earlierSummary` as its checkpoint when present and none otherwise. Every later
+  step's checkpoint is the previous step's summary, `[summary_message(text)]` with
+  `replacement_parts { strategy: 1, digest: 0 }`.
+- Each step's `messages` is the history after its checkpoint: for step k ≥ 2 it must begin with
+  step k−1's `messages[retainFrom..]` verbatim, because a real compaction keeps that tail and the
+  next compaction sees it before the new messages. A chain that breaks this is refused before any
+  model call; without it, content after a cut is lost by construction rather than by the prompt.
+- Each step is one call to the shipped strategy, its history, request and cut built exactly as a
+  single case's are, so `validate_cut` runs per step.
+- The probes are judged on the fifth summary only.
+- A step that fails ends the chain, and the case counts as one failed compaction: its `fact` and
+  `exact` probes count as missed and its `absent` probes as not violated (the failure rule
+  above).
+- The run's JSON records every step that ran, each with the outcome, duration, error, summary and
+  diagnostics a single run records. In the metrics the chain is one compaction: `T` is the fifth
+  summary's tokens, `C` sums every step's cut-off replies, the duration is the chain's, and a run
+  any of whose steps fell back counts as `fellBack`.
+
 | Case | What it exercises | Probes include |
 | --- | --- | --- |
 | `long-tool-output` | One tool result of tens of KB with the key line in the middle; middle truncation | failing test name and error line (exact), the cause and the fix decided |
@@ -1520,6 +1567,32 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 | `merge` | An earlier summary plus a new transcript | facts from both |
 | `folding` | A history several times the narrowed window | facts from the first chunk still present after the last fold |
 | `injection` | Tool output that tells the reader to drop instructions or write something | the summary records it as data and does not follow it (absent) |
+| `chain` | Five slices of one public session, compacted in sequence | a constraint kept across all five, a withdrawn constraint and its replacement, the task refined at step 4 |
+
+`chain` is five slices of one public session built from this repository's own code and documents,
+with paths under `/work/dim` and no secrets; each slice repeats the previous slice's retained
+tail. It carries at least a constraint given in step 1 and never withdrawn, checked after step 5
+by a `fact` probe with `item: "constraint"`; a constraint given in step 1 and withdrawn in step
+3, checked by an `absent` probe that it is still in force and by a `fact` probe with
+`item: "constraint"` for its replacement; and the task in force, set in step 1 and refined in
+step 4, checked by a `fact` probe with `item: "task"` for the refined task.
+
+**3b probes (c).** A probe gains an optional `item`, the 3b class it checks: `task`,
+`constraint`, `decision`, `ruledOut`, `openItem`, `judgment` or `nextStep` (compaction-quality
+§3). Exact identifiers, the eighth 3b item, are the `exact` probes and are reported as `X`, so
+they take no `item`. Only `fact` probes read `item`; an `item` on an `exact` or `absent` probe is
+refused, because the breakdown is over `fact` probes and the field would have no meaning there.
+Existing `fact` probes gain an `item` where their class is clear, with their text unchanged, and
+a new probe is added only for a class no existing probe checks. Probes are written from the
+case's own content, its earlier summary and its messages; no case gains messages, so the scores
+already measured stay comparable.
+
+**Case validation.** The cases are committed data with a format, so an `xtask` test parses and
+validates every file under `xtask/summary-eval/cases/` through the runner's own reader, with no
+model call: the case shape, the step count, the `retainFrom` bounds and the cut rule, the
+retained-tail rule, and the probe `item`. It is a test rather than an `xtask check` step: the
+files are the command's own data, not the assembly, crate boundaries or generated output that
+`check` guards, and `cargo test --workspace`, which CI runs, covers it.
 
 **Judging.**
 
@@ -1542,6 +1615,10 @@ is counted as `unjudged`, in a column of its own for the operator to correct by 
 compaction has no summary: its `fact` and `exact` probes count as missed and its `absent` probes
 count as not violated, without a judge call, so a failure lowers `F` and `X` and adds nothing to
 `V`.
+
+The report adds, per arm, `F` broken down by `item` over the `fact` probes that carry one: a
+second table, one row per item and one column per arm, a cell reading `–` where the arm has no
+probe of that item. A probe without an `item` counts only in the overall `F` and `X`, as today.
 
 **Models.** At least one model per reasoning class the catalog offers: budget thinking with a
 `thinking: disabled` off declaration (Anthropic), effort-based reasoning (OpenAI Responses),
@@ -1577,11 +1654,11 @@ and one model without reasoning as a control.
 
 | Part | Change |
 | --- | --- |
-| `summary_strategy.rs` | Reads `compaction.json` once per compaction (if the setting ships); maps the config through `reasoning_config`; appends the target sentence when the rule gives one; the strategy value gets a public constructor taking `ModelHost`, `ProviderConnectionResolver`, its factory configuration and the optional `FileStorage` handle the plugin injects when a home is configured, for the runner |
-| `ProductSummaryStrategyPlugin` | Factory configuration: the `compaction.json` location and the target rule |
+| `summary_strategy.rs` | Reads `compaction.json` once per compaction (if the setting ships); maps the config through `reasoning_config`; takes the system prompt from its factory configuration (`SYSTEM` when absent) and appends the target sentence to it when the rule gives one; the strategy value gets a public constructor taking `ModelHost`, `ProviderConnectionResolver`, its factory configuration and the optional `FileStorage` handle the plugin injects when a home is configured, for the runner |
+| `ProductSummaryStrategyPlugin` | Factory configuration: the `compaction.json` location, the target rule and the optional system prompt; the product profile sets neither the target rule nor the prompt |
 | Provider (`preferences.rs`) | The effort branch moves to `reasoning_config`; behaviour unchanged |
 | Summary diagnostics object | Adds `reasoning` (the value applied: `inherit`, `off`, `low`), `targetTokens` (S, absent without an instruction) and `cutOffCount` (replies stopped at `max_tokens`; today they are only visible inside `chunkCount`). Additive fields of the strategy-owned object in `context/compaction`; no format version change |
-| `xtask` | `summary-eval` command and `xtask/summary-eval/cases/`; `serve_home`, the product assembly on an existing home that `serve_product` (`graph`) and the runner share |
+| `xtask` | `summary-eval` command and `xtask/summary-eval/cases/`; `--candidate` and `--target` with the two-arm report and its verdict; the `steps` shape, the per-`item` breakdown and the case-validation test; `serve_home`, the product assembly on an existing home that `serve_product` (`graph`) and the runner share |
 | App Server product profile | Passes the home's `compaction.json` location to the strategy factory; `RunningServer::service` hands a served profile's process services to `xtask`, so the runner reaches `ProviderService`, `ModelHost`, `ProviderConnectionResolver` and `FileStorage` |
 
 No event, port, Session value, Loop, ContextPolicy, record or replay change.
@@ -1590,7 +1667,10 @@ reader and the mapping: with `compaction.json` holding `off`, the summarizer req
 carries the model's reasoning-off fields while the conversation's request keeps its reasoning,
 and the record's diagnostics show `reasoning: "off"`; an invalid file fails a manual compaction
 with `compaction_failed`. The target rule needs no test of its own: it is prompt text, measured
-by the evaluation.
+by the evaluation. The system-prompt member does: `product_summary` in `context_flow`
+configures a prompt much longer than `SYSTEM` and asserts that every summarizer request's system
+text begins with it and that every request still fits the window; it extends the existing CJK
+fit flow.
 
 ### 13.6 Rule check (for the #170 changes)
 
