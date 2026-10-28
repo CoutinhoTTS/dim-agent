@@ -58,7 +58,7 @@ flowchart LR
 | `managementMethods` | `unknown_method` when no namespace ever held the name, or the row that registered it is disabled or absent; a withdrawn namespace otherwise answers from that row's status (§3.2) |
 | Tool registration | A tool the Session's mount list names that no part has registered is not declared and is reported in diagnostics; it is declared from the next request once a part registers it (A.5) |
 
-Contracts defined here: the two method tables and their registration, tool registration, `MethodDecl`, `MethodCall`, `MethodReply`, `MethodError`, the `session.methods` listing method, the `callChannel` companion service (only `progress` implemented), `ToolDeclaration`, `ToolCall`, `ToolResult`, what each entry is served, naming, reserved names, the migration of existing management methods and the compatibility table. Contracts used: `SessionConfig` ([session-access](session-access.md#a3-sessionconfig-fields)), source input conventions ([session-access A.2](session-access.md#a2-source-input-conventions)), the Rpc command envelope and `appError` codes.
+Contracts defined here: the two method tables and their registration, tool registration, `MethodDecl`, `MethodCall`, `MethodReply`, `MethodError`, the `session.methods` listing method, the `callChannel` companion service (only `progress` implemented), `ToolDeclaration`, `ToolCall`, `ToolResult`, its effect declaration, what each entry is served, naming, reserved names, the migration of existing management methods and the compatibility table. Contracts used: `SessionConfig` ([session-access](session-access.md#a3-sessionconfig-fields)), source input conventions ([session-access A.2](session-access.md#a2-source-input-conventions)), the Rpc command envelope and `appError` codes.
 
 ## 2. Data and state
 
@@ -132,7 +132,7 @@ Full table: [Appendix B](#appendix-b-full-conflict-table).
 
 ## 5. Context mapping
 
-Methods have no model-visible effect. A method that changes model context does so through its owner's input or Timeline facts, and those owners' mappings apply. A registered tool reaches the model only through its declaration and its `ToolResult`, as any tool does.
+Methods have no model-visible effect. A method that changes model context does so through its owner's input or Timeline facts, and those owners' mappings apply. A registered tool reaches the model only through its declaration and its `ToolResult`, as any tool does. A tool's effect declarations have no model-visible effect of their own: they are carried in its result, and the compaction digest is the only part that projects them into context ([ContextCompaction §5.10](../plugins/ContextCompaction.md#510-class-3a-the-digest)).
 
 ## 6. Interfaces (summary)
 
@@ -157,12 +157,12 @@ Proposed (P3, with RemoteGateway; not implemented): the connection's `Connection
 | §4 rule 1 (command events) | Not applicable: the services write no Timeline event themselves; a method that changes branch state calls its owner, which writes (for example InputQueue's `input/deleted` for `session.input.withdraw`). |
 | §4 rule 2 (handover) | Not applicable: methods and tool contributions hand nothing over; a tool call is handed to ToolExecutor by the existing `step/tool-call` contract. |
 | §4 rule 3 (before callbacks only) | Rpc validates only param shape and `sessionId` authorization; feature checks belong to the method's owner, and acting before a commit is left to Timeline before callbacks. |
-| §4 rule 4 (no business meaning in core) | The method tables and ToolRegistry keep what parts register, and Rpc reads the tables; none names a provider or interprets a method. |
+| §4 rule 4 (no business meaning in core) | The method tables and ToolRegistry keep what parts register, and Rpc reads the tables; none names a provider or interprets a method. The effect declaration is carried on the result unchanged, and no part of the core names one of its kinds (A.6). |
 | §4 rule 5 (batch) | Not applicable: no decision here is taken on a Timeline event; owners decide from their own facts. |
 | §4 rule 6 (model context) | Methods have no model-visible effect, and a registered tool reaches the model only through its declaration and `ToolResult` (§5). |
 | §4 rule 7 (public events and services) | Providers reach branches only through the branch's public services, and Rpc dispatches only through the Session's `sessionMethods`. |
 | §4 rule 8 (requirements) | The Session's scope on its facade is raised in §9.4; a keyed read by name, drain on unload and listing active providers are withdrawn (§9.1 to §9.3). |
-| §4 rule 9 (only decision facts in the Timeline) | Method tables and served entries are runtime state, never Timeline facts (§2). |
+| §4 rule 9 (only decision facts in the Timeline) | Method tables and served entries are runtime state, never Timeline facts (§2). The effect declaration adds no fact either: it is an optional field of the result the executor writes on `step/tool-result`, and the compaction digest is its only consumer (A.6). |
 | §1 (Capability and App Server boundary) | Rpc only routes and dispatches; the business code of every method lives in its provider's plugin. |
 | ADR 002 D1 | `sessionMethods` and tool registrations are Session-scoped, `managementMethods` process-scoped, matching their owners. |
 | ADR 002 D2 | No port or Management plugin; method namespaces register with the method table of their scope and tools with ToolRegistry, which owns the Session's tools. |
@@ -383,10 +383,72 @@ ToolBinding reconciles the table through the existing Prompt / BranchOpening flo
   "arguments": {}, "config": { /* SessionConfig data */ } }
 // ToolResult
 { "content": [ { "type": "text", "text": "..." } | { "type": "image", "...": "..." } ],
-  "structuredContent?": {}, "isError": false }
+  "structuredContent?": {}, "isError": false,
+  "effects?": [ /* A.6 */ ] }
 ```
 
 Cancellation: turn interrupt settles `cancelled` for `callId` (or drops the call); ToolExecutor settles the call as interrupted. A provider error is returned as `ToolResult` with `isError: true`. The declaration may depend on the Session's configuration: the part builds it when it registers. Once a row of another language that registered a tool starts unloading, a call through a handler that an earlier request retained is not made, and a call in flight ends with an error warning that it may already have taken effect; a native tool settles by its own reload rule. The part's next generation registers again and is offered from the next request.
+
+### A.6 Tool effects
+
+A tool may declare what its call did by setting `effects` on the `ToolResult` it returns. The
+declaration carries no business meaning of its own: it is data on the result, carried unchanged by
+the execution path and the Loop, and a tool that declares nothing contributes nothing.
+
+```text
+// ToolResult
+{ "content": [ { "type": "text", "text": "..." } | { "type": "image", "...": "..." } ],
+  "structuredContent?": {}, "isError": false,
+  "effects?": [
+    { "kind": "fileWritten", "path": "/work/dim/src/lib.rs" },
+    { "kind": "commandRun", "command": "cargo test", "exitCode": 0 },
+    { "kind": "commandRun", "command": "npm run dev" } ] }
+```
+
+The vocabulary is closed and has two kinds:
+
+| Kind | Data | Meaning |
+| --- | --- | --- |
+| `fileWritten` | `path` | The call wrote the file at that path. One declaration per file written; `path` is the absolute resolved path the result reports, in the one form `write` and `edit` already report it (the resolved call's `path`, and the `Wrote <path>` / `Edited <path>` result text). |
+| `commandRun` | `command`, `exitCode?`, `signal?` | The call ran that command. At most one of `exitCode` and `signal` is present, and it is the exit status the tool observed: the code the process exited with, or the name of the signal that ended it. Both absent means the tool observed no exit status: the command was still running when the result was recorded, or it ended without one being seen. |
+
+Anything else — durations, output, working directories, counts — is not in the vocabulary and needs a
+requirements change ([compaction requirements §7.4](../compaction-quality.md#74-toolregistry-the-tool-contract)).
+
+**Recording.** The executor records the result a tool returns unchanged, so a declaration travels on
+the same fact as the result it describes, `step/tool-result`. That is the only fact a declaration is
+written to, and a reader takes a call's declarations from it. A tool that leaves work running
+declares what it knew when its result was recorded; whatever it observes later is not recorded as a
+declaration, and the model learns it the way it learns any other later input.
+
+**Failure and cancellation.** A declaration states what the call did, not what it was asked to do. A
+tool that returns its own error result declares the effects it completed before the error. A call
+the executor settles without a tool result — a host error, a panic, a cancellation — carries no
+declarations.
+
+**Who declares.** Any tool: a host tool, a tool a part registers in Rust, or a tool a part of another
+language registers through the bridge, which decodes `effects` with the rest of `ToolResult` and
+refuses an unknown kind. MCP tool results have no such field in their own protocol, so an MCP tool
+declares nothing until its mapping provides one.
+
+**Format decision: the native store advances to v21, and no protocol version is added.** `effects`
+is an optional field of `ToolResult`, whose serde form rejects unknown fields
+([tool.rs](../../../crates/dim-agent-types/src/tool.rs)). The store's step is the storage
+contract's: it advances to v21, marker only, because a v20 daemon cannot decode a result carrying
+the field, and the same step covers the completed `context/compaction`'s `digest_entries`
+([#527 v21 decision](../appserver/native-storage-format.md#527-v21-格式决定)). This contract adds
+no second step. The protocol changes independently of the store version:
+
+| Connection | What it receives |
+| --- | --- |
+| v1 | Nothing: the v1 event shape is frozen and projects `ToolResult` through `ToolResultRef`, which has no `effects` |
+| v2 | `step/tool-result` for a dispatched call, the native event whole |
+| v3 | Every `step/tool-result`, the native event whole |
+| A client built from older shared types | Refuses that notification: the payload is decoded with the shared types, and `ToolResult` rejects unknown fields; the bundled client's session host ends that window with the decode error |
+
+The protocol decision is accepted: the v2/v3 payloads are the shared event types and a client is
+built and shipped with the daemon, the field is the only way a declaration can travel with the
+result it describes, and v1's frozen shape does not change.
 
 ## Appendix B. Full conflict table
 
@@ -430,6 +492,7 @@ Cancellation: turn interrupt settles `cancelled` for `callId` (or drops the call
 5. A tool that a non-Rust plugin registers through `toolRegistry` is declared to the model and executed through ToolExecutor like a Rust tool; a Session without a mount list declares it with no configuration edit. A tool the Session's mount list names that no part has registered is omitted and reported in diagnostics, the Session still starts, and the tool is declared from the next request once a part registers it.
 6. Progress precedes the response; progress the connection cannot take is dropped without closing the connection or losing the response; `notify` reports `gone` after disconnect.
 7. With an enabled management provider that is Pending, `hello` succeeds and every other namespace works. Its names return `unknown_method` until it first registers; once its namespace is withdrawn they return `service_reloading` while its row starts or reloads and `service_unavailable` once the row is Failed or Unresolved; with a disabled row they return `unknown_method`. Once PluginManager provides `plugin.disable` (not implemented), it can turn the provider off unless its name is locked, as PluginManager's own is. Reloading a management provider neither reloads Rpc nor closes connections.
+8. A tool's effect declarations are carried unchanged in the result the executor records on `step/tool-result`, and a result of a tool that declares nothing carries none. A declaration of an unknown kind or an invalid shape is refused at the boundary that decodes it. `ToolResult` decodes strictly, so a reader built before the field refuses the result rather than ignoring it; A.6's format decision states what each reader does.
 
 ## Appendix E. Assumptions
 

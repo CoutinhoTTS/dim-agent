@@ -58,7 +58,7 @@ flowchart LR
 | `managementMethods` | 从没有命名空间持有过该名称，或注册它的行已禁用或不存在时返回 `unknown_method`；其他情况下，已撤回的命名空间按该行的状态作答（§3.2） |
 | 工具注册 | Session 挂载列表列出但没有部件注册的工具不声明，并在诊断中报告；有部件注册后从下一个请求起声明（A.5） |
 
-本文定义的合同：这两张方法表及其注册、工具注册、`MethodDecl`、`MethodCall`、`MethodReply`、`MethodError`、列出方法的 `session.methods`、配套服务 `callChannel`（只实现了 `progress`）、`ToolDeclaration`、`ToolCall`、`ToolResult`、各入口获得的服务范围、命名、保留名、现有管理方法的迁移以及兼容性表。使用的合同：`SessionConfig`（[session-access](session-access.md#a3-sessionconfig-字段)）、来源输入约定（[session-access A.2](session-access.md#a2-来源输入约定)）、Rpc 命令信封以及 `appError` 码。
+本文定义的合同：这两张方法表及其注册、工具注册、`MethodDecl`、`MethodCall`、`MethodReply`、`MethodError`、列出方法的 `session.methods`、配套服务 `callChannel`（只实现了 `progress`）、`ToolDeclaration`、`ToolCall`、`ToolResult` 及其效果声明、各入口获得的服务范围、命名、保留名、现有管理方法的迁移以及兼容性表。使用的合同：`SessionConfig`（[session-access](session-access.md#a3-sessionconfig-字段)）、来源输入约定（[session-access A.2](session-access.md#a2-来源输入约定)）、Rpc 命令信封以及 `appError` 码。
 
 ## 2. 数据与状态
 
@@ -132,7 +132,7 @@ sequenceDiagram
 
 ## 5. 上下文映射
 
-方法没有模型可见的效果。改变模型上下文的方法通过其所有者的输入或 Timeline 事实来做到，适用这些所有者的映射。注册的工具与任何工具一样，只通过其声明和 `ToolResult` 到达模型。
+方法没有模型可见的效果。改变模型上下文的方法通过其所有者的输入或 Timeline 事实来做到，适用这些所有者的映射。注册的工具与任何工具一样，只通过其声明和 `ToolResult` 到达模型。工具的效果声明本身没有模型可见的效果：它们随结果携带，只有压缩清单把它们投影进上下文（[ContextCompaction §5.10](../plugins/ContextCompaction.md#510-第-3a-类清单)）。
 
 ## 6. 接口（摘要）
 
@@ -157,12 +157,12 @@ sequenceDiagram
 | §4 第 1 条（指令事件） | 不适用：这些服务自身不写 Timeline 事件；改变分支状态的方法调用状态所有者，由所有者写入（例如 InputQueue 为 `session.input.withdraw` 写入的 `input/deleted`）。 |
 | §4 第 2 条（交接） | 不适用：方法与工具贡献不交接任何对象；工具调用按现有 `step/tool-call` 合同交给 ToolExecutor。 |
 | §4 第 3 条（只用 before 回调） | Rpc 只校验参数格式和 `sessionId` 授权；功能检查归方法所有者，提交前的处理只用 Timeline before 回调。 |
-| §4 第 4 条（核心不带业务含义） | 方法表与 ToolRegistry 保存部件注册的内容，Rpc 读取方法表；它们都不点名提供方，也不解释方法。 |
+| §4 第 4 条（核心不带业务含义） | 方法表与 ToolRegistry 保存部件注册的内容，Rpc 读取方法表；它们都不点名提供方，也不解释方法。效果声明随结果原样携带，核心没有任何部分认识它的类型（A.6）。 |
 | §4 第 5 条（批次） | 不适用：本文没有依据 Timeline 事件做的决定；所有者依据自己的事实决定。 |
 | §4 第 6 条（模型上下文） | 方法对模型不可见，注册的工具只通过其声明和 `ToolResult` 到达模型（§5）。 |
 | §4 第 7 条（公开事件与服务） | 提供方只通过分支的公开服务到达分支，Rpc 只经 Session 的 `sessionMethods` 分发。 |
 | §4 第 8 条（需求） | Session 门面上的 Session 作用域在 §9.4 提出；按名称带 key 的读取、卸载时等待 drain、列出已激活提供方已撤回（§9.1 至 §9.3）。 |
-| §4 第 9 条（只有决定用的事实进 Timeline） | 方法表与入口服务范围是运行时状态，从不是 Timeline 事实（§2）。 |
+| §4 第 9 条（只有决定用的事实进 Timeline） | 方法表与入口服务范围是运行时状态，从不是 Timeline 事实（§2）。效果声明也不新增事实：它是执行器写在 `step/tool-result` 上的结果的可选字段，唯一读取它的是压缩清单（A.6）。 |
 | §1（Capability 与 App Server 边界） | Rpc 只路由和分发；每个方法的业务代码在其提供方插件中。 |
 | ADR 002 D1 | `sessionMethods` 与工具注册是 Session 级，`managementMethods` 是进程级，与其所有者一致。 |
 | ADR 002 D2 | 不新增端口或 Management 插件；方法命名空间注册到其作用域的方法表，工具注册到拥有本 Session 工具的 ToolRegistry。 |
@@ -382,10 +382,51 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
   "arguments": {}, "config": { /* SessionConfig 数据 */ } }
 // ToolResult
 { "content": [ { "type": "text", "text": "..." } | { "type": "image", "...": "..." } ],
-  "structuredContent?": {}, "isError": false }
+  "structuredContent?": {}, "isError": false,
+  "effects?": [ /* A.6 */ ] }
 ```
 
 取消：turn 中断时针对 `callId` 结算 `cancelled`（或丢弃调用）；ToolExecutor 把该调用按中断结算。提供方错误以 `isError: true` 的 `ToolResult` 返回。声明可以取决于该 Session 的配置：部件在注册时构造它。注册了工具的其他语言行开始卸载后，经先前请求保留的处理器发起的调用不会发出，在途调用以错误结束，错误提示它可能已经生效；原生工具按自己的重载规则结算。该部件的下一代重新注册，从下一个请求起提供。
+
+### A.6 工具效果
+
+工具可以在它返回的 `ToolResult` 上设置 `effects`，声明这次调用做了什么。声明本身不带任何业务含义：它是结果上的数据，由执行路径和 Loop 原样携带，什么都不声明的工具什么都不贡献。
+
+```text
+// ToolResult
+{ "content": [ { "type": "text", "text": "..." } | { "type": "image", "...": "..." } ],
+  "structuredContent?": {}, "isError": false,
+  "effects?": [
+    { "kind": "fileWritten", "path": "/work/dim/src/lib.rs" },
+    { "kind": "commandRun", "command": "cargo test", "exitCode": 0 },
+    { "kind": "commandRun", "command": "npm run dev" } ] }
+```
+
+词汇是封闭的，只有两种：
+
+| 类型 | 数据 | 含义 |
+| --- | --- | --- |
+| `fileWritten` | `path` | 这次调用写了该路径的文件。每写一个文件声明一次；`path` 是结果报告的绝对已解析路径，与 `write`、`edit` 已经报告的唯一形式一致（已解析调用的 `path`，以及 `Wrote <路径>` / `Edited <路径>` 的结果文本）。 |
+| `commandRun` | `command`、`exitCode?`、`signal?` | 这次调用跑了该命令。`exitCode` 与 `signal` 至多出现一个，是工具观察到的退出状态：进程退出时的码，或终止它的信号名。两者都缺省表示工具没有观察到退出状态：记录结果时命令仍在运行，或命令已结束但没有观察到它的状态。 |
+
+其余内容——时长、输出、工作目录、次数——不在词汇内，增加它们需要改需求（[压缩需求 §7.4](../compaction-quality.md#74-toolregistry工具合同)）。
+
+**记录。** 执行器原样记录工具返回的结果，所以声明与它所描述的结果同处一条事实，即 `step/tool-result`。这是声明唯一会被写上的事实，读者也从它取一次调用的声明。把工作留在后台继续的工具，声明的是记录它的结果时已知的内容；它之后观察到的结果不会被记成声明，模型像了解任何后来的输入一样了解它。
+
+**失败与取消。** 声明陈述调用做了什么，而不是被要求做什么。返回自身错误结果的工具，声明它在出错之前已完成的效果。执行器不经工具结果就结算的调用——宿主错误、panic、取消——不带任何声明。
+
+**谁可以声明。** 任何工具：宿主工具、部件用 Rust 注册的工具，或其他语言部件经桥注册的工具；桥随 `ToolResult` 的其余部分一起解码 `effects`，遇到未知类型即拒绝。MCP 工具的结果在自己的协议里没有这个字段，所以 MCP 工具在其映射提供该字段之前不声明任何效果。
+
+**格式决定：原生存储升级到 v21，不新增协议版本。** `effects` 是 `ToolResult` 的可选字段，而 `ToolResult` 的 serde 形式拒绝未知字段（[tool.rs](../../../../crates/dim-agent-types/src/tool.rs)）。存储那一步归存储合同：升级到 v21、只动标记，因为 v20 的 daemon 解不了带该字段的结果，同一步也覆盖已完成 `context/compaction` 的 `digest_entries`（[#527 v21 格式决定](../../../design/appserver/native-storage-format.md#527-v21-格式决定)）。本合同不加第二步。协议侧独立于存储版本：
+
+| 连接 | 收到什么 |
+| --- | --- |
+| v1 | 什么也收不到：v1 的事件形状已冻结，经 `ToolResultRef` 投影 `ToolResult`，其中没有 `effects` |
+| v2 | 已派发的调用收到 `step/tool-result`，原生事件整条发出 |
+| v3 | 每条 `step/tool-result` 都收到，原生事件整条发出 |
+| 用旧共享类型构建的客户端 | 拒绝那条通知：载荷用共享类型解码，而 `ToolResult` 拒绝未知字段；内置客户端的会话宿主随之以解码错误结束那个窗口 |
+
+协议侧的决定被接受：v2/v3 的载荷就是共享的事件类型，客户端随 daemon 一起构建和发布，声明也只能随它所描述的结果携带，并且 v1 冻结的形状不变。
 
 ## 附录 B. 完整冲突表
 
@@ -429,6 +470,7 @@ ToolBinding 沿既有 Prompt / BranchOpening 流程完成匹配与必要的采�
 5. 非 Rust 插件经 `toolRegistry` 注册的工具，会像 Rust 工具一样被声明给模型，并经 ToolExecutor 执行；没有挂载列表的 Session 不需要修改配置即声明它。Session 挂载列表列出但没有部件注册的工具被省略并在诊断中报告，Session 照常启动；有部件注册后从下一个请求起声明。
 6. 进度先于响应；连接收不下的进度被丢弃，不关闭连接，也不丢失响应；断开后 `notify` 报告 `gone`。
 7. 某个已启用的管理方法提供方处于 Pending 时，`hello` 成功，其他命名空间都正常。它首次注册之前，其名称返回 `unknown_method`；其命名空间撤回后，它的行正在启动或重载时返回 `service_reloading`，该行处于 Failed 或 Unresolved 时返回 `service_unavailable`；行已禁用时返回 `unknown_method`。PluginManager 提供 `plugin.disable`（未实现）之后，可以用它关闭该提供方，除非它的名字是锁定的（PluginManager 自己的名字就是锁定的）。管理方法提供方重载既不会让 Rpc 重载，也不会关闭连接。
+8. 工具的效果声明随执行器记录在 `step/tool-result` 上的结果原样携带；不声明任何效果的工具，其结果不带该字段。未知类型或形状非法的声明在解码它的边界被拒绝。`ToolResult` 严格解码，所以在此字段之前构建的读者会拒绝该结果，而不是忽略它；各类读者各自会怎样，见 A.6 的格式决定。
 
 ## 附录 E. 假设
 
