@@ -624,19 +624,82 @@ async fn a_child_branch_opens_inherited_ids_and_tells_its_fork_and_the_cut_paren
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains(" this branch was forked from main")),
+                .any(|line| line.contains(" this line was opened by main")),
             "{page}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.ends_with(" continued on the parent branch")),
+                .any(|line| line.ends_with(" continued on the parent line")),
             "{page}"
         );
 
         let (page, error) = recall(&session, &child, json!({ "open": "not-a-line" })).await;
         assert!(error);
         assert_eq!(page, "No turn or line has id not-a-line.");
+
+        // The opening input on the child is its identity block.
+        let (page, error) = recall(&session, &child, json!({})).await;
+        assert!(!error, "{page}");
+        assert!(
+            page.contains("dim-branch-line branch=") && page.contains("parent=main source=tool"),
+            "{page}"
+        );
+
+        // A message from main reaches the child as a line write.
+        session
+            .submit(
+                format!(
+                    r#"tool:branch {{"action":"message","to":"{child}","content":"status please"}}"#
+                ),
+                InputMode::Queue,
+                "main",
+            )
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        session.idle(&child).await.unwrap();
+        let (page, error) = recall(&session, &child, json!({})).await;
+        assert!(!error, "{page}");
+        assert!(page.contains("line main: \"status please\""), "{page}");
+
+        // The child ends itself, and main hears its final message.
+        session
+            .submit(
+                r#"tool:branch {"action":"end","content":"the logs are clean"}"#.into(),
+                InputMode::Queue,
+                &child,
+            )
+            .await
+            .unwrap();
+        let mut arrived = false;
+        let mut seen = String::new();
+        for _ in 0..300 {
+            let events = session.history("main", None).await.unwrap();
+            seen = events
+                .iter()
+                .map(|event| event.kind.key().to_owned())
+                .collect::<Vec<_>>()
+                .join(",");
+            arrived = events.iter().any(|event| {
+                matches!(&event.kind, EventKind::InputMessage(data)
+                    if data.blocks.iter().any(|block| format!("{block:?}").contains("the logs are clean")))
+            });
+            if arrived {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        session.idle("main").await.unwrap();
+        assert!(arrived, "main receives the line's final message: {seen}");
+        let (page, error) = recall(&session, "main", json!({})).await;
+        assert!(!error, "{page}");
+        let last = format!("line {child}'s final message: \"the logs are clean\"");
+        assert!(page.contains(&last), "{page}");
+        assert!(
+            page.contains(&format!("line {child}'s turn ended")),
+            "{page}"
+        );
         agent.close().await.unwrap();
     })
     .await
@@ -781,6 +844,172 @@ impl Recorded {
 
 fn input_message(text: &str) -> EventKind {
     EventKind::InputMessage(InputMessageData::text(text, None))
+}
+
+/// A message one line sends another, as the branch tool writes it (branches §6).
+fn line_message(
+    from: &str,
+    to: &str,
+    text: &str,
+    mode: InputMode,
+    final_message: bool,
+) -> EventKind {
+    let block = if final_message {
+        context_block::raw(
+            context_block::element(
+                "dim-branch-message",
+                &[("from", from), ("to", to), ("final", "true")],
+                &format!("{text}\n\nLine {from} ends with this message."),
+            ),
+            None,
+        )
+    } else {
+        context_block::raw(
+            context_block::element("dim-branch-message", &[("from", from), ("to", to)], text),
+            None,
+        )
+    };
+    EventKind::InputMessage(InputMessageData {
+        blocks: vec![block],
+        mode: Some(mode),
+        ..InputMessageData::default()
+    })
+}
+
+/// A line's turn ending without a message to its parent (branches §12.1).
+fn line_idle(branch: &str, status: &str) -> EventKind {
+    let body = format!(
+        "Line {branch}'s turn ended ({status}) without a message to you, and {branch} is waiting. Read it if you need its state; message it with mode \"steer\" to give it more work, or leave it."
+    );
+    EventKind::InputMessage(InputMessageData {
+        blocks: vec![context_block::raw(
+            context_block::element(
+                "dim-branch-idle",
+                &[("branch", branch), ("status", status)],
+                &body,
+            ),
+            None,
+        )],
+        mode: Some(InputMode::Steer),
+        ..InputMessageData::default()
+    })
+}
+
+/// The roster of open lines, with the ended notice in the same input when a
+/// line was ended from outside (branches §12.1).
+fn roster(open: &[(&str, &str)], ended: Option<&str>) -> EventKind {
+    let key = Some("branch:line".to_owned());
+    let block = if open.is_empty() {
+        context_block::retire(
+            context_block::element(
+                "dim-branch-lines",
+                &[("branch", "main")],
+                "All lines you opened have ended.",
+            ),
+            "branch:line".to_owned(),
+        )
+    } else {
+        let listed = open
+            .iter()
+            .map(|(line, purpose)| format!("- {line}: {purpose}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        context_block::raw(
+            context_block::element(
+                "dim-branch-lines",
+                &[("branch", "main")],
+                &format!(
+                    "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it does not see your work after that point unless you message it.\n{listed}\nThey message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them."
+                ),
+            ),
+            key,
+        )
+    };
+    let mut blocks = vec![block];
+    if let Some(branch) = ended {
+        blocks.push(context_block::raw(
+            context_block::element(
+                "dim-branch-ended",
+                &[("branch", branch)],
+                &format!("Line {branch} was ended from outside its own line, by the user or a host operation. It no longer receives messages; read it if you need what it did."),
+            ),
+            None,
+        ));
+    }
+    EventKind::InputMessage(InputMessageData {
+        blocks,
+        mode: Some(if ended.is_some() {
+            InputMode::Steer
+        } else {
+            InputMode::Append
+        }),
+        ..InputMessageData::default()
+    })
+}
+
+/// A child's opening input: its identity block under `branch:line`.
+fn identity(line: &str, parent: &str) -> EventKind {
+    let body = format!(
+        "You are line {line} of this session. Line {parent} opened you at this point of its history to work in parallel with it.\n\nYour purpose, as {parent} wrote it:\ninvestigate the logs"
+    );
+    EventKind::InputMessage(InputMessageData {
+        blocks: vec![context_block::raw(
+            context_block::element(
+                "dim-branch-line",
+                &[("branch", line), ("parent", parent), ("source", "tool")],
+                &body,
+            ),
+            Some("branch:line".to_owned()),
+        )],
+        mode: Some(InputMode::Queue),
+        ..InputMessageData::default()
+    })
+}
+
+/// The `branch/create` the tool writes on the line that opened a child.
+fn branch_create(turn: &str, request: &str, call: &str, branch: &str, prompt: &str) -> EventKind {
+    EventKind::BranchCreate(BranchCreateData {
+        at: BranchCreateAt::Create {},
+        source: BranchSource::Tool {
+            turn_id: turn.into(),
+            request_id: request.into(),
+            call_id: call.into(),
+        },
+        branch: branch.into(),
+        prompt: prompt.into(),
+    })
+}
+
+fn branch_end(turn: &str, request: &str, call: &str) -> EventKind {
+    EventKind::BranchEnd(BranchEndData {
+        source: BranchSource::Tool {
+            turn_id: turn.into(),
+            request_id: request.into(),
+            call_id: call.into(),
+        },
+        ancestor: None,
+    })
+}
+
+fn branch_ended(branch: &str, source: BranchSource) -> EventKind {
+    EventKind::BranchEnded(BranchEndedData {
+        branch: branch.into(),
+        end_event: 12,
+        source,
+        ancestor: None,
+    })
+}
+
+/// A turn opened by one input the line received.
+fn received_turn(recorded: &mut Recorded, turn: &str, write: EventKind, reply: &str) -> String {
+    let input = recorded.push(write);
+    recorded.push(turn_start(turn));
+    recorded.push(consumed(&input));
+    recorded.push(model_start(turn, turn));
+    recorded.push(text_delta(turn, turn, reply));
+    recorded.push(model_end(turn, turn, output_completed()));
+    recorded.push(turn_ends(turn, completed_turn()));
+    input
 }
 
 /// An input whose one keyed block says `body`, as a Prompt source writes one.
@@ -1478,6 +1707,299 @@ fn a_copied_history_keeps_its_ids_and_tells_where_the_copy_starts() {
 }
 
 #[test]
+// §14 8.
+fn a_lines_roster_messages_and_notices_are_told_on_main() {
+    let mut recorded = Recorded::new();
+    recorded.push(branch_start(None));
+    recorded.at(15, 0);
+    // t1: main opens two lines. The fold of each `branch/create` writes the
+    // roster, and main reads it at the turn's next step.
+    let task = recorded.push(input_message("open two lines"));
+    recorded.push(turn_start("t1"));
+    recorded.push(consumed(&task));
+    recorded.push(model_start("t1", "r1"));
+    recorded.push(call_start("t1", "r1", "c1", "branch"));
+    recorded.push(call_input(
+        "t1",
+        "r1",
+        "c1",
+        "branch",
+        json!({"action": "create", "prompt": "watch the logs"}),
+    ));
+    recorded.push(call_start("t1", "r1", "c2", "branch"));
+    recorded.push(call_input(
+        "t1",
+        "r1",
+        "c2",
+        "branch",
+        json!({"action": "create", "prompt": "watch the tests"}),
+    ));
+    recorded.push(model_end("t1", "r1", output_tool_use()));
+    recorded.push(branch_create("t1", "r1", "c1", "C", "watch the logs"));
+    let first = recorded.push(roster(&[("C", "watch the logs")], None));
+    recorded.push(branch_create("t1", "r1", "c2", "D", "watch the tests"));
+    let both = recorded.push(roster(
+        &[("C", "watch the logs"), ("D", "watch the tests")],
+        None,
+    ));
+    recorded.push(results(
+        "t1",
+        "r1",
+        Some("r1"),
+        &[
+            ("c1", "Line created: C", false),
+            ("c2", "Line created: D", false),
+        ],
+    ));
+    recorded.push(consumed(&first));
+    recorded.push(consumed(&both));
+    recorded.push(model_start("t1", "r2"));
+    recorded.push(text_delta("t1", "r2", "opened both"));
+    recorded.push(model_end("t1", "r2", output_completed()));
+    recorded.push(turn_ends("t1", completed_turn()));
+
+    // D is ended from outside: its result is not told, and the roster with
+    // its notice wakes main as a steer.
+    recorded.at(15, 10);
+    let ended_d = recorded.push(branch_ended(
+        "D",
+        BranchSource::Host {
+            operation_id: "user-end".into(),
+        },
+    ));
+    let outside = recorded.push(roster(&[("C", "watch the logs")], Some("D")));
+    recorded.push(turn_start("t2"));
+    recorded.push(consumed(&outside));
+    recorded.push(model_start("t2", "r3"));
+    recorded.push(text_delta("t2", "r3", "noted"));
+    recorded.push(model_end("t2", "r3", output_completed()));
+    recorded.push(turn_ends("t2", completed_turn()));
+
+    // C's idle notice wakes main, and main steers C to finish.
+    recorded.at(15, 20);
+    let idle = recorded.push(line_idle("C", "completed"));
+    let last_turn = recorded.push(turn_start("t3"));
+    recorded.push(consumed(&idle));
+    recorded.push(model_start("t3", "r4"));
+    recorded.push(text_delta("t3", "r4", "asking C to finish"));
+    recorded.push(call_start("t3", "r4", "c3", "branch"));
+    recorded.push(call_input(
+        "t3",
+        "r4",
+        "c3",
+        "branch",
+        json!({"action": "message", "to": "C", "mode": "steer", "content": "wrap up"}),
+    ));
+    recorded.push(model_end("t3", "r4", output_tool_use()));
+    recorded.push(results(
+        "t3",
+        "r4",
+        Some("r4"),
+        &[("c3", "Sent to C.", false)],
+    ));
+    // C ends itself: its final message arrives while main is in the turn, then
+    // its result, then the roster of no open lines at the next step.
+    recorded.at(15, 25);
+    let last = recorded.push(line_message(
+        "C",
+        "main",
+        "all done",
+        InputMode::Steer,
+        true,
+    ));
+    let ended_c = recorded.push(branch_ended(
+        "C",
+        BranchSource::Tool {
+            turn_id: "c-t4".into(),
+            request_id: "c-r5".into(),
+            call_id: "c-c1".into(),
+        },
+    ));
+    let retiring = recorded.push(roster(&[], None));
+    recorded.push(consumed(&last));
+    recorded.push(consumed(&retiring));
+    recorded.push(model_start("t3", "r5"));
+    recorded.push(text_delta("t3", "r5", "noted C's end"));
+    recorded.push(model_end("t3", "r5", output_completed()));
+    recorded.push(turn_ends("t3", completed_turn()));
+
+    let (page, error) = recorded.answer("t3", json!({}));
+    assert!(!error, "{page}");
+    assert!(
+        page.contains("turn: line C's turn ended (completed) without a message to you"),
+        "{page}"
+    );
+    assert!(
+        page.contains("turn: line D was ended from outside"),
+        "{page}"
+    );
+    assert!(
+        !recorded.narrative().tells(&ended_c),
+        "branch/ended is not told"
+    );
+    assert!(
+        !recorded.narrative().tells(&ended_d),
+        "branch/ended is not told"
+    );
+
+    // The first roster is read inside the turn that called create.
+    let (page, error) = recorded.answer("t3", json!({ "open": first }));
+    assert!(!error, "{page}");
+    assert!(
+        page.contains("Lines you opened that are still open."),
+        "{page}"
+    );
+    assert!(page.contains("- C: watch the logs"), "{page}");
+
+    // The notice of the line ended from outside opens with its marker.
+    let (page, error) = recorded.answer("t3", json!({ "open": outside }));
+    assert!(!error, "{page}");
+    assert!(page.contains("<dim-branch-ended branch=\"D\">"), "{page}");
+
+    // C's final message and the retiring roster are inside the last turn.
+    let (page, error) = recorded.answer("t3", json!({ "open": last_turn }));
+    assert!(!error, "{page}");
+    assert!(
+        page.contains("line C's final message: \"all done\""),
+        "{page}"
+    );
+    assert!(!page.contains("last message"), "{page}");
+    let (page, error) = recorded.answer("t3", json!({ "open": last }));
+    assert!(!error, "{page}");
+    assert!(page.contains("Line C ends with this message."), "{page}");
+    let (page, error) = recorded.answer("t3", json!({ "open": retiring }));
+    assert!(!error, "{page}");
+    assert!(page.contains("All lines you opened have ended."), "{page}");
+    assert!(page.contains("</dim-branch-lines> (ended)"), "{page}");
+}
+
+#[test]
+// §14 8.
+fn a_childs_identity_and_its_parents_messages_are_told_on_the_child() {
+    let mut recorded = Recorded::new();
+    recorded.push(branch_start(None));
+    recorded.at(15, 0);
+    received_turn(
+        &mut recorded,
+        "t1",
+        input_message("plan the work"),
+        "planned",
+    );
+
+    recorded.at(15, 10);
+    recorded.push(branch_start(Some("main")));
+    let opening = received_turn(&mut recorded, "t2", identity("C", "main"), "on it");
+
+    // A steer that wakes the idle line opens its turn: no timing words.
+    recorded.at(15, 20);
+    received_turn(
+        &mut recorded,
+        "t3",
+        line_message("main", "C", "status please", InputMode::Steer, false),
+        "reporting",
+    );
+
+    // A steer that opens the turn reads without timing words; one the line
+    // reads after its turn's first model step reads with them.
+    recorded.at(15, 30);
+    let opener = recorded.push(line_message(
+        "main",
+        "C",
+        "act on the logs now",
+        InputMode::Steer,
+        false,
+    ));
+    let turn = recorded.push(turn_start("t4"));
+    recorded.push(consumed(&opener));
+    recorded.push(model_start("t4", "r4"));
+    recorded.push(text_delta("t4", "r4", "checking the logs"));
+    recorded.at(15, 35);
+    let during = recorded.push(line_message(
+        "main",
+        "C",
+        "also check the cache",
+        InputMode::Steer,
+        false,
+    ));
+    recorded.push(model_end(
+        "t4",
+        "r4",
+        ModelOutputOutcome::Cancelled {
+            reason: "replaced by steer".into(),
+        },
+    ));
+    recorded.push(consumed(&during));
+    recorded.push(model_start("t4", "r5"));
+    recorded.push(text_delta("t4", "r5", "both clean"));
+    // The line ends itself: the call is in t4 and `branch/end` follows it.
+    recorded.push(call_start("t4", "r5", "c1", "branch"));
+    recorded.push(call_input(
+        "t4",
+        "r5",
+        "c1",
+        "branch",
+        json!({"action": "end", "content": "the logs are clean"}),
+    ));
+    recorded.push(model_end("t4", "r5", output_tool_use()));
+    let ending = recorded.push(branch_end("t4", "r5", "c1"));
+    recorded.push(results(
+        "t4",
+        "r5",
+        Some("r5"),
+        &[(
+            "c1",
+            "Line C is ending; your final message was sent to main.",
+            false,
+        )],
+    ));
+    recorded.push(turn_ends("t4", completed_turn()));
+
+    let (page, error) = recorded.answer("t4", json!({}));
+    assert!(!error, "{page}");
+    assert!(
+        page.lines()
+            .any(|line| line.contains("this line was opened by main")),
+        "{page}"
+    );
+    assert!(
+        page.contains("turn: dim-branch-line branch=C parent=main source=tool (current)"),
+        "{page}"
+    );
+    assert!(
+        page.contains("turn: line main: \"status please\""),
+        "{page}"
+    );
+    assert!(
+        page.contains("turn: line main: \"act on the logs now\""),
+        "{page}"
+    );
+    assert!(
+        !page.contains("(while you were working)"),
+        "the steer that opened the turn does not carry the timing words: {page}"
+    );
+    assert!(
+        !recorded.narrative().tells(&ending),
+        "branch/end is not a told kind"
+    );
+
+    // Inside the turn, the steer that replaced its model step carries them.
+    let (page, error) = recorded.answer("t4", json!({ "open": turn }));
+    assert!(!error, "{page}");
+    assert!(
+        page.contains("line main: \"act on the logs now\""),
+        "{page}"
+    );
+    assert!(
+        page.contains("line main (while you were working): \"also check the cache\""),
+        "{page}"
+    );
+
+    let (page, error) = recorded.answer("t4", json!({ "open": opening }));
+    assert!(!error, "{page}");
+    assert!(page.contains("You are line C of this session"), "{page}");
+}
+
+#[test]
 // §14 9.
 fn every_line_stays_bounded_whatever_the_arguments_and_the_blocks() {
     let mut recorded = Recorded::new();
@@ -1842,16 +2364,16 @@ fn a_grandchild_branch_keeps_the_middle_branch_turn_its_own() {
         "the middle turn's own input: {middle_line}"
     );
     assert!(
-        middle_line.contains("continued on the parent branch"),
+        middle_line.contains("continued on the parent line"),
         "{middle_line}"
     );
     assert!(
-        line_of(&page, &root).contains("continued on the parent branch"),
+        line_of(&page, &root).contains("continued on the parent line"),
         "{page}"
     );
     assert!(
         page.lines()
-            .any(|line| line.contains("this branch was forked from b")),
+            .any(|line| line.contains("this line was opened by b")),
         "{page}"
     );
 

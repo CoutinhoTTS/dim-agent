@@ -953,7 +953,7 @@ impl<'a> Narrative<'a> {
             Kind::Interrupt => "the user interrupted the turn".into(),
             Kind::Permission { mode } => format!("permission mode changed to {mode}"),
             Kind::Compaction { current } => compaction_line(*current),
-            Kind::Fork { parent } => format!("this branch was forked from {}", part(parent)),
+            Kind::Fork { parent } => format!("this line was opened by {}", part(parent)),
             Kind::SessionFork => {
                 "this conversation was copied from another session up to here".into()
             }
@@ -979,13 +979,14 @@ impl<'a> Narrative<'a> {
                         working,
                     },
                 ..
-            }) => parts.push(match (&input.user, *working) {
-                (Some(user), true) => format!(
+            }) => parts.push(match (line_write(input), &input.user, *working) {
+                (Some(write), _, _) => format!("turn: {}", write_line(&write, *working)),
+                (None, Some(user), true) => format!(
                     "turn: user (while you were working) \"{}\"",
                     part(&user_text(user))
                 ),
-                (Some(user), false) => format!("turn: user \"{}\"", part(&user_text(user))),
-                (None, _) => format!("turn: {}", part(&blocks_name(&input.blocks, live))),
+                (None, Some(user), false) => format!("turn: user \"{}\"", part(&user_text(user))),
+                (None, None, _) => format!("turn: {}", part(&blocks_name(&input.blocks, live))),
             }),
             _ => parts.push("turn:".into()),
         }
@@ -1029,7 +1030,7 @@ impl<'a> Narrative<'a> {
         match turn.outcome {
             Some(outcome) => outcome.text(),
             None if turn.turn_id == calling_turn => "in progress",
-            None if turn.start < self.own_start => "continued on the parent branch",
+            None if turn.start < self.own_start => "continued on the parent line",
             None => "in progress",
         }
     }
@@ -1090,11 +1091,40 @@ fn heading(thing: &Thing<'_>, id: &str, time: u64) -> String {
             input,
             live,
             working,
-        } => match (&input.user, *working) {
-            (Some(_), true) => format!("{clock} {id} user (while you were working)"),
-            (Some(_), false) => format!("{clock} {id} user"),
-            (None, _) => format!("{clock} {id} {}", part(&blocks_name(&input.blocks, live))),
-        },
+        } => {
+            if let Some(write) = line_write(input) {
+                let label = match (&write, *working) {
+                    (
+                        LineWrite::Message {
+                            from,
+                            final_message: true,
+                            ..
+                        },
+                        _,
+                    ) => {
+                        format!("line {}'s final message", part(from))
+                    }
+                    (LineWrite::Message { from, .. }, true) => {
+                        format!("line {} (while you were working)", part(from))
+                    }
+                    (LineWrite::Message { from, .. }, false) => format!("line {}", part(from)),
+                    (LineWrite::Idle { branch, .. }, _) => {
+                        format!("line {}'s turn ended", part(branch))
+                    }
+                    (LineWrite::Ended { branch }, _) => {
+                        format!("line {} was ended", part(branch))
+                    }
+                };
+                return format!("{clock} {id} {label}");
+            }
+            match (&input.user, *working) {
+                (Some(_), true) => {
+                    format!("{clock} {id} user (while you were working)")
+                }
+                (Some(_), false) => format!("{clock} {id} user"),
+                (None, _) => format!("{clock} {id} {}", part(&blocks_name(&input.blocks, live))),
+            }
+        }
         Kind::Reply { state, .. } => {
             let label = match state {
                 ReplyState::Writing => "you (still writing)".to_owned(),
@@ -1269,6 +1299,9 @@ fn compaction_line(current: bool) -> String {
 }
 
 fn input_line(input: &InputMessageData, live: &[bool], working: bool) -> String {
+    if let Some(write) = line_write(input) {
+        return write_line(&write, working);
+    }
     let speaker = if working {
         "user (while you were working)"
     } else {
@@ -1307,6 +1340,110 @@ fn blocks_name(blocks: &[InputBlock], live: &[bool]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// What another line wrote to this one, when the input opens with one of the
+/// line markers (§3.4).
+enum LineWrite<'a> {
+    /// A message; `final_message` marks the one a line ends with.
+    Message {
+        from: &'a str,
+        text: &'a str,
+        final_message: bool,
+    },
+    /// A line's turn ended without a message to this one.
+    Idle { branch: &'a str, status: &'a str },
+    /// A line was ended from outside its own line.
+    Ended { branch: &'a str },
+}
+
+/// The line write an input carries, read from the marker of its first block
+/// that is one. A roster update carries its ended notice in a later block, and
+/// that notice is what the input says.
+fn line_write(input: &InputMessageData) -> Option<LineWrite<'_>> {
+    for block in &input.blocks {
+        let InputBlock::Raw { text, .. } = block;
+        let Some(head) = tag(text) else {
+            continue;
+        };
+        let name = head.split(' ').next().unwrap_or_default();
+        let write = match name {
+            "dim-branch-message" => LineWrite::Message {
+                from: attribute(head, "from")?,
+                text: body_line(text, name),
+                final_message: attribute(head, "final") == Some("true"),
+            },
+            "dim-branch-idle" => LineWrite::Idle {
+                branch: attribute(head, "branch")?,
+                status: attribute(head, "status")?,
+            },
+            "dim-branch-ended" => LineWrite::Ended {
+                branch: attribute(head, "branch")?,
+            },
+            _ => continue,
+        };
+        return Some(write);
+    }
+    None
+}
+
+/// How one line write reads in a line (§3.4). `working` is whether the input
+/// was read after its turn's first model step, whatever mode it arrived in.
+fn write_line(write: &LineWrite<'_>, working: bool) -> String {
+    match write {
+        LineWrite::Message {
+            from,
+            text,
+            final_message: true,
+        } => {
+            format!(
+                "line {}'s final message: {}",
+                part(from),
+                value(text, false)
+            )
+        }
+        LineWrite::Message {
+            from,
+            text,
+            final_message: false,
+        } if working => format!(
+            "line {} (while you were working): {}",
+            part(from),
+            value(text, false)
+        ),
+        LineWrite::Message {
+            from,
+            text,
+            final_message: false,
+        } => {
+            format!("line {}: {}", part(from), value(text, false))
+        }
+        LineWrite::Idle { branch, status } => format!(
+            "line {}'s turn ended ({}) without a message to you",
+            part(branch),
+            part(status)
+        ),
+        LineWrite::Ended { branch } => format!("line {} was ended from outside", part(branch)),
+    }
+}
+
+/// The first line of a marked block's body, without its closing tag.
+fn body_line<'a>(text: &'a str, name: &str) -> &'a str {
+    let Some((_, rest)) = text.split_once('>') else {
+        return text;
+    };
+    let closing = format!("</{name}>");
+    let body = rest.trim().trim_end_matches(closing.as_str()).trim();
+    body.lines().next().unwrap_or_default()
+}
+
+/// The value of one attribute of an opening tag, when it has one.
+fn attribute<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    let spelled = format!("{name}=\"");
+    let at = head.find(&spelled)?;
+    let rest = &head[at + spelled.len()..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
 }
 
 /// The opening tag of a block's text, when it opens with one.
