@@ -20,7 +20,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_types::{
     BaselineSource, CompactionTrigger, Message, MessageContent, MessagePart, ModelId, ModelRequest,
-    ModelSelection, Role,
+    ModelSelection, ReplacementParts, Role,
 };
 use dim_app_server::provider::{ModelPreferences, ProviderService};
 use futures_util::StreamExt;
@@ -51,7 +51,7 @@ const JUDGE_SYSTEM: &str = "You check the statements below against a summary tha
 pub async fn run() -> Result<()> {
     let options = Options::parse()?;
     let home = isolated_home(&options.home)?;
-    let cases = read_cases()?;
+    let cases = read_cases(&cases_directory())?;
     std::fs::create_dir_all(&options.out)?;
     let cancel = CancellationToken::new();
     let server =
@@ -133,6 +133,7 @@ pub async fn run() -> Result<()> {
                         "durationMs": outcome.duration.as_secs_f64() * 1000.,
                         "summary": outcome.summary(),
                         "diagnostics": outcome.diagnostics(),
+                        "steps": outcome.steps_json(),
                         "judgeError": judged.error(),
                         "probes": probes,
                     }))? + "\n",
@@ -395,9 +396,20 @@ impl Drop for CompactionFile {
     }
 }
 
+/// One compaction of a case: the whole history after its checkpoint, and the
+/// cut that replaces its earlier part.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Case {
+struct Step {
+    messages: Vec<Message>,
+    retain_from: usize,
+}
+
+/// A case file's two shapes: one compaction, or a chain of five
+/// (ContextCompaction §13.4).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CaseFile {
     id: String,
     #[serde(default)]
     description: String,
@@ -405,9 +417,59 @@ struct Case {
     context_window: Option<u64>,
     #[serde(default)]
     earlier_summary: Option<String>,
-    messages: Vec<Message>,
-    retain_from: usize,
+    #[serde(default)]
+    messages: Option<Vec<Message>>,
+    #[serde(default)]
+    retain_from: Option<usize>,
+    #[serde(default)]
+    steps: Option<Vec<Step>>,
     probes: Vec<Probe>,
+}
+
+/// A case as the runner runs it, normalized to its steps.
+struct Case {
+    id: String,
+    description: String,
+    context_window: Option<u64>,
+    earlier_summary: Option<String>,
+    probes: Vec<Probe>,
+    steps: Vec<Step>,
+}
+const CHAIN_STEPS: usize = 5;
+impl CaseFile {
+    fn into_case(self) -> std::result::Result<Case, String> {
+        let steps = match (self.messages, self.retain_from, self.steps) {
+            (Some(messages), Some(retain_from), None) => vec![Step {
+                messages,
+                retain_from,
+            }],
+            (None, None, Some(steps)) if steps.len() == CHAIN_STEPS => steps,
+            (None, None, Some(steps)) => {
+                return Err(format!(
+                    "steps has {} slices, a chain needs {CHAIN_STEPS}",
+                    steps.len()
+                ));
+            }
+            (None, None, None) => {
+                return Err("a case needs messages and retainFrom, or steps".to_owned());
+            }
+            (Some(_), Some(_), Some(_)) => {
+                return Err("a case has both messages and steps".to_owned());
+            }
+            (Some(_), None, _) | (None, Some(_), _) => {
+                return Err("a case needs both messages and retainFrom".to_owned());
+            }
+        };
+        validate_steps(&steps)?;
+        Ok(Case {
+            id: self.id,
+            description: self.description,
+            context_window: self.context_window,
+            earlier_summary: self.earlier_summary,
+            probes: self.probes,
+            steps,
+        })
+    }
 }
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
@@ -426,9 +488,11 @@ enum ProbeKind {
     Absent,
 }
 
-fn read_cases() -> Result<Vec<Case>> {
-    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(CASES);
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&directory)?
+fn cases_directory() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(CASES)
+}
+fn read_cases(directory: &Path) -> Result<Vec<Case>> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(directory)?
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
         .map(|entry| entry.path())
@@ -438,31 +502,53 @@ fn read_cases() -> Result<Vec<Case>> {
     let mut cases = Vec::new();
     for file in files {
         let bytes = std::fs::read(&file)?;
-        let case: Case = serde_json::from_slice(&bytes)
+        let raw: CaseFile = serde_json::from_slice(&bytes)
             .map_err(|error| format!("{}: {error}", file.display()))?;
-        validate_cut(&case).map_err(|error| format!("{}: {error}", file.display()))?;
+        let case = raw
+            .into_case()
+            .map_err(|error| format!("{}: {error}", file.display()))?;
         cases.push(case);
     }
     Ok(cases)
 }
 
-/// The only cut is `retainFrom`, so it must not separate a tool call from its
-/// result (ContextCompaction §4.3, §13.4).
-fn validate_cut(case: &Case) -> std::result::Result<(), String> {
-    if case.retain_from > case.messages.len() {
+/// Each step's only cut is `retainFrom`, so it must not separate a tool call
+/// from its result (ContextCompaction §4.3, §13.4); in a chain, step k must
+/// repeat step k−1's retained tail verbatim, because a real compaction keeps
+/// it and the next compaction sees it before the new messages.
+fn validate_steps(steps: &[Step]) -> std::result::Result<(), String> {
+    for (index, step) in steps.iter().enumerate() {
+        validate_cut(&step.messages, step.retain_from)
+            .map_err(|error| format!("step {}: {error}", index + 1))?;
+        let Some(previous) = index.checked_sub(1).map(|index| &steps[index]) else {
+            continue;
+        };
+        if !step
+            .messages
+            .starts_with(&previous.messages[previous.retain_from..])
+        {
+            return Err(format!(
+                "step {} does not begin with step {}'s retained tail",
+                index + 1,
+                index
+            ));
+        }
+    }
+    Ok(())
+}
+fn validate_cut(messages: &[Message], retain_from: usize) -> std::result::Result<(), String> {
+    if retain_from > messages.len() {
         return Err(format!(
-            "retainFrom {} is past the {} messages",
-            case.retain_from,
-            case.messages.len()
+            "retainFrom {retain_from} is past the {} messages",
+            messages.len()
         ));
     }
-    let calls = tool_uses(&case.messages[..case.retain_from]);
-    for message in &case.messages[case.retain_from..] {
+    let calls = tool_uses(&messages[..retain_from]);
+    for message in &messages[retain_from..] {
         for id in tool_results(std::slice::from_ref(message)) {
             if calls.contains(&id) {
                 return Err(format!(
-                    "retainFrom {} separates the tool call {id} from its result",
-                    case.retain_from
+                    "retainFrom {retain_from} separates the tool call {id} from its result"
                 ));
             }
         }
@@ -496,35 +582,29 @@ fn tool_results(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
-/// A case as the strategy sees it: the conversation request, the history with
-/// its `m<i>` sources, the single cut and the checkpoint of an earlier summary.
-struct Prepared {
-    id: String,
-    description: String,
-    probes: Vec<Probe>,
+/// One step of a case as the strategy sees it: the conversation request, the
+/// history with its `m<i>` sources, and its single cut.
+struct PreparedStep {
     request: Arc<ModelRequest>,
     history: Vec<HistoryEntry>,
-    checkpoint: Option<CompactionCheckpoint>,
     retain_from: usize,
     model: Arc<dyn ContextModel>,
-    /// The window facts the strategy ran with, after the case's narrowing.
-    window: f64,
-    output: f64,
 }
-impl Prepared {
+impl PreparedStep {
     async fn new(
-        case: &Case,
+        step: &Step,
         selection: &ModelSelection,
+        window: Option<u64>,
         cancel: &CancellationToken,
     ) -> Result<Self> {
         let mut request = ModelRequest::new(
             &selection.provider_id,
             &selection.model_id,
-            case.messages.clone(),
+            step.messages.clone(),
         );
         request.capability_snapshot = selection.capability_snapshot.clone();
         request.config = selection.config.clone();
-        if let Some(window) = case.context_window {
+        if let Some(window) = window {
             let declared_output = {
                 let snapshot = request
                     .capability_snapshot
@@ -548,14 +628,13 @@ impl Prepared {
             .await?;
         if model.context_window() - model.output_tokens() <= 0. {
             return Err(format!(
-                "case {}: a window of {} leaves no input budget with {} output tokens",
-                case.id,
+                "a window of {} leaves no input budget with {} output tokens",
                 model.context_window(),
                 model.output_tokens()
             )
             .into());
         }
-        let history = case
+        let history = step
             .messages
             .iter()
             .enumerate()
@@ -568,31 +647,17 @@ impl Prepared {
             })
             .collect();
         Ok(Self {
-            id: case.id.clone(),
-            description: case.description.clone(),
-            probes: case.probes.clone(),
-            checkpoint: case
-                .earlier_summary
-                .as_ref()
-                .map(|summary| CompactionCheckpoint {
-                    retain_from: "m0".into(),
-                    replacement: Arc::from([summary_message(summary)]),
-                    context_baseline: Arc::from([]),
-                    replacement_parts: None,
-                }),
-            history,
-            retain_from: case.retain_from,
-            window: model.context_window(),
-            output: model.output_tokens(),
-            model,
             request,
+            history,
+            retain_from: step.retain_from,
+            model,
         })
     }
-    fn input(&self) -> CompactionInput {
+    fn input(&self, checkpoint: Option<CompactionCheckpoint>) -> CompactionInput {
         let retain_from = format!("m{}", self.retain_from);
         CompactionInput {
             history: self.history.clone(),
-            checkpoint: self.checkpoint.clone(),
+            checkpoint,
             request: self.request.clone(),
             model: self.model.clone(),
             retain_limit: Some(retain_from.clone()),
@@ -612,12 +677,56 @@ impl Prepared {
     }
 }
 
-/// One compaction of the shipped strategy, with what it took.
-struct Run {
+/// A case as the runner runs it: its steps, the first step's checkpoint, and
+/// the window facts the strategy ran with, after the case's narrowing.
+struct Prepared {
+    id: String,
+    description: String,
+    probes: Vec<Probe>,
+    steps: Vec<PreparedStep>,
+    checkpoint: Option<CompactionCheckpoint>,
+    window: f64,
+    output: f64,
+}
+impl Prepared {
+    async fn new(
+        case: &Case,
+        selection: &ModelSelection,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
+        let mut steps = Vec::new();
+        for step in &case.steps {
+            steps.push(
+                PreparedStep::new(step, selection, case.context_window, cancel)
+                    .await
+                    .map_err(|error| format!("case {}: {error}", case.id))?,
+            );
+        }
+        Ok(Self {
+            id: case.id.clone(),
+            description: case.description.clone(),
+            probes: case.probes.clone(),
+            checkpoint: case
+                .earlier_summary
+                .as_ref()
+                .map(|summary| CompactionCheckpoint {
+                    retain_from: "m0".into(),
+                    replacement: Arc::from([summary_message(summary)]),
+                    context_baseline: Arc::from([]),
+                    replacement_parts: None,
+                }),
+            window: steps[0].model.context_window(),
+            output: steps[0].model.output_tokens(),
+            steps,
+        })
+    }
+}
+/// One step's compaction of the shipped strategy, with what it took.
+struct RunStep {
     duration: Duration,
     outcome: std::result::Result<StrategyOutcome, HostError>,
 }
-impl Run {
+impl RunStep {
     fn label(&self) -> &'static str {
         match &self.outcome {
             Ok(StrategyOutcome::Completed { .. }) => "completed",
@@ -663,12 +772,114 @@ impl Run {
     }
 }
 
+/// A case's run: one compaction, or a chain whose steps stop at the first
+/// that does not complete (ContextCompaction §13.4).
+struct Run {
+    steps: Vec<RunStep>,
+    duration: Duration,
+}
+impl Run {
+    fn label(&self) -> &'static str {
+        if self.steps.iter().any(|step| step.label() == "failed") {
+            "failed"
+        } else if self.steps.iter().any(|step| step.label() == "skipped") {
+            "skipped"
+        } else {
+            "completed"
+        }
+    }
+    fn error(&self) -> Option<String> {
+        self.steps.last().and_then(RunStep::error)
+    }
+    fn summary(&self) -> Option<String> {
+        self.steps.last().and_then(RunStep::summary)
+    }
+    fn diagnostics(&self) -> Option<Value> {
+        self.steps.last().and_then(RunStep::diagnostics)
+    }
+    /// The steps that ran, each with what a single run records.
+    fn steps_json(&self) -> Vec<Value> {
+        self.steps
+            .iter()
+            .map(|step| {
+                json!({
+                    "outcome": step.label(),
+                    "error": step.error(),
+                    "durationMs": step.duration.as_secs_f64() * 1000.,
+                    "summary": step.summary(),
+                    "diagnostics": step.diagnostics(),
+                })
+            })
+            .collect()
+    }
+    /// Whether any step's summarizer fell back from the arm's reasoning value.
+    fn fell_back(&self, arm: &Arm) -> bool {
+        self.steps.iter().any(|step| {
+            step.details()
+                .get("reasoning")
+                .and_then(Value::as_str)
+                .is_some_and(|applied| applied != arm.reasoning.name())
+        })
+    }
+    fn cut_offs(&self) -> u64 {
+        self.steps
+            .iter()
+            .map(|step| {
+                step.details()
+                    .get("cutOffCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+            })
+            .sum()
+    }
+    fn tokens(&self) -> Option<f64> {
+        self.steps
+            .last()?
+            .details()
+            .get("estimatedSummaryTokens")
+            .and_then(Value::as_f64)
+    }
+    fn target_tokens(&self) -> Option<f64> {
+        self.steps
+            .last()?
+            .details()
+            .get("targetTokens")
+            .and_then(Value::as_f64)
+    }
+}
+
 async fn run_case(strategy: &SummaryStrategy, case: &Prepared, cancel: &CancellationToken) -> Run {
     let started = Instant::now();
-    let outcome = strategy.compact(case.input(), cancel.clone()).await;
+    let mut checkpoint = case.checkpoint.clone();
+    let mut steps = Vec::new();
+    for prepared in &case.steps {
+        let step_started = Instant::now();
+        let outcome = strategy
+            .compact(prepared.input(checkpoint.take()), cancel.clone())
+            .await;
+        let step = RunStep {
+            duration: step_started.elapsed(),
+            outcome,
+        };
+        let next = step.summary().map(|summary| CompactionCheckpoint {
+            retain_from: "m0".into(),
+            replacement: Arc::from([summary_message(&summary)]),
+            context_baseline: Arc::from([]),
+            replacement_parts: Some(ReplacementParts {
+                strategy: 1,
+                digest: 0,
+            }),
+        });
+        let done = step.label() != "completed";
+        steps.push(step);
+        if done {
+            break;
+        }
+        checkpoint = next;
+    }
     Run {
+        steps,
         duration: started.elapsed(),
-        outcome,
     }
 }
 
@@ -926,24 +1137,13 @@ struct Metrics {
 }
 impl Metrics {
     fn add(&mut self, arm: &Arm, case: &Prepared, run: &Run, probes: &[Value]) {
-        let details = run.details();
-        if details
-            .get("reasoning")
-            .and_then(Value::as_str)
-            .is_some_and(|applied| applied != arm.reasoning.name())
-        {
+        if run.fell_back(arm) {
             self.fell_back += 1;
         }
-        self.cut_offs += details
-            .get("cutOffCount")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        if let Some(tokens) = details
-            .get("estimatedSummaryTokens")
-            .and_then(Value::as_f64)
-        {
+        self.cut_offs += run.cut_offs();
+        if let Some(tokens) = run.tokens() {
             self.tokens.push(tokens);
-            if let Some(target) = details.get("targetTokens").and_then(Value::as_f64) {
+            if let Some(target) = run.target_tokens() {
                 self.ratios.push(tokens / target);
             }
         }
