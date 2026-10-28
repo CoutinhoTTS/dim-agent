@@ -244,7 +244,8 @@
     {
       "id": "first-chunk",
       "kind": "fact",
-      "text": "A review finding was that the diagnostics object must carry cutOffCount."
+      "text": "A review finding was that the diagnostics object must carry cutOffCount.",
+      "item": "constraint"
     },
     {
       "id": "path",
@@ -255,6 +256,12 @@
       "id": "scope",
       "kind": "fact",
       "text": "The work is a review of the compaction design document."
+    },
+    {
+      "id": "task",
+      "kind": "fact",
+      "item": "task",
+      "text": "The work is a continuing review of docs/design/plugins/ContextCompaction.md: check the section numbering, the acceptance list and the rule-check table, and report code changes."
     }
   ]
 }

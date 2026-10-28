@@ -478,6 +478,8 @@ struct Probe {
     id: String,
     kind: ProbeKind,
     text: String,
+    #[serde(default)]
+    item: Option<ItemClass>,
 }
 
 #[derive(Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
@@ -487,6 +489,43 @@ enum ProbeKind {
     Fact,
     Absent,
 }
+
+/// The 3b class a `fact` probe checks (compaction-quality §3). Exact
+/// identifiers, the eighth item, are the `exact` probes (ContextCompaction
+/// §13.4).
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+enum ItemClass {
+    Task,
+    Constraint,
+    Decision,
+    RuledOut,
+    OpenItem,
+    Judgment,
+    NextStep,
+}
+impl ItemClass {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::Constraint => "constraint",
+            Self::Decision => "decision",
+            Self::RuledOut => "ruledOut",
+            Self::OpenItem => "openItem",
+            Self::Judgment => "judgment",
+            Self::NextStep => "nextStep",
+        }
+    }
+}
+const ITEMS: [ItemClass; 7] = [
+    ItemClass::Task,
+    ItemClass::Constraint,
+    ItemClass::Decision,
+    ItemClass::RuledOut,
+    ItemClass::OpenItem,
+    ItemClass::Judgment,
+    ItemClass::NextStep,
+];
 
 fn cases_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(CASES)
@@ -507,9 +546,24 @@ fn read_cases(directory: &Path) -> Result<Vec<Case>> {
         let case = raw
             .into_case()
             .map_err(|error| format!("{}: {error}", file.display()))?;
+        validate_probes(&case.probes).map_err(|error| format!("{}: {error}", file.display()))?;
         cases.push(case);
     }
     Ok(cases)
+}
+
+/// `item` names the 3b class a `fact` probe checks; on another kind it would
+/// have no meaning, because the breakdown counts `fact` probes only.
+fn validate_probes(probes: &[Probe]) -> std::result::Result<(), String> {
+    for probe in probes {
+        if probe.item.is_some() && probe.kind != ProbeKind::Fact {
+            return Err(format!(
+                "probe {}: item applies to fact probes only",
+                probe.id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Each step's only cut is `retainFrom`, so it must not separate a tool call
@@ -1120,6 +1174,9 @@ fn normalize(text: &str) -> String {
 struct Metrics {
     exact: (usize, usize),
     facts: (usize, usize),
+    /// `fact` probes that carry an `item`, counted per 3b class
+    /// (ContextCompaction §13.4).
+    items: BTreeMap<ItemClass, (usize, usize)>,
     violations: usize,
     /// Judged probes the judge did not answer, for the operator to correct
     /// by hand (ContextCompaction §13.4).
@@ -1163,13 +1220,33 @@ impl Metrics {
                 ProbeKind::Exact => {
                     self.exact = count(self.exact, present);
                 }
-                ProbeKind::Fact => self.facts = count(self.facts, present),
+                ProbeKind::Fact => {
+                    self.facts = count(self.facts, present);
+                    if let Some(item) = probe.item {
+                        let counts = self.items.entry(item).or_default();
+                        *counts = count(*counts, present);
+                    }
+                }
                 ProbeKind::Absent if present => self.violations += 1,
                 ProbeKind::Absent => {}
             }
         }
     }
     fn row(&self, arm: &Arm) -> Value {
+        let by_item: BTreeMap<&str, Value> = self
+            .items
+            .iter()
+            .map(|(item, counts)| {
+                (
+                    item.name(),
+                    json!({
+                        "present": counts.0,
+                        "total": counts.1,
+                        "recall": recall(*counts),
+                    }),
+                )
+            })
+            .collect();
         json!({
             "arm": arm.id,
             "reasoning": arm.reasoning.name(),
@@ -1179,6 +1256,7 @@ impl Metrics {
                 "inputShare": target.input_share,
             })),
             "factRecall": recall(self.facts),
+            "factRecallByItem": by_item,
             "exactRecall": recall(self.exact),
             "violations": self.violations,
             "unjudged": self.unjudged,
@@ -1289,5 +1367,43 @@ fn table(rows: &[Value]) -> String {
             number(&row["p90TargetRatio"]),
         );
     }
+    if let Some(items) = item_table(rows) {
+        text.push('\n');
+        text.push_str(&items);
+    }
     text
+}
+
+/// `F` per 3b class: one row per `item` a `fact` probe names, one column per
+/// arm (ContextCompaction §13.4).
+fn item_table(rows: &[Value]) -> Option<String> {
+    let items: Vec<ItemClass> = ITEMS
+        .into_iter()
+        .filter(|item| {
+            rows.iter()
+                .any(|row| !row["factRecallByItem"][item.name()].is_null())
+        })
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    let mut text = String::from("| item |");
+    for row in rows {
+        text += &format!(" {} |", row["arm"].as_str().unwrap_or_default());
+    }
+    text.push_str("\n| --- |");
+    for _ in rows {
+        text.push_str(" --- |");
+    }
+    text.push('\n');
+    for item in items {
+        text += &format!("| {} |", item.name());
+        for row in rows {
+            let recall = row["factRecallByItem"][item.name()]["recall"].as_f64();
+            let cell = recall.map_or_else(|| "–".to_owned(), |recall| format!("{recall:.3}"));
+            text += &format!(" {cell} |");
+        }
+        text.push('\n');
+    }
+    Some(text)
 }

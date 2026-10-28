@@ -49,7 +49,8 @@
     {
       "id": "revision",
       "kind": "fact",
-      "text": "The unwrap rule was revised: unwrap is not allowed outside tests, the runner included."
+      "text": "The unwrap rule was revised: unwrap is not allowed outside tests, the runner included.",
+      "item": "constraint"
     },
     {
       "id": "old-rule",
@@ -60,6 +61,12 @@
       "id": "error-type",
       "kind": "exact",
       "text": "Box<dyn Error>"
+    },
+    {
+      "id": "task",
+      "kind": "fact",
+      "item": "task",
+      "text": "The task was to write the compaction runner in xtask as a tool, not library code."
     }
   ]
 }

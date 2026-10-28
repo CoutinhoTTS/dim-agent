@@ -537,6 +537,7 @@
     {
       "id": "input-schema",
       "kind": "fact",
+      "item": "constraint",
       "text": "The ask_user tool input schema and the session.question.respond parameters must not change."
     },
     {
@@ -547,11 +548,13 @@
     {
       "id": "label-case",
       "kind": "fact",
+      "item": "constraint",
       "text": "Option labels are compared ignoring ASCII case in parse and in check."
     },
     {
       "id": "task",
       "kind": "fact",
+      "item": "task",
       "text": "The task is now only to land this fix and keep the existing questions_flow tests green; no new tests and no documentation change."
     }
   ]

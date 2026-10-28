@@ -110,7 +110,8 @@
     {
       "id": "cause",
       "kind": "fact",
-      "text": "The cancelled result was written without the start sequence it belongs to."
+      "text": "The cancelled result was written without the start sequence it belongs to.",
+      "item": "judgment"
     },
     {
       "id": "writer",
@@ -121,6 +122,18 @@
       "id": "old-plan",
       "kind": "absent",
       "text": "The plan to change the retention share is still current."
+    },
+    {
+      "id": "task",
+      "kind": "fact",
+      "item": "task",
+      "text": "The task was to find the cause of the failing flow test transport_flow::compaction::manual_inside_turn and fix it."
+    },
+    {
+      "id": "fix",
+      "kind": "fact",
+      "item": "decision",
+      "text": "The fix is for finish_cancelled to write the start sequence together with the cancelled outcome."
     }
   ]
 }
