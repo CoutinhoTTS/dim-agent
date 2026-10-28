@@ -156,11 +156,26 @@ directory read of at most 2,000 entries, as it does for an outside prefix.
 ## Clipboard and local image validation
 
 For one clipboard insertion, prefer the native file list when available, then an image, then
-text; do not insert the same clipboard content through several representations. Clipboard reads
-refer to the machine running the CLI. SSH does not confer access to the user's other desktop.
+text; do not insert the same clipboard content through several representations. Native clipboard
+reads refer to the machine running the CLI. SSH does not confer access to the user's other desktop
+by itself; only the terminal can grant it, as below.
 When the terminal intercepts `Ctrl+V`, its ordinary paste event follows the terminal-paste path.
 If the OS clipboard component is unavailable, show that error and keep the draft. OSC 52 text
 copying does not provide an image/file clipboard-read channel.
+
+The terminal's own clipboard is read through the kitty clipboard protocol (OSC 5522) instead of
+the native readers when both hold: the terminal reported mode 5522 to the startup DECRQM probe
+(sent before the DA1 sentinel, so a terminal without it is detected as such and keeps the native
+path), and the native readers cannot see that clipboard — the CLI runs over SSH
+(`SSH_CONNECTION` or `SSH_TTY`), or on Linux without `DISPLAY` and `WAYLAND_DISPLAY`. Inside
+tmux or screen the probe is answered by the multiplexer and the native path stays. The read first
+lists the clipboard's types, which the terminal answers without asking, then requests one: an
+image (PNG, JPEG, WebP, GIF, then any other `image/` type) before text. File lists are not read
+this way, as their paths name the terminal's machine. The terminal may ask the user to allow the
+read; the request carries the name `dim` and a password fixed for the process, so a terminal that
+remembers the answer asks once per run. A denial, an error status, an empty choice or no answer
+within 60 seconds shows the error and keeps the draft; replies to an earlier, abandoned read are
+ignored by their request id. Image and text size limits are those of the native readers.
 
 macOS uses AppKit's pasteboard; Windows uses Win32 clipboard formats. Linux uses `wl-paste`
 when `WAYLAND_DISPLAY` is set and otherwise `xclip` with the CLIPBOARD selection. On macOS the

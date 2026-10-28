@@ -72,7 +72,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 - Clipboard files: use `Ctrl+V` to read files copied in a file manager; images become attachments and other files become path references, including multiple files.
 - Message copying: copy message text to the clipboard through message actions.
 - Selection copying: fullscreen TUI supports mouse selection and copies selected text on release; scrollback uses the terminal's native selection and copying.
-- Clipboard compatibility: copy text through the system clipboard and OSC 52 for local and SSH use. Image/file reads and remote copying depend on platform components and terminal support.
+- Clipboard compatibility: copy text through the system clipboard and OSC 52 for local and SSH use. Over SSH, terminals with the kitty clipboard protocol (OSC 5522, e.g. kitty, Ghostty 1.4+) also serve `Ctrl+V` image and text reads from the local clipboard; other terminals keep the native readers. Image/file reads and remote copying depend on platform components and terminal support.
 - History browsing and navigation: use `/timeline` to locate messages. Fullscreen TUI can load earlier records; scrollback can use `/history` and continue browsing terminal scrollback.
 - Open links: click web and local-file links in fullscreen TUI output to open them with the system's default browser or application.
 - Tool groups: each group of tool calls is collapsed by default (`▸`); click its header in fullscreen TUI to expand or collapse that group. `/tools` expands or collapses every group.

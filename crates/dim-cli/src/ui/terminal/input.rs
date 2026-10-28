@@ -67,6 +67,8 @@ pub enum InputEvent {
     Paste(String),
     /// A mouse report; only the fullscreen interface turns them on.
     Mouse(MouseEvent),
+    /// The terminal answering a clipboard read (OSC 5522).
+    Clipboard(crate::clipboard::terminal::Reply),
 }
 
 /// What the mouse did. Only the left button selects; other buttons are
@@ -90,7 +92,7 @@ pub struct MouseEvent {
 
 /// Upper bound for one unfinished escape sequence; garbage beyond it is
 /// dropped instead of growing without limit.
-const MAX_PENDING: usize = 8 * 1024;
+const MAX_PENDING: usize = 64 * 1024;
 /// Upper bound for one bracketed paste.
 const MAX_PASTE: usize = 16 * 1024 * 1024;
 
@@ -113,7 +115,15 @@ impl Decoder {
     /// True while bytes of an unfinished sequence are buffered; the caller
     /// uses it to decide whether a read timeout means "lone Esc".
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty() && self.paste.is_none()
+        !self.pending.is_empty() && self.paste.is_none() && !self.clipboard_reply_pending()
+    }
+
+    /// The buffer holds the start of a clipboard reply, which may arrive over
+    /// several reads and must not be cut into keys by the lone-Esc timeout.
+    fn clipboard_reply_pending(&self) -> bool {
+        const START: &[u8] = b"\x1b]5522;";
+        self.pending.len() > 2
+            && (self.pending.starts_with(START) || START.starts_with(&self.pending))
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<InputEvent> {
@@ -199,6 +209,7 @@ impl Decoder {
                     match outcome {
                         Outcome::Key(key) => events.push(InputEvent::Key(key)),
                         Outcome::Mouse(mouse) => events.push(InputEvent::Mouse(mouse)),
+                        Outcome::Clipboard(reply) => events.push(InputEvent::Clipboard(reply)),
                         Outcome::Ignored => {}
                         Outcome::PasteStart => {
                             let rest = std::mem::take(&mut self.pending);
@@ -276,6 +287,7 @@ enum Parse {
 enum Outcome {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    Clipboard(crate::clipboard::terminal::Reply),
     Ignored,
     PasteStart,
 }
@@ -357,7 +369,13 @@ fn parse_escape(buf: &[u8]) -> Parse {
             }
         },
         b'P' | b']' | b'_' | b'^' | b'X' => match string_terminator(&buf[2..]) {
-            Some(len) => Parse::Consumed(2 + len, Outcome::Ignored),
+            Some(len) => {
+                let terminator = if buf[1 + len] == 0x07 { 1 } else { 2 };
+                let reply = (second == b']')
+                    .then(|| crate::clipboard::terminal::parse(&buf[2..2 + len - terminator]))
+                    .flatten();
+                Parse::Consumed(2 + len, reply.map_or(Outcome::Ignored, Outcome::Clipboard))
+            }
             None => Parse::Incomplete,
         },
         0x1b => Parse::Consumed(1, key(KeyCode::Esc, Modifiers::NONE)),
@@ -616,6 +634,27 @@ mod tests {
         let replies =
             b"\x1b[?5u\x1b[?62;4c\x1b[>1;10;0c\x1bP>|WezTerm 2024\x1b\\\x1b[I\x1b[12;40Rx";
         assert_eq!(keys(d.feed(replies)), vec![(KeyCode::Char('x'), 0)]);
+    }
+
+    #[test]
+    fn a_clipboard_reply_split_across_reads_waits_and_never_becomes_keys() {
+        let reply = b"\x1b]5522;type=read:status=DATA:mime=Lg==;aW1hZ2UvcG5n\x1b\\x";
+        for split in [4, 9, 30] {
+            let mut d = Decoder::new();
+            assert!(d.feed(&reply[..split]).is_empty());
+            assert!(
+                !d.has_pending(),
+                "{split}: the lone-Esc timeout would cut it"
+            );
+            let events = d.feed(&reply[split..]);
+            assert!(
+                matches!(&events[..], [InputEvent::Clipboard(_), InputEvent::Key(key)] if key.code == KeyCode::Char('x')),
+                "{split}: {events:?}"
+            );
+        }
+        let mut d = Decoder::new();
+        assert!(d.feed(b"\x1b]").is_empty());
+        assert!(d.has_pending(), "Alt+] still times out as before");
     }
 
     #[test]

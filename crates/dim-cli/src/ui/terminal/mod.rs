@@ -185,6 +185,7 @@ pub struct Terminal {
     queue: std::collections::VecDeque<InputEvent>,
     keyboard: KeyboardProtocol,
     background_report: Option<String>,
+    clipboard: bool,
     left: bool,
     /// The last size the terminal reported: a zero-sized window (a pane
     /// being re-laid out) keeps it.
@@ -215,6 +216,7 @@ impl Terminal {
             queue: Default::default(),
             keyboard: KeyboardProtocol::Legacy,
             background_report: None,
+            clipboard: false,
             left: false,
             last_size: std::cell::Cell::new((80, 24)),
         };
@@ -299,6 +301,12 @@ impl Terminal {
         self.background_report.as_deref()
     }
 
+    /// The terminal reported the kitty clipboard protocol (OSC 5522) at the
+    /// startup probe: it reads its own clipboard for this process.
+    pub fn clipboard_protocol(&self) -> bool {
+        self.clipboard
+    }
+
     fn negotiate_keyboard(&mut self) -> io::Result<()> {
         sys::write_all(sys::STDOUT, keyboard::PROBE_QUERY)?;
         let deadline = Instant::now() + PROBE_TIMEOUT;
@@ -325,6 +333,7 @@ impl Terminal {
             }
         }
         self.background_report = scan.background_report;
+        self.clipboard = scan.complete && scan.clipboard;
         let mut carry = scan.typeahead;
         carry.extend_from_slice(&scan.rest);
         if !carry.is_empty() {

@@ -221,6 +221,8 @@ fn run_terminal(
         cwd_key,
     );
     app.fullscreen = full.is_some();
+    app.terminal_clipboard =
+        terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
     app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
     app.theme_context = Some(ThemeContext {
         mode: detected.mode,
@@ -241,6 +243,13 @@ fn run_terminal(
         }
         if app.revealing() {
             dirty = true;
+        }
+        for request in std::mem::take(&mut app.terminal_requests) {
+            if terminal.write(&request).is_err() {
+                let code = terminal.lost();
+                app.host.shutdown();
+                return code;
+            }
         }
         for event in std::mem::take(&mut app.notifications) {
             if terminal
@@ -741,7 +750,13 @@ struct App {
     /// The shell-mode command running, at most one.
     shell: Option<crate::ui::shell::Running>,
     /// A Ctrl+V clipboard read in progress.
-    clipboard: Option<std::sync::mpsc::Receiver<crate::Result<crate::clipboard::Source>>>,
+    clipboard: Option<ClipboardRead>,
+    /// Ctrl+V reads through the terminal (OSC 5522) instead of natively.
+    terminal_clipboard: bool,
+    /// Clipboard reads started, numbering their request ids.
+    clipboard_reads: u64,
+    /// Requests owed to the terminal, written by the event loop.
+    terminal_requests: Vec<Vec<u8>>,
     /// Finished `!!` runs owed to the transcript.
     shell_runs: Vec<ShellRun>,
     /// The output detail currently registered with the session worker.
@@ -763,6 +778,11 @@ const FULLSCREEN_COMPOSER_ROWS: usize = 3;
 
 /// Messages a resume shows at first, and per `/history` page.
 const HISTORY_WINDOW: usize = 100;
+
+enum ClipboardRead {
+    Native(std::sync::mpsc::Receiver<crate::Result<crate::clipboard::Source>>),
+    Terminal(crate::clipboard::terminal::Read),
+}
 
 enum Prompt {
     Sessions(SessionsPanel),
@@ -858,6 +878,9 @@ impl App {
             branch: git_branch().unwrap_or_else(|| t("Not available").into()),
             shell: None,
             clipboard: None,
+            terminal_clipboard: false,
+            clipboard_reads: 0,
+            terminal_requests: Vec::new(),
             shell_runs: Vec::new(),
             output_target: None,
             member_target: None,
@@ -1062,9 +1085,14 @@ impl App {
         if self.composer.mention_tick() {
             changed = true;
         }
-        if let Some(read) = &self.clipboard
-            && let Ok(source) = read.try_recv()
-        {
+        let finished = match &self.clipboard {
+            Some(ClipboardRead::Native(read)) => read.try_recv().ok(),
+            Some(ClipboardRead::Terminal(read)) if read.expired(now) => {
+                Some(Err("the terminal did not answer".into()))
+            }
+            _ => None,
+        };
+        if let Some(source) = finished {
             self.clipboard = None;
             self.paste_clipboard(source);
             changed = true;
@@ -1382,6 +1410,21 @@ impl App {
             }
             InputEvent::Key(key) => key,
             InputEvent::Mouse(_) => return Outcome::Continue,
+            InputEvent::Clipboard(reply) => {
+                use crate::clipboard::terminal::Step;
+                let Some(ClipboardRead::Terminal(read)) = &mut self.clipboard else {
+                    return Outcome::Continue;
+                };
+                match read.feed(reply, Instant::now()) {
+                    Step::Pending => {}
+                    Step::Send(request) => self.terminal_requests.push(request),
+                    Step::Done(source) => {
+                        self.clipboard = None;
+                        self.paste_clipboard(source);
+                    }
+                }
+                return Outcome::Continue;
+            }
         };
         let ctrl = key.mods.contains(Modifiers::CTRL);
         if self.failure.is_some() {
@@ -1549,9 +1592,21 @@ impl App {
         }
     }
 
-    /// Ctrl+V: reads the native clipboard off the interface thread.
+    /// Ctrl+V: reads the native clipboard off the interface thread, or asks
+    /// the terminal for its clipboard when the native one is out of reach.
     fn read_clipboard(&mut self) {
         if self.clipboard.is_some() {
+            return;
+        }
+        if self.terminal_clipboard {
+            self.clipboard_reads += 1;
+            let (read, request) = crate::clipboard::terminal::Read::start(
+                format!("dim-{}", self.clipboard_reads),
+                Instant::now(),
+            );
+            self.clipboard = Some(ClipboardRead::Terminal(read));
+            self.terminal_requests.push(request);
+            self.set_notice(t("Reading clipboard…"));
             return;
         }
         let (send, receive) = std::sync::mpsc::channel();
@@ -1567,7 +1622,7 @@ impl App {
             });
         match started {
             Ok(_) => {
-                self.clipboard = Some(receive);
+                self.clipboard = Some(ClipboardRead::Native(receive));
                 self.set_notice(t("Reading clipboard…"));
             }
             Err(error) => {
