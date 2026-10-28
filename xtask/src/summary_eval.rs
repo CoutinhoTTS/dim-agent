@@ -101,6 +101,7 @@ pub async fn run() -> Result<()> {
             ProductSummaryStrategyConfig {
                 home: Some(home.clone()),
                 target: arm.target,
+                system_prompt: None,
             },
         )
         .await

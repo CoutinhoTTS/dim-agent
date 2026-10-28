@@ -230,6 +230,7 @@ pub fn install_compaction(
                         ProductSummaryStrategyConfig {
                             home: home.clone(),
                             target: None,
+                            system_prompt: None,
                         },
                     )?))
                 })
