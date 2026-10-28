@@ -2,11 +2,14 @@
 //!
 //! A binding is what the model has seen of a file on this branch: its raw
 //! byte revision and the text format `read` resolved (ADR agent-019).
-//! Overwriting an existing file requires a binding from this branch.
+//! Overwriting an existing file requires a binding from this branch whose
+//! operation is still in the model's context (#524).
 
-use dim_agent_runtime::Names;
-use rutis::host::{CtxHost, Key};
-use rutis::{Ctx, Plugin};
+use crate::host::HostError;
+use dim_agent_runtime::{Names, Timeline};
+use dim_agent_types::{ContextCompactionResult, EventKind};
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -59,37 +62,126 @@ pub struct TextFileBinding {
     pub eol: Eol,
 }
 
-/// Bindings keyed by canonical path; lives as long as the branch instance.
-#[derive(Default)]
-pub struct FileReads {
-    bindings: Mutex<HashMap<PathBuf, TextFileBinding>>,
+/// A binding and the sequence the branch had reached when the operation that
+/// established it ran.
+#[derive(Debug, Clone)]
+struct Binding {
+    text: TextFileBinding,
+    established: u64,
 }
+
+/// What `write` may replace an existing file with.
+#[derive(Debug)]
+pub(crate) enum WriteBinding {
+    /// No operation on this branch bound the file.
+    None,
+    /// The operation that bound the file was compacted out of the context.
+    Compacted,
+    /// The binding of an operation still in the model's context.
+    Text(TextFileBinding),
+}
+
+/// Bindings keyed by canonical path; lives as long as the branch instance.
+pub struct FileReads {
+    timeline: Arc<Timeline>,
+    bindings: Mutex<HashMap<PathBuf, Binding>>,
+}
+
 impl FileReads {
-    pub(crate) fn get(&self, path: &Path) -> Option<TextFileBinding> {
-        self.bindings.lock().unwrap().get(path).cloned()
+    pub fn new(timeline: Arc<Timeline>) -> Self {
+        Self {
+            timeline,
+            bindings: Mutex::new(HashMap::new()),
+        }
     }
-    pub(crate) fn set(&self, path: PathBuf, binding: TextFileBinding) {
-        self.bindings.lock().unwrap().insert(path, binding);
+    /// The binding `edit` may use: it checks the model's `oldText` against the
+    /// file itself, so a compaction does not take it away (#524).
+    pub(crate) fn get(&self, path: &Path) -> Option<TextFileBinding> {
+        self.bindings
+            .lock()
+            .unwrap()
+            .get(path)
+            .map(|binding| binding.text.clone())
+    }
+    /// The branch's last sequence: the operation starting now is cut out by
+    /// every later compaction whose `retain_from` is a later event.
+    pub(crate) fn established(&self) -> u64 {
+        self.timeline.committed()
+    }
+    /// The binding `write` may use: only while the operation that established
+    /// it is still in the model's context.
+    pub(crate) async fn write_binding(&self, path: &Path) -> Result<WriteBinding, HostError> {
+        let Some(binding) = self.bindings.lock().unwrap().get(path).cloned() else {
+            return Ok(WriteBinding::None);
+        };
+        Ok(if self.in_context(binding.established).await? {
+            WriteBinding::Text(binding.text)
+        } else {
+            WriteBinding::Compacted
+        })
+    }
+    pub(crate) fn set(&self, path: PathBuf, text: TextFileBinding, established: u64) {
+        self.bindings
+            .lock()
+            .unwrap()
+            .insert(path, Binding { text, established });
+    }
+    /// Whether no completed `context/compaction` on this branch cut at or after
+    /// the operation that ran when the branch reached `established`.
+    ///
+    /// `established` is the branch's last sequence when the operation started,
+    /// after its tool call committed, and no legal cut separates a tool call
+    /// from its result. So a `retain_from` in this range lies after the
+    /// operation's result, and one before it keeps the result (#524).
+    async fn in_context(&self, established: u64) -> Result<bool, HostError> {
+        let now = self.timeline.committed();
+        if now <= established {
+            return Ok(true);
+        }
+        let events = self
+            .timeline
+            .local(established + 1..=now)
+            .await
+            .map_err(|error| {
+                HostError::failed(format!("Failed to read the branch timeline: {error}"))
+            })?;
+        let Some(retain_from) = events.iter().rev().find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data) => match &data.outcome {
+                ContextCompactionResult::Completed { retain_from, .. } => Some(retain_from),
+                _ => None,
+            },
+            _ => None,
+        }) else {
+            return Ok(true);
+        };
+        Ok(!events.iter().any(|event| event.id == *retain_from))
     }
 }
 
 pub struct FileReadsPlugin {
     reads: Key<FileReads>,
+    timeline: Key<Timeline>,
 }
 impl FileReadsPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             reads: names.key()?,
+            timeline: names.key()?,
         })
     }
 }
-impl Plugin for FileReadsPlugin {
-    type Deps = ();
+impl DynPlugin for FileReadsPlugin {
     fn name(&self) -> &str {
         "FileReads"
     }
-    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
-        ctx.provide_at(self.reads.clone(), Arc::new(FileReads::default()))?;
-        Ok(())
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.timeline.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let timeline = ctx.require_at(&self.timeline)?;
+            ctx.provide_at(self.reads.clone(), Arc::new(FileReads::new(timeline)))?;
+            Ok(Effect::Done)
+        })
     }
 }
