@@ -31,12 +31,13 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 
 use crate::ui::render::Frame;
-use crate::ui::render::panel::{clip, strip_escapes};
+use crate::ui::render::panel::{clip, escape_len, strip_escapes};
 use crate::ui::render::screen::scrub;
 use crate::ui::terminal::{MouseEvent, MouseKind};
 use crate::ui::text::display_width;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
+use crate::ui::transcript::blocks::gutter_width;
 
 const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
 const END_SYNC: &[u8] = b"\x1b[?2026l";
@@ -56,6 +57,11 @@ const WHEEL_BURST_RUN: usize = 4;
 const WHEEL_STREAK_GAP: Duration = Duration::from_millis(150);
 /// Most a fast streak multiplies a mouse notch and a trackpad report by.
 const WHEEL_MAX_NOTCH: f64 = 3.0;
+/// Presses closer than this on the same spot count as one multi-click.
+const MULTI_CLICK: Duration = Duration::from_millis(400);
+/// Characters that end a double-clicked word besides whitespace: tmux's
+/// default `word-separators`.
+const WORD_SEPARATORS: &str = "!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~";
 const WHEEL_MAX_FINE: f64 = 6.0;
 /// Lower eighth blocks, index = eighths filled from the bottom.
 const EIGHTHS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
@@ -170,11 +176,13 @@ impl Wheel {
 }
 
 /// A text selection in transcript coordinates: `(row, column)`, absolute
-/// row index, display column.
+/// row index, display column. It shows once the pointer leaves the pressed
+/// cell and stays after the release until the next press or Esc.
 #[derive(Debug, Clone, Copy)]
 struct Selection {
     anchor: (usize, usize),
     head: (usize, usize),
+    dragged: bool,
 }
 
 impl Selection {
@@ -186,15 +194,16 @@ impl Selection {
         }
     }
 
-    /// The columns `[start, end)` selected on `row`, if any.
-    fn columns(&self, row: usize) -> Option<(usize, usize)> {
+    /// The columns `[start, end)` selected on `row`, if any; the first
+    /// `gutter` columns (the block's mark) are never selected.
+    fn columns(&self, row: usize, gutter: usize) -> Option<(usize, usize)> {
         let ((r0, c0), (r1, c1)) = self.ordered();
         if row < r0 || row > r1 {
             return None;
         }
         let start = if row == r0 { c0 } else { 0 };
         let end = if row == r1 { c1 + 1 } else { usize::MAX };
-        Some((start, end))
+        Some((start.max(gutter), end))
     }
 }
 
@@ -221,6 +230,10 @@ pub struct FullScreen {
     /// only while that row still shows the same text at the release, so
     /// output that moves the transcript in between cannot redirect it.
     press: Option<(MouseOutcome, String)>,
+    /// The last press: when, where, the row it showed and how many presses
+    /// in a row landed there (a double click selects a word, a triple
+    /// click the row).
+    clicks: Option<(Instant, (usize, usize), String, u8)>,
     /// The top of the view while the reader has scrolled away from the
     /// bottom; `None` follows new output.
     pinned: Option<Anchor>,
@@ -258,6 +271,7 @@ impl FullScreen {
             cache: HashMap::new(),
             tail: Vec::new(),
             press: None,
+            clicks: None,
             pinned: None,
             floor: 0,
             view_rows: 0,
@@ -436,6 +450,15 @@ impl FullScreen {
     }
 
     /// Ends the pick, leaving the view where it is.
+    /// The selection kept after a drag is on screen.
+    pub fn selecting(&self) -> bool {
+        self.selection.is_some_and(|s| s.dragged)
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
     pub fn clear_focus(&mut self) {
         self.focus = None;
         self.focus_card = None;
@@ -516,26 +539,68 @@ impl FullScreen {
                 MouseOutcome::Redraw
             }
             MouseKind::Press => {
-                let had = self.selection.take().is_some();
+                let shown = self.selection.take().is_some_and(|s| s.dragged);
                 self.press = None;
-                if let Some(index) = (row < self.view_rows).then(|| self.at(row)).flatten() {
-                    self.press = self
-                        .row(index)
-                        .map(|text| (self.spot(index), text.to_owned()));
-                    let at = (index, column);
-                    self.selection = Some(Selection {
-                        anchor: at,
-                        head: at,
-                    });
-                    MouseOutcome::Redraw
-                } else if had {
+                let Some((index, text)) = (row < self.view_rows)
+                    .then(|| self.at(row))
+                    .flatten()
+                    .and_then(|index| Some((index, self.row(index)?.to_owned())))
+                else {
+                    self.clicks = None;
+                    return if shown {
+                        MouseOutcome::Redraw
+                    } else {
+                        MouseOutcome::Ignored
+                    };
+                };
+                let now = Instant::now();
+                let count = match &self.clicks {
+                    Some((when, (r, c), pressed, n))
+                        if now.duration_since(*when) < MULTI_CLICK
+                            && *r == index
+                            && c.abs_diff(column) <= 1
+                            && *pressed == text =>
+                    {
+                        n % 3 + 1
+                    }
+                    _ => 1,
+                };
+                self.press = Some((self.spot(index), text.clone()));
+                let width = content_width(self.layout_cols);
+                let gutter = gutter_width(width);
+                let plain = strip_escapes(&text);
+                let span = match count {
+                    2 if column >= gutter => word_at(&plain, column),
+                    3 => Some((gutter, width)),
+                    _ => None,
+                };
+                self.clicks = Some((now, (index, column), text, count));
+                self.selection = Some(match span {
+                    Some((start, end)) => Selection {
+                        anchor: (index, start),
+                        head: (index, end.saturating_sub(1).max(start)),
+                        dragged: true,
+                    },
+                    None => Selection {
+                        anchor: (index, column),
+                        head: (index, column),
+                        dragged: false,
+                    },
+                });
+                if shown || span.is_some() {
                     MouseOutcome::Redraw
                 } else {
                     MouseOutcome::Ignored
                 }
             }
             MouseKind::Drag => {
-                if self.selection.is_none() {
+                let Some(selection) = self.selection else {
+                    return MouseOutcome::Ignored;
+                };
+                let row = row.min(self.view_rows.saturating_sub(1));
+                if !selection.dragged
+                    && (self.at(row), column) == (Some(selection.anchor.0), selection.anchor.1)
+                {
                     return MouseOutcome::Ignored;
                 }
                 if row == 0 {
@@ -543,34 +608,40 @@ impl FullScreen {
                 } else if row + 1 >= self.view_rows {
                     self.scroll(1);
                 }
-                let row = row.min(self.view_rows.saturating_sub(1));
                 let Some(index) = self.at(row) else {
                     return MouseOutcome::Ignored;
                 };
-                let at = (index, column);
-                if let Some(selection) = &mut self.selection {
-                    selection.head = at;
-                }
+                self.selection = Some(Selection {
+                    head: (index, column),
+                    dragged: true,
+                    ..selection
+                });
                 MouseOutcome::Redraw
             }
-            MouseKind::Release => match self.selection.take() {
-                Some(selection) if selection.anchor != selection.head => {
-                    MouseOutcome::Copy(self.selected_text(&selection, doc))
+            MouseKind::Release => {
+                let Some(selection) = self.selection else {
+                    return MouseOutcome::Ignored;
+                };
+                if selection.dragged {
+                    let text = self.selected_text(&selection, doc);
+                    if !text.is_empty() {
+                        return MouseOutcome::Copy(text);
+                    }
+                    self.selection = None;
+                    return MouseOutcome::Redraw;
                 }
-                Some(Selection {
-                    anchor: (row, column),
-                    ..
-                }) => match (self.press.take(), self.row(row)) {
+                self.selection = None;
+                let (row, column) = selection.anchor;
+                match (self.press.take(), self.row(row)) {
                     (Some((spot, pressed)), Some(text)) if pressed == text => {
                         match link_at(text, column) {
                             Some(url) => MouseOutcome::Open(url),
                             None => spot,
                         }
                     }
-                    _ => MouseOutcome::Redraw,
-                },
-                None => MouseOutcome::Ignored,
-            },
+                    _ => MouseOutcome::Ignored,
+                }
+            }
         }
     }
 
@@ -628,7 +699,11 @@ impl FullScreen {
                         _ if card.is_some_and(|(start, end)| (start..end).contains(&index)) => {
                             card_focus_row(row, width, palette)
                         }
-                        _ => match self.selection.and_then(|s| s.columns(index)) {
+                        _ => match self
+                            .selection
+                            .filter(|s| s.dragged)
+                            .and_then(|s| s.columns(index, gutter_width(width)))
+                        {
                             Some(range) => highlight(row, range, width),
                             None => clip(row, width).0,
                         },
@@ -944,7 +1019,9 @@ impl FullScreen {
                 }
             };
             let plain = strip_escapes(&row);
-            let (start, end) = selection.columns(index).unwrap_or((0, 0));
+            let (start, end) = selection
+                .columns(index, gutter_width(width))
+                .unwrap_or((0, 0));
             lines.push(columns_of(&plain, start, end).trim_end().to_owned());
         }
         lines.join("\n")
@@ -1041,6 +1118,41 @@ fn wrap_row(row: &str, width: usize) -> Vec<String> {
     }
 }
 
+/// The display columns `[start, end)` of the word under `column` of plain
+/// `text`: a run of characters other than whitespace and
+/// [`WORD_SEPARATORS`], or the single separator there; `None` on whitespace
+/// and past the text.
+fn word_at(text: &str, column: usize) -> Option<(usize, usize)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for cluster in text.graphemes(true) {
+        let cells = display_width(cluster);
+        spans.push((at, at + cells, cluster));
+        at += cells;
+    }
+    let is_word = |&(_, _, g): &(usize, usize, &str)| {
+        !g.chars()
+            .all(|c| c.is_whitespace() || WORD_SEPARATORS.contains(c))
+    };
+    let hit = spans
+        .iter()
+        .position(|&(start, end, _)| column >= start && column < end)?;
+    let (start, end, cluster) = spans[hit];
+    if !is_word(&spans[hit]) {
+        return (!cluster.trim().is_empty()).then_some((start, end));
+    }
+    let first = spans[..hit]
+        .iter()
+        .rposition(|s| !is_word(s))
+        .map_or(0, |i| i + 1);
+    let last = spans[hit..]
+        .iter()
+        .position(|s| !is_word(s))
+        .map_or(spans.len(), |i| hit + i);
+    Some((spans[first].0, spans[last - 1].1))
+}
+
 /// The display columns `[start, end)` of plain `text`.
 fn columns_of(text: &str, start: usize, end: usize) -> String {
     use unicode_segmentation::UnicodeSegmentation;
@@ -1059,20 +1171,71 @@ fn columns_of(text: &str, start: usize, end: usize) -> String {
     out
 }
 
-/// `row` as plain text with the selected columns in reverse video.
+/// `row` with the graphemes overlapping display columns `[start, end)` in
+/// one reverse-video band, padded to `end` within `width`; the rest keeps
+/// its styling. A wide character cut by either edge is taken whole.
 fn highlight(row: &str, (start, end): (usize, usize), width: usize) -> String {
-    let plain = strip_escapes(row);
-    let (plain, used) = clip(&plain, width);
-    let end = end.min(used.max(start + 1));
-    let before = columns_of(&plain, 0, start);
-    let selected = columns_of(&plain, start, end);
-    let after = columns_of(&plain, end, usize::MAX);
-    let gap = start.saturating_sub(display_width(&before));
-    format!(
-        "{before}{}\x1b[7m{}\x1b[27m{after}",
-        " ".repeat(gap),
-        if selected.is_empty() { " " } else { &selected }
-    )
+    use unicode_segmentation::UnicodeSegmentation;
+    const BAND: &str = "\x1b[0;7m";
+    let (row, _) = clip(row, width);
+    let mut out = String::with_capacity(row.len() + 16);
+    let mut style = String::new();
+    let mut column = 0;
+    let mut inside = false;
+    let mut rest = row.as_str();
+    while !rest.is_empty() {
+        let len = escape_len(rest);
+        if len > 0 {
+            let escape = &rest[..len];
+            match escape
+                .strip_prefix("\x1b[")
+                .and_then(|e| e.strip_suffix('m'))
+            {
+                Some(params) => {
+                    if matches!(params.split(';').next(), Some("" | "0")) {
+                        style.clear();
+                    }
+                    style.push_str(escape);
+                    if !inside {
+                        out.push_str(escape);
+                    }
+                }
+                None => out.push_str(escape),
+            }
+            rest = &rest[len..];
+            continue;
+        }
+        let text = rest.find('\x1b').unwrap_or(rest.len());
+        for cluster in rest[..text].graphemes(true) {
+            let cells = display_width(cluster);
+            let selected = column < end && column + cells.max(1) > start;
+            if selected != inside {
+                inside = selected;
+                if selected {
+                    out.push_str(BAND);
+                } else {
+                    out.push_str("\x1b[0m");
+                    out.push_str(&style);
+                }
+            }
+            out.push_str(cluster);
+            column += cells;
+        }
+        rest = &rest[text..];
+    }
+    let pad_to = end.min(width);
+    if pad_to > column.max(start) {
+        if !inside {
+            out.push_str(&" ".repeat(start.saturating_sub(column)));
+            out.push_str(BAND);
+        }
+        out.push_str(&" ".repeat(pad_to - column.max(start)));
+        inside = true;
+    }
+    if inside {
+        out.push_str("\x1b[0m");
+    }
+    out
 }
 
 /// Row `offset` of the picked message's box, `last` being its bottom
@@ -1470,24 +1633,69 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_selects_plain_text_across_rows() {
+    fn a_drag_selects_whole_graphemes_past_the_gutter_and_stays_until_the_next_press() {
         let (mut screen, mut emu) = setup();
         let mut doc = Doc::new();
-        doc.say(&["\x1b[1mhello\x1b[0m world", "second row"]);
+        doc.say(&["◆\x1b[1mhello\x1b[0m world", "◆分析仓库 ok"]);
         draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc);
+        let before = emu.rows_text();
         let at = |kind, column, row| MouseEvent { kind, column, row };
         assert_eq!(
-            screen.mouse(at(MouseKind::Press, 6, 5), &doc),
+            screen.mouse(at(MouseKind::Press, 7, 5), &doc),
+            MouseOutcome::Ignored
+        );
+        assert!(draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc).is_empty());
+        assert_eq!(
+            screen.mouse(at(MouseKind::Drag, 2, 6), &doc),
             MouseOutcome::Redraw
         );
+        let bytes = draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc);
+        assert_eq!(emu.rows_text(), before);
+        let bytes = String::from_utf8(bytes).unwrap();
+        assert!(
+            bytes.contains("\x1b[1mhello\x1b[0m \x1b[0;7mworld"),
+            "{bytes:?}"
+        );
+        assert!(bytes.contains("◆\x1b[0;7m分\x1b[0m析"), "{bytes:?}");
         assert_eq!(
-            screen.mouse(at(MouseKind::Drag, 5, 6), &doc),
+            screen.mouse(at(MouseKind::Release, 2, 6), &doc),
+            MouseOutcome::Copy("world\n分".to_owned())
+        );
+        assert!(screen.selecting());
+        assert_eq!(
+            screen.mouse(at(MouseKind::Press, 3, 5), &doc),
             MouseOutcome::Redraw
         );
+        assert!(!screen.selecting());
+        draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc);
+        assert_eq!(emu.rows_text(), before);
+    }
+
+    #[test]
+    fn a_double_click_copies_the_word_and_a_triple_click_the_row() {
+        let (mut screen, mut emu) = setup();
+        let mut doc = Doc::new();
+        doc.say(&["◆see foo-bar.rs now", "◆分析仓库, ok"]);
+        draw(&mut screen, &mut emu, &frame(&[], &["> x"]), &doc);
+        let at = |kind, column, row| MouseEvent { kind, column, row };
+        let mut click = |column, row| {
+            screen.mouse(at(MouseKind::Press, column, row), &doc);
+            screen.mouse(at(MouseKind::Release, column, row), &doc)
+        };
         assert_eq!(
-            screen.mouse(at(MouseKind::Release, 5, 6), &doc),
-            MouseOutcome::Copy("world\nsecond".to_owned())
+            click(10, 5),
+            MouseOutcome::Click {
+                block: Some(0),
+                row: 1
+            }
         );
+        assert_eq!(click(10, 5), MouseOutcome::Copy("bar".to_owned()));
+        assert_eq!(
+            click(10, 5),
+            MouseOutcome::Copy("see foo-bar.rs now".to_owned())
+        );
+        click(4, 6);
+        assert_eq!(click(4, 6), MouseOutcome::Copy("分析仓库".to_owned()));
     }
 
     #[test]
@@ -1644,7 +1852,7 @@ mod tests {
         );
         assert_eq!(
             screen.mouse(at(MouseKind::Release), &doc),
-            MouseOutcome::Redraw
+            MouseOutcome::Ignored
         );
     }
 

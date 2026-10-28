@@ -445,6 +445,14 @@ fn run_terminal(
                 }
             }
             Wait::Event(InputEvent::Key(key))
+                if key.code == KeyCode::Esc && full.as_ref().is_some_and(FullScreen::selecting) =>
+            {
+                if let Some(full) = &mut full {
+                    full.clear_selection();
+                }
+                dirty = true;
+            }
+            Wait::Event(InputEvent::Key(key))
                 if full.is_some()
                     && app.keyboard_free()
                     && (matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
