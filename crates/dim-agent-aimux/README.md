@@ -16,7 +16,7 @@ cargo run --locked -p dim-app-server -- \
   --ws 127.0.0.1:8787
 ```
 
-配置包含 `defaultModel`、`providers`；每个 provider 配置端点、可选凭据环境变量和模型默认设置。配置在监听前读取；不使用环境变量时可接入免密本地端点。App Server 使用生产工作区工具；MockTools 只属于显式 mock 模型配置。
+配置包含 `defaultModel`、`providers`；每个 provider 配置端点、可选凭据环境变量和模型默认设置。每个模型条目还必须声明 `contextWindow`（上下文窗口）与 `maxOutputTokens`（输出上限），两者都是正整数；缺失或为零会让配置加载失败，并在错误里点名 provider 与模型。配置在监听前读取；不使用环境变量时可接入免密本地端点。App Server 使用生产工作区工具；MockTools 只属于显式 mock 模型配置。
 
 ## 离线图与资源测量
 

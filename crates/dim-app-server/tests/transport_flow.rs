@@ -1990,7 +1990,7 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         std::fs::write(skill.join("SKILL.md"), "---\nname: review\ndescription: Review changes\n---\nInspect changes.\n").unwrap();
         std::fs::write(home.join("skills.json"), json!({"disabledSkillIds":["user:absent"],"future":{"keep":7}}).to_string()).unwrap();
         std::fs::write(home.join("mcp.json"), json!({"mcpServers":{"disabled-fixture":{"command":"never-run-this-test-command","enabled":false}}}).to_string()).unwrap();
-        std::fs::write(&configuration, json!({"defaultModel":{"providerId":"local","modelId":"native-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"models":[{"id":"native-model","config":{"maxTokens":4096}},{"id":"alternate","config":{"maxTokens":1536}}]}]}).to_string()).unwrap();
+        std::fs::write(&configuration, json!({"defaultModel":{"providerId":"local","modelId":"native-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"models":[{"id":"native-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":4096}},{"id":"alternate","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":1536}}]}]}).to_string()).unwrap();
         for restart in [false, true] {
         let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
             .args(["--model-config", configuration.to_str().unwrap(), "--home", home.to_str().unwrap(), "--unix", socket.to_str().unwrap(), "--ws", "127.0.0.1:0"])

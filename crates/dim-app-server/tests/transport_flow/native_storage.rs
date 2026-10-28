@@ -261,7 +261,7 @@ async fn process_model_and_home_storage_serve_independent_sessions() {
         });
         let models = Arc::new(AimuxModels::from_config(serde_json::from_value::<ModelConfigFile>(json!({
             "defaultModel":{"providerId":"local","modelId":"test"},
-            "providers":[{"id":"local","kind":"openai-compatible","baseUrl":endpoint,"models":[{"id":"test","config":{"maxTokens":64}}]}]
+            "providers":[{"id":"local","kind":"openai-compatible","baseUrl":endpoint,"models":[{"id":"test","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":64}}]}]
         })).unwrap()).unwrap());
         let home = std::path::PathBuf::from("/tmp").join(format!("dim-l0-{}", uuid::Uuid::new_v4()));
         let mut builder = AgentBuilder::new(AgentConfig { model: models.default_model().clone(), ..Default::default() });

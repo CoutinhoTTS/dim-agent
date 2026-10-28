@@ -3276,7 +3276,7 @@ fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
         let home = Home::new();
         let original = home.0.join("original.json");
         let requested = home.0.join("requested.json");
-        let body = json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1","models":[{"id":"fixture-model","config":{"maxTokens":128}}]}]}).to_string();
+        let body = json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":"http://127.0.0.1:9/v1","models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":128}}]}]}).to_string();
         fs::write(&original, &body).unwrap();
         fs::write(&requested, format!("{body}\n")).unwrap();
         let socket = home.0.join("rust/daemon.sock");
@@ -3552,7 +3552,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
         }
     });
     let config = home.0.join("model.json");
-    fs::write(&config,serde_json::to_vec(&json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","apiKeyEnv":"DIM_CLI_TEST_API_KEY","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","config":{"maxTokens":128}}]}]})).unwrap()).unwrap();
+    fs::write(&config,serde_json::to_vec(&json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","apiKeyEnv":"DIM_CLI_TEST_API_KEY","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":128}}]}]})).unwrap()).unwrap();
     let mut first = home.command();
     first
         .args([

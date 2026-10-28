@@ -58,7 +58,7 @@ impl TestServer {
     }
 }
 fn configuration(url: &str) -> ModelConfigFile {
-    serde_json::from_value(json!({"defaultModel":{"providerId":"local","modelId":"test-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":url,"models":[{"id":"test-model","config":{"maxTokens":4096,"temperature":0}}]}]})).unwrap()
+    serde_json::from_value(json!({"defaultModel":{"providerId":"local","modelId":"test-model"},"providers":[{"id":"local","kind":"openai-compatible","baseUrl":url,"models":[{"id":"test-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":4096,"temperature":0}}]}]})).unwrap()
 }
 fn frame(delta: Value, finish: Value) -> String {
     format!(
@@ -376,6 +376,36 @@ async fn model_configuration_rejects_unknown_models_before_session_start() {
     server.close().await;
 }
 
+#[test]
+fn a_model_entry_without_window_facts_fails_loading_and_names_the_model() {
+    let configuration = |context_window: Option<u64>, max_output_tokens: Option<u64>| {
+        serde_json::from_value::<ModelConfigFile>(json!({
+            "defaultModel": {"providerId": "local", "modelId": "test-model"},
+            "providers": [{"id": "local", "kind": "openai-compatible",
+                "baseUrl": "http://127.0.0.1:9/v1",
+                "models": [{"id": "test-model", "contextWindow": context_window,
+                    "maxOutputTokens": max_output_tokens, "config": {"maxTokens": 4096}}]}]
+        }))
+        .unwrap()
+    };
+    for (context_window, max_output_tokens, field) in [
+        (None, Some(4096), "contextWindow"),
+        (Some(0), Some(4096), "contextWindow"),
+        (Some(128_000), None, "maxOutputTokens"),
+        (Some(128_000), Some(0), "maxOutputTokens"),
+    ] {
+        let error = AimuxModels::from_config(configuration(context_window, max_output_tokens))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("local.test-model.{field}")),
+            "{error}"
+        );
+    }
+}
+
 struct OverrideRequest {
     remove_tools: bool,
     timeline: rutis::host::Key<Timeline>,
@@ -425,7 +455,7 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
         config.providers.push(dim_agent_aimux::config::ProviderConfig {
             id: "selected".into(), kind: dim_agent_aimux::config::ProviderKind::OpenaiCompatible,
             api_key_env: None, base_url: selected.url.clone(), headers: Default::default(), compatible: None,
-            models: vec![dim_agent_aimux::config::ModelEntry { id: "selected-model".into(), config: ModelConfig { max_tokens: Some(99.), temperature: Some(0.8), ..Default::default() } }],
+            models: vec![dim_agent_aimux::config::ModelEntry { id: "selected-model".into(), context_window: Some(128_000), max_output_tokens: Some(4096), config: ModelConfig { max_tokens: Some(99.), temperature: Some(0.8), ..Default::default() } }],
         });
         let models = Arc::new(AimuxModels::from_config(config).unwrap());
         for remove_tools in [false, true] {

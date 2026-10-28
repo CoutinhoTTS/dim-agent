@@ -1302,9 +1302,7 @@ impl Worker {
                         "Context usage needs the model's capabilities; select the model again"
                             .into()
                     }
-                    Some("unknown_method") => {
-                        "Context usage is not tracked for an explicit model configuration".into()
-                    }
+                    Some("unknown_method") => "This daemon does not track context usage".into(),
                     _ => error,
                 }
             })?;
