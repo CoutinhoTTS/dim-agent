@@ -115,12 +115,13 @@ impl Decoder {
     /// True while bytes of an unfinished sequence are buffered; the caller
     /// uses it to decide whether a read timeout means "lone Esc".
     pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty() && self.paste.is_none() && !self.clipboard_reply_pending()
+        !self.pending.is_empty() && self.paste.is_none()
     }
 
     /// The buffer holds the start of a clipboard reply, which may arrive over
-    /// several reads and must not be cut into keys by the lone-Esc timeout.
-    fn clipboard_reply_pending(&self) -> bool {
+    /// several reads: the caller waits longer than the lone-Esc timeout
+    /// before flushing it.
+    pub fn holds_reply(&self) -> bool {
         const START: &[u8] = b"\x1b]5522;";
         self.pending.len() > 2
             && (self.pending.starts_with(START) || START.starts_with(&self.pending))
@@ -643,7 +644,7 @@ mod tests {
             let mut d = Decoder::new();
             assert!(d.feed(&reply[..split]).is_empty());
             assert!(
-                !d.has_pending(),
+                d.holds_reply(),
                 "{split}: the lone-Esc timeout would cut it"
             );
             let events = d.feed(&reply[split..]);
@@ -654,7 +655,22 @@ mod tests {
         }
         let mut d = Decoder::new();
         assert!(d.feed(b"\x1b]").is_empty());
-        assert!(d.has_pending(), "Alt+] still times out as before");
+        assert!(
+            d.has_pending() && !d.holds_reply(),
+            "Alt+] still times out as before"
+        );
+
+        let mut d = Decoder::new();
+        assert!(d.feed(&reply[..30]).is_empty());
+        assert!(d.flush_timeout().is_empty(), "a stalled reply is dropped");
+        assert_eq!(keys(d.feed(b"a")), vec![(KeyCode::Char('a'), 0)]);
+
+        let mut d = Decoder::new();
+        let events = d.feed(b"\x1b]5522;type=read:status=DONE:id=dim-1\x07");
+        assert!(
+            matches!(&events[..], [InputEvent::Clipboard(reply)] if reply.id.as_deref() == Some("dim-1")),
+            "a BEL-terminated reply ending the read: {events:?}"
+        );
     }
 
     #[test]

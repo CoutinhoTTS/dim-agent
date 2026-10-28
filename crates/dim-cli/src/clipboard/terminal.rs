@@ -173,20 +173,15 @@ impl Read {
     }
 }
 
-/// The type a paste inserts: an image before text, as the native readers do.
-/// Files are left out, since their paths name the terminal's machine.
+/// The type a paste inserts: an attachable image before text, as the native
+/// readers do. Files are left out, since their paths name the terminal's
+/// machine.
 fn choose(listed: &[String]) -> Option<String> {
     let has = |wanted: &str| listed.iter().any(|mime| mime == wanted);
     IMAGE_TYPES
         .into_iter()
         .find(|mime| has(mime))
         .map(str::to_owned)
-        .or_else(|| {
-            listed
-                .iter()
-                .find(|mime| mime.starts_with("image/"))
-                .cloned()
-        })
         .or_else(|| {
             TEXT_TYPES
                 .into_iter()
@@ -271,13 +266,13 @@ mod tests {
     }
 
     #[test]
-    fn text_is_read_from_a_terminal_that_drops_the_id() {
+    fn text_wins_over_an_unattachable_image_from_a_terminal_that_drops_the_id() {
         let now = Instant::now();
         let (mut read, _) = Read::start("dim-2".into(), now);
         read.feed(
             reply(&format!(
                 "5522;type=read:status=DATA:mime=Lg==;{}",
-                STANDARD.encode("text/plain")
+                STANDARD.encode("image/tiff text/plain")
             )),
             now,
         );

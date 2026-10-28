@@ -170,12 +170,13 @@ path), and the native readers cannot see that clipboard — the CLI runs over SS
 (`SSH_CONNECTION` or `SSH_TTY`), or on Linux without `DISPLAY` and `WAYLAND_DISPLAY`. Inside
 tmux or screen the probe is answered by the multiplexer and the native path stays. The read first
 lists the clipboard's types, which the terminal answers without asking, then requests one: an
-image (PNG, JPEG, WebP, GIF, then any other `image/` type) before text. File lists are not read
-this way, as their paths name the terminal's machine. The terminal may ask the user to allow the
+image (PNG, JPEG, WebP or GIF, in that order) before text; other image types, such as TIFF, are skipped so
+text listed beside them is still inserted. File lists are not read this way, as their paths name the terminal's machine. The terminal may ask the user to allow the
 read; the request carries the name `dim` and a password fixed for the process, so a terminal that
 remembers the answer asks once per run. A denial, an error status, an empty choice or no answer
 within 60 seconds shows the error and keeps the draft; replies to an earlier, abandoned read are
-ignored by their request id. Image and text size limits are those of the native readers.
+ignored by their request id, and a reply that stops mid-sequence for 5 seconds is dropped so keys
+are read again. Image and text size limits are those of the native readers.
 
 macOS uses AppKit's pasteboard; Windows uses Win32 clipboard formats. Linux uses `wl-paste`
 when `WAYLAND_DISPLAY` is set and otherwise `xclip` with the CLIPBOARD selection. On macOS the
