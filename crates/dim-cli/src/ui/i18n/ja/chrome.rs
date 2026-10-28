@@ -437,6 +437,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "compact the context of the shown line" => "表示中のラインのコンテキストを圧縮",
         "Kept verbatim" => "原文のまま保持",
+        "insufficient space: {parts}" => "空き不足：{parts}",
+        "system prompt" => "システムプロンプト",
+        "tools" => "ツール",
+        "appended messages" => "追加メッセージ",
+        "keyed baseline" => "キー付きベースライン",
+        "pinned inputs" => "固定された入力",
+        "digest" => "ダイジェスト",
+        "summary" => "要約",
         _ => return None,
     })
 }

@@ -2,7 +2,7 @@
 //! gutters, wrapping, reasoning, shell output and the canonical block renderer.
 
 use crate::model::shell::Outcome as ShellOutcome;
-use crate::model::view::CompactionState;
+use crate::model::view::{CompactionPart, CompactionPartSize, CompactionState};
 use crate::ui::i18n::{t, tf};
 use crate::ui::render::markdown::MarkdownRenderer;
 use crate::ui::render::panel::{clip, wrap};
@@ -385,13 +385,15 @@ pub(crate) fn render_shell(
     rows
 }
 
-/// A compaction row: its state, the reason of one that did not complete,
-/// and a completed one's summary and kept input behind the `▸`/`▾`
-/// disclosure, drawn as the detail of a tool group is.
+/// A compaction row: its state, the reason of one that did not complete, a
+/// completed one's insufficient-space mark in its header, and its summary and
+/// kept input behind the `▸`/`▾` disclosure, drawn as the detail of a tool
+/// group is.
 fn render_compaction(
     state: CompactionState,
     text: &str,
     kept: Option<&str>,
+    insufficient: &[CompactionPartSize],
     expanded: bool,
     width: usize,
     p: &Palette,
@@ -410,6 +412,23 @@ fn render_compaction(
         CompactionState::Cancelled => t("Context compaction cancelled").to_owned(),
     };
     if state == CompactionState::Completed {
+        if !insufficient.is_empty() {
+            let sizes: Vec<String> = insufficient
+                .iter()
+                .map(|part| {
+                    format!(
+                        "{} {}",
+                        t(compaction_part_label(part.part)),
+                        crate::usage::format_tokens(part.tokens)
+                    )
+                })
+                .collect();
+            header.push_str(" · ");
+            header.push_str(&tf(
+                "insufficient space: {parts}",
+                &[("parts", &sizes.join(", "))],
+            ));
+        }
         header.push_str(if expanded { " ▾" } else { " ▸" });
     } else if !text.is_empty() {
         header.push_str(" · ");
@@ -437,6 +456,20 @@ fn render_compaction(
         }
     }
     rows
+}
+
+/// The English key of a part in the insufficient-space mark; the active
+/// locale translates it.
+fn compaction_part_label(part: CompactionPart) -> &'static str {
+    match part {
+        CompactionPart::SystemPrompt => "system prompt",
+        CompactionPart::Tools => "tools",
+        CompactionPart::AppendedMessages => "appended messages",
+        CompactionPart::KeyedBaseline => "keyed baseline",
+        CompactionPart::PinnedInputs => "pinned inputs",
+        CompactionPart::Digest => "digest",
+        CompactionPart::Summary => "summary",
+    }
 }
 
 /// A committed chunk owns the blank row that separates it from what came
@@ -493,6 +526,7 @@ pub(crate) fn render_block(
             state,
             text,
             kept,
+            insufficient,
             expanded,
         } => {
             let kept = kept.as_deref().map(crate::sanitize::safe);
@@ -500,6 +534,7 @@ pub(crate) fn render_block(
                 *state,
                 &crate::sanitize::safe(text),
                 kept.as_deref(),
+                insufficient,
                 *expanded,
                 width,
                 p,

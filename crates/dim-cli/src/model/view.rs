@@ -92,6 +92,29 @@ pub struct CompactionView {
     /// The completed compaction's pinned inputs, carried verbatim after the
     /// summary; none when the record pins nothing.
     pub kept: Option<String>,
+    /// The parts that keep a completed compaction above its bound, as the
+    /// record names them; empty when the record carries no such mark.
+    pub insufficient: Vec<CompactionPartSize>,
+}
+
+/// One part the record names in a compaction's insufficient-space mark.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionPartSize {
+    pub part: CompactionPart,
+    pub tokens: f64,
+}
+
+/// A part of the context a compaction could not shrink, as the record names
+/// it (`insufficientSpace.parts[].part`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionPart {
+    SystemPrompt,
+    Tools,
+    AppendedMessages,
+    KeyedBaseline,
+    PinnedInputs,
+    Digest,
+    Summary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

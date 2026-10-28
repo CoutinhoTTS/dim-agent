@@ -473,6 +473,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "compact the context of the shown line" => "compactar o contexto da linha apresentada",
         "Kept verbatim" => "Mantido literalmente",
+        "insufficient space: {parts}" => "espaço insuficiente: {parts}",
+        "system prompt" => "prompt do sistema",
+        "tools" => "ferramentas",
+        "appended messages" => "mensagens anexadas",
+        "keyed baseline" => "linha de base com chaves",
+        "pinned inputs" => "entradas fixadas",
+        "digest" => "compêndio",
+        "summary" => "resumo",
         _ => return None,
     })
 }

@@ -221,6 +221,14 @@ mod tests {
                 "This daemon does not support context compaction",
                 "compact the context of the shown line",
                 "Kept verbatim",
+                "insufficient space: {parts}",
+                "system prompt",
+                "tools",
+                "appended messages",
+                "keyed baseline",
+                "pinned inputs",
+                "digest",
+                "summary",
             ] {
                 assert!(lookup(key).is_some(), "{code} lacks {key:?}");
             }

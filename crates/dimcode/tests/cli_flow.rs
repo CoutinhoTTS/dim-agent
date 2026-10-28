@@ -5978,6 +5978,20 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
                      "replacement_parts":{"strategy":1,"digest":0},
                      "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":300.0,
                                     "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
+        // A record whose parts cannot meet its bound: the header names them.
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction-start-3","sequence":16,"create_at":1,"type":"context","name":"compaction-start",
+             "data":{"through":11,"trigger":"manual","strategy":"summary"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction-3","sequence":17,"create_at":1,"type":"context","name":"compaction",
+             "data":{"through":11,"start":16,"status":"completed","retain_from":"dim-2","strategy":"summary",
+                     "replacement":[{"role":"user","content":"<dim-summary>\nTrimmed."}],
+                     "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":300.0,
+                                    "estimatedOutputTokens":6400.0,"entriesReplaced":3,"modelCallCount":1,
+                                    "durationMs":10,"strategy":{"kind":"summary"},
+                                    "insufficientSpace":{"parts":[
+                                        {"part":"summary","tokens":3200.0},
+                                        {"part":"pinnedInputs","tokens":1100.0}]}}}}}));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -6010,6 +6024,7 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         at("Kept verbatim") < at("Keep the parser race in mind."),
         "the kept input follows its label: {transcript}"
     );
+    terminal.until("insufficient space: summary 3.2K, pinned inputs 1.1K");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success());

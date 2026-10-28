@@ -10,16 +10,17 @@ use std::sync::Arc;
 use dim_agent_types::{
     BranchCreateAt, BranchCreateFailedData, BranchSource, CollaborationDelivery,
     CollaborationOutcome, CollaborationTarget, ContentBlock, ContextCompactionResult, ExecStatus,
-    InputMode, JsonObject, Message, MessageContent, MessagePart, ModelOutputOutcome,
-    ReplacementParts, ToolContent, ToolResult, TurnOutcome, UserInput,
+    InputMode, InsufficientSpacePartName, JsonObject, Message, MessageContent, MessagePart,
+    ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult, TurnOutcome, UserInput,
 };
 use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, CompactionState, CompactionView, LineCut, LineState, LineView, MemberCard,
-    MemberConversationState, MemberTarget, QueuedInput, RowKind, RowTone, TaskFinish, TaskKind,
-    TaskTarget, TaskView, TurnEnd, ViewRow, ViewSnapshot, WorkflowView,
+    ApprovalView, CompactionPart, CompactionPartSize, CompactionState, CompactionView, LineCut,
+    LineState, LineView, MemberCard, MemberConversationState, MemberTarget, QueuedInput, RowKind,
+    RowTone, TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd, ViewRow, ViewSnapshot,
+    WorkflowView,
 };
 use crate::wire::{Event, EventContent, Progress, WorkflowRun, WorkflowState};
 
@@ -555,6 +556,7 @@ impl Projection {
                     state: CompactionState::Running,
                     text: String::new(),
                     kept: None,
+                    insufficient: Vec::new(),
                 });
                 self.compaction_rows.insert(sequence, index);
             }
@@ -1082,29 +1084,63 @@ impl Projection {
 }
 
 /// A compaction result as its row shows it. A completed one carries the
-/// summary that replaced the cut history and the inputs it kept verbatim;
-/// the rest carry the reason they record.
+/// summary that replaced the cut history, the inputs it kept verbatim, and
+/// the parts the record names as keeping it above its bound; the rest carry
+/// the reason they record.
 fn compaction_view(outcome: &ContextCompactionResult) -> CompactionView {
-    let (state, text, kept) = match outcome {
+    let (state, text, kept, insufficient) = match outcome {
         ContextCompactionResult::Completed {
             replacement,
+            diagnostics,
             replacement_parts,
             ..
         } => {
             let (text, kept) = replacement_text(replacement, *replacement_parts);
-            (CompactionState::Completed, text, kept)
+            let insufficient = diagnostics
+                .insufficient_space
+                .as_ref()
+                .map(|space| {
+                    space
+                        .parts
+                        .iter()
+                        .map(|part| CompactionPartSize {
+                            part: compaction_part(part.part),
+                            tokens: part.tokens,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            (CompactionState::Completed, text, kept, insufficient)
         }
         ContextCompactionResult::Skipped { reason, .. } => {
-            (CompactionState::Skipped, reason.clone(), None)
+            (CompactionState::Skipped, reason.clone(), None, Vec::new())
         }
         ContextCompactionResult::Failed { error, .. } => {
-            (CompactionState::Failed, error.clone(), None)
+            (CompactionState::Failed, error.clone(), None, Vec::new())
         }
         ContextCompactionResult::Cancelled { reason } => {
-            (CompactionState::Cancelled, reason.clone(), None)
+            (CompactionState::Cancelled, reason.clone(), None, Vec::new())
         }
     };
-    CompactionView { state, text, kept }
+    CompactionView {
+        state,
+        text,
+        kept,
+        insufficient,
+    }
+}
+
+/// A part of the insufficient-space mark, as this client names it.
+fn compaction_part(part: InsufficientSpacePartName) -> CompactionPart {
+    match part {
+        InsufficientSpacePartName::SystemPrompt => CompactionPart::SystemPrompt,
+        InsufficientSpacePartName::Tools => CompactionPart::Tools,
+        InsufficientSpacePartName::AppendedMessages => CompactionPart::AppendedMessages,
+        InsufficientSpacePartName::KeyedBaseline => CompactionPart::KeyedBaseline,
+        InsufficientSpacePartName::PinnedInputs => CompactionPart::PinnedInputs,
+        InsufficientSpacePartName::Digest => CompactionPart::Digest,
+        InsufficientSpacePartName::Summary => CompactionPart::Summary,
+    }
 }
 
 /// The parts of a completed compaction's replacement, split where the record
@@ -1707,6 +1743,7 @@ mod tests {
                 state: CompactionState::Running,
                 text: String::new(),
                 kept: None,
+                insufficient: Vec::new(),
             })
         );
 
@@ -1732,6 +1769,7 @@ mod tests {
                 state: CompactionState::Completed,
                 text: "<dim-summary>\nThe parser is half done.\n</dim-summary>".into(),
                 kept: None,
+                insufficient: Vec::new(),
             })
         );
     }
@@ -1812,6 +1850,7 @@ mod tests {
                 state: CompactionState::Failed,
                 text: "context is not configured".into(),
                 kept: None,
+                insufficient: Vec::new(),
             })
         );
     }

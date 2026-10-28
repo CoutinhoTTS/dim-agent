@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use crate::model::shell::ShellRun;
-use crate::model::view::{CompactionState, RowKind, RowTone, ViewRow};
+use crate::model::view::{CompactionPartSize, CompactionState, RowKind, RowTone, ViewRow};
 use crate::ui::transcript::tool_group::{Detail, ToolGroup, project_group};
 
 /// How a status line is coloured.
@@ -48,6 +48,7 @@ pub enum Block {
         state: CompactionState,
         text: String,
         kept: Option<String>,
+        insufficient: Vec<CompactionPartSize>,
         expanded: bool,
     },
     Error(String),
@@ -107,6 +108,7 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
                 state: compaction.state,
                 text: compaction.text.clone(),
                 kept: compaction.kept.clone(),
+                insufficient: compaction.insufficient.clone(),
                 expanded: detail == Detail::Expanded,
             },
             None => Block::Status {

@@ -455,6 +455,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "compact the context of the shown line" => "kompresi konteks baris yang ditampilkan",
         "Kept verbatim" => "Dipertahankan apa adanya",
+        "insufficient space: {parts}" => "ruang tidak cukup: {parts}",
+        "system prompt" => "system prompt",
+        "tools" => "alat",
+        "appended messages" => "pesan tambahan",
+        "keyed baseline" => "baseline ber-kunci",
+        "pinned inputs" => "input yang dipatok",
+        "digest" => "digest",
+        "summary" => "ringkasan",
         _ => return None,
     })
 }

@@ -21646,6 +21646,21 @@
     },
     {
       "from": "dim_cli::projection",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path InsufficientSpacePartName",
+        "path InsufficientSpacePartName::AppendedMessages",
+        "path InsufficientSpacePartName::Digest",
+        "path InsufficientSpacePartName::KeyedBaseline",
+        "path InsufficientSpacePartName::PinnedInputs",
+        "path InsufficientSpacePartName::Summary",
+        "path InsufficientSpacePartName::SystemPrompt",
+        "path InsufficientSpacePartName::Tools",
+        "use dim_agent_types::InsufficientSpacePartName"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolResult",
@@ -21665,6 +21680,15 @@
       "to": "dim_cli::model::view",
       "references": [
         "path ApprovalView",
+        "path CompactionPart",
+        "path CompactionPart::AppendedMessages",
+        "path CompactionPart::Digest",
+        "path CompactionPart::KeyedBaseline",
+        "path CompactionPart::PinnedInputs",
+        "path CompactionPart::Summary",
+        "path CompactionPart::SystemPrompt",
+        "path CompactionPart::Tools",
+        "path CompactionPartSize",
         "path CompactionState::Cancelled",
         "path CompactionState::Completed",
         "path CompactionState::Failed",
@@ -21710,6 +21734,8 @@
         "path ViewSnapshot::default",
         "path WorkflowView",
         "use crate::model::view::ApprovalView",
+        "use crate::model::view::CompactionPart",
+        "use crate::model::view::CompactionPartSize",
         "use crate::model::view::CompactionState",
         "use crate::model::view::CompactionView",
         "use crate::model::view::LineCut",
@@ -27068,6 +27094,7 @@
       "from": "dim_cli::ui::transcript::block",
       "to": "dim_cli::model::view",
       "references": [
+        "path CompactionPartSize",
         "path CompactionState",
         "path RowKind::AssistantMessage",
         "path RowKind::Compaction",
@@ -27082,6 +27109,7 @@
         "path RowTone::Danger",
         "path RowTone::Warning",
         "path ViewRow",
+        "use crate::model::view::CompactionPartSize",
         "use crate::model::view::CompactionState",
         "use crate::model::view::RowKind",
         "use crate::model::view::RowTone",
@@ -27174,12 +27202,23 @@
       "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::model::view",
       "references": [
+        "path CompactionPart",
+        "path CompactionPart::AppendedMessages",
+        "path CompactionPart::Digest",
+        "path CompactionPart::KeyedBaseline",
+        "path CompactionPart::PinnedInputs",
+        "path CompactionPart::Summary",
+        "path CompactionPart::SystemPrompt",
+        "path CompactionPart::Tools",
+        "path CompactionPartSize",
         "path CompactionState",
         "path CompactionState::Cancelled",
         "path CompactionState::Completed",
         "path CompactionState::Failed",
         "path CompactionState::Running",
         "path CompactionState::Skipped",
+        "use crate::model::view::CompactionPart",
+        "use crate::model::view::CompactionPartSize",
         "use crate::model::view::CompactionState"
       ]
     },
