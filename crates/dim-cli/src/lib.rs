@@ -13,6 +13,7 @@ mod leaf;
 mod login;
 mod mcp;
 mod mcp_command;
+mod migration_command;
 mod model;
 mod permission;
 mod permission_command;
@@ -462,6 +463,9 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
 }
 
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
+    if let Action::Migration(command) = &options.action {
+        return migration_command::run(root, &options, command).await;
+    }
     if let Action::Acp {
         auth_setup: Some(method),
         ..
@@ -709,6 +713,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             session::chat(&mut client, &options, images).await
         }
         Action::Acp { .. }
+        | Action::Migration(_)
         | Action::Help
         | Action::Version
         | Action::DaemonStop

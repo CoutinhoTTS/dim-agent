@@ -61,10 +61,10 @@ export class Jobs {
     const requestDigest = createHash('sha256').update(JSON.stringify([patch, recurrence])).digest('hex')
     if (previous !== undefined) return { status: previous.fingerprint === fingerprint && previous.request_digest === requestDigest ? 'already_imported' : 'conflict', job_id: sourceId }
     if (snapshot.document.jobs.some(job => job.id === sourceId)) return { status: 'conflict', job_id: sourceId }
-    const { schedule, anchor } = legacySchedule(recurrence)
+    const schedule = legacySchedule(recurrence, patch.enabled === false)
     const bound = await this.permissions.permissionDefaults({})
     const job = jobSchema.parse({ ...patch, schedule, id: sourceId, max_run_minutes: patch.max_run_minutes ?? 60,
-      policy_cap: bound, created_by: 'user', revision: 1, ...(patch.enabled ? { enabled_at: anchor } : {}),
+      policy_cap: bound, created_by: 'user', revision: 1, ...(patch.enabled ? { enabled_at: new Date().toISOString() } : {}),
     })
     validateJob(job)
     const reply = await this.settings.update({ source: 'schedule', scope: 'user', expectedRevision: snapshot.revision,

@@ -187,6 +187,11 @@ async fn node_scheduler_import_preserves_enablement_and_receipts_across_restart_
         client.rpc("schedule.list", json!({})).await["result"]["jobs"][0]["enabled"],
         true
     );
+    let listed = client.rpc("schedule.list", json!({})).await;
+    assert!(
+        listed["result"]["jobs"][0]["enabled_at"].as_str().unwrap() > "2026-01-01T00:00:00.000Z",
+        "native scheduling starts at import rather than the legacy creation boundary"
+    );
     for (id, rrule, expected) in [
         (
             "daily",
@@ -212,6 +217,31 @@ async fn node_scheduler_import_preserves_enablement_and_receipts_across_restart_
             expected
         );
     }
+    let exhausted = json!({"source_id":"exhausted","fingerprint":"e".repeat(64),"recurrence":{"rrule":"FREQ=DAILY;BYHOUR=9;BYMINUTE=0;COUNT=1","created_at":"2026-01-01T00:00:00Z","last_run_at":"2026-01-02T09:00:00Z"},"job":{"name":"Completed one-shot","prompt":"Historical disabled definition","cwd":home,"mode":"create","enabled":false}});
+    assert_ok(
+        &client
+            .rpc("schedule.import_legacy", exhausted.clone())
+            .await,
+    );
+    let listed = client.rpc("schedule.list", json!({})).await;
+    let exhausted_job = listed["result"]["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == "exhausted")
+        .unwrap();
+    assert_eq!(
+        exhausted_job["schedule"],
+        json!({"at":"2026-01-02T09:00:00.000Z"})
+    );
+    assert_eq!(exhausted_job["enabled"], false);
+    let mut active = exhausted;
+    active["source_id"] = json!("active-without-next");
+    active["job"]["enabled"] = json!(true);
+    assert_eq!(
+        client.rpc("schedule.import_legacy", active).await["error"]["data"]["appError"],
+        "schedule_import_unsupported"
+    );
     let unsupported = json!({"source_id":"unsupported","fingerprint":"d".repeat(64),"recurrence":{"rrule":"FREQ=DAILY;INTERVAL=2;BYHOUR=12;BYMINUTE=0","created_at":"2026-01-01T00:00:00Z"},"job":{"name":"Unsupported","prompt":"No approximate timing","cwd":home,"mode":"create","enabled":false}});
     assert_eq!(
         client.rpc("schedule.import_legacy", unsupported).await["error"]["data"]["appError"],

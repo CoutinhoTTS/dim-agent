@@ -1,0 +1,27 @@
+[package]
+name = "dim-migration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "On-demand legacy CLI and Desktop data migration plugin"
+
+[dependencies]
+dim-agent-types.workspace = true
+dim-agent-capabilities.workspace = true
+dim-client.workspace = true
+rutis.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+rusqlite = "0.40.2"
+sha2 = "0.10.9"
+base64 = "0.23.1"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+dim-app-server = { workspace = true, features = ["testing"] }
+dim-agent-runtime.workspace = true

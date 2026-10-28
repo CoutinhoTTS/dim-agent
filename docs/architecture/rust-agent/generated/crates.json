@@ -133,6 +133,10 @@
   },
   {
     "from": "dim-cli",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-cli",
     "to": "dim-agent-types"
   },
   {
@@ -141,7 +145,35 @@
   },
   {
     "from": "dim-cli",
+    "to": "dim-migration"
+  },
+  {
+    "from": "dim-cli",
     "to": "rutis"
+  },
+  {
+    "from": "dim-migration",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-migration",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-migration",
+    "to": "dim-client"
+  },
+  {
+    "from": "dim-migration",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-migration",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-migration",
+    "to": "dim-app-server"
   },
   {
     "from": "dim-oauth",

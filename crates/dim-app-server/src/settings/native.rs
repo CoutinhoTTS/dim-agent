@@ -49,7 +49,6 @@ impl SettingsService {
             .sources
             .get(&source)
             .ok_or(SettingsError::UnknownSource)?;
-        let validate = registered.value.validate.clone();
         let path = self
             .files
             .path(self.home_root, &registered.value.user_file)?;
@@ -59,6 +58,7 @@ impl SettingsService {
             .ok_or(SettingsError::Invalid("fill requires native storage"))?
             .clone();
         let file = self.files.read(&path, cancel).await;
+        let validate = move |value: &Value| registered.value.prepare(value);
         let owner = self.clone();
         let cancel = cancel.clone();
         let source_key = key(&source);

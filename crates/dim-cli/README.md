@@ -1,6 +1,10 @@
 # Rust CLI
 
-`dimcode` is a thin Rust client for the local App Server. It owns command-line input, scrollback output, approvals, questions and account prompts. The App Server owns model execution, tools, session state and persistence. The npm wrapper exposes the same program as `dim` and `dimcode`.
+`dimcode` is a thin Rust client for the local App Server. It owns command-line input, scrollback output, approvals, questions and account prompts. The App Server owns model execution, tools, session state and persistence. The npm wrapper exposes the same program as `dim` and `dimcode`; the alpha wrapper exposes `dima`.
+
+`migration inspect/run/list/show/retry/cancel` mounts the shared Migration plugin
+only for that invocation. Source checks, stopped-source acknowledgement, progress,
+JSON reports, cancellation and exit codes follow the [migration command contract](../../docs/design/cli-commands.md#migration-interaction).
 
 `dimcode tui` opens the interactive client. `dimcode exec -p TEXT` runs one prompt
 and exits; redirected stdin supplies the prompt when `-p` is absent.

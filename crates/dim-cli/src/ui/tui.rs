@@ -1872,7 +1872,7 @@ impl App {
                     Some(locale) => {
                         crate::ui::config::write(&self.home, i18n::LOCALE_KEY, locale.code().into())
                     }
-                    None => crate::ui::config::remove(&self.home, i18n::LOCALE_KEY),
+                    None => crate::ui::config::clear(&self.home, i18n::LOCALE_KEY),
                 };
                 self.set_notice(match (saved, locale) {
                     (Some(error), _) => {

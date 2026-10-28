@@ -240,6 +240,9 @@ impl InputMessageData {
                             return Err("recorded tool results require typed result parts");
                         }
                         MessageContent::Parts(parts) => {
+                            if record.message.role == Role::ToolResult && parts.is_empty() {
+                                return Err("recorded tool results require typed result parts");
+                            }
                             for part in parts {
                                 match part {
                                     MessagePart::ToolUse { id, .. } => {

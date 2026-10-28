@@ -190,6 +190,14 @@ async fn recorded_context_errors_preserve_history_and_prevent_a_substitute_reque
         .unwrap();
     let incomplete = conversation(vec![tool_group().remove(1)], None);
     assert!(session.input(incomplete, "main").await.is_err());
+    let mut empty_result = tool_group();
+    empty_result[2].message.content = MessageContent::Parts(Vec::new());
+    assert!(
+        session
+            .input(conversation(empty_result, None), "main")
+            .await
+            .is_err()
+    );
     let history = vec![record(
         "original",
         Message::text(Role::User, "retained original"),

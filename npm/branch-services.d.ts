@@ -34,11 +34,50 @@ export interface UserInput {
   content: ContentBlock[]
 }
 
+export type Role = "user" | "assistant" | "tool_result"
+
+/** Native continuation facts preserved at the model boundary. */
+export type ContentMetadata =
+  | { protocol: "bedrock"; signature?: string | null }
+  | { protocol: "bedrock-redacted"; data: string }
+  | { protocol: "anthropic"; signature: string }
+  | { protocol: "anthropic-redacted"; data: string }
+  | { protocol: "gemini"; thoughtSignature: string }
+  | { protocol: "xai-responses"; itemId: string; encryptedContent?: string | null }
+  | { protocol: "openai-responses"; itemId: string; encryptedContent?: string | null; summaryIndex?: number | null; phase?: string | null }
+
+export type ToolContent = string | ContentBlock[]
+
+export type MessagePart =
+  | { type: "text"; providerMetadata?: ContentMetadata | null; text: string; startTime?: string | null; endTime?: string | null }
+  | { type: "image"; source: ImageSource }
+  | { type: "tool_use"; providerMetadata?: ContentMetadata | null; id: string; name: string; input: Record<string, unknown>; startTime?: string | null }
+  | { type: "tool_result"; tool_use_id: string; content: ToolContent; structuredContent?: Record<string, unknown> | null; is_error?: boolean | null }
+  | { type: "thinking"; providerMetadata?: ContentMetadata | null; thinking: string; startTime?: string | null; endTime?: string | null }
+
+export type MessageContent = string | MessagePart[]
+
+export interface Message {
+  role: Role
+  content: MessageContent
+}
+
+/** Existing conversation content, independent of any execution that produced it. */
+export interface RecordedMessage {
+  id: string
+  createdAt?: string | null
+  message: Message
+  /** False retains a readable record without adopting it into model context. */
+  inContext: boolean
+}
+
 /**
- * Runtime content a capability places in the model context. The renderer
- * puts `text` verbatim as one user message where the input is consumed.
+ * Final content adopted where its input is consumed; never an instruction
+ * to execute historical tools or reproduce a model request.
  */
-export type InputBlock = { type: "raw"; text: string; key?: string | null; retire?: boolean }
+export type InputBlock =
+  | { type: "messages"; source: string; messages: RecordedMessage[]; context_error?: string | null }
+  | { type: "raw"; text: string; key?: string | null; retire?: boolean }
 
 export type InputMode = "queue" | "steer" | "append"
 

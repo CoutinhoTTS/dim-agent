@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rutis::host::CtxHost;
 use serde_json::Value;
 
 /// The value saved under `key`, if any.
@@ -14,36 +15,65 @@ pub fn read(home: &Path, key: &str) -> Option<Value> {
 
 /// Saves `value` under `key`; the error text on failure.
 pub fn write(home: &Path, key: &str, value: Value) -> Option<String> {
-    let path = path(home);
-    let mut config: Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| serde_json::json!({}));
-    config[key] = value;
-    let text = match serde_json::to_string_pretty(&config) {
-        Ok(text) => text + "\n",
-        Err(error) => return Some(error.to_string()),
-    };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    use dim_agent_capabilities::file_storage::{FileStorage, FileStorageError, FileStoragePlugin};
+    let home = home.to_owned();
+    let key = key.to_owned();
+    let worker = std::thread::Builder::new()
+        .name("client-settings".into())
+        .spawn(move || -> crate::Result<()> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async move {
+                std::fs::create_dir_all(&home)?;
+                let root = rutis::Ctx::root()?;
+                let result = async {
+                    let plugin = root.plugin(FileStoragePlugin::new(vec![home.canonicalize()?]));
+                    (&plugin).await?;
+                    let files = root
+                        .get::<FileStorage>()
+                        .ok_or("Client settings storage is unavailable")?;
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    let mut lease = files.lock(&files.path(0, "config.json")?, &cancel).await?;
+                    let mut document: Value = match lease.read(&cancel).await {
+                        Ok(bytes) => serde_json::from_slice(&bytes)?,
+                        Err(FileStorageError::Io(error))
+                            if error.kind() == std::io::ErrorKind::NotFound =>
+                        {
+                            serde_json::json!({})
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    let fields = document
+                        .as_object_mut()
+                        .ok_or("Client config.json must be an object")?;
+                    fields.insert(key, value);
+                    #[cfg(unix)]
+                    let permissions = Some(std::os::unix::fs::PermissionsExt::from_mode(0o600));
+                    #[cfg(not(unix))]
+                    let permissions = None;
+                    lease
+                        .replace(serde_json::to_vec_pretty(&document)?, permissions, &cancel)
+                        .await?;
+                    Ok(())
+                }
+                .await;
+                let cleanup = root.shutdown().await.map_err(Into::into);
+                result.and(cleanup)
+            })
+        });
+    match worker {
+        Err(error) => Some(error.to_string()),
+        Ok(worker) => match worker.join() {
+            Ok(result) => result.err().map(|error| error.to_string()),
+            Err(_) => Some("Client settings worker failed".into()),
+        },
     }
-    std::fs::write(&path, text).err().map(|e| e.to_string())
 }
 
-/// Removes `key`; the error text on failure.
-pub fn remove(home: &Path, key: &str) -> Option<String> {
-    let path = path(home);
-    let mut config = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .filter(Value::is_object)?;
-    config.as_object_mut()?.remove(key);
-    let text = match serde_json::to_string_pretty(&config) {
-        Ok(text) => text + "\n",
-        Err(error) => return Some(error.to_string()),
-    };
-    std::fs::write(&path, text).err().map(|e| e.to_string())
+/// Saves an explicit cleared value so import cannot replace the user's default choice.
+pub fn clear(home: &Path, key: &str) -> Option<String> {
+    write(home, key, Value::Null)
 }
 
 /// `config.json` key of the default terminal UI mode.
@@ -80,4 +110,46 @@ pub fn save_permission(home: &Path, preset: &str) -> Option<String> {
 
 fn path(home: &Path) -> PathBuf {
     home.join("config.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dim_agent_capabilities::file_storage::{FileStorage, FileStoragePlugin};
+
+    #[tokio::test]
+    async fn client_writes_share_migration_locks_and_keep_explicit_clear_and_corrupt_files() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            path(home.path()),
+            br#"{"locale":"en","tuiNotifyOnComplete":false}"#,
+        )
+        .unwrap();
+        let root = rutis::Ctx::root().unwrap();
+        let plugin = root.plugin(FileStoragePlugin::new(vec![
+            home.path().canonicalize().unwrap(),
+        ]));
+        (&plugin).await.unwrap();
+        let files = root.get::<FileStorage>().unwrap();
+        let lease = files
+            .lock(
+                &files.path(0, "config.json").unwrap(),
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(write(home.path(), "locale", "ja".into()).is_some());
+        assert_eq!(read(home.path(), "locale"), Some("en".into()));
+        drop(lease);
+        assert_eq!(clear(home.path(), "locale"), None);
+        assert_eq!(read(home.path(), "locale"), Some(Value::Null));
+        assert_eq!(read(home.path(), "tuiNotifyOnComplete"), Some(false.into()));
+        std::fs::write(path(home.path()), b"broken document").unwrap();
+        assert!(write(home.path(), "locale", "ja".into()).is_some());
+        assert_eq!(
+            std::fs::read(path(home.path())).unwrap(),
+            b"broken document"
+        );
+        root.shutdown().await.unwrap();
+    }
 }

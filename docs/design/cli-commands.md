@@ -23,6 +23,9 @@ contract records the native platform acceptance evidence and outstanding checks.
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
+| `dimcode migration inspect\|run --source OLD_HOME --source-stopped` | Inspect or import a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
+| `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
+| `dimcode migration retry TASK --source-stopped [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
@@ -33,7 +36,7 @@ meanings and work before or after the command. Existing login/account/logout,
 models, MCP and daemon commands remain available. Existing `--prompt`, piped
 stdin and `--resume` calls retain their behavior; `exec resume` also accepts the
 same existing global options. Supplying the Session twice or the prompt twice
-is an argument error. `--json` is an `exec` option, and `tui` requires a terminal.
+is an argument error. `--json` serves `exec` and `migration`, and `tui` requires a terminal.
 Help/version and argument errors do not start the daemon.
 
 The interactive export parser reads the format token and treats the remainder
@@ -42,6 +45,45 @@ quote expansion. Missing paths and unsupported formats print usage and return
 to the prompt without submitting input. `/exit` takes no arguments. Only these
 exact command names are intercepted; other text follows the normal input path.
 Subcommands do not create a plugin command registry.
+
+### Migration interaction
+
+`dim` and the alpha package's `dima` invoke these same native commands. The caller
+sets an isolated target with `--home`; it must be outside `OLD_HOME`. The stopped
+acknowledgement is required on inspect, run and retry. Source/target overlap is
+rejected before starting the target daemon. Run and retry mount Migration for the
+invocation and use the ordinary daemon profile; metadata commands mount it without
+a target connection. Disposal drains accepted work before command exit. No long-term
+plugin selection or automatic migration trigger is changed.
+
+```text
+$ dim migration inspect --home /tmp/dim-new --source /tmp/dim-old --source-stopped
+{ "database": "dimcode.sqlite", "tables": { ... }, "issues": [] }
+
+$ dim migration run --home /tmp/dim-new --source /tmp/dim-old --source-stopped
+<task-id>  sessions        0/12      <legacy-session>
+<task-id>  file-bytes      262144/524288  <session>/<file>
+<task-id>  message-chunks  8/20      <legacy-session>
+{ "task": { "id": "...", "status": "partial", ... }, "objects": [ ... ] }
+
+$ dim migration show <task-id> --home /tmp/dim-new
+$ dim migration retry <task-id> --home /tmp/dim-new --source-stopped --json
+$ dim migration cancel <running-task-id> --home /tmp/dim-new
+$ dim migration list --home /tmp/dim-new
+```
+
+Progress goes to stderr; final output is JSON on stdout. `--json` suppresses
+progress. Exit codes are 0 for complete, 2 for partial, 1 for failure and 130 for
+settled cancellation. A partial report names failed, conflicting, deferred and
+unsupported objects and omitted fields. Ctrl+C requests cancellation and waits
+for accepted owner operations; a second process can use `cancel TASK`. Retry
+requires the stopped acknowledgement again, accepts a moved source path and keeps
+the prior report. Querying results does not require Migration to remain loaded.
+
+Client preference writes and Migration use the same physical FileStorage leases;
+an occupied lease or malformed target document is reported without overwriting it.
+The language picker's system default is persisted as an explicit null so later
+import preserves that choice.
 
 P1 shell prefixes apply only to interactive input. Their execution, recording,
 progress, cancellation and lifetime follow [ShellInput](plugins/ShellInput.md).

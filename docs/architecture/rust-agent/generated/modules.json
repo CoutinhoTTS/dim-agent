@@ -1,7 +1,7 @@
 {
   "analysis": {
     "source": "syn AST: mod declarations, use trees, item definitions and symbol paths",
-    "scope": "dim-agent-*, dim-app-server and dim-cli library/binary targets; cfg branches are conservatively included",
+    "scope": "dim-agent-*, dim-app-server, dim-client, dim-acp, dim-cli and dim-migration library/binary targets; cfg branches are conservatively included",
     "glob": "glob/re-export chains are resolved for referenced names; an unused glob does not create every possible dependency",
     "limitations": [
       "Macros are not expanded; unexpandedMacros names are reported per module",
@@ -1250,6 +1250,13 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_types::account",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types",
+      "file": "crates/dim-agent-types/src/account.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_types::checkpoint",
       "crate": "dim_agent_types",
       "parent": "dim_agent_types",
@@ -1261,6 +1268,13 @@
       "crate": "dim_agent_types",
       "parent": "dim_agent_types",
       "file": "crates/dim-agent-types/src/content.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_agent_types::conversation",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types",
+      "file": "crates/dim-agent-types/src/conversation.rs",
       "unexpandedMacros": []
     },
     {
@@ -1405,6 +1419,13 @@
         "tokio::select",
         "vec"
       ]
+    },
+    {
+      "id": "dim_app_server::agents::conversation_import",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::agents",
+      "file": "crates/dim-app-server/src/agents/conversation_import.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_app_server::agents::sessions",
@@ -1613,6 +1634,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "serde_json::json",
         "tokio::select"
       ]
     },
@@ -1658,6 +1680,15 @@
         "matches",
         "tokio::select",
         "tracing::info"
+      ]
+    },
+    {
+      "id": "dim_app_server::mcp::auth::import",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp::auth",
+      "file": "crates/dim-app-server/src/mcp/auth/import.rs",
+      "unexpandedMacros": [
+        "format"
       ]
     },
     {
@@ -2138,7 +2169,8 @@
       "file": "crates/dim-app-server/src/settings/native.rs",
       "unexpandedMacros": [
         "format",
-        "params"
+        "params",
+        "serde_json::json"
       ]
     },
     {
@@ -2261,6 +2293,17 @@
         "matches",
         "params",
         "tracing::error",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::storage::timeline::imports",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage::timeline",
+      "file": "crates/dim-app-server/src/storage/timeline/imports.rs",
+      "unexpandedMacros": [
+        "format",
+        "params",
         "vec"
       ]
     },
@@ -2517,6 +2560,16 @@
       ]
     },
     {
+      "id": "dim_cli::export::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::export",
+      "file": "crates/dim-cli/src/export.rs",
+      "unexpandedMacros": [
+        "assert",
+        "json"
+      ]
+    },
+    {
       "id": "dim_cli::images",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -2594,6 +2647,18 @@
         "eprintln",
         "format",
         "json",
+        "println",
+        "tokio::pin",
+        "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_cli::migration_command",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/migration_command.rs",
+      "unexpandedMacros": [
+        "matches",
         "println",
         "tokio::pin",
         "tokio::select"
@@ -2943,7 +3008,19 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/config.rs",
       "unexpandedMacros": [
-        "serde_json::json"
+        "serde_json::json",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::config::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui::config",
+      "file": "crates/dim-cli/src/ui/config.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "vec"
       ]
     },
     {
@@ -4272,6 +4349,111 @@
       "parent": "dim_client",
       "file": "crates/dim-client/src/wire.rs",
       "unexpandedMacros": []
+    },
+    {
+      "id": "dim_migration",
+      "crate": "dim_migration",
+      "parent": null,
+      "file": "crates/dim-migration/src/lib.rs",
+      "unexpandedMacros": [
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_migration::accounts",
+      "crate": "dim_migration",
+      "parent": "dim_migration",
+      "file": "crates/dim-migration/src/accounts.rs",
+      "unexpandedMacros": [
+        "format",
+        "json"
+      ]
+    },
+    {
+      "id": "dim_migration::archives",
+      "crate": "dim_migration",
+      "parent": "dim_migration",
+      "file": "crates/dim-migration/src/archives.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_migration::engine",
+      "crate": "dim_migration",
+      "parent": "dim_migration",
+      "file": "crates/dim-migration/src/engine.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_migration::inventory",
+      "crate": "dim_migration",
+      "parent": "dim_migration",
+      "file": "crates/dim-migration/src/inventory.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_migration::ledger",
+      "crate": "dim_migration",
+      "parent": "dim_migration",
+      "file": "crates/dim-migration/src/ledger.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_migration::scheduler",
+      "crate": "dim_migration",
+      "parent": "dim_migration",
+      "file": "crates/dim-migration/src/scheduler.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_migration::settings",
+      "crate": "dim_migration",
+      "parent": "dim_migration",
+      "file": "crates/dim-migration/src/settings.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_migration::settings::permissions",
+      "crate": "dim_migration",
+      "parent": "dim_migration::settings",
+      "file": "crates/dim-migration/src/settings/permissions.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "unreachable"
+      ]
+    },
+    {
+      "id": "dim_migration::source",
+      "crate": "dim_migration",
+      "parent": "dim_migration",
+      "file": "crates/dim-migration/src/source.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "serde_json::json"
+      ]
     }
   ],
   "edges": [
@@ -7168,6 +7350,7 @@
         "path EventKind::ToolUse",
         "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
+        "path InputBlock::Messages",
         "path InputBlock::Raw",
         "path InputMessageData",
         "path UserInput",
@@ -12166,6 +12349,13 @@
     },
     {
       "from": "dim_agent_types",
+      "to": "dim_agent_types::account",
+      "references": [
+        "mod account"
+      ]
+    },
+    {
+      "from": "dim_agent_types",
       "to": "dim_agent_types::checkpoint",
       "references": [
         "mod checkpoint"
@@ -12176,6 +12366,13 @@
       "to": "dim_agent_types::content",
       "references": [
         "mod content"
+      ]
+    },
+    {
+      "from": "dim_agent_types",
+      "to": "dim_agent_types::conversation",
+      "references": [
+        "mod conversation"
       ]
     },
     {
@@ -12289,6 +12486,30 @@
       ]
     },
     {
+      "from": "dim_agent_types::conversation",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputMessageData",
+        "use crate::InputMessageData"
+      ]
+    },
+    {
+      "from": "dim_agent_types::conversation",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPolicy",
+        "use crate::PermissionPolicy"
+      ]
+    },
+    {
+      "from": "dim_agent_types::conversation",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use crate::ModelId"
+      ]
+    },
+    {
       "from": "dim_agent_types::event_sequence",
       "to": "dim_agent_types::safe_integer",
       "references": [
@@ -12309,7 +12530,14 @@
       "references": [
         "path ContentBlock",
         "path Message",
-        "path MessagePart"
+        "path MessageContent::Parts",
+        "path MessageContent::Text",
+        "path MessagePart",
+        "path MessagePart::Thinking",
+        "path MessagePart::ToolResult",
+        "path MessagePart::ToolUse",
+        "path Role::Assistant",
+        "path Role::ToolResult"
       ]
     },
     {
@@ -13174,6 +13402,13 @@
     },
     {
       "from": "dim_app_server::agents",
+      "to": "dim_app_server::agents::conversation_import",
+      "references": [
+        "mod conversation_import"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
       "to": "dim_app_server::agents::sessions",
       "references": [
         "mod sessions",
@@ -13315,6 +13550,70 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path crate::protocol::agent_unknown"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::conversation_import",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::InvalidInput",
+        "path AgentError::Reloading",
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::conversation_import",
+      "to": "dim_agent_types::conversation",
+      "references": [
+        "path ConversationBegin",
+        "path ConversationChunk",
+        "path ConversationFileChunk",
+        "path ConversationFileReceipt",
+        "path ConversationReceipt",
+        "path ConversationStatus::Committed",
+        "use dim_agent_types::ConversationBegin",
+        "use dim_agent_types::ConversationChunk",
+        "use dim_agent_types::ConversationFileChunk",
+        "use dim_agent_types::ConversationFileReceipt",
+        "use dim_agent_types::ConversationReceipt",
+        "use dim_agent_types::ConversationStatus"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::conversation_import",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path dim_agent_types::PermissionPolicy::default"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::conversation_import",
+      "to": "dim_agent_types::prompt",
+      "references": [
+        "path ModelSelection",
+        "use dim_agent_types::ModelSelection"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::conversation_import",
+      "to": "dim_app_server::agents",
+      "references": [
+        "path AgentIndex",
+        "path session_config"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::conversation_import",
+      "to": "dim_app_server::agents::sessions",
+      "references": [
+        "path sessions::cap"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::conversation_import",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore"
       ]
     },
     {
@@ -14022,6 +14321,13 @@
     },
     {
       "from": "dim_app_server::codex_oauth",
+      "to": "dim_agent_types::account",
+      "references": [
+        "path dim_agent_types::AccountImportStatus"
+      ]
+    },
+    {
+      "from": "dim_app_server::codex_oauth",
       "to": "dim_app_server::codex_oauth::management",
       "references": [
         "mod management",
@@ -14498,6 +14804,7 @@
         "path RpcError::from",
         "path RpcError::invalid",
         "path RpcError::reloading",
+        "path RpcError::unknown_method",
         "path RpcError::wire",
         "path dim_agent_capabilities::methods::valid_name",
         "path params",
@@ -14750,6 +15057,10 @@
         "path Call::BranchEnd",
         "path Call::Close",
         "path Call::Contributed",
+        "path Call::ConversationBegin",
+        "path Call::ConversationChunk",
+        "path Call::ConversationFile",
+        "path Call::ConversationFinish",
         "path Call::Create",
         "path Call::Delete",
         "path Call::Detach",
@@ -14800,6 +15111,8 @@
         "path Reply::Barrier",
         "path Reply::Configuration",
         "path Reply::Contributed",
+        "path Reply::ConversationFile",
+        "path Reply::ConversationImport",
         "path Reply::Create",
         "path Reply::ExecEnded",
         "path Reply::Fork",
@@ -15201,6 +15514,13 @@
     },
     {
       "from": "dim_app_server::grok_oauth",
+      "to": "dim_agent_types::account",
+      "references": [
+        "path dim_agent_types::AccountImportStatus"
+      ]
+    },
+    {
+      "from": "dim_app_server::grok_oauth",
       "to": "dim_app_server::grok_oauth::management",
       "references": [
         "mod management",
@@ -15305,6 +15625,13 @@
       ]
     },
     {
+      "from": "dim_app_server::managed_oauth",
+      "to": "dim_agent_types::account",
+      "references": [
+        "path dim_agent_types::AccountImportStatus"
+      ]
+    },
+    {
       "from": "dim_app_server::managed_provider",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -15325,6 +15652,14 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::managed_provider",
+      "to": "dim_agent_types::account",
+      "references": [
+        "path dim_agent_types::AccountImportStatus",
+        "use dim_agent_types::AccountImportStatus"
       ]
     },
     {
@@ -15608,6 +15943,13 @@
     },
     {
       "from": "dim_app_server::mcp::auth",
+      "to": "dim_app_server::mcp::auth::import",
+      "references": [
+        "mod import"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth",
       "to": "dim_app_server::mcp::auth::oauth",
       "references": [
         "mod oauth",
@@ -15663,6 +16005,77 @@
         "use super::config::BearerAuth",
         "use super::config::McpOAuthSettings",
         "use super::config::McpServerSettings"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::import",
+      "to": "dim_agent_types",
+      "references": [
+        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::import",
+      "to": "dim_agent_types::account",
+      "references": [
+        "path AccountImportStatus",
+        "path AccountImportStatus::AlreadyImported",
+        "path AccountImportStatus::Conflict",
+        "path AccountImportStatus::Imported",
+        "use dim_agent_types::AccountImportStatus"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::import",
+      "to": "dim_app_server::mcp::auth",
+      "references": [
+        "path CredentialKey",
+        "path CredentialKey::new",
+        "path McpAuth",
+        "path McpAuthError",
+        "path McpAuthError::Unsupported",
+        "use super::CredentialKey",
+        "use super::McpAuth",
+        "use super::McpAuthError"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::import",
+      "to": "dim_app_server::mcp::auth::oauth",
+      "references": [
+        "path oauth::loopback",
+        "path oauth::now",
+        "path oauth::trusted",
+        "use super::oauth"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::import",
+      "to": "dim_app_server::mcp::auth::store",
+      "references": [
+        "path AuthMethod::ClientSecretBasic",
+        "path AuthMethod::ClientSecretPost",
+        "path AuthMethod::None",
+        "path Binding",
+        "path Client",
+        "path Record::new",
+        "path Registration::Dynamic",
+        "path Registration::Preregistered",
+        "path Tokens",
+        "use super::store::AuthMethod",
+        "use super::store::Binding",
+        "use super::store::Client",
+        "use super::store::Record",
+        "use super::store::Registration",
+        "use super::store::Tokens"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::auth::import",
+      "to": "dim_app_server::mcp::config",
+      "references": [
+        "path McpOAuthSettings",
+        "use crate::mcp::config::McpOAuthSettings"
       ]
     },
     {
@@ -17128,6 +17541,18 @@
     },
     {
       "from": "dim_app_server::protocol",
+      "to": "dim_agent_types::conversation",
+      "references": [
+        "path dim_agent_types::ConversationBegin",
+        "path dim_agent_types::ConversationChunk",
+        "path dim_agent_types::ConversationFileChunk",
+        "path dim_agent_types::ConversationFileReceipt",
+        "path dim_agent_types::ConversationKey",
+        "path dim_agent_types::ConversationReceipt"
+      ]
+    },
+    {
+      "from": "dim_app_server::protocol",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -17275,6 +17700,13 @@
       "to": "dim_agent_types",
       "references": [
         "path dim_agent_types::JS_MAX_SAFE_INTEGER"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
+      "to": "dim_agent_types::account",
+      "references": [
+        "path account"
       ]
     },
     {
@@ -17842,6 +18274,13 @@
     },
     {
       "from": "dim_app_server::provider::models",
+      "to": "dim_agent_types::account",
+      "references": [
+        "path account"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::models",
       "to": "dim_agent_types::model",
       "references": [
         "path model"
@@ -18084,6 +18523,13 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_agent_types::account",
+      "references": [
+        "path account"
       ]
     },
     {
@@ -18539,7 +18985,8 @@
       "from": "dim_app_server::settings::native",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
-        "path FilePath"
+        "path FilePath",
+        "path FileStorageError::Io"
       ]
     },
     {
@@ -18560,6 +19007,7 @@
         "path SettingsError::Conflict",
         "path SettingsError::Invalid",
         "path SettingsError::Persistence",
+        "path SettingsError::UnknownSource",
         "path SettingsService",
         "path SettingsSnapshot",
         "path revision",
@@ -19379,6 +19827,122 @@
       ]
     },
     {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::timeline::imports",
+      "references": [
+        "mod imports"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "use dim_agent_capabilities::host::PutSessionFile"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path dim_agent_runtime::core::unix_millis"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "path AgentError::InvalidInput",
+        "path Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path StoredEvent",
+        "path TimelineKey"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_agent_types",
+      "references": [
+        "path dim_agent_types::JS_MAX_SAFE_INTEGER"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_agent_types::conversation",
+      "references": [
+        "path ConversationBegin",
+        "path ConversationChunk",
+        "path ConversationFileChunk",
+        "path ConversationFileReceipt",
+        "path ConversationReceipt",
+        "path ConversationStatus::Committed",
+        "path ConversationStatus::Deleted",
+        "path ConversationStatus::Preparing",
+        "use dim_agent_types::ConversationBegin",
+        "use dim_agent_types::ConversationChunk",
+        "use dim_agent_types::ConversationFileChunk",
+        "use dim_agent_types::ConversationFileReceipt",
+        "use dim_agent_types::ConversationReceipt",
+        "use dim_agent_types::ConversationStatus"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputMessage",
+        "path InputAppliedData",
+        "path InputConsumedData",
+        "path InputMode::Append",
+        "path dim_agent_types::InputMessageData",
+        "use dim_agent_types::InputAppliedData",
+        "use dim_agent_types::InputConsumedData",
+        "use dim_agent_types::InputMode"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_app_server::storage::files",
+      "references": [
+        "path files",
+        "path files::MAX_BYTES",
+        "path files::valid_name"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline::imports",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore",
+        "path create_session",
+        "path head",
+        "path read_sequence",
+        "path write_batch"
+      ]
+    },
+    {
       "from": "dim_app_server::transport",
       "to": "dim_agent_capabilities::methods",
       "references": [
@@ -19717,6 +20281,7 @@
         "path Action::McpList",
         "path Action::McpLogin",
         "path Action::McpLogout",
+        "path Action::Migration",
         "path Action::Models",
         "path Action::Plugin",
         "path Action::RuntimeInstall",
@@ -19848,6 +20413,14 @@
         "path mcp_command::list",
         "path mcp_command::sign_in",
         "path mcp_command::sign_out"
+      ]
+    },
+    {
+      "from": "dim_cli",
+      "to": "dim_cli::migration_command",
+      "references": [
+        "mod migration_command",
+        "path migration_command::run"
       ]
     },
     {
@@ -20029,6 +20602,14 @@
         "path Format",
         "path Format::Markdown",
         "use crate::export::Format"
+      ]
+    },
+    {
+      "from": "dim_cli::args",
+      "to": "dim_cli::migration_command",
+      "references": [
+        "path crate::migration_command::Command",
+        "path crate::migration_command::parse"
       ]
     },
     {
@@ -20378,6 +20959,9 @@
       "references": [
         "path ContentBlock::Image",
         "path ContentBlock::Text",
+        "path dim_agent_types::Role::Assistant",
+        "path dim_agent_types::Role::ToolResult",
+        "path dim_agent_types::Role::User",
         "use dim_agent_types::ContentBlock"
       ]
     },
@@ -20389,6 +20973,7 @@
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
         "path BranchCreateFailedData::deserialize",
+        "path InputBlock::Messages",
         "path InputBlock::Raw",
         "path InputMessageData::deserialize",
         "path TextData::deserialize",
@@ -20431,6 +21016,20 @@
     },
     {
       "from": "dim_cli::export",
+      "to": "dim_cli::export::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::export",
+      "to": "dim_cli::projection",
+      "references": [
+        "path crate::projection::recorded_text"
+      ]
+    },
+    {
+      "from": "dim_cli::export",
       "to": "dim_cli::session",
       "references": [
         "path session::read_history",
@@ -20443,6 +21042,13 @@
       "references": [
         "path Client",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::export::tests",
+      "to": "dim_cli::export",
+      "references": [
+        "path markdown"
       ]
     },
     {
@@ -20698,6 +21304,62 @@
       "references": [
         "path Capture::bind",
         "use crate::mcp::Capture"
+      ]
+    },
+    {
+      "from": "dim_cli::migration_command",
+      "to": "dim_cli",
+      "references": [
+        "path Result",
+        "path crate::daemon_link",
+        "path crate::plugin_error",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::migration_command",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options",
+        "path crate::args::Action",
+        "path crate::args::Action::Help",
+        "path crate::args::Action::Migration",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::migration_command",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "use crate::sanitize::safe"
+      ]
+    },
+    {
+      "from": "dim_cli::migration_command",
+      "to": "dim_cli::ui::theme::themes",
+      "references": [
+        "path crate::ui::theme::themes::THEMES"
+      ]
+    },
+    {
+      "from": "dim_cli::migration_command",
+      "to": "dim_migration",
+      "references": [
+        "path Migration",
+        "path MigrationPlugin::new",
+        "path TaskStatus::Cancelled",
+        "path TaskStatus::Completed",
+        "path TaskStatus::Partial",
+        "use dim_migration::Migration",
+        "use dim_migration::MigrationPlugin",
+        "use dim_migration::TaskStatus"
+      ]
+    },
+    {
+      "from": "dim_cli::migration_command",
+      "to": "dim_migration::source",
+      "references": [
+        "path dim_migration::validate_source_home"
       ]
     },
     {
@@ -21098,6 +21760,10 @@
         "path ContentBlock::Text",
         "path ToolContent::Blocks",
         "path ToolContent::Text",
+        "path dim_agent_types::Message",
+        "path dim_agent_types::Role::Assistant",
+        "path dim_agent_types::Role::ToolResult",
+        "path dim_agent_types::Role::User",
         "use dim_agent_types::ContentBlock",
         "use dim_agent_types::ToolContent"
       ]
@@ -21130,6 +21796,7 @@
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
         "path UserInput",
+        "path dim_agent_types::InputBlock::Messages",
         "path dim_agent_types::InputBlock::Raw",
         "use dim_agent_types::BranchCreateFailedData",
         "use dim_agent_types::BranchSource",
@@ -22937,6 +23604,37 @@
         "path ColorMode::TrueColor",
         "use crate::ui::theme::Appearance",
         "use crate::ui::theme::ColorMode"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::config",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::config",
+      "to": "dim_cli::ui::config::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::config::tests",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "path FileStoragePlugin::new",
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStoragePlugin"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::config::tests",
+      "to": "dim_cli::ui::config",
+      "references": [
+        "path path"
       ]
     },
     {
@@ -26973,8 +27671,8 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::config",
       "references": [
+        "path crate::ui::config::clear",
         "path crate::ui::config::read",
-        "path crate::ui::config::remove",
         "path crate::ui::config::save_fullscreen",
         "path crate::ui::config::save_permission",
         "path crate::ui::config::saved_fullscreen",
@@ -27895,6 +28593,650 @@
         "path Result",
         "use crate::Result"
       ]
+    },
+    {
+      "from": "dim_migration",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorage",
+        "path FileStorageError",
+        "path FileStorageError::Cancelled",
+        "path FileStoragePlugin::new",
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorageError",
+        "use dim_agent_capabilities::file_storage::FileStoragePlugin"
+      ]
+    },
+    {
+      "from": "dim_migration",
+      "to": "dim_client",
+      "references": [
+        "path ConnectionConfig",
+        "use dim_client::ConnectionConfig"
+      ]
+    },
+    {
+      "from": "dim_migration",
+      "to": "dim_migration::accounts",
+      "references": [
+        "mod accounts"
+      ]
+    },
+    {
+      "from": "dim_migration",
+      "to": "dim_migration::archives",
+      "references": [
+        "mod archives"
+      ]
+    },
+    {
+      "from": "dim_migration",
+      "to": "dim_migration::engine",
+      "references": [
+        "mod engine",
+        "path engine::run"
+      ]
+    },
+    {
+      "from": "dim_migration",
+      "to": "dim_migration::inventory",
+      "references": [
+        "mod inventory",
+        "path inventory"
+      ]
+    },
+    {
+      "from": "dim_migration",
+      "to": "dim_migration::ledger",
+      "references": [
+        "mod ledger",
+        "path ledger",
+        "path ledger::Ledger",
+        "path ledger::Ledger::open"
+      ]
+    },
+    {
+      "from": "dim_migration",
+      "to": "dim_migration::scheduler",
+      "references": [
+        "mod scheduler"
+      ]
+    },
+    {
+      "from": "dim_migration",
+      "to": "dim_migration::settings",
+      "references": [
+        "mod settings"
+      ]
+    },
+    {
+      "from": "dim_migration",
+      "to": "dim_migration::source",
+      "references": [
+        "mod source",
+        "path Inventory",
+        "path source",
+        "path source::Source::open",
+        "path validate_source_home",
+        "use source::Inventory",
+        "use source::validate_source_home"
+      ]
+    },
+    {
+      "from": "dim_migration::accounts",
+      "to": "dim_agent_types::account",
+      "references": [
+        "path AccountImportStatus",
+        "path AccountImportStatus::AlreadyImported",
+        "path AccountImportStatus::Conflict",
+        "path AccountImportStatus::Imported",
+        "use dim_agent_types::AccountImportStatus"
+      ]
+    },
+    {
+      "from": "dim_migration::accounts",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use dim_client::Client"
+      ]
+    },
+    {
+      "from": "dim_migration::accounts",
+      "to": "dim_migration",
+      "references": [
+        "path Error::Deferred",
+        "path Error::Object",
+        "path Error::Unsupported",
+        "path Migration",
+        "path ObjectResult",
+        "path Outcome::AlreadyImported",
+        "path Outcome::Conflict",
+        "path Outcome::Deferred",
+        "path Outcome::Imported",
+        "path Outcome::Unsupported",
+        "path Result",
+        "path TaskState",
+        "use crate::Error",
+        "use crate::Migration",
+        "use crate::ObjectResult",
+        "use crate::Outcome",
+        "use crate::Result",
+        "use crate::TaskState"
+      ]
+    },
+    {
+      "from": "dim_migration::accounts",
+      "to": "dim_migration::engine",
+      "references": [
+        "path crate::engine::document",
+        "path request",
+        "use crate::engine::request"
+      ]
+    },
+    {
+      "from": "dim_migration::accounts",
+      "to": "dim_migration::source",
+      "references": [
+        "path Source",
+        "use crate::source::Source"
+      ]
+    },
+    {
+      "from": "dim_migration::archives",
+      "to": "dim_migration",
+      "references": [
+        "path Error::Object",
+        "path Error::Target",
+        "path Result",
+        "use crate::Error",
+        "use crate::Result"
+      ]
+    },
+    {
+      "from": "dim_migration::archives",
+      "to": "dim_migration::source",
+      "references": [
+        "path HistoricalRecord",
+        "path SessionData",
+        "path Source",
+        "use crate::source::HistoricalRecord",
+        "use crate::source::SessionData",
+        "use crate::source::Source",
+        "use crate::source::fingerprint"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Text",
+        "path ImageSource",
+        "path ImageSourceType::Base64",
+        "path Message::text",
+        "path MessageContent::Parts",
+        "path MessagePart::Image",
+        "path MessagePart::Text",
+        "path MessagePart::Thinking",
+        "path MessagePart::ToolResult",
+        "path MessagePart::ToolUse",
+        "path Role::User",
+        "path ToolContent::Blocks",
+        "path ToolContent::Text",
+        "path content"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_agent_types::conversation",
+      "references": [
+        "path ConversationBegin",
+        "path ConversationChunk",
+        "path ConversationFileChunk",
+        "path ConversationFileReceipt",
+        "path ConversationKey",
+        "path ConversationReceipt",
+        "path ConversationStatus::Committed",
+        "path ConversationStatus::Deleted",
+        "path ConversationStatus::Preparing"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path InputMessageData",
+        "path InputMode::Append",
+        "path RecordedMessage"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "path Client::connect",
+        "path dim_client::ConnectionConfig",
+        "path dim_client::RpcError",
+        "use dim_client::Client"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_migration",
+      "references": [
+        "path Error::Cancelled",
+        "path Error::Deferred",
+        "path Error::Object",
+        "path Error::Target",
+        "path Error::Unsupported",
+        "path Migration",
+        "path ObjectResult",
+        "path Outcome",
+        "path Outcome::AlreadyImported",
+        "path Outcome::Deferred",
+        "path Outcome::Deleted",
+        "path Outcome::Failed",
+        "path Outcome::Imported",
+        "path Outcome::Unsupported",
+        "path Result",
+        "path TaskReport",
+        "path TaskState",
+        "path TaskStatus::Cancelled",
+        "path TaskStatus::Completed",
+        "path TaskStatus::Failed",
+        "path TaskStatus::Interrupted",
+        "path TaskStatus::Partial",
+        "path TaskStatus::Running",
+        "use crate::Error",
+        "use crate::Migration",
+        "use crate::ObjectResult",
+        "use crate::Outcome",
+        "use crate::Result",
+        "use crate::TaskReport",
+        "use crate::TaskState",
+        "use crate::TaskStatus"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_migration::accounts",
+      "references": [
+        "path crate::accounts::import"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_migration::archives",
+      "references": [
+        "path crate::archives::Archive::read"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_migration::inventory",
+      "references": [
+        "path crate::inventory::inspect"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_migration::scheduler",
+      "references": [
+        "path crate::scheduler::import"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_migration::settings",
+      "references": [
+        "path crate::settings::import"
+      ]
+    },
+    {
+      "from": "dim_migration::engine",
+      "to": "dim_migration::source",
+      "references": [
+        "path SessionData",
+        "path Source",
+        "path Source::open",
+        "path crate::source::Blob",
+        "path fingerprint",
+        "use crate::source::SessionData",
+        "use crate::source::Source",
+        "use crate::source::fingerprint"
+      ]
+    },
+    {
+      "from": "dim_migration::inventory",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path EntryKind::Directory",
+        "use dim_agent_capabilities::file_storage::EntryKind"
+      ]
+    },
+    {
+      "from": "dim_migration::inventory",
+      "to": "dim_migration",
+      "references": [
+        "path Error::Object",
+        "path Migration",
+        "path ObjectResult",
+        "path Outcome::Deferred",
+        "path Result",
+        "path TaskState",
+        "use crate::Error",
+        "use crate::Migration",
+        "use crate::ObjectResult",
+        "use crate::Outcome",
+        "use crate::Result",
+        "use crate::TaskState"
+      ]
+    },
+    {
+      "from": "dim_migration::inventory",
+      "to": "dim_migration::engine",
+      "references": [
+        "path check",
+        "path document",
+        "use crate::engine::check",
+        "use crate::engine::document"
+      ]
+    },
+    {
+      "from": "dim_migration::inventory",
+      "to": "dim_migration::source",
+      "references": [
+        "path Source",
+        "use crate::source::Source"
+      ]
+    },
+    {
+      "from": "dim_migration::ledger",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileLease",
+        "path FilePath",
+        "path FileStorage",
+        "path FileStorageError::Io",
+        "path FileStorageError::Locked",
+        "use dim_agent_capabilities::file_storage::FileLease",
+        "use dim_agent_capabilities::file_storage::FilePath",
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_migration::ledger",
+      "to": "dim_migration",
+      "references": [
+        "path Error::Object",
+        "path Error::Source",
+        "path Error::Storage",
+        "path ObjectResult",
+        "path Result",
+        "path TaskReport",
+        "path TaskState",
+        "path TaskStatus::Interrupted",
+        "path TaskStatus::Running",
+        "use crate::Error",
+        "use crate::ObjectResult",
+        "use crate::Result",
+        "use crate::TaskReport",
+        "use crate::TaskState",
+        "use crate::TaskStatus"
+      ]
+    },
+    {
+      "from": "dim_migration::ledger",
+      "to": "dim_migration::source",
+      "references": [
+        "path crate::source::fingerprint"
+      ]
+    },
+    {
+      "from": "dim_migration::scheduler",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use dim_client::Client"
+      ]
+    },
+    {
+      "from": "dim_migration::scheduler",
+      "to": "dim_migration",
+      "references": [
+        "path Error::Deferred",
+        "path Error::Object",
+        "path Error::Target",
+        "path Error::Unsupported",
+        "path Migration",
+        "path ObjectResult",
+        "path Outcome::AlreadyImported",
+        "path Outcome::Conflict",
+        "path Outcome::Deferred",
+        "path Outcome::Failed",
+        "path Outcome::Imported",
+        "path Outcome::Unsupported",
+        "path Result",
+        "path TaskState",
+        "use crate::Error",
+        "use crate::Migration",
+        "use crate::ObjectResult",
+        "use crate::Outcome",
+        "use crate::Result",
+        "use crate::TaskState"
+      ]
+    },
+    {
+      "from": "dim_migration::scheduler",
+      "to": "dim_migration::engine",
+      "references": [
+        "path check",
+        "path publish",
+        "path request",
+        "use crate::engine::check",
+        "use crate::engine::publish",
+        "use crate::engine::request"
+      ]
+    },
+    {
+      "from": "dim_migration::scheduler",
+      "to": "dim_migration::source",
+      "references": [
+        "path Source",
+        "path fingerprint",
+        "use crate::source::Source",
+        "use crate::source::fingerprint"
+      ]
+    },
+    {
+      "from": "dim_migration::settings",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileStorageError::Io",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_migration::settings",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use dim_client::Client"
+      ]
+    },
+    {
+      "from": "dim_migration::settings",
+      "to": "dim_migration",
+      "references": [
+        "path Error::Deferred",
+        "path Error::Object",
+        "path Error::Target",
+        "path Error::Unsupported",
+        "path Migration",
+        "path ObjectResult",
+        "path Outcome",
+        "path Outcome::AlreadyImported",
+        "path Outcome::Conflict",
+        "path Outcome::Deferred",
+        "path Outcome::Imported",
+        "path Outcome::Unsupported",
+        "path Result",
+        "path TaskState",
+        "use crate::Error",
+        "use crate::Migration",
+        "use crate::ObjectResult",
+        "use crate::Outcome",
+        "use crate::Result",
+        "use crate::TaskState"
+      ]
+    },
+    {
+      "from": "dim_migration::settings",
+      "to": "dim_migration::engine",
+      "references": [
+        "path crate::engine::document",
+        "path request",
+        "use crate::engine::request"
+      ]
+    },
+    {
+      "from": "dim_migration::settings",
+      "to": "dim_migration::settings::permissions",
+      "references": [
+        "mod permissions",
+        "path permissions",
+        "path permissions::import"
+      ]
+    },
+    {
+      "from": "dim_migration::settings",
+      "to": "dim_migration::source",
+      "references": [
+        "path Source",
+        "use crate::source::Source"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::permissions",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path COMMAND_SEPARATORS",
+        "path CommandMatch::Exact",
+        "path CommandMatch::Prefix",
+        "path CommandRule",
+        "path CommandRuleDecision::Allow",
+        "path CommandRuleDecision::Deny",
+        "use dim_agent_types::COMMAND_SEPARATORS",
+        "use dim_agent_types::CommandMatch",
+        "use dim_agent_types::CommandRule",
+        "use dim_agent_types::CommandRuleDecision"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::permissions",
+      "to": "dim_client",
+      "references": [
+        "path Client",
+        "use dim_client::Client"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::permissions",
+      "to": "dim_migration",
+      "references": [
+        "path Migration",
+        "path Outcome::Unsupported",
+        "path Result",
+        "path TaskState",
+        "use crate::Migration",
+        "use crate::Outcome",
+        "use crate::Result",
+        "use crate::TaskState"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::permissions",
+      "to": "dim_migration::settings",
+      "references": [
+        "path fill",
+        "path record",
+        "use super::fill",
+        "use super::record"
+      ]
+    },
+    {
+      "from": "dim_migration::settings::permissions",
+      "to": "dim_migration::source",
+      "references": [
+        "use crate::source::fingerprint"
+      ]
+    },
+    {
+      "from": "dim_migration::source",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path DirectoryEntry",
+        "path FilePath",
+        "path FileStorage",
+        "path FileStorageError::Cancelled",
+        "path FileStorageError::Closed",
+        "path FileStorageError::InvalidPath",
+        "path FileStorageError::Io",
+        "use dim_agent_capabilities::file_storage::DirectoryEntry",
+        "use dim_agent_capabilities::file_storage::FilePath",
+        "use dim_agent_capabilities::file_storage::FileStorage",
+        "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_migration::source",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path Message",
+        "path Message::text",
+        "path MessageContent::Parts",
+        "path MessagePart::ToolResult",
+        "path MessagePart::ToolUse",
+        "path Role",
+        "path Role::User",
+        "use dim_agent_types::Message",
+        "use dim_agent_types::MessageContent",
+        "use dim_agent_types::MessagePart",
+        "use dim_agent_types::Role"
+      ]
+    },
+    {
+      "from": "dim_migration::source",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path RecordedMessage",
+        "use dim_agent_types::RecordedMessage"
+      ]
+    },
+    {
+      "from": "dim_migration::source",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_migration::source",
+      "to": "dim_migration",
+      "references": [
+        "path Error",
+        "path Error::Cancelled",
+        "path Error::Deferred",
+        "path Error::Object",
+        "path Error::Source",
+        "path Error::Target",
+        "path Result",
+        "use crate::Error",
+        "use crate::Result"
+      ]
     }
   ],
   "unresolved": [
@@ -28215,6 +29557,10 @@
       "path": "OAuthError::Worker"
     },
     {
+      "module": "dim_app_server::mcp::auth::import",
+      "path": "char::is_control"
+    },
+    {
       "module": "dim_app_server::mcp::auth::oauth",
       "path": "char::is_control"
     },
@@ -28515,6 +29861,34 @@
       "path": "SignalKind::terminate"
     },
     {
+      "module": "dim_cli::projection",
+      "path": "MessageContent::Parts"
+    },
+    {
+      "module": "dim_cli::projection",
+      "path": "MessageContent::Text"
+    },
+    {
+      "module": "dim_cli::projection",
+      "path": "MessagePart::Image"
+    },
+    {
+      "module": "dim_cli::projection",
+      "path": "MessagePart::Text"
+    },
+    {
+      "module": "dim_cli::projection",
+      "path": "MessagePart::Thinking"
+    },
+    {
+      "module": "dim_cli::projection",
+      "path": "MessagePart::ToolResult"
+    },
+    {
+      "module": "dim_cli::projection",
+      "path": "MessagePart::ToolUse"
+    },
+    {
       "module": "dim_cli::session",
       "path": "char::is_whitespace"
     },
@@ -28545,6 +29919,14 @@
     {
       "module": "dim_cli::ui::composer",
       "path": "char::is_whitespace"
+    },
+    {
+      "module": "dim_cli::ui::config",
+      "path": "FileStorageError::Io"
+    },
+    {
+      "module": "dim_cli::ui::config",
+      "path": "FileStoragePlugin::new"
     },
     {
       "module": "dim_cli::ui::lines_panel::tests",
@@ -28711,12 +30093,36 @@
       "path": "Reply::Start"
     },
     {
+      "module": "dim_client",
+      "path": "D::Error"
+    },
+    {
       "module": "dim_client::wire",
       "path": "D::Error"
     },
     {
       "module": "dim_client::wire",
       "path": "Wire::deserialize"
+    },
+    {
+      "module": "dim_migration::source",
+      "path": "ValueRef::Blob"
+    },
+    {
+      "module": "dim_migration::source",
+      "path": "ValueRef::Integer"
+    },
+    {
+      "module": "dim_migration::source",
+      "path": "ValueRef::Null"
+    },
+    {
+      "module": "dim_migration::source",
+      "path": "ValueRef::Real"
+    },
+    {
+      "module": "dim_migration::source",
+      "path": "ValueRef::Text"
     }
   ]
 }

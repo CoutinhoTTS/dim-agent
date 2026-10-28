@@ -187,7 +187,7 @@ impl SettingsService {
             .get(source)
             .and_then(|registered| match &registered.value.kind {
                 Kind::Declared(declared) => Some(declared.clone()),
-                Kind::Rust(_) => None,
+                Kind::Rust(_, _) => None,
             })
             .ok_or(SettingsError::UnknownSource)?;
         if let SettingsScope::Project(root) = scope {

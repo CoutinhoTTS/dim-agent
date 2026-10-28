@@ -139,11 +139,20 @@ struct Source {
     user_file: String,
     project_file: Option<String>,
     kind: Kind,
-    validate: Arc<dyn Fn(&Value) -> Result<Value> + Send + Sync>,
 }
 enum Kind {
-    Rust(TypeId),
+    Rust(TypeId, fn(&Value) -> Result<Value>),
     Declared(Arc<Declared>),
+}
+impl Source {
+    fn prepare(&self, value: &Value) -> Result<Value> {
+        match &self.kind {
+            Kind::Rust(_, prepare) => prepare(value),
+            Kind::Declared(declared) => declared
+                .prepare(value.clone())
+                .map_err(SettingsError::Document),
+        }
+    }
 }
 
 pub struct SettingsService {
@@ -179,8 +188,7 @@ impl SettingsService {
                 owner: ctx.instance(),
                 user_file: D::USER_FILE.into(),
                 project_file: D::PROJECT_FILE.map(Into::into),
-                kind: Kind::Rust(TypeId::of::<D>()),
-                validate: Arc::new(|value| {
+                kind: Kind::Rust(TypeId::of::<D>(), |value| {
                     let mut defaults = serde_json::to_value(D::default())
                         .map_err(|_| SettingsError::Invalid("cannot encode source defaults"))?;
                     if let (Some(defaults), Some(fields)) =
@@ -211,7 +219,6 @@ impl SettingsService {
             .map_err(|reason| registration_failed(&source, reason))?;
         let (user_file, project_file) = declared.files();
         let declared = Arc::new(declared);
-        let validator = declared.clone();
         self.insert(
             ctx,
             &source,
@@ -220,11 +227,6 @@ impl SettingsService {
                 user_file,
                 project_file,
                 kind: Kind::Declared(declared),
-                validate: Arc::new(move |value| {
-                    validator
-                        .prepare(value.clone())
-                        .map_err(SettingsError::Document)
-                }),
             },
         )
     }
@@ -237,7 +239,7 @@ impl SettingsService {
             .filter(|registered| registered.value.owner == owner)
             .filter_map(|registered| match &registered.value.kind {
                 Kind::Declared(declared) => Some(declared.declaration().clone()),
-                Kind::Rust(_) => None,
+                Kind::Rust(_, _) => None,
             })
             .collect()
     }
@@ -328,7 +330,7 @@ impl SettingsService {
     }
     fn path<D: BusinessDocument>(&self, scope: SettingsScope) -> Result<FilePath> {
         match self.sources.get(D::NAMESPACE) {
-            Some(registered) if matches!(registered.value.kind, Kind::Rust(id) if id == TypeId::of::<D>()) =>
+            Some(registered) if matches!(registered.value.kind, Kind::Rust(id,_) if id == TypeId::of::<D>()) =>
                 {}
             _ => return Err(SettingsError::UnknownSource),
         }

@@ -51,6 +51,18 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
             .write_all(b"{\"text\":\"complete\"}}\n")
             .await
             .unwrap();
+        for result in [Some(Value::Null), None] {
+            let request: Value =
+                serde_json::from_str(&read.next_line().await.unwrap().unwrap()).unwrap();
+            let mut reply = json!({"jsonrpc":"2.0","id":request["id"]});
+            if let Some(result) = result {
+                reply["result"] = result;
+            }
+            write
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .unwrap();
+        }
     });
     let config = ConnectionConfig {
         endpoint,
@@ -80,6 +92,14 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
     assert!(
         matches!(client.next().await.unwrap(), Message::Notice { method, params } if method == "session.notice" && params == json!({"text":"complete"}))
     );
+    assert_eq!(
+        client
+            .typed::<Option<Value>>("session.null", json!({}))
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(client.rpc("session.missing", json!({})).await.is_err());
     server.await.unwrap();
     client.wait_closed().await.unwrap();
 }

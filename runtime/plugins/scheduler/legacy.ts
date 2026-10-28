@@ -1,13 +1,12 @@
 import { z } from 'zod'
 import { ScheduleError, type Schedule } from './data.ts'
 
-export const recurrence = z.strictObject({ rrule: z.string().min(1), created_at: z.iso.datetime({ offset: true }), next_run_at: z.iso.datetime({ offset: true }).nullish() })
+export const recurrence = z.strictObject({ rrule: z.string().min(1), created_at: z.iso.datetime({ offset: true }), next_run_at: z.iso.datetime({ offset: true }).nullish(), last_run_at: z.iso.datetime({ offset: true }).nullish() })
 export type LegacyRecurrence = z.infer<typeof recurrence>
 
-export function legacySchedule(input: LegacyRecurrence): { schedule: Schedule; anchor: string } {
+export function legacySchedule(input: LegacyRecurrence, disabled: boolean): Schedule {
   const created = new Date(input.created_at)
   created.setSeconds(0, 0)
-  const anchor = created.toISOString()
   const fields = new Map<string, string>()
   for (const segment of input.rrule.trim().toUpperCase().replace(/^RRULE:/, '').split(';')) {
     const pair = segment.split('=')
@@ -41,13 +40,15 @@ export function legacySchedule(input: LegacyRecurrence): { schedule: Schedule; a
   const minute = integer('BYMINUTE', 0, 59, frequency === 'HOURLY' ? 0 : created.getMinutes())
   const month = integer('BYMONTH', 1, 12, created.getMonth() + 1)
   const day = integer('BYMONTHDAY', 1, 31, created.getDate())
+  if (frequency === 'YEARLY' && day > [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]) throw new ScheduleError('schedule_invalid', 'Legacy month and day have no calendar occurrence')
   const weekdayNames = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA']
   const days = fields.get('BYDAY')?.split(',').map(day => weekdayNames.indexOf(day))
   if (days && (days.some(day => day < 0) || new Set(days).size !== days.length)) throw new ScheduleError('schedule_invalid', 'Invalid legacy weekdays')
   if (fields.has('COUNT')) {
     integer('COUNT', 1, 1)
-    if (!input.next_run_at) throw new ScheduleError('schedule_import_unsupported', 'One-shot job has no persisted occurrence')
-    return { schedule: { at: new Date(input.next_run_at).toISOString() }, anchor }
+    const occurrence = input.next_run_at ?? (disabled ? input.last_run_at : undefined)
+    if (!occurrence) throw new ScheduleError('schedule_import_unsupported', 'One-shot job has no persisted occurrence')
+    return { at: new Date(occurrence).toISOString() }
   }
   const slots = (first: number, end: number, step: number) => {
     const result: number[] = []
@@ -62,5 +63,5 @@ export function legacySchedule(input: LegacyRecurrence): { schedule: Schedule; a
   else if (frequency === 'MONTHLY' && 12 % interval === 0) cron = `${minute} ${hour} ${day} ${slots(created.getMonth() % interval + 1, 13, interval)} *`
   else if (frequency === 'YEARLY' && interval === 1) cron = `${minute} ${hour} ${day} ${month} *`
   else throw new ScheduleError('schedule_import_unsupported', 'Recurrence interval has no equivalent native calendar schedule')
-  return { schedule: { cron }, anchor }
+  return { cron }
 }
