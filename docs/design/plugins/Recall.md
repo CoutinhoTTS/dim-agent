@@ -236,11 +236,15 @@ it:
 
 A turn is the span of one `turn_id` from `turn/start` to `turn/end`; the inputs it consumed belong
 to it. Things outside any turn (a compaction between turns, the line opening, the Session fork)
-are lines of their own between turns. A turn's line in the index gives its first user text (or,
-for a turn opened by an input without user text, such as a Goal continuation or a message from
-another line, that input's `<blocks>` or the line write it carries (§3.4)), the tools it called
-with counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`). A turn
-without `turn/end` in the pinned history is `in progress` when it is the calling turn, and
+are lines of their own between turns. A turn's line in the index gives its first user text, the
+tools it called with counts, and its outcome from `turn/end` (`completed`, `failed`, `cancelled`).
+The inputs that open a turn are the ones it consumed before its first model request; an input read
+later, such as a steer while it works, does not open it. The line gives the first user text among
+the opening inputs; when none of them carries user text (a Goal continuation, a message from
+another line), the first of them that carries a line write (§3.4), or else the first one's
+`<blocks>`.
+
+A turn without `turn/end` in the pinned history is `in progress` when it is the calling turn, and
 `continued on the parent line` when it is the parent's turn that a child's inherited prefix cuts
 into. The calling `recall` call is itself in the calling turn, with the ending `no result yet`.
 

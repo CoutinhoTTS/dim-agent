@@ -140,7 +140,9 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 
 ### 3.6 轮次
 
-一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、开通本行、Session fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本（由没有用户文本的输入开启的一轮，例如 Goal 续行或其他行发来的消息开启的一轮，给出该输入的 `<blocks>` 或它携带的行写（§3.4））、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。固定历史中没有 `turn/end` 的一轮：若是发起调用的这一轮，结局为 `in progress`；若是子分支继承前缀截断的父分支那一轮，结局为 `continued on the parent line`。发起调用的这次 `recall` 本身也在这一轮中，结局为 `no result yet`。
+一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、开通本行、Session fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。开启一轮的输入是它在第一次模型请求之前消费的那些；之后才读到的输入，例如它工作时到达的 steer，不开启这一轮。这一行给出开启它的输入中最先的一段用户文本；这些输入都没有用户文本时（Goal 续行、其他行发来的消息），给出其中第一个携带行写的输入（§3.4），否则给出第一个输入的 `<blocks>`。
+
+固定历史中没有 `turn/end` 的一轮：若是发起调用的这一轮，结局为 `in progress`；若是子分支继承前缀截断的父分支那一轮，结局为 `continued on the parent line`。发起调用的这次 `recall` 本身也在这一轮中，结局为 `no result yet`。
 
 索引按最近在前列出各轮和轮次之间的行。检索按最近在前列出所有轮次中命中的行。
 

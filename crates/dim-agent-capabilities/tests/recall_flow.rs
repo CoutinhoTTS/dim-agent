@@ -229,6 +229,72 @@ async fn the_turn_index_lists_turns_latest_first_and_pages_back_to_nothing_earli
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// §14 1.
+async fn a_turn_is_indexed_by_its_first_user_text_not_by_the_block_that_came_first() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let agent = agent();
+        let session = open(&agent).await;
+        // A Prompt source writes a rule as an Append input between turns; it
+        // waits as pending until the next driven input consumes it (§3.6).
+        session
+            .input(
+                InputMessageData {
+                    blocks: vec![context_block::raw(
+                        context_block::element(
+                            "dim-rule",
+                            &[
+                                ("source", "AGENTS.md"),
+                                ("scope", "branch"),
+                                ("op", "replace"),
+                            ],
+                            "Use pnpm, not npm.",
+                        ),
+                        Some("rule".into()),
+                    )],
+                    mode: Some(InputMode::Append),
+                    ..InputMessageData::default()
+                },
+                "main",
+            )
+            .await
+            .unwrap();
+        session
+            .submit("please deploy to staging".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = session.history("main", None).await.unwrap();
+        let turn = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::TurnStart(_)))
+            .expect("a turn")
+            .id
+            .clone();
+
+        let (page, error) = recall(&session, "main", json!({})).await;
+        assert!(!error, "{page}");
+        let line = line_of(&page, &turn);
+        assert!(
+            line.contains("turn: user \"please deploy to staging\""),
+            "{line}"
+        );
+        assert!(!line.contains("dim-rule"), "{line}");
+
+        // The rule is still told as its own line inside the turn.
+        let (page, error) = recall(&session, "main", json!({ "open": turn })).await;
+        assert!(!error, "{page}");
+        assert!(
+            page.contains("dim-rule source=AGENTS.md scope=branch op=replace (current)"),
+            "{page}"
+        );
+        assert!(page.contains("user: please deploy to staging"), "{page}");
+        agent.close().await.unwrap();
+    })
+    .await
+    .expect("turn index input flow");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // §14 2.
 async fn a_turn_tells_its_input_its_replies_its_calls_with_results_and_an_interrupt_in_order() {
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -2106,6 +2172,64 @@ fn a_childs_identity_and_its_parents_messages_are_told_on_the_child() {
     let (page, error) = recorded.answer("t4", json!({ "open": opening }));
     assert!(!error, "{page}");
     assert!(page.contains("You are line C of this session"), "{page}");
+}
+
+#[test]
+// §14 1.
+fn a_turn_opened_by_a_line_message_is_indexed_by_that_write_not_by_a_pending_block() {
+    let mut recorded = Recorded::new();
+    recorded.at(16, 0);
+    // A rule written between turns waits as an Append input; the message the
+    // line receives consumes it and opens the turn (§3.6).
+    let rule = recorded.push(EventKind::InputMessage(InputMessageData {
+        blocks: vec![context_block::raw(
+            context_block::element(
+                "dim-rule",
+                &[
+                    ("source", "AGENTS.md"),
+                    ("scope", "branch"),
+                    ("op", "replace"),
+                ],
+                "Use pnpm, not npm.",
+            ),
+            Some("rule".into()),
+        )],
+        mode: Some(InputMode::Append),
+        ..InputMessageData::default()
+    }));
+    let message = recorded.push(line_message(
+        "main",
+        "C",
+        "start now",
+        InputMode::Steer,
+        false,
+    ));
+    let turn = recorded.push(turn_start("t1"));
+    recorded.push(consumed(&rule));
+    recorded.push(consumed(&message));
+    recorded.push(model_start("t1", "r1"));
+    recorded.push(text_delta("t1", "r1", "on it"));
+    recorded.push(model_end("t1", "r1", output_completed()));
+    recorded.push(turn_ends("t1", completed_turn()));
+
+    let (page, error) = recorded.answer("t1", json!({}));
+    assert!(!error, "{page}");
+    let line = line_of(&page, &turn);
+    assert!(line.contains("turn: line main: \"start now\""), "{line}");
+    assert!(!line.contains("dim-rule"), "{line}");
+
+    // The rule is still a line of the turn.
+    let (page, error) = recorded.answer("t1", json!({ "open": turn }));
+    assert!(!error, "{page}");
+    assert!(
+        line_of(&page, &rule)
+            .contains("dim-rule source=AGENTS.md scope=branch op=replace (current)"),
+        "{page}"
+    );
+    assert!(
+        line_of(&page, &message).contains("line main: \"start now\""),
+        "{page}"
+    );
 }
 
 #[test]
