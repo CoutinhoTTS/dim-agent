@@ -1078,9 +1078,29 @@
         "name": "FileReads",
         "state": "Active",
         "generation": 1,
-        "injects": [],
-        "resolved": [],
-        "reads": []
+        "injects": [
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "scope": null,
+            "provider": 54,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::core::timeline::Timeline@main",
+            "provider": 54,
+            "declared": true,
+            "external": true
+          }
+        ]
       },
       {
         "id": 60,

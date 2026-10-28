@@ -5,13 +5,29 @@ use dim_agent_capabilities::{
     host::HostError,
     workspace_tools::{file_reads::FileReads, files::FileTools},
 };
+use dim_agent_runtime::{MemoryTimelineStore, Timeline, TimelineKey};
 use dim_agent_types::{ToolCall, ToolContent, ToolResult};
+use rutis::host::CtxHost;
 use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use tokio_util::sync::CancellationToken;
+
+/// One branch with its own empty Timeline.
+fn branch() -> FileReads {
+    FileReads::new(Arc::new(Timeline::new(
+        rutis::Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "workspace".into(),
+            branch_id: "main".into(),
+        },
+        Vec::new(),
+        Arc::new(MemoryTimelineStore::default()),
+    )))
+}
 
 struct Workspace {
     root: PathBuf,
@@ -129,7 +145,7 @@ async fn atomic_mutations_preserve_native_metadata() {
             .collect::<Vec<_>>()
             .join("\n");
         let before = fs::metadata(&path).unwrap();
-        let reads = FileReads::default();
+        let reads = branch();
         workspace.read(&reads, "file").await;
         let result = workspace.call(&reads, tool, json!({"path": "file", "content": "after\n", "oldText": "before", "newText": "after"})).await;
         assert_eq!(result.is_error, None, "{}", text(&result));
@@ -204,7 +220,7 @@ async fn coordinated_sessions_reject_stale_mutations() {
         coordinator,
     );
     workspace.put("shared", b"before\r\n");
-    let (a, b) = (FileReads::default(), FileReads::default());
+    let (a, b) = (branch(), branch());
     workspace.read(&a, "shared").await;
     let call = |name: &str, input: Value| ToolCall {
         id: "other".into(),
@@ -247,7 +263,7 @@ async fn replacement_preserves_permissions_and_open_original() {
     workspace.put("private", b"before\r\n");
     fs::set_permissions(workspace.path("private"), fs::Permissions::from_mode(0o600)).unwrap();
     let mut original = fs::File::open(workspace.path("private")).unwrap();
-    let reads = FileReads::default();
+    let reads = branch();
     workspace.read(&reads, "private").await;
     ok(&workspace
         .call(
@@ -303,7 +319,7 @@ fn definitions_match_the_ts_tool_contracts() {
 #[tokio::test]
 async fn edits_and_writes_preserve_bom_and_line_endings() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
 
     workspace.put("crlf.txt", b"one\r\ntwo\r\nthree\r\n");
     ok(&workspace.read(&reads, "crlf.txt").await);
@@ -375,7 +391,7 @@ async fn edits_and_writes_preserve_bom_and_line_endings() {
 #[tokio::test]
 async fn writes_require_a_fresh_read_on_the_same_branch() {
     let workspace = Workspace::new();
-    let main = FileReads::default();
+    let main = branch();
     workspace.put("a.txt", b"original\n");
 
     let unread = workspace
@@ -388,7 +404,7 @@ async fn writes_require_a_fresh_read_on_the_same_branch() {
     );
 
     ok(&workspace.read(&main, "a.txt").await);
-    let child = FileReads::default();
+    let child = branch();
     let foreign = workspace
         .call(
             &child,
@@ -442,7 +458,7 @@ fn edits_of_one_file_run_in_fifo_order_and_waiters_can_cancel() {
         .unwrap();
     runtime.block_on(async {
         let workspace = Workspace::new();
-        let reads = FileReads::default();
+        let reads = branch();
         workspace.put("pair.txt", b"left right\n");
         ok(&workspace.read(&reads, "pair.txt").await);
         let (first, second) = tokio::join!(
@@ -500,7 +516,7 @@ fn edits_of_one_file_run_in_fifo_order_and_waiters_can_cancel() {
 #[tokio::test]
 async fn read_rejects_non_text_targets() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     workspace.put("latin.txt", b"caf\xe9\n");
     workspace.put("blob.dat", b"ab\0cd");
     workspace.put("archive.zip", b"PK");
@@ -532,7 +548,7 @@ async fn read_rejects_non_text_targets() {
 #[tokio::test]
 async fn read_pages_long_files() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     workspace.put("lines.txt", b"a\nb\nc\nd\n");
     let page = workspace
         .call(
@@ -555,7 +571,7 @@ async fn read_pages_long_files() {
 #[tokio::test]
 async fn read_offloads_large_results_to_the_output_directory() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     let line = "x".repeat(99);
     let body: String = (0..400).map(|_| format!("{line}\n")).collect();
     workspace.put("big.txt", body.as_bytes());
@@ -615,7 +631,7 @@ async fn read_offloads_large_results_to_the_output_directory() {
 #[tokio::test]
 async fn oversized_lines_report_partial_content_without_skipping_the_tail() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     for (body, partial) in [
         (format!("{}TAIL", "a".repeat(262_138)), false),
         (format!("{}TAIL", "a".repeat(300_000)), true),
@@ -644,7 +660,7 @@ async fn oversized_lines_report_partial_content_without_skipping_the_tail() {
 #[tokio::test]
 async fn special_files_are_refused_without_blocking() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     let fifo = workspace.path("pipe");
     let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
     // SAFETY: plain syscall creating a FIFO in the test directory.
@@ -667,7 +683,7 @@ async fn special_files_are_refused_without_blocking() {
 #[tokio::test]
 async fn read_windows_far_into_a_file_and_rejects_overflowing_offsets() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     let body: String = (1..=5000).map(|n| format!("line {n}\n")).collect();
     workspace.put("log.txt", body.as_bytes());
     let page = workspace
@@ -702,7 +718,7 @@ async fn read_windows_far_into_a_file_and_rejects_overflowing_offsets() {
 #[tokio::test]
 async fn a_failed_offload_does_not_bind_the_file() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     workspace.put("blocker", b"");
     let tools = FileTools::new(
         workspace.root.clone(),
@@ -739,7 +755,7 @@ async fn a_failed_offload_does_not_bind_the_file() {
 #[tokio::test]
 async fn edit_inserts_new_text_literally() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     workspace.put("run.sh", b"echo PID\n");
     ok(&workspace.read(&reads, "run.sh").await);
     ok(&workspace.edit(&reads, "run.sh", "PID", "$$ $& $' $`").await);
@@ -749,7 +765,7 @@ async fn edit_inserts_new_text_literally() {
 #[tokio::test]
 async fn legacy_encodings_round_trip_and_reject_unrepresentable_text() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     let (gbk, _, _) = encoding_rs::GBK.encode("中文内容\r\n第二行\r\n");
     workspace.put("gbk.txt", &gbk);
 
@@ -841,7 +857,7 @@ fn glob_paths(result: &ToolResult) -> Vec<String> {
 #[tokio::test]
 async fn glob_matches_the_ripgrep_runner() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     search_fixture(&workspace);
 
     let all = workspace
@@ -936,7 +952,7 @@ async fn glob_matches_the_ripgrep_runner() {
 #[tokio::test]
 async fn grep_survives_byte_matches_and_rejects_bad_include_globs() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     workspace.put("accent.txt", "café\n".as_bytes());
     let result = workspace
         .call(
@@ -979,7 +995,7 @@ async fn grep_survives_byte_matches_and_rejects_bad_include_globs() {
 #[tokio::test]
 async fn grep_matches_the_ripgrep_runner() {
     let workspace = Workspace::new();
-    let reads = FileReads::default();
+    let reads = branch();
     search_fixture(&workspace);
 
     let found = workspace

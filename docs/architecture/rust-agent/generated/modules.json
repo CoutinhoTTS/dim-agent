@@ -957,7 +957,10 @@
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::workspace_tools",
       "file": "crates/dim-agent-capabilities/src/workspace_tools/file_reads.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "format",
+        "vec"
+      ]
     },
     {
       "id": "dim_agent_capabilities::workspace_tools::files",
@@ -10676,10 +10679,37 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::file_reads",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostError::failed",
+        "use crate::host::HostError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads",
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::file_reads",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ContextCompactionResult::Completed",
+        "path EventKind::ContextCompaction",
+        "use dim_agent_types::ContextCompactionResult",
+        "use dim_agent_types::EventKind"
       ]
     },
     {
@@ -10926,7 +10956,7 @@
       "to": "dim_agent_capabilities::workspace_tools::file_reads",
       "references": [
         "path FileReads",
-        "path FileReads::default"
+        "path FileReads::new"
       ]
     },
     {
@@ -10937,6 +10967,30 @@
         "path FileTools::new",
         "path FileTools::with_coordinator",
         "path FileWriteCoordinator"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::mutation_tests",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline::new",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::mutation_tests",
+      "to": "dim_agent_runtime::memory_timeline_store",
+      "references": [
+        "path MemoryTimelineStore::default",
+        "use dim_agent_runtime::MemoryTimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::mutation_tests",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path TimelineKey",
+        "use dim_agent_runtime::TimelineKey"
       ]
     },
     {
@@ -11119,11 +11173,16 @@
         "path FileReads",
         "path TextEncoding::Utf8",
         "path TextFileBinding",
+        "path WriteBinding",
+        "path WriteBinding::Compacted",
+        "path WriteBinding::None",
+        "path WriteBinding::Text",
         "use super::super::file_reads::Bom",
         "use super::super::file_reads::EncodingSource",
         "use super::super::file_reads::FileReads",
         "use super::super::file_reads::TextEncoding",
-        "use super::super::file_reads::TextFileBinding"
+        "use super::super::file_reads::TextFileBinding",
+        "use super::super::file_reads::WriteBinding"
       ]
     },
     {

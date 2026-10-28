@@ -119,6 +119,7 @@ pub(super) async fn run(
         Ok(input) => input,
         Err(result) => return Ok(result),
     };
+    let established = reads.established();
     let (cwd, home) = (tools.cwd.clone(), tools.home.clone());
     let outcome = blocking(move || {
         let path = match resolve_path(&cwd, &home, &input.path) {
@@ -132,7 +133,7 @@ pub(super) async fn run(
     let (result, binding) = outcome;
     let result = offload(tools, call_id, result).await?;
     if let Some((path, binding)) = binding {
-        reads.set(path, binding);
+        reads.set(path, binding, established);
     }
     Ok(result)
 }

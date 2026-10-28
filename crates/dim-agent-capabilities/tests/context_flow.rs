@@ -707,6 +707,8 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
 
 #[path = "context_flow/checkpoint_projection.rs"]
 mod checkpoint_projection;
+#[path = "context_flow/compacted_bindings.rs"]
+mod compacted_bindings;
 #[path = "context_flow/compaction_events.rs"]
 mod compaction_events;
 #[path = "context_flow/context_reads.rs"]
