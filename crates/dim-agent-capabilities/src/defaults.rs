@@ -19,7 +19,7 @@ use crate::{
 };
 use dim_agent_runtime::{AgentBuilder, Feature, Names};
 use rutis::Error;
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 /// The same timeline factories apply to main and every future branch.
 pub fn install(builder: &mut AgentBuilder) {
@@ -213,25 +213,17 @@ pub fn install_local_execution(
 }
 
 /// Installs ContextCompaction for a model that compacts: window facts from
-/// `model`, the summary strategy whose `compaction.json` lives under `home`,
-/// and the `session.context` methods (ContextCompaction §4).
-pub fn install_compaction(
-    builder: &mut AgentBuilder,
-    model: Arc<dyn ResolveContextModel>,
-    home: Option<PathBuf>,
-) {
+/// `model`, the summary strategy with its factory defaults, and the
+/// `session.context` methods (ContextCompaction §4).
+pub fn install_compaction(builder: &mut AgentBuilder, model: Arc<dyn ResolveContextModel>) {
     builder
         .session_value(Arc::new(ContextModelHost(Some(model))))
         .require_feature(
             Feature::new("ContextCompaction")
-                .session("ProductSummaryStrategy", move |names| {
+                .session("ProductSummaryStrategy", |names| {
                     Ok(Box::new(ProductSummaryStrategyPlugin::new(
                         names,
-                        ProductSummaryStrategyConfig {
-                            home: home.clone(),
-                            target: None,
-                            system_prompt: None,
-                        },
+                        ProductSummaryStrategyConfig::default(),
                     )?))
                 })
                 .session("ContextMethods", |names| {

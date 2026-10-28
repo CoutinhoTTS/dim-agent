@@ -71,14 +71,10 @@ pub async fn serve_home(
         )))))
         .require_feature(
             Feature::new("ContextCompaction")
-                .session("ProductSummaryStrategy", move |names| {
+                .session("ProductSummaryStrategy", |names| {
                     Ok(Box::new(ProductSummaryStrategyPlugin::new(
                         names,
-                        ProductSummaryStrategyConfig {
-                            home: Some(home.clone()),
-                            target: None,
-                            system_prompt: None,
-                        },
+                        ProductSummaryStrategyConfig::default(),
                     )?))
                 })
                 .session("ContextMethods", |names| {
