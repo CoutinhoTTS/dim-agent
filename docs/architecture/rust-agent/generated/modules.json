@@ -21376,6 +21376,8 @@
       "from": "dim_cli::projection",
       "to": "dim_agent_types::events",
       "references": [
+        "path BranchCreateAt::Create",
+        "path BranchCreateAt::Sequence",
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
         "path BranchSource::Host",
@@ -21401,6 +21403,7 @@
         "path TurnOutcome::Failed",
         "path UserInput",
         "path dim_agent_types::InputBlock::Raw",
+        "use dim_agent_types::BranchCreateAt",
         "use dim_agent_types::BranchCreateFailedData",
         "use dim_agent_types::BranchSource",
         "use dim_agent_types::CollaborationDelivery",
@@ -21434,6 +21437,7 @@
       "to": "dim_cli::model::view",
       "references": [
         "path ApprovalView",
+        "path LineCut",
         "path LineState::CreationFailed",
         "path LineState::EndedByOperation",
         "path LineState::EndedItself",
@@ -21471,6 +21475,7 @@
         "path ViewSnapshot::default",
         "path WorkflowView",
         "use crate::model::view::ApprovalView",
+        "use crate::model::view::LineCut",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
         "use crate::model::view::MemberCard",
@@ -21937,6 +21942,7 @@
         "path Command::Configure",
         "path Command::EndLine",
         "path Command::FocusLine",
+        "path Command::Fork",
         "path Command::InputControl",
         "path Command::ListModels",
         "path Command::ListPlugins",
@@ -21950,6 +21956,7 @@
         "path Command::OauthCancel",
         "path Command::OauthPaste",
         "path Command::OauthStart",
+        "path Command::OpenLine",
         "path Command::Plugin",
         "path Command::Provider",
         "path Command::ReadModelPolicy",
@@ -21999,6 +22006,7 @@
         "path SessionPort",
         "path SubagentModelPolicy",
         "path SwitchKind",
+        "path SwitchKind::Forked",
         "path SwitchKind::New",
         "path SwitchKind::Resumed",
         "path Update",
@@ -23868,6 +23876,7 @@
       "from": "dim_cli::ui::lines_panel",
       "to": "dim_cli::sanitize",
       "references": [
+        "path safe",
         "use crate::sanitize::safe"
       ]
     },
@@ -23961,6 +23970,7 @@
         "path LineState::EndedWith",
         "path ViewSnapshot",
         "path ViewSnapshot::default",
+        "path crate::model::view::LineCut",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
         "use crate::model::view::ViewSnapshot"
@@ -25186,6 +25196,13 @@
       "to": "dim_cli::ui::render::testterm",
       "references": [
         "mod testterm"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::render::fullscreen",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path crate::ui::i18n::t"
       ]
     },
     {
@@ -26834,6 +26851,7 @@
         "path Block::Boundary",
         "path Block::Error",
         "path Block::Failure",
+        "path Block::Line",
         "path Block::Note",
         "path Block::Shell",
         "path Block::Status",
@@ -27074,6 +27092,7 @@
         "path Command::Configure",
         "path Command::EndLine",
         "path Command::FocusLine",
+        "path Command::Fork",
         "path Command::InputControl",
         "path Command::ListModels",
         "path Command::ListPlugins",
@@ -27087,6 +27106,7 @@
         "path Command::OauthCancel",
         "path Command::OauthPaste",
         "path Command::OauthStart",
+        "path Command::OpenLine",
         "path Command::Plugin",
         "path Command::Provider",
         "path Command::ReadModelPolicy",
@@ -27110,6 +27130,7 @@
         "path Command::WatchTaskOutput",
         "path SessionPort",
         "path SwitchKind",
+        "path SwitchKind::Forked",
         "path SwitchKind::New",
         "path SwitchKind::Resumed",
         "path Update",
@@ -27144,6 +27165,7 @@
         "path Update::Web",
         "path crate::model::session::PluginAction::Install",
         "use crate::model::session::Command",
+        "use crate::model::session::DraftPart",
         "use crate::model::session::SessionPort",
         "use crate::model::session::SwitchKind",
         "use crate::model::session::Update"
@@ -27164,6 +27186,7 @@
       "to": "dim_cli::model::view",
       "references": [
         "path LineState::Working",
+        "path LineView",
         "path RowKind::AssistantMessage",
         "path RowKind::Status",
         "path RowKind::StreamingAssistant",
@@ -27174,6 +27197,7 @@
         "path ViewRow",
         "path ViewSnapshot",
         "use crate::model::view::LineState",
+        "use crate::model::view::LineView",
         "use crate::model::view::RowKind",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewRow",
@@ -27661,6 +27685,7 @@
         "path Block::Banner",
         "path Block::Boundary",
         "path Block::Failure",
+        "path Block::Line",
         "path Block::Note",
         "path Block::Shell",
         "path Block::Status",
@@ -27795,8 +27820,10 @@
       "references": [
         "path Command",
         "path Command::ListPlugins",
+        "path Command::OpenLine",
         "path Command::Plugin",
         "path SessionPort",
+        "path SwitchKind::Forked",
         "path Update",
         "path Update::PluginResult",
         "path Update::Plugins",

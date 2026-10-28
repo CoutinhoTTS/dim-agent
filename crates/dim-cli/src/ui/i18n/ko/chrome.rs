@@ -35,6 +35,23 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main은 세션 자체입니다. 라인은 종료되지만 main은 그렇지 않습니다"
         }
         "Line has ended:" => "라인이 종료되었습니다:",
+        "e edit · b branch · f fork" => "e 편집 · b 브랜치 · f 포크",
+        "e edit" => "e 편집",
+        "Fork the session before this message? (y/N)" => {
+            "이 메시지 앞에서 세션을 포크할까요? (y/N)"
+        }
+        "⑂ new line from {id} · Esc cancel" => "⑂ {id}에서 새 라인 · Esc 취소",
+        "A fork copies main; b opens a line here" => {
+            "포크는 main만 복사합니다. b로 여기서 라인을 여세요"
+        }
+        "A line opens from text; images and files were not included" => {
+            "라인은 텍스트로 열립니다. 이미지와 파일은 포함되지 않았습니다"
+        }
+        "No finished turn to cut at yet" => "잘라낼 끝난 턴이 아직 없습니다",
+        "forked {id} · {count} messages" => "{id} 포크됨 · 메시지 {count}개",
+        "after message {count}" => "메시지 {count}개 이후",
+        "open a line from the end of the shown line" => "표시 중인 라인의 끝에서 라인 열기",
+        "fork the session at its last finished turn" => "마지막으로 끝난 턴에서 세션 포크",
         "Starting" => "시작 중",
         "Delegation result" => "위임 결과",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {

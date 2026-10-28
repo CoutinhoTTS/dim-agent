@@ -736,10 +736,7 @@ impl Worker {
                     self.send(Update::Notice(
                         "main is the session itself; a line ends, main does not".into(),
                     ));
-                } else if self.session_id.is_empty()
-                    || session_id != self.session_id
-                    || projection_id != self.projection_id
-                {
+                } else if !self.attached(&session_id, projection_id) {
                     self.send(Update::Notice(
                         "Session attachment changed; reopen the lines before ending one".into(),
                     ));
@@ -752,6 +749,72 @@ impl Worker {
                         )
                         .await;
                     self.report_failure(result);
+                }
+            }
+            Command::OpenLine {
+                session_id,
+                projection_id,
+                parent,
+                at,
+                prompt,
+            } => {
+                #[derive(Deserialize)]
+                struct Opened {
+                    branch: OpenedBranch,
+                }
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct OpenedBranch {
+                    branch_id: String,
+                }
+                if !self.attached(&session_id, projection_id) {
+                    self.send(Update::Notice(
+                        "Session attachment changed; pick the message again".into(),
+                    ));
+                    return Ok(());
+                }
+                let opened = self
+                    .client
+                    .typed::<Opened>(
+                        "session.branch_create",
+                        json!({
+                            "sessionId": self.session_id, "parentBranchId": parent,
+                            "at": at, "prompt": prompt,
+                        }),
+                    )
+                    .await;
+                if let Ok(opened) = &opened {
+                    self.discover_branch(&opened.branch.branch_id);
+                    self.focus_line(opened.branch.branch_id.clone()).await;
+                }
+                self.report_failure(opened);
+            }
+            Command::Fork {
+                session_id,
+                projection_id,
+                at,
+            } => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct Forked {
+                    session_id: String,
+                }
+                if !self.attached(&session_id, projection_id) {
+                    self.send(Update::Notice(
+                        "Session attachment changed; pick the message again".into(),
+                    ));
+                    return Ok(());
+                }
+                let forked = self
+                    .client
+                    .typed::<Forked>(
+                        "session.fork",
+                        json!({"sessionId": self.session_id, "at": at}),
+                    )
+                    .await;
+                match forked {
+                    Ok(forked) => self.attach(forked.session_id, SwitchKind::Forked).await?,
+                    Err(error) => self.send(Update::Notice(error.to_string())),
                 }
             }
             Command::Stop => {
@@ -1262,6 +1325,14 @@ impl Worker {
             group(tokens(usage.output_tokens)),
             group(tokens(usage.threshold_tokens)),
         ))
+    }
+
+    /// Whether a request made from a snapshot still addresses this
+    /// attachment.
+    fn attached(&self, session_id: &str, projection_id: u64) -> bool {
+        !self.session_id.is_empty()
+            && session_id == self.session_id
+            && projection_id == self.projection_id
     }
 
     /// Reports a failed command as a notice; the session itself keeps going.
@@ -2526,6 +2597,7 @@ impl Worker {
             parent: None,
             purpose: String::new(),
             state: LineState::Main,
+            cut: None,
         }];
         lines.extend(
             self.projection

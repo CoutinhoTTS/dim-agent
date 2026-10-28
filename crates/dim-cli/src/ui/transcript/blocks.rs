@@ -413,7 +413,7 @@ pub(crate) fn render_block(
 ) -> Vec<String> {
     match block {
         Block::Banner => Vec::new(),
-        Block::User(text) => render_user(
+        Block::User { text, .. } => render_user(
             &crate::sanitize::safe(text),
             width,
             &UserStyle {
@@ -482,6 +482,9 @@ pub(crate) fn render_block(
         Block::Failure(message) => vec![tf("Error: {message}", &[("message", message)])],
         Block::Boundary(label) => vec![fg(&boundary_line(label, width), &p.muted)],
         Block::Note(text) => vec![fg(&truncate_cells(text, width), &p.muted)],
+        Block::Line { text, .. } => {
+            gutter_text("⑂", &crate::sanitize::safe(text), width, &p.accent)
+        }
     }
 }
 

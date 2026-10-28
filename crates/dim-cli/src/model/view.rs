@@ -68,6 +68,12 @@ pub struct ViewRow {
     pub exit_code: Option<i64>,
     /// An `agent` request call: the delegation it started, drawn as a card.
     pub member: Option<Box<MemberCard>>,
+    /// A user message: the line's sequence just before it, where a line or
+    /// a fork opened from this message cuts (timeline UI §4.1).
+    pub cut: Option<u64>,
+    /// A line-opened marker: the line it opened, which a pick enters
+    /// (timeline UI §4.4).
+    pub line: Option<String>,
 }
 
 /// A delegation in its leader's transcript, with what this client observed
@@ -99,6 +105,18 @@ pub struct LineView {
     /// The first line of the purpose it was opened with.
     pub purpose: String,
     pub state: LineState,
+    /// Where it was cut from its parent; `None` for `main`.
+    pub cut: Option<LineCut>,
+}
+
+/// Where a line was cut from its parent (timeline UI §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineCut {
+    /// The parent's sequence the line inherits through.
+    pub sequence: u64,
+    /// User messages in the parent's history by then, its inherited ones
+    /// included: the cut reads "after message N".
+    pub messages: usize,
 }
 
 /// How a line stands (design §14).
