@@ -499,6 +499,7 @@
       "parent": "dim_agent_capabilities::host_platform",
       "file": "crates/dim-agent-capabilities/src/host_platform/isolation.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq",
         "cfg",
         "format",
@@ -647,6 +648,26 @@
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/prompt_state.rs",
+      "unexpandedMacros": []
+    },
+    {
+      "id": "dim_agent_capabilities::recall",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/recall.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::recall::testing",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::recall",
+      "file": "crates/dim-agent-capabilities/src/recall.rs",
       "unexpandedMacros": []
     },
     {
@@ -3320,7 +3341,8 @@
       "file": "crates/dim-cli/src/ui/i18n/mod.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "panic"
       ]
     },
     {
@@ -3637,6 +3659,7 @@
       "file": "crates/dim-cli/src/ui/render/fullscreen.rs",
       "unexpandedMacros": [
         "format",
+        "matches",
         "vec",
         "write"
       ]
@@ -5849,6 +5872,13 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::recall",
+      "references": [
+        "mod recall"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
         "mod session_broadcast"
@@ -6993,6 +7023,13 @@
     },
     {
       "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::recall",
+      "references": [
+        "path crate::recall::install"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
         "path SessionBroadcastEndPlugin::new",
@@ -7554,12 +7591,17 @@
         "path Isolation",
         "path ProcessSpec",
         "path ProcessSpecError",
+        "path Sandbox",
+        "path Sandbox::Host",
+        "path Sandbox::Network",
+        "path Sandbox::Workspace",
         "path TemporaryDirectory",
         "path super::path_entries",
         "use super::HostPlatform",
         "use super::Isolation",
         "use super::ProcessSpec",
         "use super::ProcessSpecError",
+        "use super::Sandbox",
         "use super::TemporaryDirectory"
       ]
     },
@@ -8628,6 +8670,241 @@
         "path PromptScope::Branch",
         "path PromptScope::Task",
         "path PromptScope::Turn"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_capabilities::context_policy",
+      "references": [
+        "path check_cancel",
+        "use crate::context_policy::check_cancel"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostError::Cancelled",
+        "path HostError::failed",
+        "path HostFuture",
+        "path ToolExecutionContext",
+        "use crate::host::HostError",
+        "use crate::host::HostFuture",
+        "use crate::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_capabilities::recall::testing",
+      "references": [
+        "mod testing"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use crate::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolContribution",
+        "path ToolHandler",
+        "path ToolRegistry",
+        "path definition",
+        "use crate::tool_registry::ToolContribution",
+        "use crate::tool_registry::ToolHandler",
+        "use crate::tool_registry::ToolRegistry",
+        "use crate::tool_registry::definition"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "path AgentError::Reloading",
+        "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_runtime::lifecycle",
+      "references": [
+        "path CAPABILITY_RELOADING",
+        "use dim_agent_runtime::CAPABILITY_RELOADING"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path Feature",
+        "path Feature::new",
+        "use dim_agent_runtime::Feature"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_types",
+      "references": [
+        "path JsonObject",
+        "path JsonObject::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Image",
+        "path ContentBlock::Text",
+        "path Message",
+        "path MessageContent::Parts",
+        "path MessageContent::Text",
+        "path MessagePart",
+        "path MessagePart::Image",
+        "path MessagePart::Text",
+        "path MessagePart::Thinking",
+        "path MessagePart::ToolResult",
+        "path MessagePart::ToolUse",
+        "path Role::Assistant",
+        "path Role::ToolResult",
+        "path Role::User",
+        "path ToolContent::Blocks",
+        "path ToolContent::Text",
+        "path content"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path ApprovalDecision::Allow",
+        "path ApprovalDecision::Deny",
+        "path BranchSource::Tool",
+        "path CollaborationOutcome",
+        "path CollaborationOutcome::Cancelled",
+        "path CollaborationOutcome::Completed",
+        "path CollaborationOutcome::Failed",
+        "path EventKind::ApprovalCancelled",
+        "path EventKind::ApprovalRequest",
+        "path EventKind::ApprovalRespond",
+        "path EventKind::BranchCreate",
+        "path EventKind::BranchStart",
+        "path EventKind::CollaborationMessage",
+        "path EventKind::CollaborationRequest",
+        "path EventKind::CollaborationResult",
+        "path EventKind::ContextCompaction",
+        "path EventKind::ExecEnded",
+        "path EventKind::ExecStarted",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputMessage",
+        "path EventKind::ModelContent",
+        "path EventKind::ModelOutputEnd",
+        "path EventKind::ModelStart",
+        "path EventKind::PermissionChanged",
+        "path EventKind::SessionForked",
+        "path EventKind::StopInterrupt",
+        "path EventKind::Text",
+        "path EventKind::ToolResult",
+        "path EventKind::ToolUse",
+        "path EventKind::ToolUseStart",
+        "path EventKind::TurnEnd",
+        "path EventKind::TurnStart",
+        "path ExecStatus",
+        "path ExecStatus::Cancelled",
+        "path ExecStatus::Completed",
+        "path ExecStatus::Failed",
+        "path InputBlock",
+        "path InputBlock::Messages",
+        "path InputBlock::Raw",
+        "path InputMessageData",
+        "path ModelOutputOutcome::Cancelled",
+        "path ModelOutputOutcome::Completed",
+        "path ModelOutputOutcome::Failed",
+        "path TurnOutcome::Cancelled",
+        "path TurnOutcome::Completed",
+        "path TurnOutcome::Failed",
+        "path UserInput",
+        "path events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPreset",
+        "path PermissionPreset::FullAccess",
+        "path PermissionPreset::ReadOnly",
+        "path PermissionPreset::WorkspaceWrite"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolDefinition",
+        "path ToolResult",
+        "path ToolResult::error",
+        "path ToolResult::text",
+        "path ToolSource::Extension",
+        "path tool"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall::testing",
+      "to": "dim_agent_capabilities::recall",
+      "references": [
+        "path Fold",
+        "path Fold::new",
+        "use super::Narrative"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall::testing",
+      "to": "dim_agent_types",
+      "references": [
+        "path JsonObject",
+        "use dim_agent_types::JsonObject"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall::testing",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::recall::testing",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolResult",
+        "use dim_agent_types::ToolResult"
       ]
     },
     {
@@ -10499,6 +10776,10 @@
         "path Isolation",
         "path Os::Windows",
         "path ProcessTree",
+        "path Sandbox",
+        "path Sandbox::Host",
+        "path Sandbox::Network",
+        "path Sandbox::Workspace",
         "path ShellKind::Posix",
         "use crate::host_platform::EXEC_SHELL_CONFIG_INVALID",
         "use crate::host_platform::EXEC_SHELL_UNAVAILABLE",
@@ -10507,6 +10788,7 @@
         "use crate::host_platform::Isolation",
         "use crate::host_platform::Os",
         "use crate::host_platform::ProcessTree",
+        "use crate::host_platform::Sandbox",
         "use crate::host_platform::ShellKind"
       ]
     },
@@ -18141,6 +18423,8 @@
         "path AwsCredentials",
         "path HostError",
         "path HostError::Cancelled",
+        "path HostError::classified",
+        "path HostErrorKind::InvalidRequest",
         "path ModelNetwork"
       ]
     },
@@ -25650,8 +25934,10 @@
       "to": "dim_cli::ui::render::panel",
       "references": [
         "path clip",
+        "path escape_len",
         "path strip_escapes",
         "use crate::ui::render::panel::clip",
+        "use crate::ui::render::panel::escape_len",
         "use crate::ui::render::panel::strip_escapes"
       ]
     },
@@ -25685,7 +25971,9 @@
       "to": "dim_cli::ui::text",
       "references": [
         "path display_width",
-        "use crate::ui::text::display_width"
+        "path gutter_width",
+        "use crate::ui::text::display_width",
+        "use crate::ui::text::gutter_width"
       ]
     },
     {
@@ -27245,9 +27533,11 @@
       "to": "dim_cli::ui::text",
       "references": [
         "path display_width",
+        "path gutter_width",
         "path truncate_cells",
         "path wrap_cells",
         "use crate::ui::text::display_width",
+        "use crate::ui::text::gutter_width",
         "use crate::ui::text::truncate_cells",
         "use crate::ui::text::wrap_cells"
       ]
@@ -27871,6 +28161,7 @@
         "path Document",
         "path FullScreen::focused",
         "path FullScreen::new",
+        "path FullScreen::selecting",
         "path MouseOutcome::Click",
         "path MouseOutcome::Copy",
         "path MouseOutcome::Ignored",
@@ -29406,6 +29697,10 @@
     {
       "module": "dim_agent_capabilities::host",
       "path": "T::deserialize"
+    },
+    {
+      "module": "dim_agent_capabilities::recall",
+      "path": "char::is_whitespace"
     },
     {
       "module": "dim_agent_capabilities::session_broadcast",

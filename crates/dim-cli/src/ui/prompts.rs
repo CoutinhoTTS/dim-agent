@@ -371,10 +371,14 @@ impl PermissionPrompt {
         } else {
             collapse(&self.reason)
         };
-        vec![
+        let mut lines = vec![
             format!("# {description}"),
             format!("$ {}", self.command_preview()),
-        ]
+        ];
+        if let Some(Value::String(sandbox)) = self.input.get("sandbox") {
+            lines.push(tf("boundary: {sandbox}", &[("sandbox", sandbox)]));
+        }
+        lines
     }
 
     fn full_access(&self) -> Effect {
@@ -1429,6 +1433,27 @@ mod tests {
             .collect();
         assert!(rows[2].contains("Permission on branch b-7c"), "{rows:#?}");
         assert!(rows[3].contains("# source: tool_rule"), "{rows:#?}");
+    }
+
+    #[test]
+    fn escalated_exec_prompt_shows_the_requested_boundary() {
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
+        let p = PermissionPrompt::new(
+            "r1".into(),
+            "main".into(),
+            "Tool `exec` requires approval for starting processes under the workspace-write preset"
+                .into(),
+            "exec".into(),
+            serde_json::json!({"command": "curl https://example.com", "sandbox": "host"}),
+            true,
+        );
+        let rows: Vec<String> = p
+            .render(100, &theme.palette)
+            .iter()
+            .map(|r| strip(r))
+            .collect();
+        assert!(rows[3].contains("$ curl https://example.com"));
+        assert!(rows[4].contains("boundary: host"), "{rows:#?}");
     }
 
     #[test]

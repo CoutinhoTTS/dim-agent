@@ -35,6 +35,9 @@ With DIM_OAUTH_CLIENT_ID_CN and DIM_OAUTH_CLIENT_ID_GLOBAL set, dimcode is
 built as the account build; otherwise as the API-key build.
 Use --model-config PATH for independent API-key development.
 Optional local configuration: .env.dev (see .env.example).
+A new development home runs commands without OS isolation: a new
+host-isolation.json with {"version": 2, "sandbox": "host"} is written to the
+daemon's home, and an existing file is kept.
 USAGE
   exit 0
 fi
@@ -125,6 +128,14 @@ fi
 if [[ "$native_help" == false ]]; then
   mkdir -p -m 700 -- "$product_home"
   product_home=$(cd -- "$product_home" && pwd)
+  policy_root=$product_home
+  if [[ -n "$model_config" ]]; then
+    policy_root="$product_home/rust"
+  fi
+  if [[ ! -e "$policy_root/host-isolation.json" ]]; then
+    mkdir -p -m 700 -- "$policy_root"
+    printf '%s\n' '{"version": 2, "sandbox": "host"}' >"$policy_root/host-isolation.json"
+  fi
   "$binary" --home "$product_home" daemon stop >&2
 fi
 # Bash 3.2 (macOS) treats an empty array as unset under `set -u`.

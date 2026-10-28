@@ -42,6 +42,8 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 
 每次调用开始时，工具读取 `head = branch.sequence()`（已发布序号）和 `events = branch.history(Some(head))`：对子分支，是父分支到 fork 点为止的事件（继承前缀）加上它自己的事件；对 fork 出的 Session 的 `main`，是复制来的事实、它的 `session/forked`，再加上它自己的事件。两者都是 fork 之前的历史，Recall 像读其他历史一样读取。其余一切都基于这一份固定的列表计算，所以一次调用不会混用两个 head。这与 `wait` 已有的做法一致（[wait.rs](../../../../crates/dim-agent-capabilities/src/wait.rs)）：一个 Session 工具从 `ToolExecutionContext.branch_id` 经 `TreeCommands` 找到调用方分支。Recall 不应用压缩，遍历的是整个列表。
 
+在行结束的过程中，`branch/end` 不讲，`end` 调用像其他调用一样讲述。
+
 ### 3.2 事：一个起点事件和挂到它上面的事件
 
 投影把事件折叠成**事**。一件事有一个**起点事件**，以及之后通过事件本来就带着的 id 挂到它上面的事件。一件事的那一行显示起点的时间和 id；它的结局是折叠完所有挂上来的事件之后剩下的状态。
@@ -54,8 +56,10 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 | 中断 | `stop/interrupt` | — |
 | 权限变更 | `permission/changed` | — |
 | 压缩 | 结果为 `completed` 的 `context/compaction` | — |
-| fork | 本分支带 `parent` 的 `branch/start` | — |
+| 开通本行 | 本行带 `parent` 的 `branch/start` | — |
 | Session fork | `session/forked` | — |
+
+压缩只有完成时才算一件事：`context/compact` 与 `context/compaction-start` 是它的命令与开始；skipped、failed 或 cancelled 的压缩没有替换任何内容，所以命令和未完成的结果都不是一件事。完成的压缩携带的摘要留在这条记录里（§3.5）。
 
 一个输入事件是一件事。它的用户内容和它携带的每个 `InputBlock::Raw` 共用它的事件 id，并一起讲述，所以一个 id 不会指向多个条目；没有块序号，也没有子把手。块是否仍然生效，由之后同一 `key` 的块判断（§3.5）。
 
@@ -66,7 +70,7 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 - 回复收集它的 `step/text` 片段；之后的 `step/model-content` 用最终内容替换它们。`step/model-output-end` 以 completed、failed 或 cancelled 结束它。thinking 丢弃。折叠后文本为空的请求（只有调用或只有 thinking）不成为回复行；其调用各自讲述。
 - 调用从 `step/tool-use-start` 取得名字。若 `step/tool-use` 已到达，参数取自它；否则参数从未提交，不显示。因输出失败而被关闭的调用会得到 `model_provider` 写入的、不带 `call_event_id` 的关闭结果，因此结局为 `not run`（§3.4）。
 
-**Recall 只讲它点名的类型。** 它读取上表中的起点事件和挂上来的事件（按表中所列的形态），以及划分轮次的 `turn/start` 与 `turn/end`（§3.6）。其他任何事件按规则都不讲：无论是核心事件还是不透明事件（[ADR 001](../../../adr/001-harness-foundation.md#events-and-ownership-issue-2)），无论已有还是以后新增。事件类型是动态增加的，所以新类型不需要改 Recall，也绝不会出现在结果中；想让模型看到内容的能力会写已采用的输入或工具结果，Recall 讲的正是这些。
+**Recall 只讲它点名的类型。** 它读取上表中的起点事件和挂上来的事件（按表中所列的形态），以及划分轮次的 `turn/start` 与 `turn/end`（§3.6）。其他任何事件按规则都不讲：无论是核心事件还是不透明事件（[ADR 001](../../../adr/001-harness-foundation.md#events-and-ownership-issue-2)），无论已有还是以后新增。`branch/end` 与 `branch/ended` 不讲。事件类型是动态增加的，所以新类型不需要改 Recall，也绝不会出现在结果中；想让模型看到内容的能力会写已采用的输入或工具结果，Recall 讲的正是这些。
 
 ### 3.3 什么算数
 
@@ -82,14 +86,27 @@ Recall 就像客户端里的会话视图，只是讲给模型而不是展示给�
 
 | 事 | 行 |
 | --- | --- |
-| 输入 | 有用户内容时：`user: <文本>`（图片为 `[image]`；`steer` 输入为 `user (while you were working): <文本>`），同时带块时后接 `+ <blocks>`；只有块时：`<blocks>: <第一个块正文的第一行>`。`<blocks>` 按顺序列出每个块的开头标签和属性（照写），文本不以标签开头的块写作 `block`；生效中的块加 `(current)`，让其 `key` 失效的块加 `(ended)` |
+| 输入 | 有用户内容时：`user: <文本>`（图片为 `[image]`），同时带块时后接 `+ <blocks>`；只有块时：`<blocks>: <第一个块正文的第一行>`。`<blocks>` 按顺序列出每个块的开头标签和属性（照写），文本不以标签开头的块写作 `block`；生效中的块加 `(current)`，让其 `key` 失效的块加 `(ended)` |
 | 你的回复 | `you: <文本>`，省略 thinking；未完成的输出为 `your reply was cut off (<原因>): <部分文本>`，带已提交的文本和其 `step/model-output-end` 的结果；head 停在其中的输出为 `you (still writing): <目前的文本>` |
 | 工具调用 | `you called <tool> <参数简述> → <结局>`；参数从未到达的调用为 `you started calling <tool> (arguments not received) → <结局>` |
 | 中断 | `the user interrupted the turn` |
 | 权限变更 | `permission mode changed to <mode>` |
 | 压缩 | `the conversation up to here was summarized` |
-| fork | `this branch was forked from <parent branch>`；它的第一个输入紧接着讲出，就是它的任务 |
+| 开通本行 | `this line was opened by <parent line>`；紧接着讲出的它的开通输入，就是它的身份和任务 |
 | Session fork | `this conversation was copied from another session up to here` |
+
+其他行写给本行的输入——消息、最终消息、空闲通知、结束通知——就是该输入里的那个块，是那一行的意思，不是用户的话。这些输入由 Timeline branches 书写（[timeline-branches](../timeline-branches.md) §6、§7.1、§10、§12.1），Recall 按其中携带的标记块读取：
+
+| 标记 | 行 |
+| --- | --- |
+| `<dim-branch-message from="L" to="P">` | `line L: <文本>`；本行在其本轮第一个模型步骤之后读到时为 `line L (while you were working): <文本>` |
+| 同一标记带 `final="true"` | `line L's final message: <文本>` |
+| `<dim-branch-idle branch="L" status="…">` | `line L's turn ended (<status>) without a message to you` |
+| `<dim-branch-ended branch="L">` | `line L was ended from outside` |
+
+时间措辞由输入的位置决定，而不是它的模式：在本轮第一个模型步骤之前被消费的输入，是被一条没有在工作的行读到的，所以唤醒空闲行的消息读作 `line L: <文本>`；同一轮在某个模型步骤之后读到的才带措辞。带用户内容的输入按同一规则得到 `user (while you were working): <文本>`。
+
+标记是输入中第一个以这些标签开头的块，所以带着结束通知的花名册更新读作结束通知。带标记的输入无论以哪种模式到达，都不读作 `user: …`；展开时给出它的所有块全文，所以消息正文、开通时的任务和花名册本身都在 `open` 之后。
 
 Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key` 和 `retire` 字段，通用地读取运行时块；它不认识任何生产者，所以新增一种块不需要改它。例如带一条 Prompt 规则的输入读作 `dim-rule source=AGENTS.md scope=branch op=replace (current): …`，Goal 的续行读作 `dim-goal kind=continuation count=2 limit=20 …: …`，都来自这些生产者已经写出的文本。展开一个输入时，先给出其用户内容全文，再按顺序给出每个块的全文，适用时各带 `(current version in your context)` 或 `(ended)`，与其他事一样按字符分页。
 
@@ -109,7 +126,7 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 
 **参数简述**对所有工具通用：`input` 的标量字段写作 `key=value`，嵌套的值显示为 `{…}`。展开这次调用时给出完整参数。
 
-**每行都有固定的最大长度。** 一行就是一行：引用的文本取其第一行。行中每个可变部分超过 120 个字符时截断并加 `…`：引用的文本（用户文本、回复、块的正文、结果）、整个参数简述、`<blocks>`、工具名、一轮的工具汇总、原因、任务 id、agent 名、模式或父分支。一行最多有四个可变部分（最多的是工具调用：工具名、参数简述、任务和结果文本），其时间、id 和固定文字最多占 120 个字符，所以**一行绝不超过 600 个字符**。因此一页 20 个条目，连同日期行和最后一行，不超过 13,000 个字符。每个部分的全文都可用 `open` 展开。这是行格式，不是可调的限制。
+**每行都有固定的最大长度。** 一行就是一行：引用的文本取其第一行。行中每个可变部分超过 120 个字符时截断并加 `…`：引用的文本（用户文本、回复、块的正文、结果）、整个参数简述、`<blocks>`、工具名、一轮的工具汇总、原因、任务 id、agent 名、模式或父行。一行最多有四个可变部分（最多的是工具调用：工具名、参数简述、任务和结果文本），其时间、id 和固定文字最多占 120 个字符，所以**一行绝不超过 600 个字符**。因此一页 20 个条目，连同日期行和最后一行，不超过 13,000 个字符。每个部分的全文都可用 `open` 展开。这是行格式，不是可调的限制。
 
 **结果**是 `content` 的文本；blob 和图片为 `[file]` 与 `[image]`；工具带入的上下文消息为 `with <n> context messages`。展开这次调用时给出全部内容。结果比调用晚到不同的分钟时，结局带上结果的时间。
 
@@ -118,11 +135,14 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 有些经历此刻仍在模型眼前。Recall 指向它们，而不是重复：
 
 - 仍然生效的块，即固定历史中其 `key` 的最新一块且不是 retire 块（与上下文拼装重放 keyed baseline 的规则相同），在其输入那一行标为 `(current)`，展开时标为 `(current version in your context)`；展开带有同一 key 更早的块的输入，显示当时投递的那个版本；
-- 最近一次的摘要就在上下文中；它的压缩那一行指出这一点，而不重复它。
+- 最近一次的摘要就在上下文中；它的压缩那一行指出这一点，而不重复它；
+- 本行自己的身份块标为 `(current)`；同一 key 更早的块读作更早的版本。
 
 ### 3.6 轮次
 
-一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、fork、Session fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本（由没有用户文本的输入开启的一轮，例如 Goal 续行开启的一轮，给出该输入的 `<blocks>`）、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。固定历史中没有 `turn/end` 的一轮：若是发起调用的这一轮，结局为 `in progress`；若是子分支继承前缀截断的父分支那一轮，结局为 `continued on the parent branch`。发起调用的这次 `recall` 本身也在这一轮中，结局为 `no result yet`。
+一轮是同一个 `turn_id` 从 `turn/start` 到 `turn/end` 的跨度；它消费的输入属于它。任何轮次之外的事（两轮之间的压缩、开通本行、Session fork）是轮次之间独立的行。索引中一轮的那一行给出它的第一段用户文本、调用过的工具及次数，以及 `turn/end` 中的结局（`completed`、`failed`、`cancelled`）。开启一轮的输入是它在第一次模型请求之前消费的那些；之后才读到的输入，例如它工作时到达的 steer，不开启这一轮。这一行给出开启它的输入中最先的一段用户文本；这些输入都没有用户文本时（Goal 续行、其他行发来的消息），给出其中第一个携带行写的输入（§3.4），否则给出第一个输入的 `<blocks>`。没有开启输入的轮次没有这些：它的索引行读作 `turn: no opening input`。
+
+固定历史中没有 `turn/end` 的一轮：若是发起调用的这一轮，结局为 `in progress`；若是子分支继承前缀截断的父分支那一轮，结局为 `continued on the parent line`。发起调用的这次 `recall` 本身也在这一轮中，结局为 `no result yet`。
 
 索引按最近在前列出各轮和轮次之间的行。检索按最近在前列出所有轮次中命中的行。
 
@@ -191,7 +211,7 @@ Recall 按块文本的开头标签与属性，以及 `InputBlock::Raw` 的 `key`
 
 `before` 是固定历史中的一个位置：结果从事件位于该 id 的事件之前的最新条目开始。它接受任何一行的 id，所以结果返回的 `before=` 无论指向一轮、轮次之间的一行还是命中的一行都能用。`tool` 精确比较工具名；没有被调用过的名字给出 `Nothing matches …`。
 
-`open` 与 `about`、`tool` 或 `before` 同时出现，或没有 `open` 却给了 `offset`，都是参数错误。ToolExecutor 不按 schema 检查输入，所以处理函数像 `wait` 一样自己检查参数，对类型错误、空字符串、超过 200 字符的 `about` 或未知字段返回 `ToolResult::error`。
+`open` 与 `about`、`tool` 或 `before` 同时出现，或没有 `open` 却给了 `offset`，都是参数错误。ToolExecutor 不按 schema 检查输入，所以处理函数像 `wait` 一样自己检查参数，对类型错误、空字符串或只有空白的字符串、超过 200 字符的 `about` 或未知字段返回 `ToolResult::error`。
 
 ### 5.3 分页
 
@@ -238,7 +258,7 @@ End of turn. Open one: open=<id>.
 | --- | --- |
 | 轮次索引 | `Earlier: before=<id>. Open one: open=<id>.` 或 `Nothing earlier.` |
 | 检索 | `More: before=<id>.` 或 `No more.`；完全没有命中：`Nothing matches <复述的过滤条件>.` |
-| 一轮 | `End of turn. Open one: open=<id>.` 或 `More of this turn: open=<id> offset=<next>.` |
+| 一轮 | `End of turn. Open one: open=<id>.`、`More of this turn: open=<id> offset=<next>.`，没有行的一轮为 `Nothing in this turn.` |
 | 一件事 | `Continue: open=<id> offset=<next>.` 或 `End.` |
 
 错误（`ToolResult::error`）说明怎么改正调用：
@@ -247,7 +267,7 @@ End of turn. Open one: open=<id>.
 | --- | --- |
 | `open` 与 `about`、`tool` 或 `before` 同时出现 | `recall: open shows one turn or thing; drop about, tool and before.` |
 | 没有 `open` 却给了 `offset` | `recall: offset needs open.` |
-| 类型错误、空字符串、`about` 超过 200 字符、未知字段 | `recall: <field> must be <what>.` |
+| 类型错误、空字符串或只有空白、`about` 超过 200 字符、未知字段 | `recall: <field> must be <what>.` |
 | `open` 或 `before` 不是某一行的 id | `No turn or line has id <id>.` |
 | `offset` 超出一轮或一件事的末尾 | `Turn <id> has <n> lines.` / `<id> has <len> characters.` |
 
@@ -349,11 +369,11 @@ End of turn. Open one: open=<id>.
 1. **轮次索引。** 无参数调用按最近在前列出各轮，带时间、id、第一段用户文本、工具及次数和结局；沿 `before=` 往前翻直到 `Nothing earlier.`。
 2. **一轮。** 展开一轮时按顺序讲出用户原文、回复、每次调用连同其结局的一行，以及一次中断，各带时间和 id。
 3. **一件事。** 展开一次调用的 id 显示其完整输入和结果，每页 8,000 字符，用 `offset` 分页直到 `End.`；CJK 文本从不被拆开。展开一个带用户内容和三个块的输入，先显示用户内容，再按顺序显示三个块，跨块按字符分页。
-4. **选取。** 已撤回和已删除的输入和 thinking 从不出现，§3.2 未点名的任何类型的事件（如 `context/prepare` 或 `step/tool-start`）也从不出现；Prompt 规则、Prompt state 和后台通知块各按其标签和属性出现，key 仍生效的块标为 `(current)`，retire 块标为 `(ended)`。带用户内容和多个块的输入是一个条目，结束在它上面的检索页以 `before=<它的 id>` 从下一个更早的条目继续，不漏掉任何条目。`project_history` 放进上下文的每个事件都属于某件事。
+4. **选取。** 已撤回和已删除的输入和 thinking 从不出现，§3.2 未点名的任何类型的事件（如 `context/prepare` 或 `step/tool-start`）也从不出现；Prompt 规则、Prompt state 和后台通知块各按其标签和属性出现，key 仍生效的块标为 `(current)`，retire 块标为 `(ended)`。带用户内容和多个块的输入是一个条目，结束在它上面的检索页以 `before=<它的 id>` 从下一个更早的条目继续，不漏掉任何条目。`project_history` 放进上下文的每个事件都属于某件事，包括本行开通输入的身份块和其他行写来的输入。
 5. **压缩。** 两次压缩之后，Recall 仍能回到第一轮；每次压缩是一行；压缩前返回的 id 在压缩后仍展开同样的内容。
 6. **检索。** 顺序和大小写都不同的词作为 `about`，能找到第一次压缩之前的一条用户消息，长工具结果深处的一个词能找到那次调用；`tool` 只保留该工具的调用。
 7. **工具调用的结局。** 被拒绝、从未派发、转入后台任务且之后结束、由子 agent 回答、失败和成功的调用各一次，都按 §3.4 的结局讲成一行；steer 输入讲作用户在模型工作时插话。
-8. **id 与 fork。** 一行的完整 id 可以展开它；不是某一行的 id 的找不到。由 `branch` 工具创建的子分支可以展开继承的 id，用它自己的 `branch/start` 讲出 fork 那一行，把前缀截断的父分支那一轮讲作 `continued on the parent branch`；发起调用的这一轮为 `in progress`。在从该分支所在 Session fork 出的 Session 中，fork 前返回的 id 展开同样的内容，`session/forked` 那一行跟在复制来的轮次之后。
+8. **id 与行。** 一行的完整 id 可以展开它；不是某一行的 id 的找不到。由 `branch` 工具的 `create` 动作开通的子行可以展开继承的 id，用它自己的 `branch/start` 讲出开通那一行，用它的 `branch:line` 块讲出身份输入，把前缀截断的父行那一轮讲作 `continued on the parent line`；发起调用的这一轮为 `in progress`。在父行上，花名册更新、子行发来的消息、它的最终消息、它的空闲通知和结束通知各读作 `line <行> …`——唤醒空闲行的消息读作 `line <行>: …`，同一轮在模型步骤之后读到的读作 `line <行> (while you were working): …`——而 `branch/end` 与 `branch/ended` 从不讲述。在从该分支所在 Session fork 出的 Session 中，fork 前返回的 id 展开同样的内容，`session/forked` 那一行跟在复制来的轮次之后。
 9. **分页与无副作用。** 轮次索引、检索和一轮每页最多 20 条。带 1,000 个标量参数和 1,000 字符工具名的调用、带 50 个块的输入、调用过 100 种工具的一轮，各自的一行都不超过 600 个字符，每个可变部分在 120 个字符处以 `…` 截断；Timeline 只新增 ToolExecutor 为任何工具调用写的事件。
 10. **权限。** 在 read-only 预设下，工具不经审批请求即运行。
 11. **长的一轮。** 超过一页的一轮以 `More of this turn: open=<轮> offset=<n>.` 结尾；沿每次返回的续读参数一直读到这一轮结束，每行恰好出现一次，每页 20 条。
@@ -380,12 +400,23 @@ End of turn. Open one: open=<id>.
 ```rust
 // dim-agent-capabilities/src/recall.rs（新增）
 pub const RECALL_TOOL: &str = "recall";
-pub struct RecallPlugin;
-//   Deps = (Keyed<TreeCommands>, Keyed<ToolRegistry>)
-//   apply: tools.register(ctx, ToolContribution { definition, handler: RecallTool(tree) })
+pub fn feature() -> Feature {
+    Feature::new("Recall").session("Recall", |names| Ok(Box::new(RecallPlugin::new(names)?)))
+}
+pub struct RecallPlugin {
+    tree: Key<TreeCommands>,
+    tools: Key<ToolRegistry>,
+}
+impl RecallPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> { /* 两个都是 names.key()? */ }
+}
+impl DynPlugin for RecallPlugin {
+    // injects: [tree.erase(), tools.erase()]
+    // apply: tools.register(ctx, ToolContribution { definition, handler: RecallTool(tree) })
+}
 struct RecallTool(Arc<TreeCommands>);
 impl ToolHandler for RecallTool { /* §3–§6 */ }
 
 // dim-agent-capabilities/src/defaults.rs，install_local_execution，与 wait::install 并列
-builder.require_feature(Feature::new("Recall").session("Recall", |names| names.part(RecallPlugin)));
+crate::recall::install(builder);   // builder.require_feature(recall::feature())
 ```

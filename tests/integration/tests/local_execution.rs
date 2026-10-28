@@ -648,7 +648,7 @@ async fn model_exec_isolation_reads_local_policy_without_expanding_from_command_
     for bytes in [
         "broken".into(),
         "{}".into(),
-        json!({"version":2}).to_string(),
+        json!({"version":3}).to_string(),
         json!({"version":1,"unknown":true}).to_string(),
         json!({"version":1,"network":"private-policy-fixture-value"}).to_string(),
         json!({"version":1,"readOnlyPaths":["relative"]}).to_string(),
@@ -1765,7 +1765,7 @@ async fn an_unavailable_shell_or_backend_refuses_the_payload() {
         assert_eq!(code(&result), Some("isolation_unavailable"));
         assert!(
             text(&result).contains(
-                "Install bubblewrap, or set \"enabled\": false in host-isolation.json to run commands without isolation."
+                "Install bubblewrap, or set \"sandbox\": \"host\" in host-isolation.json to run commands without isolation."
             ),
             "{}",
             text(&result)
@@ -2622,6 +2622,79 @@ async fn wait_ends_on_a_steer_or_a_stop_and_refuses_a_second_wait() {
             "wait is already running in this session.".to_owned()
         ]
     );
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exec_sandbox_requests_follow_the_nodes_escalation_policy() {
+    let home = scratch("isolation-escalation");
+    let policy = home.join("host-isolation.json");
+    let escaped = home.join("escaped");
+    std::fs::write(
+        home.join("exec-shell.json"),
+        r#"{"version":1,"executablePath":"/bin/bash"}"#,
+    )
+    .unwrap();
+    let root = Ctx::root_with(tokio::runtime::Handle::current());
+    let storage = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    (&storage).await.unwrap();
+    let view = root.plugin(
+        HostPlatformPlugin::new(
+            &Names::copy(
+                &dim_agent_capabilities::catalog(),
+                &rutis_loader::resolve::Build::default(),
+            ),
+            HostPlatformConfig {
+                exec_shell_file: Some((0, "exec-shell.json".into())),
+                isolation_file: Some((0, "host-isolation.json".into())),
+            },
+        )
+        .unwrap(),
+    );
+    let harness = Harness::with_platform(root, view, Hook::None, scratch("cwd")).await;
+    let session = harness.session().await;
+    let command = format!(
+        "printf escaped > '{}'; cat '{}'",
+        escaped.display(),
+        escaped.display()
+    );
+
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command": command.clone(), "cwd": home.clone(), "sandbox": "host"}),
+            )],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let events = local_events(&session).await;
+    let result = results(&events).pop().unwrap();
+    assert_eq!(result.is_error, Some(true), "{}", text(&result));
+    assert_eq!(code(&result), Some("isolation_denied"));
+    assert!(!escaped.exists(), "{}", text(&result));
+
+    std::fs::write(
+        &policy,
+        r#"{"version":2,"sandbox":"workspace","escalation":"ask"}"#,
+    )
+    .unwrap();
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command": command, "cwd": home.clone(), "sandbox": "host"}),
+            )],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let events = local_events(&session).await;
+    let result = results(&events).pop().unwrap();
+    assert!(result.is_error != Some(true), "{}", text(&result));
+    assert_eq!(std::fs::read_to_string(&escaped).unwrap(), "escaped");
     session.close().await.unwrap();
     harness.shutdown().await;
 }

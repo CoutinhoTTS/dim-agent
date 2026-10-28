@@ -448,7 +448,9 @@ repeated import. Drafts, templates, usage replies and resolved credentials are n
 persisted. Register cleanup at acquisition, close admission, cancel owned I/O,
 release leases and settle accepted calls before removing services.
 
-An unreadable or incompatible legacy source returns `provider_invalid_config` before target writes. Target storage failures retain `provider_failed`; callers may isolate a rejected source domain without hiding target failures.
+An unreadable or incompatible legacy source returns `provider_invalid_config` before target
+writes. Target storage failures retain `provider_failed`; callers may isolate a rejected source
+domain without hiding target failures.
 
 The frozen legacy schema uses `modelsSource` to distinguish model origins:
 

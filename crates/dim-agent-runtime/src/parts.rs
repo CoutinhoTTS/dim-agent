@@ -362,7 +362,14 @@ impl PartMounter {
             .cloned()
             .collect();
         let live: HashSet<_> = entries.iter().map(|entry| entry.id).collect();
-        seen.retain(|entry, _| live.contains(entry));
+        let withdrawn: HashSet<_> = seen
+            .extract_if(|entry, _| !live.contains(entry))
+            .filter_map(|(_, view)| view.map(|view| view.id))
+            .collect();
+        site.copies
+            .lock()
+            .unwrap()
+            .retain(|copy| !withdrawn.contains(&copy.id));
         let mut new = vec![];
         for entry in entries {
             if !self.owns(&entry) || seen.contains_key(&entry.id) {
@@ -381,7 +388,7 @@ impl PartMounter {
                 seen.insert(entry.id, None);
                 continue;
             };
-            let view = mount(ctx, part, &site.copies)?;
+            let view = mount(ctx, part, &site.copies);
             if !site.registry.shared.attach(entry.id, id, view.clone()) {
                 tokio::spawn(async move {
                     let _ = view.dispose().await;
@@ -395,40 +402,39 @@ impl PartMounter {
     }
 }
 
-/// Mounts a copy under the mounter and unloads it before rutis's own
-/// cascade does (effects run last in, first out). A copy that already failed
-/// showed its failure when it happened and is not reported again; a cleanup
-/// error of a running copy is the mounter's, as a row's would be.
-fn mount(ctx: &Ctx, part: Box<dyn DynPlugin>, copies: &Copies) -> Result<FiberView, Error> {
+/// Mounts a copy under the mounter.
+fn mount(ctx: &Ctx, part: Box<dyn DynPlugin>, copies: &Copies) -> FiberView {
     let view = ctx.plugin(part);
-    {
-        let mut copies = copies.lock().unwrap();
-        copies.retain(|copy| copy.state().state != FiberState::Disposed);
-        copies.push(view.clone());
-    }
-    let owned = view.clone();
-    let registered = ctx.effect(move || async move {
-        match owned.state().state {
-            FiberState::Disposed => Ok(()),
+    let mut copies = copies.lock().unwrap();
+    copies.retain(|copy| copy.state().state != FiberState::Disposed);
+    copies.push(view.clone());
+    view
+}
+
+/// Unloads a mounter's copies before rutis's own cascade does. A copy that
+/// already failed showed its failure when it happened and is not reported
+/// again; a cleanup error of a running copy is the mounter's, as a row's
+/// would be.
+async fn unmount(copies: impl Iterator<Item = FiberView>) -> Result<(), Error> {
+    let errors: Vec<_> = futures_util::future::join_all(copies.map(|copy| async move {
+        match copy.state().state {
+            FiberState::Disposed => None,
             FiberState::Failed => {
-                let _ = owned.dispose().await;
-                Ok(())
+                let _ = copy.dispose().await;
+                None
             }
-            _ => owned.dispose().await.map_err(|error| {
-                rutis::Error::from(ErrorKind::Aggregate {
-                    errors: vec![error],
-                })
-            }),
+            _ => copy.dispose().await.err(),
         }
-    });
-    if let Err(error) = registered {
-        let late = view.clone();
-        tokio::spawn(async move {
-            let _ = late.dispose().await;
-        });
-        return Err(error);
+    }))
+    .await
+    .into_iter()
+    .flatten()
+    .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ErrorKind::Aggregate { errors }.into())
     }
-    Ok(view)
 }
 
 impl DynPlugin for PartMounter {
@@ -479,22 +485,29 @@ impl DynPlugin for PartMounter {
                 tokio::spawn(async move {
                     loop {
                         tokio::select! {
-                            changed = changes.changed() => if changed.is_err() { return },
-                            _ = cancel.cancelled() => return,
+                            changed = changes.changed() => if changed.is_err() { break },
+                            _ = cancel.cancelled() => break,
                         }
                         let snapshot = this.site.registry.shared.snapshot();
                         if let Err(error) = this.reconcile(&ctx, id, &mut seen, &snapshot) {
                             tracing::warn!(%error, "a registered part failed to build");
                         }
                     }
+                    seen
                 })
             };
             let registry = site.registry.clone();
             ctx.effect(move || async move {
                 cancel.cancel();
-                let _ = follow.await;
+                let seen = match follow.await {
+                    Ok(seen) => seen,
+                    Err(error) => {
+                        tracing::warn!(%error, "a part mounter's follow task ended abnormally");
+                        HashMap::new()
+                    }
+                };
                 registry.shared.detach(id);
-                Ok(())
+                unmount(seen.into_values().flatten()).await
             })?;
             let mut opened = site.mounted.lock().unwrap();
             if self.required {

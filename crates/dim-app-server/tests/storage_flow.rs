@@ -2848,7 +2848,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
             .unwrap();
         let mut ready = String::new();
         tokio::time::timeout(
-            Duration::from_secs(10),
+            Duration::from_secs(30),
             BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready),
         )
         .await

@@ -350,4 +350,38 @@ mod tests {
             ["✗ Edited 1 file ▾", "  ✗ Edit a.ts"]
         );
     }
+
+    #[test]
+    fn an_exec_row_draws_the_boundary_it_requests() {
+        let escalated = [
+            call(
+                "exec",
+                json!({ "command": "cargo test", "sandbox": "host" }),
+                Some("ok"),
+            ),
+            call(
+                "exec",
+                json!({ "command": "ls -la", "sandbox": "network" }),
+                Some("a"),
+            ),
+        ];
+        let expanded = drawn(&escalated, Detail::Expanded, 120).join("\n");
+        assert!(expanded.contains("(boundary: host)"), "{expanded}");
+        assert!(expanded.contains("(boundary: network)"), "{expanded}");
+
+        let collapsed = drawn(&escalated, Detail::Collapsed, 120).join("\n");
+        assert!(
+            collapsed.contains("(boundary: network, host)"),
+            "{collapsed}"
+        );
+
+        let plain = [
+            call("exec", json!({ "command": "cargo test" }), Some("ok")),
+            call("exec", json!({ "command": "ls -la" }), Some("a")),
+        ];
+        for detail in [Detail::Expanded, Detail::Collapsed] {
+            let text = drawn(&plain, detail, 120).join("\n");
+            assert!(!text.contains("(boundary:"), "{text}");
+        }
+    }
 }

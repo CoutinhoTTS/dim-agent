@@ -61,3 +61,36 @@ if (args.slice(-2).join(' ') === 'daemon stop') {
   assert.equal(stops.length, 4);
   assert(stops.every((call) => JSON.stringify(call.stop) === JSON.stringify(['--home', home, 'daemon', 'stop'])));
 });
+
+test('development home starts without OS isolation and keeps an existing policy', { skip: process.platform === 'win32' }, (t) => {
+  const temporary = mkdtempSync(path.join(os.tmpdir(), 'dim dev isolation '));
+  t.after(() => rmSync(temporary, { recursive: true, force: true }));
+  const repo = path.join(temporary, 'public source');
+  const bin = path.join(temporary, 'tools');
+  const home = path.join(temporary, 'isolated home');
+  for (const directory of [repo, bin, path.join(repo, 'target/debug')]) mkdirSync(directory, { recursive: true });
+  cpSync(path.resolve(import.meta.dirname, '../dev'), path.join(repo, 'dev'));
+  writeFileSync(path.join(bin, 'cargo'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+  writeFileSync(path.join(repo, 'target/debug/dimcode'), '#!/bin/bash\nexit 0\n', { mode: 0o755 });
+  const env = { ...process.env, PATH: `${bin}:/usr/bin:/bin`, DIMCODE_HOME: home, DIMCODE_MODEL_CONFIG: '', DIMCODE_PROVIDER: '', DIMCODE_MODEL: '' };
+  const run = (...args) => spawnSync(path.join(repo, 'dev'), ['--prompt', 'hello', ...args], { env, encoding: 'utf8', input: '' });
+  const product = path.join(home, 'host-isolation.json');
+  const created = run();
+  assert.equal(created.status, 0, created.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(product, 'utf8')), { version: 2, sandbox: 'host' });
+  const edited = { version: 2, sandbox: 'workspace', escalation: 'ask' };
+  writeFileSync(product, JSON.stringify(edited));
+  const kept = run();
+  assert.equal(kept.status, 0, kept.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(product, 'utf8')), edited);
+  const configured = path.join(temporary, 'model.json');
+  writeFileSync(configured, '{}');
+  const configured_home = path.join(temporary, 'configured home');
+  const configured_run = spawnSync(path.join(repo, 'dev'), ['--model-config', configured, '--prompt', 'hello'], {
+    env: { ...env, DIMCODE_HOME: configured_home },
+    encoding: 'utf8',
+    input: '',
+  });
+  assert.equal(configured_run.status, 0, configured_run.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(configured_home, 'rust/host-isolation.json'), 'utf8')), { version: 2, sandbox: 'host' });
+});

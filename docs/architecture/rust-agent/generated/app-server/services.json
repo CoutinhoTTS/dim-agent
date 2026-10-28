@@ -23,7 +23,7 @@
         "reads": []
       },
       {
-        "id": 52,
+        "id": 53,
         "parent": 2,
         "name": "Attachments",
         "state": "Active",
@@ -53,7 +53,7 @@
         ]
       },
       {
-        "id": 51,
+        "id": 52,
         "parent": 2,
         "name": "Questions",
         "state": "Active",
@@ -83,7 +83,7 @@
         ]
       },
       {
-        "id": 50,
+        "id": 51,
         "parent": 2,
         "name": "PrepareModelHost",
         "state": "Active",
@@ -113,7 +113,7 @@
         ]
       },
       {
-        "id": 49,
+        "id": 50,
         "parent": 2,
         "name": "ContextCompaction",
         "state": "Active",
@@ -143,7 +143,7 @@
         ]
       },
       {
-        "id": 48,
+        "id": 49,
         "parent": 2,
         "name": "CommandRules",
         "state": "Active",
@@ -173,7 +173,7 @@
         ]
       },
       {
-        "id": 47,
+        "id": 48,
         "parent": 2,
         "name": "PromptSources",
         "state": "Active",
@@ -203,9 +203,39 @@
         ]
       },
       {
-        "id": 46,
+        "id": 47,
         "parent": 2,
         "name": "ShellInput",
+        "state": "Active",
+        "generation": 1,
+        "injects": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "status": "Ready"
+          }
+        ],
+        "resolved": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "scope": null,
+            "provider": 31,
+            "generation": 1
+          }
+        ],
+        "reads": [
+          {
+            "service": "dim_agent_runtime::parts::PartRegistry",
+            "provider": 31,
+            "declared": true,
+            "external": true
+          }
+        ]
+      },
+      {
+        "id": 46,
+        "parent": 2,
+        "name": "Recall",
         "state": "Active",
         "generation": 1,
         "injects": [

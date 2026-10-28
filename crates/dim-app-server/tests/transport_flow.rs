@@ -59,6 +59,9 @@ mod native_storage;
 #[path = "transport_flow/compaction.rs"]
 mod compaction;
 
+#[path = "transport_flow/recall.rs"]
+mod recall;
+
 #[path = "transport_flow/barrier.rs"]
 mod barrier;
 

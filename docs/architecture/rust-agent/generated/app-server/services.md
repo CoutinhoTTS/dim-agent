@@ -8,13 +8,14 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p52["Attachments"]
-    p51["Questions"]
-    p50["PrepareModelHost"]
-    p49["ContextCompaction"]
-    p48["CommandRules"]
-    p47["PromptSources"]
-    p46["ShellInput"]
+    p53["Attachments"]
+    p52["Questions"]
+    p51["PrepareModelHost"]
+    p50["ContextCompaction"]
+    p49["CommandRules"]
+    p48["PromptSources"]
+    p47["ShellInput"]
+    p46["Recall"]
     p45["Wait"]
     p44["WorkspaceTools"]
     p43["BranchTool"]
@@ -59,6 +60,7 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
+  p31 -->|"dim_agent_runtime::parts::PartRegistry"| p53
   p31 -->|"dim_agent_runtime::parts::PartRegistry"| p52
   p31 -->|"dim_agent_runtime::parts::PartRegistry"| p51
   p31 -->|"dim_agent_runtime::parts::PartRegistry"| p50

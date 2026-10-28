@@ -121,31 +121,8 @@ pub fn clip(text: &str, max: usize) -> (String, usize) {
     let mut width = 0;
     let mut rest = text;
     'outer: while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix('\x1b') {
-            let len = if let Some(body) = after.strip_prefix('[') {
-                let end = body
-                    .char_indices()
-                    .find(|(_, n)| ('\u{40}'..='\u{7e}').contains(n))
-                    .map_or(body.len(), |(i, n)| i + n.len_utf8());
-                2 + end
-            } else if let Some(body) = after.strip_prefix(']') {
-                let mut end = body.len();
-                let mut indices = body.char_indices().peekable();
-                while let Some((i, n)) = indices.next() {
-                    if n == '\x07' {
-                        end = i + 1;
-                        break;
-                    }
-                    if n == '\x1b' && matches!(indices.peek(), Some((_, '\\'))) {
-                        end = i + 2;
-                        break;
-                    }
-                }
-                2 + end
-            } else {
-                1
-            };
-            let len = len.min(rest.len());
+        if rest.starts_with('\x1b') {
+            let len = escape_len(rest);
             out.push_str(&rest[..len]);
             rest = &rest[len..];
             continue;
@@ -162,6 +139,38 @@ pub fn clip(text: &str, max: usize) -> (String, usize) {
         rest = &rest[run_end..];
     }
     (out, width)
+}
+
+/// Bytes of the CSI or OSC sequence that `text` starts with (a lone ESC is
+/// one byte); 0 when `text` does not start with ESC.
+pub fn escape_len(text: &str) -> usize {
+    let Some(after) = text.strip_prefix('\x1b') else {
+        return 0;
+    };
+    let len = if let Some(body) = after.strip_prefix('[') {
+        let end = body
+            .char_indices()
+            .find(|(_, n)| ('\u{40}'..='\u{7e}').contains(n))
+            .map_or(body.len(), |(i, n)| i + n.len_utf8());
+        2 + end
+    } else if let Some(body) = after.strip_prefix(']') {
+        let mut end = body.len();
+        let mut indices = body.char_indices().peekable();
+        while let Some((i, n)) = indices.next() {
+            if n == '\x07' {
+                end = i + 1;
+                break;
+            }
+            if n == '\x1b' && matches!(indices.peek(), Some((_, '\\'))) {
+                end = i + 2;
+                break;
+            }
+        }
+        2 + end
+    } else {
+        1
+    };
+    len.min(text.len())
 }
 
 /// Borders in `color`, one column of padding, rows padded with blanks to
