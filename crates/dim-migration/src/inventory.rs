@@ -24,6 +24,45 @@ async fn retained(owner: &Migration, task: &TaskState, id: String, reason: &str)
 }
 
 pub(crate) async fn inspect(owner: &Migration, task: &TaskState, source: &Source) -> Result<()> {
+    let mut preserved = std::collections::BTreeMap::<String, u64>::new();
+    for result in owner.ledger.report(&task.id).await?.objects {
+        if result.kind == "historical_record"
+            && matches!(result.outcome, Outcome::Imported | Outcome::AlreadyImported)
+            && let Some((table, _)) = result.id.split_once(':')
+        {
+            *preserved.entry(table.into()).or_default() += 1;
+        }
+    }
+    for (table, count) in &source.inventory.tables {
+        let remaining = count.saturating_sub(preserved.get(table).copied().unwrap_or_default());
+        if remaining == 0
+            || [
+                "sessions",
+                "session_states",
+                "messages",
+                "compaction_states",
+                "session_relations",
+                "session_blobs",
+                "blob_data",
+                "providers",
+                "provider_selections",
+                "scheduled_jobs",
+                "terminal.scheduled_jobs",
+            ]
+            .contains(&table.as_str())
+        {
+            continue;
+        }
+        retained(
+            owner,
+            task,
+            format!("table:{table}"),
+            &format!(
+                "{remaining} legacy records remain at source for an equivalent native mapping"
+            ),
+        )
+        .await?;
+    }
     for file in [
         "hooks.json",
         "modality.json",

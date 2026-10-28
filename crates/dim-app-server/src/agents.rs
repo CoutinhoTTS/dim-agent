@@ -32,7 +32,6 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 mod configuration;
-mod conversation_import;
 pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
 
 mod sessions;

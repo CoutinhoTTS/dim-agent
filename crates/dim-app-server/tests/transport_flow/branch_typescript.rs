@@ -45,9 +45,7 @@ pub(super) async fn marked(
             for event in session.local(branch, ..).await.unwrap() {
                 if let EventKind::InputMessage(data) = &event.kind {
                     for block in &data.blocks {
-                        let dim_agent_types::InputBlock::Raw { text, .. } = block else {
-                            continue;
-                        };
+                        let dim_agent_types::InputBlock::Raw { text, .. } = block;
                         if text.starts_with(prefix) {
                             return text.clone();
                         }

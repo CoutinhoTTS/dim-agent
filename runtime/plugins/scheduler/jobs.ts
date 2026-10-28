@@ -1,7 +1,6 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { JsonObject, SessionPermissions, Settings } from '../../../npm/plugin.js'
-import { authority, jobSchema, ScheduleError, validateJob, type Caller, type Job, type JobPatch, type ScheduleSettings } from './data.ts'
-import { legacySchedule, type LegacyRecurrence } from './legacy.ts'
+import { authority, ScheduleError, validateJob, type Caller, type Job, type JobPatch, type ScheduleSettings } from './data.ts'
 
 export class SettingsReadError extends ScheduleError {}
 
@@ -53,26 +52,6 @@ export class Jobs {
     const job = (await this.read()).document.jobs.find(value => value.id === id)
     if (!job) throw new ScheduleError('schedule_not_found')
     return job
-  }
-
-  async importLegacy(sourceId: string, fingerprint: string, patch: JobPatch, recurrence: LegacyRecurrence) {
-    const snapshot = await this.read()
-    const previous = snapshot.document.legacy_imports?.[sourceId]
-    const requestDigest = createHash('sha256').update(JSON.stringify([patch, recurrence])).digest('hex')
-    if (previous !== undefined) return { status: previous.fingerprint === fingerprint && previous.request_digest === requestDigest ? 'already_imported' : 'conflict', job_id: sourceId }
-    if (snapshot.document.jobs.some(job => job.id === sourceId)) return { status: 'conflict', job_id: sourceId }
-    const schedule = legacySchedule(recurrence, patch.enabled === false)
-    const bound = await this.permissions.permissionDefaults({})
-    const job = jobSchema.parse({ ...patch, schedule, id: sourceId, max_run_minutes: patch.max_run_minutes ?? 60,
-      policy_cap: bound, created_by: 'user', revision: 1, ...(patch.enabled ? { enabled_at: new Date().toISOString() } : {}),
-    })
-    validateJob(job)
-    const reply = await this.settings.update({ source: 'schedule', scope: 'user', expectedRevision: snapshot.revision,
-      document: { ...snapshot.document, jobs: [...snapshot.document.jobs, job],
-        legacy_imports: { ...snapshot.document.legacy_imports, [sourceId]: { fingerprint, request_digest: requestDigest } } } as unknown as JsonObject,
-    })
-    if (!reply.ok) throw new ScheduleError(reply.error.code === 'conflict' ? 'schedule_conflict' : reply.error.code, reply.error.message)
-    return { status: 'imported', job_id: sourceId }
   }
 
   async setEnabled(id: string, enabled: boolean) {

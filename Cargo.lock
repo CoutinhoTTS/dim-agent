@@ -1318,14 +1318,17 @@ name = "dim-migration"
 version = "0.1.0-alpha.8"
 dependencies = [
  "base64 0.23.1",
+ "chrono",
  "dim-agent-capabilities",
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
  "dim-client",
+ "reqwest 0.12.28",
  "rusqlite",
  "rutis",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",

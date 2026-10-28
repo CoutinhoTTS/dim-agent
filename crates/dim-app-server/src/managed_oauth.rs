@@ -323,60 +323,6 @@ impl Service {
         })
         .await
     }
-    pub(crate) async fn import_legacy(
-        self: &Arc<Self>,
-        document: Value,
-        c: &CancellationToken,
-    ) -> Result<dim_agent_types::AccountImportStatus> {
-        self.owned(c, move |s, c| async move {
-            use dim_agent_types::AccountImportStatus::*;
-            let mut incoming = Map::new();
-            for key in [s.key, s.state_key] {
-                if let Some(value) = document.get(key) {
-                    incoming.insert(key.into(), value.clone());
-                }
-            }
-            let source = s.parse_record(incoming)?;
-            source.revision()?;
-            let tokens = source.tokens.ok_or(OAuthError::Missing)?;
-            let receipt_key = format!("{}Import", s.state_key);
-            let digest = hash_value(document.get(s.key).ok_or(OAuthError::Missing)?)?;
-            let mut lease = s.lease(&c).await?;
-            let mut current = s.read(&mut lease, &c).await?;
-            if let Some(receipt) = current.document.get(&receipt_key) {
-                if receipt.get("digest").and_then(Value::as_str) != Some(&digest) {
-                    return Ok(Conflict);
-                }
-                if receipt.get("complete") == Some(&Value::Bool(true)) {
-                    return Ok(AlreadyImported);
-                }
-                if current.state.is_some()
-                    || current.digest.as_deref()
-                        != receipt.get("tokenDigest").and_then(Value::as_str)
-                    || current.tokens.is_none()
-                {
-                    return Ok(Conflict);
-                }
-            } else {
-                if current.tokens.is_some() || current.state.is_some() {
-                    return Ok(Conflict);
-                }
-                let value = serde_json::to_value(tokens)
-                    .map_err(|_| OAuthError::InvalidStore("provider record"))?;
-                let token_digest = hash_value(&value)?;
-                current.document.insert(s.key.into(), value);
-                current.document.insert(
-                    receipt_key,
-                    serde_json::json!({"digest":digest,"tokenDigest":token_digest,"complete":false}),
-                );
-                Self::write(&mut lease, current.document).await?;
-            }
-            let current = s.read(&mut lease, &c).await?;
-            s.refresh(&mut lease, current, true, &c).await?;
-            Ok(Imported)
-        })
-        .await
-    }
     pub(crate) async fn credential(
         self: &Arc<Self>,
         rejected: Option<&CredentialLease>,
@@ -1072,15 +1018,6 @@ impl Service {
         if !new_account && tokens.account_id != account_id {
             self.persist(lease, record, Some(&tokens), true).await?;
             return Err(OAuthError::AccountChanged);
-        }
-        if record.state.is_none()
-            && let Some(receipt) = record
-                .document
-                .get_mut(&format!("{}Import", self.state_key))
-            && receipt.get("complete") == Some(&Value::Bool(false))
-            && receipt.get("tokenDigest").and_then(Value::as_str) == record.digest.as_deref()
-        {
-            receipt["complete"] = Value::Bool(true);
         }
         let state = self
             .persist(lease, record, Some(&tokens), new_account)

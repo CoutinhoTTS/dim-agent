@@ -1,7 +1,7 @@
 use super::{fill, record};
+use crate::native::Native;
 use crate::{Migration, Outcome, Result, TaskState, source::fingerprint};
 use dim_agent_types::{COMMAND_SEPARATORS, CommandMatch, CommandRule, CommandRuleDecision};
-use dim_client::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,7 +41,7 @@ impl Pattern {
 pub(super) async fn import(
     owner: &Migration,
     task: &TaskState,
-    client: &mut Client,
+    client: &Native,
     document: Value,
 ) -> Result<()> {
     let unsupported = |id: String, reason: &str| {

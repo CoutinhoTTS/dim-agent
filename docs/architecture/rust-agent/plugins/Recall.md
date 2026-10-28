@@ -28,9 +28,7 @@ the kinds the design lists; every other kind, core or opaque, is skipped
 without decoding its data, so a new kind needs no change here. Counting
 follows context assembly: an input counts once it is consumed, a reply counts
 when its output completed or as the partial text an interruption left, and a
-tool result is told as its `content`. Recorded message blocks remain one input
-thing, with source, native roles and context membership visible when opened;
-their historical calls never become execution facts.
+tool result is told as its `content`.
 
 The pinned read is the whole call: a compaction during the call cannot move
 it. A facade read while the Session reloads returns

@@ -206,7 +206,11 @@ async fn run_home(
         )
         .map(str::to_owned)
         .collect();
-    let plugin = root.plugin(MigrationPlugin::new(options.home.clone(), themes));
+    let plugin = root.plugin(MigrationPlugin::new(
+        options.home.clone(),
+        PathBuf::from("rust"),
+        themes,
+    ));
     (&plugin).await.map_err(crate::plugin_error)?;
     let service = root
         .get::<Migration>()
@@ -233,7 +237,7 @@ fn confirm_sources<'a>(sources: impl IntoIterator<Item = (&'a Path, &'a Path)>) 
         eprintln!("Source: {}", safe(&source.to_string_lossy()));
         eprintln!("Target: {}", safe(&target.to_string_lossy()));
     }
-    eprint!("Close legacy CLI and Desktop using these sources. Continue? [y/N] ");
+    eprint!("Close legacy and native clients using these homes. Continue? [y/N] ");
     std::io::stderr().flush()?;
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
@@ -281,14 +285,13 @@ async fn execute(
             {
                 return Ok((130, None));
             }
-            let (_, connection) = crate::daemon_link(root, options, true).await?;
-            let connection = connection
-                .take()
-                .ok_or("App Server did not start")?
-                .connection_config()
-                .clone();
+            let (link, connection) = crate::daemon_link(root, options, false).await?;
+            if let Some(client) = connection.take() {
+                crate::client::shutdown(client).await?;
+            }
+            link.dispose().await?;
             let mut progress = service.progress();
-            let future = service.run(source, true, retry, connection);
+            let future = service.run(source, true, retry);
             tokio::pin!(future);
             let mut interrupted = false;
             let report = loop {

@@ -86,9 +86,7 @@ impl AgentRecords {
                    SELECT session_id FROM agent_sessions UNION SELECT session_id FROM session_owners\
                  ) ids LEFT JOIN agent_sessions s ON s.session_id = ids.session_id \
                  LEFT JOIN session_owners o ON o.session_id = ids.session_id \
-                 LEFT JOIN agents a ON a.agent_id = o.agent_id \
-                 WHERE NOT EXISTS (SELECT 1 FROM conversation_imports i WHERE i.session_id=ids.session_id AND i.committed=0) \
-                 ORDER BY ids.session_id",
+                 LEFT JOIN agents a ON a.agent_id = o.agent_id ORDER BY ids.session_id",
             ).map_err(storage_error)?;
             query.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, Value>(2)?,

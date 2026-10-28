@@ -1,20 +1,13 @@
 use super::{fill, record};
-use crate::{Error, Migration, Outcome, Result, TaskState, engine::request, source::Source};
-use dim_client::Client;
-use serde::Deserialize;
+use crate::native::Native;
+use crate::{Error, Migration, Outcome, Result, TaskState, source::Source};
 use serde_json::{Value, json};
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Selection {
-    status: String,
-}
 
 pub(super) async fn import(
     owner: &Migration,
     task: &TaskState,
     source: &Source,
-    client: &mut Client,
+    client: &Native,
 ) -> Result<()> {
     let shared = source
         .json("data/plugins/web/state.json", &owner.stopping)
@@ -121,19 +114,19 @@ pub(super) async fn import(
         )
         .await?;
     }
-    let selection: Result<Selection> = request(client, "plugin.fill", json!({"name":"web","enabled":state.get("enabled").and_then(Value::as_bool).unwrap_or(true)})).await;
+    let selection = client
+        .plugin(
+            "web",
+            state
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            &owner.stopping,
+        )
+        .await;
     let (outcome, reason) = match selection {
-        Ok(selection) => (
-            match selection.status.as_str() {
-                "imported" => Outcome::Imported,
-                "unchanged" => Outcome::AlreadyImported,
-                "conflict" => Outcome::Conflict,
-                _ => return Err(Error::Target("Unknown plugin selection outcome".into())),
-            },
-            None,
-        ),
-        Err(Error::Unsupported(reason)) => (Outcome::Unsupported, Some(reason)),
-        Err(Error::Deferred(reason)) => (Outcome::Deferred, Some(reason)),
+        Ok(outcome) => (outcome, None),
+        Err(Error::Object(reason)) => (Outcome::Conflict, Some(reason)),
         Err(error) => return Err(error),
     };
     record(owner, task, "web.enabled".into(), outcome, reason).await

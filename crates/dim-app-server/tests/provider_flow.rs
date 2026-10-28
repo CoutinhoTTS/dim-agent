@@ -3869,21 +3869,14 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
             .iter()
             .filter(|item| item["status"] == "imported")
             .count(),
-        4
+        3
     );
     assert_eq!(
         items
             .iter()
             .filter(|item| item["status"] == "rejected")
             .count(),
-        2
-    );
-    assert_eq!(
-        items
-            .iter()
-            .find(|item| item["id"] == "unsupported-usage")
-            .unwrap()["omitted"],
-        json!(["accountUsageSettings"])
+        3
     );
     assert!(!result.to_string().contains("legacy-secret"));
     assert!(!result.to_string().contains("must-not-be-echoed"));
@@ -3933,33 +3926,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
             .iter()
             .filter(|item| item["status"] == "already_imported")
             .count(),
-        4
-    );
-    let moved = home.join("moved.sqlite");
-    std::fs::copy(&source, &moved).unwrap();
-    {
-        let db = rusqlite::Connection::open(&moved).unwrap();
-        db.execute(
-            "UPDATE providers SET accountUsageSettings='{}' WHERE providerId='unsupported-usage'",
-            [],
-        )
-        .unwrap();
-    }
-    let changed = serde_json::to_value(
-        provider
-            .import_legacy(moved.clone(), &cancel)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        changed["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| item["id"] == "unsupported-usage")
-            .unwrap()["status"],
-        "already_imported"
+        3
     );
     let edited = provider
         .update(

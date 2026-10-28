@@ -697,9 +697,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                 let events = session.history("main", None).await.unwrap();
                 let delivered = events.iter().rev().find_map(|event| match &event.kind {
                     EventKind::InputMessage(data) => data.blocks.iter().find_map(|block| {
-                        let dim_agent_types::InputBlock::Raw { text, .. } = block else {
-                            return None;
-                        };
+                        let dim_agent_types::InputBlock::Raw { text, .. } = block;
                         text.starts_with("<dim-state source=\"dim/skills/list\"")
                             .then(|| text.clone())
                     }),
@@ -1186,9 +1184,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             .rev()
             .find_map(|event| match &event.kind {
                 EventKind::InputMessage(data) => data.blocks.iter().find_map(|block| {
-                    let dim_agent_types::InputBlock::Raw { text, .. } = block else {
-                        return None;
-                    };
+                    let dim_agent_types::InputBlock::Raw { text, .. } = block;
                     text.starts_with("<dim-rule source=\"dim/instructions/project\"")
                         .then(|| text.clone())
                 }),

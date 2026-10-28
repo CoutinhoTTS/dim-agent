@@ -76,10 +76,6 @@ pub enum Call {
     Ping,
     Shutdown(Shutdown),
     Create(Create),
-    ConversationBegin(dim_agent_types::ConversationBegin),
-    ConversationChunk(dim_agent_types::ConversationChunk),
-    ConversationFile(dim_agent_types::ConversationFileChunk),
-    ConversationFinish(dim_agent_types::ConversationKey),
     List(SessionList),
     Summaries(SessionList),
     Attach(Attach),
@@ -120,15 +116,6 @@ pub enum Call {
 }
 
 impl Call {
-    pub(crate) fn is_conversation_import(&self) -> bool {
-        matches!(
-            self,
-            Self::ConversationBegin(_)
-                | Self::ConversationChunk(_)
-                | Self::ConversationFile(_)
-                | Self::ConversationFinish(_)
-        )
-    }
     pub(crate) fn is_execution_session(&self) -> bool {
         matches!(
             self,
@@ -447,7 +434,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 37] = [
+const BUILTIN_METHODS: [&str; 33] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -462,10 +449,6 @@ const BUILTIN_METHODS: [&str; 37] = [
     "ui.shutdown",
     "ui.replace",
     "session.create",
-    "session.import.begin",
-    "session.import.chunk",
-    "session.import.file",
-    "session.import.finish",
     "session.list",
     "session.summaries",
     "session.attach",
@@ -545,10 +528,6 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             }
             "daemon.shutdown" => Call::Shutdown(params(raw_params)?),
             "session.create" => Call::Create(params(raw_params)?),
-            "session.import.begin" => Call::ConversationBegin(params(raw_params)?),
-            "session.import.chunk" => Call::ConversationChunk(params(raw_params)?),
-            "session.import.file" => Call::ConversationFile(params(raw_params)?),
-            "session.import.finish" => Call::ConversationFinish(params(raw_params)?),
             "session.list" => Call::List(params(raw_params)?),
             "session.summaries" => Call::Summaries(params(raw_params)?),
             "session.attach" => Call::Attach(params(raw_params)?),
@@ -850,8 +829,6 @@ pub enum Reply {
     Contributed(Value),
     Ping(PingResult),
     Create(CreateResult),
-    ConversationImport(dim_agent_types::ConversationReceipt),
-    ConversationFile(Option<dim_agent_types::ConversationFileReceipt>),
     Fork(ForkResult),
     List(Vec<SessionInfo>),
     Summaries(Vec<SessionSummary>),

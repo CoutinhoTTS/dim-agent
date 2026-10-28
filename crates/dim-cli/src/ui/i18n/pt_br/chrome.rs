@@ -41,6 +41,25 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main é a própria sessão; uma linha encerra, main não"
         }
         "Line has ended:" => "A linha foi encerrada:",
+        "e edit · b branch · f fork" => "e editar · b ramo · f fork",
+        "e edit" => "e editar",
+        "Fork the session before this message? (y/N)" => {
+            "Fazer fork da sessão antes desta mensagem? (y/N)"
+        }
+        "⑂ new line from {id} · Esc cancel" => "⑂ nova linha a partir de {id} · Esc cancelar",
+        "A fork copies main; b opens a line here" => "Um fork copia main; b abre uma linha aqui",
+        "A line opens from text; images and files were not included" => {
+            "Uma linha abre com texto; imagens e arquivos não foram incluídos"
+        }
+        "No finished turn to cut at yet" => "Ainda não há turno encerrado para cortar",
+        "forked {id} · {count} messages" => "fork {id} · {count} mensagens",
+        "after message {count}" => "após a mensagem {count}",
+        "open a line from the end of the shown line" => {
+            "abrir uma linha a partir do fim da linha exibida"
+        }
+        "fork the session at its last finished turn" => {
+            "fazer fork da sessão no último turno encerrado"
+        }
         "Starting" => "Iniciando",
         "Delegation result" => "Resultado da delegação",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {

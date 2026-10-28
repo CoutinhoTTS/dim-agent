@@ -72,7 +72,7 @@ impl Declared {
         )
     }
     /// Defaults, then the schema (§3.2).
-    pub(super) fn prepare(&self, mut document: Value) -> std::result::Result<Value, String> {
+    fn prepare(&self, mut document: Value) -> std::result::Result<Value, String> {
         if !document.is_object() {
             return Err("document must be an object".into());
         }
@@ -187,7 +187,7 @@ impl SettingsService {
             .get(source)
             .and_then(|registered| match &registered.value.kind {
                 Kind::Declared(declared) => Some(declared.clone()),
-                Kind::Rust(_, _) => None,
+                Kind::Rust(_) => None,
             })
             .ok_or(SettingsError::UnknownSource)?;
         if let SettingsScope::Project(root) = scope {
@@ -239,7 +239,6 @@ impl SettingsService {
             scope,
             expected,
             document,
-            None,
             move |current, next| match writer {
                 Writer::Client => Ok(()),
                 Writer::Owner => rules.user_only(current, next),

@@ -81,14 +81,16 @@ remaining imports. Overall exit is 1 for any failed distribution, otherwise 2
 for any partial result, 0 for success, or 130 when cancelled. Explicitly scoped
 commands retain their single-home JSON result.
 
-Inspect, run and retry require the old clients to have stopped writing. Without
-`--source-stopped`, an interactive terminal shows the resolved source and target
-and asks once for confirmation of all selected sources. Declining exits 130 without starting an import;
-noninteractive callers must pass `--source-stopped`. Source/target overlap is
-rejected before starting the target daemon. Run and retry mount Migration for the
-invocation and use the ordinary daemon profile; metadata commands mount it without
-a target connection. Disposal drains accepted work before command exit. Migration
-has no persistent enablement selection or automatic trigger. Imported business configuration uses each owner's ordinary enablement and execution rules.
+Inspect, run and retry require stopped legacy writers. Run and retry also require
+closed native clients and use normal verified shutdown to settle an existing target
+daemon. Without `--source-stopped`, a terminal shows the resolved homes and asks
+once for all selected sources. Declining exits 130; scripts must supply the flag.
+Source/target overlap is rejected before target access. Migration performs the data
+conversion offline under the native store lease; it does not start a daemon.
+The CLI binds `TARGET/rust/dimcode.sqlite`, matching its normal profile. Queries
+and inspection do not open that database. Disposal drains accepted work before
+exit. There is no persistent Migration selection or automatic trigger. Imported
+business configuration takes effect through normal feature loading.
 
 ```text
 $ ./dev migration
@@ -96,7 +98,7 @@ Source: /Users/me/.dim/v2
 Target: /Users/me/.dim
 Source: /Users/me/.dimcode/v2
 Target: /Users/me/.dimcode
-Close legacy CLI and Desktop using these sources. Continue? [y/N] y
+Close legacy and native clients using these homes. Continue? [y/N] y
 <task-id>  sessions        0/12      <legacy-session>
 { "global": { "home": ".../.dim", "result": { ... } }, "cn": { "home": ".../.dimcode", "result": { ... } } }
 
@@ -105,8 +107,7 @@ $ dim migration inspect --home /tmp/dim-new --source /tmp/dim-old --source-stopp
 
 $ dim migration run --home /tmp/dim-new --source /tmp/dim-old --source-stopped
 <task-id>  sessions        0/12      <legacy-session>
-<task-id>  file-bytes      262144/524288  <session>/<file>
-<task-id>  message-chunks  8/20      <legacy-session>
+<task-id>  scheduler       0/?       <legacy-job>
 { "task": { "id": "...", "status": "partial", ... }, "objects": [ ... ] }
 
 $ dim migration show <task-id> --home /tmp/dim-new
@@ -119,14 +120,13 @@ Progress goes to stderr; final output is JSON on stdout. `--json` suppresses
 progress. Exit codes are 0 for complete, 2 for partial, 1 for failure and 130 for
 settled cancellation. A partial report names failed, conflicting, deferred and
 unsupported objects and omitted fields. Ctrl+C requests cancellation and waits
-for accepted owner operations; a second process can use `cancel TASK`. Retry
+for accepted writes; a second process can use `cancel TASK`. Retry
 requires the stopped acknowledgement again, accepts a moved source path and keeps
 the prior report. Querying results does not require Migration to remain loaded.
 
-Client preference writes and Migration use the same physical FileStorage leases;
-an occupied lease or malformed target document is reported without overwriting it.
-The language picker's system default is persisted as an explicit null so later
-import preserves that choice.
+Client preference replacement requires stopped clients. Existing values and
+recorded clears remain unchanged. Ambiguous interrupted file writes are reported
+as conflicts; retry does not replay them over later user changes.
 
 P1 shell prefixes apply only to interactive input. Their execution, recording,
 progress, cancellation and lifetime follow [ShellInput](plugins/ShellInput.md).

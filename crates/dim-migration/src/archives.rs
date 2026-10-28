@@ -132,12 +132,17 @@ impl Archive {
                 Err(error) => return Err(error),
             }
         }
+        let mut metadata = session.archive.clone();
+        metadata["blobs"] = serde_json::to_value(&session.blobs)
+            .map_err(|_| Error::Object("Cannot encode historical blob metadata".into()))?;
+        metadata["attachments"] = serde_json::to_value(&session.attachments)
+            .map_err(|_| Error::Object("Cannot encode historical attachment metadata".into()))?;
         Ok(Self {
             version: 1,
             source: "legacy-session",
             session_id: session.id.clone(),
             meaning: "Imported historical metadata and results. These records do not restore execution, queues, approvals or native usage measurements.",
-            metadata: session.archive.clone(),
+            metadata,
             relations: session.relations.clone(),
             records,
             artifacts,
@@ -147,6 +152,8 @@ impl Archive {
     }
 
     pub fn encode(mut self, paths: &BTreeMap<String, String>) -> Result<Vec<u8>> {
+        self.metadata["importedFiles"] = serde_json::to_value(paths)
+            .map_err(|_| Error::Object("Cannot encode historical file mapping".into()))?;
         for artifact in &mut self.artifacts {
             if let Some(id) = &artifact.file {
                 artifact.path = Some(

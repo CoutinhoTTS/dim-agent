@@ -2,13 +2,10 @@ mod permissions;
 mod skills;
 mod web;
 
-use crate::{
-    Error, Migration, ObjectResult, Outcome, Result, TaskState, engine::request, source::Source,
-};
+use crate::native::Native;
+use crate::{Error, Migration, ObjectResult, Outcome, Result, TaskState, source::Source};
 use dim_agent_capabilities::file_storage::FileStorageError;
-use dim_client::Client;
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
 
 async fn record(
     owner: &Migration,
@@ -36,26 +33,11 @@ async fn record(
 async fn fill(
     owner: &Migration,
     task: &TaskState,
-    client: &mut Client,
+    client: &Native,
     source: &str,
     fields: Value,
 ) -> Result<()> {
-    if !client.offers("settings.fill") {
-        return record(
-            owner,
-            task,
-            source.into(),
-            Outcome::Unsupported,
-            Some("Target Settings does not expose missing-field import".into()),
-        )
-        .await;
-    }
-    let result: Result<BTreeMap<String, String>> = request(
-        client,
-        "settings.fill",
-        json!({"source":source,"document":fields}),
-    )
-    .await;
+    let result = client.fill(source, fields, &owner.stopping).await;
     match result {
         Ok(results) => {
             for (field, status) in results {
@@ -100,9 +82,21 @@ async fn fill(
 async fn file_fill(
     owner: &Migration,
     task: &TaskState,
+    target: &Native,
     name: &str,
     fields: Map<String, Value>,
 ) -> Result<()> {
+    if fields.is_empty() {
+        return Ok(());
+    }
+    let key = format!("migration/file/{name}");
+    let coverage = target.document(&key)?;
+    let mut configured: std::collections::BTreeSet<String> = coverage
+        .as_ref()
+        .and_then(|value| value.get("fields"))
+        .map(|value| serde_json::from_value(value.clone()).map_err(crate::native::failure))
+        .transpose()?
+        .unwrap_or_default();
     let path = owner.ledger.files.path(0, name)?;
     let mut lease = owner.ledger.files.lock(&path, &owner.stopping).await?;
     let mut current: Value = match lease.read(&owner.stopping).await {
@@ -134,14 +128,28 @@ async fn file_fill(
         )
         .await;
     };
+    let existed = !members.is_empty();
+    configured.extend(members.keys().cloned());
     let mut changed = false;
     let mut results = Vec::new();
     for (field, value) in fields {
         let outcome = match members.get(&field) {
             Some(existing) if existing == &value => Outcome::AlreadyImported,
             Some(_) => Outcome::Conflict,
+            None if configured.contains(&field) => {
+                if coverage
+                    .as_ref()
+                    .is_some_and(|value| value["complete"] == true)
+                {
+                    Outcome::Deleted
+                } else {
+                    Outcome::Conflict
+                }
+            }
+            None if name == "exec-shell.json" && existed => Outcome::Conflict,
             None => {
                 members.insert(field.clone(), value);
+                configured.insert(field.clone());
                 changed = true;
                 Outcome::Imported
             }
@@ -155,7 +163,30 @@ async fn file_fill(
         let permissions = Some(std::os::unix::fs::PermissionsExt::from_mode(0o600));
         #[cfg(not(unix))]
         let permissions = None;
-        lease.replace(bytes, permissions, &owner.stopping).await?;
+        crate::engine::check(owner, &task.id).await?;
+        Native::save_document(
+            &target.db.lock().unwrap(),
+            &key,
+            &json!({"fields":configured,"complete":false}),
+        )?;
+        lease
+            .replace(
+                bytes,
+                permissions,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await?;
+    }
+    if changed
+        || coverage
+            .as_ref()
+            .is_none_or(|value| value["complete"] == true)
+    {
+        Native::save_document(
+            &target.db.lock().unwrap(),
+            &key,
+            &json!({"fields":configured,"complete":true}),
+        )?;
     }
     for (field, outcome) in results {
         record(owner, task, format!("{name}.{field}"), outcome, None).await?;
@@ -167,7 +198,7 @@ pub(crate) async fn import(
     owner: &Migration,
     task: &TaskState,
     source: &Source,
-    client: &mut Client,
+    client: &Native,
 ) -> Result<()> {
     let cli = crate::engine::document(owner, task, source, "config.json")
         .await?
@@ -265,7 +296,7 @@ pub(crate) async fn import(
             .await?;
         }
     }
-    file_fill(owner, task, "config.json", preferences).await?;
+    file_fill(owner, task, client, "config.json", preferences).await?;
     if let Some(model) = cli_fields.get("subagentModel") {
         let policy = if model.is_null() {
             Some(json!({"mode":"inherit"}))
@@ -334,6 +365,7 @@ pub(crate) async fn import(
             file_fill(
                 owner,
                 task,
+                client,
                 "exec-shell.json",
                 shell.as_object().unwrap().clone(),
             )

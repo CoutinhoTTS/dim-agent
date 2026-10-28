@@ -13,7 +13,6 @@ use dim_agent_runtime::{Names, Registrations};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, InstanceId, Key, TypeKey};
 use rutis::{Ctx, Event};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     any::TypeId,
@@ -141,18 +140,8 @@ struct Source {
     kind: Kind,
 }
 enum Kind {
-    Rust(TypeId, fn(&Value) -> Result<Value>),
+    Rust(TypeId),
     Declared(Arc<Declared>),
-}
-impl Source {
-    fn prepare(&self, value: &Value) -> Result<Value> {
-        match &self.kind {
-            Kind::Rust(_, prepare) => prepare(value),
-            Kind::Declared(declared) => declared
-                .prepare(value.clone())
-                .map_err(SettingsError::Document),
-        }
-    }
 }
 
 pub struct SettingsService {
@@ -188,21 +177,7 @@ impl SettingsService {
                 owner: ctx.instance(),
                 user_file: D::USER_FILE.into(),
                 project_file: D::PROJECT_FILE.map(Into::into),
-                kind: Kind::Rust(TypeId::of::<D>(), |value| {
-                    let mut defaults = serde_json::to_value(D::default())
-                        .map_err(|_| SettingsError::Invalid("cannot encode source defaults"))?;
-                    if let (Some(defaults), Some(fields)) =
-                        (defaults.as_object_mut(), value.as_object())
-                    {
-                        defaults.extend(fields.clone());
-                    } else {
-                        defaults = value.clone();
-                    }
-                    let document: D = serde_json::from_value(defaults.clone())
-                        .map_err(|_| SettingsError::Invalid("invalid source document"))?;
-                    document.validate()?;
-                    Ok(defaults)
-                }),
+                kind: Kind::Rust(TypeId::of::<D>()),
             },
         )
     }
@@ -218,7 +193,6 @@ impl SettingsService {
         let declared = Declared::compile(declaration)
             .map_err(|reason| registration_failed(&source, reason))?;
         let (user_file, project_file) = declared.files();
-        let declared = Arc::new(declared);
         self.insert(
             ctx,
             &source,
@@ -226,7 +200,7 @@ impl SettingsService {
                 owner: ctx.instance(),
                 user_file,
                 project_file,
-                kind: Kind::Declared(declared),
+                kind: Kind::Declared(Arc::new(declared)),
             },
         )
     }
@@ -239,7 +213,7 @@ impl SettingsService {
             .filter(|registered| registered.value.owner == owner)
             .filter_map(|registered| match &registered.value.kind {
                 Kind::Declared(declared) => Some(declared.declaration().clone()),
-                Kind::Rust(_, _) => None,
+                Kind::Rust(_) => None,
             })
             .collect()
     }
@@ -330,7 +304,7 @@ impl SettingsService {
     }
     fn path<D: BusinessDocument>(&self, scope: SettingsScope) -> Result<FilePath> {
         match self.sources.get(D::NAMESPACE) {
-            Some(registered) if matches!(registered.value.kind, Kind::Rust(id,_) if id == TypeId::of::<D>()) =>
+            Some(registered) if matches!(registered.value.kind, Kind::Rust(id) if id == TypeId::of::<D>()) =>
                 {}
             _ => return Err(SettingsError::UnknownSource),
         }
@@ -388,33 +362,6 @@ impl SettingsService {
             scope,
             expected,
             document,
-            None,
-            |_, _| Ok(()),
-            cancel,
-        )
-        .await
-    }
-    /// Replaces an owner's document while declaring which top-level fields were configured.
-    /// Native authority preserves the other fields' import provenance. File sources
-    /// retain whole-document replacement semantics and have no import provenance.
-    pub async fn update_with_configured_fields<D: BusinessDocument>(
-        self: &Arc<Self>,
-        scope: SettingsScope,
-        expected: &str,
-        document: D,
-        fields: &[&str],
-        cancel: &CancellationToken,
-    ) -> Result<SettingsSnapshot<D>> {
-        document.validate()?;
-        self.check_open(cancel)?;
-        let path = self.path::<D>(scope)?;
-        self.replace(
-            typed::<D>(),
-            path,
-            scope,
-            expected,
-            document,
-            Some(fields.iter().map(|field| (*field).to_owned()).collect()),
             |_, _| Ok(()),
             cancel,
         )
@@ -442,7 +389,6 @@ impl SettingsService {
         scope: SettingsScope,
         expected: &str,
         document: F::Document,
-        configured_fields: Option<std::collections::BTreeSet<String>>,
         check: impl FnOnce(&F::Document, &F::Document) -> Result<()> + Send + 'static,
         cancel: &CancellationToken,
     ) -> Result<SettingsSnapshot<F::Document>> {
@@ -455,15 +401,7 @@ impl SettingsService {
             self.updates.spawn(async move {
                 if scope == SettingsScope::User && owner.database.is_some() {
                     return owner
-                        .native_replace(
-                            format,
-                            path,
-                            expected,
-                            document,
-                            configured_fields,
-                            check,
-                            &cancel,
-                        )
+                        .native_replace(format, path, expected, document, check, &cancel)
                         .await;
                 }
                 let mut lease = owner.lease(&path, &cancel).await?;
@@ -476,9 +414,6 @@ impl SettingsService {
                     .map_err(|_| SettingsError::Invalid("cannot encode settings"))?;
                 bytes.push(b'\n');
                 let revision = revision(Some(&bytes));
-                if configured_fields.is_some() && revision == current.revision {
-                    return Ok(current);
-                }
                 match lease.replace(bytes, private_permissions(), &cancel).await {
                     Ok(()) => {}
                     Err(FileStorageError::Unsynced(error)) => {

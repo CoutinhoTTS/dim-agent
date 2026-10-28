@@ -122,137 +122,6 @@ fn config(home: &Path) -> ServerConfig {
     config
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_scheduler_import_preserves_enablement_and_receipts_across_restart_and_deletion() {
-    let home = home();
-    let request = json!({"source_id":"legacy-job","fingerprint":"a".repeat(64),"recurrence":{"rrule":"FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0","created_at":"2026-01-01T00:00:00.000Z"},"job":{
-        "name":"Imported schedule","prompt":"Imported definition","cwd":home,
-        "mode":"create","enabled":false,
-        "model":{"providerId":"removed-provider","modelId":"removed-model"}
-    }});
-    let (server, _) = launch_with_agent(Arc::new(MockTools), config(&home)).await;
-    let mut client = Client::new_version(&server, false, 3).await;
-    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
-    let first = client.rpc("schedule.import_legacy", request.clone()).await;
-    assert_ok(&first);
-    assert_eq!(first["result"]["status"], "imported");
-    let listed = client.rpc("schedule.list", json!({})).await;
-    assert_eq!(listed["result"]["jobs"][0]["enabled"], false);
-    assert_eq!(listed["result"]["jobs"][0]["created_by"], "user");
-    assert_eq!(
-        client
-            .rpc("schedule.history", json!({"job_id":"legacy-job"}))
-            .await["result"]["runs"],
-        json!([])
-    );
-    let mut changed = request.clone();
-    changed["job"]["prompt"] = json!("Changed final input with the same source fingerprint");
-    assert_eq!(
-        client.rpc("schedule.import_legacy", changed).await["result"]["status"],
-        "conflict"
-    );
-    drop(client);
-    server.shutdown();
-    server.join().await.unwrap();
-    let (server, _) = launch_with_agent(Arc::new(MockTools), config(&home)).await;
-    let mut client = Client::new_version(&server, false, 3).await;
-    process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
-    assert_eq!(
-        client.rpc("schedule.import_legacy", request.clone()).await["result"]["status"],
-        "already_imported"
-    );
-    assert_ok(
-        &client
-            .rpc("schedule.delete", json!({"job_id":"legacy-job"}))
-            .await,
-    );
-    assert_eq!(
-        client.rpc("schedule.import_legacy", request).await["result"]["status"],
-        "already_imported"
-    );
-    assert_eq!(
-        client.rpc("schedule.list", json!({})).await["result"]["jobs"],
-        json!([])
-    );
-    let enabled = json!({"source_id":"legacy-future","fingerprint":"b".repeat(64),"recurrence":{"rrule":"FREQ=DAILY;BYHOUR=9;BYMINUTE=0;COUNT=1","created_at":"2026-01-01T00:00:00.000Z","next_run_at":"2030-01-01T00:00:00Z"},"job":{
-        "name":"Future import","prompt":"Ordinary future execution","cwd":home,
-        "mode":"create","enabled":true
-    }});
-    assert_eq!(
-        client.rpc("schedule.import_legacy", enabled).await["result"]["status"],
-        "imported"
-    );
-    assert_eq!(
-        client.rpc("schedule.list", json!({})).await["result"]["jobs"][0]["enabled"],
-        true
-    );
-    let listed = client.rpc("schedule.list", json!({})).await;
-    assert!(
-        listed["result"]["jobs"][0]["enabled_at"].as_str().unwrap() > "2026-01-01T00:00:00.000Z",
-        "native scheduling starts at import rather than the legacy creation boundary"
-    );
-    for (id, rrule, expected) in [
-        (
-            "daily",
-            "FREQ=DAILY;BYHOUR=12;BYMINUTE=30",
-            json!({"cron":"30 12 * * *"}),
-        ),
-        (
-            "yearly",
-            "FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=4;BYHOUR=12;BYMINUTE=30",
-            json!({"cron":"30 12 4 3 *"}),
-        ),
-    ] {
-        let request = json!({"source_id":id,"fingerprint":"c".repeat(64),"recurrence":{"rrule":rrule,"created_at":"2026-01-01T00:00:00Z"},"job":{"name":id,"prompt":"Disabled mapped recurrence","cwd":home,"mode":"create","enabled":false}});
-        assert_ok(&client.rpc("schedule.import_legacy", request).await);
-        let listed = client.rpc("schedule.list", json!({})).await;
-        assert_eq!(
-            listed["result"]["jobs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|job| job["id"] == id)
-                .unwrap()["schedule"],
-            expected
-        );
-    }
-    let exhausted = json!({"source_id":"exhausted","fingerprint":"e".repeat(64),"recurrence":{"rrule":"FREQ=DAILY;BYHOUR=9;BYMINUTE=0;COUNT=1","created_at":"2026-01-01T00:00:00Z","last_run_at":"2026-01-02T09:00:00Z"},"job":{"name":"Completed one-shot","prompt":"Historical disabled definition","cwd":home,"mode":"create","enabled":false}});
-    assert_ok(
-        &client
-            .rpc("schedule.import_legacy", exhausted.clone())
-            .await,
-    );
-    let listed = client.rpc("schedule.list", json!({})).await;
-    let exhausted_job = listed["result"]["jobs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|job| job["id"] == "exhausted")
-        .unwrap();
-    assert_eq!(
-        exhausted_job["schedule"],
-        json!({"at":"2026-01-02T09:00:00.000Z"})
-    );
-    assert_eq!(exhausted_job["enabled"], false);
-    let mut active = exhausted;
-    active["source_id"] = json!("active-without-next");
-    active["job"]["enabled"] = json!(true);
-    assert_eq!(
-        client.rpc("schedule.import_legacy", active).await["error"]["data"]["appError"],
-        "schedule_import_unsupported"
-    );
-    let unsupported = json!({"source_id":"unsupported","fingerprint":"d".repeat(64),"recurrence":{"rrule":"FREQ=DAILY;INTERVAL=2;BYHOUR=12;BYMINUTE=0","created_at":"2026-01-01T00:00:00Z"},"job":{"name":"Unsupported","prompt":"No approximate timing","cwd":home,"mode":"create","enabled":false}});
-    assert_eq!(
-        client.rpc("schedule.import_legacy", unsupported).await["error"]["data"]["appError"],
-        "schedule_import_unsupported"
-    );
-    drop(client);
-    server.shutdown();
-    server.join().await.unwrap();
-    std::fs::remove_dir_all(home).unwrap();
-}
-
 async fn settled(client: &mut Client, job: &Value, run: &Value) -> Value {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
@@ -2222,10 +2091,9 @@ async fn node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_i
                         if let EventKind::InputMessage(data) = &event.kind
                             && data.submission_id.as_deref() == Some(&submission)
                         {
-                            data.blocks.first().and_then(|block| match block {
-                                dim_agent_types::InputBlock::Raw { text, .. } => Some(text),
-                                _ => None,
-                            })
+                            data.blocks
+                                .first()
+                                .map(|dim_agent_types::InputBlock::Raw { text, .. }| text)
                         } else {
                             None
                         }

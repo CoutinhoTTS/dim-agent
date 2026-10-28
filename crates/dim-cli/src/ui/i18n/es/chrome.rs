@@ -41,6 +41,27 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main es la propia sesión; una línea termina, main no"
         }
         "Line has ended:" => "La línea ha terminado:",
+        "e edit · b branch · f fork" => "e editar · b rama · f bifurcar",
+        "e edit" => "e editar",
+        "Fork the session before this message? (y/N)" => {
+            "¿Bifurcar la sesión antes de este mensaje? (y/N)"
+        }
+        "⑂ new line from {id} · Esc cancel" => "⑂ nueva línea desde {id} · Esc cancelar",
+        "A fork copies main; b opens a line here" => {
+            "Una bifurcación copia main; b abre una línea aquí"
+        }
+        "A line opens from text; images and files were not included" => {
+            "Una línea se abre con texto; no se incluyeron imágenes ni archivos"
+        }
+        "No finished turn to cut at yet" => "Aún no hay un turno terminado donde cortar",
+        "forked {id} · {count} messages" => "bifurcada {id} · {count} mensajes",
+        "after message {count}" => "después del mensaje {count}",
+        "open a line from the end of the shown line" => {
+            "abrir una línea desde el final de la línea mostrada"
+        }
+        "fork the session at its last finished turn" => {
+            "bifurcar la sesión en su último turno terminado"
+        }
         "Starting" => "Iniciando",
         "Delegation result" => "Resultado de delegación",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {

@@ -299,7 +299,7 @@ fn settlement(error: AgentError) -> SessionsError {
 /// The launch cap (sessions service §6.1): the lower preset, the union of the
 /// disallowed tools, and only the allowed tools both sides allow
 /// unconditionally. It is never wider than either side.
-pub(super) fn cap(requested: &PermissionPolicy, bound: &PermissionPolicy) -> PermissionPolicy {
+fn cap(requested: &PermissionPolicy, bound: &PermissionPolicy) -> PermissionPolicy {
     fn rank(preset: PermissionPreset) -> u8 {
         match preset {
             PermissionPreset::ReadOnly => 0,

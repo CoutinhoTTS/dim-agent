@@ -251,18 +251,6 @@ export const settings: SourceDeclaration = {
           ]
         }
       },
-      "legacy_imports": {
-        "type": "object",
-        "additionalProperties": {
-          "type": "object",
-          "properties": {
-            "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-            "request_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
-          },
-          "required": ["fingerprint", "request_digest"],
-          "additionalProperties": false
-        }
-      },
       "max_concurrent_runs": {
         "default": 4,
         "type": "integer",

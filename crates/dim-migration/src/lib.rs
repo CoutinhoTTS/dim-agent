@@ -3,12 +3,13 @@ mod archives;
 mod engine;
 mod inventory;
 mod ledger;
+mod native;
+mod providers;
 mod scheduler;
 mod settings;
 mod source;
 
 use dim_agent_capabilities::file_storage::{FileStorage, FileStorageError, FileStoragePlugin};
-use dim_client::ConnectionConfig;
 use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
 use serde::{Deserialize, Serialize};
@@ -109,11 +110,16 @@ pub struct TaskReport {
 pub struct MigrationPlugin {
     home: PathBuf,
     themes: Vec<String>,
+    native_directory: PathBuf,
 }
 
 impl MigrationPlugin {
-    pub fn new(home: PathBuf, themes: Vec<String>) -> Self {
-        Self { home, themes }
+    pub fn new(home: PathBuf, native_directory: PathBuf, themes: Vec<String>) -> Self {
+        Self {
+            home,
+            native_directory,
+            themes,
+        }
     }
 }
 
@@ -145,6 +151,7 @@ impl Plugin for MigrationPlugin {
             tasks: TaskTracker::new(),
             progress,
             themes: self.themes.clone(),
+            native_directory: self.native_directory.clone(),
             admission: Mutex::new(()),
         });
         let owner = service.clone();
@@ -168,6 +175,7 @@ pub struct Migration {
     tasks: TaskTracker,
     progress: watch::Sender<Option<TaskState>>,
     themes: Vec<String>,
+    native_directory: PathBuf,
     admission: Mutex<()>,
 }
 
@@ -184,7 +192,6 @@ impl Migration {
         source_home: PathBuf,
         source_stopped: bool,
         retry: Option<String>,
-        connection: ConnectionConfig,
     ) -> Result<TaskReport> {
         if !source_stopped {
             return Err(Error::Source(
@@ -199,7 +206,7 @@ impl Migration {
             }
             let owner = self.clone();
             self.tasks
-                .spawn(async move { engine::run(owner, source_home, retry, connection).await })
+                .spawn(async move { engine::run(owner, source_home, retry).await })
         };
         task.await.map_err(|_| {
             Error::Source("Migration worker stopped before its result was recorded".into())

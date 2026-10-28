@@ -442,15 +442,13 @@ new core field, epoch or registry. Managed route/lease checks remain unchanged.
 Legacy TypeScript import stays explicit, read-only and per-entry:
 `imported`/`already_imported`/`rejected`. Map connections, defaults, user overrides,
 user models, disables, preferences and scoped selections explicitly. `activeModelId`
-is only a hint and cannot overwrite an existing scoped choice. Compatible static fields import even when nonempty usage settings, `retryConfig`, `capabilityDefaults` or unrecognized metadata have no equivalent. Each item returns an `omitted` list of field paths, without their values. Invalid required connection, credential, descriptor or preference fields still reject the entry and preserve its source; use the mapping below.
+is only a hint and cannot overwrite an existing scoped choice. Nonempty static
+usage settings, unsupported `retryConfig`/`capabilityDefaults` and other unmapped
+fields reject the entry and preserve its source; use the frozen mapping below.
 Never overwrite an existing target, copy OAuth grants or resurrect deletion on
 repeated import. Drafts, templates, usage replies and resolved credentials are not
 persisted. Register cleanup at acquisition, close admission, cancel owned I/O,
 release leases and settle accepted calls before removing services.
-
-An unreadable or incompatible legacy source returns `provider_invalid_config` before target
-writes. Target storage failures retain `provider_failed`; callers may isolate a rejected source
-domain without hiding target failures.
 
 The frozen legacy schema uses `modelsSource` to distinguish model origins:
 
@@ -464,9 +462,9 @@ The frozen legacy schema uses `modelsSource` to distinguish model origins:
 | `activeModelId` | A per-Provider hint; no authority to create or overwrite a scoped selection |
 | `provider_selections` | Explicit scoped choices, subject to existing target and import-ledger checks |
 
-Null or empty objects/arrays in unsupported usage/retry/capability settings carry no configuration; nonempty values and other metadata keys are reported as omitted. Unknown descriptor fields still reject the entry. Source bytes remain unchanged.
-
-Native format v21 adds per-field import coverage and the native record the owner last wrote. Only mapped fields gain coverage; omissions remain eligible for incremental import. A repeated identity compares previously covered source fields, independently of its path and omitted values. Changed covered fields conflict. Newly supported fields can enter only when the target still equals the owner’s saved record; user changes and deletions are preserved. Earlier complete import receipts remain authoritative and do not resurrect targets. Already imported Providers that still exist may satisfy a newly imported scoped selection’s dependency.
+Null or empty objects/arrays in unsupported usage/retry/capability settings carry
+no configuration; nonempty values reject the entry. Other metadata keys and
+unknown descriptor fields also reject it. Source bytes remain unchanged.
 
 ## 7. Acceptance and delivery
 

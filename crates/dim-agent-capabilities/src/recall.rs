@@ -1064,46 +1064,16 @@ impl<'a> Narrative<'a> {
                     output.push(user_full(user));
                 }
                 for (position, block) in input.blocks.iter().enumerate() {
+                    let InputBlock::Raw { text, key, retire } = block;
+                    let marker = if live[position] {
+                        " (current version in your context)"
+                    } else if *retire && key.is_some() {
+                        " (ended)"
+                    } else {
+                        ""
+                    };
                     output.push(String::new());
-                    match block {
-                        InputBlock::Raw { text, key, retire } => {
-                            let marker = if live[position] {
-                                " (current version in your context)"
-                            } else if *retire && key.is_some() {
-                                " (ended)"
-                            } else {
-                                ""
-                            };
-                            output.push(format!("{text}{marker}"));
-                        }
-                        InputBlock::Messages {
-                            source,
-                            messages,
-                            context_error,
-                        } => {
-                            output.push(source.clone());
-                            if let Some(reason) = context_error {
-                                output.push(format!("Recorded context is unavailable: {reason}"));
-                            }
-                            for record in messages {
-                                let role = match record.message.role {
-                                    Role::User => "user",
-                                    Role::Assistant => "assistant",
-                                    Role::ToolResult => "tool",
-                                };
-                                let membership = if record.in_context {
-                                    "adopted as context"
-                                } else {
-                                    "readable history only"
-                                };
-                                output.push(format!(
-                                    "\nrecorded {role} {} ({membership}):\n{}",
-                                    record.id,
-                                    recorded_text(&record.message)
-                                ));
-                            }
-                        }
-                    }
+                    output.push(format!("{text}{marker}"));
                 }
                 output.join("\n")
             }
@@ -1277,45 +1247,6 @@ fn content_text(parts: &[MessagePart]) -> String {
         .join(" ")
 }
 
-fn recorded_text(message: &Message) -> String {
-    match &message.content {
-        MessageContent::Text(text) => text.clone(),
-        MessageContent::Parts(parts) => parts
-            .iter()
-            .filter_map(|part| match part {
-                MessagePart::Text { text, .. } => Some(text.clone()),
-                MessagePart::Image { .. } => Some("[image]".into()),
-                MessagePart::ToolUse {
-                    id, name, input, ..
-                } => Some(format!(
-                    "recorded call {name} ({id}): {}",
-                    Value::Object(input.clone())
-                )),
-                MessagePart::ToolResult {
-                    tool_use_id,
-                    content,
-                    ..
-                } => {
-                    let text = match content {
-                        ToolContent::Text(text) => text.clone(),
-                        ToolContent::Blocks(blocks) => blocks
-                            .iter()
-                            .map(|block| match block {
-                                ContentBlock::Text { text } => text.clone(),
-                                ContentBlock::Image { .. } => "[image]".into(),
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    };
-                    Some(format!("recorded result ({tool_use_id}): {text}"))
-                }
-                MessagePart::Thinking { .. } => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-    }
-}
-
 fn user_text(user: &UserInput) -> String {
     user.content
         .iter()
@@ -1405,9 +1336,7 @@ fn blocks_name(blocks: &[InputBlock], live: &[bool]) -> String {
         .iter()
         .enumerate()
         .map(|(position, block)| {
-            let InputBlock::Raw { text, key, retire } = block else {
-                return "recorded messages".into();
-            };
+            let InputBlock::Raw { text, key, retire } = block;
             let mut name = match tag(text) {
                 Some(tag) => tag.replace('"', ""),
                 None => "block".into(),
@@ -1443,9 +1372,7 @@ enum LineWrite<'a> {
 /// that notice is what the input says.
 fn line_write(input: &InputMessageData) -> Option<LineWrite<'_>> {
     for block in &input.blocks {
-        let InputBlock::Raw { text, .. } = block else {
-            continue;
-        };
+        let InputBlock::Raw { text, .. } = block;
         let Some(head) = tag(text) else {
             continue;
         };
@@ -1539,9 +1466,6 @@ fn tag(text: &str) -> Option<&str> {
 
 /// The first line of a block's body: after its opening tag, or of its text.
 fn first_body_line(blocks: &[InputBlock]) -> String {
-    if let Some(InputBlock::Messages { source, .. }) = blocks.first() {
-        return source.lines().next().unwrap_or_default().to_owned();
-    }
     let Some(InputBlock::Raw { text, .. }) = blocks.first() else {
         return String::new();
     };

@@ -23,7 +23,6 @@ pub struct ImportItem {
     pub id: String,
     pub status: ImportStatus,
     pub reason: Option<String>,
-    pub omitted: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,70 +43,17 @@ struct Snapshot {
     selections: Vec<SourceRow>,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Coverage {
-    fields: BTreeMap<String, String>,
-    target: StaticProviderRecord,
-}
-
-fn covered_fields(source: &SourceRow) -> Result<BTreeMap<String, String>, String> {
-    let mut fields = BTreeMap::new();
-    for name in [
-        "source",
-        "displayName",
-        "driverKind",
-        "defaultBaseUrl",
-        "baseUrl",
-        "auth",
-        "credential",
-        "headers",
-        "proxy",
-        "timeoutMs",
-        "models",
-        "modelConfigOverrides",
-        "modelsSource",
-        "enabled",
-    ] {
-        fields.insert(
-            name.into(),
-            format!(
-                "{:x}",
-                Sha256::digest(
-                    serde_json::to_vec(&source.fields[name])
-                        .map_err(|_| "Cannot fingerprint Provider field")?
-                )
-            ),
-        );
-    }
-    let metadata: Option<Map<String, Value>> = json_field(&source.fields, "metadata")?;
-    for name in ["enabledModelIds", "disabledModelIds", "modelPreferences"] {
-        fields.insert(
-            format!("metadata.{name}"),
-            format!(
-                "{:x}",
-                Sha256::digest(
-                    serde_json::to_vec(&metadata.as_ref().and_then(|value| value.get(name)))
-                        .map_err(|_| "Cannot fingerprint Provider metadata")?
-                )
-            ),
-        );
-    }
-    Ok(fields)
-}
-
 fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, HostError> {
-    let invalid = |message| HostError::classified(HostErrorKind::InvalidRequest, message);
     if !path.is_absolute() || !path.is_file() {
-        return Err(invalid("Import source must be an absolute SQLite file"));
+        return Err(failure("Import source must be an absolute SQLite file"));
     }
     let mut db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|_| invalid("Cannot open legacy SQLite source read-only"))?;
+        .map_err(|_| failure("Cannot open legacy SQLite source read-only"))?;
     db.pragma_update(None, "trusted_schema", false)
-        .map_err(|_| invalid("Cannot secure legacy SQLite reader"))?;
+        .map_err(|_| failure("Cannot secure legacy SQLite reader"))?;
     let tx = db
         .transaction()
-        .map_err(|_| invalid("Cannot read legacy snapshot"))?;
+        .map_err(|_| failure("Cannot read legacy snapshot"))?;
     let mut schema = Vec::new();
     let mut bytes = 0usize;
     let mut read = |table: &str, columns: &str| -> Result<Vec<SourceRow>, HostError> {
@@ -117,14 +63,14 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
                 [table],
                 |row| row.get(0),
             )
-            .map_err(|_| invalid("Legacy provider tables are missing"))?;
+            .map_err(|_| failure("Legacy provider tables are missing"))?;
         if table_type != "table" {
-            return Err(invalid("Legacy provider source must use tables"));
+            return Err(failure("Legacy provider source must use tables"));
         }
         let columns: Vec<_> = columns.split_whitespace().collect();
         let mut statement = tx
             .prepare(&format!("PRAGMA table_xinfo({table})"))
-            .map_err(|_| invalid("Cannot inspect legacy schema"))?;
+            .map_err(|_| failure("Cannot inspect legacy schema"))?;
         let mut actual = statement
             .query_map([], |row| {
                 Ok((
@@ -134,9 +80,9 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
                     row.get::<_, i64>(5)?,
                 ))
             })
-            .map_err(|_| invalid("Cannot inspect legacy schema"))?
+            .map_err(|_| failure("Cannot inspect legacy schema"))?
             .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|_| invalid("Cannot inspect legacy schema"))?;
+            .map_err(|_| failure("Cannot inspect legacy schema"))?;
         if actual.len() != columns.len()
             || columns.iter().any(|expected| {
                 !actual.iter().any(|(name, ty, hidden, primary)| {
@@ -152,7 +98,7 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
                 })
             })
         {
-            return Err(invalid(
+            return Err(failure(
                 "Unsupported legacy provider schema; source preserved",
             ));
         }
@@ -164,56 +110,56 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
                 columns.join(","),
                 columns[0]
             ))
-            .map_err(|_| invalid("Cannot read legacy rows"))?;
+            .map_err(|_| failure("Cannot read legacy rows"))?;
         let mut rows = statement
             .query([])
-            .map_err(|_| invalid("Cannot read legacy rows"))?;
+            .map_err(|_| failure("Cannot read legacy rows"))?;
         let mut result = Vec::new();
-        while let Some(row) = rows.next().map_err(|_| invalid("Cannot read legacy row"))? {
+        while let Some(row) = rows.next().map_err(|_| failure("Cannot read legacy row"))? {
             if cancel.is_cancelled() {
                 return Err(HostError::Cancelled("Provider import cancelled".into()));
             }
             if result.len() == 1024 {
-                return Err(invalid("Legacy import exceeds 1024 rows per table"));
+                return Err(failure("Legacy import exceeds 1024 rows per table"));
             }
             let mut fields = Map::new();
             for (index, name) in columns.iter().enumerate() {
                 let value = row
                     .get_ref(index)
-                    .map_err(|_| invalid("Cannot read legacy value"))?;
+                    .map_err(|_| failure("Cannot read legacy value"))?;
                 bytes += match value {
                     ValueRef::Text(bytes) | ValueRef::Blob(bytes) => bytes.len(),
                     _ => 8,
                 };
                 if bytes > 8 * 1024 * 1024 {
-                    return Err(invalid("Legacy import exceeds 8 MiB"));
+                    return Err(failure("Legacy import exceeds 8 MiB"));
                 }
                 let value = match value {
                     ValueRef::Null => Value::Null,
                     ValueRef::Integer(value) => json!(value),
                     ValueRef::Text(value) => Value::String(
                         std::str::from_utf8(value)
-                            .map_err(|_| invalid("Invalid legacy text"))?
+                            .map_err(|_| failure("Invalid legacy text"))?
                             .to_owned(),
                     ),
-                    _ => return Err(invalid("Invalid legacy SQLite value type")),
+                    _ => return Err(failure("Invalid legacy SQLite value type")),
                 };
                 fields.insert((*name).into(), value);
             }
             let id = fields[columns[0]]
                 .as_str()
                 .filter(|id| !id.trim().is_empty())
-                .ok_or_else(|| invalid("Invalid legacy row identity"))?
+                .ok_or_else(|| failure("Invalid legacy row identity"))?
                 .to_owned();
             let version = fields["version"]
                 .as_i64()
                 .filter(|v| *v > 0 && *v <= dim_agent_types::JS_MAX_SAFE_INTEGER as i64)
-                .ok_or_else(|| invalid("Invalid legacy row version"))?;
+                .ok_or_else(|| failure("Invalid legacy row version"))?;
             let digest = format!(
                 "{:x}",
                 Sha256::digest(
                     serde_json::to_vec(&fields)
-                        .map_err(|_| invalid("Cannot fingerprint legacy row"))?
+                        .map_err(|_| failure("Cannot fingerprint legacy row"))?
                 )
             );
             result.push(SourceRow {
@@ -229,9 +175,7 @@ fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, Ho
     let selections = read("provider_selections", SELECTION_COLUMNS)?;
     let schema = format!(
         "{:x}",
-        Sha256::digest(
-            serde_json::to_vec(&schema).map_err(|_| invalid("Cannot fingerprint legacy schema"))?
-        )
+        Sha256::digest(serde_json::to_vec(&schema).map_err(failure)?)
     );
     Ok(Snapshot {
         schema,
@@ -317,7 +261,12 @@ fn convert_provider(
     }
     for name in ["accountUsageSettings", "retryConfig", "capabilityDefaults"] {
         let value: Option<Value> = json_field(fields, name)?;
-        let _ = value;
+        if value.as_ref().is_some_and(|value| {
+            !matches!(value, Value::Object(fields) if fields.is_empty())
+                && !matches!(value, Value::Array(items) if items.is_empty())
+        }) {
+            return Err(format!("Unsupported legacy field: {name}"));
+        }
     }
     let _: Option<String> = field(fields, "activeModelId")?;
     let source_kind: String = field(fields, "source")?;
@@ -483,6 +432,14 @@ fn convert_provider(
     }
     let metadata =
         json_field::<Option<Map<String, Value>>>(fields, "metadata")?.unwrap_or_default();
+    if metadata.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "enabledModelIds" | "disabledModelIds" | "modelPreferences"
+        )
+    }) {
+        return Err("Unsupported provider metadata; source preserved".into());
+    }
     let model_preferences: BTreeMap<String, ModelPreferences> = metadata
         .get("modelPreferences")
         .map(|value| serde_json::from_value(value.clone()))
@@ -565,29 +522,6 @@ fn convert_provider(
     Ok(record)
 }
 
-fn omitted_fields(source: &SourceRow) -> Result<Vec<String>, String> {
-    let mut omitted = Vec::new();
-    for name in ["accountUsageSettings", "retryConfig", "capabilityDefaults"] {
-        let value: Option<Value> = json_field(&source.fields, name)?;
-        if value.as_ref().is_some_and(|value| {
-            !matches!(value, Value::Object(fields) if fields.is_empty())
-                && !matches!(value, Value::Array(items) if items.is_empty())
-        }) {
-            omitted.push(name.into());
-        }
-    }
-    let metadata: Option<Map<String, Value>> = json_field(&source.fields, "metadata")?;
-    for key in metadata
-        .into_iter()
-        .flat_map(|value| value.into_iter().map(|(key, _)| key))
-    {
-        if !["enabledModelIds", "disabledModelIds", "modelPreferences"].contains(&key.as_str()) {
-            omitted.push(format!("metadata.{key}"));
-        }
-    }
-    Ok(omitted)
-}
-
 impl ProviderService {
     pub async fn import_legacy(
         self: &Arc<Self>,
@@ -607,48 +541,9 @@ impl ProviderService {
                 let mut imported = HashSet::new();
                 for (kind, rows) in [("provider", snapshot.providers), ("selection", snapshot.selections)] {
                     for source in rows {
-                        let omitted = if kind == "provider" { match omitted_fields(&source) {
-                            Ok(omitted) => omitted,
-                            Err(reason) => { items.push(ImportItem {kind,id:source.id,status:ImportStatus::Rejected,reason:Some(reason),omitted:Vec::new()}); continue; }
-                        }} else {Vec::new()};
                         let seen: Option<String> = tx.query_row("SELECT source_digest FROM provider_imports WHERE kind=?1 AND id=?2", params![kind, source.id], |row| row.get(0)).optional().map_err(storage)?;
                         if let Some(digest) = seen {
-                            let body: Option<String> = if kind == "provider" {tx.query_row("SELECT record FROM provider_import_coverage WHERE provider_id=?1",[&source.id],|row|row.get(0)).optional().map_err(storage)?} else {None};
-                            let mut status = if digest == source.digest {ImportStatus::AlreadyImported} else {ImportStatus::Rejected};
-                            let mut reason = if digest == source.digest {"Source identity was already imported"} else {"Previously imported identity changed; automatic replay refused"};
-                            if let Some(body) = body {
-                                let covered:Coverage=serde_json::from_str(&body).map_err(|_|storage("Provider import coverage is unreadable"))?;
-                                match covered_fields(&source) {
-                                    Err(_) => {status=ImportStatus::Rejected;reason="Source fields cannot be checked against their import coverage";},
-                                    Ok(fields) if covered.fields.iter().any(|(field,digest)|fields.get(field)!=Some(digest)) => {status=ImportStatus::Rejected;reason="Previously imported fields changed; target preserved";},
-                                    Ok(fields) => {
-                                        status=ImportStatus::AlreadyImported;
-                                        reason="Covered fields retained; omitted fields remain eligible for later import";
-                                        if let Some(current)=read_static(&tx,&source.id)? {
-                                            imported.insert(source.id.clone());
-                                            if fields.keys().any(|field|!covered.fields.contains_key(field)) {
-                                                if serde_json::to_value(&current).map_err(storage)? != serde_json::to_value(&covered.target).map_err(storage)? {
-                                                    status=ImportStatus::Rejected;reason="Target Provider changed; newly supported fields were preserved at source";
-                                                } else {
-                                                    let previous=if current.kind==StaticRecordKind::Builtin {let mut previous=current.clone();previous.version=1;Some(previous)} else {None};
-                                                    match convert_provider(&source,previous) {
-                                                        Err(_) => {status=ImportStatus::Rejected;reason="Newly supported fields are incompatible";},
-                                                        Ok(mut target) => {
-                                                            target.version=current.version.checked_add(1).ok_or_else(||storage("Provider version exhausted"))?;
-                                                            tx.execute("UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",params![source.id,target.version,serde_json::to_string(&target).map_err(storage)?]).map_err(storage)?;
-                                                            let covered=Coverage {fields,target};
-                                                            tx.execute("UPDATE provider_import_coverage SET record=?2 WHERE provider_id=?1",params![source.id,serde_json::to_string(&covered).map_err(storage)?]).map_err(storage)?;
-                                                            status=ImportStatus::Imported;
-                                                            reason="Newly supported fields imported";
-                                                        },
-                                                    }
-                                                }
-                                            }
-                                        } else {reason="Target Provider was deleted; import does not restore it";}
-                                    },
-                                }
-                            } else if kind=="provider" && matches!(status,ImportStatus::AlreadyImported) && read_static(&tx,&source.id)?.is_some() {imported.insert(source.id.clone());}
-                            items.push(ImportItem {kind,id:source.id,status,omitted,reason:Some(reason.into())});
+                            items.push(ImportItem { kind, id: source.id, status: ImportStatus::AlreadyImported, reason: Some(if digest == source.digest { "Source row was already imported" } else { "Previously imported identity changed; automatic replay refused" }.into()) });
                             continue;
                         }
                         let result: Result<(), String> = if kind == "provider" {
@@ -659,9 +554,6 @@ impl ProviderService {
                                 Ok(record) if record.kind == StaticRecordKind::Custom && bundled.provider(&source.id).is_some() => Err("Builtin identity cannot be imported as custom".into()),
                                 Ok(record) => {
                                     tx.execute("INSERT INTO providers(provider_id,version,record) VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![source.id, record.version, serde_json::to_string(&record).map_err(storage)?]).map_err(storage)?;
-                                    let fields=covered_fields(&source).map_err(storage)?;
-                                    let covered=Coverage {fields,target:record};
-                                    tx.execute("INSERT INTO provider_import_coverage(provider_id,record) VALUES (?1,?2)",params![source.id,serde_json::to_string(&covered).map_err(storage)?]).map_err(storage)?;
                                     imported.insert(source.id.clone());
                                     Ok(())
                                 }
@@ -684,9 +576,9 @@ impl ProviderService {
                         match result {
                             Ok(()) => {
                                 tx.execute("INSERT INTO provider_imports(kind,id,source_schema,source_version,source_digest) VALUES (?1,?2,?3,?4,?5)", params![kind, source.id, snapshot.schema, source.version, source.digest]).map_err(storage)?;
-                                items.push(ImportItem { kind, id: source.id, status: ImportStatus::Imported, reason: None, omitted });
+                                items.push(ImportItem { kind, id: source.id, status: ImportStatus::Imported, reason: None });
                             }
-                            Err(reason) => items.push(ImportItem { kind, id: source.id, status: ImportStatus::Rejected, reason: Some(reason), omitted }),
+                            Err(reason) => items.push(ImportItem { kind, id: source.id, status: ImportStatus::Rejected, reason: Some(reason) }),
                         }
                     }
                 }

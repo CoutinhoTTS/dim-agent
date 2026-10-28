@@ -1,37 +1,35 @@
 # Rust 会话存储格式
 
-The current native format is **v22**, with recorded conversation inputs and source-owned `settings_documents`,
+The current native format is **v20**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, and the two
-branch end events. Startup requires the exact v22 SQL schema and a single
-format marker of 22 before writable PRAGMAs, or the exact v21, v20, v19, v18, v17, v16,
+branch end events. Startup requires the exact v20 SQL schema and a single
+format marker of 20 before writable PRAGMAs, or the exact v19, v18, v17, v16,
 v15 or v13 schema with its own marker, which the same startup transaction
-upgrades in place to v22 one step after another ([S5a v15 decision](#s5a-v15-格式决定),
+upgrades in place to v20 one step after another ([S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
-[#427 v20 decision](#427-v20-格式决定), [recorded inputs v21 decision](#recorded-inputs-and-import-coverage-v21), [settings presence v22](#settings-field-presence-v22)). Older databases and the removed
+[#427 v20 decision](#427-v20-格式决定)). Older databases and the removed
 branch-only v14 `user_configuration` format are unsupported and preserved, never
-migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19, v20, v21 or v22. No
+migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19 or v20. No
 migration API or startup option is provided. S5c (Session deletion and fork) kept
 v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain valid in
-v22, and v16 request rows stay readable as written.
+v20, and v16 request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v22 tables
+## Current v20 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 22)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 20)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
 | `settings_documents.imported_revision` | `TEXT` | No | — | Original file SHA-256 or `missing`; import provenance, not a CAS token |
-| `settings_import_fields.source` | `TEXT` | No | — | Primary key; foreign key to `settings_documents.source` |
-| `settings_import_fields.fields` | `TEXT` | No | — | JSON array of configured top-level keys; absent row follows the v22 decision below |
 | `provider_imports.kind` | `TEXT` | 否 | — | 联合主键；`provider` 或 `selection` |
 | `provider_imports.id` | `TEXT` | 否 | — | 联合主键；来源业务 ID，删除 Provider 不删除标记 |
 | `provider_imports.source_schema` | `TEXT` | 否 | — | 已检查的来源两表结构 SHA-256 |
@@ -352,53 +350,6 @@ ProjectionCheckpoint = {
 - 新版本 reseed 若因用户模型与新默认项重名，保留该记录已准入定义、fingerprint 和 version，继续处理其他记录，管理面沿既有逐项错误提示。用户删除冲突模型后，下次启动采用新定义；不以 Provider 激活失败阻断修复入口。其他非法记录和未知数据库格式沿原规则拒绝并保留。
 - 验证在一次性 v19 库中运行 Provider 管理实现之前的实际 App Server 二进制：只读不改变自定义记录字节；旧 `provider.save` 重写丢失三个新增字段，旧启动 reseed 丢失内置记录的用户模型和偏好，库标记不因本决定改变。新增字段的缺失值、重启保留、用户模型冲突、删除和重新装载由 Provider 流程测试保护。
 
-### Settings field presence v22
-
-Native format v22 adds `settings_import_fields(source TEXT NOT NULL PRIMARY KEY
-REFERENCES settings_documents(source), fields TEXT NOT NULL)` and changes the marker
-constraint to `CHECK (version = 22)`. The fields payload is a JSON array of configured
-top-level field names. Settings commits it with its ordinary normalized document,
-so typed readers always receive a complete document while explicit false, null and
-empty values remain configured. A whole-document owner replacement removes the
-presence row and treats the replacement's keys as configured. An owner replacement
-with explicit configured-field intent instead unions those names into existing
-provenance atomically; unchanged defaults retain their previous presence.
-
-An exact v21 database upgrades by adding this empty table and replacing the marker;
-existing document bytes and all other business rows remain unchanged. Without a
-presence row, a revision-1 source imported from `missing` is unconfigured; every other
-existing document is conservatively configured at its stored keys. New file imports
-record the file's actual keys, and a missing file records an empty set. The original
-`imported_revision` provenance retains its meaning. The upgrade uses the normal atomic
-startup transaction and warning. Older formats use their existing steps first;
-unknown or mismatched formats remain rejected and preserved. Empty stores start at v22.
-
-### Recorded inputs and import coverage v21
-
-[Recorded conversation inputs](../recorded-conversations.md) add a `messages`
-variant to committed `input/message` blocks. A v20 reader cannot decode it.
-Native format v21 changes the marker constraint to `CHECK (version = 21)` and adds
-SessionStore's [conversation import reservations](conversation-import.md):
-
-| Table | Exact columns and constraints |
-| --- | --- |
-| `conversation_imports` | `import_key TEXT NOT NULL PRIMARY KEY`, `session_id TEXT NOT NULL UNIQUE`, `agent_id TEXT NOT NULL`, `request TEXT NOT NULL`, `next_chunk INTEGER NOT NULL CHECK(next_chunk >= 0)`, `committed INTEGER NOT NULL CHECK(committed IN (0, 1))` |
-| `conversation_import_files` | `import_key TEXT NOT NULL REFERENCES conversation_imports(import_key)`, `source_id TEXT NOT NULL`, `name TEXT NOT NULL`, `sha256 TEXT NOT NULL`, `bytes INTEGER NOT NULL CHECK(bytes >= 0)`, `content BLOB NOT NULL`, `receipt TEXT`; primary key `(import_key, source_id)` |
-
-`request` is the typed begin request. File rows hold bounded staging bytes and an
-optional completed file receipt; finish clears staging bytes. Reservations outlive
-Session deletion. The v20 tables, indexes and existing business bytes remain unchanged.
-The existing startup transaction upgrades an exact v20 schema and marker, or a
-supported earlier format through its existing steps, creates the two empty tables
-and upgrades to v21. Empty stores start
-at v21. Unknown or mismatched schemas are rejected and preserved. A v20 daemon
-rejects the v21 marker schema before interpreting any Session. This is a one-way
-upgrade with the existing explicit startup warning, not legacy TypeScript import.
-Disposable-store tests verify unchanged business rows, v20-to-v21 admission,
-recorded inputs across reopen and rejection of mismatched markers.
-
-Provider owns `provider_import_coverage(provider_id, record)`. Its record carries digests of the source fields actually mapped and the last native Provider record it wrote. Omitted fields have no completed coverage. Repeated imports can fill newly supported fields when previously covered source fields and the target record are unchanged; configured or deleted targets are preserved.
-
 ### #427 v20 格式决定
 
 [Timeline 分支](../timeline-branches.md#16-format)（#427）的格式决定：升级到 **v20**，从 v19 原地升级。
@@ -463,7 +414,7 @@ Provider owns `provider_import_coverage(provider_id, record)`. Its record carrie
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v22）
+## 完整记录示例（v20）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -476,7 +427,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 22}],
+  "agent_store_format": [{"version": 20}],
   "settings_documents": [],
   "providers": [],
   "provider_selections": [],

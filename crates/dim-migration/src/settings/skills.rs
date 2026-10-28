@@ -1,13 +1,13 @@
 use super::{fill, record};
+use crate::native::Native;
 use crate::{Migration, Outcome, Result, TaskState};
-use dim_client::Client;
 use serde_json::{Value, json};
 use std::path::{Component, Path};
 
 pub(super) async fn import(
     owner: &Migration,
     task: &TaskState,
-    client: &mut Client,
+    client: &Native,
     document: Value,
 ) -> Result<()> {
     let Some(fields) = document.as_object() else {

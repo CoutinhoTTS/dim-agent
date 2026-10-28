@@ -161,11 +161,15 @@
   },
   {
     "from": "dim-migration",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-migration",
     "to": "dim-agent-types"
   },
   {
     "from": "dim-migration",
-    "to": "dim-client"
+    "to": "dim-app-server"
   },
   {
     "from": "dim-migration",
@@ -173,11 +177,11 @@
   },
   {
     "from": "dim-migration",
-    "to": "dim-agent-runtime"
+    "to": "dim-app-server"
   },
   {
     "from": "dim-migration",
-    "to": "dim-app-server"
+    "to": "dim-client"
   },
   {
     "from": "dim-oauth",

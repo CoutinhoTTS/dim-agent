@@ -1,7 +1,6 @@
 import { z } from 'zod'
 import type { JsonObject } from '../../../npm/plugin.js'
 import { id, managementJob, patchSchema, type Caller } from './data.ts'
-import { recurrence } from './legacy.ts'
 
 export const unloadingBeforeCall = 'tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider.'
 export const unloadingAfterCall = "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider."
@@ -28,10 +27,6 @@ export const toolRequest = z.discriminatedUnion('action', [
 export const management = {
   list: z.strictObject({}),
   save: z.strictObject({ job: managementJob, revision: z.number().int().min(0).optional() }),
-  import_legacy: z.strictObject({ source_id: id, fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
-    job: managementJob.omit({ id: true, agent_id: true, schedule: true }).required({ name: true, prompt: true, cwd: true, mode: true, enabled: true }),
-    recurrence,
-  }),
   delete: z.strictObject({ job_id: id }),
   set_enabled: z.strictObject({ job_id: id, enabled: z.boolean() }),
   run_now: z.strictObject({ job_id: id }),

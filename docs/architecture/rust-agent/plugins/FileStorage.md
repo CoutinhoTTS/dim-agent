@@ -30,10 +30,6 @@ folding names would break case-sensitive directories and their aliases.
 
 `read_limited(path, limit, cancel)` preserves the same authorized-handle traversal and cancellation as `read`. It checks the opened file's length before allocating contents, then checks each chunk before extending the buffer to cover concurrent growth. Exceeding the byte limit returns `Io(InvalidData)` without partial bytes or a write. The business caller chooses its byte limit; ordinary `read` and lease reads remain unbounded.
 
-## Exclusive copies
-
-`copy_exclusive(source, destination, cancel)` streams a regular file between authorized roots into a new exclusive destination. Both paths use the existing handle-relative traversal. The operation compares source length and modification time across the copy, syncs the destination file and directory, and returns the byte count. Cancellation stops the copy; a failure can leave a partial destination owned by the caller. It never overwrites an existing destination. Snapshot callers remove their private staging directory on failure.
-
 ## Leases and lock keys
 
 A lease locks a key file with the target's name in the reserved

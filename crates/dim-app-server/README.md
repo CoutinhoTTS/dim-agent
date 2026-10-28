@@ -252,17 +252,15 @@ and paired devices cannot read or write them. See
 
 The configured digest is SHA-256 of the same original bytes parsed and validated for that server launch. It excludes neither whitespace nor environment-variable reference names, and never prints file contents or resolved environment values. A client must refuse another profile or configuration rather than reuse, delete or terminate its daemon.
 
-`--home` and `--database` are mutually exclusive. The SQLite store uses native format v22. It holds user settings, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17), extension event rows (v18), Session configurations and Agent profiles that may omit their mount list (v19), branch end events (v20), recorded conversation inputs with recoverable import receipts (v21), and configured Settings field provenance (v22).
+`--home` and `--database` are mutually exclusive. The SQLite store uses native format v20. It holds user settings in the unchanged v13 settings data contract, normalized managed-provider records, Timeline facts with optional recovery snapshots kept separate, Session file rows (v15), Session title metadata (v16), request messages stored as content-addressed node lists (v17), extension event rows (v18), Session configurations and Agent profiles that may omit their mount list (v19) and the branch end events, which need no schema change (v20).
 
-Startup opens a store with the exact v22 schema and a single marker of 22. A store with the exact v21, v20, v19, v18, v17, v16, v15 or v13 schema and its own single marker is upgraded in place to v22 inside the startup admission transaction, before any writable PRAGMA. The transaction replaces the marker table once, then applies each step from that version on:
+Startup opens a store with the exact v20 schema and a single marker of 20. A store with the exact v19, v18, v17, v16, v15 or v13 schema and its own single marker is upgraded in place to v20 inside the startup admission transaction, before any writable PRAGMA. The transaction replaces the marker table once, then applies each step from that version on:
 
 - v13 → v15 adds `session_files`, `session_file_owners` and the `session_file_owners_by_file` index.
 - v15 → v16 adds `session_metadata`.
 - v16 → v17, v17 → v18, v18 → v19 and v19 → v20 change only the marker.
-- v20 → v21 adds conversation reservations, file transfer receipts and Provider import field coverage.
-- v21 → v22 adds `settings_import_fields`, preserving normalized documents and explicit configured values.
 
-No business row is read or rewritten by format upgrade. v13 settings bytes and v16 request rows stay readable as written, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v22; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. Native format admission has no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
+No business row is read or rewritten. v13 settings bytes and v16 request rows stay readable as written, and a failure rolls back to the untouched store. The upgrade is one-way: the daemon writes `Upgraded native store <path> from format v<N> to v20; earlier dimcode versions cannot open it.` to stderr once, and earlier daemons refuse the upgraded store. Any other database is rejected and preserved: an older format such as v12, the removed branch-only v14, a mismatched marker, a partly upgraded schema or an unknown one. There is no migration command or startup option. [Native storage format](../../docs/design/appserver/native-storage-format.md) defines the SQL and JSON contract.
 
 ### Timeline export
 
@@ -418,23 +416,6 @@ type Usage = {
 ```
 
 Account and login operations are exposed as `account.providers`, `account.status`, `account.recover`, `account.logout`, `account.usage`, `account.login.begin`, `account.login.browser.begin`, `account.login.browser.complete`, `account.login.status` and `account.login.cancel`; a failed attempt reports only `Login failed`. Existing `account.codex.*` and `account.grok.*` retain their native contracts. Attempt secrets are memory-only and cleared on completion, cancellation or expiry; a terminal attempt stays queryable until its deadline.
-
-Explicit legacy account import uses `account.import_legacy {providerId, document}`,
-`account.codex.import_legacy {document}` or `account.grok.import_legacy {document}`
-on protected local v3 management. These mutating calls drain accepted work and return
-`"imported"`, `"already_imported"` or `"conflict"`. A managed provider without
-an import implementation returns `account_unsupported_schema`.
-Each account owner selects only its own grant and state fields, validates the source
-schema, digest, endpoint and client binding, and preserves existing target account
-configuration. The Dim owner's automatically seeded signed-out default is unconfigured;
-an explicit logout is configured. Compatible grants pass through the owner's ordinary
-online identity recovery before they become native credentials. A pending receipt binds
-the source digest to the exact stored grant. Transient failure remains retryable, and a
-rotated grant retains that binding. Recovery and the completed receipt commit atomically;
-a concurrent account change wins. Rejected grants are not reported as imported. An exact
-repeat of a completed import remains acknowledged after logout, without restoring tokens.
-Unrelated token-file fields and pending login attempts are never imported. Import replies
-and diagnostics contain no token or account-body data.
 
 `ManagedModel` is `{entry: ModelEntry, protocol, unavailableReason, zdr}`. `ModelEntry`, capabilities and metadata are defined in [`model_catalog.rs`](src/model_catalog.rs) and `dim-agent-types`. A provider supplies final public model descriptions; `BundledCatalog::fallback` offers the provider service's bundled metadata (refreshed before each release) for what its source omits. An unavailable model keeps a reason and is unselectable.
 

@@ -102,7 +102,7 @@ A compaction is a thing only when it completed: `context/compact` and
 cancelled replaced nothing, so neither the command nor an uncompleted result is a thing. The
 summary a completed compaction carries stays in that one record (§3.5).
 
-One input event is one thing. Its user content and every block it carries share its
+One input event is one thing. Its user content and every `InputBlock::Raw` it carries share its
 event id and are told together, so an id never names more than one entry; there is no block index
 or sub-handle. Whether a block is still live is read from the later blocks with the same `key`
 (§3.5).
@@ -187,13 +187,6 @@ scope=branch op=replace (current): …` and a Goal continuation reads `dim-goal 
 count=2 limit=20 …: …`, from the text those producers already write. Opening an input shows its
 user content in full, then each block's full text in order, each with `(current version in your
 context)` or `(ended)` where it applies, paged by characters like any thing.
-
-A recorded-message block reads `recorded messages: <source>` and stays part of its one input
-thing. Opening it shows the source, original message ids and roles, and whether each message was
-adopted as context or retained only as readable history. Calls and results inside those messages
-are labeled as recorded; they do not become executed tool things or new turns. Thinking and tool
-`structuredContent` remain excluded. The input event id is the only handle; original message ids
-do not introduce sub-handles.
 
 **A tool call's ending** is the folded state, the first that applies:
 

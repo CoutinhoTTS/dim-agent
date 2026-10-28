@@ -82,6 +82,9 @@ const FENCE_TIMEOUT: Duration = Duration::from_millis(300);
 const CURSOR_REPORT_TIMEOUT: Duration = Duration::from_millis(250);
 /// How long a lone ESC waits for the rest of a sequence.
 const ESCAPE_TIMEOUT: Duration = Duration::from_millis(30);
+/// How long a clipboard reply may stall mid-sequence before it is dropped and
+/// keys are read again.
+const REPLY_STALL: Duration = Duration::from_secs(5);
 
 /// Why the terminal layer cannot run.
 #[derive(Debug)]
@@ -185,6 +188,8 @@ pub struct Terminal {
     queue: std::collections::VecDeque<InputEvent>,
     keyboard: KeyboardProtocol,
     background_report: Option<String>,
+    clipboard: bool,
+    last_input: Instant,
     left: bool,
     /// The last size the terminal reported: a zero-sized window (a pane
     /// being re-laid out) keeps it.
@@ -205,6 +210,7 @@ impl Terminal {
         let mut terminal = Self {
             writer: WriteThread::start(),
             decoder: input::Decoder::new(),
+            last_input: Instant::now(),
             coalesce_min_run: Some(
                 if cfg!(windows) || std::env::var_os("DIM_COALESCE_PASTE").is_some() {
                     input::COALESCE_MIN_RUN
@@ -215,6 +221,7 @@ impl Terminal {
             queue: Default::default(),
             keyboard: KeyboardProtocol::Legacy,
             background_report: None,
+            clipboard: false,
             left: false,
             last_size: std::cell::Cell::new((80, 24)),
         };
@@ -299,6 +306,12 @@ impl Terminal {
         self.background_report.as_deref()
     }
 
+    /// The terminal reported the kitty clipboard protocol (OSC 5522) at the
+    /// startup probe: it reads its own clipboard for this process.
+    pub fn clipboard_protocol(&self) -> bool {
+        self.clipboard
+    }
+
     fn negotiate_keyboard(&mut self) -> io::Result<()> {
         sys::write_all(sys::STDOUT, keyboard::PROBE_QUERY)?;
         let deadline = Instant::now() + PROBE_TIMEOUT;
@@ -325,6 +338,7 @@ impl Terminal {
             }
         }
         self.background_report = scan.background_report;
+        self.clipboard = scan.complete && scan.clipboard;
         let mut carry = scan.typeahead;
         carry.extend_from_slice(&scan.rest);
         if !carry.is_empty() {
@@ -388,7 +402,12 @@ impl Terminal {
         let mut buf = [0u8; 4096];
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let wait = if self.decoder.has_pending() {
+            let wait = if self.decoder.holds_reply() {
+                REPLY_STALL
+                    .saturating_sub(self.last_input.elapsed())
+                    .min(remaining)
+                    .max(Duration::from_millis(1))
+            } else if self.decoder.has_pending() {
                 ESCAPE_TIMEOUT.min(remaining.max(Duration::from_millis(1)))
             } else {
                 remaining
@@ -401,7 +420,9 @@ impl Terminal {
                     }
                 }
                 sys::ReadOutcome::Timeout => {
-                    if self.decoder.has_pending() {
+                    let stalled =
+                        !self.decoder.holds_reply() || self.last_input.elapsed() >= REPLY_STALL;
+                    if self.decoder.has_pending() && stalled {
                         self.queue.extend(self.decoder.flush_timeout());
                         if let Some(event) = self.queue.pop_front() {
                             return Wait::Event(event);
@@ -417,6 +438,7 @@ impl Terminal {
     }
 
     fn ingest(&mut self, bytes: &[u8]) {
+        self.last_input = Instant::now();
         let events = self.decoder.feed(bytes);
         let events = match self.coalesce_min_run {
             Some(min_run) => input::coalesce_paste(events, min_run),

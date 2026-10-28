@@ -178,44 +178,9 @@ fn markdown(session_id: &str, events: &[Value]) -> Result<String> {
                     }
                 }
                 for block in data.blocks {
-                    match block {
-                        InputBlock::Raw { text, .. } => {
-                            output.push_str("\n\n### Runtime input\n");
-                            fence(&mut output, &text, "text");
-                        }
-                        InputBlock::Messages {
-                            source,
-                            messages,
-                            context_error,
-                        } => {
-                            output.push_str("\n\n### Recorded history\n");
-                            fence(&mut output, &source, "text");
-                            for record in messages {
-                                let role = match record.message.role {
-                                    dim_agent_types::Role::User => "User",
-                                    dim_agent_types::Role::Assistant => "Assistant",
-                                    dim_agent_types::Role::ToolResult => "Tool result",
-                                };
-                                output.push_str(&format!("\n\n### {role}\n\n"));
-                                output.push_str(&format!("Record: {}\n", record.id));
-                                if let Some(time) = record.created_at {
-                                    output.push_str(&format!("Source time: {time}\n"));
-                                }
-                                if !record.in_context {
-                                    output.push_str("History only\n");
-                                }
-                                fence(
-                                    &mut output,
-                                    &crate::projection::recorded_text(&record.message),
-                                    "text",
-                                );
-                            }
-                            if let Some(reason) = context_error {
-                                output.push_str("\nRecorded context is unavailable:\n");
-                                fence(&mut output, &reason, "text");
-                            }
-                        }
-                    }
+                    let InputBlock::Raw { text, .. } = block;
+                    output.push_str("\n\n### Runtime input\n");
+                    fence(&mut output, &text, "text");
                 }
             }
             (Some("step"), Some(name @ ("text" | "thinking"))) => {
@@ -276,38 +241,4 @@ fn markdown(session_id: &str, events: &[Value]) -> Result<String> {
     }
     output.push('\n');
     Ok(output)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recorded_history_exports_individual_roles_and_provenance() {
-        let events = [json!({"type":"input","name":"message","data":{"blocks":[{
-            "type":"messages","source":"Imported from legacy Session s","messages":[
-                {"id":"old-u","createdAt":"2026-01-01","message":{"role":"user","content":"Original user"},"inContext":false},
-                {"id":"old-a","message":{"role":"assistant","content":"Original assistant"},"inContext":true},
-                {"id":"old-t","message":{"role":"tool_result","content":[{"type":"tool_result","tool_use_id":"old-call","content":"Original result"}]},"inContext":false}
-            ]
-        }]}})];
-        let text = markdown("session", &events).unwrap();
-        assert!(text.contains("Imported from legacy Session s"));
-        assert!(text.contains("### User"));
-        assert!(text.contains("### Assistant"));
-        assert!(text.contains("### Tool result"));
-        for content in [
-            "old-u",
-            "old-a",
-            "old-t",
-            "2026-01-01",
-            "History only",
-            "Original user",
-            "Original assistant",
-            "old-call",
-            "Original result",
-        ] {
-            assert!(text.contains(content), "export must preserve {content}");
-        }
-    }
 }

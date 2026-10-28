@@ -89,7 +89,7 @@ enum Mark {
 /// the text's own line breaks, up to [`WRAP_MAX_ROWS`] (`Rows` up to its
 /// own count), ending the last in `…`; `Whole` keeps every row, however long the command.
 /// `Tail` keeps the last [`TAIL_MAX_ROWS`] rows, as a command's output is
-/// shown, with a scrollbar beside them when there are more.
+/// shown, under a `… +N lines` row when there are more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Overflow {
     Truncate,
@@ -1566,14 +1566,7 @@ fn lay_out_group(
         };
         let mark = line.mark.map(|mark| mark_text(mark, spinner, p));
         let lead = line.indent + if mark.is_some() { 2 } else { 0 };
-        let content = (line.overflow == Overflow::Tail)
-            .then(|| wrapped_rows(&line.spans, width.saturating_sub(lead + 2).max(1)))
-            .filter(|rows| *rows > TAIL_MAX_ROWS);
-        let reserve = if disclosure.is_some() || content.is_some() {
-            2
-        } else {
-            0
-        };
+        let reserve = if disclosure.is_some() { 2 } else { 0 };
         let rest_indent = line.indent + line.hang;
         let laid = layout(
             &line.spans,
@@ -1581,11 +1574,14 @@ fn lay_out_group(
             width.saturating_sub(rest_indent + reserve).max(1),
             line.overflow,
         );
+        if line.overflow == Overflow::Tail {
+            let hidden = hidden_lines(&line.spans, width.saturating_sub(lead).max(1));
+            if hidden > 0 {
+                let note = tf("… +{count} lines", &[("count", &hidden.to_string())]);
+                rows.push(format!("{}{}", " ".repeat(lead), fg(&note, &p.muted)));
+            }
+        }
         let last = laid.len().saturating_sub(1);
-        let bar = content.and_then(|content| {
-            let view = laid.len();
-            crate::ui::render::fullscreen::scrollbar(view, content, content.saturating_sub(view), p)
-        });
         for (index, cells) in laid.iter().enumerate() {
             let disclosure = match disclosure {
                 Some(glyph) if index == last => format!(" {}", fg(glyph, &p.text)),
@@ -1599,13 +1595,7 @@ fn lay_out_group(
             } else {
                 " ".repeat(rest_indent)
             };
-            let mut row = format!("{prefix}{}{disclosure}", paint_cells(cells, p));
-            if let Some(cell) = bar.as_ref().and_then(|bar| bar.get(index)) {
-                let used = display_width(&prefix) + cells.iter().map(|c| c.2).sum::<usize>();
-                row.push_str(&" ".repeat(width.saturating_sub(used + 1)));
-                row.push_str(cell);
-            }
-            rows.push(row);
+            rows.push(format!("{prefix}{}{disclosure}", paint_cells(cells, p)));
         }
     }
     (rows, starts)
@@ -1762,14 +1752,22 @@ fn layout(
     rows
 }
 
-/// About how many rows the spans take at `width`, without laying them out:
-/// each source line its width over the row, at least one.
-fn wrapped_rows(spans: &[Span], width: usize) -> usize {
+/// Source lines of the spans wholly above the last [`TAIL_MAX_ROWS`] rows at
+/// `width`, without laying them out: each line takes its width over the row,
+/// at least one.
+fn hidden_lines(spans: &[Span], width: usize) -> usize {
     let text: String = spans.iter().map(|s| s.text.as_str()).collect();
-    normalize(&text)
-        .split('\n')
-        .map(|line| display_width(line).div_ceil(width).max(1))
-        .sum()
+    let text = normalize(&text);
+    let mut rows = 0;
+    let mut hidden = text.split('\n').count();
+    for line in text.rsplit('\n') {
+        if rows >= TAIL_MAX_ROWS {
+            break;
+        }
+        rows += display_width(line).div_ceil(width).max(1);
+        hidden -= 1;
+    }
+    hidden
 }
 
 fn cells_of(text: &str, tone: Tone) -> Vec<Cell> {

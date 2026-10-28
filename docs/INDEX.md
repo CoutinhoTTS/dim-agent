@@ -11,9 +11,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Temporary MCP](design/plugins/TemporaryMcp.md): disposable Session bindings, server plugins, tool registration and cleanup
 - [Development plan and priorities](design/roadmap.md)（中文）
 - [Agent context: goals and requirements to define](design/agent-context.md)（中文；branches, compaction, model prompts; requirements, not design）
-- [Migration plugin proposal](design/plugins/Migration.md)（中文；on-demand legacy data import, native-role history, retry and incremental import; implementation plan included）
-- [Recorded conversation inputs](design/recorded-conversations.md): native roles, readable history and effective context through adopted input
-- [Recoverable conversation import](design/appserver/conversation-import.md): bounded history/files, unpublished staging and atomic publication
+- [Migration plugin](design/plugins/Migration.md)（中文；on-demand legacy data import, native-role history, retry and incremental import; implementation plan included）
 - [Plugin management: requirements](design/plugin-management.md)（中文；one plugin concept, install, reload, replacement; requirements, not design）
 - [Document templates](templates/README.md)
 - [ADR 002 — Plugin scope](adr/002-plugin-scope.md)（[中文](zh/adr/002-plugin-scope.md)）
@@ -31,6 +29,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Owner-independent Timeline instances](design/collaboration-timeline.md) (#335)
 - [Timeline branches](design/timeline-branches.md): what branches are for, branch versus member and fork, messages between lines, identity across compaction, ending a line (#427)（[中文](zh/design/timeline-branches.md)）
 - [Compaction requirements](design/compaction-quality.md): what compaction keeps, what users see and control, its cost bounds, how its quality is judged (#428)（[中文](zh/design/compaction-quality.md)）
+- [Timeline-first TUI](design/timeline-ui.md): the TUI's Timeline as the primary surface, opening lines and forks from a point of it, line markers and cuts（[中文](zh/design/timeline-ui.md)）
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
 - [Local development and managed provider boundary](architecture/development.md)

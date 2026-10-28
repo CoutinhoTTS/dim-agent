@@ -219,7 +219,6 @@ pub(super) fn provide(
             "mcp.auth.start",
             "mcp.auth.complete",
             "mcp.auth.logout",
-            "mcp.auth.import_legacy",
         ]
         .into_iter()
         .map(|name| MethodDecl::new(name, !matches!(name, "mcp.catalog" | "mcp.temporary.capabilities"), Interruption::Report))
@@ -399,16 +398,6 @@ pub(super) fn provide(
                             .await
                             .map_err(|e| error(e.into()))?;
                         return reply(McpAuthLoggedOut { revoked });
-                    }
-                    "mcp.auth.import_legacy" => {
-                        #[derive(Deserialize)]
-                        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-                        struct Import { id:String, entry:serde_json::Value }
-                        let p:Import=params(value)?;
-                        let entry=target(&directory,McpSource::User,p.id.clone(),&stopping).await?;
-                        let (key,_)=credential_key(&p.id,&entry.configuration).ok_or_else(||error(McpAuthError::Unsupported.into()))?;
-                        let McpServerSettings::Remote {oauth,..}=entry.configuration else {unreachable!("OAuth entries are remote")};
-                        return reply(auth.import_legacy(key,oauth.map(|value|*value),p.entry,&stopping).await.map_err(|e|error(e.into()))?);
                     }
                     _ => unreachable!("registered MCP management method"),
                 }

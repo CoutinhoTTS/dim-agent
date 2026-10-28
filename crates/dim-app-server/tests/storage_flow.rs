@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const INTERPRETER: &str = "dim/context-projection/v4";
+const INTERPRETER: &str = "dim/context-projection/v3";
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
     let mut snapshot = RecoverySnapshot {
         sequence,
@@ -189,12 +189,6 @@ const BUSINESS_TABLES: &[&str] = &[
 /// and v19 add none.
 const V15_TABLES: [&str; 2] = ["session_files", "session_file_owners"];
 const V16_TABLES: [&str; 1] = ["session_metadata"];
-const V21_TABLES: [&str; 3] = [
-    "conversation_imports",
-    "conversation_import_files",
-    "provider_import_coverage",
-];
-const V22_TABLES: [&str; 1] = ["settings_import_fields"];
 /// Inserts the rows of `tables` from the complete record example in
 /// native-storage-format.md.
 fn insert_documented_records(connection: &Connection, tables: &[&str]) {
@@ -269,14 +263,6 @@ const V15_ADDITIONS: &[&str] = &[
 const V16_ADDITIONS: &[&str] = &[
     "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
 ];
-const V21_ADDITIONS: &[&str] = &[
-    "CREATE TABLE provider_import_coverage (provider_id TEXT NOT NULL PRIMARY KEY, record TEXT NOT NULL)",
-    "CREATE TABLE conversation_imports (import_key TEXT NOT NULL PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL, request TEXT NOT NULL, next_chunk INTEGER NOT NULL CHECK(next_chunk >= 0), committed INTEGER NOT NULL CHECK(committed IN (0, 1)))",
-    "CREATE TABLE conversation_import_files (import_key TEXT NOT NULL REFERENCES conversation_imports(import_key), source_id TEXT NOT NULL, name TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes >= 0), content BLOB NOT NULL, receipt TEXT, PRIMARY KEY (import_key, source_id))",
-];
-const V22_ADDITIONS: &[&str] = &[
-    "CREATE TABLE settings_import_fields (source TEXT NOT NULL PRIMARY KEY REFERENCES settings_documents(source), fields TEXT NOT NULL)",
-];
 /// The exact schema of `version`, sorted: v13's, plus each later step's
 /// additions, with that version's marker.
 fn schema_of(version: u32) -> Vec<String> {
@@ -284,8 +270,6 @@ fn schema_of(version: u32) -> Vec<String> {
         .iter()
         .chain(V15_ADDITIONS.iter().filter(|_| version >= 15))
         .chain(V16_ADDITIONS.iter().filter(|_| version >= 16))
-        .chain(V21_ADDITIONS.iter().filter(|_| version >= 21))
-        .chain(V22_ADDITIONS.iter().filter(|_| version >= 22))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .collect();
     statements.sort();
@@ -2349,7 +2333,6 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         V18,
         V19,
         V20,
-        V21,
     }
     for (base, sql) in [
         (Base::Empty, "CREATE TABLE sessions (id TEXT PRIMARY KEY)"),
@@ -2505,12 +2488,6 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
         (Base::V18, "DROP TABLE session_metadata"),
         (Base::V19, "DROP TABLE session_metadata"),
         (Base::V20, "DROP TABLE session_metadata"),
-        (Base::V21, "DELETE FROM agent_store_format"),
-        (
-            Base::V21,
-            "PRAGMA ignore_check_constraints=ON; UPDATE agent_store_format SET version=20",
-        ),
-        (Base::V21, "DROP TABLE session_metadata"),
     ] {
         let database = Database::new();
         match base {
@@ -2521,8 +2498,7 @@ fn unsupported_legacy_or_changed_schema_is_rejected_without_migration() {
             Base::V17 => drop(v16_tables_store(&database.0, 17)),
             Base::V18 => drop(v16_tables_store(&database.0, 18)),
             Base::V19 => drop(v16_tables_store(&database.0, 19)),
-            Base::V20 => drop(v16_tables_store(&database.0, 20)),
-            Base::V21 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
+            Base::V20 => drop(SqliteStorage::open(database.0.clone()).unwrap()),
         }
         let connection = Connection::open(&database.0).unwrap();
         connection.execute_batch(sql).unwrap();
@@ -2556,7 +2532,7 @@ fn marker(connection: &Connection) -> Vec<i64> {
 }
 
 /// Upgrades the disposable `connection`'s store, built at `from` and holding
-/// every documented row of the tables it has, to the exact v22 store in place:
+/// every documented row of the tables it has, to the exact v20 store in place:
 /// every business row is unchanged, the added tables are empty, and only that
 /// open reports the upgrade. The documented v16 request row then reads and
 /// continues as mixed rows.
@@ -2568,8 +2544,6 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
         .iter()
         .filter(|_| from < 16)
         .chain(V15_TABLES.iter().filter(|_| from < 15))
-        .chain(V21_TABLES.iter().filter(|_| from < 21))
-        .chain(V22_TABLES.iter().filter(|_| from < 22))
         .copied()
         .collect();
     let kept: Vec<&str> = BUSINESS_TABLES
@@ -2589,8 +2563,8 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     store.close().await.unwrap();
     db.close().await.unwrap();
     let connection = Connection::open(&database.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(22));
-    assert_eq!(marker(&connection), [22]);
+    assert_eq!(schema(&connection), schema_of(20));
+    assert_eq!(marker(&connection), [20]);
     let after: Vec<_> = kept.iter().map(|table| rows(&connection, table)).collect();
     assert_eq!(after, before);
     for table in added {
@@ -2653,7 +2627,7 @@ async fn upgrades_in_place_once(database: &Database, connection: Connection, fro
     db.close().await.unwrap();
 }
 
-/// An empty store is created at exactly v22; a v13 store takes S5a's,
+/// An empty store is created at exactly v20; a v13 store takes S5a's,
 /// S5b's, #193's, #2's, #364's and the branch end's one-way steps in one open.
 #[tokio::test]
 async fn a_v13_store_upgrades_in_place_once() {
@@ -2662,8 +2636,8 @@ async fn a_v13_store_upgrades_in_place_once() {
     assert_eq!(db.upgraded_from(), None);
     db.close().await.unwrap();
     let connection = Connection::open(&fresh.0).unwrap();
-    assert_eq!(schema(&connection), schema_of(22));
-    assert_eq!(marker(&connection), [22]);
+    assert_eq!(schema(&connection), schema_of(20));
+    assert_eq!(marker(&connection), [20]);
     drop(connection);
 
     let database = Database::new();
@@ -2672,7 +2646,7 @@ async fn a_v13_store_upgrades_in_place_once() {
 }
 
 /// S5b's one-way upgrade, then #193's, #2's, #364's and the branch end's: an
-/// exact v15 store becomes the exact v22 store.
+/// exact v15 store becomes the exact v20 store.
 #[tokio::test]
 async fn a_v15_store_upgrades_in_place_once() {
     let database = Database::new();
@@ -2721,109 +2695,6 @@ async fn a_v19_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 19).await;
 }
 
-#[tokio::test]
-async fn recorded_inputs_keep_roles_provenance_and_excluded_history_across_reopen() {
-    let database = Database::new();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let store = SqliteTimelineStore::new(db.clone());
-    store
-        .create_session("recorded", &SessionConfig::default())
-        .await
-        .unwrap();
-    let input = InputMessageData {
-        blocks: vec![InputBlock::Messages {
-            source: "Imported from an existing conversation".into(),
-            messages: vec![
-                RecordedMessage {
-                    id: "old-1".into(),
-                    created_at: Some("2026-01-01".into()),
-                    message: Message::text(Role::User, "history only"),
-                    in_context: false,
-                },
-                RecordedMessage {
-                    id: "old-2".into(),
-                    created_at: None,
-                    message: Message::text(Role::Assistant, "effective answer"),
-                    in_context: true,
-                },
-            ],
-            context_error: None,
-        }],
-        mode: Some(InputMode::Append),
-        ..InputMessageData::default()
-    };
-    input.validate().unwrap();
-    let written = vec![
-        record(1, EventKind::InputMessage(input)),
-        record(
-            2,
-            EventKind::InputApplied(InputAppliedData {
-                input_id: "event-1".into(),
-                mode: Some(InputMode::Append),
-            }),
-        ),
-        record(
-            3,
-            EventKind::InputConsumed(InputConsumedData {
-                input_id: "event-1".into(),
-            }),
-        ),
-    ];
-    append(&store, key("recorded", "main"), written.clone())
-        .await
-        .unwrap();
-    store.close().await.unwrap();
-    db.close().await.unwrap();
-    let db = SqliteStorage::open(database.0.clone()).unwrap();
-    let store = SqliteTimelineStore::new(db.clone());
-    let restored = store.read(&key("recorded", "main"), 1..=3).await.unwrap();
-    assert_eq!(
-        restored
-            .iter()
-            .map(|record| &record.event)
-            .collect::<Vec<_>>(),
-        written
-            .iter()
-            .map(|record| &record.event)
-            .collect::<Vec<_>>()
-    );
-    let messages = dim_agent_capabilities::history::project_messages(
-        &restored
-            .iter()
-            .map(|record| record.event.clone())
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    assert_eq!(
-        messages,
-        vec![
-            Message::text(Role::User, "Imported from an existing conversation"),
-            Message::text(Role::Assistant, "effective answer")
-        ]
-    );
-    store.close().await.unwrap();
-    db.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_v20_store_upgrades_in_place_once() {
-    let database = Database::new();
-    let connection = v16_tables_store(&database.0, 20);
-    assert_eq!(schema(&connection), schema_of(20));
-    upgrades_in_place_once(&database, connection, 20).await;
-}
-
-#[tokio::test]
-async fn a_v21_store_upgrades_without_claiming_configured_default_fields() {
-    let database = Database::new();
-    let connection = v16_tables_store(&database.0, 21);
-    for sql in V21_ADDITIONS {
-        connection.execute_batch(sql).unwrap();
-    }
-    assert_eq!(schema(&connection), schema_of(21));
-    upgrades_in_place_once(&database, connection, 21).await;
-}
-
 /// The daemon names the one-way upgrade on stderr, where its default log
 /// filter would hide a tracing event, and only on the start that upgrades.
 #[cfg(unix)]
@@ -2867,7 +2738,7 @@ async fn the_daemon_reports_a_v13_upgrade_on_stderr_once() {
         reports.push(stderr);
     }
     let line = format!(
-        "Upgraded native store {} from format v13 to v22; earlier dimcode versions cannot open it.",
+        "Upgraded native store {} from format v13 to v20; earlier dimcode versions cannot open it.",
         path.display()
     );
     assert!(

@@ -55,7 +55,7 @@ pub(super) fn loopback(url: &Url) -> bool {
 /// metadata cannot point Dim at a local or internal service. This is
 /// rmcp's policy for authorization server metadata URLs, applied to every
 /// OAuth URL.
-pub(super) fn trusted(url: &Url, local: bool) -> bool {
+fn trusted(url: &Url, local: bool) -> bool {
     let development = local && loopback(url);
     url.username().is_empty()
         && url.password().is_none()

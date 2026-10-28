@@ -82,32 +82,11 @@ pub struct UserInput {
     pub content: Vec<ContentBlock>,
 }
 
-/// Existing conversation content, independent of any execution that produced it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RecordedMessage {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
-    pub message: Message,
-    /// False retains a readable record without adopting it into model context.
-    pub in_context: bool,
-}
-
-/// Final content adopted where its input is consumed; never an instruction
-/// to execute historical tools or reproduce a model request.
+/// Runtime content a capability places in the model context. The renderer
+/// puts `text` verbatim as one user message where the input is consumed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum InputBlock {
-    Messages {
-        /// A final, model-visible description of the content's origin.
-        source: String,
-        messages: Vec<RecordedMessage>,
-        /// Existing context that cannot be represented prevents continuation
-        /// instead of silently adopting a different conversation.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        context_error: Option<String>,
-    },
     Raw {
         text: String,
         /// Content that stays in effect: a later block with the same key
@@ -205,89 +184,6 @@ impl InputMessageData {
         }
         if self.user.is_none() && self.blocks.is_empty() {
             return Err("input must contain user content or blocks");
-        }
-        for block in &self.blocks {
-            if let InputBlock::Messages {
-                source,
-                messages,
-                context_error,
-            } = block
-            {
-                if source.is_empty() || messages.is_empty() {
-                    return Err("recorded messages require a source and content");
-                }
-                if context_error.as_ref().is_some_and(String::is_empty) {
-                    return Err("unavailable context requires a reason");
-                }
-                if context_error.is_some() && messages.iter().any(|message| message.in_context) {
-                    return Err("unavailable context cannot adopt recorded messages");
-                }
-                let mut ids = std::collections::HashSet::new();
-                let mut calls = std::collections::HashSet::new();
-                let mut open = std::collections::HashSet::new();
-                for record in messages {
-                    if record.id.is_empty() || !ids.insert(&record.id) {
-                        return Err("recorded message identities must be nonempty and unique");
-                    }
-                    if !record.in_context {
-                        continue;
-                    }
-                    if record.message.role != Role::ToolResult && !open.is_empty() {
-                        return Err("recorded tool calls require results before the next message");
-                    }
-                    match &record.message.content {
-                        MessageContent::Text(_) if record.message.role == Role::ToolResult => {
-                            return Err("recorded tool results require typed result parts");
-                        }
-                        MessageContent::Parts(parts) => {
-                            if record.message.role == Role::ToolResult && parts.is_empty() {
-                                return Err("recorded tool results require typed result parts");
-                            }
-                            for part in parts {
-                                match part {
-                                    MessagePart::ToolUse { id, .. } => {
-                                        if record.message.role != Role::Assistant
-                                            || id.is_empty()
-                                            || !calls.insert(id)
-                                        {
-                                            return Err(
-                                                "recorded tool calls require unique assistant call identities",
-                                            );
-                                        }
-                                        open.insert(id);
-                                    }
-                                    MessagePart::ToolResult { tool_use_id, .. } => {
-                                        if record.message.role != Role::ToolResult
-                                            || !open.remove(tool_use_id)
-                                        {
-                                            return Err(
-                                                "recorded tool result has no matching call",
-                                            );
-                                        }
-                                    }
-                                    _ if record.message.role == Role::ToolResult => {
-                                        return Err(
-                                            "recorded tool results require typed result parts",
-                                        );
-                                    }
-                                    MessagePart::Thinking { .. }
-                                        if record.message.role != Role::Assistant =>
-                                    {
-                                        return Err(
-                                            "recorded thinking requires the assistant role",
-                                        );
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if !open.is_empty() {
-                    return Err("recorded message block leaves tool calls without results");
-                }
-            }
         }
         Ok(())
     }

@@ -41,6 +41,11 @@ fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin
     )
     .unwrap();
     legacy_home(&source.0, "dimcode.sqlite", "legacy user message");
+    let legacy = rusqlite::Connection::open(source.0.join("dimcode.sqlite")).unwrap();
+    legacy.execute_batch("INSERT INTO sessions SELECT 'missing-model',cwd,'Removed model',status,tags,createdAt,updatedAt,version FROM sessions WHERE sessionId='old';
+        INSERT INTO session_states VALUES ('missing-model','removed-provider','removed-model','{}','{}','agent');
+        INSERT INTO messages SELECT 'missing-message','missing-model',role,parts,attachments,metadata,orderKey,createdAt FROM messages WHERE messageId='old-message';").unwrap();
+    drop(legacy);
     fs::write(source.0.join("permissions.json"),json!({"version":1,"execCommandPermissions":{"rules":{"cargo test *":"allow","git push *":"deny"}}}).to_string()).unwrap();
     let before = fs::read(source.0.join("dimcode.sqlite")).unwrap();
     for args in [
@@ -95,7 +100,7 @@ fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin
         String::from_utf8_lossy(&inspected.stderr)
     );
     let inventory: Value = serde_json::from_slice(&inspected.stdout).unwrap();
-    assert_eq!(inventory["tables"]["messages"], 1);
+    assert_eq!(inventory["tables"]["messages"], 2);
     assert!(!home.0.join("rust/daemon.sock").exists());
     let run = |args: &[&str]| {
         home.command()
@@ -126,10 +131,33 @@ fn migration_commands_load_on_demand_and_reconcile_retries_without_a_live_plugin
         .as_array()
         .unwrap()
         .iter()
-        .find(|item| item["kind"] == "session")
+        .find(|item| item["kind"] == "session" && item["id"] == "old")
         .unwrap()["targetId"]
         .as_str()
         .unwrap();
+    let missing = first["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["kind"] == "session" && item["id"] == "missing-model")
+        .unwrap();
+    assert_eq!(missing["outcome"], "imported");
+    let native = rusqlite::Connection::open_with_flags(
+        home.0.join("rust/dimcode.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let configuration: String = native
+        .query_row(
+            "SELECT config FROM agent_sessions WHERE session_id=?1",
+            [missing["targetId"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let configuration: Value = serde_json::from_str(&configuration).unwrap();
+    assert_eq!(configuration["model"]["providerId"], "removed-provider");
+    assert_eq!(configuration["model"]["modelId"], "removed-model");
+    drop(native);
     let exported = run(&["session", "export", session, "--format", "json"]);
     assert!(
         exported.status.success(),

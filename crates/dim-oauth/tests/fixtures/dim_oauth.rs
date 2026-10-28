@@ -30,7 +30,6 @@ pub struct Service {
     pub issued: AtomicUsize,
     pub refreshes: AtomicUsize,
     pub reject_refresh: AtomicBool,
-    pub unavailable_userinfo: AtomicBool,
     /// `expires_in` of the next issued token only; absent means one hour.
     pub expires_in: Mutex<Option<Value>>,
     pub models: Mutex<Option<Value>>,
@@ -153,9 +152,6 @@ pub async fn start() -> Fixture {
             "/oauth/userinfo",
             get(|State(s): State<Arc<Service>>, headers: HeaderMap| async move {
                 s.record("GET /oauth/userinfo".into());
-                if s.unavailable_userinfo.load(Ordering::SeqCst) {
-                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
-                }
                 if bearer(&headers).is_empty() {
                     return unauthorized();
                 }

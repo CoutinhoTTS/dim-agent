@@ -9,7 +9,6 @@ use crate::{
 };
 use dim_agent_capabilities::methods::{Interruption, MethodDecl, params, reply};
 use rutis::{Ctx, Error};
-use serde::Deserialize;
 use std::sync::Arc;
 
 pub(super) fn provide(
@@ -23,7 +22,6 @@ pub(super) fn provide(
         [
             "account.grok.status",
             "account.grok.recover",
-            "account.grok.import_legacy",
             "account.grok.login.begin",
             "account.grok.login.status",
             "account.grok.login.cancel",
@@ -46,20 +44,6 @@ pub(super) fn provide(
                     "account.grok.status" => {
                         let _: Empty = params(value)?;
                         reply(oauth.status(cancel).await.map_err(error)?)
-                    }
-                    "account.grok.import_legacy" => {
-                        #[derive(Deserialize)]
-                        #[serde(deny_unknown_fields)]
-                        struct Import {
-                            document: serde_json::Value,
-                        }
-                        let p: Import = params(value)?;
-                        reply(
-                            oauth
-                                .import_legacy(p.document, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
                     }
                     "account.grok.recover" => {
                         let _: Empty = params(value)?;

@@ -18,7 +18,6 @@ const AUTH_FILE: &str = "auth.json";
 const DEVICE_FILE: &str = "device-id";
 const TOKENS: &str = "nextApiOauth";
 const STATE: &str = "dimAccountState";
-const IMPORT: &str = "dimAccountImport";
 const FRESH_MS: u64 = 30_000;
 
 type Result<T> = std::result::Result<T, ManagedError>;
@@ -465,9 +464,7 @@ impl Store {
         // No Dim record at all, even beside other owners' records, is signed
         // out; Dim tokens without their state still need recovery.
         if !doc.contains_key(STATE) && !doc.contains_key(TOKENS) {
-            let mut state = signed_out(None, false)?;
-            state["configurationSource"] = json!("default");
-            doc.insert(STATE.into(), state);
+            doc.insert(STATE.into(), signed_out(None, false)?);
             file.write(&doc).await?;
         }
         snapshot(&doc)
@@ -653,24 +650,9 @@ impl Store {
     /// Explicit identity recovery for a legacy grant or a digest mismatch.
     /// Never applies to unknown or corrupt schema.
     pub async fn recover(&self) -> Result<AccountSnapshot> {
-        self.recover_inner(None).await
-    }
-
-    async fn recover_inner(&self, import_digest: Option<&str>) -> Result<AccountSnapshot> {
-        let (tokens, raw, importing) = {
+        let (tokens, raw) = {
             let mut file = self.open(None).await?;
             let (mut doc, _) = file.read().await?;
-            if let Some(expected) = import_digest {
-                let receipt = doc.get(IMPORT).ok_or(ManagedError::AccountChanged)?;
-                if receipt.get("digest").and_then(Value::as_str) != Some(expected)
-                    || (receipt.get("complete") != Some(&json!(true))
-                        && (doc.contains_key(STATE)
-                            || receipt.get("tokenDigest").and_then(Value::as_str)
-                                != doc.get(TOKENS).map(digest).transpose()?.as_deref()))
-                {
-                    return Err(ManagedError::AccountChanged);
-                }
-            }
             let mut legacy = false;
             match parse(&doc, true) {
                 Ok(_) if doc.contains_key(STATE) => return snapshot(&doc),
@@ -682,13 +664,6 @@ impl Store {
                 file.normalize(&mut doc).await?;
             }
             let Parsed { tokens, state } = parse(&doc, false)?;
-            let token_digest = doc.get(TOKENS).map(digest).transpose()?;
-            let importing = state.is_none()
-                && doc.get(IMPORT).is_some_and(|receipt| {
-                    receipt.get("complete") == Some(&json!(false))
-                        && receipt.get("tokenDigest").and_then(Value::as_str)
-                            == token_digest.as_deref()
-                });
             let Some(mut tokens) = tokens else {
                 doc.insert(STATE.into(), signed_out(None, false)?);
                 file.write(&doc).await?;
@@ -705,14 +680,13 @@ impl Store {
                     }
                     Err(error) => return Err(error),
                 };
-                if importing {
-                    doc[IMPORT]["tokenDigest"] = digest(&Value::Object(tokens.0.clone()))?.into();
-                }
+                // Persist the rotated grant and drop unverified identity
+                // before going online for userinfo.
                 doc.insert(TOKENS.into(), Value::Object(tokens.0.clone()));
                 doc.remove(STATE);
                 file.write(&doc).await?;
             }
-            (tokens, file.read().await?.1, importing)
+            (tokens, file.read().await?.1)
         };
         let identity = http::userinfo(&self.client, &tokens, None).await?;
         let mut file = self.open(None).await?;
@@ -722,66 +696,10 @@ impl Store {
         }
         let mut tokens = tokens;
         tokens.0.remove("clientSecret");
-        if importing {
-            doc[IMPORT]["complete"] = json!(true);
-        }
         let state = authenticated(Uuid::new_v4().to_string(), 1, 1, &identity, &tokens)?;
         doc.insert(TOKENS.into(), Value::Object(tokens.0));
         doc.insert(STATE.into(), state);
         file.write(&doc).await?;
         snapshot(&doc)
-    }
-    pub async fn import_legacy(
-        &self,
-        document: Value,
-    ) -> Result<dim_app_server::managed_provider::AccountImportStatus> {
-        use dim_app_server::managed_provider::AccountImportStatus::*;
-        let source = document.as_object().ok_or(ManagedError::InvalidStore)?;
-        let mut incoming = Doc::new();
-        for key in [TOKENS, STATE] {
-            if let Some(value) = source.get(key) {
-                incoming.insert(key.into(), value.clone());
-            }
-        }
-        let parsed = parse(&incoming, true)?;
-        let tokens = parsed.tokens.ok_or(ManagedError::TokenMissing)?;
-        let source_digest = digest(source.get(TOKENS).ok_or(ManagedError::TokenMissing)?)?;
-        {
-            let mut file = self.open(None).await?;
-            let (mut current, _) = file.read().await?;
-            parse(&current, true)?;
-            if let Some(receipt) = current.get(IMPORT) {
-                if receipt.get("digest").and_then(Value::as_str) != Some(&source_digest) {
-                    return Ok(Conflict);
-                }
-                if receipt.get("complete") == Some(&json!(true)) {
-                    return Ok(AlreadyImported);
-                }
-                let token_digest = current.get(TOKENS).map(digest).transpose()?;
-                if current.contains_key(STATE)
-                    || !current.contains_key(TOKENS)
-                    || receipt.get("tokenDigest").and_then(Value::as_str) != token_digest.as_deref()
-                {
-                    return Ok(Conflict);
-                }
-            } else {
-                let configured = current.get(STATE).is_some_and(|state| {
-                    state.get("configurationSource") != Some(&json!("default"))
-                });
-                if current.contains_key(TOKENS) || configured {
-                    return Ok(Conflict);
-                }
-                current.remove(STATE);
-                current.insert(TOKENS.into(), Value::Object(tokens.0));
-                let token_digest = digest(&current[TOKENS])?;
-                current.insert(
-                    IMPORT.into(),
-                    json!({"digest":source_digest,"tokenDigest":token_digest,"complete":false}),
-                );
-                file.write(&current).await?;
-            }
-        }
-        self.recover_inner(Some(&source_digest)).await?;
-        Ok(Imported)
     }
 }

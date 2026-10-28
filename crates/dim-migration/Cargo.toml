@@ -9,7 +9,8 @@ description = "On-demand legacy CLI and Desktop data migration plugin"
 [dependencies]
 dim-agent-types.workspace = true
 dim-agent-capabilities.workspace = true
-dim-client.workspace = true
+dim-agent-runtime.workspace = true
+dim-app-server.workspace = true
 rutis.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -20,8 +21,11 @@ rusqlite = "0.40.2"
 sha2 = "0.10.9"
 base64 = "0.23.1"
 thiserror.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde_jcs = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
 dim-app-server = { workspace = true, features = ["testing"] }
-dim-agent-runtime.workspace = true
+dim-client.workspace = true

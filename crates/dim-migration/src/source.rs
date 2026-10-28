@@ -2,7 +2,7 @@ use crate::{Error, Result};
 use dim_agent_capabilities::file_storage::{
     DirectoryEntry, FilePath, FileStorage, FileStorageError,
 };
-use dim_agent_types::{Message, MessageContent, MessagePart, ModelId, RecordedMessage, Role};
+use dim_agent_types::{Message, MessageContent, MessagePart, ModelId, Role};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,6 +20,14 @@ pub struct Inventory {
     pub database: String,
     pub tables: BTreeMap<String, u64>,
     pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RecordedMessage {
+    pub id: String,
+    pub created_at: Option<String>,
+    pub message: Message,
+    pub in_context: bool,
 }
 
 pub(crate) struct SessionData {
@@ -239,17 +247,15 @@ impl Source {
         files.create_directory(&directory, cancel).await?;
         let result = async {
             let copied = files.path(target_root, relative.join("legacy.sqlite"))?;
-            files
-                .copy_exclusive(&files.path(root, name)?, &copied, cancel)
-                .await?;
+            copy_snapshot(&files, &files.path(root, name)?, &copied, cancel).await?;
             let wal = files.path(root, format!("{name}-wal"))?;
-            match files
-                .copy_exclusive(
-                    &wal,
-                    &files.path(target_root, relative.join("legacy.sqlite-wal"))?,
-                    cancel,
-                )
-                .await
+            match copy_snapshot(
+                &files,
+                &wal,
+                &files.path(target_root, relative.join("legacy.sqlite-wal"))?,
+                cancel,
+            )
+            .await
             {
                 Ok(_) => {}
                 Err(FileStorageError::Io(error))
@@ -330,13 +336,13 @@ impl Source {
             .map_err(|_| Error::Source("Legacy snapshot reader stopped".into()))??;
             let terminal_path = snapshot.with_file_name("terminal.sqlite");
             let mut issues = Vec::new();
-            let terminal = match files
-                .copy_exclusive(
-                    &files.path(root, "schedule-tui.sqlite")?,
-                    &files.path(target_root, relative.join("terminal.sqlite"))?,
-                    cancel,
-                )
-                .await
+            let terminal = match copy_snapshot(
+                &files,
+                &files.path(root, "schedule-tui.sqlite")?,
+                &files.path(target_root, relative.join("terminal.sqlite"))?,
+                cancel,
+            )
+            .await
             {
                 Err(FileStorageError::Io(error))
                     if error.kind() == std::io::ErrorKind::NotFound =>
@@ -345,13 +351,13 @@ impl Source {
                 }
                 Err(error) => return Err(error.into()),
                 Ok(_) => {
-                    match files
-                        .copy_exclusive(
-                            &files.path(root, "schedule-tui.sqlite-wal")?,
-                            &files.path(target_root, relative.join("terminal.sqlite-wal"))?,
-                            cancel,
-                        )
-                        .await
+                    match copy_snapshot(
+                        &files,
+                        &files.path(root, "schedule-tui.sqlite-wal")?,
+                        &files.path(target_root, relative.join("terminal.sqlite-wal"))?,
+                        cancel,
+                    )
+                    .await
                     {
                         Ok(_) => {}
                         Err(FileStorageError::Io(error))
@@ -692,6 +698,9 @@ impl Source {
             for record in &mut records {
                 record.in_context = false;
             }
+        }
+        if context_error.is_none() {
+            validate_context(&records)?;
         }
         let mut relations = Vec::new();
         if self.inventory.tables.contains_key("session_relations") {
@@ -1068,4 +1077,66 @@ fn read_database(path: PathBuf) -> Result<(Connection, BTreeMap<String, u64>)> {
     }
 
     Ok((connection, tables))
+}
+
+async fn copy_snapshot(
+    files: &Arc<FileStorage>,
+    source: &FilePath,
+    destination: &FilePath,
+    cancel: &CancellationToken,
+) -> std::result::Result<(), FileStorageError> {
+    let bytes = files.read(source, cancel).await?;
+    files.replace(destination, bytes, None, cancel).await
+}
+
+fn validate_context(records: &[RecordedMessage]) -> Result<()> {
+    let invalid = || {
+        Error::Deferred("Legacy effective context has incompatible roles or incomplete tool pairs; Session retained in source".into())
+    };
+    let mut calls = std::collections::HashSet::new();
+    let mut open = std::collections::HashSet::new();
+    for record in records.iter().filter(|record| record.in_context) {
+        if record.message.role != Role::ToolResult && !open.is_empty() {
+            return Err(invalid());
+        }
+        match &record.message.content {
+            MessageContent::Text(_) if record.message.role == Role::ToolResult => {
+                return Err(invalid());
+            }
+            MessageContent::Parts(parts) => {
+                if record.message.role == Role::ToolResult && parts.is_empty() {
+                    return Err(invalid());
+                }
+                for part in parts {
+                    match part {
+                        MessagePart::ToolUse { id, .. } => {
+                            if record.message.role != Role::Assistant
+                                || id.is_empty()
+                                || !calls.insert(id)
+                            {
+                                return Err(invalid());
+                            }
+                            open.insert(id);
+                        }
+                        MessagePart::ToolResult { tool_use_id, .. } => {
+                            if record.message.role != Role::ToolResult || !open.remove(tool_use_id)
+                            {
+                                return Err(invalid());
+                            }
+                        }
+                        _ if record.message.role == Role::ToolResult => return Err(invalid()),
+                        MessagePart::Thinking { .. } if record.message.role != Role::Assistant => {
+                            return Err(invalid());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if !open.is_empty() {
+        return Err(invalid());
+    }
+    Ok(())
 }

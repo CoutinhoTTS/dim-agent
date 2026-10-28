@@ -16,7 +16,7 @@
 //! ```text
 //!  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓     █  Tab: the picked
 //!  ┃ › a user message                            ┃     ▅  message, boxed on
-//!  ┗━e to edit━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛     █  its blank rows
+//!  ┗━e edit · b branch · f fork━━━━━━━━━━━━━━━━━┛     █  its blank rows
 //!  answer rows (the live tail scrolls with them)       █  scrollbar thumb
 //!  ╭───────────────────────────── provider / model ─╮      in eighths
 //!  │ composer                                       │      dock: never
@@ -64,7 +64,8 @@ const WORD_SEPARATORS: &str = "!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~";
 const WHEEL_MAX_FINE: f64 = 6.0;
 /// Lower eighth blocks, index = eighths filled from the bottom.
 const EIGHTHS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-const EDIT_HINT: &str = "e to edit";
+/// The keys a picked message takes, the full hint first.
+const PICK_HINTS: [&str; 2] = ["e edit · b branch · f fork", "e edit"];
 
 /// The committed transcript as the App keeps it: blocks, oldest first,
 /// that can be laid out for any width.
@@ -80,6 +81,9 @@ pub trait Document {
     fn estimate(&self, index: usize, cols: usize) -> usize;
     /// The text of block `index` when it is a user message.
     fn message(&self, index: usize) -> Option<&str>;
+    /// Where a line or fork opened from user message `index` cuts the shown
+    /// line (timeline UI §4.1).
+    fn cut(&self, index: usize) -> Option<u64>;
     /// The member cards of block `index` a pick can stop on, by delegation.
     fn cards(&self, index: usize) -> Vec<String>;
     /// Rows `[start, end)` of block `index` at `cols` that card `card` takes.
@@ -475,7 +479,17 @@ impl FullScreen {
             .map(str::to_owned)
     }
 
-    /// The picked member card's delegation.
+    /// Where a line or fork opened from the picked message cuts.
+    pub fn focused_cut(&self, doc: &dyn Document) -> Option<u64> {
+        if self.focus_card.is_some() {
+            return None;
+        }
+        let index = self.focus?.checked_sub(doc.dropped())?;
+        (index < doc.len()).then(|| doc.cut(index)).flatten()
+    }
+
+    /// The picked member card's delegation, or the line a picked marker
+    /// opened.
     pub fn focused_card(&self) -> Option<&str> {
         self.focus_card.as_deref()
     }
@@ -1248,12 +1262,12 @@ fn focus_row(row: &str, offset: usize, last: usize, cols: usize, p: &Palette) ->
         return format!(" {}", edge(&format!("┏{}┓", "━".repeat(inner))));
     }
     if offset == last {
-        let hint = if inner > EDIT_HINT.len() + 1 {
-            EDIT_HINT
-        } else {
-            ""
-        };
-        let fill = inner.saturating_sub(1 + hint.len());
+        let hint = PICK_HINTS
+            .iter()
+            .map(|hint| crate::ui::i18n::t(hint))
+            .find(|hint| inner > display_width(hint) + 1)
+            .unwrap_or("");
+        let fill = inner.saturating_sub(1 + display_width(hint));
         return format!(
             " {}{}{}",
             edge("┗━"),
@@ -1379,12 +1393,7 @@ fn cells(text: &str, start: usize, end: usize) -> String {
 /// The scrollbar column for a viewport of `view` rows over `content` rows
 /// starting at `top`, one cell per row, in eighths of a row; `None` when
 /// everything fits.
-pub(crate) fn scrollbar(
-    view: usize,
-    content: usize,
-    top: usize,
-    palette: &Palette,
-) -> Option<Vec<String>> {
+fn scrollbar(view: usize, content: usize, top: usize, palette: &Palette) -> Option<Vec<String>> {
     if content <= view || view == 0 {
         return None;
     }
@@ -1496,6 +1505,9 @@ mod tests {
         fn message(&self, index: usize) -> Option<&str> {
             let (user, rows) = &self.blocks[index];
             user.then(|| rows[0].trim_start_matches(" › "))
+        }
+        fn cut(&self, index: usize) -> Option<u64> {
+            self.blocks[index].0.then_some(index as u64)
         }
     }
 
@@ -1712,9 +1724,10 @@ mod tests {
         assert_eq!(rows[1], before[1]);
         assert!(rows[2].starts_with(" ┏━"), "{rows:?}");
         assert!(rows[3].starts_with(" ┃ second"), "{rows:?}");
-        assert!(rows[4].starts_with(" ┗━e to edit"), "{rows:?}");
+        assert!(rows[4].starts_with(" ┗━e edit━"), "{rows:?}");
         assert_eq!(rows[5], before[5]);
         assert_eq!(screen.focused_text(&doc).as_deref(), Some("second"));
+        assert_eq!(screen.focused_cut(&doc), Some(1));
         screen.focus_older(&doc);
         assert_eq!(screen.focused_text(&doc).as_deref(), Some("first"));
         screen.focus_older(&doc);

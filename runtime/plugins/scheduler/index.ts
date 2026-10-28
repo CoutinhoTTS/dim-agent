@@ -100,7 +100,7 @@ export default definePlugin({
 
     await ctx.use<ManagementMethods>('managementMethods').register(
       'schedule',
-      ['list', 'save', 'import_legacy', 'delete', 'set_enabled', 'run_now', 'history'].map(name => ({
+      ['list', 'save', 'delete', 'set_enabled', 'run_now', 'history'].map(name => ({
         name: `schedule.${name}`, mutating: name !== 'list' && name !== 'history',
         interruption: name === 'list' || name === 'history' ? 'report' : 'drain', progress: false,
       })),
@@ -120,11 +120,6 @@ export default definePlugin({
                 break
               }
               case 'schedule.delete': value = await remove(management.delete.parse(call.params).job_id); break
-              case 'schedule.import_legacy': {
-                const input = management.import_legacy.parse(call.params)
-                value = await jobs.importLegacy(input.source_id, input.fingerprint, input.job, input.recurrence)
-                break
-              }
               case 'schedule.set_enabled': {
                 const input = management.set_enabled.parse(call.params)
                 value = { job: await jobs.setEnabled(input.job_id, input.enabled) }

@@ -319,69 +319,6 @@ impl FileStorage {
         self.read_limited(path, usize::MAX, cancel).await
     }
 
-    /// Copies a regular file to an exclusive destination without buffering it.
-    /// A failed copy may leave a partial destination, which the caller owns.
-    /// Both paths stay below authorized roots; links are never followed.
-    pub async fn copy_exclusive(
-        self: &Arc<Self>,
-        source: &FilePath,
-        destination: &FilePath,
-        cancel: &CancellationToken,
-    ) -> Result<u64> {
-        if destination.generation != self.generation {
-            return Err(FileStorageError::Closed);
-        }
-        let destination = destination.clone();
-        let relative = source.relative.clone();
-        self.run(source, cancel, move |root, owner, cancel| {
-            let target = owner
-                .state
-                .lock()
-                .unwrap()
-                .roots
-                .get(destination.root)
-                .ok_or(FileStorageError::InvalidPath("unknown authorized root"))?
-                .try_clone()?;
-            let (source_parent, source_name) = native::parent(root, &relative)?;
-            let (target_parent, target_name) = native::parent(target, &destination.relative)?;
-            let mut source = native::read_user_file(&source_parent, &source_name)?;
-            let before = source.metadata()?;
-            let mut target = native::create_temp(
-                &target_parent,
-                &target_name,
-                &target_parent,
-                &target_name,
-                None,
-            )?;
-            let mut buffer = [0; 64 * 1024];
-            let mut copied = 0u64;
-            loop {
-                owner.check(&cancel)?;
-                let count = source.read(&mut buffer)?;
-                if count == 0 {
-                    break;
-                }
-                target.write_all(&buffer[..count])?;
-                copied += count as u64;
-            }
-            let after = source.metadata()?;
-            if copied != before.len()
-                || before.len() != after.len()
-                || before.modified()? != after.modified()?
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Copy source changed while reading",
-                )
-                .into());
-            }
-            target.sync_all()?;
-            native::sync_replacement(&target, &target_parent, &target_parent)?;
-            Ok(copied)
-        })
-        .await
-    }
-
     /// Rejects larger files before allocation and enforces the limit while reading.
     /// Exceeding the byte limit returns Io(InvalidData), without partial bytes.
     pub async fn read_limited(

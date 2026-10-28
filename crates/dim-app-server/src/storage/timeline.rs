@@ -7,7 +7,6 @@ use super::{
     metadata::{self, Titles},
     sqlite::error,
 };
-mod imports;
 use dim_agent_capabilities::host::SessionFilesHost;
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
@@ -719,7 +718,6 @@ impl SqliteTimelineStore {
 #[derive(Clone)]
 pub struct SessionStore {
     timeline: Arc<SqliteTimelineStore>,
-    import_gates: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
     /// The file steps on the Session's resource node: Session files and the
     /// command output a delete removes.
     files: SessionFiles,
@@ -736,7 +734,6 @@ impl SessionStore {
         let files = SessionFiles::new(db, ctx, files_root, timeline.sweep_files.clone());
         Self {
             timeline,
-            import_gates: Arc::new(Mutex::new(HashMap::new())),
             files,
             titles,
         }
@@ -749,7 +746,7 @@ impl SessionStore {
             .db
             .run(|connection| {
                 connection
-                    .prepare("SELECT session_id FROM agent_sessions s WHERE NOT EXISTS (SELECT 1 FROM conversation_imports i WHERE i.session_id=s.session_id AND i.committed=0) ORDER BY session_id")
+                    .prepare("SELECT session_id FROM agent_sessions ORDER BY session_id")
                     .map_err(error)?
                     .query_map([], |row| row.get(0))
                     .map_err(error)?
@@ -1217,7 +1214,7 @@ fn transaction<'a>(
         batches
             .iter()
             .zip(&prepared.lists)
-            .try_for_each(|(batch, lists)| write_batch(&tx, &batch.key, &batch.events, lists))
+            .try_for_each(|(batch, lists)| write_batch(&tx, batch, lists))
     });
     match written {
         Ok(()) => tx.commit().map_err(|failure| {
@@ -1281,12 +1278,11 @@ fn sql_sequence(value: u64) -> Result<i64> {
 /// Writes `batch`, with `lists` the prepared lists of each of its records.
 fn write_batch(
     connection: &Connection,
-    key: &TimelineKey,
-    events: &[StoredEvent],
+    batch: &Pending,
     lists: &[Vec<Option<ListReferences>>],
 ) -> Result<()> {
-    let mut sequence = head(connection, key)?;
-    for (record, lists) in events.iter().zip(lists) {
+    let mut sequence = head(connection, &batch.key)?;
+    for (record, lists) in batch.events.iter().zip(lists) {
         if record.event.sequence != sequence + 1 {
             return Err(error("Timeline sequence is not contiguous"));
         }
@@ -1295,7 +1291,7 @@ fn write_batch(
         let kind = record.event.kind.key();
         match &record.event.kind {
             EventKind::Text(data) | EventKind::Thinking(data) => {
-                let previous: Option<(u64, String, String)> = connection.query_row("SELECT sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 ORDER BY sequence DESC LIMIT 1", params![key.session_id, key.branch_id], |row| Ok((read_sequence(row, 0)?, row.get(1)?, row.get(2)?))).optional().map_err(error)?;
+                let previous: Option<(u64, String, String)> = connection.query_row("SELECT sequence, kind, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 ORDER BY sequence DESC LIMIT 1", params![batch.key.session_id, batch.key.branch_id], |row| Ok((read_sequence(row, 0)?, row.get(1)?, row.get(2)?))).optional().map_err(error)?;
                 let output_data = wire.event["data"]
                     .as_object_mut()
                     .ok_or_else(|| error("output data is missing in event encoding"))?;
@@ -1322,7 +1318,7 @@ fn write_batch(
                         records,
                     })
                     .map_err(error)?;
-                    connection.execute("UPDATE timeline_events SET last_sequence = ?3, body = ?4 WHERE session_id = ?1 AND branch_id = ?2 AND sequence = ?5", params![key.session_id, key.branch_id, sql_sequence(sequence)?, body, sql_sequence(start)?]).map_err(error)?;
+                    connection.execute("UPDATE timeline_events SET last_sequence = ?3, body = ?4 WHERE session_id = ?1 AND branch_id = ?2 AND sequence = ?5", params![batch.key.session_id, batch.key.branch_id, sql_sequence(sequence)?, body, sql_sequence(start)?]).map_err(error)?;
                     continue;
                 }
                 let row = Row::Output {
@@ -1331,12 +1327,12 @@ fn write_batch(
                     started_at: record.event.create_at,
                     records: vec![wire],
                 };
-                insert_event(connection, key, sequence, kind, &row)?;
+                insert_event(connection, &batch.key, sequence, kind, &row)?;
             }
             _ => {
                 insert_event(
                     connection,
-                    key,
+                    &batch.key,
                     sequence,
                     kind,
                     &Row::Event {
@@ -1348,20 +1344,24 @@ fn write_batch(
         if let EventKind::BranchCreate(data) = &record.event.kind {
             let info = BranchRecord {
                 id: data.branch.clone(),
-                parent: Some(key.branch_id.clone()),
+                parent: Some(batch.key.branch_id.clone()),
                 branch_point: Some(match data.at {
                     BranchCreateAt::Sequence { sequence } => sequence,
                     BranchCreateAt::Create {} => sequence,
                 }),
                 create_anchor: Some(sequence),
             };
-            insert_branch(connection, &key.session_id, &info)?;
+            insert_branch(connection, &batch.key.session_id, &info)?;
         }
     }
     connection
         .execute(
             "UPDATE timeline_branches SET sequence = ?3 WHERE session_id = ?1 AND branch_id = ?2",
-            params![key.session_id, key.branch_id, sql_sequence(sequence)?],
+            params![
+                batch.key.session_id,
+                batch.key.branch_id,
+                sql_sequence(sequence)?
+            ],
         )
         .map_err(error)?;
     Ok(())

@@ -30,7 +30,6 @@ pub(super) fn provide(
         [
             "account.codex.status",
             "account.codex.recover",
-            "account.codex.import_legacy",
             "account.codex.login.browser.begin",
             "account.codex.login.browser.complete",
             "account.codex.login.status",
@@ -54,20 +53,6 @@ pub(super) fn provide(
                     "account.codex.status" => {
                         let _: Empty = params(value)?;
                         reply(oauth.status(cancel).await.map_err(error)?)
-                    }
-                    "account.codex.import_legacy" => {
-                        #[derive(Deserialize)]
-                        #[serde(deny_unknown_fields)]
-                        struct Import {
-                            document: serde_json::Value,
-                        }
-                        let p: Import = params(value)?;
-                        reply(
-                            oauth
-                                .import_legacy(p.document, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
                     }
                     "account.codex.recover" => {
                         let _: Empty = params(value)?;

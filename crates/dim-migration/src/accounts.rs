@@ -1,39 +1,166 @@
 use crate::{
-    Error, Migration, ObjectResult, Outcome, Result, TaskState, engine::request, source::Source,
+    Error, Migration, ObjectResult, Outcome, Result, TaskState,
+    native::Native,
+    source::{Source, fingerprint},
 };
-use dim_agent_types::AccountImportStatus;
-use dim_client::Client;
-use serde_json::{Value, json};
+use dim_agent_capabilities::file_storage::FileStorageError;
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
-async fn account(
+async fn insert(
+    target: &Native,
+    file: &str,
+    id: &str,
+    fields: Map<String, Value>,
+    cancel: &CancellationToken,
+) -> Result<Outcome> {
+    let path = target.files.path(0, file)?;
+    let mut lease = target.files.lock(&path, cancel).await?;
+    let mut doc: Value = match lease.read(cancel).await {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| Error::Object("Invalid target account file is preserved".into()))?,
+        Err(FileStorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(e) => return Err(e.into()),
+    };
+    let doc = doc
+        .as_object_mut()
+        .ok_or_else(|| Error::Object("Invalid target account file is preserved".into()))?;
+    let receipt = format!("migration:{id}");
+    let digest = fingerprint(&fields)?;
+    if let Some(previous) = doc.get(&receipt) {
+        return Ok(if previous == &digest {
+            Outcome::AlreadyImported
+        } else {
+            Outcome::Conflict
+        });
+    }
+    if fields.keys().any(|key| doc.contains_key(key)) {
+        return Ok(Outcome::Conflict);
+    }
+    doc.extend(fields);
+    doc.insert(receipt, Value::String(digest));
+    #[cfg(unix)]
+    let permissions = Some(std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    #[cfg(not(unix))]
+    let permissions = None;
+    lease
+        .replace(
+            serde_json::to_vec_pretty(doc).map_err(crate::native::failure)?,
+            permissions,
+            cancel,
+        )
+        .await?;
+    Ok(Outcome::Imported)
+}
+
+pub(crate) async fn import(
     owner: &Migration,
     task: &TaskState,
-    client: &mut Client,
-    id: &str,
-    method: &str,
-    params: Value,
+    source: &Source,
+    target: &Native,
 ) -> Result<()> {
-    let result: Result<AccountImportStatus> = if client.offers(method) {
-        request(client, method, params).await
-    } else {
-        Err(Error::Object(
-            "This target profile does not expose the account owner's import operation".into(),
-        ))
-    };
+    if let Some(auth) = crate::engine::document(owner, task, source, "auth.json").await? {
+        for (id, key, state) in [
+            ("dimcode-api-oauth", "nextApiOauth", "dimAccountState"),
+            ("openai-codex", "openaiCodex", "openaiCodexAccountState"),
+            ("xai-grok", "xaiGrokBuild", "xaiGrokBuildAccountState"),
+        ] {
+            let Some(tokens) = auth.get(key) else {
+                continue;
+            };
+            let result = async {
+                if tokens["type"] != "oauth"
+                    || !["access", "refresh"].iter().all(|key| {
+                        tokens[*key].as_str().is_some_and(|s| {
+                            !s.trim().is_empty() && !s.chars().any(char::is_control)
+                        })
+                    })
+                    || !tokens["expires"]
+                        .as_u64()
+                        .is_some_and(|n| n <= dim_agent_types::JS_MAX_SAFE_INTEGER)
+                {
+                    return Err(Error::Object(
+                        "Legacy OAuth tokens are invalid; source preserved".into(),
+                    ));
+                }
+                let mut fields = Map::new();
+                fields.insert(key.into(), tokens.clone());
+                if let Some(state) = auth.get(state) {
+                    if state["schemaVersion"] != 1 {
+                        return Err(Error::Unsupported(
+                            "Legacy account state schema is unsupported".into(),
+                        ));
+                    }
+                    let token_digest =
+                        format!(
+                            "{:x}",
+                            Sha256::digest(serde_jcs::to_vec(tokens).map_err(
+                                |_| Error::Object("Invalid legacy account tokens".into())
+                            )?)
+                        );
+                    if state["tokenDigest"].as_str() != Some(&token_digest) {
+                        return Err(Error::Unsupported(
+                            "Legacy account digest requires recovery; source preserved".into(),
+                        ));
+                    }
+                    let generation = if key == "nextApiOauth" {
+                        state["credentialEpoch"].as_str()
+                    } else {
+                        state["generation"].as_str()
+                    };
+                    if !generation
+                        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil()))
+                        || !state["credentialRevision"]
+                            .as_u64()
+                            .is_some_and(|revision| {
+                                revision > 0 && revision <= dim_agent_types::JS_MAX_SAFE_INTEGER
+                            })
+                    {
+                        return Err(Error::Unsupported(
+                            "Legacy account state is incompatible; source preserved".into(),
+                        ));
+                    }
+                    fields.insert(
+                        match key {
+                            "nextApiOauth" => "dimAccountState",
+                            "openaiCodex" => "openaiCodexAccountState",
+                            _ => "xaiGrokBuildAccountState",
+                        }
+                        .into(),
+                        state.clone(),
+                    );
+                }
+                insert(target, "auth.json", id, fields, &owner.stopping).await
+            }
+            .await;
+            record(owner, task, id, result).await?;
+        }
+    }
+    if let Some(mcp) = crate::engine::document(owner, task, source, "mcp-oauth.json").await? {
+        let Some(servers) = mcp["servers"].as_object() else {
+            return Err(Error::Object("Invalid legacy MCP OAuth file".into()));
+        };
+        for (id, entry) in servers {
+            let result = import_mcp(target, id, entry, &owner.stopping).await;
+            record(owner, task, &format!("mcp:{id}"), result).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn record(
+    owner: &Migration,
+    task: &TaskState,
+    id: &str,
+    result: Result<Outcome>,
+) -> Result<()> {
     let (outcome, reason) = match result {
-        Ok(AccountImportStatus::Imported) => (Outcome::Imported, None),
-        Ok(AccountImportStatus::AlreadyImported) => (Outcome::AlreadyImported, None),
-        Ok(AccountImportStatus::Conflict) => (
-            Outcome::Conflict,
-            Some(
-                "Target account state is configured or source identity changed; target preserved"
-                    .into(),
-            ),
-        ),
-        Err(Error::Object(reason)) => (Outcome::Unsupported, Some(reason)),
-        Err(Error::Unsupported(reason)) => (Outcome::Unsupported, Some(reason)),
-        Err(Error::Deferred(reason)) => (Outcome::Deferred, Some(reason)),
-        Err(error) => return Err(error),
+        Ok(outcome) => (outcome, None),
+        Err(Error::Object(reason) | Error::Unsupported(reason)) => {
+            (Outcome::Unsupported, Some(reason))
+        }
+        Err(e) => return Err(e),
     };
     owner
         .ledger
@@ -51,88 +178,211 @@ async fn account(
         .await
 }
 
-pub(crate) async fn import(
-    owner: &Migration,
-    task: &TaskState,
-    source: &Source,
-    client: &mut Client,
-) -> Result<()> {
-    if let Some(auth) = crate::engine::document(owner, task, source, "auth.json").await? {
-        if !auth.is_object() {
-            owner
-                .ledger
-                .object(
-                    &task.id,
-                    &ObjectResult {
-                        kind: "file".into(),
-                        id: "auth.json".into(),
-                        outcome: Outcome::Failed,
-                        target_id: None,
-                        reason: Some("Legacy auth.json must be an object".into()),
-                        omitted: Vec::new(),
-                    },
-                )
-                .await?;
+async fn import_mcp(
+    target: &Native,
+    id: &str,
+    entry: &Value,
+    cancel: &CancellationToken,
+) -> Result<Outcome> {
+    let unsupported =
+        || Error::Unsupported("Legacy MCP OAuth binding is incompatible; source preserved".into());
+    let legacy: LegacyMcp = serde_json::from_value(entry.clone()).map_err(|_| unsupported())?;
+    let url = reqwest::Url::parse(&legacy.server_url).map_err(|_| unsupported())?;
+    let loopback = |url: &reqwest::Url| {
+        url.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
+    };
+    let trusted = |raw: &str| {
+        reqwest::Url::parse(raw).is_ok_and(|url| {
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.fragment().is_none()
+                && (url.scheme() == "https" || url.scheme() == "http" && loopback(&url))
+        })
+    };
+    if !trusted(&legacy.server_url) {
+        return Err(unsupported());
+    }
+    let endpoint = |key: &str| {
+        legacy.authorization_metadata[key]
+            .as_str()
+            .filter(|raw| trusted(raw))
+            .ok_or_else(unsupported)
+    };
+    let issuer = endpoint("issuer")?;
+    let token = endpoint("token_endpoint")?;
+    let settings = target.settings("mcp", cancel).await?;
+    let configured = &settings["mcpServers"][id];
+    if configured["url"]
+        .as_str()
+        .and_then(|raw| reqwest::Url::parse(raw).ok())
+        .as_ref()
+        != Some(&url)
+        || configured.get("auth").is_some_and(|auth| !auth.is_null())
+        || configured["headers"].as_object().is_some_and(|headers| {
+            headers
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("authorization"))
+        })
+    {
+        return Err(unsupported());
+    }
+    let client = legacy.client_info;
+    let tokens = legacy.tokens;
+    let redirect = client
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("redirectUri"))
+        .and_then(Value::as_str)
+        .ok_or_else(unsupported)?;
+    let redirect_url = reqwest::Url::parse(redirect).map_err(|_| unsupported())?;
+    if redirect_url.scheme() != "http" || !loopback(&redirect_url) || !trusted(redirect) {
+        return Err(unsupported());
+    }
+    let text = |text: &str| !text.trim().is_empty() && !text.chars().any(char::is_control);
+    let now = dim_agent_runtime::core::unix_millis();
+    let max = dim_agent_types::JS_MAX_SAFE_INTEGER;
+    if !text(&client.client_id)
+        || !text(&tokens.access_token)
+        || tokens
+            .refresh_token
+            .as_deref()
+            .is_some_and(|token| !text(token))
+        || tokens.expires_at.is_some_and(|expires| {
+            expires > max || expires <= now && tokens.refresh_token.is_none()
+        })
+        || client.client_id_issued_at.is_some_and(|at| at > max)
+        || client
+            .client_secret_expires_at
+            .is_some_and(|at| at > max || at > 0 && at.saturating_mul(1000) <= now)
+    {
+        return Err(unsupported());
+    }
+    let method = client
+        .token_endpoint_auth_method
+        .as_deref()
+        .unwrap_or("none");
+    if !matches!(
+        (method, client.client_secret.as_deref()),
+        ("none", None) | ("client_secret_basic" | "client_secret_post", Some(_))
+    ) || client
+        .client_secret
+        .as_deref()
+        .is_some_and(|secret| !text(secret))
+    {
+        return Err(unsupported());
+    }
+    let resource = legacy
+        .protected_resource_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("resource"))
+        .and_then(Value::as_str)
+        .unwrap_or(&legacy.server_url);
+    if !trusted(resource)
+        || reqwest::Url::parse(resource)
+            .map_err(|_| unsupported())?
+            .origin()
+            != url.origin()
+    {
+        return Err(unsupported());
+    }
+    let scopes: Vec<_> = tokens
+        .scope
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect();
+    let mut canonical = url.to_string();
+    if url.path() == "/" && url.query().is_none() {
+        canonical.pop();
+    }
+    let registration = if let Some(client_id) = configured["oauth"]["clientId"].as_str() {
+        if client.client_id != client_id {
+            return Err(unsupported());
+        }
+        "preregistered"
+    } else {
+        "dynamic"
+    };
+    let requested_scopes: Vec<_> = configured["oauth"]["scopes"]
+        .as_str()
+        .map(|scopes| scopes.split_whitespace().collect())
+        .unwrap_or_else(|| scopes.clone());
+    let record = json!({"serverId":id,"url":canonical,"resource":resource,"issuer":issuer,"tokenEndpoint":token,"client":{"clientId":client.client_id,"clientSecret":client.client_secret,"registration":registration,"redirectUri":redirect,"authMethod":method},"tokens":{"accessToken":tokens.access_token,"refreshToken":tokens.refresh_token,"expiresAt":tokens.expires_at,"scopes":scopes},"requestedScopes":requested_scopes});
+    let path = target.files.path(0, "mcp-oauth.json")?;
+    let mut lease = target.files.lock(&path, cancel).await?;
+    let mut doc: Value = match lease.read(cancel).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| unsupported())?,
+        Err(FileStorageError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            json!({"version":1,"credentials":[]})
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if doc["version"] != 1 {
+        return Err(unsupported());
+    }
+    let receipt = format!("migration:{id}");
+    let digest = fingerprint(entry)?;
+    if let Some(previous) = doc.get(&receipt) {
+        return Ok(if previous == &digest {
+            Outcome::AlreadyImported
         } else {
-            for (id, key, state, method) in [
-                (
-                    "dimcode-api-oauth",
-                    "nextApiOauth",
-                    "dimAccountState",
-                    "account.import_legacy",
-                ),
-                (
-                    "openai-codex",
-                    "openaiCodex",
-                    "openaiCodexAccountState",
-                    "account.codex.import_legacy",
-                ),
-                (
-                    "xai-grok",
-                    "xaiGrokBuild",
-                    "xaiGrokBuildAccountState",
-                    "account.grok.import_legacy",
-                ),
-            ] {
-                if auth.get(key).is_none() {
-                    continue;
-                }
-                let mut document = serde_json::Map::new();
-                for field in [key, state] {
-                    if let Some(value) = auth.get(field) {
-                        document.insert(field.into(), value.clone());
-                    }
-                }
-                let params = if method == "account.import_legacy" {
-                    json!({"providerId":id,"document":document})
-                } else {
-                    json!({"document":document})
-                };
-                account(owner, task, client, id, method, params).await?;
-            }
-        }
+            Outcome::Conflict
+        });
     }
-    if let Some(mcp) = crate::engine::document(owner, task, source, "mcp-oauth.json").await? {
-        if mcp.get("version") != Some(&json!(1)) {
-            return Err(Error::Object(
-                "Legacy MCP OAuth schema is unsupported".into(),
-            ));
-        }
-        let servers = mcp
-            .get("servers")
-            .and_then(Value::as_object)
-            .ok_or_else(|| Error::Object("Legacy MCP OAuth server records are invalid".into()))?;
-        for (id, entry) in servers {
-            account(
-                owner,
-                task,
-                client,
-                &format!("mcp:{id}"),
-                "mcp.auth.import_legacy",
-                json!({"id":id,"entry":entry}),
-            )
-            .await?;
-        }
+    let records = doc["credentials"].as_array_mut().ok_or_else(unsupported)?;
+    if records
+        .iter()
+        .any(|r| r["serverId"] == id && r["url"] == canonical)
+    {
+        return Ok(Outcome::Conflict);
     }
-    Ok(())
+    records.push(record);
+    doc[receipt] = Value::String(digest);
+    #[cfg(unix)]
+    let permissions = Some(std::os::unix::fs::PermissionsExt::from_mode(0o600));
+    #[cfg(not(unix))]
+    let permissions = None;
+    lease
+        .replace(
+            serde_json::to_vec_pretty(&doc).map_err(crate::native::failure)?,
+            permissions,
+            cancel,
+        )
+        .await?;
+    Ok(Outcome::Imported)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyMcp {
+    server_url: String,
+    tokens: LegacyMcpTokens,
+    client_info: LegacyMcpClient,
+    authorization_metadata: Value,
+    protected_resource_metadata: Option<Value>,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyMcpTokens {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at: Option<u64>,
+    scope: Option<String>,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyMcpClient {
+    client_id: String,
+    client_secret: Option<String>,
+    client_id_issued_at: Option<u64>,
+    client_secret_expires_at: Option<u64>,
+    token_endpoint_auth_method: Option<String>,
+    metadata: Option<Value>,
 }

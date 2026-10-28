@@ -704,12 +704,6 @@ struct NameParams {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FillParams {
-    name: String,
-    enabled: bool,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct IdParams {
     id: String,
     #[serde(rename = "ref")]
@@ -724,8 +718,8 @@ fn decode<T: for<'de> Deserialize<'de>>(params: Value) -> Result<T, PluginError>
         .map_err(|error| PluginError::new("invalid_params", error.to_string()))
 }
 
-/// Public methods of the `plugin` namespace (A.1).
-pub(crate) const METHODS: [&str; 8] = [
+/// The methods of the `plugin` namespace (A.1), shared with the tools.
+pub(crate) const METHODS: [&str; 7] = [
     "plugin.list",
     "plugin.install",
     "plugin.enable",
@@ -733,7 +727,6 @@ pub(crate) const METHODS: [&str; 8] = [
     "plugin.reload",
     "plugin.update",
     "plugin.remove",
-    "plugin.fill",
 ];
 
 impl Manager {
@@ -801,7 +794,6 @@ impl Manager {
             }
             "plugin.install" => self.install(decode(params)?, &phase).await,
             "plugin.enable" => self.enable(decode(params)?).await,
-            "plugin.fill" => self.fill(decode(params)?).await,
             "plugin.disable" => {
                 let NameParams { name, use_: None } = decode(params)? else {
                     return Err(PluginError::new("invalid_params", "disable takes no use"));
@@ -1003,50 +995,13 @@ impl Manager {
                         ),
                     });
                 }
+                if choice == Choice::default() {
+                    record.names.remove(&name);
+                }
                 Ok(())
             },
         )?;
         Ok(Value::Object(self.switch(&name, change).await.into_map()))
-    }
-
-    async fn fill(&self, params: FillParams) -> Result<Value, PluginError> {
-        let FillParams { name, enabled } = params;
-        if self.locked(&name) {
-            return Err(PluginError::new(
-                "plugin_locked",
-                "Plugin selection is locked",
-            ));
-        }
-        let (status, change) = self.commit(
-            |_, _| name.clone(),
-            |record| {
-                if !self.known(record, &name) {
-                    return Err(not_found(&name));
-                }
-                if let Some(choice) = record.names.get(&name) {
-                    return Ok(if choice.off != enabled {
-                        "unchanged"
-                    } else {
-                        "conflict"
-                    });
-                }
-                if self.shipped(&name).is_none() {
-                    return Err(not_found(&name));
-                }
-                record.names.insert(
-                    name.clone(),
-                    Choice {
-                        off: !enabled,
-                        use_: None,
-                    },
-                );
-                Ok("imported")
-            },
-        )?;
-        if status == "imported" {
-            self.switch(&name, change).await;
-        }
-        Ok(json!({"status":status}))
     }
 
     /// `plugin.disable` (§3.3).
@@ -1092,7 +1047,7 @@ impl Manager {
                     && choice.use_.as_deref() == Some(id)
                 {
                     choice.use_ = None;
-                    if self.shipped(&entry.name).is_none() {
+                    if self.shipped(&entry.name).is_none() || *choice == Choice::default() {
                         record.names.remove(&entry.name);
                     }
                 }

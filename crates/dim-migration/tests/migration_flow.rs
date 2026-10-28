@@ -146,41 +146,71 @@ fn snapshot(home: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plugin_imports_wal_history_files_and_settings_then_reconciles_without_duplicates() {
+async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_continuation() {
     let directory = tempfile::tempdir().unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut source = directory.path().join("source");
-    let _db = fixture(&source);
-    _db.execute_batch("CREATE TABLE scheduled_jobs(incompatible TEXT); INSERT INTO scheduled_jobs VALUES ('bad schema');").unwrap();
-    _db.execute_batch("CREATE TABLE providers(providerId TEXT); INSERT INTO providers VALUES ('incompatible-provider');").unwrap();
-    let terminal = Connection::open(source.join("schedule-tui.sqlite")).unwrap();
-    terminal.execute_batch("CREATE TABLE scheduled_jobs(jobId TEXT PRIMARY KEY,name TEXT,prompt TEXT,status TEXT,rrule TEXT,cwd TEXT,providerId TEXT,modelId TEXT,reasoningEffort TEXT,sessionMode TEXT,boundSessionId TEXT,nextRunAt TEXT,lastRunAt TEXT,createdAt TEXT);").unwrap();
-    terminal.execute("INSERT INTO scheduled_jobs VALUES ('independent','Independent CLI job','Prompt','paused','FREQ=DAILY;BYHOUR=9;BYMINUTE=0',?1,'mock','deterministic',NULL,'new',NULL,NULL,NULL,'2026-01-01T00:00:00Z')", [source.canonicalize().unwrap().to_str().unwrap()]).unwrap();
-    drop(terminal);
-    std::fs::write(source.join("auth.json"), b"[]").unwrap();
-    std::fs::write(
-        source.join("mcp-oauth.json"),
-        br#"{"version":1,"servers":{"independent":{}}}"#,
+    std::fs::set_permissions(
+        directory.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
     )
     .unwrap();
-    let before = snapshot(&source);
+    let source = directory.path().join("source");
+    let db = fixture(&source);
     let target = directory.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(
         target.join("config.json"),
-        json!({"locale":"en","tuiToolDetailsExpanded":false}).to_string(),
+        r#"{"locale":"en","tuiToolDetailsExpanded":false}"#,
     )
     .unwrap();
+    let before = snapshot(&source);
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        Path::new("rust").to_owned(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let migration = root.get::<Migration>().unwrap();
+    let report = migration.run(source.clone(), true, None).await.unwrap();
+    assert_eq!(report.task.status, TaskStatus::Partial, "{report:?}");
+    let imported = report
+        .objects
+        .iter()
+        .find(|r| r.kind == "session" && r.id == "old")
+        .unwrap();
+    assert_eq!(imported.outcome, Outcome::Imported, "{report:?}");
+    let id = imported.target_id.clone().unwrap();
+    assert_eq!(snapshot(&source), before);
+    assert_eq!(
+        Connection::open(target.join("rust/dimcode.sqlite"))
+            .unwrap()
+            .query_row("SELECT version FROM agent_store_format", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        20
+    );
+    let retried = migration
+        .run(source.clone(), true, Some(report.task.id.clone()))
+        .await
+        .unwrap();
+    assert!(
+        retried
+            .objects
+            .iter()
+            .any(|r| r.id == "old" && r.outcome == Outcome::AlreadyImported),
+        "{retried:?}"
+    );
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts(&mut builder);
     let server = serve(
         builder,
         ServerConfig {
-            database_path: Some(target.join("store.sqlite")),
+            database_path: Some(target.join("rust/dimcode.sqlite")),
             product_home: Some(target.clone()),
-            unix_path: Some(directory.path().join("server.sock")),
+            unix_path: Some(directory.path().join("native.sock")),
             ..Default::default()
         },
     )
@@ -197,169 +227,30 @@ async fn plugin_imports_wal_history_files_and_settings_then_reconciles_without_d
         client_kind: "cli",
         client_name: "migration-test",
     };
-    let root = rutis::Ctx::root().unwrap();
-    let plugin = root.plugin(MigrationPlugin::new(target.clone(), vec!["system".into()]));
-    (&plugin).await.unwrap();
-    let migration = root.get::<Migration>().unwrap();
-    assert!(migration.inspect(source.clone(), false).await.is_err());
-    assert_eq!(
-        migration
-            .inspect(source.clone(), true)
-            .await
-            .unwrap()
-            .tables["sessions"],
-        3
-    );
-    let report = migration
-        .run(source.clone(), true, None, connection.clone())
-        .await
-        .unwrap();
-    assert_eq!(report.task.status, TaskStatus::Partial, "{report:?}");
-    assert!(
-        report.objects.iter().any(|item| item.kind == "providers"
-            && item.outcome == Outcome::Failed
-            && item
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("provider_invalid_config"))),
-        "{report:?}"
-    );
-    assert!(
-        report
-            .objects
-            .iter()
-            .any(|item| item.id == "config.subagentModel.reasoningEffort"
-                && item.outcome == Outcome::Unsupported)
-    );
-    assert!(
-        report
-            .objects
-            .iter()
-            .any(|item| item.id == "auth.json" && item.outcome == Outcome::Failed)
-    );
-    assert!(report.objects.iter().any(|item| item.kind == "account"
-        && item.id == "mcp:independent"
-        && item.outcome == Outcome::Unsupported));
-    assert!(
-        report
-            .objects
-            .iter()
-            .any(|item| item.kind == "scheduled_jobs"
-                && item.id == "legacy-desktop"
-                && item.outcome == Outcome::Failed)
-    );
-    assert!(
-        report
-            .objects
-            .iter()
-            .any(|item| item.kind == "scheduled_job"
-                && item.id == "legacy-cli:independent"
-                && item.outcome == Outcome::Unsupported)
-    );
-    assert!(
-        report
-            .objects
-            .iter()
-            .any(|item| item.id == "archived" && item.outcome == Outcome::Deferred)
-    );
-    assert!(
-        report
-            .objects
-            .iter()
-            .any(|item| item.id == "broken" && item.outcome == Outcome::Failed)
-    );
-    let session = report
-        .objects
-        .iter()
-        .find(|item| item.id == "old" && item.kind == "session")
-        .unwrap();
-    assert_eq!(session.outcome, Outcome::Imported, "{session:?}");
-    assert!(session.omitted.contains(&"tags".into()));
-    assert!(
-        session
-            .omitted
-            .contains(&"session.settings.__privateUnsupported__".into())
-    );
-    let id = session.target_id.clone().unwrap();
-    let config: Value =
-        serde_json::from_slice(&std::fs::read(target.join("config.json")).unwrap()).unwrap();
-    assert_eq!(
-        config,
-        json!({"locale":"en","tuiNotifyOnComplete":false,"tuiToolDetailsExpanded":false,"themeId":"system"})
-    );
-    assert_eq!(snapshot(&source), before);
     let mut client = Client::connect(&connection).await.unwrap();
     let listed: Value = client.typed("session.list", json!({})).await.unwrap();
-    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    let session = agent
+        .restore_session(id.clone())
+        .await
+        .expect("Native restore must accept imported data");
     client
         .rpc("session.attach", json!({"sessionId":id}))
         .await
         .unwrap();
-    let session = agent.get_session(&id).unwrap();
-    let imported_history = session.history("main", None).await.unwrap();
-    let metadata_path = imported_history
-        .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::InputMessage(input) => Some(&input.blocks),
-            _ => None,
-        })
-        .flatten()
-        .filter_map(|block| match block {
-            dim_agent_types::InputBlock::Messages { messages, .. } => Some(messages),
-            _ => None,
-        })
-        .flatten()
-        .find_map(|record| match &record.message.content {
-            dim_agent_types::MessageContent::Text(text)
-                if text.starts_with("Migration import record:") =>
-            {
-                assert!(!record.in_context);
-                Some(
-                    text.split("readable at ")
-                        .nth(1)
-                        .unwrap()
-                        .split(". These records")
-                        .next()
-                        .unwrap()
-                        .to_owned(),
-                )
-            }
-            _ => None,
-        })
-        .unwrap();
-    let archive: Value = serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
-    assert_eq!(archive["source"], "legacy-session");
-    assert!(!archive.to_string().contains("not-yet-supported"));
-    assert!(!archive.to_string().contains("__privateUnsupported__"));
-    assert_eq!(archive["records"].as_array().unwrap().len(), 5);
-    assert!(archive["records"].as_array().unwrap().iter().any(|record|record["table"]=="queue_items" && record["data"]["status"]=="pending"));
-    assert_eq!(archive["artifacts"].as_array().unwrap().len(), 3);
-    let output = archive["artifacts"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|artifact| artifact["source"] == "data/jobs/old-output.txt")
-        .unwrap();
-    assert_eq!(
-        std::fs::read(output["path"].as_str().unwrap()).unwrap(),
-        b"historical output bytes"
-    );
-    assert_eq!(
-        report
-            .objects
-            .iter()
-            .filter(|item| item.kind == "historical_record" && item.outcome == Outcome::Imported)
-            .count(),
-        5
-    );
+    let history = session.history("main", None).await.unwrap();
     assert!(
-        session
-            .history("main", None)
-            .await
-            .unwrap()
+        history
             .iter()
-            .all(|event| !matches!(event.kind, EventKind::ModelCall(_) | EventKind::ToolCall(_)))
+            .any(|e| matches!(&e.kind,EventKind::Text(t) if t.delta=="effective suffix"))
     );
+    assert!(history.iter().all(|e| !matches!(
+        e.kind,
+        EventKind::ModelCall(_)
+            | EventKind::ModelStart(_)
+            | EventKind::ToolCall(_)
+            | EventKind::ToolStart(_)
+    )));
     client
         .rpc(
             "session.submit",
@@ -374,121 +265,230 @@ async fn plugin_imports_wal_history_files_and_settings_then_reconciles_without_d
     let history = session.history("main", None).await.unwrap();
     let request = history
         .iter()
-        .find_map(|event| match &event.kind {
+        .find_map(|e| match &e.kind {
             EventKind::ModelCall(call) => Some(&call.request),
             _ => None,
         })
-        .unwrap();
+        .expect("Native continuation must reach the normal model host");
     let context = serde_json::to_string(&request.messages).unwrap();
     assert!(
-        context.contains("retained summary") && context.contains("effective suffix"),
+        context.contains("Imported history")
+            && context.contains("retained summary")
+            && context.contains("effective suffix"),
         "{context}"
     );
-    assert!(!context.contains("compressed original"));
-    assert!(!context.contains("never automatically submit this queued input"));
-    assert!(!context.contains("Migration import record:"));
-    let retried = migration
-        .run(
-            source.clone(),
-            true,
-            Some(report.task.id),
-            connection.clone(),
-        )
-        .await
-        .unwrap();
+    assert!(!context.contains("compressed original"), "{context}");
     assert!(
-        retried
-            .objects
+        request
+            .messages
             .iter()
-            .any(|item| item.id == "old" && item.outcome == Outcome::AlreadyImported)
-    );
-    let listed: Value = client.typed("session.list", json!({})).await.unwrap();
-    assert_eq!(listed.as_array().unwrap().len(), 1);
-    let moved = directory.path().join("moved-source");
-    std::fs::rename(&source, &moved).unwrap();
-    source = moved;
-    let moved_report = migration
-        .run(source.clone(), true, None, connection.clone())
-        .await
-        .unwrap();
-    assert!(
-        moved_report
-            .objects
-            .iter()
-            .any(|item| item.id == "old" && item.outcome == Outcome::AlreadyImported),
-        "{moved_report:?}"
+            .any(|m| m.role == dim_agent_types::Role::Assistant)
     );
     client
         .rpc("session.delete", json!({"sessionId":id}))
         .await
         .unwrap();
-    let owned = rusqlite::Connection::open(target.join("store.sqlite"))
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target,
+        Path::new("rust").to_owned(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
         .unwrap()
-        .query_row(
-            "SELECT count(*) FROM session_file_owners WHERE session_id=?1",
-            [&id],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap();
-    assert_eq!(
-        owned, 0,
-        "historical data must follow Session deletion ownership"
-    );
-    let replay = migration
-        .run(source.clone(), true, None, connection.clone())
+        .run(source.clone(), true, None)
         .await
         .unwrap();
     assert!(
-        replay
+        report
             .objects
             .iter()
-            .any(|item| item.id == "old" && item.outcome == Outcome::Deleted)
+            .any(|r| r.id == "old" && r.outcome == Outcome::Deleted),
+        "{report:?}"
     );
     assert_eq!(snapshot(&source), before);
     plugin.dispose().await.unwrap();
-    assert!(root.get::<Migration>().is_none());
     root.shutdown().await.unwrap();
-    server.shutdown();
-    server.join().await.unwrap();
+    drop(db);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unloading_during_file_transfer_settles_cancelled_and_retry_resumes_hidden_session() {
+async fn migration_defers_remote_compaction_without_sealing_a_future_incremental_import() {
     let directory = tempfile::tempdir().unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let source = directory.path().join("source");
     let db = fixture(&source);
-    let bytes = vec![42_u8; 3 * 1024 * 1024];
+    db.execute("UPDATE compaction_states SET compactionSegments=?1 WHERE sessionId='old'",[json!([{"endMessageId":"first","summary":"[remote-compacted]","rawItems":[{"type":"compaction","encrypted_content":"opaque"}]}]).to_string()]).unwrap();
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let migration = root.get::<Migration>().unwrap();
+    let before = snapshot(&source);
+    let report = migration.run(source.clone(), true, None).await.unwrap();
+    let remote = report
+        .objects
+        .iter()
+        .find(|o| o.id == "old" && o.kind == "session")
+        .unwrap();
+    assert_eq!(remote.outcome, Outcome::Deferred, "{report:?}");
+    assert!(remote.target_id.is_none());
+    assert_eq!(snapshot(&source), before);
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    assert_eq!(
+        native
+            .query_row("SELECT count(*) FROM agent_sessions", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(native);
     db.execute(
-        "UPDATE session_blobs SET sizeBytes=?1 WHERE blobId='attachment'",
-        [bytes.len() as i64],
+        "UPDATE compaction_states SET compactionSegments=?1 WHERE sessionId='old'",
+        [
+            json!([{"endMessageId":"first","summary":"compatible summary","rawItems":[]}])
+                .to_string(),
+        ],
     )
     .unwrap();
-    db.execute(
-        "UPDATE blob_data SET data=?1 WHERE blobId='attachment'",
-        [&bytes],
+    let report = migration
+        .run(source, true, Some(report.task.id))
+        .await
+        .unwrap();
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|o| o.id == "old" && o.outcome == Outcome::Imported),
+        "{report:?}"
+    );
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_normal_native_data()
+{
+    use sha2::{Digest, Sha256};
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
     )
     .unwrap();
+    let source = directory.path().join("source");
+    let db = fixture(&source);
+    db.execute_batch("CREATE TABLE providers (providerId TEXT PRIMARY KEY, source TEXT, displayName TEXT, driverKind TEXT, defaultBaseUrl TEXT, baseUrl TEXT, auth TEXT, credential TEXT, accountUsageSettings TEXT, headers TEXT, proxy TEXT, timeoutMs INTEGER, retryConfig TEXT, models TEXT, modelConfigOverrides TEXT, capabilityDefaults TEXT, activeModelId TEXT, modelsSource TEXT, catalogVersion TEXT, modelsUpdatedAt TEXT, metadata TEXT, enabled INTEGER, createdAt TEXT, updatedAt TEXT, version INTEGER); CREATE TABLE provider_selections (selectionId TEXT PRIMARY KEY, scope TEXT, cwd TEXT, providerId TEXT, modelId TEXT, createdAt TEXT, updatedAt TEXT, version INTEGER);").unwrap();
+    let models = json!([{"modelId":"legacy-model","displayName":"Legacy model","status":"active","capabilities":dim_agent_types::ModelCapabilities::default()}]);
+    db.execute("INSERT INTO providers (providerId,source,displayName,driverKind,baseUrl,auth,credential,accountUsageSettings,models,modelsSource,metadata,enabled,version) VALUES ('legacy-provider','custom','Legacy','openai-responses','https://model.example/v1',?1,?2,?3,?4,'remote','{}',0,1)",params![json!({"type":"bearer"}).to_string(),json!({"type":"bearer","token":"private-provider-secret"}).to_string(),json!({"unsupported":"private-unused-secret"}).to_string(),models.to_string()]).unwrap();
+    db.execute("INSERT INTO provider_selections (selectionId,scope,providerId,modelId,version) VALUES ('chosen','global','legacy-provider','legacy-model',1)",[]).unwrap();
+    let tokens = json!({"type":"oauth","refresh":"private-refresh","access":"private-access","expires":4102444800000u64,"issuer":"https://auth.openai.com","tokenEndpoint":"https://auth.openai.com/oauth/token","clientId":"app_EMoamEEZ73f0CkXaXp7hrann","scope":"openid profile email offline_access api.connectors.read api.connectors.invoke","relayBaseUrl":"https://chatgpt.com/backend-api/codex"});
+    let digest = format!("{:x}", Sha256::digest(serde_jcs::to_vec(&tokens).unwrap()));
+    std::fs::write(source.join("auth.json"),json!({"openaiCodex":tokens,"openaiCodexAccountState":{"schemaVersion":1,"generation":"0b6f9a52-7e4b-4a59-9d0c-9a0c1c2f7e11","credentialRevision":1,"tokenDigest":digest}}).to_string()).unwrap();
+    std::fs::write(source.join("mcp.json"),json!({"mcpServers":{"docs":{"type":"http","url":"https://mcp.example.test","enabled":false,"oauth":{"clientId":"legacy-client","scopes":"files:read"}},"bad":{"type":"http","url":"https://mcp.example.test/bad","enabled":false}}}).to_string()).unwrap();
+    let mcp_grant = json!({"serverUrl":"https://mcp.example.test","tokens":{"accessToken":"private-mcp-token","refreshToken":"private-mcp-refresh","expiresAt":4102444800000u64,"scope":"files:read"},"clientInfo":{"clientId":"legacy-client","metadata":{"redirectUri":"http://127.0.0.1:1456/callback"}},"authorizationMetadata":{"issuer":"https://login.example.test","token_endpoint":"https://login.example.test/token"},"protectedResourceMetadata":{"resource":"https://mcp.example.test"}});
+    let mut bad_grant = mcp_grant.clone();
+    bad_grant["serverUrl"] = json!("https://mcp.example.test/bad");
+    bad_grant["tokens"]["expiresAt"] = json!("private-invalid-expiry");
+    std::fs::write(
+        source.join("mcp-oauth.json"),
+        json!({"version":1,"servers":{"docs":mcp_grant,"bad":bad_grant}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("skills.json"),
+        json!({"disabledSkillIds":["user:legacy-skill"]}).to_string(),
+    )
+    .unwrap();
+    db.execute_batch("CREATE TABLE scheduled_jobs(jobId TEXT PRIMARY KEY,name TEXT,prompt TEXT,status TEXT,rrule TEXT,cwd TEXT,providerId TEXT,modelId TEXT,reasoningEffort TEXT,sessionMode TEXT,boundSessionId TEXT,nextRunAt TEXT,lastRunAt TEXT,createdAt TEXT);").unwrap();
+    db.execute("INSERT INTO scheduled_jobs VALUES ('paused','Paused job','do work','paused','FREQ=DAILY;BYHOUR=9;BYMINUTE=15',?1,'mock','deterministic',NULL,'new',NULL,NULL,NULL,'2026-01-01T00:00:00Z')",[source.to_str().unwrap()]).unwrap();
     let before = snapshot(&source);
     let target = directory.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
-    std::fs::write(target.join("config.json"), b"{invalid").unwrap();
+    std::fs::write(
+        target.join("config.json"),
+        r#"{"locale":null,"tuiNotifyOnComplete":false}"#,
+    )
+    .unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let migration = root.get::<Migration>().unwrap();
+    let report = migration.run(source.clone(), true, None).await.unwrap();
+    let provider = report
+        .objects
+        .iter()
+        .find(|r| r.kind == "provider" && r.id == "legacy-provider")
+        .unwrap();
+    assert_eq!(provider.outcome, Outcome::Imported, "{report:?}");
+    assert!(provider.omitted.contains(&"accountUsageSettings".into()));
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|r| r.id == "openai-codex" && r.outcome == Outcome::Imported),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|r| r.id == "legacy-desktop:paused" && r.outcome == Outcome::Imported),
+        "{report:?}"
+    );
+    assert_eq!(snapshot(&source), before);
+    let safe = serde_json::to_string(&report).unwrap();
+    assert!(
+        !safe.contains("private-provider-secret")
+            && !safe.contains("private-refresh")
+            && !safe.contains("private-unused-secret")
+    );
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    let schedule: String = native
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/schedule'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let schedule: Value = serde_json::from_str(&schedule).unwrap();
+    assert_eq!(schedule["jobs"][0]["enabled"], false);
+    assert_eq!(schedule["jobs"][0]["schedule"]["cron"], "15 9 * * *");
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(target.join("config.json")).unwrap()).unwrap();
+    assert!(config["locale"].is_null());
+    assert_eq!(config["tuiNotifyOnComplete"], false);
+    drop(native);
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts(&mut builder);
     let server = serve(
         builder,
         ServerConfig {
-            database_path: Some(target.join("store.sqlite")),
+            database_path: Some(target.join("rust/dimcode.sqlite")),
             product_home: Some(target.clone()),
-            unix_path: Some(directory.path().join("server.sock")),
+            unix_path: Some(directory.path().join("native.sock")),
             ..Default::default()
         },
     )
     .await
     .unwrap();
-    let connection = ConnectionConfig {
+    let config = ConnectionConfig {
         endpoint: server.unix_path.clone().unwrap(),
         server: Server {
             program: std::env::current_exe().unwrap(),
@@ -498,138 +498,392 @@ async fn unloading_during_file_transfer_settles_cancelled_and_retry_resumes_hidd
         client_kind: "cli",
         client_name: "migration-test",
     };
+    let mut client = Client::connect(&config).await.unwrap();
+    let listed: Value = client.typed("provider.list", json!({})).await.unwrap();
+    assert!(listed.to_string().contains("legacy-provider"), "{listed}");
+    let status: Value = client
+        .typed("account.codex.status", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["authenticated"], true, "{status}");
+    let mcp: Value = client.typed("mcp.catalog", json!({})).await.unwrap();
+    let docs = mcp["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|server| server["id"] == "docs")
+        .unwrap();
+    assert_eq!(docs["auth"]["status"], "authorized", "{mcp}");
+    assert_eq!(docs["enabled"], false);
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|result| result.id == "mcp:bad" && result.outcome == Outcome::Unsupported)
+    );
+    assert!(!safe.contains("private-mcp-token") && !safe.contains("private-invalid-expiry"));
+    let skills: Value = client.typed("skills.catalog", json!({})).await.unwrap();
+    assert!(skills["entries"].is_array(), "{skills}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_preserves_removed_client_settings_and_refuses_unsupported_target_formats() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
     let root = rutis::Ctx::root().unwrap();
-    let plugin = root.plugin(MigrationPlugin::new(target.clone(), vec!["system".into()]));
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let migration = root.get::<Migration>().unwrap();
+    let first = migration.run(source.clone(), true, None).await.unwrap();
+    let path = target.join("config.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config.as_object_mut().unwrap().remove("locale");
+    std::fs::write(&path, config.to_string()).unwrap();
+    let retry = migration
+        .run(source.clone(), true, Some(first.task.id))
+        .await
+        .unwrap();
+    assert!(
+        retry
+            .objects
+            .iter()
+            .any(|r| r.id == "config.json.locale" && r.outcome == Outcome::Deleted),
+        "{retry:?}"
+    );
+    let config: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(config.get("locale").is_none());
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    let preview = directory.path().join("preview");
+    std::fs::create_dir_all(preview.join("rust")).unwrap();
+    let native = Connection::open(preview.join("rust/dimcode.sqlite")).unwrap();
+    native.execute_batch("CREATE TABLE agent_store_format(version INTEGER PRIMARY KEY CHECK(version=22));INSERT INTO agent_store_format VALUES(22);CREATE TABLE important(data TEXT);INSERT INTO important VALUES('preserve');").unwrap();
+    drop(native);
+    let before = std::fs::read(preview.join("rust/dimcode.sqlite")).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        preview.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source, true, None)
+        .await
+        .unwrap();
+    assert_eq!(report.task.status, TaskStatus::Failed);
+    assert_eq!(
+        std::fs::read(preview.join("rust/dimcode.sqlite")).unwrap(),
+        before
+    );
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_cancellation_settles_before_unload_and_a_new_load_can_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    let before = snapshot(&source);
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
     (&plugin).await.unwrap();
     let migration = root.get::<Migration>().unwrap();
     let mut progress = migration.progress();
-    let mut worker = {
-        let owner = migration.clone();
+    let work = {
+        let migration = migration.clone();
         let source = source.clone();
-        let connection = connection.clone();
-        tokio::spawn(async move { owner.run(source, true, None, connection).await.unwrap() })
+        tokio::spawn(async move { migration.run(source, true, None).await.unwrap() })
     };
-    let interrupted = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            tokio::select! {
-                changed = progress.changed() => changed.unwrap(),
-                result = &mut worker => panic!("Migration stopped before file transfer: {result:?}"),
-            }
-            if let Some(state) = progress.borrow_and_update().clone()
-                && state.stage == "file-bytes"
-                && state.processed > 0
-            {
-                break state;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), progress.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    migration.cancel_current();
     plugin.dispose().await.unwrap();
-    let cancelled = worker.await.unwrap();
+    let cancelled = work.await.unwrap();
     assert_eq!(
         cancelled.task.status,
         TaskStatus::Cancelled,
         "{cancelled:?}"
     );
-    assert_eq!(cancelled.task.id, interrupted.id);
-    assert!(root.get::<Migration>().is_none());
-    let mut client = Client::connect(&connection).await.unwrap();
-    let listed: Value = client.typed("session.list", json!({})).await.unwrap();
-    assert!(
-        listed.as_array().unwrap().is_empty(),
-        "A partly transferred Session must stay hidden"
-    );
-    let plugin = root.plugin(MigrationPlugin::new(target.clone(), vec!["system".into()]));
+    assert_eq!(snapshot(&source), before);
+    root.shutdown().await.unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target,
+        "rust".into(),
+        vec!["system".into()],
+    ));
     (&plugin).await.unwrap();
-    let migration = root.get::<Migration>().unwrap();
-    assert_eq!(
-        migration
-            .report(&cancelled.task.id)
-            .await
-            .unwrap()
-            .task
-            .status,
-        TaskStatus::Cancelled
-    );
-    let retried = migration
-        .run(
-            source.clone(),
-            true,
-            Some(cancelled.task.id.clone()),
-            connection,
-        )
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source.clone(), true, Some(cancelled.task.id))
         .await
         .unwrap();
-    assert_eq!(
-        retried.task.retry_of.as_deref(),
-        Some(cancelled.task.id.as_str())
-    );
-    assert_ne!(retried.task.id, cancelled.task.id);
     assert!(
-        retried.objects.iter().any(|result| result.kind == "session"
-            && result.id == "old"
-            && result.outcome == Outcome::Imported),
-        "{retried:?}"
-    );
-    let listed: Value = client.typed("session.list", json!({})).await.unwrap();
-    assert_eq!(listed.as_array().unwrap().len(), 1);
-    assert_eq!(
-        migration
-            .report(&cancelled.task.id)
-            .await
-            .unwrap()
-            .task
-            .status,
-        TaskStatus::Cancelled
-    );
-    assert_eq!(
-        std::fs::read(target.join("config.json")).unwrap(),
-        b"{invalid"
+        report
+            .objects
+            .iter()
+            .any(|r| r.id == "old"
+                && matches!(r.outcome, Outcome::Imported | Outcome::AlreadyImported)),
+        "{report:?}"
     );
     assert_eq!(snapshot(&source), before);
     plugin.dispose().await.unwrap();
     root.shutdown().await.unwrap();
-    server.shutdown();
-    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries() {
+    for case in ["tools", "revert", "retry"] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            directory.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let source = directory.path().join("source");
+        let db = fixture(&source);
+        match case {
+            "tools" => {
+                db.execute("UPDATE messages SET role='assistant',parts=?1 WHERE messageId='first'",[json!([{"type":"tool_use","id":"old-call","name":"echo","input":{"text":"never replay"}}]).to_string()]).unwrap();
+                db.execute("UPDATE messages SET role='tool_result',parts=?1 WHERE messageId='tail'",[json!([{"type":"tool_result","tool_use_id":"old-call","content":"historical output","structuredContent":{"exitCode":0}}]).to_string()]).unwrap();
+            }
+            "revert" => {
+                db.execute(
+                    "UPDATE session_states SET settings=?1 WHERE sessionId='old'",
+                    [json!({"__revertState__":{"anchorOrderKey":"b"}}).to_string()],
+                )
+                .unwrap();
+            }
+            "retry" => {
+                db.execute("UPDATE messages SET metadata=?1 WHERE messageId='tail'",[json!({"_dimTranscript":{"kind":"provider_retry","visibility":"visible","owner":"runtime"}}).to_string()]).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = snapshot(&source);
+        let target = directory.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let root = rutis::Ctx::root().unwrap();
+        let plugin = root.plugin(MigrationPlugin::new(
+            target.clone(),
+            "rust".into(),
+            vec!["system".into()],
+        ));
+        (&plugin).await.unwrap();
+        let report = root
+            .get::<Migration>()
+            .unwrap()
+            .run(source.clone(), true, None)
+            .await
+            .unwrap();
+        let imported = report
+            .objects
+            .iter()
+            .find(|r| r.kind == "session" && r.id == "old")
+            .unwrap();
+        assert_eq!(imported.outcome, Outcome::Imported, "{case}: {report:?}");
+        let id = imported.target_id.clone().unwrap();
+        plugin.dispose().await.unwrap();
+        root.shutdown().await.unwrap();
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::install(&mut builder);
+        defaults::mock_hosts(&mut builder);
+        let server = serve(
+            builder,
+            ServerConfig {
+                database_path: Some(target.join("rust/dimcode.sqlite")),
+                product_home: Some(target),
+                unix_path: Some(directory.path().join("native.sock")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let agent = server.agent().unwrap();
+        let config = ConnectionConfig {
+            endpoint: server.unix_path.clone().unwrap(),
+            server: Server {
+                program: std::env::current_exe().unwrap(),
+                embedded: false,
+            },
+            profile: None,
+            client_kind: "cli",
+            client_name: "migration-test",
+        };
+        let mut client = Client::connect(&config).await.unwrap();
+        client
+            .rpc("session.attach", json!({"sessionId":id}))
+            .await
+            .unwrap();
+        let session = agent.get_session(&id).unwrap();
+        let history = session.history("main", None).await.unwrap();
+        assert!(history.iter().all(|event| !matches!(
+            event.kind,
+            EventKind::ModelCall(_)
+                | EventKind::ToolCall(_)
+                | EventKind::ModelStart(_)
+                | EventKind::ToolStart(_)
+        )));
+        if case == "tools" {
+            assert!(history.iter().any(|event|matches!(&event.kind,EventKind::ToolResult(result) if result.results[0].result.structured_content.as_ref().and_then(|value|value.get("exitCode"))==Some(&json!(0)))));
+        } else {
+            assert!(history.iter().any(|event|matches!(&event.kind,EventKind::Text(text) if text.delta=="effective suffix")));
+        }
+        client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":"continue"}),
+            )
+            .await
+            .unwrap();
+        client
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await
+            .unwrap();
+        let history = session.history("main", None).await.unwrap();
+        let request = history
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelCall(call) => Some(&call.request),
+                _ => None,
+            })
+            .unwrap();
+        let context = serde_json::to_string(&request.messages).unwrap();
+        match case {
+            "tools" => {
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.role == dim_agent_types::Role::Assistant)
+                );
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.role == dim_agent_types::Role::ToolResult)
+                );
+                assert!(
+                    context.contains("old-call") && context.contains("historical output"),
+                    "{context}"
+                );
+            }
+            "revert" => {
+                assert!(
+                    context.contains("compressed original")
+                        && !context.contains("retained summary")
+                        && !context.contains("effective suffix"),
+                    "{context}"
+                );
+            }
+            "retry" => {
+                assert!(
+                    context.contains("retained summary") && !context.contains("effective suffix"),
+                    "{context}"
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            history
+                .iter()
+                .all(|event| !matches!(event.kind, EventKind::ToolCall(_)))
+        );
+        assert_eq!(snapshot(&source), before);
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn native_web_and_skills_import_keep_disabled_state_secrets_and_source_id_boundaries() {
+async fn node_migration_configuration_is_consumed_by_unchanged_web_and_scheduler() {
     let directory = tempfile::tempdir().unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let source = directory.path().join("source");
-    let _db = fixture(&source);
-    std::fs::create_dir_all(source.join("data/plugins/web")).unwrap();
-    let web = json!({"version":1,"enabled":false,"activeProvider":"brave","activeProviderExplicit":true,"providers":{"brave":{"apiKey":"legacy-brave-fixture","apiEndpoint":"https://api.search.brave.com/res/v1/web/search"},"tavily":{"apiKey":"inactive-fixture"}},"numResults":5});
-    std::fs::write(source.join("data/plugins/web/state.json"), web.to_string()).unwrap();
-    std::fs::write(source.join("config.json"), b"[]").unwrap();
-    let skills = source.join("skills.json");
-    std::fs::write(
-        &skills,
-        json!({"disabledSkillIds":["user:shared"]}).to_string(),
+    std::fs::set_permissions(
+        directory.path(),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
     )
     .unwrap();
+    let source = directory.path().join("source");
+    let db = fixture(&source);
+    std::fs::create_dir_all(source.join("data/plugins/web")).unwrap();
+    std::fs::write(source.join("data/plugins/web/state.json"),json!({"version":1,"enabled":false,"activeProvider":"brave","activeProviderExplicit":true,"providers":{"brave":{"apiKey":"private-brave-key"}}}).to_string()).unwrap();
+    db.execute_batch("CREATE TABLE scheduled_jobs(jobId TEXT PRIMARY KEY,name TEXT,prompt TEXT,status TEXT,rrule TEXT,cwd TEXT,providerId TEXT,modelId TEXT,reasoningEffort TEXT,sessionMode TEXT,boundSessionId TEXT,nextRunAt TEXT,lastRunAt TEXT,createdAt TEXT);").unwrap();
+    db.execute("INSERT INTO scheduled_jobs VALUES ('paused','Paused job','do work','paused','FREQ=DAILY;BYHOUR=9;BYMINUTE=15',?1,'mock','deterministic',NULL,'new',NULL,NULL,NULL,'2026-01-01T00:00:00Z')",[source.to_str().unwrap()]).unwrap();
+    let before = snapshot(&source);
     let target = directory.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source.clone(), true, None)
+        .await
+        .unwrap();
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|r| r.id == "web.enabled" && r.outcome == Outcome::Imported),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|r| r.id == "legacy-desktop:paused" && r.outcome == Outcome::Imported),
+        "{report:?}"
+    );
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    let choices: Value =
+        serde_json::from_slice(&std::fs::read(target.join("plugins.json")).unwrap()).unwrap();
+    assert_eq!(choices["names"]["web"]["off"], true);
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
         .unwrap();
-    let defaults_file = target.join("defaults.json");
-    std::fs::write(&defaults_file, json!({"plugins":{"web":repository.join("runtime/plugins/web"),"plugin-authoring":repository.join("runtime/plugins/plugin-authoring")},"locked":["PluginManager","Rpc","Transport"]}).to_string()).unwrap();
+    let defaults = target.join("defaults.json");
+    std::fs::write(&defaults,json!({"plugins":{"web":repository.join("runtime/plugins/web"),"scheduler":repository.join("runtime/plugins/scheduler")},"locked":["PluginManager","Rpc","Transport"]}).to_string()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts(&mut builder);
     let server = serve(
         builder,
         ServerConfig {
-            database_path: Some(target.join("store.sqlite")),
-            product_home: Some(target.clone()),
-            unix_path: Some(directory.path().join("server.sock")),
-            plugin_defaults: Some(defaults_file),
+            database_path: Some(target.join("rust/dimcode.sqlite")),
+            product_home: Some(target),
+            unix_path: Some(directory.path().join("native.sock")),
+            plugin_defaults: Some(defaults),
             session_typescript: Some(
                 dim_app_server::session_typescript::SessionTypeScriptConfig {
                     node: std::env::var_os("DIM_TEST_NODE").unwrap().into(),
@@ -645,7 +899,7 @@ async fn native_web_and_skills_import_keep_disabled_state_secrets_and_source_id_
     )
     .await
     .unwrap();
-    let connection = ConnectionConfig {
+    let config = ConnectionConfig {
         endpoint: server.unix_path.clone().unwrap(),
         server: Server {
             program: std::env::current_exe().unwrap(),
@@ -655,366 +909,61 @@ async fn native_web_and_skills_import_keep_disabled_state_secrets_and_source_id_
         client_kind: "cli",
         client_name: "migration-test",
     };
-    let mut client = Client::connect(&connection).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while client
+    let mut client = Client::connect(&config).await.unwrap();
+    let jobs = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            match client.typed::<Value>("schedule.list", json!({})).await {
+                Ok(jobs) => break jobs,
+                Err(error)
+                    if error
+                        .downcast_ref::<dim_client::RpcError>()
+                        .is_some_and(|error| error.code == -32601) =>
+                {
+                    tokio::task::yield_now().await
+                }
+                Err(error) => panic!("Native Scheduler rejected imported data: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("Native Scheduler must finish loading");
+    assert_eq!(jobs["jobs"][0]["id"], "legacy-desktop:paused", "{jobs}");
+    assert_eq!(jobs["jobs"][0]["enabled"], false, "{jobs}");
+    assert_eq!(jobs["jobs"][0]["schedule"]["cron"], "15 9 * * *", "{jobs}");
+    let history: Value = client
+        .typed(
+            "schedule.history",
+            json!({"job_id":"legacy-desktop:paused"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(history["runs"], json!([]), "{history}");
+    assert!(
+        client
             .rpc("settings.read", json!({"source":"web","scope":"user"}))
             .await
             .is_err()
-        {
+    );
+    client
+        .rpc("plugin.enable", json!({"name":"web"}))
+        .await
+        .unwrap();
+    let web = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if let Ok(value) = client
+                .typed::<Value>("settings.read", json!({"source":"web","scope":"user"}))
+                .await
+            {
+                break value;
+            }
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    let configured: String = Connection::open_with_flags(
-        target.join("store.sqlite"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap()
-    .query_row(
-        "SELECT fields FROM settings_import_fields WHERE source='user/skills'",
-        [],
-        |row| row.get(0),
-    )
-    .unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&configured).unwrap(),
-        json!(["pluginSkills"])
-    );
-    let root = rutis::Ctx::root().unwrap();
-    let plugin = root.plugin(MigrationPlugin::new(target.clone(), vec!["system".into()]));
-    (&plugin).await.unwrap();
-    let migration = root.get::<Migration>().unwrap();
-    let report = migration
-        .run(source.clone(), true, None, connection.clone())
-        .await
-        .unwrap();
-    assert!(
-        report
-            .objects
-            .iter()
-            .any(|item| item.id == "web.enabled" && item.outcome == Outcome::Imported),
-        "{report:?}"
-    );
-    assert!(
-        report
-            .objects
-            .iter()
-            .any(|item| item.id == "web.searchService" && item.outcome == Outcome::Imported),
-        "{report:?}"
-    );
-    assert!(
-        report
-            .objects
-            .iter()
-            .any(|item| item.id == "skills.disabledSkillIds" && item.outcome == Outcome::Imported),
-        "{report:?}"
-    );
-    let record: Value =
-        serde_json::from_slice(&std::fs::read(target.join("plugins.json")).unwrap()).unwrap();
-    assert_eq!(record["names"]["web"]["off"], true);
-    let native = Connection::open_with_flags(
-        target.join("store.sqlite"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let read = |source: &str| {
-        let document: String = native
-            .query_row(
-                "SELECT document FROM settings_documents WHERE source=?1",
-                [source],
-                |row| row.get(0),
-            )
-            .unwrap();
-        serde_json::from_str::<Value>(&document).unwrap()
-    };
-    assert_eq!(
-        read("user/web")["searchService"],
-        json!({"kind":"brave","apiKey":"legacy-brave-fixture","endpoint":"https://api.search.brave.com/res/v1/web/search"})
-    );
-    assert_eq!(
-        read("user/skills")["disabledSkillIds"],
-        json!(["user:shared"])
-    );
-    let encoded = serde_json::to_string(&report).unwrap();
-    assert!(!encoded.contains("legacy-brave-fixture") && !encoded.contains("inactive-fixture"));
-    std::fs::write(
-        &skills,
-        json!({"disabledSkillIds":["host:legacy","user:ambiguous/nested"]}).to_string(),
-    )
-    .unwrap();
-    let retry = migration
-        .run(source, true, Some(report.task.id), connection)
-        .await
-        .unwrap();
-    assert!(
-        retry
-            .objects
-            .iter()
-            .any(|item| item.id == "skills.disabledSkillIds" && item.outcome == Outcome::Deferred)
-    );
-    assert_eq!(
-        read("user/skills")["disabledSkillIds"],
-        json!(["user:shared"])
-    );
-    plugin.dispose().await.unwrap();
-    root.shutdown().await.unwrap();
-    server.shutdown();
-    server.join().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_context_boundaries_and_changed_sources_reach_native_continuation() {
-    let directory = tempfile::tempdir().unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let target = directory.path().join("target");
-    std::fs::create_dir_all(&target).unwrap();
-    let mut builder = AgentBuilder::new(AgentConfig::default());
-    defaults::install(&mut builder);
-    defaults::mock_hosts(&mut builder);
-    let server = serve(
-        builder,
-        ServerConfig {
-            database_path: Some(target.join("store.sqlite")),
-            product_home: Some(target.clone()),
-            unix_path: Some(directory.path().join("server.sock")),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    let agent = server.agent().unwrap();
-    let connection = ConnectionConfig {
-        endpoint: server.unix_path.clone().unwrap(),
-        server: Server {
-            program: std::env::current_exe().unwrap(),
-            embedded: false,
-        },
-        profile: None,
-        client_kind: "cli",
-        client_name: "migration-test",
-    };
-    let root = rutis::Ctx::root().unwrap();
-    let plugin = root.plugin(MigrationPlugin::new(target, vec!["system".into()]));
-    (&plugin).await.unwrap();
-    let migration = root.get::<Migration>().unwrap();
-    let mut client = Client::connect(&connection).await.unwrap();
-    for case in [
-        "revert",
-        "remote",
-        "tools",
-        "retry",
-        "image",
-        "oversize-message",
-        "oversize-file",
-    ] {
-        let source = directory.path().join(case);
-        let db = fixture(&source);
-        let source_id = format!("old-{case}");
-        for table in [
-            "sessions",
-            "session_states",
-            "messages",
-            "compaction_states",
-            "session_blobs",
-            "background_tasks",
-            "workflow_runs",
-            "queue_items",
-            "permission_decisions",
-            "usage_ledger",
-        ] {
-            db.execute(
-                &format!("UPDATE {table} SET sessionId=?1 WHERE sessionId='old'"),
-                [&source_id],
-            )
-            .unwrap();
-        }
-        match case {
-            "revert" => {
-                db.execute(
-                    "UPDATE session_states SET settings=?1 WHERE sessionId=?2",
-                    params![
-                        json!({"__revertState__":{"anchorOrderKey":"b"}}).to_string(),
-                        source_id
-                    ],
-                )
-                .unwrap();
-            }
-            "remote" => {
-                db.execute("UPDATE compaction_states SET compactionSegments=?1 WHERE sessionId=?2", params![json!([{"endMessageId":"first","summary":"[remote-compacted]","rawItems":[{"type":"compaction","encrypted_content":"legacy-opaque"}]}]).to_string(),source_id]).unwrap();
-            }
-            "tools" => {
-                db.execute("UPDATE messages SET role='assistant',parts=?1 WHERE messageId='first'", [json!([{"type":"tool_use","id":"historical-call","name":"legacy-never-execute","input":{"value":1}}]).to_string()]).unwrap();
-                db.execute("UPDATE messages SET role='tool_result',parts=?1 WHERE messageId='tail'", [json!([{"type":"tool_result","tool_use_id":"historical-call","content":"historical output"}]).to_string()]).unwrap();
-            }
-            "retry" => {
-                db.execute("UPDATE messages SET metadata=?1 WHERE messageId='tail'", [json!({"_dimTranscript":{"kind":"provider_retry","visibility":"visible","owner":"runtime"}}).to_string()]).unwrap();
-            }
-            "image" => {
-                use base64::Engine;
-                let image = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFZkAAAAASUVORK5CYII=").unwrap();
-                db.execute("UPDATE session_blobs SET mimeType='image/png',sizeBytes=?1 WHERE blobId='attachment'", [image.len() as i64]).unwrap();
-                db.execute(
-                    "UPDATE blob_data SET data=?1 WHERE blobId='attachment'",
-                    [&image],
-                )
-                .unwrap();
-                db.execute("UPDATE messages SET attachments=?1 WHERE messageId='first'", [json!([{"attachmentId":"legacy-image","kind":"blob","data":{"blobId":"attachment","mediaType":"image/png","source":"paste"}}]).to_string()]).unwrap();
-                db.execute(
-                    "DELETE FROM compaction_states WHERE sessionId=?1",
-                    [&source_id],
-                )
-                .unwrap();
-            }
-            "oversize-message" => {
-                db.execute(
-                    "UPDATE messages SET parts=?1 WHERE messageId='first'",
-                    [json!([{"type":"text","text":"x".repeat(1024*1024)}]).to_string()],
-                )
-                .unwrap();
-            }
-            "oversize-file" => {
-                db.execute(
-                    "UPDATE session_blobs SET sizeBytes=?1 WHERE blobId='attachment'",
-                    [16 * 1024 * 1024 + 1],
-                )
-                .unwrap();
-            }
-            _ => unreachable!(),
-        }
-        let before = snapshot(&source);
-        let report = migration
-            .run(source.clone(), true, None, connection.clone())
-            .await
-            .unwrap();
-        let imported = report
-            .objects
-            .iter()
-            .find(|item| item.kind == "session" && item.id == source_id)
-            .unwrap();
-        if case.starts_with("oversize-") {
-            assert_eq!(imported.outcome, Outcome::Failed, "{report:?}");
-            assert!(imported.target_id.is_none());
-            assert_eq!(snapshot(&source), before);
-            continue;
-        }
-        assert_eq!(imported.outcome, Outcome::Imported, "{report:?}");
-        let id = imported.target_id.as_ref().unwrap();
-        client
-            .rpc("session.attach", json!({"sessionId":id}))
-            .await
-            .unwrap();
-        let session = agent.get_session(id).unwrap();
-        let history = session.history("main", None).await.unwrap();
-        assert!(
-            history.iter().all(|event| !matches!(
-                event.kind,
-                EventKind::ModelCall(_) | EventKind::ToolCall(_)
-            ))
-        );
-        let original_ids = history
-            .iter()
-            .filter_map(|event| match &event.kind {
-                EventKind::InputMessage(input) => Some(&input.blocks),
-                _ => None,
-            })
-            .flatten()
-            .filter_map(|block| match block {
-                dim_agent_types::InputBlock::Messages { messages, .. } => Some(messages),
-                _ => None,
-            })
-            .flatten()
-            .map(|record| record.id.as_str())
-            .collect::<Vec<_>>();
-        assert!(original_ids.contains(&"first") && original_ids.contains(&"tail"));
-        client
-            .rpc(
-                "session.submit",
-                json!({"sessionId":id,"branchId":"main","text":"continue"}),
-            )
-            .await
-            .unwrap();
-        client
-            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
-            .await
-            .unwrap();
-        let history = session.history("main", None).await.unwrap();
-        let request = history.iter().find_map(|event| match &event.kind {
-            EventKind::ModelCall(call) => Some(&call.request),
-            _ => None,
-        });
-        if case == "remote" {
-            assert!(request.is_none());
-            assert!(history.iter().any(|event| matches!(&event.kind,EventKind::TurnEnd(end) if matches!(end.outcome,dim_agent_types::TurnOutcome::Failed{..}))));
-        } else {
-            let request = request.unwrap();
-            let context = serde_json::to_string(&request.messages).unwrap();
-            match case {
-                "revert" => {
-                    assert!(context.contains("compressed original"), "{context}");
-                    assert!(
-                        !context.contains("retained summary")
-                            && !context.contains("effective suffix"),
-                        "{context}"
-                    );
-                }
-                "tools" => {
-                    assert!(
-                        request
-                            .messages
-                            .iter()
-                            .any(|message| message.role == dim_agent_types::Role::Assistant)
-                    );
-                    assert!(
-                        request
-                            .messages
-                            .iter()
-                            .any(|message| message.role == dim_agent_types::Role::ToolResult)
-                    );
-                    assert!(
-                        context.contains("historical-call")
-                            && context.contains("historical output")
-                    );
-                }
-                "retry" => {
-                    assert!(
-                        context.contains("retained summary")
-                            && !context.contains("effective suffix"),
-                        "{context}"
-                    );
-                }
-                "image" => {
-                    assert!(
-                        context.contains("image/png") && context.contains("iVBORw0KGgo"),
-                        "{context}"
-                    );
-                }
-                _ => unreachable!(),
-            }
-        }
-        assert!(
-            history
-                .iter()
-                .all(|event| !matches!(event.kind, EventKind::ToolCall(_)))
-        );
-        assert_eq!(snapshot(&source), before);
-        db.execute("UPDATE messages SET parts='[{\"type\":\"text\",\"text\":\"changed after import\"}]' WHERE messageId='first'", []).unwrap();
-        let changed = migration
-            .run(source, true, Some(report.task.id), connection.clone())
-            .await
-            .unwrap();
-        let conflict = changed
-            .objects
-            .iter()
-            .find(|item| item.kind == "session" && item.id == source_id)
-            .unwrap();
-        assert_eq!(conflict.outcome, Outcome::Conflict, "{changed:?}");
-        assert_eq!(conflict.target_id.as_deref(), Some(id.as_str()));
-    }
-    plugin.dispose().await.unwrap();
-    root.shutdown().await.unwrap();
+    assert_eq!(web["document"]["searchService"]["kind"], "brave", "{web}");
+    assert_eq!(snapshot(&source), before);
+    drop(client);
     server.shutdown();
     server.join().await.unwrap();
 }

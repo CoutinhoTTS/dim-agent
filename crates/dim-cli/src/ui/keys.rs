@@ -32,9 +32,10 @@ fn history(platform: &str, var: &dyn Fn(&str) -> String) -> History {
     if program == "apple_terminal" || program == "iterm.app" {
         return of("Cmd+PageUp", "Cmd+F", drag_or("Cmd+C"));
     }
+    let term = var("TERM");
     if ["ghostty", "wezterm", "kitty", "alacritty"]
         .iter()
-        .any(|name| program.contains(name))
+        .any(|name| program.contains(name) || term.contains(name))
     {
         return of(
             "Shift+PageUp",
@@ -132,6 +133,8 @@ mod tests {
         );
         let kitty = history("linux", &env(&[("TERM_PROGRAM", "kitty")]));
         assert_eq!(kitty.search, "terminal search");
+        let ghostty_over_ssh = history("linux", &env(&[("TERM", "xterm-ghostty")]));
+        assert_eq!(ghostty_over_ssh.search, "terminal search");
         let linux = history("linux", &env(&[]));
         assert_eq!(linux.copy, "Ctrl+Shift+C");
     }

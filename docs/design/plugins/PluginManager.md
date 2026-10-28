@@ -129,9 +129,7 @@ The repository's own TypeScript plugins (`runtime/plugins/*`) get a `dim-plugin.
 | `names.<name>.use` | Which plugin the name uses: an installed id, `"builtin"` or `"default"`. Absent: the built-in plugin of that name if there is one, else the default plugin of that name. |
 | `names.<name>.off` | `true` when the user turned the name off. |
 
-A name with no entry is in its shipped state: a built-in or default plugin on. An explicit enable retains its name entry even when it selects that shipped state; this distinguishes a user choice from an unconfigured default. Writing goes to a temporary file in the same directory, flushed on its own writable handle (`sync_all`, which also works on Windows), then renamed over `plugins.json`. A file that does not parse fails startup with its path; PluginManager never overwrites a file it could not read. The format is versioned; an unknown version fails startup.
-
-`plugin.fill` is a protected local configuration operation. It fills only a known, unlocked name with no explicit entry and a shipped implementation. Existing entries retain both their selected implementation and enablement; matching enablement returns `unchanged`, otherwise `conflict`. A new entry is persisted before the normal loader/content reconciliation, and retries compare that entry. It neither installs missing plugins nor changes locked names. The agent tool does not expose this operation.
+A name with no entry is in its shipped state: a built-in or default plugin on. Writing goes to a temporary file in the same directory, flushed on its own writable handle (`sync_all`, which also works on Windows), then renamed over `plugins.json`. A file that does not parse fails startup with its path; PluginManager never overwrites a file it could not read. The format is versioned; an unknown version fails startup.
 
 ### 2.3 The default configuration file
 
@@ -251,7 +249,7 @@ PluginManager adds nothing to model context. A plugin's tools and prompt sources
 
 ## 6. Interfaces (summary)
 
-- Management methods, namespace `plugin` (A.1): `list`, `install`, `enable`, `disable`, `reload`, `update`, `remove`, `fill`.
+- Management methods, namespace `plugin` (A.1): `list`, `install`, `enable`, `disable`, `reload`, `update`, `remove`.
 - CLI: `dimcode plugin list | install <path|git-url> [--ref R] [--id ID] [--no-enable] | enable <name> [--use ID|builtin|default] | disable <name> | reload <name> | update <id> | remove <id>`.
 - Agent tool from `PluginTools`: one tool, `plugin`, with one string parameter `command`, written like the CLI's arguments: whitespace separates words, single or double quotes group one (a path with spaces is quoted), and a backslash is an ordinary character, so a Windows path is written as is:
 
@@ -356,7 +354,6 @@ None to rutis: every loader operation used exists in rutis-loader 0.17.1.
 | `plugin.reload` | `{name}` | `{status?, skipped?, refused?, restartRequired?}` |
 | `plugin.update` | `{id, ref?}` | `{commit, status?, skipped?, refused?, restartRequired?}` |
 | `plugin.remove` | `{id}` | `{}` |
-| `plugin.fill` | `{name, enabled}` | `{status: "imported"\|"unchanged"\|"conflict"}` |
 
 `status`, for a name whose plugin in use has code, is the row's `EntryStatus` from `Loader::get`: `Inactive` → `pending` (with `waitingFor` from `Loader::waiting_for`), `Unresolved` → `failed` (with `error`), `Running` → `running`, `Stopped` → `stopped`. A name that is off has no plugin in use and shows `off` instead of a status. `install` and `update` report the phases `fetch`, `check` and `load` through the call's progress sink.
 

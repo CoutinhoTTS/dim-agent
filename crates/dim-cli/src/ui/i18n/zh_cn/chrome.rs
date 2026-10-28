@@ -30,6 +30,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "main 就是会话本身；分支线可以结束，main 不能"
         }
         "Line has ended:" => "该分支线已结束：",
+        "e edit · b branch · f fork" => "e 编辑 · b 分支 · f 派生",
+        "e edit" => "e 编辑",
+        "Fork the session before this message? (y/N)" => "在这条消息之前派生会话？(y/N)",
+        "⑂ new line from {id} · Esc cancel" => "⑂ 从 {id} 开新分支线 · Esc 取消",
+        "A fork copies main; b opens a line here" => "派生只复制 main；按 b 在这里开分支线",
+        "A line opens from text; images and files were not included" => {
+            "分支线只用文字开场；图片和文件未包含在内"
+        }
+        "No finished turn to cut at yet" => "还没有已结束的回合可以切分",
+        "forked {id} · {count} messages" => "已派生 {id} · {count} 条消息",
+        "after message {count}" => "第 {count} 条消息之后",
+        "open a line from the end of the shown line" => "从当前线的末尾开一条分支线",
+        "fork the session at its last finished turn" => "在最近结束的回合处派生会话",
         "Starting" => "启动中",
         "Delegation result" => "委派结果",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {

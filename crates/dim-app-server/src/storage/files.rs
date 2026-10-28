@@ -35,7 +35,7 @@ use tokio::sync::Notify;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// One file's limit: a put is one message, and storage holds it in memory.
-pub(super) const MAX_BYTES: usize = 16 * 1024 * 1024;
+const MAX_BYTES: usize = 16 * 1024 * 1024;
 
 /// The `sessionFiles` service of one SessionStore generation.
 #[derive(Clone)]
@@ -95,7 +95,7 @@ fn storage_failure(failure: FileStorageError) -> SessionFileError {
 /// `[A-Za-z0-9._-]{1,64}` without a leading dot, never FileStorage's account
 /// file or marker in any letter case: `auth.json` would switch replacement to
 /// the account-marker protocol.
-pub(super) fn valid_name(name: &str) -> bool {
+fn valid_name(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && !name.starts_with('.')
         && name
