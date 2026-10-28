@@ -829,7 +829,7 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 - 不带 `--reasoning` 时运行器执行第一阶段：三个推理分组（`inherit`、`off`、`low`），不带目标指令。带 `--reasoning VALUE` 时执行第二阶段：无指令分组加四个 `(α, β)` 分组，`VALUE` 是第一阶段为该模型选定的推理值。
 - `--candidate FILE` 读取一个 UTF-8 文本文件，内容作为候选系统提示。它需要 `--reasoning VALUE`，并取代两个阶段的分组，而不是与它们并列：运行器在同一批用例上运行两个分组 `current` 与 `candidate`，两者都用 `VALUE`，并共用一条目标规则——给了 `--target OUTPUT_SHARE,INPUT_SHARE` 就用它，没有就不写目标。每个份额是大于 0、至多 1 的小数。`--candidate` 缺 `--reasoning`、`--target` 缺 `--candidate`、份额格式错误、文件不是 UTF-8 文本，都在任何模型调用之前拒绝。
 - `--home` 必填，必须是一个隔离的产品 home，由操作者在其中配置好提供方；运行器从不使用 `~/.dimcode` 或 `~/.dimcode-alpha`。凭据留在那个 home 里，不进入仓库、用例或输出。
-- 运行器在该 home 上启动产品配置（与 `graph` 相同），用默认偏好（用户得到的配置）从 `ProviderService::configuration` 为 `--model` 构造对话请求，并在其上解析 `ProductContextModel`。
+- 运行器在该 home 上启动产品配置（与 `graph` 相同），用模型保存的偏好（用户得到的配置）从 `ProviderService::configuration` 为 `--model` 构造对话请求，并在其上解析 `ProductContextModel`。
 - 对每个用例和每个分组，它用进程的 `ModelHost` 和 `ProviderConnectionResolver` 构造产品摘要策略，把分组的工厂配置（目标规则，以及候选分组的候选提示）传给策略，把分组的 `compaction.json` 写进 home，然后用由用例构造的 `CompactionInput` 直接调用 `compact`。因此每个分组都运行已发布的请求构造、分块、截断处理和推理映射，只有可调项不同。
 - 输出（每次运行一份 JSON，加一张 Markdown 表）写到仓库之外的 `--out`。评估跑完后，决定和它的表格作为研究笔记提交（`docs/design/research/summary-eval.md`，英文 + 中文）。
 
@@ -887,6 +887,8 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 
 - `exact` 探针机械检查：规范化空白后，文本原样出现在摘要中。
 - `fact` 和 `absent` 探针由 `--judge` 评判；评判模型尽量与摘要模型不同家族，模型接受时用温度 0。评判模型只看摘要和探针列表，不看记录，对每个探针回答 `present`、`absent` 或 `contradicted`，并附引文。`fact` 为 `present` 时得分；`absent` 探针为 `present` 时算一次违规。评判提示是运行器的一部分。
+- 评判模型就是仪器。同一次评估里，每个分组、每次运行都用同一份评判配置，即评估者搭好的隔离 `--home` 中保存的偏好，每次运行的记录和报告都把它写下来，所以两次评估只有在评判配置相同时才可比。记录里写明评判模型的推理强度、服务档位，以及模型拒绝温度后请求是否回退到不带温度。
+- 运行记录和报告还按分组写下它的摘要请求实际携带的推理强度和服务档位：评估 home 里构建出的配置，加上策略在推理强度上实际施加的值（`off` 记为 `none`）。
 - 记录决定之前，操作者阅读每个分组得分最低的摘要，手工纠正评判错误；纠正列在研究笔记中。
 
 每个模型和分组，在用例和运行次数上统计：事实召回 `F`、exact 召回 `X`、违规 `V`、被截断的回复 `C`（`cutOffCount`）、失败的压缩、摘要 token 中位数 `T`（`estimatedSummaryTokens`）和 `durationMs` 中位数；目标分组还统计比值 `T / S`。实际采用的推理（`reasoning`）与分组值不同的运行计为 `fellBack`，避免模型拒绝该分组时拿分组和自己比较（§13.2）。评判模型没有作答的判断探针单独计入 `unjudged` 列，由操作者手工纠正。失败的压缩没有摘要：它的事实探针和 exact 探针计为未命中，absent 探针计为未违规，且不调用评判模型，因此一次失败会降低 `F` 和 `X`，不会增加 `V`。
