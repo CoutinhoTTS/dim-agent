@@ -132,6 +132,8 @@ Full table: Appendix B.
 
 ## 5. Context mapping
 
+Existing conversations use the generic [recorded conversation input](../recorded-conversations.md) contract. They follow the same adoption path and retain native roles; raw block placement below is unchanged.
+
 | Input form | What the model sees | Placement |
 | --- | --- | --- |
 | Marker block | One user-role message with the verbatim `<dim-<source> kind="...">` element | First, at the input's consumed position |

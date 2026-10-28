@@ -10,11 +10,11 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-const FORMAT: u32 = 20;
+const FORMAT: u32 = 21;
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 20))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 21))",
     ),
     (
         "settings_documents",
@@ -23,6 +23,10 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "provider_imports",
         "CREATE TABLE provider_imports (kind TEXT NOT NULL, id TEXT NOT NULL, source_schema TEXT NOT NULL, source_version INTEGER NOT NULL, source_digest TEXT NOT NULL, PRIMARY KEY (kind, id))",
+    ),
+    (
+        "provider_import_coverage",
+        "CREATE TABLE provider_import_coverage (provider_id TEXT NOT NULL PRIMARY KEY, record TEXT NOT NULL)",
     ),
     (
         "providers",
@@ -96,11 +100,19 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
         "session_metadata",
         "CREATE TABLE session_metadata (session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), revision INTEGER NOT NULL CHECK (revision > 0), title TEXT, title_source TEXT CHECK (title_source IN ('auto', 'manual')), CHECK ((title IS NULL) = (title_source IS NULL)))",
     ),
+    (
+        "conversation_imports",
+        "CREATE TABLE conversation_imports (import_key TEXT NOT NULL PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, agent_id TEXT NOT NULL, request TEXT NOT NULL, next_chunk INTEGER NOT NULL CHECK(next_chunk >= 0), committed INTEGER NOT NULL CHECK(committed IN (0, 1)))",
+    ),
+    (
+        "conversation_import_files",
+        "CREATE TABLE conversation_import_files (import_key TEXT NOT NULL REFERENCES conversation_imports(import_key), source_id TEXT NOT NULL, name TEXT NOT NULL, sha256 TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes >= 0), content BLOB NOT NULL, receipt TEXT, PRIMARY KEY (import_key, source_id))",
+    ),
 ];
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 6] = [
+const UPGRADES: [(u32, &[&str]); 7] = [
     (
         13,
         &[
@@ -120,6 +132,14 @@ const UPGRADES: [(u32, &[&str]); 6] = [
     // omit `tools`, which a v18 daemon cannot decode; the marker only.
     (18, &[]),
     (19, &[]),
+    (
+        20,
+        &[
+            "conversation_imports",
+            "conversation_import_files",
+            "provider_import_coverage",
+        ],
+    ),
 ];
 
 fn format_table(version: u32) -> String {

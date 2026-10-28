@@ -117,7 +117,7 @@ impl Default for HistoryRenderer {
         Self {
             render: project_context_history,
             checkpoint: projection_checkpoint,
-            checkpoint_interpreter: "dim/context-projection/v3",
+            checkpoint_interpreter: "dim/context-projection/v4",
             encode_checkpoint,
             decode_checkpoint,
         }
@@ -175,30 +175,56 @@ struct ProjectionEntry {
 }
 
 /// Raw blocks in order, then the operator's words; each is one message.
-fn render_input(event: &AgentEvent, input: &InputMessageData) -> Vec<ProjectionEntry> {
-    let mut entries: Vec<_> = input
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(index, block)| {
-            let InputBlock::Raw { text, key, retire } = block;
-            let message = Message::text(Role::User, text);
-            ProjectionEntry {
-                id: format!("{}:block:{index}", event.id),
-                state: key.as_ref().map(|key| {
-                    (
-                        key.clone(),
-                        (!retire).then(|| ContextBaselineEntry {
-                            key: key.clone(),
-                            source_event: event.id.clone(),
-                            message: message.clone(),
-                        }),
-                    )
-                }),
-                message,
+fn render_input(
+    event: &AgentEvent,
+    input: &InputMessageData,
+) -> Result<Vec<ProjectionEntry>, String> {
+    let mut entries = Vec::new();
+    for (index, block) in input.blocks.iter().enumerate() {
+        match block {
+            InputBlock::Messages {
+                source,
+                messages,
+                context_error,
+            } => {
+                if let Some(reason) = context_error {
+                    return Err(format!("Recorded context is unavailable: {reason}"));
+                }
+                if !messages.iter().any(|record| record.in_context) {
+                    continue;
+                }
+                entries.push(ProjectionEntry {
+                    id: format!("{}:block:{index}", event.id),
+                    message: Message::text(Role::User, source),
+                    state: None,
+                });
+                for record in messages.iter().filter(|record| record.in_context) {
+                    entries.push(ProjectionEntry {
+                        id: format!("{}:block:{index}:{}", event.id, record.id),
+                        message: record.message.clone(),
+                        state: None,
+                    });
+                }
             }
-        })
-        .collect();
+            InputBlock::Raw { text, key, retire } => {
+                let message = Message::text(Role::User, text);
+                entries.push(ProjectionEntry {
+                    id: format!("{}:block:{index}", event.id),
+                    state: key.as_ref().map(|key| {
+                        (
+                            key.clone(),
+                            (!retire).then(|| ContextBaselineEntry {
+                                key: key.clone(),
+                                source_event: event.id.clone(),
+                                message: message.clone(),
+                            }),
+                        )
+                    }),
+                    message,
+                });
+            }
+        }
+    }
     if let Some(user) = &input.user {
         entries.push(ProjectionEntry {
             id: event.id.clone(),
@@ -206,7 +232,7 @@ fn render_input(event: &AgentEvent, input: &InputMessageData) -> Vec<ProjectionE
             state: None,
         });
     }
-    entries
+    Ok(entries)
 }
 
 fn user_message(user: &UserInput) -> Message {
@@ -290,7 +316,7 @@ fn replay(
                         data.input_id
                     )
                 })?;
-                for projection in render_input(event, &input) {
+                for projection in render_input(event, &input)? {
                     apply(&mut history, &mut delivered_state, projection);
                 }
             }

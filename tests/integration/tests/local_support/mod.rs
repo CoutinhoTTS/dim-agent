@@ -521,7 +521,9 @@ pub async fn inputs(session: &Session) -> Vec<InputMessageData> {
 pub fn state_value(input: &InputMessageData, source: &str) -> Option<Option<String>> {
     let open = format!("<dim-state source=\"{source}\"");
     input.blocks.iter().find_map(|block| {
-        let InputBlock::Raw { text, retire, .. } = block;
+        let InputBlock::Raw { text, retire, .. } = block else {
+            return None;
+        };
         let rest = text.strip_prefix(&open)?;
         if *retire {
             return Some(None);

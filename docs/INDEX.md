@@ -12,6 +12,8 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Development plan and priorities](design/roadmap.md)（中文）
 - [Agent context: goals and requirements to define](design/agent-context.md)（中文；branches, compaction, model prompts; requirements, not design）
 - [Migration plugin proposal](design/plugins/Migration.md)（中文；on-demand legacy data import, native-role history, retry and incremental import; implementation plan included）
+- [Recorded conversation inputs](design/recorded-conversations.md): native roles, readable history and effective context through adopted input
+- [Recoverable conversation import](design/appserver/conversation-import.md): bounded history/files, unpublished staging and atomic publication
 - [Plugin management: requirements](design/plugin-management.md)（中文；one plugin concept, install, reload, replacement; requirements, not design）
 - [Document templates](templates/README.md)
 - [ADR 002 — Plugin scope](adr/002-plugin-scope.md)（[中文](zh/adr/002-plugin-scope.md)）

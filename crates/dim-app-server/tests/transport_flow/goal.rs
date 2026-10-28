@@ -77,7 +77,9 @@ async fn goal_writes(session: &dim_agent_runtime::Session, branch: &str) -> Vec<
         .iter()
         .filter_map(|event| match &event.kind {
             EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
-                let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                let dim_agent_types::InputBlock::Raw { text, .. } = block else {
+                    return None;
+                };
                 text.starts_with("<dim-goal ")
                     .then(|| (event.sequence, text.lines().next().unwrap().to_owned()))
             }),
@@ -134,7 +136,9 @@ async fn goal_block(session: &dim_agent_runtime::Session, branch: &str, needle: 
         .rev()
         .find_map(|event| match &event.kind {
             EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
-                let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                let dim_agent_types::InputBlock::Raw { text, .. } = block else {
+                    return None;
+                };
                 (text.starts_with("<dim-goal ") && text.lines().next().unwrap().contains(needle))
                     .then(|| text.clone())
             }),
@@ -865,9 +869,11 @@ async fn node_goal_on_a_line_behaves_as_on_main() {
         .unwrap()
         .iter()
         .find_map(|event| match &event.kind {
-            EventKind::InputMessage(data) => data.blocks.first().map(|block| {
-                let dim_agent_types::InputBlock::Raw { text, .. } = block;
-                (text.clone(), data.user.clone())
+            EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
+                let dim_agent_types::InputBlock::Raw { text, .. } = block else {
+                    return None;
+                };
+                Some((text.clone(), data.user.clone()))
             }),
             _ => None,
         })
@@ -1036,7 +1042,9 @@ async fn node_goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() 
         .iter()
         .find_map(|event| match &event.kind {
             EventKind::InputMessage(data) => data.blocks.first().and_then(|block| {
-                let dim_agent_types::InputBlock::Raw { text, .. } = block;
+                let dim_agent_types::InputBlock::Raw { text, .. } = block else {
+                    return None;
+                };
                 text.starts_with(r#"<dim-goal kind="report""#)
                     .then(|| (data.blocks.len(), text.lines().next().unwrap().to_owned()))
             }),

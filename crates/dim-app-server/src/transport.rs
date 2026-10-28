@@ -706,6 +706,14 @@ async fn run_connection(
                                         ]);
                                         if hub.config().database_path.is_some() {
                                             features.push("session.fork");
+                                            if local {
+                                                features.extend([
+                                                    "session.import.begin",
+                                                    "session.import.chunk",
+                                                    "session.import.file",
+                                                    "session.import.finish",
+                                                ]);
+                                            }
                                         }
                                     }
                                     if trusted && hub.config().local_execution() {

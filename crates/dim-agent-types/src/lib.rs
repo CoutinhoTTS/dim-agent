@@ -2,6 +2,7 @@
 
 mod checkpoint;
 mod content;
+mod conversation;
 mod events;
 mod model;
 mod permission;
@@ -12,6 +13,7 @@ pub mod v1;
 
 pub use checkpoint::*;
 pub use content::*;
+pub use conversation::*;
 pub use events::*;
 pub use model::*;
 pub use permission::*;

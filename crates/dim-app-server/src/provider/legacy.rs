@@ -23,6 +23,7 @@ pub struct ImportItem {
     pub id: String,
     pub status: ImportStatus,
     pub reason: Option<String>,
+    pub omitted: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,6 +42,58 @@ struct Snapshot {
     schema: String,
     providers: Vec<SourceRow>,
     selections: Vec<SourceRow>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Coverage {
+    fields: BTreeMap<String, String>,
+    target: StaticProviderRecord,
+}
+
+fn covered_fields(source: &SourceRow) -> Result<BTreeMap<String, String>, String> {
+    let mut fields = BTreeMap::new();
+    for name in [
+        "source",
+        "displayName",
+        "driverKind",
+        "defaultBaseUrl",
+        "baseUrl",
+        "auth",
+        "credential",
+        "headers",
+        "proxy",
+        "timeoutMs",
+        "models",
+        "modelConfigOverrides",
+        "modelsSource",
+        "enabled",
+    ] {
+        fields.insert(
+            name.into(),
+            format!(
+                "{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&source.fields[name])
+                        .map_err(|_| "Cannot fingerprint Provider field")?
+                )
+            ),
+        );
+    }
+    let metadata: Option<Map<String, Value>> = json_field(&source.fields, "metadata")?;
+    for name in ["enabledModelIds", "disabledModelIds", "modelPreferences"] {
+        fields.insert(
+            format!("metadata.{name}"),
+            format!(
+                "{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&metadata.as_ref().and_then(|value| value.get(name)))
+                        .map_err(|_| "Cannot fingerprint Provider metadata")?
+                )
+            ),
+        );
+    }
+    Ok(fields)
 }
 
 fn read_source(path: PathBuf, cancel: &CancellationToken) -> Result<Snapshot, HostError> {
@@ -261,12 +314,7 @@ fn convert_provider(
     }
     for name in ["accountUsageSettings", "retryConfig", "capabilityDefaults"] {
         let value: Option<Value> = json_field(fields, name)?;
-        if value.as_ref().is_some_and(|value| {
-            !matches!(value, Value::Object(fields) if fields.is_empty())
-                && !matches!(value, Value::Array(items) if items.is_empty())
-        }) {
-            return Err(format!("Unsupported legacy field: {name}"));
-        }
+        let _ = value;
     }
     let _: Option<String> = field(fields, "activeModelId")?;
     let source_kind: String = field(fields, "source")?;
@@ -432,14 +480,6 @@ fn convert_provider(
     }
     let metadata =
         json_field::<Option<Map<String, Value>>>(fields, "metadata")?.unwrap_or_default();
-    if metadata.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "enabledModelIds" | "disabledModelIds" | "modelPreferences"
-        )
-    }) {
-        return Err("Unsupported provider metadata; source preserved".into());
-    }
     let model_preferences: BTreeMap<String, ModelPreferences> = metadata
         .get("modelPreferences")
         .map(|value| serde_json::from_value(value.clone()))
@@ -522,6 +562,29 @@ fn convert_provider(
     Ok(record)
 }
 
+fn omitted_fields(source: &SourceRow) -> Result<Vec<String>, String> {
+    let mut omitted = Vec::new();
+    for name in ["accountUsageSettings", "retryConfig", "capabilityDefaults"] {
+        let value: Option<Value> = json_field(&source.fields, name)?;
+        if value.as_ref().is_some_and(|value| {
+            !matches!(value, Value::Object(fields) if fields.is_empty())
+                && !matches!(value, Value::Array(items) if items.is_empty())
+        }) {
+            omitted.push(name.into());
+        }
+    }
+    let metadata: Option<Map<String, Value>> = json_field(&source.fields, "metadata")?;
+    for key in metadata
+        .into_iter()
+        .flat_map(|value| value.into_iter().map(|(key, _)| key))
+    {
+        if !["enabledModelIds", "disabledModelIds", "modelPreferences"].contains(&key.as_str()) {
+            omitted.push(format!("metadata.{key}"));
+        }
+    }
+    Ok(omitted)
+}
+
 impl ProviderService {
     pub async fn import_legacy(
         self: &Arc<Self>,
@@ -541,9 +604,48 @@ impl ProviderService {
                 let mut imported = HashSet::new();
                 for (kind, rows) in [("provider", snapshot.providers), ("selection", snapshot.selections)] {
                     for source in rows {
+                        let omitted = if kind == "provider" { match omitted_fields(&source) {
+                            Ok(omitted) => omitted,
+                            Err(reason) => { items.push(ImportItem {kind,id:source.id,status:ImportStatus::Rejected,reason:Some(reason),omitted:Vec::new()}); continue; }
+                        }} else {Vec::new()};
                         let seen: Option<String> = tx.query_row("SELECT source_digest FROM provider_imports WHERE kind=?1 AND id=?2", params![kind, source.id], |row| row.get(0)).optional().map_err(storage)?;
                         if let Some(digest) = seen {
-                            items.push(ImportItem { kind, id: source.id, status: ImportStatus::AlreadyImported, reason: Some(if digest == source.digest { "Source row was already imported" } else { "Previously imported identity changed; automatic replay refused" }.into()) });
+                            let body: Option<String> = if kind == "provider" {tx.query_row("SELECT record FROM provider_import_coverage WHERE provider_id=?1",[&source.id],|row|row.get(0)).optional().map_err(storage)?} else {None};
+                            let mut status = if digest == source.digest {ImportStatus::AlreadyImported} else {ImportStatus::Rejected};
+                            let mut reason = if digest == source.digest {"Source identity was already imported"} else {"Previously imported identity changed; automatic replay refused"};
+                            if let Some(body) = body {
+                                let covered:Coverage=serde_json::from_str(&body).map_err(|_|storage("Provider import coverage is unreadable"))?;
+                                match covered_fields(&source) {
+                                    Err(_) => {status=ImportStatus::Rejected;reason="Source fields cannot be checked against their import coverage";},
+                                    Ok(fields) if covered.fields.iter().any(|(field,digest)|fields.get(field)!=Some(digest)) => {status=ImportStatus::Rejected;reason="Previously imported fields changed; target preserved";},
+                                    Ok(fields) => {
+                                        status=ImportStatus::AlreadyImported;
+                                        reason="Covered fields retained; omitted fields remain eligible for later import";
+                                        if let Some(current)=read_static(&tx,&source.id)? {
+                                            imported.insert(source.id.clone());
+                                            if fields.keys().any(|field|!covered.fields.contains_key(field)) {
+                                                if serde_json::to_value(&current).map_err(storage)? != serde_json::to_value(&covered.target).map_err(storage)? {
+                                                    status=ImportStatus::Rejected;reason="Target Provider changed; newly supported fields were preserved at source";
+                                                } else {
+                                                    let previous=if current.kind==StaticRecordKind::Builtin {let mut previous=current.clone();previous.version=1;Some(previous)} else {None};
+                                                    match convert_provider(&source,previous) {
+                                                        Err(_) => {status=ImportStatus::Rejected;reason="Newly supported fields are incompatible";},
+                                                        Ok(mut target) => {
+                                                            target.version=current.version.checked_add(1).ok_or_else(||storage("Provider version exhausted"))?;
+                                                            tx.execute("UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",params![source.id,target.version,serde_json::to_string(&target).map_err(storage)?]).map_err(storage)?;
+                                                            let covered=Coverage {fields,target};
+                                                            tx.execute("UPDATE provider_import_coverage SET record=?2 WHERE provider_id=?1",params![source.id,serde_json::to_string(&covered).map_err(storage)?]).map_err(storage)?;
+                                                            status=ImportStatus::Imported;
+                                                            reason="Newly supported fields imported";
+                                                        },
+                                                    }
+                                                }
+                                            }
+                                        } else {reason="Target Provider was deleted; import does not restore it";}
+                                    },
+                                }
+                            } else if kind=="provider" && matches!(status,ImportStatus::AlreadyImported) && read_static(&tx,&source.id)?.is_some() {imported.insert(source.id.clone());}
+                            items.push(ImportItem {kind,id:source.id,status,omitted,reason:Some(reason.into())});
                             continue;
                         }
                         let result: Result<(), String> = if kind == "provider" {
@@ -554,6 +656,9 @@ impl ProviderService {
                                 Ok(record) if record.kind == StaticRecordKind::Custom && bundled.provider(&source.id).is_some() => Err("Builtin identity cannot be imported as custom".into()),
                                 Ok(record) => {
                                     tx.execute("INSERT INTO providers(provider_id,version,record) VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![source.id, record.version, serde_json::to_string(&record).map_err(storage)?]).map_err(storage)?;
+                                    let fields=covered_fields(&source).map_err(storage)?;
+                                    let covered=Coverage {fields,target:record};
+                                    tx.execute("INSERT INTO provider_import_coverage(provider_id,record) VALUES (?1,?2)",params![source.id,serde_json::to_string(&covered).map_err(storage)?]).map_err(storage)?;
                                     imported.insert(source.id.clone());
                                     Ok(())
                                 }
@@ -576,9 +681,9 @@ impl ProviderService {
                         match result {
                             Ok(()) => {
                                 tx.execute("INSERT INTO provider_imports(kind,id,source_schema,source_version,source_digest) VALUES (?1,?2,?3,?4,?5)", params![kind, source.id, snapshot.schema, source.version, source.digest]).map_err(storage)?;
-                                items.push(ImportItem { kind, id: source.id, status: ImportStatus::Imported, reason: None });
+                                items.push(ImportItem { kind, id: source.id, status: ImportStatus::Imported, reason: None, omitted });
                             }
-                            Err(reason) => items.push(ImportItem { kind, id: source.id, status: ImportStatus::Rejected, reason: Some(reason) }),
+                            Err(reason) => items.push(ImportItem { kind, id: source.id, status: ImportStatus::Rejected, reason: Some(reason), omitted }),
                         }
                     }
                 }

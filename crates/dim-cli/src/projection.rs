@@ -170,6 +170,42 @@ impl Projection {
         let sequence = event.sequence;
         match &event.content {
             EventContent::Input(data) => {
+                for (index, block) in data.blocks.iter().enumerate() {
+                    if let dim_agent_types::InputBlock::Messages {
+                        source,
+                        messages,
+                        context_error,
+                    } = block
+                    {
+                        self.push(
+                            format!("source-{sequence}-{index}"),
+                            RowKind::Status,
+                            source.clone(),
+                        );
+                        for record in messages {
+                            let kind = match record.message.role {
+                                dim_agent_types::Role::User => RowKind::UserMessage,
+                                dim_agent_types::Role::Assistant => RowKind::AssistantMessage,
+                                dim_agent_types::Role::ToolResult => RowKind::Status,
+                            };
+                            let mut text = recorded_text(&record.message);
+                            if let Some(time) = &record.created_at {
+                                text = format!("[{time}]\n{text}");
+                            }
+                            if !record.in_context {
+                                text = format!("[History only]\n{text}");
+                            }
+                            self.push(
+                                format!("recorded-{sequence}-{index}-{}", record.id),
+                                kind,
+                                text,
+                            );
+                        }
+                        if let Some(reason) = context_error {
+                            self.push_error(format!("Recorded context is unavailable: {reason}"));
+                        }
+                    }
+                }
                 if let Some(user) = &data.user {
                     let held = self.running && data.mode != Some(InputMode::Append);
                     if held {
@@ -177,14 +213,16 @@ impl Projection {
                     } else {
                         self.push_user(sequence, user);
                     }
-                } else if let Some(text) = data.blocks.iter().find_map(|block| {
-                    let dim_agent_types::InputBlock::Raw { text, .. } = block;
-                    ShellRun::parse(text).is_some().then(|| text.clone())
+                } else if let Some(text) = data.blocks.iter().find_map(|block| match block {
+                    dim_agent_types::InputBlock::Raw { text, .. } => {
+                        ShellRun::parse(text).is_some().then(|| text.clone())
+                    }
+                    _ => None,
                 }) {
                     self.push(format!("user-{sequence}"), RowKind::Shell, text);
-                } else if let Some(row) = data.blocks.iter().find_map(|block| {
-                    let dim_agent_types::InputBlock::Raw { text, .. } = block;
-                    branch_notice(text, data.mode)
+                } else if let Some(row) = data.blocks.iter().find_map(|block| match block {
+                    dim_agent_types::InputBlock::Raw { text, .. } => branch_notice(text, data.mode),
+                    _ => None,
                 }) {
                     self.push(format!("line-{sequence}"), RowKind::Status, row);
                 }
@@ -981,6 +1019,49 @@ impl Projection {
     }
 }
 
+pub(crate) fn recorded_text(message: &dim_agent_types::Message) -> String {
+    use dim_agent_types::{MessageContent, MessagePart};
+    match &message.content {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .map(|part| match part {
+                MessagePart::Text { text, .. } => text.clone(),
+                MessagePart::Thinking { thinking, .. } => format!("[Thinking]\n{thinking}"),
+                MessagePart::Image { source } => {
+                    format!("[Image attachment: {}]", source.media_type)
+                }
+                MessagePart::ToolUse {
+                    id, name, input, ..
+                } => format!(
+                    "[Tool call: {name} ({id})]\n{}",
+                    serde_json::Value::Object(input.clone())
+                ),
+                MessagePart::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                    ..
+                } => {
+                    let text = match content {
+                        ToolContent::Text(text) => text.clone(),
+                        ToolContent::Blocks(blocks) => text_of(blocks),
+                    };
+                    format!(
+                        "[Tool result: {tool_use_id}{}]\n{text}",
+                        if *is_error == Some(true) {
+                            ", error"
+                        } else {
+                            ""
+                        }
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 pub(crate) fn result_text(result: &ToolResult) -> String {
     match &result.content {
         ToolContent::Text(text) => text.clone(),
@@ -1050,6 +1131,34 @@ fn text_of(blocks: &[ContentBlock]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_messages_remain_individual_rows_with_source_and_context_status() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[serde_json::json!({
+                "id":"import-input", "sequence":1, "create_at":1000,
+                "type":"input", "name":"message", "data":{
+                    "mode":"append", "blocks":[{"type":"messages", "source":"Imported from legacy Session s", "messages":[
+                        {"id":"u", "createdAt":"2026-01-01", "message":{"role":"user","content":"old user"},"inContext":false},
+                        {"id":"a", "message":{"role":"assistant","content":"old assistant"},"inContext":true},
+                        {"id":"t", "message":{"role":"tool_result","content":[{"type":"tool_result","tool_use_id":"call-1","content":"old result"}]},"inContext":false}
+                    ]}]
+                }
+            })],
+        );
+        let view = projection.snapshot();
+        assert_eq!(view.rows.len(), 4);
+        assert_eq!(view.rows[0].kind, RowKind::Status);
+        assert_eq!(view.rows[1].kind, RowKind::UserMessage);
+        assert!(view.rows[1].text.contains("2026-01-01"));
+        assert!(view.rows[1].text.contains("History only"));
+        assert_eq!(view.rows[2].kind, RowKind::AssistantMessage);
+        assert_eq!(view.rows[2].text, "old assistant");
+        assert!(view.rows[3].text.contains("call-1"));
+        assert!(view.rows[3].text.contains("old result"));
+    }
 
     fn apply(projection: &mut Projection, events: &[serde_json::Value]) {
         for event in events {

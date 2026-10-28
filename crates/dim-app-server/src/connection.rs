@@ -339,6 +339,18 @@ impl Connection {
         *self.version.get().expect("handshake precedes requests")
     }
     fn validate_call(&self, rpc: &RpcService, call: &Call) -> Result<(), RpcError> {
+        if call.is_conversation_import() {
+            if self.protocol_version() < 3 || rpc.config.database_path.is_none() {
+                return Err(RpcError::unknown_method());
+            }
+            if self.entry != Entry::Local {
+                return Err(RpcError::app(
+                    -32000,
+                    "local_transport_required",
+                    "Conversation import requires a protected local connection",
+                ));
+            }
+        }
         if call.is_web_entry() || call.is_ui_host() {
             if self.protocol_version() < 3 {
                 return Err(RpcError::app(
@@ -665,6 +677,30 @@ impl Connection {
                 return None;
             }
             Call::Create(params) => self.create(rpc, params).await,
+            Call::ConversationBegin(params) => rpc
+                .index
+                .import_begin(params)
+                .await
+                .map(Reply::ConversationImport)
+                .map_err(RpcError::from),
+            Call::ConversationChunk(params) => rpc
+                .index
+                .import_chunk(params)
+                .await
+                .map(Reply::ConversationImport)
+                .map_err(RpcError::from),
+            Call::ConversationFile(params) => rpc
+                .index
+                .import_file(params, rpc.unloading.clone())
+                .await
+                .map(Reply::ConversationFile)
+                .map_err(RpcError::from),
+            Call::ConversationFinish(params) => rpc
+                .index
+                .import_finish(params.key)
+                .await
+                .map(Reply::ConversationImport)
+                .map_err(RpcError::from),
             Call::List(params) | Call::Summaries(params) => {
                 let filter: Option<String> = if self.protocol_version() >= 3 {
                     params.agent_id

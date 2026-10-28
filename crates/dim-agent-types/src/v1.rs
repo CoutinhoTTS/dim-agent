@@ -677,6 +677,15 @@ impl Serialize for KindRef<'_> {
             results: Vec<ResultItem<'a>>,
         }
         if let crate::EventKind::InputMessage(data) = self.0 {
+            if data
+                .blocks
+                .iter()
+                .any(|block| matches!(block, crate::InputBlock::Messages { .. }))
+            {
+                return Err(serde::ser::Error::custom(
+                    "recorded conversation inputs require protocol v3",
+                ));
+            }
             let text = data
                 .user
                 .iter()

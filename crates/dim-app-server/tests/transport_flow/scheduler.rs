@@ -2091,9 +2091,10 @@ async fn node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_i
                         if let EventKind::InputMessage(data) = &event.kind
                             && data.submission_id.as_deref() == Some(&submission)
                         {
-                            data.blocks
-                                .first()
-                                .map(|dim_agent_types::InputBlock::Raw { text, .. }| text)
+                            data.blocks.first().and_then(|block| match block {
+                                dim_agent_types::InputBlock::Raw { text, .. } => Some(text),
+                                _ => None,
+                            })
                         } else {
                             None
                         }
