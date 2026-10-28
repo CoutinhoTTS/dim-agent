@@ -49,7 +49,7 @@ pub fn install(builder: &mut AgentBuilder) {
 fn recall_definition() -> ToolDefinition {
     let mut definition = definition(
         RECALL_TOOL,
-        "Recall what happened earlier in this conversation: what the user said, what you did and what came back. With no arguments it lists past turns; open a turn or anything in it by its id, or search with about.",
+        "Recall what happened earlier in this conversation, including what a compaction summarized: what the user said, what you did and what came back. With no arguments it lists past turns; open a turn or anything in it by its id, or search with about. A shortened input that ends in [input <id>] is read in full by opening that id.",
         json!({
             "type": "object",
             "properties": {
