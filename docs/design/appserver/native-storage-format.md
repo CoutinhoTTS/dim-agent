@@ -1,34 +1,33 @@
 # Rust 会话存储格式
 
-The current native format is **v20**, with source-owned `settings_documents`,
+The current native format is **v21**, with source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
-configurations and Agent profiles that may omit their mount list, and the two
-branch end events. Startup requires the exact v20 SQL schema and a single
-format marker of 20 before writable PRAGMAs, or the exact v19, v18, v17, v16,
-v15 or v13 schema with its own marker, which the same startup transaction
-upgrades in place to v20 one step after another ([S5a v15 decision](#s5a-v15-格式决定),
+configurations and Agent profiles that may omit their mount list, the two
+branch end events, and the tool-effect and digest fields. Startup requires the
+exact v21 SQL schema and a single format marker of 21 before writable PRAGMAs,
+or the exact v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
+which the same startup transaction upgrades in place to v21 one step after
+another ([S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
-[#427 v20 decision](#427-v20-格式决定)). Older databases and the removed
+[#427 v20 decision](#427-v20-格式决定), [#527 v21 decision](#527-v21-格式决定)).
+Older databases and the removed
 branch-only v14 `user_configuration` format are unsupported and preserved, never
-migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19 or v20. No
-migration API or startup option is provided. S5c (Session deletion and fork) kept
-v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain valid in
-v20, and v16 request rows stay readable as written. #527 decided v21 for its
-tool-effect field and the digest entries a completed `context/compaction`
-records; that step takes effect with #527's implementation, and until then the
-current format stays v20 ([#527 v21 decision](#527-v21-格式决定)).
+migrated, downgraded or interpreted as v13, v15, v16, v17, v18, v19, v20 or v21.
+No migration API or startup option is provided. S5c (Session deletion and fork)
+kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
+valid in v21, and v16 request rows stay readable as written.
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
 in loader rows, events, diagnostics, Sessions or Timelines.
 
-## Current v20 tables
+## Current v21 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 20)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 21)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -344,7 +343,7 @@ ProjectionCheckpoint = {
 
 ### #329 格式决定
 
-[Provider 完整管理 #329](https://github.com/arcships/dim/issues/329) 的格式决定沿用当时当前的 **v19，不额外改变格式号或 SQL 结构**（#364 已决定 v18 → v19；其后 #427 升到 v20，本决定随之保持）；具体合同见[Provider 管理 §6](provider-management.md#6-persistence-existing-sessions-and-migration)。
+[Provider 完整管理 #329](https://github.com/arcships/dim/issues/329) 的格式决定沿用当时当前的 **v19，不额外改变格式号或 SQL 结构**（#364 已决定 v18 → v19；其后 #427 升到 v20、#527 升到 v21，本决定随之保持）；具体合同见[Provider 管理 §6](provider-management.md#6-persistence-existing-sessions-and-migration)。
 这是对上文保持版本条件中“旧写入器不会重写丢失新值”的明确例外，按首次发布前的开发阶段兼容范围接受。
 
 - 只增加三个可选顶层 JSON 字段：静态记录的 `userModels: ModelEntry[]`、静态/托管记录的 `modelPreferences: Record<modelId, ModelPreferences>`，以及静态记录的 `endpointOverrides: Record<modelId, NewApiEndpoint>`。缺失表示无对应用户数据；默认模型与用户新增列表分开。
@@ -357,7 +356,7 @@ ProjectionCheckpoint = {
 
 [Timeline 分支](../timeline-branches.md#16-format)（#427）的格式决定：升级到 **v20**，从 v19 原地升级。
 
-- **状态**：当前格式是 v20。
+- **状态**：v20 已随 #427 的实现生效；当前格式由 [#527 v21 格式决定](#527-v21-格式决定) 升到 v21。
 - **只增两种核心事件**：两者都以 `encoding: "event"` 写入普通 `event` 行，不进输出行、不带请求引用。行结构、内容寻址和其他记录的字节不变。
   - `branch/end` 写在要结束的分支上，`data` 为 `{source, ancestor?}`。`source` 是 `branch/create` 已在用的 `BranchSource`：`{kind: "tool", turn_id, request_id, call_id}` 或 `{kind: "host", operation_id}`。`ancestor` 是分支 ID，只在因祖先结束而结束时出现。
   - `branch/ended` 写在其父分支上，`data` 为 `{branch, endEvent, source, ancestor?}`。`endEvent` 是 `branch/end` 在结束分支上的序号（安全整数），`source` 与 `ancestor` 取自 `branch/end`（[Timeline 分支 §10](../timeline-branches.md#10-ending-a-line)）。
@@ -389,7 +388,7 @@ ProjectionCheckpoint = {
 
 [工具效果](../contracts/session-boundary.md#a6-tool-effects)与[压缩清单](../plugins/ContextCompaction.md#510-class-3a-the-digest)（#527）的格式决定：升级到 **v21**，从 v20 原地升级。
 
-- **状态**：由 #527 决定，随其实现生效。在那之前当前格式仍是 v20，本文其余部分描述的都是 v20。
+- **状态**：当前格式是 v21。
 - **只增两处可选字段**：SQL 结构、表、列、索引、内容寻址与其他记录的字节都不变。
   - `ToolResult.effects`：`step/tool-result` 的 `result` 上一个可选的效果声明数组；不声明任何效果的工具不写它，此前写下的事件也都没有它。
   - 已完成 `context/compaction` 的 `digest_entries`：清单条目（按顺序）与 `dropped`；没有清单消息的压缩不写它。
@@ -406,6 +405,7 @@ ProjectionCheckpoint = {
   - 其他库（标记不符的结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
 - **旧版本的失败方式**：v20 守护进程以现有的"unsupported SQLite schema … preserved"错误在启动时拒绝整个 v21 库，因为其启动门禁比较精确的 SQL 结构，而 `agent_store_format` 的 `CHECK (version = 21)` 已不同。它不会等到恢复含这两种值的 Session 时才失败。
 - **单向**：不做备份，与之前各步相同。升级日志沿用同一行：`Upgraded native store <path> from format v20 to v21; earlier dimcode versions cannot open it.`
+- **验证**：用 v20 结构和完整记录示例构建一次性 v20 库，升级后核对结构恰为 v21、标记为 21、业务行逐行不变；v19、v18、v17、v16、v15、v13 库一次升级到 v21；标记不符的 v20、v21 结构和升级到一半的库被拒绝并保留；从不打开用户已有的库（`storage_flow.rs` 的 `a_v20_store_upgrades_in_place_once` 及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration`）。
 
 ## 索引与实际查询
 
@@ -438,7 +438,7 @@ ProjectionCheckpoint = {
 
 当前两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段、协作表和旧记录回填在业务范围确定后另行设计。
 
-## 完整记录示例（v20）
+## 完整记录示例（v21）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -451,7 +451,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 20}],
+  "agent_store_format": [{"version": 21}],
   "settings_documents": [],
   "providers": [],
   "provider_selections": [],
