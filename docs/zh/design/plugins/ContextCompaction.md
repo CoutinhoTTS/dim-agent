@@ -2,7 +2,7 @@
 
 状态：已在 F1 分支实现（设计已批准；实现说明见 §12）。路线图项 F1（[#72](https://github.com/arcships/dim/issues/72)）。
 总体设计：[附录 B.1 ContextPreparation 行](../overview.md#b1-session-与分支-capability)。
-作用域：[ADR 002](../../adr/002-plugin-scope.md)：若干 Session 部件，加上对现有分支 Capability Loop 与 ContextPreparation 的补充。§12 记录实现对本文的细化。触发点、保留与恢复规则遵循 [#128](https://github.com/arcships/dim/issues/128) 的研究（[compaction-trigger](../research/compaction-trigger.md)）；其中的余量和保留份额是暂定的经验值。§13 是摘要评估、摘要器推理与目标长度的已批准设计（[#170](https://github.com/arcships/dim/issues/170)）；默认值由运行该评估决定（§13.4）。英文版：[ContextCompaction](../../../design/plugins/ContextCompaction.md)。
+作用域：[ADR 002](../../adr/002-plugin-scope.md)：若干 Session 部件，加上对现有分支 Capability Loop 与 ContextPreparation 的补充。§12 记录实现对本文的细化。触发点、保留与恢复规则遵循 [#128](https://github.com/arcships/dim/issues/128) 的研究（[compaction-trigger](../research/compaction-trigger.md)）；其中的余量和保留份额是暂定的经验值。§13 是摘要评估、摘要器推理与目标长度的已批准设计（[#170](https://github.com/arcships/dim/issues/170)）；默认值由运行该评估决定（§13.4）。§14 把 [#428 §7.1](../compaction-quality.md#71-contextcompaction) 的压缩质量需求对应到回答它们的各节。英文版：[ContextCompaction](../../../design/plugins/ContextCompaction.md)。
 
 ## 1. 概要
 
@@ -10,7 +10,7 @@
 
 压缩是 Loop 控制上下文窗口的一部分。它是 Loop 的一个步骤，和模型调用、工具批次一样，不绑定 turn。压缩步骤运行期间，Loop 不推进到下一步。否则压缩期间上下文可能溢出，新事件也会基于旧上下文决定，与替换内容不一致。
 
-自动压缩已经在请求的准备中运行（`context/prepare` → 压缩 → `model/call`），Loop 等待该请求的终态（[context_policy.rs](../../../../crates/dim-agent-capabilities/src/context_policy.rs)）。但它在生产环境里从不运行，因为 App Server 绑定的是 `ContextModelHost(None)`（[main.rs](../../../../crates/dim-app-server/src/main.rs)）。
+自动压缩已经在请求的准备中运行（`context/prepare` → 压缩 → `model/call`），Loop 等待该请求的终态（[context_policy.rs](../../../../crates/dim-agent-capabilities/src/context_policy.rs)）。它在所有经 `defaults::install_compaction` 安装它的配置里运行（[cli.rs](../../../../crates/dim-app-server/src/cli.rs)）：产品配置和 `--models` 配置。各配置绑定什么见 §4.4。
 
 F1 把压缩分成三层（§2.2），并新增：
 
@@ -80,7 +80,7 @@ Loop 在一个受跟踪的任务中，调用 `ContextPolicy::compact_step` 自�
 | --- | --- | --- | --- |
 | 机制 | 压缩何时运行，以及运行期间 Loop 停住：准备中的自动触发、Loop 的手动步骤、保留规则、验收、提交 | Loop、ContextPolicy | 否 |
 | 合同 | 记录及其重放：`context/compaction {retain_from, replacement, strategy, context_baseline}`，`retain_from` 是 Timeline 事件 id；重放依次放 `replacement`、按键的基线、由 `retain_from` 及其后事件放置的条目。记录引用的是 Timeline 事件而不是渲染细节，所以换一个 `HistoryRenderer` 或策略仍能找到切点。重放是确定的，所以 fork、重载和提示缓存前缀看到的消息相同 | `dim-agent-types`、`history.rs` 投影 | 否 |
-| 策略 | 替换内容是什么，以及在保留规则之内选哪个切点 | Session 值 `CompactionStrategyHost` | 被替换 |
+| 策略 | 替换内容里属于策略自己的消息（摘要）、替换内容的计划大小，以及在保留规则之内选哪个切点。钉住的输入和清单是机制的组成部分（§5.9、§5.10、§4.3） | Session 值 `CompactionStrategyHost` | 被替换 |
 
 **安装另一种策略。** 替换 `CompactionStrategyHost` 这个 Session 值即可：装配注册另一个值，或注册另一个提供它的 Session 部件，代替 `ProductSummaryStrategy`。
 
@@ -118,6 +118,8 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 - 然后在分支 Timeline 上等待带其指令的结果：第一条 `command = c` 的 `context/compaction`。
 - 结果映射：`completed` → `{status: "completed", sequence}`；`skipped` → `{status: "skipped", reason}`；`failed` → `compaction_failed`；`cancelled` → `compaction_cancelled`。
 
+回复保持这个形状。已完成压缩的成本和它的空间不足标记在回复用 `sequence` 指名的 `context/compaction` 事实的诊断里（§4.3），同一条事实也会到达每个 v3 客户端（§4.3 客户端可见性），所以客户端不必另开通道就能显示成本。
+
 `session.context.usage` 返回在已提交头部 `through` 处做一次准备时会写进 `context/budget` 的值，外加 `thresholdTokens`。
 
 取消按 session-boundary A.1：卸载会中断调用，调用方断开不取消任何东西。
@@ -129,18 +131,22 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 | 端口 | Session 值 | 方法 | F1 实现 |
 | --- | --- | --- | --- |
 | `ContextModel`（收窄） | `ContextModelHost(Option<Arc<dyn ResolveContextModel>>)`（现有） | `context_window`、`output_tokens`、`threshold_tokens`、`count_tokens`；`compact` 移出 | `ProductContextModel`（§5.1） |
-| `CompactionStrategy`（新） | `CompactionStrategyHost(Option<Arc<dyn CompactionStrategy>>)` | `compact(input, cancel) -> Completed {retain_from, replacement, strategy, diagnostics} \| Skipped {reason, diagnostics} \| Err(HostError)` | `ProductSummaryStrategy`（§5.2） |
+| `CompactionStrategy`（新） | `CompactionStrategyHost(Option<Arc<dyn CompactionStrategy>>)` | `name`、`replacement_size(model)`、`compact(input, cancel) -> Completed {retain_from, replacement, strategy, diagnostics} \| Skipped {reason, diagnostics} \| Failed {error, diagnostics} \| Err(HostError)` | `ProductSummaryStrategy`（§5.2） |
 
 两个值在每种配置中都显式绑定，与现在的 `ContextModelHost` 一样。两者都是 `Some` 时策略存在。只有一个是 `Some` 属于装配缺陷，ContextPreparation 装载时报告。
+
+`replacement_size(model)` 是 `compact` 返回的消息的计划 token 数：摘要的目标 `S`（§13.3）加上一条空的 `summary_message` 包装，按 `count_tokens` 计数。`S` 来自策略的工厂配置——与它的提示词声明的是同一条规则——所以计划不会与摘要器脱节。保留规则在策略运行之前预留这块空间（§5.3）。它是计划大小，不是硬上限：`maxTokens` 仍为 `output_tokens`，超出 `S` 的回复照常完成，并在诊断里报告它实际的大小。`Completed` 的 `replacement` 是策略自己的消息；记录里的 `replacement` 由 ContextPolicy 用它、清单和钉住的输入组合而成（§4.3、§5.9、§5.10）。
+
+`compact` 把策略内部的失败报告为 `Failed {error, diagnostics}`，而不是 `Err`：结果携带与完成时相同的诊断，所以 `failed` 事实与其它事实一样报告尝试次数、用量和耗时（§4.3）。`Err` 只留给取消，以及任何模型工作之前的失败。
 
 `CompactionInput` 由 ContextPolicy 产生：
 
 | 字段 | 含义 |
 | --- | --- |
 | `history` | 从上一个 `retain_from` 起的投影条目（现有） |
-| `checkpoint` | 上一次的 `{retain_from, replacement, context_baseline}`（由 `cursor` 与 `summary` 改来） |
+| `checkpoint` | 上一次的 `{retain_from, replacement, replacement_parts, context_baseline}`（由 `cursor` 与 `summary` 改来） |
 | `request`、`model` | 被压缩上下文所属的请求，及其 `ContextModel` 窗口事实（新） |
-| `retain_limit` | 保留尾部放得进保留预算的最早合法切点的 `retain_from`（手动步骤至少为最新一轮的开头）；策略的 `retain_from` 必须在它或它之前（新；§5.3） |
+| `retain_limit` | 保留尾部放得进尾部预算的最早合法切点的 `retain_from`，该预算计入压缩无法压缩的部分（§5.3；手动步骤至少为最新一轮的开头）；策略的 `retain_from` 必须在它或它之前（新；§5.3） |
 | `trigger` | `Threshold`、`ProviderOutputBudgetExhausted` 或 `Manual`（新） |
 | 各估算值、`provider_budget` | 现有 |
 
@@ -154,9 +160,9 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 
 `outcome` 为以下之一：
 
-- `completed {retain_from, replacement: Message[], strategy: string, diagnostics, context_baseline}`。`retain_from`（Timeline 事件 id）取代渲染层的 `cursor`，`replacement` 取代 `summary: String`，`strategy` 标明产出方，例如 `"summary"`。
+- `completed {retain_from, replacement: Message[], strategy: string, diagnostics, context_baseline, replacement_parts?}`。`retain_from`（Timeline 事件 id）取代渲染层的 `cursor`，`replacement` 取代 `summary: String`，`strategy` 标明产出方，例如 `"summary"`。`replacement_parts`（`{strategy, digest}` 的消息条数）定位 `replacement` 的各部分；缺省表示只有一部分，即策略的消息（§4.3）。
 - `skipped {reason, diagnostics}`。
-- `failed {error, diagnostics?}`。
+- `failed {error, diagnostics?}`；策略运行过的失败都带诊断（§4.2）。
 - `cancelled {reason}`（新），因此每个手动步骤都恰好以一条事实结束。
 
 | 来源 | `turn_id` | `request_id` | `command` |
@@ -194,6 +200,16 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 - 历史快照的状态保存 `retain_from`，代替原来以条目 id 表示的 `compacted_through`；替换内容从锚定它的事实中读取。快照解释器版本随之升级。旧快照被绕过，这没有问题，因为快照只是缓存。
 - 历史一侧的切点检查（`validate_cut` 和投影中的游标查找）改为比较事件 id，而不是条目 id。快照锚点由快照的所有者检查，而不是由 Timeline 检查（见下）。
 
+**替换内容的组成。** ContextPolicy 按以下顺序用三部分组合出它保存的 `replacement`：
+
+1. 策略的消息（摘要，第 3b 类）。
+2. 清单（第 3a 类），有内容时（§5.10）。在工具通过 ToolRegistry 的通用方式声明效果之前（[需求 §7.4](../../../design/compaction-quality.md#74-toolregistry-the-tool-contract)），它是空的。
+3. 进行中轮次的钉住输入（第 2a 类，§5.9），按事件顺序。
+
+摘要放在最前，因为它说明整个被替换范围；清单紧随其后，是同一范围的确定性说明；钉住的输入放在最后，让这一轮自己的话正好接在保留的尾部之前。第 2、3 部分不由策略决定：它们是机制的保证，所以每个策略都原样得到它们。重放仍然把 `replacement` 当成一个列表，所以这两部分在重载、fork 和缓存时都不需要自己的规则。
+
+已完成结果记录 `replacement_parts: {strategy, digest}`——开头各部分的条数；其余是钉住的输入。缺少它时按一部分读，即策略的消息。后续压缩据此找到上一份摘要、清单和钉住内容，不需要解析任何内容（§5.2、§5.10）；重放不受影响，忽略这个字段的读者投影出相同的消息。
+
 **不含业务内容的快照锚定（#130）。** 目前 Timeline 核心和两个存储为了锚定投影快照，都会读取 `context/compaction` 的内容：
 
 - `Timeline::context_with_checkpoint`（[timeline.rs](../../../../crates/dim-agent-runtime/src/core/timeline.rs)）要求锚点是 `EventKind::ContextCompaction`，比较 `data.through`，并把 `Completed { cursor }` 与 `checkpoint.state.compacted_through` 比对。
@@ -225,6 +241,8 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
   retainFrom: string, retainLimit?: string,    // Timeline 事件 id
   estimatedInputTokens, estimatedOutputTokens,  // 压缩前后，由 count_tokens 算出
   entriesReplaced, modelCallCount, durationMs,
+  modelUsage?: Usage,                           // 策略各次回复的用量之和
+  insufficientSpace?: { parts: [{part, tokens}] },   // 仅已完成压缩
   strategy: { kind: string, ... } }             // 由策略拥有
 // 摘要策略: { kind: "summary", summaryChars, estimatedSummaryTokens,
 //             chunkCount, compactedToolPayloadCount, droppedMessageCount }
@@ -232,7 +250,11 @@ Session 值不持有状态。解析出的连接只存在于一次策略调用内
 
 公共字段由 ContextPolicy 填写，策略返回自己的对象。旧的扁平记录直接删除，不与新记录并存。冻结的 v1 样本不改，在 v1 模块中保留它们自己的扁平记录类型（§12）。
 
-**客户端可见性。** SessionBroadcast 不加过滤地转发每个分支事件（[session_broadcast.rs](../../../../crates/dim-agent-capabilities/src/session_broadcast.rs)），但 Rpc 的 wire 过滤器——[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs) 中的 `ProductEvent::new`——目前会丢掉 `context/compaction`。F1 经 `ProductEvent::new` 让协议 v3 连接能看到 `context/compact`、`context/compaction-start` 和 `context/compaction`，客户端由此可以从实时事件或历史中看到每一种状态。`context/budget` 和 `context/prepare` 仍然隐藏。
+`modelCallCount` 是策略发出的模型请求数，每个在发出时计数：它的分块、它自己的重试，以及共享失败策略的各次尝试（§5.2）。`durationMs` 在策略调用周围测量，所以它是一次摘要的耗时；策略层自身的本地工作不计。`modelUsage` 是策略各次回复报告的 `Usage` 之和——`promptTokens`、`completionTokens`、`totalTokens` 以及缓存读写的 token；`cost` 和 `currency` 不出现，没有发过请求的策略不报告它。`insufficientSpace` 只在已完成的压缩上出现，条件是这次压缩无法压缩的部分本身就超过 `0.5 × B`；`parts` 按从大到小列出过大的部分，每项带它的 `count_tokens` 大小，部分名称为 `systemPrompt`、`tools`、`appendedMessages`、`keyedBaseline`、`pinnedInputs`、`digest` 和 `summary`（§5.3）。两个字段都是描述性的：没有任何后续决定读它们——触发点把已提交历史与最近一条开始事实的 `through` 比较，预算恢复把估算与 `B` 比较——所以它们是给读者看的内容（§9 规则 9）。
+
+每个走到策略的压缩都带上这段公共记录。验收失败的那个带上策略的记录、没有压缩后大小。策略内部失败的那个同样带着它，只是没有压缩后大小：失败也是携带诊断的结果（§4.2），所以 `modelCallCount`、`modelUsage` 和 `durationMs` 与完成时一样报告。只有从未构造出请求的手动压缩没有诊断。
+
+**客户端可见性。** SessionBroadcast 不加过滤地转发每个分支事件（[session_broadcast.rs](../../../../crates/dim-agent-capabilities/src/session_broadcast.rs)），但 Rpc 的 wire 过滤器——[tree_protocol.rs](../../../../crates/dim-app-server/src/tree_protocol.rs) 中的 `ProductEvent::new`——目前会丢掉 `context/compaction`。F1 经 `ProductEvent::new` 让协议 v3 连接能看到 `context/compact`、`context/compaction-start` 和 `context/compaction`，客户端由此可以从实时事件或历史中看到每一种状态。`context/budget` 和 `context/prepare` 仍然隐藏。展示摘要的客户端展示的是替换内容中属于策略的部分，由 `replacement_parts` 定位；没有这个字段时，整份替换内容就是策略的部分。
 
 ### 4.4 Rust 绑定
 
@@ -249,7 +271,8 @@ pub struct ContextCompactionData {
 pub enum ContextCompactionResult {
     Completed { retain_from: String, replacement: Vec<Message>, strategy: String,
                 diagnostics: Box<CompactionDiagnosticsRecord>,
-                context_baseline: Vec<ContextBaselineEntry> },
+                context_baseline: Vec<ContextBaselineEntry>,
+                replacement_parts: Option<ReplacementParts> },
     Skipped { .. }, Failed { .. }, Cancelled { reason: String } }
 
 // dim-agent-capabilities/src/host.rs
@@ -259,11 +282,16 @@ pub trait ContextModel { fn context_window(&self) -> f64; fn output_tokens(&self
 pub struct HistoryEntry { /* 现有 */ pub source: String }   // 放置它的事件的 id
 pub trait CompactionStrategy: Send + Sync + 'static {
     fn name(&self) -> &str;                            // 写入开始事实，例如 "summary"
+    fn replacement_size(&self, model: &dyn ContextModel) -> f64;   // 计划中的替换 token 数
     fn compact(&self, input: CompactionInput, cancel: CancellationToken)
-        -> HostFuture<'_, StrategyOutcome>; }          // Completed | Skipped
+        -> HostFuture<'_, StrategyOutcome>; }          // Completed | Skipped | Failed
+pub struct StrategyDiagnostics { pub model_call_count: u64, pub usage: Option<Usage>,
+                                 pub record: CompactionStrategyRecord }
 pub struct CompactionStrategyHost(pub Option<Arc<dyn CompactionStrategy>>);
 pub struct CompactionCheckpoint { pub retain_from: String, pub replacement: Arc<[Message]>,
+                                  pub replacement_parts: Option<ReplacementParts>,
                                   pub context_baseline: Arc<[ContextBaselineEntry]> }
+pub struct ReplacementParts { pub strategy: usize, pub digest: usize }  // 开头各部分的条数
 
 // dim-agent-capabilities/src/context_policy.rs（crate 内部）
 impl ContextPolicy { async fn compact_step(&self, step: CompactionStep, cancel: CancellationToken)
@@ -311,13 +339,15 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 
 `--models` 配置从模型文件解析同样的窗口事实：`AimuxModels` 按请求的 provider 与 model id 读取对应的模型条目；请求的能力快照保持未设置，所以能力未知时图片照常发出。
 
+**压缩没有自己的窗口上限。** 窗口事实是模型目录里的值及其覆盖，压缩不施加自己的窗口限制：`B`、阈值、`0.5 × B`、`0.25 × B` 和 `S` 都随声明的窗口缩放。一个模型的有用窗口小于声明的窗口时，应当把它声明得更小——在它的目录条目里（由 Provider 拥有），或者通过用户现有的 `contextWindow` 覆盖。压缩从不靠自己的常量做出这个决定。
+
 ### 5.2 ProductSummaryStrategy
 
 `compact(input, cancel)`：
 
-1. **切点。** `retain_from` 是 `input.retain_limit` 或之前最晚的合法事件边界，通常就是 `retain_limit` 本身。这样的边界不存在时（单个很长的轮次），取最晚的、仍保留内容的合法边界；预算恢复（`provider_budget`）时也可以取替换全部的边界（#169）。仍然没有，或它之前什么都没有：返回 `Skipped {reason: "nothing_to_compact"}`，不调模型。
-2. **摘要。** 对上一份替换内容（取自 `input.checkpoint`）加上由 `retain_from` 之前的事件放置的条目做摘要。
-3. **结果。** 返回 `Completed {retain_from, replacement: [summary_message(summary)], strategy: "summary", diagnostics}`。现有的 `summary_message` 包装会把文本标为数据并转义；它只在这里施加一次，随记录保存。
+1. **切点。** `retain_from` 是 `input.retain_limit` 或之前最晚的合法事件边界，通常就是 `retain_limit` 本身。`0.5 × B` 规则落在界限里：没有尾部放得下时，界限就是替换全部的那个边界（§5.3）。没有界限时（压缩无法压缩的部分本身就超过上限），取最晚的、仍保留内容的合法边界；预算恢复时也可以取替换全部的边界（#169）。仍然没有，或它之前什么都没有：返回 `Skipped {reason: "nothing_to_compact"}`，不调模型。
+2. **摘要。** 对上一份替换内容中属于策略的部分和钉住的部分（取自 `input.checkpoint`，按 `replacement_parts` 定位；§4.3）加上由 `retain_from` 之前的事件放置的条目做摘要，更早的不读：固定上下文从上一个切点开始，所以一次压缩的读取量和成本与会话跑了多久无关。上一份的清单部分不送给摘要器：清单作为数据逐次滚动（§5.10）。
+3. **结果。** 返回 `Completed {retain_from, replacement: [summary_message(summary)], strategy: "summary", diagnostics}`。现有的 `summary_message` 包装会把文本标为数据并转义；它只在这里施加一次，随记录保存。那份 `replacement` 是记录的替换内容中属于策略的部分；ContextPolicy 组合其余部分（§4.3）。
 
 摘要的产出方式：
 
@@ -326,30 +356,47 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 - **输出。** 丢弃 thinking 输出。工具停止或空文本算失败。
 - **记录文本。** 按角色标注的文本：工具调用写名称和输入，工具结果写文本，图片写 `[image]`。
 - **分块。** 一次调用的输入预算为 `context_window − output_tokens`，用 `count_tokens` 对整个摘要请求（系统提示、携带的摘要、外层格式和本块）计数，与其他所有请求的计数方式相同，不另设按字符计的规则。更长的记录分块折叠：每次调用拿到当前摘要和能放下的条目。单条放不下的，按字节在 UTF-8 字符边界上从中间截断，截断标记计入预算，并计入 `compactedToolPayloadCount`。
-- **被截断的回复。** 停在 `max_tokens` 的回复（思考可能用掉大部分额度）不算摘要。该块在最接近中间的条目分隔处（或字符边界）一分为二，逐半折叠；小于 2 KiB 仍被截断时压缩失败，任何记录都不会保留被截断的文本（#169）。每一半都携带前一半的摘要，所以调用前会再次按预算检查它的整个请求；不再放得下的一半继续一分为二，文本全部保留；携带的摘要与包装在没有任何转录内容时也放不下，则压缩失败，不发送该请求。
-- **诊断。** 摘要对象（`kind: "summary"`、`summaryChars`、`estimatedSummaryTokens`、`chunkCount`、`compactedToolPayloadCount`、`droppedMessageCount`、`reasoning`、`targetTokens`（没有指令时不出现）、`cutOffCount`）；公共部分由 ContextPolicy 填写。
+- **被截断的回复。** 停在 `max_tokens` 的回复（思考可能用掉大部分额度）不算摘要。该块在最接近中间的条目分隔处（或字符边界）一分为二，逐半折叠；小于 2 KiB 仍被截断时压缩失败，达到重试上限时也失败（见下文工作量有界），所以任何记录都不会保留被截断的文本（#169）。每一半都携带前一半的摘要，所以调用前会再次按预算检查它的整个请求；不再放得下的一半继续一分为二，文本全部保留；携带的摘要与包装在没有任何转录内容时也放不下，则压缩失败，不发送该请求。
+- **替换大小。** 策略按 `replacement_size(model)` 规划它的替换内容：目标 `S`（§13.3，`S = min(α × O, β × B)`，来自策略的工厂配置）加上一条空的 `summary_message` 的 token 数。在 §13.4 的评估做出选择之前，`α = 0.5`、`β = 0.10`（暂定，与 `RETAINED_SHARE` 同级）；提示词里的目标句仍是 §13 的决定，本设计不添加。它是计划大小：`maxTokens` 仍为 `O`，超出 `S` 的回复照常保留，事实报告它实际的大小（§4.3）。
+- **工作量有界。** 一次压缩至多发出 `chunkCount + SUMMARY_RETRY_LIMIT` 个摘要请求，`chunkCount` 是诊断里各次折叠的块数（截断回复拆出的对半也计入），`SUMMARY_RETRY_LIMIT` 是本模块的暂定常量 `8`。额外的 `8` 覆盖共享失败策略的重试：每个请求都计入 `modelCallCount`，在发出时计数，无论该尝试是否产生了流——策略的 host 外包一层在委托前计数的驱动，因此任何流之前的可重试失败也花掉额度。因携带的摘要放不下而重新拆分的片段不发送任何请求，所以拆截断回复只会增加 `chunkCount`，不会耗尽额度；这种拆分由 `MIN_CHUNK_BYTES` 兜底。已发出的请求达到 `chunkCount + SUMMARY_RETRY_LIMIT` 时，包装层在下一个请求到达提供方之前就拒绝它，返回非暂时性错误，失败策略因此不再重试；结果为 `failed`，不生效。`modelCallCount` 是已发出的请求数（§4.3）。
+- **摘要实质性。** 非空在每条回复上强制：回复去掉空白后没有文本时 `summarize` 让压缩失败（`failed`，回复 `compaction_failed`，不是跳过：跳过意味着没有东西可压缩）。折叠后的摘要始终是最后一条回复，所以压缩提交的摘要从不为空。要求的部分属于 [#429 的产品策略](../../../design/compaction-quality.md#77-model-facing-prompts-429)，由 §13.4 的评估决定：本设计不改提示词，各部分在声明它们的提示词落地时一并加入检查。
+- **成本。** 每次回复的 `Usage` 块累加进 `StrategyDiagnostics.usage`，`model_call_count` 是尝试次数；ContextPolicy 把两者连同压缩前后的大小和耗时写进已完成事实的公共诊断（§4.3）。
+- **诊断。** 摘要对象（`kind: "summary"`、`summaryChars`、`estimatedSummaryTokens`、`chunkCount`、`compactedToolPayloadCount`、`droppedMessageCount`、`reasoning`、`targetTokens`（没有指令时不出现）、`cutOffCount`）；公共部分由 ContextPolicy 填写，策略随它报告尝试次数和累加的用量（§4.3）。
 
 ### 5.3 一条压缩路径（ContextPolicy）
 
 `compact_step` 就是把 `ContextPolicy::prepare` 中现有的压缩部分抽出来：
 
-1. **保留界限。** 保留预算为 `0.25 × B`（暂定，#128）。`retain_limit` 是最早的、仍保留内容且保留尾部放得进该预算的合法切点的 `retain_from`；尾部用 `count_tokens` 对切点处的带 key 基线加上切点起的条目计数。基线要计入，因为每次切割后都会重放它。这样，最近的整轮放得下时整轮保留，正在进行的轮次过大时在它内部切割。手动步骤在最新一轮的开头切割，若按 token 规则的切点保留得更少则取后者。没有符合条件的切点时（单个条目或基线本身就超出预算），没有界限，按 `CompactionInput::cut` 的退回规则取切点。
+1. **不可压缩部分与保留界限。** 令 `B = context_window − output_tokens`（§5.1），一次压缩在某个切点上无法压缩的部分是：
+   - 请求框架：system prompt、工具声明，以及准备阶段在历史之后追加的消息；
+   - 切点处的带 key 基线；
+   - 切点之前、进行中轮次已消费的钉住输入（§5.9），按该切点自己的大小计；
+   - 清单在它自己的上限内占用的空间；今天它没有内容，所以上限为零（§5.10）；
+   - 策略的替换内容，按 `replacement_size(model)` 计（§4.2）。
+
+   `resident(cut)` 是这些部分用 `count_tokens` 求和的结果，该切点的尾部预算为 `min(RETAINED_SHARE × B, 0.5 × B − resident(cut))`，其中 `RETAINED_SHARE = 0.25`（暂定，#128）。尾部是从切点起的条目。带 key 的基线属于不可压缩部分，因为每次切割后都会重放它；它不再像 #128 那样计入尾部预算，所以只有当 `0.5 × B − resident` 是约束项时，带 key 的块才会缩短尾部。
+
+   `retain_limit` 是保留尾部放得进该预算的最早合法切点的 `retain_from`：在上限允许范围内保留最多尾部的切点。更晚的切点保留得更少，策略取界限内最晚的那个，也就是界限本身。这样，最近的整轮放得下时整轮保留，正在进行的轮次过大时在它内部切割。手动步骤在最新一轮的开头切割，若按 token 规则的切点保留得更少则取后者。
+
+   候选切点的最后一个落在上下文最后的事件上。该事件没有放置条目时，这个切点替换全部，保留的尾部为零；只要该切点上的不可压缩部分在 `0.5 × B` 以内它就放得下，所以在没有保留内容的切点放得下时，它就是界限：压缩不留任何原样尾部，请求只剩不可压缩部分，被替换的内容仍可通过 Recall 读回。这改变了 #169 只允许预算恢复替换全部的做法。
+
+   连这个切点都放不下时不设界限。此时取最晚的、仍保留内容的切点（预算恢复时可以替换全部），有两种情况在上限之上完成。不可压缩部分本身就超过 `0.5 × B` 时，已完成结果带上空间不足标记（第 5 步）。上下文最后的事件放置的条目放不下时，该事件之后没有切点，那些条目只能留下，而压缩无法压缩的每个部分都放得下，所以结果不带标记。
 2. **开始。** 追加 `context/compaction-start`，带调用方的 id、`command`、`through`、`trigger` 和 `strategy.name()`。
-3. **策略。** 调用 `strategy.compact`，传入 `retain_limit`、合法切点 `cuts` 和 `trigger`。若在策略返回之前被取消，就为该开始追加 `cancelled` 结果并返回 `Cancelled`。
+3. **策略与组合。** 调用 `strategy.compact`，传入 `retain_limit`、合法切点 `cuts` 和 `trigger`。若在策略返回之前被取消，就为该开始追加 `cancelled` 结果并返回 `Cancelled`；`Failed` 结果写成带诊断的 `failed` 结果。随后组合记录里的替换内容——策略的消息、有内容时的清单（§5.10）、钉住的输入（§5.9），按这个顺序——并记录 `replacement_parts`（§4.3）。
 4. **验收。** 对任何策略都检查：
    - `retain_from` 是固定上下文中的一个事件，并通过基于事件的合法性规则（§4.3）；
-   - `retain_from` 在 `retain_limit` 或之前；没有这样的合法切点时，它要保留内容，只有预算恢复时才能替换全部；
+   - `retain_from` 在 `retain_limit` 或之前；没有切点在界限内时，它要保留内容，只有预算恢复时才能替换全部；
    - 投影后的请求比之前小，且低于窗口。
 
-   任何一项不通过，结果变为 `failed`。
-5. **结果。** 带上调用方的 id、`command` 和 `start` 追加 `context/compaction`，然后保存可选快照。
+   上限由切点达成：第二项检查让每个策略都守住界限，而已完成的压缩无论摘要实际多大都保持完成。任何一项不通过，结果变为 `failed`。
+5. **结果与标记。** 带上调用方的 id、`command` 和 `start` 追加 `context/compaction`，然后保存可选快照。不可压缩部分——第 1 步的各部分，按结果实测，摘要按它实际的大小——超过 `0.5 × B` 的已完成结果带上空间不足标记：每个部分的 `count_tokens` 大小，以及从 `systemPrompt`、`tools`、`appendedMessages`、`keyedBaseline`、`pinnedInputs`、`digest` 和 `summary` 中按大小从大到小、直到累计覆盖超出 `0.5 × B` 差额的各个部分。标记是公共诊断里的一个字段（§4.3），没有决定读它。
 
 调用方：
 
-- **ContextPreparation，在 `prepare` 内。** 达到阈值时（与现在一样，每个边界一次），或在 `recovery` 下。`prepare` 的其余部分不变。
+- **ContextPreparation，在 `prepare` 内。** 达到阈值时（§5.6），或在 `recovery` 下。`prepare` 的其余部分不变。
 - **Loop 的手动步骤。** 触发原因为 `Manual`。请求按 `start_preparation` 的方式构造：最新 `context/configured` 的设置和 system 加上投影后的消息，不绑定工具。
 
-**预算恢复。** ModelProvider 在每次模型调用前调用 `validate`。它使用与触发点相同的请求估算（有提供方基线时为基线加增量，否则为完整的本地计数），超过 `B` 时带预算事实失败；随后 Loop 带 `recovery` 重试该请求一次。因此恢复的含义是“请求放不进声明的预算”，与触发点一致。没有提供方基线时，完整本地估算及其误差依旧存在（#128）。
+**预算恢复。** ModelProvider 在每次模型调用前调用 `validate`。它使用与触发点相同的请求估算（有提供方基线时为基线加增量，否则为完整的本地计数），超过 `B` 时带预算事实失败；随后 Loop 带 `recovery` 重试该请求一次。因此恢复的含义是“请求放不进声明的预算”，与触发点一致。恢复不受再增长规则约束，每个请求至多压缩一次（§5.6）。恢复压缩之后，准备过程自己检查投影后的请求：有界限时它至多 `0.5 × B`；没有界限时，只要那个切点存在，恢复就取了替换全部的切点。若它的计数仍超过 `B`，准备过程带预算事实失败，错误指出让它超出的东西：过大的不可压缩部分（与标记相同的部分和命名规则），或者它们都放得下时、最后的事件放置的、任何切点都切不掉的条目。其后不再有 `model/call`。Loop 不再压缩，turn 带着这个错误失败。没有提供方基线时，完整本地估算及其误差依旧存在（#128）。
 
 ### 5.4 手动压缩
 
@@ -430,6 +477,11 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 ### 5.6 ContextPreparation 新增的内容
 
 - `ContextPolicy::prepare` 改为调用 `compact_step`。ContextPreparation 注入 `CompactionStrategyHost`；两个宿主都是 `Some` 时它才有策略。
+- **触发点。** 自动触发只在以下两条同时成立时于 `prepare` 中运行：
+  - 估算达到 `threshold_tokens`（现有）；
+  - 自分支最近一次压缩尝试以来，至少累积了 `0.25 × B` 的新历史。新历史是由该尝试的 `context/compaction-start` 的 `through` 之后的事件放置的条目，用 `count_tokens` 逐个计数后求和。该尝试是任何触发原因、任何结局的最近一条开始事实；分支上没有开始事实时，全部历史都算新历史。
+
+  这取代了 `context/budget` 每个边界只查一次的检查：同一边界上没有新历史，第二条规则本身就会阻止重复。因此跳过或失败的自动压缩不会在同一段历史上再次运行，手动压缩也像自动压缩一样移动锚点。预算恢复不受这两条规则约束，放不下的请求仍然靠它压缩。
 - `rebuild`：没有结果的自动开始（没有 `command`）先以 `cancelled` 结果结算，然后照旧以重载终态结算未完成的准备。
 - `usage(cancel)` 读取已提交头部，运行现有估算。不写任何东西。
 
@@ -454,6 +506,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 | 策略错误或验收失败，turn 内的手动压缩 | 开始，然后是 `context/compaction {start, failed}` | 不压缩，继续该 turn（`next_model`）。下一个请求超过输入预算时，由现有的预算恢复强制压缩（退回切点）；这次也失败的话，请求和 turn 失败 | 运行中，然后是 `failed`；回复 `compaction_failed` |
 | 同上，turn 外的手动压缩 | 开始，然后是 `failed` | 不再做别的（有输入在等时调用 `try_start`） | 运行中，然后是 `failed`；回复 `compaction_failed` |
 | 同上，自动压缩 | 开始，然后是 `failed` | 不变：请求不压缩继续；在恢复中则请求失败 | 运行中，然后是 `failed` |
+| 恢复压缩已完成，请求仍超过 `B` | 开始，然后是 `completed`；不再有 `model/call` | 准备过程带着预算错误失败，错误指出让请求超出 `B` 的东西（§5.3）；Loop 不再压缩，于是 turn 带着这个错误失败 | 压缩显示 `completed`，自身部分无法压缩时带标记；turn 显示预算错误 |
 | 手动，无法构造请求（没有配置或快照） | 不带 `start` 的 `failed` | 同上 | 待处理，然后是 `failed` |
 | 正在运行的步骤（手动或自动）被 `stop/interrupt` | 该开始的 `cancelled {reason}`，策略已经返回时为 `completed` | turn 内的手动压缩：经 `next_model` 检查，turn 以 `Cancelled` 结束。自动压缩：请求照旧以 `Cancelled` 结束 | 运行中，然后是 `cancelled` 或 `completed`；回复与之一致 |
 | 手动指令待处理时被 `stop/interrupt` | 不带 `start` 的 `cancelled` | turn 的行为不变 | 待处理，然后是 `cancelled` |
@@ -467,6 +520,27 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 - **模型工作会丢失。** 进行中的策略模型工作会丢失。下一次自动触发或新的 `/compact` 会重新压缩。
 - **不续做半途的压缩。** 运行时在任何地方都不会在重载后重放模型调用，因为模型调用不是幂等的。而且用户的意图可能已经过时：历史可能已经增长，用户也可能不再需要它。
 
+### 5.9 第 2 类 (a)：进行中轮次的输入
+
+切点落在进行中的轮次里时，这一轮的输入会随其余被替换范围一起离开上下文。替换内容原样带上它们。
+
+- **放在哪里。** ContextPolicy，而不是策略。这条规则只需要公开事实（`input/message`、`input/consumed` 和该轮次的 `turn/start`），对每个策略都一样，而且策略不能把它丢掉。摘要也覆盖同样的条目，因为它们就在被替换范围内；钉住重复它们，是因为摘要是有损的，而这一轮自己的话绝不能丢。
+- **何时。** 步骤有进行中的轮次——`turn_id` 为 `Some`，自动压缩总是如此，手动步骤只在 turn 内如此——且切点晚于该轮次的 `turn/start`。切点在轮次开头或在更早的轮次时不钉住。
+- **哪些输入。** 该轮次在 `retain_from` 之前的每个 `input/consumed` 事件，按事件顺序，连同它指名的 `input/message`。在切点或之后消费的输入已在保留的尾部里，不重复。输入消息在固定上下文之前时，它是投影检查点仍按未消费保存的那个输入，由那份状态提供；没有检查点时固定上下文包含全部事件，所以快照缺失只意味着多读一段前缀，不会丢内容。
+- **哪些部分。** 输入的用户内容，以及每个不声明 `key` 的 `InputBlock::Raw`，各自按渲染器为它放置的消息。这个渲染是投影自己的规则，与渲染器共用，所以钉住的文本正是模型当时看到的内容。声明了 key 的块不论是否 retire 都排除：带 key 的基线重放这个 key 的当前值，而 retire 就是 key 的不存在。输入只靠它的事件和这些公开字段区分；不解析输入文本里的任何标记，所以写入带 key 内容的插件（例如 TimelineTree 的分支上下文）按它的 key 排除，从不按文本判断。
+- **预算。** 钉住的消息总共至多 `0.1 × B`，按 `count_tokens` 计。全部放得下时原样钉住；放不下时，每个输入在预算的一份均分内保留头尾，并带一个指名它 `input/message` 事件 id 的标记——Recall 打开该输入时用的把手（[Recall §4](Recall.md#4-把手时间与事件-id)）——分到连标记都放不下的那一份时只保留标记。因此超出上限时，单个输入保留头尾加上它的事件 id。
+- **位置。** 替换内容的最后几条消息（§4.3），在策略的消息和清单之后，让这一轮的话正好接在保留的尾部之前。
+- **界限。** 钉住的消息计入 `0.5 × B` 上限的不可压缩部分（§5.3），并且保存在记录的 `replacement` 里，所以重放不需要自己的规则。
+- **后续的压缩。** 钉住内容是上一份替换内容的一部分（§4.3），不在 `history` 里；下一次压缩把它们当作条目送给摘要器，并且只重新钉住进行中的轮次。已经结束的轮次的钉住内容像其它条目一样被摘要，不会再次钉住。
+
+### 5.10 第 3a 类：清单
+
+清单是工具做过什么的确定性说明：写过的文件、跑过并带退出状态的命令，除此之外没有别的。
+
+- **由机制从事实生成。** ContextPolicy 从它要替换的事件里的声明生成它，并从上一份替换内容的清单部分逐次滚动（`input.checkpoint.replacement_parts`，§4.3）；这一部分归策略层所有、由它直接读取，模型既不写也不选它，它也从不送给摘要器。它不读任何工具的输入 schema：工具的效果只能通过它的所有者提供的声明进入清单。
+- **在替换内容里。** 一条消息，像摘要一样标为数据，放在策略的消息之后、钉住的输入之前（§4.3）。
+- **在声明方式出现之前是空的。** 今天没有工具声明效果；这个方式是 [ToolRegistry 的](../../../design/compaction-quality.md#74-toolregistry-the-tool-contract)，需求向它提出。在它出现之前，清单没有内容，替换内容也不带清单消息。第 3b 类摘要里对工具结果的叙述不是清单，也不从工具输出或工具的 schema 推导出清单。
+
 ## 6. 错误
 
 `MethodError` 代码（未注明的为 `code -32000`）：
@@ -478,11 +552,13 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 | `session_closed` | 两者 | Session 或分支正在关闭 | 否 |
 | `context_not_configured` | usage | 分支历史中没有 `context/configured` | 采用模型之后 |
 | `context_model_failed` | usage | `resolve` 失败（没有能力快照） | 重新选择模型之后 |
-| `compaction_failed` | compact | 事实为 `failed`：共享失败策略之后的策略错误、空摘要、未通过验收的 `retain_from`、没有减少输入、没有 `context/configured`，或没有能力快照 | 由用户决定 |
+| `compaction_failed` | compact | 事实为 `failed`：共享失败策略之后的策略错误、没有文本的回复、未通过验收的 `retain_from`、达到摘要重试上限、没有减少输入、没有 `context/configured`，或没有能力快照 | 由用户决定 |
 | `compaction_cancelled` | compact | 事实为 `cancelled`：`stop/interrupt` 或重载 | 由用户决定 |
 | `operation_interrupted` | compact | 等待期间 ContextMethods 卸载；指令照样会被服务或结算 | 由用户决定 |
 
 自动压缩的错误处理不变：策略错误成为 `failed` 事实，请求不压缩继续；在恢复中则使请求失败。
+
+恢复压缩之后仍超过 `B` 的请求作为 turn 失败（`ModelOutputEnd failed`）结束，错误指出让请求超出的东西：过大的不可压缩部分，或最后的事件放置的条目（§5.3）；它不是方法错误，也不会再压缩一次。策略运行过的 `failed` 事实与已完成的事实一样带成本诊断（§4.3）。
 
 ## 7. 安全
 
@@ -529,12 +605,14 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 | §4 规则 6（上下文只来自交接后的事件） | 替换内容只经已完成事实的投影到达模型。待处理输入不被步骤消费（AGENTS 规则 10）。 |
 | §4 规则 7（公开事件与服务） | `TreeCommands`、`PublicService` 上的 `Branch::service`、`ProviderConnectionResolver`、`ModelHost`、`sessionMethods`。 |
 | §4 规则 8（基础设施不变） | Dispatcher、信封、rutis、loader、Agent 装配和门面都不改。有一处基础设施改动（#130）：Timeline 与两个存储的快照锚定不再了解 `context/compaction`，只保留结构检查，所有者的解码回调接收锚点事件。需求来自 Timeline 自身：它不能了解事件内容（原则 §4 规则 4；Timeline 只检查信封与核心保留领域，ADR 001）。它在 Timeline 自己的合同内闭环：快照是带结构锚点的缓存。有效快照的行为不变，无效快照算作缓存未命中。|
-| §4 规则 9（只写需要的事实） | `context/compact` 由 Loop 后续的决定和重载读取。`context/compaction` 用于投影。按维护者的决定，`context/compaction-start` 和可见的结果都是事实，理由有两条。第一，它们不只是驱动某个状态机：用户和其他状态机读取历史时需要这些内容（任何时候接入的 UI 都必须看到压缩正在进行，或者它是怎样结束的）。第二，重载结算要用它们：没有结果的开始意味着当时有压缩在途。Loop 和 ContextPreparation 由开始与结果的配对重建，这比只靠指令更精确：它能区分运行中和待处理，也覆盖自动压缩。用量查询不写任何东西。 |
-| ADR 002 D1（作用域） | 窗口事实、策略和方法：Session。指令、步骤和压缩槽：分支，在 Loop 中。 |
+| §4 规则 9（只写需要的事实） | `context/compact` 由 Loop 后续的决定和重载读取。`context/compaction` 用于投影。按维护者的决定，`context/compaction-start` 和可见的结果都是事实，理由有两条。第一，它们不只是驱动某个状态机：用户和其他状态机读取历史时需要这些内容（任何时候接入的 UI 都必须看到压缩正在进行，或者它是怎样结束的）。第二，重载结算要用它们：没有结果的开始意味着当时有压缩在途。Loop 和 ContextPreparation 由开始与结果的配对重建，这比只靠指令更精确：它能区分运行中和待处理，也覆盖自动压缩。用量查询不写任何东西。已完成结果的 `modelUsage` 与 `insufficientSpace` 是这条必需事实上的描述性字段：触发点读最近一条开始事实的 `through`，预算恢复读预算，只有客户端读成本和标记。 |
+| ADR 002 D1（作用域） | 窗口事实、策略和方法：Session。指令、步骤和压缩槽：分支，在 Loop 中。钉住、清单、保留规则和标记是分支作用域的 ContextPolicy 工作：它们读分支的事件并组合它的记录。 |
 | ADR 002 D2（无接线模块） | ContextMethods 经 `sessionMethods` 暴露所有者的操作。 |
 | ADR 002 D3（依赖） | 只硬依赖核心。Provider 或 Aimux 重载会传播到策略部件（已接受的代价）。 |
 | ADR 002 D4（配置） | 不增加配置；暂定常量写在代码里（#128）。 |
 | ADR 002 D5（语言中立合同） | §4.1 与 §4.3 是合同；§4.4 是一种绑定。 |
+
+**压缩质量需求。** §14 把 [#428 §7.1](../compaction-quality.md#71-contextcompaction) 的需求对应到各自的节。它们不新增事件、Session 值或方法：上限、标记、再增长规则、钉住和清单都是现有压缩路径、替换内容及其记录的一部分。跳过或失败的自动压缩不会在同一段历史上再次运行，这是再增长规则的推论（§5.6），不是独立规则。策略端口增加一个只读方法 `replacement_size`（§4.2），它不指名任何服务，也不增加依赖；规则 8 不受影响，每次写入仍是一个事件（规则 5）。
 
 **影响面（公开内容）：**
 
@@ -560,7 +638,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 | 项 | 决定 |
 | --- | --- |
 | 用哪个模型压缩 | 摘要策略用请求自己的模型；单独的模型推迟 |
-| 触发点与保留量 | #128：在 `B − min(max(0.10 × B, 16,000), 0.20 × B)` 触发；保留放得进 `0.25 × B` 的最长尾部（含带 key 的基线）；手动步骤至多保留最新一轮；`validate` 用触发点的估算与 `B` 比较；`字节数 / 4` 和每张图片 1,600 token 不变。余量和份额是暂定的经验值 |
+| 触发点与保留量 | #128：在 `B − min(max(0.10 × B, 16,000), 0.20 × B)` 触发；保留放得进 `min(0.25 × B, 0.5 × B − resident)` 的最长尾部（§5.3），没有尾部放得进上限时替换全部；手动步骤至多保留最新一轮；`validate` 用触发点的估算与 `B` 比较；`字节数 / 4` 和每张图片 1,600 token 不变。余量和份额是暂定的经验值 |
 | 手动压缩 | 由 `context/compact` 安排的 Loop 步骤，在 turn 内外都可以，永远不创建 turn |
 | 步骤在哪里运行 | 在 Loop 中，调用 ContextPolicy 唯一的压缩函数（§2.1） |
 | 记录 | `retain_from`（Timeline 事件 id）、`replacement` 与 `strategy`，一条重放规则；可选 id、`command`、`cancelled`；直接修改（尚未发布） |
@@ -569,11 +647,20 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 | 新事件类型 | `context/compact` 与 `context/compaction-start` 作为 `EventKind` 变体 |
 | `--models` 配置 | 窗口事实来自模型条目；能力快照保持未设置 |
 | 提供方报告的溢出 | 单独的 Aimux issue，不在 F1 内 |
-| 诊断 | 现在就改成与策略无关：公共计数加一个由策略拥有的对象（破坏性修改） |
+| 诊断 | 与策略无关：公共计数、摘要的累加用量和空间不足标记，加一个由策略拥有的对象（破坏性修改） |
 | 压缩状态 | 事实：待处理 = 有指令无开始，运行中 = 有开始无结果，已结束 = 结果（§5.7） |
 | 半途的压缩 | 从不续做；结算为 `cancelled`（§5.8） |
 | 摘要器推理（#170） | 由评估决定（§13.4）：`compaction.json` 中的 `summaryReasoning: inherit \| off \| low`，或在一个值于每类模型上都胜出时改为常量。在此之前为 `inherit`（现在的行为） |
-| 摘要目标长度（#170） | 由评估决定（§13.4）：在提示中写明 `S = min(α × O, β × B)`，或不写指令。在此之前不写指令 |
+| 摘要目标长度（#170） | 由评估决定（§13.4）：在提示中写明 `S = min(α × O, β × B)`，或不写指令。在此之前不写指令，计划大小用 α = 0.5、β = 0.10（暂定） |
+| 窗口上限 | 压缩自身不设：窗口事实是模型目录值及其覆盖，`B`、阈值、`0.5 × B`、`0.25 × B` 和 `S` 随声明的窗口缩放。有用窗口更小时，应在目录（Provider）或通过 `contextWindow` 覆盖把它声明得更小（§5.1） |
+| `0.5 × B` 上限 | 尾部预算为 `min(0.25 × B, 0.5 × B − resident)`，替换内容按 `replacement_size` 规划（§13.3 的 `S`，暂定 α = 0.5、β = 0.10）；没有尾部放得下时，界限是替换全部的切点；上限由切点达成，摘要超出计划大小也照常完成（§5.3）。`0.5` 份额是暂定的（#428） |
+| 空间不足 | 已完成压缩的公共诊断里一个描述性的 `insufficientSpace` 对象，列出最大的不可压缩部分；没有决定读它（§4.3、§5.3） |
+| 再增长 | 自动阈值压缩需要最近一次压缩尝试的 `through` 之后有 `0.25 × B` 的条目；预算恢复例外，每个请求运行一次（§5.6、§5.3） |
+| 恢复后的失败 | 恢复压缩之后仍超过 `B` 的请求带着错误失败，错误指出让请求超出的东西——不可压缩部分，或最后的事件放置的条目——不再压缩（§5.3、§6） |
+| 第 2 类 (a) 钉住 | 在 ContextPolicy 而不是策略：切点之前进行中轮次的输入，排除带 key 的块，至多 `0.1 × B`（暂定，#428），保留头尾和 `input/message` id（§5.9） |
+| 第 3a 类清单 | 替换内容里的一条数据消息，在策略的消息之后、钉住的输入之前；在 ToolRegistry 声明效果之前为空（§5.10） |
+| 摘要工作量 | 每次压缩至多 `chunkCount + 8` 个请求，每个在发出时计数；`modelCallCount` 和 `durationMs` 报告它们，`modelUsage` 累加它们的用量（§5.2、§4.3） |
+| 摘要实质性 | 非空在每条回复上强制，所以提交的摘要从不为空；各部分在 [#429 的产品策略](../../../design/compaction-quality.md#77-model-facing-prompts-429) 声明它们时一并加入检查（§5.2） |
 
 待定：F1 之外的 #128 后续工作（复用对话前缀的摘要请求、Anthropic 缓存断点、把提供方报告的溢出映射到恢复），以及运行 #170 的摘要评估（§13），其结果确定上面两行。
 
@@ -581,9 +668,9 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 
 测试用产品配置的 App Server 连接一个上下文窗口很小的 mock HTTP 提供方，也用同样的 App Server 连接一个模型条目声明了小窗口的 `--models` 文件（`crates/dim-app-server/tests`），另加 `crates/dim-agent-capabilities/tests` 中的 Loop 与策略流程测试。
 
-1. **自动。** 超过阈值后，下一次准备依次写 `context/budget`、`context/compaction-start {trigger: threshold}`，并发出一个摘要请求。它提交 `completed` 的 `context/compaction`：带该请求的 id 和 `start`，没有 `command`，`strategy: "summary"`，`replacement` 只有一条消息，`retain_from` 为保留尾部放得进 `0.25 × B` 的最早合法切点。模型请求以这条消息开头，原样保留该尾部。产品窗口事实给出余量的上限、下限和比例（32k/8k → 19,200；128k/8k → 104,000；1M/128k → 784,800）。一个大轮次之后的许多小轮次会保留两轮以上；切点后会重放的带 key 块，比同样内容不带 key 时保留的轮次少。
+1. **自动。** 超过阈值、且自上一次压缩以来已有 `0.25 × B` 的新历史后，下一次准备依次写 `context/budget`、`context/compaction-start {trigger: threshold}`，并发出一个摘要请求。它提交 `completed` 的 `context/compaction`：带该请求的 id 和 `start`，没有 `command`，`strategy: "summary"`，`replacement` 只有一条消息，`retain_from` 为保留尾部放得进 `min(0.25 × B, 0.5 × B − resident)` 的最早合法切点（§5.3）。模型请求以这条消息开头，原样保留该尾部。产品窗口事实给出余量的上限、下限和比例（32k/8k → 19,200；128k/8k → 104,000；1M/128k → 784,800）。一个大轮次之后的许多小轮次会保留两轮以上；当 `0.5 × B` 是约束项（框架或基线占去上限的大部分）时，切点后会重放的带 key 块比同样内容不带 key 时保留的轮次少。
 2. **预算恢复。** 重试时以 `trigger: provider_output_budget_exhausted` 压缩。有提供方基线时，本地计数放得进窗口、但基线估算超过 `B` 的请求会恢复；基线估算放得下的不会。
-3. **手动，没有 turn。** `session.context.compact` 只写 `context/compact`、`context/compaction-start {command}` 和 `context/compaction {command, start}`；没有 `turn/*`、`step/*` 或 `model/call`。回复为 `completed`。两轮的 Session 上切点为最新一轮的开头；该轮的输入本身超出保留预算时，切点在这一轮内部。
+3. **手动，没有 turn。** `session.context.compact` 只写 `context/compact`、`context/compaction-start {command}` 和 `context/compaction {command, start}`；没有 `turn/*`、`step/*` 或 `model/call`。回复为 `completed`。两轮的 Session 上切点为最新一轮的开头；该轮的输入本身超出尾部预算时，切点在这一轮内部。
 4. **手动，turn 内。** 序列为 `step/tool-result` → `context/compaction-start {turn_id, command}` → `context/compaction {turn_id, command, start}` → 下一个请求的 `step/model-start`，该请求基于压缩后的上下文准备。
 5. **重放与替换策略。**
    - 压缩之后重载的 Session、以及压缩之后 fork 出的分支，投影出的消息与之前相同。
@@ -606,6 +693,16 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
    - 在摘要请求被挂住时才接入的客户端，从分支历史（一条没有结果的开始）看到“运行中”。
    - 自动压缩显示 `trigger: threshold` 和请求 id。
    - 在以上所有测试中（成功、跳过、失败、中断、重载、崩溃），每条 `context/compaction-start` 都恰好有一条带其 `start` 的 `context/compaction`，也没有结果引用不存在的 `start`。
+9. **`0.5 × B` 上限。** 在输出额度大的模型（200,000 / 64,000）、12,000 token 的框架、没有进行中轮次时，压缩后的第一个请求按 `count_tokens` 计至多 `0.5 × B`，它的尾部就是预算 `min(0.25 × B, 0.5 × B − resident)`——按暂定目标为 34,000 token。框架占去上限的大部分时，压缩保留的轮次比同样历史下小框架时更少。没有尾部放得下时，压缩替换全部，于是第一个请求就是不可压缩部分，进行中轮次的输入被钉住，不留原样尾部。摘要超出计划大小时压缩照常完成，压缩后大小在诊断里。
+10. **空间不足标记。** 在 32,000 / 8,000 上，12,000 token 的框架加上按计划大小的摘要本身已超过 `0.5 × B`：压缩完成，它的诊断带上 `insufficientSpace`，指出框架的各部分和摘要，而不指出小的部分。在 200,000 / 64,000 上同样的框架让压缩留在上限之下，不带标记。
+11. **再增长。** 一次已完成的自动压缩之后，在阈值处、新历史不足 `0.25 × B` 的准备不写 `context/compaction-start`；累积到 `0.25 × B` 之后才写。因为没有新历史，跳过或失败的自动压缩不会在同一段历史上重试，手动压缩可以在同一段历史上运行。
+12. **一次恢复压缩。** 恢复下压缩不受再增长规则约束照常运行。恢复后的请求仍超过 `B` 时，turn 带着指出让它超出的东西的错误失败，该请求不再压缩，恢复压缩之后不再有 `model/call`。
+13. **第 2 类 (a) 钉住。** 切点在进行中的轮次里时，替换内容按事件顺序原样带上这一轮已消费的输入，与模型当时看到的一致，包括加入这一轮的 steer；带 key 的块不论是否 retire 都不重复；切点之后消费的输入不重复；输入超过 `0.1 × B` 的一轮里，每个输入保留头尾和它的 `input/message` id；切点在轮次开头或更早轮次时不钉住。
+14. **线性滚动。** 在数倍于窗口的历史上做一次压缩，摘要请求只携带上一份替换内容的摘要部分和钉住部分以及新切出来的条目：任何早于上一个切点放置的条目都不出现，上一份的清单部分不发送，而是滚进新的替换内容。
+15. **工作量有界。** 每次回复都被截断的摘要器在至多 `chunks + 8` 个请求之后记录 `failed`；每块截断一次的摘要器以每块一个请求加它的重试完成。任何流之前就失败的摘要器，其重试也记在同一额度里：额度内再也折不完的压缩记录 `failed`，`modelCallCount` 等于已折分块数加 `8`，提供方恰好收到这么多请求。每条失败路径为其开始记录一条 `context/compaction`，失败或取消的压缩让投影保持原样。
+16. **成本。** 已完成压缩的诊断带上 `modelCallCount`、`durationMs`、按各次请求累加的输入、输出和缓存 token 的 `modelUsage`，以及压缩前后的大小；没有发过请求的压缩不带 `modelUsage`。发出过请求之后在策略内部失败的压缩，其 `failed` 事实带上同样的字段。
+17. **摘要实质性。** 为空或只有空白的回复让压缩失败：事实为 `failed`，回复为 `compaction_failed`，不生效。折叠后的摘要是最后一条回复，所以从不为空；各部分在声明它们的提示词落地时检查。
+18. **清单。** 没有工具声明效果时，已完成的替换内容不带清单消息；在清单出现之前写下的记录仍然原样重放。
 
 ## 12. 实现说明
 
@@ -625,7 +722,7 @@ builder.session_value(Arc::new(ContextModelHost(Some(model))))
 | 摘要预算 | 评审修正：分块与截断用窗口事实的 `count_tokens` 对整个摘要请求计数，对照 `context_window − output_tokens`（§5.2），以 CJK 为主的历史不再超出窗口；`product_summary.rs` 检查每个摘要请求。 |
 | 验收 | 验收 1、3、6（崩溃与重启）和 8 在二进制流程测试 `transport_flow/compaction.rs` 中运行。验收 2、4、5 以及 6 中的重载、中断和失败情形在 `dim-agent-capabilities/tests/context_flow`（`manual_compaction.rs` 和既有压缩测试）中运行。事实与快照之间的崩溃由 `compaction_events.rs` 的快照失败测试覆盖。 |
 | 触发点、保留与恢复（#128） | `ContextPolicy` 保存其 `prepare` 返回的请求的估算（完成压缩后为完整计数），所以 `validate` 检查同一请求时不再读取上下文；不是它准备的请求会读取一次上下文。每个保留条目用 `count_tokens` 单独计数后求和，因此不含整体计数时消息之间的分隔符。触发点取值在 `transport_flow/compaction.rs` 和 `product_summary.rs` 中验证；保留与恢复在 `context_flow/retention.rs`；手动切点在 `manual_compaction.rs`。 |
-| 死区与被截断的摘要 | #169：保留规则的退回不再依赖预算恢复，单个很长的轮次会在最晚的、仍保留内容的切点压缩；只有恢复时才能替换全部。`CompactionInput` 去掉了 `fallback`。停在 `max_tokens` 的摘要回复会对半重试，到最小块仍截断就失败，不再被保留。 |
+| 死区与被截断的摘要 | #169：保留规则的退回不再依赖预算恢复，单个很长的轮次会在最晚的、仍保留内容的切点压缩；只有恢复时才能替换全部。§5.3 改变了后一条：没有尾部放得进上限时，替换全部的切点成为界限，对所有触发方式都一样。`CompactionInput` 去掉了 `fallback`。停在 `max_tokens` 的摘要回复会对半重试，到最小块仍截断就失败，不再被保留。 |
 
 ## 13. 摘要质量：推理与目标长度（#170）
 
@@ -808,3 +905,24 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
 - **CI 质量测试**：结果不确定且付费；用例是由运行器解析的数据。
 
 保留的及其用途：回退到 `inherit`（该设置的含义：“模型允许时”）；诊断中的 `reasoning`、`targetTokens` 和 `cutOffCount`（评估从结果中读取它们，用户从记录中读到摘要器做了什么；`cutOffCount` 是思考带来的代价，否则它隐含在 `chunkCount` 中）；目标规则的工厂配置（使评估无需评估专用代码路径就能让每个候选经过已发布的策略运行）。
+
+## 14. 压缩质量需求（#428 §7.1）
+
+[#428 §7.1](../compaction-quality.md#71-contextcompaction) 的需求在各自拥有该规则的节里回答；本节只是索引，本身不陈述规则。
+
+| 需求 | 设计 |
+| --- | --- |
+| `0.5 × B` 上限，以及上限需要时把切点往后移 | §5.3 第 1、4 步，§4.2 `replacement_size` |
+| 空间不足标记 | §5.3 第 5 步，§4.3 诊断 |
+| 再增长；跳过或失败的自动压缩不会在同一段历史上再次运行是它的推论 | §5.6、§5.3 |
+| 一次恢复压缩，然后是指出不可压缩部分的错误 | §5.3 预算恢复，§5.8、§6 |
+| 第 2 类 (a) 钉住 | §5.9、§4.3 组成 |
+| 线性滚动 | §5.2：摘要只读上一份替换内容和新切出来的条目，不变 |
+| 工作量有界 | §5.2 工作量有界 |
+| 自报成本 | §4.1、§4.3、§5.2 成本 |
+| 摘要实质性：每条回复非空，各部分随声明它们的提示词一起检查 | §5.2 摘要实质性 |
+| 第 3b 类状态摘要，首项是正在生效的任务或目标 | §5.2 摘要实质性；提示词及其声明的部分仍是 [#429/#170 的产品策略](../../../design/compaction-quality.md#77-model-facing-prompts-429)，随它一起检查 |
+| 第 3a 类清单 | §5.10、§4.3 组成 |
+| §1 里过时的那句话 | §1 |
+
+**向机制所有者提出的需求：** 无。清单依赖 [需求 §7.4](../../../design/compaction-quality.md#74-toolregistry-the-tool-contract) 向 ToolRegistry 提出的工具效果声明；本设计不读任何工具的 schema，在那种方式出现之前清单保持为空。
