@@ -309,7 +309,7 @@ impl Arguments {
                     };
                     arguments.offset = Some(usize::try_from(offset).unwrap_or(usize::MAX));
                 }
-                _ => return Err(format!("recall: {field} must be a known argument.")),
+                _ => return Err(format!("recall: {} must be a known argument.", part(field))),
             }
         }
         if arguments.open.is_some()
@@ -741,7 +741,7 @@ impl<'a> Narrative<'a> {
         };
         if let Some(open) = &arguments.open {
             let Some(entry) = self.ids.get(open.as_str()).copied() else {
-                return ToolResult::error(format!("No turn or line has id {open}."));
+                return ToolResult::error(format!("No turn or line has id {}.", part(open)));
             };
             return match entry {
                 Entry::Turn(index) => self.turn_page(index, arguments.offset.unwrap_or(0)),
@@ -752,7 +752,7 @@ impl<'a> Narrative<'a> {
             Some(before) => match self.ids.get(before.as_str()).copied() {
                 Some(entry) => Some(entry_anchor(&self.turns, &self.things, entry)),
                 None => {
-                    return ToolResult::error(format!("No turn or line has id {before}."));
+                    return ToolResult::error(format!("No turn or line has id {}.", part(before)));
                 }
             },
             None => None,
@@ -1647,9 +1647,9 @@ fn first_line(text: &str) -> (String, bool) {
 
 fn filters(arguments: &Arguments) -> String {
     match (&arguments.about, &arguments.tool) {
-        (Some(about), Some(tool)) => format!("about \"{about}\" and tool {tool}"),
+        (Some(about), Some(tool)) => format!("about \"{about}\" and tool {}", part(tool)),
         (Some(about), None) => format!("about \"{about}\""),
-        (None, Some(tool)) => format!("tool {tool}"),
+        (None, Some(tool)) => format!("tool {}", part(tool)),
         (None, None) => String::new(),
     }
 }

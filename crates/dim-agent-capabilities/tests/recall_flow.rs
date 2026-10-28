@@ -2098,6 +2098,17 @@ fn every_line_stays_bounded_whatever_the_arguments_and_the_blocks() {
     assert!(summary.starts_with("09:20 "), "{summary}");
     assert!(summary.contains("you called tool-0, tool-1, "), "{summary}");
     assert!(summary.contains('…'), "{summary}");
+
+    let missing = "missing".repeat(1_000);
+    for arguments in [
+        json!({"tool": missing}),
+        json!({"open": missing}),
+        json!({"before": missing}),
+        json!({(missing.clone()): true}),
+    ] {
+        let (page, _) = recorded.answer("t3", arguments);
+        bounded(&page);
+    }
 }
 
 #[test]
