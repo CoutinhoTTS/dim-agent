@@ -1139,8 +1139,8 @@ Internal Rust changes:
 | Diagnostics | Strategy-neutral: common counts, the summarizer's summed usage and the insufficient-space mark, plus a strategy-owned object (breaking) |
 | Compaction state | Facts: pending = command without start, running = start without result, done = result (§5.7) |
 | Half-finished compaction | Never resumed; settled as `cancelled` (§5.8) |
-| Summarizer reasoning (#170) | Decided by the evaluation (§13.4): `summaryReasoning: inherit \| off \| low` in `compaction.json`, or a constant if one value wins on every model class. Until then `inherit` (today's behaviour) |
-| Target summary length (#170) | Decided by the evaluation (§13.4): `S = min(α × O, β × B)` stated in the prompt, or no instruction. Until then no instruction, and the planning size uses α = 0.5 and β = 0.10 (provisional) |
+| Summarizer reasoning (#170) | `off` (§13.2). The evaluation ([research note](../research/summary-eval.md)) passes `off` on the measured reasoning class and finds no arm better than it, so the value is a strategy constant and `compaction.json` is not introduced |
+| Target summary length (#170) | No instruction (§13.3). Every phase-2 arm passed; the no-instruction arm's cut-offs and failures were no higher than any target arm's, so none is kept. The planning size uses α = 0.5 and β = 0.10 |
 | Window limits | None of compaction's own: the window facts are the model's catalog values with their overrides, and `B`, the threshold, `0.5 × B`, `0.25 × B` and `S` scale with the declared window. A smaller useful window is declared smaller in the catalog (Provider) or by the `contextWindow` override (§5.1) |
 | The `0.5 × B` bound | The tail budget is `min(0.25 × B, 0.5 × B − resident)` with the replacement planned at `replacement_size` (§13.3's `S` at the provisional α = 0.5, β = 0.10); when no kept tail fits, the limit is the cut that replaces everything; a completed result still above the bound is re-planned once at the replacement's actual size before anything is committed, and only that re-plan's outcome is written; the mark is measured from the written result's total, so a result above the bound always carries it (§5.3). The `0.5` share is provisional (#428) |
 | Insufficient space | A descriptive `insufficientSpace` object present exactly when a completed compaction's total exceeds `0.5 × B`, naming the resident parts that cover the excess, largest first, and never the kept tail; no decision reads it (§4.3, §5.3) |
@@ -1152,8 +1152,7 @@ Internal Rust changes:
 | Substantive summary | Non-empty is enforced on every reply, so a committed summary is never empty; the parts are checked when [#429's prompt](../compaction-quality.md#77-model-facing-prompts-429) declares them, added with it (§5.2) |
 
 Open: the #128 follow-ups outside F1 (a summarizer request that reuses the conversation prefix,
-Anthropic cache breakpoints, provider-reported overflow mapped to recovery) and running the
-summary evaluation of #170 (§13), whose results set the two rows above.
+Anthropic cache breakpoints, provider-reported overflow mapped to recovery).
 
 ## 11. Acceptance (flow tests)
 
@@ -1331,10 +1330,11 @@ fix, the smallest choice was made and is recorded here.
 
 ## 13. Summary quality: reasoning and target length (#170)
 
-Status: approved design for [#170](https://github.com/arcships/dim/issues/170). It designs the
-evaluation and the two knobs; the defaults are decided by running the evaluation (§13.4) and are
-recorded in §10 when it has run. Until then the default behaviour (§5.2) is unchanged: the
-summarizer inherits the conversation's reasoning and its prompt states no length.
+Status: approved design for [#170](https://github.com/arcships/dim/issues/170). It designed the
+evaluation and the two knobs; the evaluation has run on the measured classes and its result is
+the [research note](../research/summary-eval.md). §10 records the decisions and §13 is their
+contract: the summarizer's reasoning is `off`, the setting is not introduced, and the prompt
+states no length.
 
 ### 13.1 What is decided here and what is not
 
@@ -1360,8 +1360,8 @@ Out of scope: a separate summarizer model (§10), summarizer prefix reuse and ca
 | `off` | The conversation request's config with reasoning effort `none`, mapped as Provider maps it for a conversation |
 | `low` | The conversation request's config with reasoning effort `low`, mapped the same way |
 
-- The value applies to every summarizer request of a compaction, read once when the compaction
-  starts. `maxTokens = output_tokens` is unchanged in every case.
+- The value applies to every summarizer request of a compaction, fixed when the strategy is
+  built. `maxTokens = output_tokens` is unchanged in every case.
 - `off` and `low` apply where the model allows it. Where Provider's mapping rejects the effort for
   this model and protocol (no reasoning support, no reasoning-off declaration for the protocol,
   `low` not among the model's effort options, Bedrock, the local development connection), the
@@ -1375,28 +1375,11 @@ Out of scope: a separate summarizer model (§10), summarizer prefix reuse and ca
   record shows what the summarizer actually did. A compaction that sends no summarizer request
   records the requested value.
 
-**Where it lives.** Business configuration of the summary strategy (ADR 002 D4): the user file
-`compaction.json` in the product home, `{"summaryReasoning": "inherit" | "off" | "low"}`, unknown
-members rejected.
-
-- `ProductSummaryStrategyPlugin`'s factory captures the product home path, and
-  `SummaryStrategy::new` resolves it at load with `FileStorage::register_root`, which returns the
-  root `serve` already registered for that home (idempotent by path, so no new root is opened);
-  the product profile is assembled in `cli.rs`, before `serve` computes the root list, so the
-  factory cannot carry that root's index. The strategy then reads `compaction.json` under that
-  root through `FileStorage` at the start of each compaction. A change takes effect at the next
-  compaction without a reload. A missing file means the default (§13.4).
-- An unreadable or invalid file fails the compaction (`failed`, reply `compaction_failed`) with a
-  message that names `compaction.json`, as an invalid `exec-shell.json` fails the command that
-  needs it. The file is the user's explicit choice; silently using another value would hide it.
-- User scope only. A project file is not offered: summarizer reasoning is a cost and quality
-  preference of the user, not of a repository.
-- It is not a declared Settings source (those are for owners not written in Rust) and not a
-  `BusinessDocument` with management methods: no client edits it in #170. When a client needs to,
-  it becomes a `BusinessDocument` with its owner's methods, with the same document.
-- The mock profile does not install the strategy, so it has no file. The `--models` profile
-  installs it with its `--home`, the home its storage already uses, so its `compaction.json` sits
-  there.
+**Where it lives.** There is no `compaction.json`: the value is factory configuration of
+`ProductSummaryStrategyPlugin` (§13.5), and the product profile never sets it, so `off` is the
+constant (§10). The evaluation sets it per arm through the same factory member, as it already
+sets the target rule and the candidate system prompt (§13.3, §13.4). A missing member means
+`off`.
 
 **How it maps through Provider.** The effort mapping already exists:
 `ModelPreferences::configure` ([preferences.rs](../../../crates/dim-app-server/src/provider/preferences.rs))
@@ -1449,6 +1432,16 @@ Candidates evaluated (§13.4): `α ∈ {0.25, 0.5}`, `β ∈ {0.05, 0.10}`, and 
 | 128,000 / 16,000 | 112,000 | 4,000 | 4,000 | 5,600 | 8,000 |
 | 200,000 / 64,000 | 136,000 | 6,800 | 13,600 | 6,800 | 13,600 |
 
+**Decision.** No instruction ships (§10). In the evaluation's phase 2 every arm passed, and the
+no-instruction arm's cut-offs and failures were no higher than any target arm's, so none is
+kept; `S` stays a planning size and never enters a prompt. The candidate values above remain
+what the evaluation compared (§13.4).
+
+**Planning-size evidence.** Against the planned `replacement_size`, the no-instruction arm's
+`T` had a median of 0.11 and a p90 of 0.67, and no run exceeded the plan (0 of 24; the maximum
+was 0.89, on the case whose window is narrowed to 8,000): an overshoot would be re-planned once
+(§5.3).
+
 The chosen rule is a code constant of the strategy (ADR 002 D4: provisional constants are code),
 passed as factory configuration of `ProductSummaryStrategyPlugin` so that the evaluation can run
 every candidate through the shipped strategy. It is not user configuration.
@@ -1478,17 +1471,18 @@ cargo run --locked -p xtask -- summary-eval --home DIR --model PROVIDER/MODEL --
   the providers; the runner never uses `~/.dimcode` or `~/.dimcode-alpha`. Credentials stay in that home and never enter
   the repository, the cases or the output.
 - The runner serves the product profile on that home (as `graph` does), builds the conversation
-  request from `ProviderService::configuration` for `--model` with default preferences (what a
-  user gets), and resolves `ProductContextModel` on it.
+  request from `ProviderService::configuration` for `--model` with the model's saved preferences
+  (what a user gets), and resolves `ProductContextModel` on it.
 - For each case and arm it constructs the product summary strategy from the process's `ModelHost`
-  and `ProviderConnectionResolver`, with the arm's factory configuration (its target rule, and the
-  candidate arm's prompt) and the arm's `compaction.json` written into the home, and calls
-  `compact` directly with a `CompactionInput` built from the case. Every arm therefore runs the
-  shipped request building, chunking, cut-off handling and reasoning mapping; only the knobs
-  differ.
+  and `ProviderConnectionResolver`, with the arm's factory configuration (its reasoning value,
+  its target rule, and the candidate arm's prompt), and calls `compact` directly with a
+  `CompactionInput` built from the case. Every arm therefore runs the shipped request building,
+  chunking, cut-off handling and reasoning mapping; only the knobs differ.
 - Output (JSON per run plus a Markdown table) goes to `--out`, outside the repository. The
-  decision and its table are committed as a research note
-  (`docs/design/research/summary-eval.md`, EN + zh) when the evaluation has run.
+  result and its table are the [research note](../research/summary-eval.md) (EN + zh).
+- Two defects in this runner were fixed in [#545](https://github.com/arcships/dim/pull/545): the
+  conversation and judge configs had ignored the model's saved preferences, and `exact` probes
+  were compared with the escaped summary. The evaluation was measured on the fixed runner.
 
 **Candidate arms (a).** The candidate prompt is factory configuration of the product summary
 strategy: `ProductSummaryStrategyConfig` gains one optional member holding the system prompt
@@ -1633,6 +1627,13 @@ and one model without reasoning as a control.
 2. Target: with phase 1's reasoning value for each class, arms no instruction and the four
    `(α, β)` candidates.
 
+**Coverage.** The reasoning class for the OpenAI Responses protocol could not run: the request
+builder asks for the encrypted reasoning continuation data, the endpoint returned none, and the
+reply reader rejects a thinking part without it
+(`crates/dim-agent-aimux/src/stream.rs:261-273`), so every recorded run that reasoned failed.
+That class measures the endpoint-driver pairing, not summary quality, so no arm of it enters a
+decision; the rule is rerun for it when it can run.
+
 **Decision criteria** (`δ = 0.05`):
 
 - **Reasoning default.** For a class, an arm passes when `F ≥ F_inherit − δ`, `X ≥ X_inherit − δ`,
@@ -1649,27 +1650,31 @@ and one model without reasoning as a control.
   Otherwise the passing target arm with the fewest `C` plus failures is kept, ties broken by the
   smaller median `T`. A kept target must be followed: the 90th percentile of `T / S` is at most
   1.5; if not, the instruction does not control length and is not kept.
-- The result, the arms' table and any hand corrections go into the research note; §10 records the
-  defaults and §13 becomes the implemented contract.
+- The result, the arms' table and any hand corrections are in the
+  [research note](../research/summary-eval.md); §10 records the decisions and §13 is their
+  contract.
 
 ### 13.5 Changes when implemented
 
 | Part | Change |
 | --- | --- |
-| `summary_strategy.rs` | Reads `compaction.json` once per compaction (if the setting ships); maps the config through `reasoning_config`; takes the system prompt from its factory configuration (`SYSTEM` when absent) and appends the target sentence to it when the rule gives one; the strategy value gets a public constructor taking `ModelHost`, `ProviderConnectionResolver`, its factory configuration and the optional `FileStorage` handle the plugin injects when a home is configured, for the runner |
-| `ProductSummaryStrategyPlugin` | Factory configuration: the `compaction.json` location, the target rule and the optional system prompt; the product profile sets neither the target rule nor the prompt |
+| `summary_strategy.rs` | Takes its reasoning value from factory configuration (`off` when unset) and maps the config through `reasoning_config`; takes the system prompt from its factory configuration (`SYSTEM` when absent) and appends the target sentence to it when the rule gives one; the strategy value gets a public constructor taking `ModelHost`, `ProviderConnectionResolver` and its factory configuration, for the runner |
+| `ProductSummaryStrategyPlugin` | Factory configuration: the reasoning value, the target rule and the optional system prompt; the product profile sets none of them |
 | Provider (`preferences.rs`) | The effort branch moves to `reasoning_config`; behaviour unchanged |
 | Summary diagnostics object | Adds `reasoning` (the value applied: `inherit`, `off`, `low`), `targetTokens` (S, absent without an instruction) and `cutOffCount` (replies stopped at `max_tokens`; today they are only visible inside `chunkCount`). Additive fields of the strategy-owned object in `context/compaction`; no format version change |
 | `xtask` | `summary-eval` command and `xtask/summary-eval/cases/`; `--candidate` and `--target` with the two-arm report and its verdict; the `steps` shape, the per-`item` breakdown and the case-validation test; `serve_home`, the product assembly on an existing home that `serve_product` (`graph`) and the runner share |
-| App Server product profile | Passes the home's `compaction.json` location to the strategy factory; `RunningServer::service` hands a served profile's process services to `xtask`, so the runner reaches `ProviderService`, `ModelHost`, `ProviderConnectionResolver` and `FileStorage` |
+| App Server product profile | `RunningServer::service` hands a served profile's process services to `xtask`, so the runner reaches `ProviderService`, `ModelHost` and `ProviderConnectionResolver` |
 
 No event, port, Session value, Loop, ContextPolicy, record or replay change.
-`summary_reasoning_comes_from_the_compaction_file` in `transport_flow/compaction.rs` covers the
-reader and the mapping: with `compaction.json` holding `off`, the summarizer request's config
-carries the model's reasoning-off fields while the conversation's request keeps its reasoning,
-and the record's diagnostics show `reasoning: "off"`; an invalid file fails a manual compaction
-with `compaction_failed`. The target rule needs no test of its own: it is prompt text, measured
-by the evaluation. The system-prompt member does: `product_summary` in `context_flow`
+`summary_reasoning_comes_from_factory_configuration` in `transport_flow/compaction.rs` covers
+the product's default (nothing set): the summarizer request's config carries the model's
+reasoning-off fields while the conversation's request keeps its reasoning, and the record's
+diagnostics show `reasoning: "off"`.
+`summary_reasoning_maps_off_and_falls_back_to_inherit` in `context_flow/product_summary.rs`
+covers an explicit `off` and the fallback to `inherit` on a model whose protocol has no off
+declaration, whose diagnostics show `reasoning: "inherit"`. The target rule needs no test of
+its own: it is prompt text, measured by the evaluation. The system-prompt member does:
+`product_summary` in `context_flow`
 configures a prompt much longer than `SYSTEM` and asserts that every summarizer request's system
 text begins with it and that every request still fits the window; it extends the existing CJK
 fit flow.
@@ -1679,17 +1684,17 @@ fit flow.
 | Rule | Answer |
 | --- | --- |
 | Principles §1, one event bus | No new event or state; the knobs change only the content of the summarizer request inside one strategy call. |
-| §3 dependency direction | The strategy gains no dependency: `FileStorage` is read as HostPlatform reads it, and `reasoning_config` is a function in its own crate. |
+| §3 dependency direction | The strategy gains no dependency: the reasoning value is its own factory configuration, and `reasoning_config` is a function in its own crate. |
 | §3 changing another module (Provider) | Provider's effort mapping moves into a shared pure function. The need is that the summarizer must apply the same mapping to a request without a wiring part (D2); the function keeps Provider's behaviour and Provider remains its only author. |
 | §3 extension without change | Strategy layer only (§2.2): another strategy is unaffected, old records replay unchanged. |
 | §4 rules 1–7 | Not applicable: no command, handoff, handler, core, batch, context path or public service is added. The replacement still reaches the model only through the completed fact's projection. |
 | §4 rule 8 | No infrastructure change. |
 | §4 rule 9 | No new fact; the new diagnostics fields are content of the existing fact that users read to understand a compaction. |
 | ADR 002 D1 | Session part, unchanged scope. |
-| ADR 002 D2 | No adapter part: the mapping is a function, the file is read by its owner. |
+| ADR 002 D2 | No adapter part: the mapping is a function, and the value is the strategy's own factory configuration. |
 | ADR 002 D3 | Unchanged. |
-| ADR 002 D4 | `summaryReasoning` is business configuration in the owner's file, read at use time, no reload. The target rule is a provisional constant in code. |
-| ADR 002 D5 | The contract is the file's JSON shape (§13.2) and the diagnostics fields (§13.5); `reasoning_config` is a Rust-internal binding. |
+| ADR 002 D4 | `summaryReasoning` is factory configuration of the strategy, whose product value is a constant (`off`); the target rule is also factory configuration, unset in the product, with a constant planning default. Neither is user configuration. |
+| ADR 002 D5 | The contract is the diagnostics fields (§13.5); the value and the target rule are Rust factory configuration, and `reasoning_config` is a Rust-internal binding. |
 
 **Requirements raised to mechanism owners:** none. The Provider change in the table is a change
 to a product module, not to infrastructure.
@@ -1702,8 +1707,9 @@ Considered and removed:
   `apply_preferences`): it would only connect Provider to the strategy (D2), and it would re-read
   the catalog instead of using the adopted snapshot. Replaced by the moved pure function.
 - **A Settings source or management method** for `summaryReasoning`: no client edits it in #170;
-  the file read at use time has the same document and can become a `BusinessDocument` later.
-- **A project-scope file**: no repository-level need.
+  it is factory configuration, and a client need would make it a `BusinessDocument`.
+- **A user or project-scope file**: the value is a constant; a file would add a reader and a
+  failure mode for nothing.
 - **`low` as "at most low"** (keeping off when the conversation is off): needs a second reading of
   provider options; `low` is a plain request instead.
 - **A hard `maxTokens = S`**: turns overshoot into cut-off retries.
@@ -1717,8 +1723,8 @@ Kept, with their purpose: the fallback to `inherit` (the setting's meaning, "whe
 allows"); `reasoning`, `targetTokens` and `cutOffCount` in diagnostics (the evaluation reads them
 from the outcome, and a user reads from the record what the summarizer did; `cutOffCount` is the
 cost thinking imposes, which is otherwise hidden in `chunkCount`); the factory configuration for
-the target rule (it lets the evaluation run every candidate through the shipped strategy without
-an evaluation-only code path).
+the reasoning value and the target rule (it lets the evaluation run every candidate through the
+shipped strategy without an evaluation-only code path).
 
 ## 14. Compaction quality requirements (#428 §7.1)
 
