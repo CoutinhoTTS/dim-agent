@@ -5940,6 +5940,7 @@ fn tui_composer_shows_context_use_and_refreshes_it_when_a_run_ends() {
 #[test]
 fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     let home = Home::new();
+    let (shown, wait_shown) = std::sync::mpsc::channel();
     let (started, wait_started) = std::sync::mpsc::channel();
     let (more, wait_more) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
@@ -5954,17 +5955,23 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
         );
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
+        // The composer's first frame is out before the row is sent: `until`
+        // only searches what follows its last match, and a row painted above
+        // the status line in the same frame would be behind that cursor.
+        // The wait carries no deadline of its own: the main thread's `until`
+        // deadlines bound the flow, and a test that fails drops the sender.
+        wait_shown.recv().unwrap();
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction-start","sequence":12,"create_at":1,"type":"context","name":"compaction-start",
              "data":{"through":11,"trigger":"threshold","strategy":"summary"}}}));
-        wait_started.recv_timeout(PATIENCE).unwrap();
+        wait_started.recv().unwrap();
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
             {"id":"dim-compaction","sequence":13,"create_at":1,"type":"context","name":"compaction",
              "data":{"through":11,"start":12,"status":"completed","retain_from":"dim-2","strategy":"summary",
                      "replacement":[{"role":"user","content":"<dim-summary>\nThe parser is half done.\n</dim-summary>"}],
                      "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
                                     "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
-        wait_more.recv_timeout(PATIENCE).unwrap();
+        wait_more.recv().unwrap();
         // A record that locates its parts: the summary is the strategy's
         // message, and the pinned input follows it, shown apart.
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
@@ -5999,6 +6006,7 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     });
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("test / model");
+    shown.send(()).unwrap();
     terminal.until("Compacting context…");
     started.send(()).unwrap();
     terminal.until("Context compacted");
@@ -6125,7 +6133,8 @@ fn tui_context_warning_starts_at_the_threshold_share_and_a_compaction_refreshes_
                 method => panic!("unexpected request {method:?}"),
             }
         }
-        wait_shown.recv_timeout(PATIENCE).unwrap();
+        // No deadline of its own; the main thread's `until` bounds the flow.
+        wait_shown.recv().unwrap();
         wire.notice(
             "session.event",
             json!({"sessionId":"session","branchId":"main","event":
