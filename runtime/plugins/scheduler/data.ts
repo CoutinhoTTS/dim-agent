@@ -31,7 +31,7 @@ export const jobSchema = fields.extend({
 })
 export type Job = z.infer<typeof jobSchema>
 export type Schedule = z.infer<typeof schedule>
-export interface ScheduleSettings { jobs: Job[]; max_concurrent_runs: number }
+export interface ScheduleSettings { jobs: Job[]; max_concurrent_runs: number; legacy_imports?: Record<string, { fingerprint: string; request_digest: string }> }
 export interface Caller { sessionId: string; branchId: string; cwd: string }
 
 export const patchSchema = fields.partial()

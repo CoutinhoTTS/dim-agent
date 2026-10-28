@@ -413,7 +413,7 @@ The Scheduler process row registers one source in its `apply`
 | Schema root | Object with `jobs` (array, default `[]`) and `max_concurrent_runs` (integer, minimum 1, default 4); job fields and constraints are A.1/A.4 |
 
 Settings applies these defaults and validates external documents once at its boundary. An invalid
-document is an error, not an empty job list. The source holds jobs only; A.7's inner v1 run history
+document is an error, not an empty job list. The source holds jobs and optional `legacy_imports` receipts (source identity to source/request digests); A.7's inner v1 run history
 stays in `pluginFiles`. Reading or changing this document never structurally reloads the package.
 
 ## 8. Rule check
@@ -509,8 +509,17 @@ Namespace `schedule`, registered with `managementMethods`: its declarations list
 | `schedule.set_enabled` | `{job_id, enabled}` | Pause/resume |
 | `schedule.run_now` | `{job_id}` | `run_id` or the skip reason |
 | `schedule.history` | `{job_id, limit?}` | Runs, newest first |
+| `schedule.import_legacy` | `{source_id, fingerprint, job, enabled_at?}` | `{status, job_id}`; final native job fields without a caller-supplied id/cap/origin/revision |
 
 The process row's `schedule` namespace (§1.3) uses existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent.
+
+### A.3.1 Configuration import
+
+A protected local operator can import a final native job through `schedule.import_legacy`. Migration converts the old schedule and Session reference before calling it. The owner captures the same default permission cap and user origin as management save, validates the job, and preserves its supplied enabled flag. `enabled_at` supplies the established minute anchor of an imported repeating job; it is present only for an enabled job.
+
+A single Settings CAS stores the job and `legacy_imports[source_id]` source fingerprint and final-request digest together. Matching source and final-request digests return `already_imported`; a changed request, changed source or an existing target identity returns `conflict`. Receipt coverage belongs to configuration only, never run history. Job deletion retains the receipt, so repeat cannot recreate the job. Source data without a compatible mapping does not receive a receipt. An enabled imported job follows ordinary Scheduler timing and policy checks. Import never restores a prior running execution or sends its historical notifications.
+
+The method is owned by Scheduler and has the same availability and drain behavior as its other mutations. A disabled or unavailable owner reports its ordinary availability error; importing is not a request to enable it.
 
 ### A.4 Schedule formats
 

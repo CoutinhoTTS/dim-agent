@@ -122,6 +122,45 @@ fn config(home: &Path) -> ServerConfig {
     config
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_import_preserves_enablement_and_receipts_across_restart_and_deletion() {
+    let home=home();
+    let request=json!({"source_id":"legacy-job","fingerprint":"a".repeat(64),"job":{
+        "name":"Imported schedule","prompt":"Imported definition","cwd":home,
+        "schedule":{"cron":"0 9 * * 1"},"mode":"create","enabled":false,
+        "model":{"providerId":"removed-provider","modelId":"removed-model"}
+    }});
+    let (server,_)=launch_with_agent(Arc::new(MockTools),config(&home)).await;
+    let mut client=Client::new_version(&server,false,3).await;
+    process_typescript::files_available(&mut client,"schedule.list",json!({})).await;
+    let first=client.rpc("schedule.import_legacy",request.clone()).await;
+    assert_ok(&first);
+    assert_eq!(first["result"]["status"],"imported");
+    let listed=client.rpc("schedule.list",json!({})).await;
+    assert_eq!(listed["result"]["jobs"][0]["enabled"],false);
+    assert_eq!(listed["result"]["jobs"][0]["created_by"],"user");
+    assert_eq!(client.rpc("schedule.history",json!({"job_id":"legacy-job"})).await["result"]["runs"],json!([]));
+    let mut changed=request.clone();
+    changed["job"]["prompt"]=json!("Changed final input with the same source fingerprint");
+    assert_eq!(client.rpc("schedule.import_legacy",changed).await["result"]["status"],"conflict");
+    drop(client);server.shutdown();server.join().await.unwrap();
+    let (server,_)=launch_with_agent(Arc::new(MockTools),config(&home)).await;
+    let mut client=Client::new_version(&server,false,3).await;
+    process_typescript::files_available(&mut client,"schedule.list",json!({})).await;
+    assert_eq!(client.rpc("schedule.import_legacy",request.clone()).await["result"]["status"],"already_imported");
+    assert_ok(&client.rpc("schedule.delete",json!({"job_id":"legacy-job"})).await);
+    assert_eq!(client.rpc("schedule.import_legacy",request).await["result"]["status"],"already_imported");
+    assert_eq!(client.rpc("schedule.list",json!({})).await["result"]["jobs"],json!([]));
+    let enabled=json!({"source_id":"legacy-future","fingerprint":"b".repeat(64),"enabled_at":"2026-01-01T00:00:00.000Z","job":{
+        "name":"Future import","prompt":"Ordinary future execution","cwd":home,
+        "schedule":{"at":"2030-01-01T00:00:00Z"},"mode":"create","enabled":true
+    }});
+    assert_eq!(client.rpc("schedule.import_legacy",enabled).await["result"]["status"],"imported");
+    assert_eq!(client.rpc("schedule.list",json!({})).await["result"]["jobs"][0]["enabled"],true);
+    drop(client);server.shutdown();server.join().await.unwrap();std::fs::remove_dir_all(home).unwrap();
+}
+
 async fn settled(client: &mut Client, job: &Value, run: &Value) -> Value {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
