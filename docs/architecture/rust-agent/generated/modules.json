@@ -2768,6 +2768,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "panic",
         "serde_json::json"
       ]
     },
@@ -21578,9 +21579,16 @@
         "path ContentBlock",
         "path ContentBlock::Image",
         "path ContentBlock::Text",
+        "path Message",
+        "path MessageContent::Parts",
+        "path MessageContent::Text",
+        "path MessagePart::Text",
         "path ToolContent::Blocks",
         "path ToolContent::Text",
         "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::Message",
+        "use dim_agent_types::MessageContent",
+        "use dim_agent_types::MessagePart",
         "use dim_agent_types::ToolContent"
       ]
     },
@@ -21602,6 +21610,11 @@
         "path CollaborationTarget::Agent",
         "path CollaborationTarget::Member",
         "path CollaborationTarget::Temporary",
+        "path ContextCompactionResult",
+        "path ContextCompactionResult::Cancelled",
+        "path ContextCompactionResult::Completed",
+        "path ContextCompactionResult::Failed",
+        "path ContextCompactionResult::Skipped",
         "path ExecStatus::Cancelled",
         "path ExecStatus::Completed",
         "path ExecStatus::Failed",
@@ -21609,6 +21622,7 @@
         "path InputMode::Append",
         "path InputMode::Steer",
         "path ModelOutputOutcome::Failed",
+        "path ReplacementParts",
         "path TurnOutcome",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
@@ -21621,9 +21635,11 @@
         "use dim_agent_types::CollaborationDelivery",
         "use dim_agent_types::CollaborationOutcome",
         "use dim_agent_types::CollaborationTarget",
+        "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::ExecStatus",
         "use dim_agent_types::InputMode",
         "use dim_agent_types::ModelOutputOutcome",
+        "use dim_agent_types::ReplacementParts",
         "use dim_agent_types::TurnOutcome",
         "use dim_agent_types::UserInput"
       ]
@@ -21649,6 +21665,12 @@
       "to": "dim_cli::model::view",
       "references": [
         "path ApprovalView",
+        "path CompactionState::Cancelled",
+        "path CompactionState::Completed",
+        "path CompactionState::Failed",
+        "path CompactionState::Running",
+        "path CompactionState::Skipped",
+        "path CompactionView",
         "path LineCut",
         "path LineState::CreationFailed",
         "path LineState::EndedByOperation",
@@ -21664,6 +21686,7 @@
         "path QueuedInput",
         "path RowKind",
         "path RowKind::AssistantMessage",
+        "path RowKind::Compaction",
         "path RowKind::Error",
         "path RowKind::Shell",
         "path RowKind::Status",
@@ -21687,6 +21710,8 @@
         "path ViewSnapshot::default",
         "path WorkflowView",
         "use crate::model::view::ApprovalView",
+        "use crate::model::view::CompactionState",
+        "use crate::model::view::CompactionView",
         "use crate::model::view::LineCut",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
@@ -21779,6 +21804,13 @@
         "use crate::wire::Event",
         "use crate::wire::EventContent",
         "use crate::wire::Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::projection::tests",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path CompactionState"
       ]
     },
     {
@@ -27025,7 +27057,9 @@
       "from": "dim_cli::ui::transcript::block",
       "to": "dim_cli::model::view",
       "references": [
+        "path CompactionState",
         "path RowKind::AssistantMessage",
+        "path RowKind::Compaction",
         "path RowKind::Error",
         "path RowKind::Other",
         "path RowKind::Shell",
@@ -27037,6 +27071,7 @@
         "path RowTone::Danger",
         "path RowTone::Warning",
         "path ViewRow",
+        "use crate::model::view::CompactionState",
         "use crate::model::view::RowKind",
         "use crate::model::view::RowTone",
         "use crate::model::view::ViewRow"
@@ -27126,6 +27161,19 @@
     },
     {
       "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path CompactionState",
+        "path CompactionState::Cancelled",
+        "path CompactionState::Completed",
+        "path CompactionState::Failed",
+        "path CompactionState::Running",
+        "path CompactionState::Skipped",
+        "use crate::model::view::CompactionState"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::sanitize",
       "references": [
         "path crate::sanitize::safe"
@@ -27197,6 +27245,7 @@
         "path Block::Assistant",
         "path Block::Banner",
         "path Block::Boundary",
+        "path Block::Compaction",
         "path Block::Error",
         "path Block::Failure",
         "path Block::Line",
@@ -27538,10 +27587,12 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::model::view",
       "references": [
+        "path CompactionState::Running",
         "path LineState::Waiting",
         "path LineState::Working",
         "path LineView",
         "path RowKind::AssistantMessage",
+        "path RowKind::Compaction",
         "path RowKind::Status",
         "path RowKind::StreamingAssistant",
         "path RowKind::Thinking",
@@ -27551,6 +27602,7 @@
         "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
+        "use crate::model::view::CompactionState",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
         "use crate::model::view::RowKind",
@@ -28069,6 +28121,7 @@
         "path Block::Assistant",
         "path Block::Banner",
         "path Block::Boundary",
+        "path Block::Compaction",
         "path Block::Failure",
         "path Block::Line",
         "path Block::LoadMore",
@@ -29373,6 +29426,10 @@
     {
       "module": "dim_cli::ui::tui",
       "path": "Event::Question"
+    },
+    {
+      "module": "dim_cli::ui::tui",
+      "path": "LiveItem::Compaction"
     },
     {
       "module": "dim_cli::ui::tui",

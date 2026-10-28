@@ -15,6 +15,8 @@ pub enum RowKind {
     AssistantMessage,
     Thinking,
     ToolCall,
+    /// A `context/compaction-start` and the `context/compaction` that ends it.
+    Compaction,
     Error,
     Status,
     /// A row kind the UI does not draw specially; it falls back to a status
@@ -74,6 +76,32 @@ pub struct ViewRow {
     /// A line-opened marker: the line it opened, which a pick enters
     /// (timeline UI §4.4).
     pub line: Option<String>,
+    /// A compaction row's state and detail.
+    pub compaction: Option<CompactionView>,
+}
+
+/// A context compaction as its transcript row shows it (compaction
+/// requirements §4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompactionView {
+    pub state: CompactionState,
+    /// A completed compaction's summary text — the strategy's part of what
+    /// replaced the cut history — or the reason or error of one that did not
+    /// complete.
+    pub text: String,
+    /// The completed compaction's pinned inputs, carried verbatim after the
+    /// summary; none when the record pins nothing.
+    pub kept: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionState {
+    /// The strategy was called and its result has not arrived.
+    Running,
+    Completed,
+    Skipped,
+    Failed,
+    Cancelled,
 }
 
 /// A delegation in its leader's transcript, with what this client observed

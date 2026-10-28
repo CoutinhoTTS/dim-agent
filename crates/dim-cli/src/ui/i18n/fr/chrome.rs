@@ -299,7 +299,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "défiler en haut",
         "scroll to the bottom" => "défiler en bas",
         "pick an earlier message to edit or quote" => "choisir un message à modifier ou citer",
-        "collapse or expand tool details and thoughts" => "replier/déplier outils et réflexions",
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "replier/déplier outils, réflexions et résumés de compression"
+        }
         "switch between fullscreen and scrollback" => "basculer plein écran / défilement",
         "switch theme" => "changer de thème",
         "switch language" => "changer de langue",
@@ -446,6 +448,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "copie du terminal",
         "drag to select" => "glisser pour sélectionner",
         "drag or {shortcut}" => "glisser ou {shortcut}",
+        "Compacting context…" => "Compression du contexte…",
+        "Context compacted" => "Contexte compressé",
+        "Context compaction skipped" => "Compression du contexte ignorée",
+        "Context compaction failed" => "La compression du contexte a échoué",
+        "Context compaction cancelled" => "Compression du contexte annulée",
+        "Kept verbatim" => "Conservé tel quel",
         _ => return None,
     })
 }

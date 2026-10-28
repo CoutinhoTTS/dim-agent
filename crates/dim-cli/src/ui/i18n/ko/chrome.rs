@@ -271,7 +271,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "맨 위로 스크롤",
         "scroll to the bottom" => "맨 아래로 스크롤",
         "pick an earlier message to edit or quote" => "편집/인용할 이전 메시지 선택",
-        "collapse or expand tool details and thoughts" => "도구 상세·생각 접기/펼치기",
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "도구 상세·생각·압축 요약 접기/펼치기"
+        }
         "switch between fullscreen and scrollback" => "전체 화면/스크롤백 전환",
         "switch theme" => "테마 전환",
         "switch language" => "언어 전환",
@@ -412,6 +414,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "터미널 복사",
         "drag to select" => "드래그 선택",
         "drag or {shortcut}" => "드래그 또는 {shortcut}",
+        "Compacting context…" => "컨텍스트 압축 중…",
+        "Context compacted" => "컨텍스트가 압축되었습니다",
+        "Context compaction skipped" => "컨텍스트 압축을 건너뜀",
+        "Context compaction failed" => "컨텍스트 압축 실패",
+        "Context compaction cancelled" => "컨텍스트 압축 취소됨",
+        "Kept verbatim" => "원문 그대로 유지",
         _ => return None,
     })
 }

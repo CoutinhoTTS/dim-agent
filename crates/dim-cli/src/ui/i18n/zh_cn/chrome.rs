@@ -254,7 +254,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "滚动到顶部",
         "scroll to the bottom" => "滚动到底部",
         "pick an earlier message to edit or quote" => "选择较早的消息进行编辑或引用",
-        "collapse or expand tool details and thoughts" => "折叠或展开工具详情与思考",
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "折叠或展开工具详情、思考与压缩摘要"
+        }
         "switch between fullscreen and scrollback" => "在全屏和回滚界面之间切换",
         "switch theme" => "切换主题",
         "switch language" => "切换语言",
@@ -380,6 +382,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "终端复制",
         "drag to select" => "拖动选择",
         "drag or {shortcut}" => "拖动或 {shortcut}",
+        "Compacting context…" => "正在压缩上下文…",
+        "Context compacted" => "上下文已压缩",
+        "Context compaction skipped" => "上下文压缩已跳过",
+        "Context compaction failed" => "上下文压缩失败",
+        "Context compaction cancelled" => "上下文压缩已取消",
+        "Kept verbatim" => "原文保留",
         _ => return None,
     })
 }

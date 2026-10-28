@@ -297,7 +297,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "scroll to the top" => "gulir ke atas",
         "scroll to the bottom" => "gulir ke bawah",
         "pick an earlier message to edit or quote" => "pilih pesan lama untuk diedit/dikutip",
-        "collapse or expand tool details and thoughts" => "lipat/buka detail tool dan pikiran",
+        "collapse or expand tool details, thoughts and compaction summaries" => {
+            "lipat/buka detail tool, pikiran, dan ringkasan kompresi"
+        }
         "switch between fullscreen and scrollback" => "ganti layar penuh/scrollback",
         "switch theme" => "ganti tema",
         "switch language" => "ganti bahasa",
@@ -442,6 +444,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "terminal copy" => "salin terminal",
         "drag to select" => "seret untuk pilih",
         "drag or {shortcut}" => "seret atau {shortcut}",
+        "Compacting context…" => "Mengompresi konteks…",
+        "Context compacted" => "Konteks dikompresi",
+        "Context compaction skipped" => "Kompresi konteks dilewati",
+        "Context compaction failed" => "Kompresi konteks gagal",
+        "Context compaction cancelled" => "Kompresi konteks dibatalkan",
+        "Kept verbatim" => "Dipertahankan apa adanya",
         _ => return None,
     })
 }

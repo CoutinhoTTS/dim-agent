@@ -2,6 +2,7 @@
 //! gutters, wrapping, reasoning, shell output and the canonical block renderer.
 
 use crate::model::shell::Outcome as ShellOutcome;
+use crate::model::view::CompactionState;
 use crate::ui::i18n::{t, tf};
 use crate::ui::render::markdown::MarkdownRenderer;
 use crate::ui::render::panel::{clip, wrap};
@@ -384,6 +385,60 @@ pub(crate) fn render_shell(
     rows
 }
 
+/// A compaction row: its state, the reason of one that did not complete,
+/// and a completed one's summary and kept input behind the `▸`/`▾`
+/// disclosure, drawn as the detail of a tool group is.
+fn render_compaction(
+    state: CompactionState,
+    text: &str,
+    kept: Option<&str>,
+    expanded: bool,
+    width: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let (mark, color) = match state {
+        CompactionState::Running => ("·", &p.accent),
+        CompactionState::Completed => ("✓", &p.success),
+        CompactionState::Skipped | CompactionState::Cancelled => ("◦", &p.muted),
+        CompactionState::Failed => ("✗", &p.danger),
+    };
+    let mut header = match state {
+        CompactionState::Running => t("Compacting context…").to_owned(),
+        CompactionState::Completed => t("Context compacted").to_owned(),
+        CompactionState::Skipped => t("Context compaction skipped").to_owned(),
+        CompactionState::Failed => t("Context compaction failed").to_owned(),
+        CompactionState::Cancelled => t("Context compaction cancelled").to_owned(),
+    };
+    if state == CompactionState::Completed {
+        header.push_str(if expanded { " ▾" } else { " ▸" });
+    } else if !text.is_empty() {
+        header.push_str(" · ");
+        header.push_str(text);
+    }
+    let mut rows = gutter_text(mark, &header, width, color);
+    if state == CompactionState::Completed && expanded {
+        rows.extend(
+            thinking_body(text, width)
+                .iter()
+                .map(|row| thinking_row(row, width, p)),
+        );
+        if let Some(kept) = kept {
+            let bar = gutter_mark(THINKING_BAR, gutter_width(width));
+            rows.push(format!(
+                "{}{}",
+                fg(&bar, &p.border),
+                fg(t("Kept verbatim"), &p.faint)
+            ));
+            rows.extend(
+                thinking_body(kept, width)
+                    .iter()
+                    .map(|row| thinking_row(row, width, p)),
+            );
+        }
+    }
+    rows
+}
+
 /// A committed chunk owns the blank row that separates it from what came
 /// before, and every row carries the document pad.
 /// A rule centred on `label`, at most [`BOUNDARY_MAX_WIDTH`] wide.
@@ -434,6 +489,22 @@ pub(crate) fn render_block(
             p,
         ),
         Block::ToolGroup(group) => render_group(group, width, p, "·"),
+        Block::Compaction {
+            state,
+            text,
+            kept,
+            expanded,
+        } => {
+            let kept = kept.as_deref().map(crate::sanitize::safe);
+            render_compaction(
+                *state,
+                &crate::sanitize::safe(text),
+                kept.as_deref(),
+                *expanded,
+                width,
+                p,
+            )
+        }
         Block::Shell(run) => {
             let shown = run.output.len().saturating_sub(SHELL_PREVIEW_LINES);
             let mut notes = Vec::new();

@@ -12,7 +12,7 @@ use crate::model::session::{Command, DraftPart, SessionPort, SwitchKind, Update}
 use crate::model::shell::Outcome as ShellOutcome;
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    LineState, LineView, RowKind, SideLine, TaskTarget, ViewRow, ViewSnapshot,
+    CompactionState, LineState, LineView, RowKind, SideLine, TaskTarget, ViewRow, ViewSnapshot,
 };
 use crate::ui::Env;
 use crate::ui::approvals_panel::{ApprovalsPanel, status_label};
@@ -2432,7 +2432,9 @@ impl App {
         for block in &mut self.history {
             match block {
                 Block::ToolGroup(group) => group.detail = detail,
-                Block::Thinking { expanded, .. } => *expanded = detail == Detail::Expanded,
+                Block::Thinking { expanded, .. } | Block::Compaction { expanded, .. } => {
+                    *expanded = detail == Detail::Expanded
+                }
                 _ => {}
             }
         }
@@ -3211,6 +3213,7 @@ impl App {
             Text(String),
             Thinking(String),
             Tool(usize),
+            Compaction(usize),
         }
         let mut live_text: Vec<TextBlock> = Vec::new();
         let mut live_items: Vec<LiveItem> = Vec::new();
@@ -3242,6 +3245,14 @@ impl App {
                         .any(|call| call.pending) =>
                 {
                     live_items.push(LiveItem::Tool(index));
+                }
+                RowKind::Compaction
+                    if row
+                        .compaction
+                        .as_ref()
+                        .is_some_and(|c| c.state == CompactionState::Running) =>
+                {
+                    live_items.push(LiveItem::Compaction(index));
                 }
                 RowKind::AssistantMessage => match self.revealed.get(&row.row_id) {
                     Some(&(_, shown)) if shown < text.len() => {
@@ -3413,6 +3424,12 @@ impl App {
                         "·",
                     )
                 }
+                LiveItem::Compaction(index) => render_block(
+                    &project_row(&snapshot.rows, *index, detail_of(*index)),
+                    width,
+                    p,
+                    markdown,
+                ),
             };
             if rows.is_empty() {
                 continue;
@@ -3645,7 +3662,9 @@ impl App {
         let index = id.checked_sub(self.dropped);
         match index.and_then(|index| self.history.get_mut(index)) {
             Some(Block::ToolGroup(group)) => group.detail = group.detail.flipped(),
-            Some(Block::Thinking { expanded, .. }) => *expanded = !*expanded,
+            Some(Block::Thinking { expanded, .. } | Block::Compaction { expanded, .. }) => {
+                *expanded = !*expanded
+            }
             _ => return false,
         }
         self.mark_rewritten(id);
@@ -4800,6 +4819,7 @@ mod tests {
                 member: None,
                 cut: None,
                 line: None,
+                compaction: None,
             })
         };
         app.apply(snapshot(Some(SideLine {
@@ -5037,6 +5057,7 @@ mod tests {
                         member: None,
                         cut: None,
                         line: None,
+                        compaction: None,
                     })
                 })
                 .collect();
@@ -5173,6 +5194,7 @@ mod tests {
                 member: None,
                 cut: None,
                 line: None,
+                compaction: None,
             })],
             focus: "b-7c".into(),
             main_topic: Some("fix the login bug".into()),
@@ -5239,6 +5261,7 @@ mod tests {
                     member: None,
                     cut: Some(n as u64),
                     line: None,
+                    compaction: None,
                 })
             })
             .collect();

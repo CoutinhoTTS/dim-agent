@@ -5935,6 +5935,127 @@ fn tui_composer_shows_context_use_and_refreshes_it_when_a_run_ends() {
     }
 }
 
+/// The compaction events (§4): one row that runs until its result, then the
+/// summary behind the same disclosure a tool group uses.
+#[test]
+fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
+    let home = Home::new();
+    let (started, wait_started) = std::sync::mpsc::channel();
+    let (more, wait_more) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction-start","sequence":12,"create_at":1,"type":"context","name":"compaction-start",
+             "data":{"through":11,"trigger":"threshold","strategy":"summary"}}}));
+        wait_started.recv_timeout(PATIENCE).unwrap();
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction","sequence":13,"create_at":1,"type":"context","name":"compaction",
+             "data":{"through":11,"start":12,"status":"completed","retain_from":"dim-2","strategy":"summary",
+                     "replacement":[{"role":"user","content":"<dim-summary>\nThe parser is half done.\n</dim-summary>"}],
+                     "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
+                                    "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
+        wait_more.recv_timeout(PATIENCE).unwrap();
+        // A record that locates its parts: the summary is the strategy's
+        // message, and the pinned input follows it, shown apart.
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction-start-2","sequence":14,"create_at":1,"type":"context","name":"compaction-start",
+             "data":{"through":11,"trigger":"manual","strategy":"summary"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":
+            {"id":"dim-compaction-2","sequence":15,"create_at":1,"type":"context","name":"compaction",
+             "data":{"through":11,"start":14,"status":"completed","retain_from":"dim-2","strategy":"summary",
+                     "replacement":[{"role":"user","content":"<dim-summary>\nThe cache lock moved into a RwLock."},
+                                    {"role":"user","content":"Keep the parser race in mind."}],
+                     "replacement_parts":{"strategy":1,"digest":0},
+                     "diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":300.0,
+                                    "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.until("Compacting context…");
+    started.send(()).unwrap();
+    terminal.until("Context compacted");
+    terminal.until("The parser is half done.");
+    terminal.write(b"/tools\r");
+    terminal.until("Context compacted ▸");
+    terminal.write(b"/tools\r");
+    terminal.until("The parser is half done.");
+    more.send(()).unwrap();
+    terminal.until("Kept verbatim");
+    terminal.until("Keep the parser race in mind.");
+    let transcript = terminal.transcript.clone();
+    let at = |needle: &str| {
+        transcript
+            .find(needle)
+            .unwrap_or_else(|| panic!("no {needle:?}: {transcript}"))
+    };
+    assert!(
+        at("The cache lock moved into a RwLock.") < at("Kept verbatim"),
+        "the summary comes before the kept input: {transcript}"
+    );
+    assert!(
+        at("Kept verbatim") < at("Keep the parser race in mind."),
+        "the kept input follows its label: {transcript}"
+    );
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
+/// A resumed session rebuilds its compaction rows from history.
+#[test]
+fn tui_rebuilds_compaction_rows_from_history_on_resume() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        let summaries = wire.read("session.summaries");
+        wire.reply(&summaries, json!([{"sessionId":"session","cwd":"/workspace","model":{"providerId":"test","modelId":"model"},"updatedAt":1}]));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[
+                {"id":"dim-compaction-start","sequence":3,"create_at":1,"type":"context","name":"compaction-start",
+                 "data":{"through":2,"trigger":"threshold","strategy":"summary"}},
+                {"id":"dim-compaction","sequence":4,"create_at":1,"type":"context","name":"compaction",
+                 "data":{"through":2,"start":3,"status":"completed","retain_from":"dim-1","strategy":"summary",
+                         "replacement":[{"role":"user","content":"<dim-summary>\nRestored summary text.\n</dim-summary>"}],
+                         "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
+                                        "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}}}],
+                "through":8,"nextAfter":8,"done":true}),
+        );
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut command = home.command();
+    command.args(["--resume", "session"]);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("Context compacted");
+    terminal.until("Restored summary text.");
+    terminal.write(b"/exit\r");
+    terminal.until("Bye!");
+    assert!(terminal.wait().success());
+    daemon.join().unwrap();
+}
+
 /// `dimcode export` (Timeline export design §7, §13 item 6): the sibling
 /// App Server's read-only export, live and after stop, without a daemon.
 #[test]

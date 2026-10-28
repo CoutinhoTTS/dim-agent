@@ -161,6 +161,7 @@ mod tests {
             member: None,
             cut: Some(1),
             line: None,
+            compaction: None,
         })
     }
 
