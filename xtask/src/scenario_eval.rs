@@ -12,11 +12,11 @@
 //! Both arms run the shipped assembly: `current` with the product's own texts
 //! and `candidate` with the candidate file in place of the text `--text`
 //! names. Each arm runs every scenario `--runs` times, one fixed judge reads
-//! each run's exported Timeline, and the report applies the relative rule of
-//! model-prompts §8.1: every probe's pass rate is at least the current arm's
-//! minus 0.05, the candidate's violations, failed runs and unjudged runs are
-//! no higher, and every probe has at least one judged run in each arm. There
-//! is no absolute pass line.
+//! a view of each run's exported Timeline, and the report applies the
+//! relative rule of model-prompts §8.1: every probe's pass rate is at least
+//! the current arm's minus 0.05, the candidate's violations, failed runs and
+//! unjudged runs are no higher, and every probe has at least one judged run
+//! in each arm. There is no absolute pass line.
 //!
 //! A failed run is one that ended on an error or its wall-clock budget, or
 //! one whose judging did not happen: there was nothing the judge could be
@@ -100,8 +100,9 @@
 //! The runner copies the scenario's workspace and `--home` into a fresh
 //! directory for every run, so runs share no state, and writes one directory
 //! per run under `--out`, which it creates and resolves where the command
-//! line is read: `timeline.jsonl` (the whole Timeline, every line
-//! included, which the judge reads), `home/` and `workspace/`. The App
+//! line is read: `timeline.jsonl` (the whole Timeline, every line included:
+//! the run's account of record), `judge-view.jsonl` (the view of it the judge
+//! read), `home/` and `workspace/`. The App
 //! Server's local endpoint sits under the system temporary directory, because
 //! a Unix socket's path is short and a run's directory is not; each run
 //! owns its endpoint directory and removes it when the run ends, on success
@@ -143,7 +144,7 @@ const QUIET: Duration = Duration::from_secs(1);
 /// How long one `session.idle` call may take before its line counts as busy.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
-const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
+const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. A context/prepare or model/call event carries its request: addedMessages are the messages added since that line's previous request, with messageCount the whole request's count, and messages is the whole list when the history changed; system, tools and config appear in full only when they changed, and otherwise read {\"unchanged\": true}. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
 
 /// The message that asks the judge again, `{what}` saying why its last answer
 /// could not be used.
@@ -757,6 +758,9 @@ async fn run_once(
     if let Some(export) = &finished.export {
         std::fs::write(run_directory.join("timeline.jsonl"), export)?;
     }
+    if let Some(view) = &finished.view {
+        std::fs::write(run_directory.join("judge-view.jsonl"), view)?;
+    }
     let driven = finished.driven;
     let error = driven.error;
     Ok(RunRecord {
@@ -778,11 +782,12 @@ async fn run_once(
     })
 }
 
-/// What one run left behind: the driven Session, its export and the judge's
-/// part.
+/// What one run left behind: the driven Session, its export, the view of it
+/// the judge read, and the judge's part.
 struct Finished {
     driven: Driven,
     export: Option<String>,
+    view: Option<String>,
     judging: Judging,
 }
 impl Finished {
@@ -796,6 +801,7 @@ impl Finished {
                 error: Some(error),
             },
             export: None,
+            view: None,
             judging: Judging::not_asked(scenario, None),
         }
     }
@@ -866,6 +872,7 @@ async fn drive_once(
         return Ok(Finished {
             driven,
             export: None,
+            view: None,
             judging: Judging::not_asked(scenario, None),
         });
     }
@@ -898,6 +905,7 @@ async fn drive_once(
             return Ok(Finished {
                 driven,
                 export: None,
+                view: None,
                 judging: Judging::not_asked(scenario, Some(format!("no export to judge: {error}"))),
             });
         }
@@ -909,16 +917,19 @@ async fn drive_once(
         return Ok(Finished {
             driven,
             export: Some(export),
+            view: None,
             judging: Judging::not_asked(
                 scenario,
                 Some("the served profile has no model host for the judge".to_owned()),
             ),
         });
     };
-    let judging = judge_export(&host, &resolver, judge, scenario, &export, cancel).await;
+    let view = judge_view(&export);
+    let judging = judge_export(&host, &resolver, judge, scenario, &view, cancel).await;
     Ok(Finished {
         driven,
         export: Some(export),
+        view: Some(view),
         judging,
     })
 }
@@ -1393,6 +1404,67 @@ async fn idle(
         .any(|message| matches!(message, WireMessage::Notice { .. })))
 }
 
+/// The export as the judge reads it (issue #635): every line in order, with
+/// each request-bearing event's request rendered against the previous request
+/// of the same line, so a run does not carry a request's unchanged history
+/// once per model call.
+fn judge_view(export: &str) -> String {
+    let mut view = String::new();
+    let mut previous: BTreeMap<String, Value> = BTreeMap::new();
+    for raw in export.lines() {
+        let Ok(mut line) = serde_json::from_str::<Value>(raw) else {
+            view.push_str(raw);
+            view.push('\n');
+            continue;
+        };
+        if line["event"]["data"]["request"].is_object() {
+            let branch = line["branch_id"].as_str().unwrap_or_default().to_owned();
+            let request = line["event"]["data"]["request"].clone();
+            line["event"]["data"]["request"] = rendered_request(&request, previous.get(&branch));
+            previous.insert(branch, request);
+        }
+        view.push_str(&serde_json::to_string(&line).expect("a parsed line serializes"));
+        view.push('\n');
+    }
+    view
+}
+
+/// One request as [`judge_view`] renders it: the messages added since the
+/// line's previous request, when that request's messages are a prefix of this
+/// one's, or all of them otherwise; `system`, `tools` and `config` in full
+/// when they differ from the previous request's, or a marker when they do
+/// not. Nothing is dropped: every request can be rebuilt from the view.
+fn rendered_request(request: &Value, previous: Option<&Value>) -> Value {
+    let messages = request["messages"].as_array();
+    let added = messages.and_then(|messages| {
+        let previous = previous?["messages"].as_array()?;
+        let added = messages.get(previous.len()..)?;
+        messages[..previous.len()]
+            .iter()
+            .zip(previous)
+            .all(|(message, earlier)| message == earlier)
+            .then_some(added)
+    });
+    let mut rendered = json!({
+        "providerId": request["providerId"].clone(),
+        "modelId": request["modelId"].clone(),
+        "messageCount": messages.map_or(0, Vec::len),
+    });
+    match added {
+        Some(added) => rendered["addedMessages"] = json!(added),
+        None => rendered["messages"] = request["messages"].clone(),
+    }
+    for field in ["system", "tools", "config"] {
+        let unchanged = previous.is_some_and(|previous| previous.get(field) == request.get(field));
+        rendered[field] = if unchanged {
+            json!({"unchanged": true})
+        } else {
+            request.get(field).cloned().unwrap_or(Value::Null)
+        };
+    }
+    rendered
+}
+
 /// The judge's answer for one run: a record per probe, the judge's error,
 /// whether the judge had to drop its temperature, and how many times it was
 /// asked again. A reply that gives no verdict, or leaves a probe without one,
@@ -1404,7 +1476,7 @@ async fn judge_export(
     resolver: &Arc<ProviderConnectionResolver>,
     judge: &ModelSelection,
     scenario: &Scenario,
-    export: &str,
+    view: &str,
     cancel: &CancellationToken,
 ) -> Judging {
     let statements = scenario
@@ -1414,7 +1486,7 @@ async fn judge_export(
         .collect::<Vec<_>>()
         .join("\n");
     let text =
-        format!("<statements>\n{statements}\n</statements>\n\n<timeline>\n{export}\n</timeline>");
+        format!("<statements>\n{statements}\n</statements>\n\n<timeline>\n{view}\n</timeline>");
     let mut messages = vec![Message::text(Role::User, text)];
     let mut config = judge.config.clone().unwrap_or_default();
     config.temperature = Some(0.);
@@ -2097,6 +2169,124 @@ mod tests {
             (2, Some("main: the turn failed: provider error".to_owned()))
         );
         assert_eq!(turns_in_export(""), (0, None));
+    }
+
+    /// The judge's view keeps every line in order, changes nothing but the
+    /// requests, and renders each request against the previous request of its
+    /// line: the messages added since, or all of them after a history change;
+    /// system, tools and config in full only when they changed (issue #635).
+    #[test]
+    fn the_judge_view_gives_each_request_its_unchanged_parts_once() {
+        fn request_line(
+            kind: &str,
+            name: &str,
+            branch: &str,
+            messages: &[&str],
+            system: &str,
+            tools: &[&str],
+        ) -> String {
+            json!({
+                "kind": "event",
+                "branch_id": branch,
+                "event": {"type": kind, "name": name, "data": {"request": {
+                    "providerId": "p",
+                    "modelId": "m",
+                    "messages": messages
+                        .iter()
+                        .map(|text| json!({"role": "user", "content": text}))
+                        .collect::<Vec<_>>(),
+                    "system": system,
+                    "tools": tools
+                        .iter()
+                        .map(|name| json!({"name": name}))
+                        .collect::<Vec<_>>(),
+                    "config": {"maxTokens": 8},
+                }}},
+            })
+            .to_string()
+        }
+        let header = r#"{"kind":"header","export":1}"#.to_owned();
+        let end = r#"{"kind":"end","branches":2,"events":5}"#.to_owned();
+        let export = [
+            header.clone(),
+            request_line("context", "prepare", "main", &["one"], "S", &["read"]),
+            request_line("model", "call", "main", &["one"], "S", &["read"]),
+            request_line(
+                "context",
+                "prepare",
+                "main",
+                &["one", "two"],
+                "S",
+                &["read", "write"],
+            ),
+            request_line("model", "call", "B", &["cut"], "S", &["read"]),
+            request_line(
+                "context",
+                "prepare",
+                "main",
+                &["summary"],
+                "S",
+                &["read", "write"],
+            ),
+            end.clone(),
+        ]
+        .join("\n");
+        let view = judge_view(&export);
+        let lines: Vec<Value> = view
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 7, "every line is kept");
+        // Every line but a request-bearing one is the export's own.
+        for (index, raw) in export.lines().enumerate() {
+            if matches!(index, 1..=5) {
+                continue;
+            }
+            assert_eq!(lines[index], serde_json::from_str::<Value>(raw).unwrap());
+        }
+        let request = |index: usize| lines[index]["event"]["data"]["request"].clone();
+
+        // The first request of a line is given in full.
+        let first = request(1);
+        assert_eq!(first["messages"].as_array().unwrap().len(), 1, "{first}");
+        assert_eq!(first["messageCount"], 1, "{first}");
+        assert_eq!(first["system"], "S", "{first}");
+        assert_eq!(first["tools"].as_array().unwrap().len(), 1, "{first}");
+        assert_eq!(first["config"], json!({"maxTokens": 8}), "{first}");
+
+        // The same request again adds no message and changes nothing.
+        let same = request(2);
+        assert_eq!(same["addedMessages"], json!([]), "{same}");
+        assert_eq!(same["messageCount"], 1, "{same}");
+        assert_eq!(same["system"], json!({"unchanged": true}), "{same}");
+        assert_eq!(same["tools"], json!({"unchanged": true}), "{same}");
+        assert_eq!(same["config"], json!({"unchanged": true}), "{same}");
+
+        // A later request gives the message added since and the tools that
+        // changed; the system is still the one given.
+        let added = request(3);
+        assert_eq!(
+            added["addedMessages"],
+            json!([{"role": "user", "content": "two"}]),
+            "{added}"
+        );
+        assert_eq!(added["messageCount"], 2, "{added}");
+        assert_eq!(added["system"], json!({"unchanged": true}), "{added}");
+        assert_eq!(added["tools"].as_array().unwrap().len(), 2, "{added}");
+
+        // Another line's first request is given in full.
+        let branch = request(4);
+        assert_eq!(branch["messages"].as_array().unwrap().len(), 1, "{branch}");
+
+        // A history change leaves no prefix: the whole list is given.
+        let changed = request(5);
+        assert_eq!(
+            changed["messages"].as_array().unwrap().len(),
+            1,
+            "{changed}"
+        );
+        assert_eq!(changed["messageCount"], 1, "{changed}");
+        assert_eq!(changed["tools"], json!({"unchanged": true}), "{changed}");
     }
 
     /// More violations or more failed runs fail the candidate even when every
@@ -2984,6 +3174,22 @@ mod tests {
         text.contains("You check statements")
             .then(|| content(r#"[{"id":"ran","verdict":"present","quote":"turn/end"}]"#))
     }
+    /// The model the long-run test asks as judge: its declared window holds
+    /// the view of a compaction run's export and not the export itself.
+    const JUDGE_MODEL: &str = "judge";
+    /// That window in the bytes of a request body, at the product's four
+    /// bytes per token.
+    const JUDGE_WINDOW_BYTES: usize = 64_000 * 4;
+    /// The judge's answers, and its refusal of a request its window cannot
+    /// hold, the way a judge model refuses one over its window.
+    fn refuses_over_the_judge_window(text: &str) -> Option<Value> {
+        if !text.contains("You check statements") {
+            return None;
+        }
+        (text.len() > JUDGE_WINDOW_BYTES)
+            .then(|| refusal("This model's maximum context length is 64000 tokens"))
+            .or_else(|| judged(text))
+    }
     /// The judge's verdict, the summarizer's two texts, and plain text for
     /// everything else.
     fn summaries_and_judgements(text: &str) -> Option<Value> {
@@ -3060,6 +3266,11 @@ mod tests {
                         "models": [{
                             "id": "mock",
                             "contextWindow": 24000,
+                            "maxOutputTokens": 200,
+                            "config": {"maxTokens": 200}
+                        }, {
+                            "id": JUDGE_MODEL,
+                            "contextWindow": 64000,
                             "maxOutputTokens": 200,
                             "config": {"maxTokens": 200}
                         }]
@@ -3298,6 +3509,68 @@ mod tests {
                 .all(|request| !request.contains("You summarize a coding session")),
             "the candidate arm never carries the product prompt"
         );
+    }
+
+    /// A run whose export is longer than the judge's window is judged through
+    /// the view, which carries each request's unchanged parts once: the judge
+    /// refuses the raw export and answers the view (issue #635). The raw
+    /// export alone is longer than the judge's window; the view fits it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_longer_than_the_judge_window_is_judged_through_its_view() {
+        const WINDOW: u64 = 64_000;
+        let fixture = Fixture::start(
+            "judge-view",
+            refuses_over_the_judge_window,
+            json!({
+                "message": compaction_message(),
+                "steers": [{"afterSeconds": 1.0, "text": "second"}],
+                "budget": {"turns": 6, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.judge = ModelId {
+            provider_id: "gateway".into(),
+            model_id: JUDGE_MODEL.into(),
+        };
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            assert_eq!(record["probes"][0]["verdict"], "present", "{record}");
+        }
+        let estimate = |text: &str| {
+            let judge = ModelSelection {
+                provider_id: "gateway".into(),
+                model_id: JUDGE_MODEL.into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            };
+            let request = judge_request(
+                &judge,
+                &[Message::text(Role::User, text)],
+                &ModelConfig::default(),
+            );
+            window_facts(WINDOW, 200, &request).count_tokens(&request)
+        };
+        for arm in ["current", "candidate"] {
+            let directory = options.out.join(arm).join("case").join("run-0");
+            let export = std::fs::read_to_string(directory.join("timeline.jsonl")).unwrap();
+            let view = std::fs::read_to_string(directory.join("judge-view.jsonl")).unwrap();
+            assert!(
+                estimate(&export) > WINDOW as f64,
+                "{arm}: the raw export is longer than the judge's window"
+            );
+            assert!(
+                estimate(&view) < WINDOW as f64,
+                "{arm}: the view fits the judge's window"
+            );
+        }
     }
 
     /// A run offers the shipped assembly's whole tool catalog — the workspace
