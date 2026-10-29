@@ -5503,6 +5503,7 @@ dependencies = [
 name = "xtask"
 version = "0.1.0-alpha.8"
 dependencies = [
+ "axum",
  "dim-agent-aimux",
  "dim-agent-attachments",
  "dim-agent-capabilities",
@@ -5510,6 +5511,7 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
+ "dim-client",
  "futures-util",
  "rutis",
  "rutis-bridge",

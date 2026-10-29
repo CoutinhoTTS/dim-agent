@@ -54,8 +54,14 @@ pub async fn run() -> Result<()> {
     let cases = read_cases(&cases_directory())?;
     std::fs::create_dir_all(&options.out)?;
     let cancel = CancellationToken::new();
-    let server =
-        app_server::serve_home(&home, &home, options.out.join("command-output"), |_| {}).await?;
+    let server = app_server::serve_home(
+        &home,
+        &home,
+        options.out.join("command-output"),
+        app_server::RunSettings::default(),
+        |_| {},
+    )
+    .await?;
     let providers = server
         .service::<ProviderService>()
         .ok_or("the product profile serves no provider catalog")?;
@@ -975,16 +981,17 @@ fn render(replacement: &[Message]) -> String {
         .join("\n")
 }
 
+/// One judge answer; the scenario runner reads the same shape.
 #[derive(serde::Deserialize)]
-struct Judgement {
-    id: String,
-    verdict: Verdict,
+pub struct Judgement {
+    pub id: String,
+    pub verdict: Verdict,
     #[serde(default)]
-    quote: Option<String>,
+    pub quote: Option<String>,
 }
 #[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum Verdict {
+pub enum Verdict {
     Present,
     Absent,
     Contradicted,
@@ -1157,7 +1164,7 @@ async fn judge_probes(
         .collect())
 }
 
-async fn complete(
+pub(crate) async fn complete(
     host: &Arc<ModelHost>,
     resolver: &Arc<ProviderConnectionResolver>,
     request: &Arc<ModelRequest>,
@@ -1195,7 +1202,7 @@ async fn collected(mut stream: ModelStream) -> std::result::Result<(String, bool
 /// The first JSON array of a reply that parses as a verdict list. Prose, a
 /// fenced block or a bracketed lead-in before the array must not hide it, and
 /// a bracket inside a quoted verdict is part of the JSON, not a boundary.
-fn parse_judgements(text: &str) -> Option<Vec<Judgement>> {
+pub(crate) fn parse_judgements(text: &str) -> Option<Vec<Judgement>> {
     text.match_indices('[').find_map(|(start, _)| {
         serde_json::Deserializer::from_str(&text[start..])
             .into_iter::<Vec<Judgement>>()
@@ -1215,15 +1222,15 @@ fn normalize(text: &str) -> String {
 /// strategy's applied reasoning replaces the effort where its mapping took it
 /// (ContextCompaction §13.4). One shape serves the arm and the judge.
 #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
-struct Configuration {
-    effort: Option<String>,
-    tier: Option<String>,
+pub(crate) struct Configuration {
+    pub(crate) effort: Option<String>,
+    pub(crate) tier: Option<String>,
 }
 impl Configuration {
     /// Reads the configuration a request built from `config` carries. A saved
     /// service tier lands in the OpenAI protocols' options, the only protocols
     /// the preferences support (`provider/preferences.rs`).
-    fn read(config: Option<&ModelConfig>) -> Self {
+    pub(crate) fn read(config: Option<&ModelConfig>) -> Self {
         let Some(config) = config else {
             return Self::default();
         };

@@ -6974,7 +6974,7 @@
       "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::summary_strategy",
       "references": [
-        "path ProductSummaryStrategyConfig::default",
+        "path ProductSummaryStrategyConfig",
         "path ProductSummaryStrategyPlugin::new",
         "use crate::summary_strategy::ProductSummaryStrategyConfig",
         "use crate::summary_strategy::ProductSummaryStrategyPlugin"
@@ -14238,6 +14238,7 @@
       "from": "dim_app_server::cli",
       "to": "dim_agent_aimux::models",
       "references": [
+        "path AimuxModels",
         "path AimuxModels::from_config",
         "use dim_agent_aimux::AimuxModels"
       ]
@@ -14301,6 +14302,14 @@
     },
     {
       "from": "dim_app_server::cli",
+      "to": "dim_agent_capabilities::summary_strategy",
+      "references": [
+        "path ProductSummaryStrategyConfig::default",
+        "use dim_agent_capabilities::summary_strategy::ProductSummaryStrategyConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
       "to": "dim_agent_capabilities::workspace_tools",
       "references": [
         "path WorkspaceToolsConfig",
@@ -14327,6 +14336,7 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path AgentConfig::default",
+        "path dim_agent_runtime::SessionConfig",
         "use dim_agent_runtime::AgentConfig"
       ]
     },
@@ -14404,6 +14414,7 @@
       "from": "dim_app_server::cli",
       "to": "dim_app_server::protocol",
       "references": [
+        "path crate::protocol::DaemonProfile",
         "path crate::protocol::DaemonProfile::Configured",
         "path crate::protocol::DaemonProfile::Mock",
         "path crate::protocol::DaemonProfile::Product"
