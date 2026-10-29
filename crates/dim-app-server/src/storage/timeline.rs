@@ -239,7 +239,12 @@ impl SqliteTimelineStore {
                     Command::Release { session_id, done } => {
                         let Some(store) = weak.upgrade() else { break };
                         store.forget(&session_id);
-                        store.admission.lock().unwrap().failures.remove(&session_id);
+                        store
+                            .admission
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .failures
+                            .remove(&session_id);
                         let _ = done.send(Ok(()));
                         continue;
                     }
@@ -1828,7 +1833,10 @@ impl TimelineStore for SqliteTimelineStore {
         Box::pin(async move {
             let (done, wait) = tokio::sync::oneshot::channel();
             {
-                let admission = self.admission.lock().unwrap();
+                let admission = self
+                    .admission
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if admission.closed {
                     return Err(error("Timeline storage is closed"));
                 }
@@ -2367,6 +2375,13 @@ async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() 
         let (healthy, publication) = tokio::sync::oneshot::channel();
         store.append(key("healthy"), vec![record(5)], Box::new(move |result| { let _ = healthy.send(result); })).unwrap();
         publication.await.unwrap().unwrap();
+        assert_eq!(store.head(&key("healthy")).await.unwrap(), 5);
+        let poisoned = store.clone();
+        assert!(thread::spawn(move || {
+            let _admission = poisoned.admission.lock().unwrap();
+            panic!("injected admission panic");
+        }).join().is_err());
+        store.release_session("healthy").await.unwrap();
         assert_eq!(store.head(&key("healthy")).await.unwrap(), 5);
         store.close().await.unwrap();
         assert_eq!(db.run(|connection| connection.query_row("SELECT count(*) FROM timeline_events", [], |row| row.get::<_, i64>(0)).map_err(error)).await.unwrap(), 5);
