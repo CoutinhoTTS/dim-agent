@@ -22,10 +22,26 @@ use std::{
 /// The parts the Skills plugin registers.
 const PARTS: [&str; 2] = ["Skills", "SkillsBranch"];
 
+/// Skills' factory configuration: the text that replaces [`INSTRUCTIONS`]
+/// ([model-prompts §9.2](../../../docs/design/model-prompts.md#92-every-capability-that-writes-model-facing-text)).
+#[derive(Debug, Clone, Default)]
+pub struct SkillsConfig {
+    /// The how-to-use text in place of [`INSTRUCTIONS`].
+    pub instructions: Option<Arc<str>>,
+}
+
 /// Requires the Session and branch parts in the profile and adds the
 /// per-content extension. The Skills plugin (`SkillsCatalogPlugin`, or a
 /// host's plugin that mounts its catalog) registers the parts.
 pub fn install(builder: &mut AgentBuilder) {
+    install_with_config(builder, SkillsConfig::default());
+}
+
+/// As [`install`], with `config` as the factory configuration: the parts it
+/// registers deliver the configured instructions instead of the built-in
+/// text.
+pub fn install_with_config(builder: &mut AgentBuilder, config: SkillsConfig) {
+    builder.session_value(Arc::new(config));
     builder.session_extension_part::<content::ContentConfig>(
         content::GROUP,
         "SkillContent",

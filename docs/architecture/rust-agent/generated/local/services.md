@@ -154,6 +154,7 @@ flowchart LR
   p31 -->|"dim_agent_runtime::config::SessionIdentity@session"| p48
   p31 -->|"dyn dim_agent_runtime::timeline_store::TimelineStore@session"| p48
   p40 -->|"dim_agent_capabilities::prompt_registry::PromptRegistry@session"| p47
+  p31 -->|"dim_agent_capabilities::skills::SkillsConfig@session"| p47
   p26 -->|"dim_agent_capabilities::skills::catalog::SkillsCatalog"| p47
   p49 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p47
   p31 -->|"dim_agent_runtime::config::SessionConfig@session"| p47

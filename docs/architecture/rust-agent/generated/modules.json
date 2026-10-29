@@ -6115,7 +6115,8 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::skills",
       "references": [
-        "mod skills"
+        "mod skills",
+        "path skills::SkillsConfig"
       ]
     },
     {
@@ -9986,6 +9987,7 @@
         "path SkillView",
         "path SkillsError",
         "path super::INSTRUCTIONS",
+        "path super::SkillsConfig",
         "use super::SkillSummary",
         "use super::SkillView",
         "use super::SkillsError"
