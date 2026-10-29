@@ -558,7 +558,7 @@ reader and merged with live events. A child question shows its originating branc
    [ ] Billing
    [x] Search
        Type your own answer: audit log
- Space toggle · Enter next · Tab switch · Esc decline
+ Space toggle · Enter next · Tab switch · / commands · Esc decline
 ```
 
 Number keys select choices, Space toggles a multi-select choice, and Tab/Shift+Tab
@@ -567,6 +567,21 @@ offered labels and custom text remain separate. The custom row exists only when
 `allowCustom` is true. Esc declines the whole call. An existing approval or question
 keeps its prompt until handled; leader prompts preempt a read-only member detail.
 Member questions never open a response control in the leader UI.
+
+A pending question does not block commands. While its free-text answer is not being
+edited, `/`, `Ctrl+O` and `Ctrl+P` open the command palette over it, drawn as the
+palette is drawn anywhere else; the question stays pending with its tabs, its
+selections and its typed answers. The palette opens command entry, which keeps the
+keys through a command's argument, shown on the composer line, until `Enter` runs the
+command, `Esc`, or a draft that stops being a command. `Enter` runs the chosen command
+as it does during a reply, and `Esc` in the palette or while an argument is typed
+closes command entry and gives the keys back to the question, without declining it or
+interrupting a run. A command that opens its own panel gives the question back, with
+its answers, when that panel closes — unless the Session stopped asking it meanwhile,
+for example because another client answered or the turn was interrupted. `/` is the
+palette before the free-text row is edited, so an answer may itself start with a path:
+Enter, Space, the row's number or any other character enters the row, and `/` typed
+inside it is text.
 
 Submission retains the prompt and disables duplicate submissions until its reply.
 Success closes this client's prompt; a committed tool result also closes it,
@@ -667,7 +682,7 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
 | Click a link | Opens it in the system browser (OSC 8 links, or a bare `http(s)://` URL); over SSH the status row shows the URL instead |
 | Click a tool group's header or a thought's title | Opens (`▾`) or closes (`▸`) that group, or shows a settled thought whole or as its one-row summary; a running group keeps the form it is given when it settles. A settled block opens in place: the view stops following the bottom so the header stays under the pointer. A press counts as a click only if no drag followed and its row still shows the same text at the release, so output arriving in between cannot redirect it. `/tools` sets every group and thought, settled ones included, and lays the transcript out again from the bottom |
 | `Tab` / `Shift+Tab` | Pick older / newer user messages (`Up` / `Down` while one is picked); past the newest the pick ends. `Esc` ends it, `e` puts the message in the composer to edit and send again; `b` opens a line of the shown line cut just before the message, with the message in the composer as its opening input (`Enter` opens it through `session.branch_create` and shows it, `Esc` cancels); `f`, on `main` only, asks, then forks the Session just before the message (`session.fork`) and attaches to the fork with the message in its composer. A `⑂ line` row, written where a line opened on the shown line, is picked too: `Enter` (or a click) shows that line ([timeline UI](../../docs/design/timeline-ui.md)); so is the load-more row at the top, which `Enter` loads |
-| `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the palette closes |
+| `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the command entry it opened ends (`Enter`, `Esc` or an emptied draft). With a question pending whose free-text answer is not being edited, the palette opens over it instead, and the question keeps its answers while the command's argument is typed |
 | `Home` / `End` | With an empty composer: scroll to the top / bottom of the transcript |
 | `Esc` | Interrupt the run |
 | `Ctrl+C` | Clear the draft, then exit on a second press; a busy session asks for confirmation instead of being interrupted |
@@ -704,7 +719,7 @@ A context compaction has a row of its own in the transcript. `context/compaction
 
 `/models` uses Ctrl+X to clear the highlighted model's saved reasoning/tier preferences with the displayed record version; Enter adopts it separately. For noninteractive recovery, run `dimcode models PROVIDER --clear-preferences MODEL`. A concurrent change fails and requires a reread/retry; preferences are never silently discarded.
 
-Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/language`, `/settings`) open as centred boxes too; the mouse wheel moves their selection. Approval and question prompts, and the exit confirmation, take the composer's place until they are answered, in both modes: there is nothing to type into meanwhile. The live tail above (the tool group waiting on the answer, a running thought) stays where it is. Every panel is framed the same way: the title in the top border, the keys in the bottom one (`╰── Enter select · Esc close ─╯`, keys in the keybinding colour), and a filterable list has a `> query` row between blank rows instead of a count; the query is a line editor like the composer's (cursor keys, Home/End, Delete, pastes).
+Pickers (`/resume`, `/models`, `/connect`, `/login`, `/approvals`, `/theme`, `/language`, `/settings`) open as centred boxes too; the mouse wheel moves their selection. Approval prompts, question prompts and the exit confirmation take the composer's place until they are answered, in both modes: there is nothing to type into meanwhile. A question is the exception: while its free-text answer is not being edited, `/`, `Ctrl+O` and `Ctrl+P` open the palette over it (see [Questions in the terminal UI](#questions-in-the-terminal-ui)). The live tail above (the tool group waiting on the answer, a running thought) stays where it is. Every panel is framed the same way: the title in the top border, the keys in the bottom one (`╰── Enter select · Esc close ─╯`, keys in the keybinding colour), and a filterable list has a `> query` row between blank rows instead of a count; the query is a line editor like the composer's (cursor keys, Home/End, Delete, pastes).
 
 ```text
  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓    picked message: the box

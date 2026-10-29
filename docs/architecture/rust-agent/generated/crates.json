@@ -249,6 +249,10 @@
   },
   {
     "from": "xtask",
+    "to": "dim-client"
+  },
+  {
+    "from": "xtask",
     "to": "rutis"
   },
   {
