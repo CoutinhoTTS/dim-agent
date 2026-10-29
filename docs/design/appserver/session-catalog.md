@@ -11,9 +11,10 @@ Rules: [design rules](../../architecture/rust-agent/principles.md), [ADR 002](..
 ## 1. Summary
 
 A client lists Sessions with `session.summaries`, and that reply is built from history: for every Session the App
-Server reads up to 256 events for a preview and then the last event whole for a time, one Session after another, and
-replies one array with no page boundary. An imported Session's last event is a complete `context/compaction`, so a
-listing decodes the whole catalog's history, and a client sorts and converts all of it before it can draw a row.
+Server reads the batches that start within the first 256 events for a preview and then the last event whole for a
+time, one Session after another, and replies one array with no page boundary. An imported Session's last event is a
+complete `context/compaction`, so a listing decodes the whole catalog's history, and a client sorts and converts all
+of it before it can draw a row.
 
 The catalog read becomes bounded work. SessionStore keeps a projection of what a listing needs — per Session its last
 activity time, its first user input as the preview, and its workspace — written by the creating transaction and then
@@ -54,7 +55,7 @@ It does not own:
 | `limit` | 1 to 200, default 50. A larger one is rejected, not clamped, as `history`'s `limit` is |
 | `cursor` | Opaque. It encodes the last returned row's `(updatedAt, sessionId)` and a digest of the request's `query`, `cwd` and `withPreview`; it pages by keyset, and a client echoes it back unchanged. It is not a Session id |
 | Order | `updatedAt` descending, then `sessionId` ascending |
-| `query` | Case-insensitive, literal substring match over the five fields the picker searches today — the title, the preview, the Session id, the workspace, and the model's provider id and model id — applied in the catalog query before the page boundary. `%`, `_` and the escape character are escaped, so the value matches only itself (`LIKE … ESCAPE`). The model is read from the stored Session config, the value `session.list` reports, so the query decodes no event |
+| `query` | Case-insensitive, literal substring match over the four fields the picker searches today — the Session id, the workspace, the model id and the preview — plus the title and the provider id, which its search text never holds. At query time a SQL function the store registers on its connection lowercases the query and each field with `str::to_lowercase`, the picker's fold; the match is `instr(fold(field), fold(query)) > 0` field by field, so it is literal and `%` and `_` match only themselves. It is applied in the catalog query before the page boundary. The model is read from the stored Session config, the value `session.list` reports, so the query decodes no event |
 | `cwd` | Exact match on the workspace, applied before the page boundary |
 | `withPreview` | Boolean, default `false`. `true` keeps only rows whose preview is not NULL, applied before the page boundary, so a client that hides preview-less rows receives a full page of rows it shows; the projection's partial index over previews keeps that read bounded ([native storage format](native-storage-format.md#556-v22-格式决定)) |
 | Reply | `SessionSummary` entries, the shape `session.summaries` returns: the fields of a `session.list` record with `preview` and `updatedAt`. `nextCursor` is absent on the last page |
@@ -66,7 +67,8 @@ another store's catalog cannot be told apart, and needs no check, because it onl
 order.
 
 A search with a rare match scans the catalog's rows: the filters read the projection, the stored title and the stored
-model, and no filter decodes an event.
+model, and no filter decodes an event. Registering that function needs rusqlite's `functions` feature and no new
+dependency, and nothing is stored folded: a title rename or a model change adds no projection write.
 
 ### 3.2 Order, cursor and paging
 
@@ -85,15 +87,17 @@ store has no projection and answers from the loaded Sessions as today; it does n
 (§3.1). So the method is how a client that does not find `session.catalog` lists, and how clients on a daemon older
 than this change list; both stay working because the method's shape does not change.
 
-**The preview keeps today's rule, bound included.** Among a Session's first 256 events on `main`, the first
-`input/message` that carries a user part decides the preview: that part's text blocks joined with newlines, cut to 120
-characters and ending in `…` when the text is longer. The decision is final — a first user message whose text is empty
-(an image-only message, for example) leaves `preview` NULL and no later message fills it, and a Session with no such
-message among those events keeps NULL. The projection applies the same rule live as in the backfill: a batch may set
-`preview` only while the row's preview is still undecided and the deciding message's `main` sequence is within the
-first 256 events, and once decided it never changes. Backfilled and live rows are therefore column-identical
-([native storage format](native-storage-format.md#556-v22-格式决定)). Dropping the bound would be a separate, visible
-change to what `session.summaries` lists.
+**The preview keeps today's rule, its batch-complete window included.** The window is the batches that start within
+the first 256 `main` events, and it is batch-complete as today's read is: the batch that holds sequence 256 is read
+whole, so a user input just past 256 in that batch is inside it. The first `input/message` that carries a user part
+among the window's events decides the preview: that part's text blocks joined with newlines, cut to 120 characters and
+ending in `…` when the text is longer. The decision is final — a first user message whose text is empty (an image-only
+message, for example) leaves `preview` NULL and no later message fills it, and a Session with no such message in the
+window keeps NULL. The projection applies the same rule live as in the backfill: a batch may set `preview` only while
+the row's preview is still undecided and the deciding message lies in the window, and once decided it never changes.
+Backfilled and live rows are therefore column-identical
+([native storage format](native-storage-format.md#556-v22-格式决定)). Dropping or narrowing the window would be a
+separate, visible change to what `session.summaries` lists.
 
 ### 3.4 Lease-free
 
@@ -139,8 +143,9 @@ own design owns its interaction.
   page is a full page of rows it shows and the trigger near the end always has rows. Every cold launch creates a
   Session that may never get a message, so without the filter the newest rows would often be ones it hides.
 - **Search.** Its filter goes to the server as a debounced `query`, instead of narrowing only the rows it holds, and
-  the server matches the same five fields the picker searches today — the title, the preview, the Session id, the
-  workspace and the model — so a match on a page it has not fetched still appears.
+  the server matches the fields it searches today — the Session id, the workspace, the model id and the preview —
+  plus the title and the provider id, under the same Unicode fold, so a match on a page it has not fetched still
+  appears.
 - **Cancellation.** Closing or refreshing the panel drops its pending read, and a command entered afterwards runs at
   once.
 - **Fallback.** A daemon that does not advertise the method is listed through `session.summaries`.
@@ -159,8 +164,9 @@ page boundary, and the picker's first page does not use it. The gap is recorded 
 | C4 | `query` and `cwd` are applied in the catalog query | Filtering the rows the client already loaded | It hides matches on pages the client has not fetched |
 | C5 | `session.summaries` keeps its contract and reads the same projection | Leaving it on the history read; removing it | It is how a client lists without the new method, and once the projection answers both, keeping its contract costs nothing |
 | C6 | Neither method takes a Session lease | One lease per listed Session | A lease restores and pins every listed Session; the projection, and the process's live state for `running` and `attachedClients`, answer without one |
-| C7 | The preview is today's rule with its 256-event bound, applied identically by a live batch and by the backfill | An unbounded live rule, writing the preview with the batch that carries the first user input | It changes what `session.summaries` lists for a Session whose first user message follows 256 `main` events, and leaves backfilled and live rows different. Dropping the bound is a separate, visible change |
+| C7 | The preview is today's rule over its batch-complete window, applied identically by a live batch and by the backfill | An unbounded live rule, writing the preview with the batch that carries the first user input; a strict cutoff after sequence 256 | It changes what `session.summaries` lists for a Session whose first user message follows the window, or whose first user input is just past sequence 256 in the batch that holds 256, and leaves backfilled and live rows different. Dropping or narrowing the window is a separate, visible change |
 | C8 | `withPreview` drops preview-less rows in the catalog query, over the projection's partial index | A client that fetches pages until it holds enough rows it shows | A cold launch creates a Session that may never get a message, so the newest rows are often preview-less and that loop reads an unbounded run of them; the partial index keeps the server read bounded |
+| C9 | `query` folds both sides with Unicode `str::to_lowercase` at query time, as the picker does | ASCII-only matching through SQLite's `LIKE`, which folds ASCII alone | It would silently miss accented and non-Latin case pairs the picker finds today |
 
 ## 8. Changes to other documents
 
@@ -195,17 +201,20 @@ page boundary, and the picker's first page does not use it. The gap is recorded 
 - A first page of 50 by default, an explicit `limit` within 1 to 200, and a last page without `nextCursor`.
 - Paging by the returned cursor returns every remaining Session exactly once in the stated order, including when a
   Session is updated between two pages.
-- `query` finds a Session by each of its five fields — the title, the preview, the Session id, the workspace and the
-  provider id or model id — without regard to case, and finds a Session that is only on a later page; `cwd` matches
-  the workspace exactly; `withPreview` leaves out a Session with no preview; all apply before the page boundary.
-- A `%` or `_` in `query` matches only that character, and an escape character in it does not end the pattern.
+- `query` finds a Session by each of its six fields — the title, the preview, the Session id, the workspace, the
+  model id and the provider id — without regard to case, including a case pair outside ASCII, and finds a Session
+  that is only on a later page; `cwd` matches the workspace exactly; `withPreview` leaves out a Session with no
+  preview; all apply before the page boundary.
+- A `%` or `_` in `query` matches only that character.
 - A page with `withPreview` returns `limit` rows even when many preview-less Sessions precede them in the order.
 - A cursor returned for one combination of `query`, `cwd` and `withPreview` is rejected as `invalid_params` when
   replayed with another.
 - A Session created and never written to is listed from its creation with `updatedAt` equal to its creation time and
   no preview, as `session.summaries` lists it today.
-- The preview keeps its bound and its finality: a Session whose first user message follows 256 `main` events lists
-  with no preview, and one whose first user message is image-only lists with no preview that a later message fills.
+- The preview keeps its batch-complete window and its finality: a user input just past sequence 256 in the batch that
+  holds 256 lists as the preview, both live and after a backfill; a Session whose first user message is in a batch
+  that starts after sequence 256 lists with no preview; and one whose first user message is image-only lists with no
+  preview that a later message fills.
 - A daemon with no native store does not list `session.catalog`, and its `session.summaries` answers from the loaded
   Sessions as today.
 - A Session whose `main` ends in a full `context/compaction` is listed with its stored preview without decoding that
