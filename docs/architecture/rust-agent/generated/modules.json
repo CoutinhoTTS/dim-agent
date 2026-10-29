@@ -853,6 +853,16 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::summary_strategy::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::summary_strategy",
+      "file": "crates/dim-agent-capabilities/src/summary_strategy.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::timeline_tree",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -10187,6 +10197,13 @@
     },
     {
       "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::summary_strategy::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
@@ -10232,6 +10249,13 @@
         "path SystemPrompt::Text",
         "path Usage",
         "path model"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_types::prompt",
+      "references": [
+        "path prompt"
       ]
     },
     {

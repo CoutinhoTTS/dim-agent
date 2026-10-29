@@ -15,7 +15,7 @@ use dim_agent_capabilities::{
     },
     model_provider::invoke_with_recovery,
     summary_strategy::{
-        ProductSummaryStrategyConfig, SummaryReasoning, SummaryStrategy, TargetRule,
+        LengthSentence, ProductSummaryStrategyConfig, SummaryReasoning, SummaryStrategy, TargetRule,
     },
 };
 use dim_agent_types::{
@@ -89,6 +89,7 @@ pub async fn run() -> Result<()> {
                 reasoning: arm.reasoning,
                 target: arm.target,
                 system_prompt: arm.prompt.clone(),
+                length_sentence: arm.length_sentence.clone(),
             },
         );
         let mut metrics = Metrics::default();
@@ -235,6 +236,7 @@ struct Options {
     out: PathBuf,
     reasoning: Option<SummaryReasoning>,
     candidate: Option<Arc<str>>,
+    candidate_length: Option<LengthSentence>,
     target: Option<TargetRule>,
 }
 impl Options {
@@ -242,11 +244,12 @@ impl Options {
         let usage = "usage: cargo run -p xtask -- summary-eval --home DIR \
                      --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs N --out DIR \
                      [--reasoning inherit|off|low] \
-                     [--candidate FILE [--target OUTPUT_SHARE,INPUT_SHARE]]";
+                     [--candidate FILE [--candidate-length FILE] \
+                     [--target OUTPUT_SHARE,INPUT_SHARE]]";
         let mut args = std::env::args().skip(2);
         let (mut home, mut model, mut judge, mut runs, mut out, mut reasoning) =
             (None, None, None, None, None, None);
-        let (mut candidate, mut target_rule) = (None, None);
+        let (mut candidate, mut candidate_length, mut target_rule) = (None, None, None);
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(format!("{flag} requires a value"))?;
             match flag.as_str() {
@@ -257,6 +260,9 @@ impl Options {
                 "--out" => out = Some(PathBuf::from(value)),
                 "--reasoning" => reasoning = Some(reasoning_value(&value)?),
                 "--candidate" => candidate = Some(candidate_prompt(Path::new(&value))?),
+                "--candidate-length" => {
+                    candidate_length = Some(candidate_length_sentence(Path::new(&value))?)
+                }
                 "--target" => target_rule = Some(target_share(&value)?),
                 _ => return Err(usage.into()),
             }
@@ -269,6 +275,7 @@ impl Options {
             out: out.ok_or(usage)?,
             reasoning,
             candidate,
+            candidate_length,
             target: target_rule,
         };
         if options.candidate.is_some() && options.reasoning.is_none() {
@@ -276,6 +283,12 @@ impl Options {
         }
         if options.target.is_some() && options.candidate.is_none() {
             return Err("--target requires --candidate".into());
+        }
+        if options.candidate_length.is_some() && options.candidate.is_none() {
+            return Err("--candidate-length requires --candidate".into());
+        }
+        if options.candidate_length.is_some() && options.target.is_none() {
+            return Err("--candidate-length requires --target".into());
         }
         Ok(options)
     }
@@ -288,6 +301,17 @@ fn candidate_prompt(path: &Path) -> Result<Arc<str>> {
     let text = String::from_utf8(bytes)
         .map_err(|_| format!("--candidate {}: not UTF-8 text", path.display()))?;
     Ok(Arc::from(text))
+}
+
+/// The candidate's length sentence, read and checked for its one `{target}`
+/// placeholder before any model call (ContextCompaction §13.3, §13.5).
+fn candidate_length_sentence(path: &Path) -> Result<LengthSentence> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("--candidate-length {}: {error}", path.display()))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("--candidate-length {}: not UTF-8 text", path.display()))?;
+    LengthSentence::new(text.as_str())
+        .map_err(|error| format!("--candidate-length {}: {error}", path.display()).into())
 }
 
 /// One target rule for both candidate arms: two shares greater than 0 and at
@@ -336,12 +360,14 @@ fn reasoning_value(value: &str) -> Result<SummaryReasoning> {
 
 /// One arm of the protocol: a reasoning value with either no target rule
 /// (phase 1) or one of the target rules (phase 2); a candidate arm also
-/// carries its prompt (ContextCompaction §13.4).
+/// carries its prompt and, when one is given, its length sentence
+/// (ContextCompaction §13.4).
 struct Arm {
     id: String,
     reasoning: SummaryReasoning,
     target: Option<TargetRule>,
     prompt: Option<Arc<str>>,
+    length_sentence: Option<LengthSentence>,
 }
 fn arms(options: &Options) -> Vec<Arm> {
     let Some(reasoning) = options.reasoning else {
@@ -356,6 +382,7 @@ fn arms(options: &Options) -> Vec<Arm> {
             reasoning,
             target: None,
             prompt: None,
+            length_sentence: None,
         })
         .collect();
     };
@@ -366,12 +393,14 @@ fn arms(options: &Options) -> Vec<Arm> {
                 reasoning,
                 target: options.target,
                 prompt: None,
+                length_sentence: None,
             },
             Arm {
                 id: "candidate".into(),
                 reasoning,
                 target: options.target,
                 prompt: Some(prompt.clone()),
+                length_sentence: options.candidate_length.clone(),
             },
         ];
     }
@@ -380,6 +409,7 @@ fn arms(options: &Options) -> Vec<Arm> {
         reasoning,
         target: None,
         prompt: None,
+        length_sentence: None,
     })
     .chain(TARGETS.into_iter().map(|(output_share, input_share)| Arm {
         id: format!("target-{}-{}", percent(output_share), percent(input_share)),
@@ -389,6 +419,7 @@ fn arms(options: &Options) -> Vec<Arm> {
             input_share,
         }),
         prompt: None,
+        length_sentence: None,
     }))
     .collect()
 }
