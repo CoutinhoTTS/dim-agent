@@ -59,12 +59,11 @@ pub struct Projection {
     running: bool,
     approvals: Vec<ApprovalView>,
     pub questions: crate::question::Pending,
-    /// Messages InputQueue still holds: submitted while a turn ran and not
-    /// applied yet, `Append` aside. Shown in the queue strip; each enters the
-    /// transcript when its `input/applied` comes, so the transcript keeps the
-    /// order the model sees, and a withdrawn input never becomes a row.
-    /// Withdrawal re-submits the kept `UserInput` as Steer. Each keeps its
-    /// input id and the sequence it was submitted at.
+    /// Written messages without their `input/applied` yet. Each enters the
+    /// transcript when it comes, so the transcript keeps the order the model
+    /// sees and a withdrawn input never becomes a row; the queue strip shows
+    /// them while a turn runs. Withdrawal re-submits the kept `UserInput` as
+    /// Steer. Each keeps its input id and the sequence it was submitted at.
     held: Vec<(String, u64, UserInput)>,
     /// The row each written user message draws in, by input id, until its
     /// `input/consumed` settles that row.
@@ -216,11 +215,7 @@ impl Projection {
         match &event.content {
             EventContent::Input(data) => {
                 if let Some(user) = &data.user {
-                    if self.running && data.mode != Some(InputMode::Append) {
-                        self.held.push((event.id.clone(), sequence, user.clone()));
-                    } else {
-                        self.push_user(&event.id, sequence, sequence, user);
-                    }
+                    self.held.push((event.id.clone(), sequence, user.clone()));
                 } else if let Some(text) = data.blocks.iter().find_map(|block| {
                     let dim_agent_types::InputBlock::Raw { text, .. } = block;
                     ShellRun::parse(text).is_some().then(|| text.clone())
@@ -715,14 +710,17 @@ impl Projection {
             running: self.running,
             approvals: self.approvals.clone(),
             questions: self.questions.calls().cloned().collect(),
-            queued: self
-                .held
-                .iter()
-                .map(|(id, _, user)| QueuedInput {
-                    id: id.clone(),
-                    text: text_of(&user.content),
-                })
-                .collect(),
+            queued: if self.running {
+                self.held
+                    .iter()
+                    .map(|(id, _, user)| QueuedInput {
+                        id: id.clone(),
+                        text: text_of(&user.content),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             tasks: self.tasks.clone(),
             ended: self.ended,
             ..ViewSnapshot::default()
@@ -1752,22 +1750,27 @@ mod tests {
         };
         let mut main = Projection::default();
         apply(&mut main, &[input(1, "in-1", "find the leak", "queue")]);
-        let rows = main.snapshot().rows;
         assert!(
-            rows[0].pending,
-            "a message sent while idle is pending until the model reads it"
+            main.snapshot().rows.is_empty(),
+            "a message enters the transcript when the queue applies it"
         );
         assert!(
             main.snapshot().queued.is_empty(),
-            "a message that is not held is not in the queue strip"
+            "the queue strip belongs to a running turn"
         );
-        apply(&mut main, &[control(2, "consumed", "in-1")]);
+        apply(&mut main, &[control(2, "applied", "in-1")]);
+        let rows = main.snapshot().rows;
+        assert!(
+            rows[0].pending,
+            "a message applied but not consumed is pending"
+        );
+        apply(&mut main, &[control(3, "consumed", "in-1")]);
         assert!(
             !main.snapshot().rows[0].pending,
             "a consumed message settles out of pending"
         );
         main.set_running(true);
-        apply(&mut main, &[input(3, "in-2", "and the test", "queue")]);
+        apply(&mut main, &[input(4, "in-2", "and the test", "queue")]);
         assert_eq!(
             main.snapshot().queued.len(),
             1,
@@ -1776,9 +1779,9 @@ mod tests {
         assert_eq!(
             main.snapshot().rows.len(),
             1,
-            "a message the model cannot read yet is not in the transcript"
+            "a message without its input/applied is not in the transcript"
         );
-        apply(&mut main, &[control(4, "applied", "in-2")]);
+        apply(&mut main, &[control(5, "applied", "in-2")]);
         let rows = main.snapshot().rows;
         assert_eq!(rows[1].text, "and the test");
         assert!(
@@ -1794,7 +1797,7 @@ mod tests {
         apply(
             &mut main,
             &[serde_json::json!({
-                "id": "end-5", "sequence": 5, "create_at": 5000,
+                "id": "end-6", "sequence": 6, "create_at": 6000,
                 "type": "turn", "name": "end",
                 "data": {"turn_id": "t1", "status": "cancelled", "reason": "user stop"},
             })],
@@ -1806,7 +1809,7 @@ mod tests {
                 .any(|row| row.text == "and the test" && row.pending),
             "a stop leaves the applied message pending"
         );
-        apply(&mut main, &[control(6, "consumed", "in-2")]);
+        apply(&mut main, &[control(7, "consumed", "in-2")]);
         assert!(
             !main.snapshot().rows[1].pending,
             "a consumed message settles out of pending"
@@ -1814,8 +1817,8 @@ mod tests {
         apply(
             &mut main,
             &[
-                input(7, "in-3", "withdrawn", "queue"),
-                control(8, "deleted", "in-3"),
+                input(8, "in-3", "withdrawn", "queue"),
+                control(9, "deleted", "in-3"),
             ],
         );
         assert!(
@@ -1824,6 +1827,25 @@ mod tests {
                 .iter()
                 .all(|row| row.text != "withdrawn"),
             "a withdrawn message never becomes a row"
+        );
+        // A reattach folds history before it knows whether the line runs; the
+        // same events still draw nothing without their `input/applied`.
+        let mut replay = Projection::default();
+        apply(
+            &mut replay,
+            &[
+                input(1, "in-5", "withdrawn", "queue"),
+                control(2, "deleted", "in-5"),
+                input(3, "in-6", "sent later", "queue"),
+            ],
+        );
+        assert!(
+            replay.snapshot().rows.is_empty(),
+            "replay draws nothing before its input/applied"
+        );
+        assert!(
+            replay.snapshot().queued.is_empty(),
+            "replay does not guess that a turn runs"
         );
     }
 
