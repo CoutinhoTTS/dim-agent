@@ -157,7 +157,7 @@
 
 ### 9.1 Prompt、PromptRegistry 与 PromptSources
 
-**所有者：** Prompt、PromptRegistry 与 PromptSources。
+**所有者：** Prompt、PromptRegistry 与 PromptSources；在 [#548](https://github.com/arcships/dim/issues/548) 下实现。
 
 - Prompt 拥有指南的框架（§6.2）并审定它；任何作用域都删不掉、换不掉。
 - 框架写明通道规则及其 `[input <id>]` 例外（§6.1）。
@@ -170,7 +170,7 @@
 
 ### 9.2 每个写入面向模型文字的能力
 
-**所有者：** 每个写入文字的能力——内建的或贡献的。
+**所有者：** 每个写入文字的能力——内建的或贡献的；在 [#551](https://github.com/arcships/dim/issues/551) 下实现。
 
 - 它在自己设计页上列出它的面向模型文字，逐条标明协议或策略，混合的按句子标明。本文不重复这些清单，正如 [Timeline 分支 §12.1](timeline-branches.md#121-上下文映射) 对它自己的文字所做的那样。
 - 它为它写的每个标记贡献指南条目，并且它自己的流程断言：承载该标记的请求也承载该条目（§6.3）。
@@ -179,7 +179,7 @@
 
 ### 9.3 ToolRegistry 与 ToolBinding
 
-**所有者：** ToolRegistry 与 ToolBinding。
+**所有者：** ToolRegistry 与 ToolBinding；在 [#549](https://github.com/arcships/dim/issues/549) 下实现。
 
 - 它们承载声明，不拥有任何措辞。
 - 声明里，描述的指导是策略；schema、结果格式与拒绝码是协议（§4）。
@@ -187,7 +187,7 @@
 
 ### 9.4 TimelineTree
 
-**所有者：** TimelineTree。
+**所有者：** TimelineTree；在 [#552](https://github.com/arcships/dim/issues/552) 下实现。
 
 - **协议。** 标记名与属性、身份块里的事实句、branch 工具的 action 与 mode、以及它的拒绝码，只随分支机制一起改，并与断言它们的流程测试同一个改动（§4）。
 - **`main` 的协调文字覆盖 [Timeline 分支 §12.2](timeline-branches.md#122-交给提示词层的事项429) 的事项。**
@@ -195,7 +195,7 @@
 
 ### 9.5 Goal
 
-**所有者：** Goal。
+**所有者：** Goal；在 [#553](https://github.com/arcships/dim/issues/553) 下实现。
 
 - **措辞。** Goal 自己的设计页把另一条线上的工作说成被委派的工作：目标块与续跑块的 "delegated sub-task"，以及 [Goal §3.4](plugins/Goal.md#34-新分支清除继承的目标) 和 [Goal §5](plugins/Goal.md#5-上下文映射) 子分支那一行里的 "delegated work"（[Goal §A.5](plugins/Goal.md#a5-模型可见文本)）。一条线不是被委派的工作：它是同一个 agent 在本 Session 的另一条线上（[Timeline 分支 §1](timeline-branches.md#1-分支用来做什么)）。要求：上述每一处都改为 "on another line of this Session"，含义不变——目标属于另一条线，这条线既不续跑它，也不为它调用 `goal_update`。
 - **分类。** 标记名、`kind` 取值与 key 是协议；上面那些句子是策略。
@@ -204,7 +204,7 @@
 
 ### 9.6 ContextCompaction
 
-**所有者：** ContextCompaction。
+**所有者：** ContextCompaction；在 [#554](https://github.com/arcships/dim/issues/554) 下实现。
 
 - **声明的部件**以 [压缩需求 §7.1](compaction-quality.md#71-contextcompaction) 为准，它载有 [§3](compaction-quality.md#3-压缩保住什么) 要求的各个部件，已在 [#528](https://github.com/arcships/dim/issues/528) 下实现：摘要提示词用自己的措辞声明它们，实质摘要检查验证它们在场（[ContextCompaction §5.2](plugins/ContextCompaction.md#52-productsummarystrategy)）。
 - **语言。** 提示词是英文，它要求的摘要保持会话的语言、标识符逐字保留（§7）。
@@ -213,7 +213,7 @@
 
 ### 9.7 Loop 与 ContextPreparation
 
-**所有者：** Loop 与 ContextPreparation。
+**所有者：** Loop 与 ContextPreparation；在 [#555](https://github.com/arcships/dim/issues/555) 下实现。
 
 - **不自己组装指南。** ContextPreparation 发布供采用的 System，也就是 Prompt 组合好的那份，指南与条目都在其中；Loop 承载它所组装请求的 System。两者都不追加那份固定文字或任何条目。
 - **今天带着指南的请求仍然带着它**：由采用配置构建的请求带着它所属 Session 采用的指南，摘要请求也包括在内；宿主准备的路径带着同一份组合，今天由它送达的条目一样不少（§6.2）。
@@ -221,7 +221,7 @@
 
 ### 9.8 评估工具
 
-**所有者：** 评估工具，`xtask`。
+**所有者：** 评估工具，`xtask`；在 [#550](https://github.com/arcships/dim/issues/550) 下实现。
 
 - **一个场景运行器**，带 §8.1 的候选注入与相对规则：场景即用例，两臂都跑 shipped 装配，结果写进 PR。
 - **不用绝对通过线，不进 CI**（§8.1）。

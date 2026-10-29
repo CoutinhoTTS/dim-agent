@@ -157,7 +157,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 ### 9.1 Prompt, PromptRegistry and PromptSources
 
-**Owners:** Prompt, PromptRegistry and PromptSources.
+**Owners:** Prompt, PromptRegistry and PromptSources; implemented under [#548](https://github.com/arcships/dim/issues/548).
 
 - Prompt owns the guide's frame (§6.2) and reviews it; no scope removes or replaces it.
 - The frame states the channel rule with the `[input <id>]` exception (§6.1).
@@ -170,7 +170,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 ### 9.2 Every capability that writes model-facing text
 
-**Owners:** every capability that writes a text — built-in or contributed.
+**Owners:** every capability that writes a text — built-in or contributed; implemented under [#551](https://github.com/arcships/dim/issues/551).
 
 - It lists its model-facing texts on its own design page, each marked protocol or policy, sentence by sentence where mixed. This document does not restate them, as [Timeline branches §12.1](timeline-branches.md#121-context-mapping) does for its own.
 - It contributes the guide entry for each marker it writes, and its own flow asserts that a request carrying the marker carries the entry (§6.3).
@@ -179,7 +179,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 ### 9.3 ToolRegistry and ToolBinding
 
-**Owners:** ToolRegistry and ToolBinding.
+**Owners:** ToolRegistry and ToolBinding; implemented under [#549](https://github.com/arcships/dim/issues/549).
 
 - They carry the declarations and own no wording.
 - In a declaration, the description's guidance is policy; a schema, a result format and a refusal code are protocol (§4).
@@ -187,7 +187,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 ### 9.4 TimelineTree
 
-**Owner:** TimelineTree.
+**Owner:** TimelineTree; implemented under [#552](https://github.com/arcships/dim/issues/552).
 
 - **Protocol.** The marker names and attributes, the identity blocks' factual sentences, the branch tool's actions and modes, and its refusal codes change only with the branch mechanism, in the same change as the flow tests that assert them (§4).
 - **The coordination text for `main` covers the items of [Timeline branches §12.2](timeline-branches.md#122-items-for-the-prompt-layer-429).**
@@ -195,7 +195,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 ### 9.5 Goal
 
-**Owner:** Goal.
+**Owner:** Goal; implemented under [#553](https://github.com/arcships/dim/issues/553).
 
 - **The wording.** Goal's own design page describes work on another line as delegated work: the objective block's and the continuation block's "delegated sub-task", and "delegated work" in [Goal §3.4](plugins/Goal.md#34-a-new-branch-clears-the-inherited-goal) and in [Goal §5](plugins/Goal.md#5-context-mapping)'s row for child branches ([Goal §A.5](plugins/Goal.md#a5-model-visible-texts)). A line is not delegated work: it is the same agent on another line of the Session ([Timeline branches §1](timeline-branches.md#1-what-branches-are-for)). The requirement: each of those texts says "on another line of this Session", and the meaning stays — the goal belongs to another line, and this line neither continues it nor calls `goal_update` for it.
 - **The classes.** The marker name, its `kind` values and its keys are protocol; the sentences above are policy.
@@ -204,7 +204,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 ### 9.6 ContextCompaction
 
-**Owner:** ContextCompaction.
+**Owner:** ContextCompaction; implemented under [#554](https://github.com/arcships/dim/issues/554).
 
 - **The declared parts** are [Compaction requirements §7.1](compaction-quality.md#71-contextcompaction)'s, which carries the required parts of [§3](compaction-quality.md#3-what-compaction-keeps) and is implemented under [#528](https://github.com/arcships/dim/issues/528): the summary prompt declares them in its own words, and the substantive-summary check verifies that they are present ([ContextCompaction §5.2](plugins/ContextCompaction.md#52-productsummarystrategy)).
 - **Language.** The prompt is English, and the summary it asks for keeps the conversation's language, identifiers verbatim (§7).
@@ -213,7 +213,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 ### 9.7 Loop and ContextPreparation
 
-**Owner:** Loop and ContextPreparation.
+**Owners:** Loop and ContextPreparation; implemented under [#555](https://github.com/arcships/dim/issues/555).
 
 - **No guide of their own.** ContextPreparation publishes for adoption the System Prompt composes, guide and entries included, and Loop carries the System of the request it assembles. Neither appends the fixed text or any entry.
 - **Every request that carries the guide today still carries it**: a request built from an adopted configuration carries the guide its Session adopted, the summarizer's included, and the host-prepared path carries the same composition, so no request loses an entry it carries today (§6.2).
@@ -221,7 +221,7 @@ The format follows [Timeline branches §17](timeline-branches.md#17-requirements
 
 ### 9.8 The evaluation tooling
 
-**Owner:** the evaluation tooling, `xtask`.
+**Owner:** the evaluation tooling, `xtask`; implemented under [#550](https://github.com/arcships/dim/issues/550).
 
 - **A scenario runner** with the candidate injection of §8.1 and the relative rule of §8.1: the scenarios are the cases, both arms run the shipped assembly, and the result is reported in the pull request.
 - **No absolute pass line and no CI run** (§8.1).
