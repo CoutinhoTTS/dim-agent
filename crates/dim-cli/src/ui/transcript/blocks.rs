@@ -513,7 +513,7 @@ pub(crate) fn render_block(
             &crate::sanitize::safe(text),
             width,
             &UserStyle {
-                color: if *pending { &p.faint } else { &p.user },
+                color: if *pending { &p.muted } else { &p.user },
                 surface: if *pending { None } else { p.surface.as_deref() },
             },
         ),
