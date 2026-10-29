@@ -222,7 +222,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 | --- | --- |
 | `agent_sessions` | 新 id（UUID v4）、分叉时刻的 `created_at_ms`，以及原样的源 `config` 文本，也就是整个 `SessionConfig`，包括 `interactive`（[Session 访问 A.3](../contracts/session-access.md#a3-sessionconfig-字段)）、`permissionPolicy`、`collaborationRole`、`cwd`、`model`、`systemPrompt` 和 `tools`。复制文本而不重新序列化，`interactive` 的省略规则保持原样 |
 | `session_owners` | 源的 Agent 与协议版本 |
-| `session_catalog` | 给 F 一行，取值与按 F 的事件回填相同：`updated_at_ms` 是被复制的最后一个事件的 `create_at`，`preview` 是被复制事件里按同一 256 事件规则的第一条用户输入；在 `0` 处分叉时为创建时间与 NULL（[#556 的目录投影](../../../design/appserver/native-storage-format.md#556-v22-格式决定)） |
+| `session_catalog` | 给 F 一行，取值与按 F 的事件回填相同：`updated_at_ms` 是分叉事务最后写入的事件的 `create_at`——非零处为 `at + 1` 的 `session/forked`，`0` 处为 F 的创建时间——`preview` 是被复制事件里按同一按批次完整的窗口的第一条用户输入，`0` 处为 NULL（[#556 的目录投影](../../../design/appserver/native-storage-format.md#556-v22-格式决定)） |
 | `timeline_branches` | 头部为 `at + 1` 的 `main`（即它的 `session/forked`；在 `0` 处分叉为 `0`），以及 `branch/create` 位于 `main` 上 `at` 及之前的每个分支，保留存储的 `info`，头部为 0。其下的分支不复制：它们的创建事件在 F 拿不到的事件里 |
 | `timeline_events` | `main` 截至 `at` 的行（切点规则保证没有行跨过它），种类、正文、序号、批次终点、事件 id 和 before 轨迹都按存储的样子；随后在 `at + 1` 新写一行 `session/forked`（在 `0` 处分叉不写）。不含任何子分支的行 |
 | `timeline_content` | 被复制事件按编解码器写入的引用（请求及其 before 轨迹）所引用的行，以及这些引用到达的每个列表节点（格式 v17）。`session/forked` 行不引用内容 |
@@ -357,7 +357,7 @@ S5c 中被否决：在 S 的分叉都删除之前保留 S 的命令输出。删�
 [native-storage-format.md](../../../design/appserver/native-storage-format.md#s5c-格式决定)。
 
 - 删除只从现有表中删行，以及 [#556 的目录投影](../../../design/appserver/native-storage-format.md#556-v22-格式决定)的派生行 `session_catalog`。
-- 分叉向现有表插入行，按字节复制存储的文本，然后在 `at + 1` 插入一行 `session/forked`（数据为空），并按它复制的事件写下 F 的 `session_catalog` 行。头部为 0、没有事件的子分支目录是存储已经接受的状态：子分支尚未开始的创建。
+- 分叉向现有表插入行，按字节复制存储的文本，然后在 `at + 1` 插入一行 `session/forked`（数据为空），并在同一事务内按它写入的行写下 F 的 `session_catalog` 行。头部为 0、没有事件的子分支目录是存储已经接受的状态：子分支尚未开始的创建。
 - 事件 id 在所属 Session 内唯一，分叉在另一个 Session 中重复源的 id。存储本就按 Session 检查和索引 id；S5c 把这一点写明为不变量，不是格式变化。
 - 不加来源列、不写墓碑，原因见 §4 和 §6.6。
 - **兼容性（开发阶段，随 #222 决定）。** `EventKind` 是封闭列表，所以在 `session/forked` 出现之前构建的守护进程无法解码这一行，也就无法恢复由新版守护进程分叉出的 Session。这一点被接受：原生格式在首次发布前不承诺兼容，因此不升版本号，也不加回退解码或迁移。在 `0` 处分叉的 Session，以及从未被分叉的 Session，都没有这一行。已删除的 Session 读起来如同从未存在。

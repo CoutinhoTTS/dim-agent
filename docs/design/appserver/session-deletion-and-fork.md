@@ -317,7 +317,7 @@ fork's conversation would then not be its `main`, which clients, `session.list` 
 | --- | --- |
 | `agent_sessions` | A new id (UUID v4), `created_at_ms` at the fork, and the source's `config` text unchanged. That is the whole `SessionConfig`, including `interactive` ([session access A.3](../contracts/session-access.md#a3-sessionconfig-fields)), `permissionPolicy`, `collaborationRole`, `cwd`, `model`, `systemPrompt` and `tools`. Copying the text instead of re-serializing it keeps `interactive`'s omission rule as written |
 | `session_owners` | The source's Agent and protocol version |
-| `session_catalog` | One row for F, with the values a backfill over F's events writes: `updated_at_ms` the `create_at` of the last copied event, and `preview` the first user input among the copied events under the same 256-event rule — F's creation time and no preview at a cut of `0` ([#556's catalog projection](native-storage-format.md#556-v22-格式决定)) |
+| `session_catalog` | One row for F, with the values a backfill over F's events writes: `updated_at_ms` the `create_at` of the last event the fork transaction writes — the `session/forked` row at `at + 1` for a nonzero cut, F's creation time at a cut of `0` — and `preview` the first user input among the copied events under the same batch-complete window, NULL at a cut of `0` ([#556's catalog projection](native-storage-format.md#556-v22-格式决定)) |
 | `timeline_branches` | `main` with head `at + 1` (its `session/forked`; `0` for a fork at `0`), and every branch whose `branch/create` is on `main` at or before `at`, with its stored `info` and head 0. Branches below those are not copied: their creations are in events F does not get |
 | `timeline_events` | `main`'s rows through `at` (the cut rule means no row spans it), with kinds, bodies, sequences, batch ends, event ids and before traces as stored, then one new `session/forked` row at `at + 1` (none for a fork at `0`). No row of a child branch |
 | `timeline_content` | The rows the copied events reference, by the references the codec writes for requests and their before traces, and every list node those references reach (format v17). The `session/forked` row references no content |
@@ -506,8 +506,9 @@ bump, and format v17 keeps it). Recorded in [native-storage-format.md](native-st
 - A delete removes rows from existing tables and, since [#556's catalog projection](native-storage-format.md#556-v22-格式决定),
   the derived `session_catalog` row.
 - A fork inserts rows into existing tables and copies stored text byte for byte, then inserts one `session/forked` row
-  (empty data) at `at + 1`, and writes F's `session_catalog` row from the events it copied. A child directory with head
-  0 and no events is a state the store already accepts: a creation whose child never started.
+  (empty data) at `at + 1`, and writes F's `session_catalog` row in the same transaction from the rows it writes. A
+  child directory with head 0 and no events is a state the store already accepts: a creation whose child never
+  started.
 - An event id is unique within its Session, and a fork repeats the source's ids in another Session. The store already
   checks and indexes ids per Session; S5c states this as an invariant, not as a change.
 - No provenance column and no tombstone, for the reasons in §4 and §6.6.
