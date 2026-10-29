@@ -416,33 +416,57 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             let unused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let dead = format!("http://user:private-proxy@{}", unused.local_addr().unwrap());
             drop(unused);
-            version = provider
-                .update(PROXY.into(), version, serde_json::from_value(json!({"network":{"proxy":{"action":"set","value":dead},"timeoutMs":{"action":"set","value":500}}})).unwrap(), &cancel)
-                .await
-                .unwrap()
-                .version.unwrap();
             let error = provider
-                .refresh_for(PROXY.into(), &cancel)
+                .update(PROXY.into(), version, serde_json::from_value(json!({"network":{"proxy":{"action":"set","value":dead},"timeoutMs":{"action":"set","value":500}}})).unwrap(), &cancel)
                 .await
                 .err()
                 .unwrap();
             assert!(!error.to_string().contains("private-proxy"));
-            assert_eq!(direct.lock().unwrap().len(), 2);
+            assert_eq!(
+                direct.lock().unwrap().len(),
+                2,
+                "a connection update whose listing fails writes nothing"
+            );
             provider
                 .update(PROXY.into(), version, serde_json::from_value(json!({"network":{"proxy":{"action":"clear"},"timeoutMs":{"action":"clear"}}})).unwrap(), &cancel)
                 .await
                 .unwrap();
+            assert_eq!(
+                direct.lock().unwrap().len(),
+                3,
+                "the update listed the new connection once"
+            );
             version = provider
                 .refresh_for(PROXY.into(), &cancel)
                 .await
                 .unwrap()
                 .version;
-            assert_eq!(direct.lock().unwrap().len(), 3);
+            assert_eq!(direct.lock().unwrap().len(), 4);
+            assert!(
+                provider
+                    .update(PROXY.into(), version, serde_json::from_value(json!({"baseUrl":format!("http://{}/slow/v1", addresses[0]),"network":{"timeoutMs":{"action":"set","value":500}}})).unwrap(), &cancel)
+                    .await
+                    .is_err(),
+                "a listing that outlives the catalog timeout fails the update"
+            );
+            // Re-point while the record is disabled: an enabled custom record
+            // lists the new endpoint, and this one never answers a listing.
             version = provider
-                .update(PROXY.into(), version, serde_json::from_value(json!({"baseUrl":format!("http://{}/slow/v1", addresses[0]),"network":{"timeoutMs":{"action":"set","value":500}}})).unwrap(), &cancel)
+                .update(PROXY.into(), version, serde_json::from_value(json!({"baseUrl":format!("http://{}/slow/v1", addresses[0]),"network":{"timeoutMs":{"action":"set","value":500}},"enabled":false})).unwrap(), &cancel)
                 .await
                 .unwrap()
                 .version.unwrap();
+            version = provider
+                .update(
+                    PROXY.into(),
+                    version,
+                    serde_json::from_value(json!({"enabled":true})).unwrap(),
+                    &cancel,
+                )
+                .await
+                .unwrap()
+                .version
+                .unwrap();
             assert!(
                 tokio::time::timeout(
                     std::time::Duration::from_secs(3),
@@ -499,14 +523,25 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             .unwrap();
             assert_eq!(text, "network reply");
             assert!(failed && !stopped);
-            provider
+            version = provider
                 .update(
                     PROXY.into(),
                     version,
                     serde_json::from_value(
-                        json!({"baseUrl":format!("http://{}/redirect/v1", addresses[0])}),
+                        json!({"baseUrl":format!("http://{}/redirect/v1", addresses[0]),"enabled":false}),
                     )
                     .unwrap(),
+                    &cancel,
+                )
+                .await
+                .unwrap()
+                .version
+                .unwrap();
+            provider
+                .update(
+                    PROXY.into(),
+                    version,
+                    serde_json::from_value(json!({"enabled":true})).unwrap(),
                     &cancel,
                 )
                 .await
@@ -1710,6 +1745,248 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// A patch that changes a connection field follows the record's models: a
+/// custom provider lists the new endpoint and stores that listing in the same
+/// compare-and-set write, a failed listing fails the update and writes
+/// nothing, a builtin keeps its bundled models without a request, and a
+/// driver that cannot list saves the connection alone.
+#[tokio::test]
+async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
+    use axum::{
+        http::{StatusCode, Uri},
+        routing::get,
+    };
+    use tokio::sync::{mpsc, oneshot};
+    type Exchange = (Uri, oneshot::Sender<(StatusCode, Json<Value>)>);
+    let (send, mut requests) = mpsc::channel::<Exchange>(8);
+    let app = Router::new().route(
+        "/{*path}",
+        get(move |uri: Uri| {
+            let send = send.clone();
+            async move {
+                let (reply, response) = oneshot::channel();
+                send.send((uri, reply)).await.unwrap();
+                response
+                    .await
+                    .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-update-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin::new(&names()).unwrap());
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+
+    let custom = input(
+        REMOTE,
+        &format!("{base}/old/v1"),
+        StaticAuth::Bearer,
+        Some("first-key"),
+        "first",
+        31,
+    );
+    provider.create(custom, &cancel).await.unwrap();
+    let moved = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        let patch = serde_json::from_value(json!({"baseUrl":format!("{base}/new/v1")})).unwrap();
+        tokio::spawn(async move { provider.update(REMOTE.into(), 1, patch, &cancel).await })
+    };
+    let (uri, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/new/v1/models");
+    reply
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[
+                {"id":"new-model","context_window":64000,"max_output_tokens":512},
+                {"id":"second-model","context_window":32000,"max_output_tokens":256}
+            ]})),
+        ))
+        .unwrap();
+    let updated = moved.await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&updated).unwrap()["modelsListed"],
+        json!("listed")
+    );
+    assert_eq!(
+        updated.version,
+        Some(2),
+        "the connection and its listing are one write"
+    );
+    let catalog = provider
+        .catalog_for(REMOTE.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        catalog
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        ["new-model", "second-model"]
+    );
+
+    let refused = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        let patch = serde_json::from_value(json!({
+            "baseUrl":format!("{base}/down/v1"),
+            "credential":{"action":"set","value":"second-key"}
+        }))
+        .unwrap();
+        tokio::spawn(async move { provider.update(REMOTE.into(), 2, patch, &cancel).await })
+    };
+    let (uri, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/down/v1/models");
+    reply
+        .send((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"down"})),
+        ))
+        .unwrap();
+    assert!(refused.await.unwrap().is_err());
+    let unchanged = provider
+        .management(Some(REMOTE.into()), &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    assert_eq!(unchanged.version, Some(2));
+    assert_eq!(
+        unchanged.connection.as_ref().unwrap().base_url,
+        format!("{base}/new/v1")
+    );
+    assert_eq!(
+        unchanged
+            .models
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|model| model.model.model_id.as_str())
+            .collect::<Vec<_>>(),
+        ["new-model", "second-model"]
+    );
+
+    let seeded = provider
+        .management(Some("deepseek".into()), &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    let bundled: Vec<String> = seeded
+        .models
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|model| model.model.model_id.clone())
+        .collect();
+    assert!(!bundled.is_empty());
+    let keyed = provider
+        .update(
+            "deepseek".into(),
+            seeded.version.unwrap(),
+            serde_json::from_value(json!({
+                "baseUrl":format!("{base}/bundled"),
+                "credential":{"action":"set","value":"builtin-key"},
+                "enabled":true
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&keyed).unwrap()["modelsListed"],
+        json!("bundled")
+    );
+    assert_eq!(
+        keyed
+            .models
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|model| model.model.model_id.clone())
+            .collect::<Vec<_>>(),
+        bundled,
+        "a builtin keeps the bundled catalog's models"
+    );
+    let repointed = provider
+        .update(
+            "deepseek".into(),
+            keyed.version.unwrap(),
+            serde_json::from_value(json!({"baseUrl":format!("{base}/bundled-2")})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&repointed).unwrap()["modelsListed"],
+        json!("bundled")
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "no listing request reaches a builtin's endpoint"
+    );
+
+    let azure = {
+        let mut azure = input(
+            INVALID_AZURE,
+            "https://fixture.services.ai.azure.com/openai/",
+            StaticAuth::ApiKey {
+                header_name: "api-key".into(),
+                prefix: String::new(),
+            },
+            Some("azure-key"),
+            "azure",
+            11,
+        );
+        azure.connection.driver_kind = "azure-openai".into();
+        azure
+    };
+    provider.create(azure, &cancel).await.unwrap();
+    let saved = provider
+        .update(
+            INVALID_AZURE.into(),
+            1,
+            serde_json::from_value(json!({"credential":{"action":"set","value":"next-azure-key"}}))
+                .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&saved).unwrap()["modelsListed"],
+        json!("unsupported")
+    );
+    assert!(saved.connection.as_ref().unwrap().credential_configured);
+    assert!(requests.try_recv().is_err());
+
+    root.shutdown().await.unwrap();
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// A listing item's `type: "model"` names the object, not a model kind: an
 /// OpenAI-compatible provider lists those models available and a Session
 /// adopts one, an already stored catalog keeps them available without a
@@ -2809,19 +3086,46 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             Some(1)
         );
     }
-    let edited = provider.update(managed_id.into(), 1, serde_json::from_value(json!({
+    // The connection edit runs on a disabled record: an enabled custom
+    // record lists the new endpoint, and this fixture answers completions
+    // only.
+    let disabled = provider
+        .update(
+            managed_id.into(),
+            1,
+            serde_json::from_value(json!({"enabled":false})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(disabled.version, Some(2));
+    let edited = provider.update(managed_id.into(), 2, serde_json::from_value(json!({
         "displayName":"Renamed", "headers":[{"name":"x-private","action":"remove"},{"name":"X-Preserved","action":"set","value":"preserved"}],
         "network":{"timeoutMs":{"action":"clear"}}
     })).unwrap(), &cancel).await.unwrap();
-    assert_eq!(edited.version, Some(2));
+    assert_eq!(edited.version, Some(3));
+    assert_eq!(
+        serde_json::to_value(&edited).unwrap()["modelsListed"],
+        json!("disabled")
+    );
+    let edited = provider
+        .update(
+            managed_id.into(),
+            3,
+            serde_json::from_value(json!({"enabled":true})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited.version, Some(4));
     let connection = edited.connection.unwrap();
     assert!(connection.credential_configured && connection.proxy_auth_configured);
     assert_eq!(connection.header_names, ["X-Preserved"]);
     assert_eq!(connection.timeout_ms, None);
-    let preferred = provider.update_preferences(managed_id.into(), 2, "editable".into(), serde_json::from_value(json!({
+    let preferred = provider.update_preferences(managed_id.into(), 4, "editable".into(), serde_json::from_value(json!({
         "reasoningEffort":{"action":"set","value":"high"},"serviceTier":{"action":"set","value":"priority"}
     })).unwrap(), &cancel).await.unwrap();
-    assert_eq!(preferred.version, Some(3));
+    assert_eq!(preferred.version, Some(5));
     let preference_target = ModelId {
         provider_id: managed_id.into(),
         model_id: "editable".into(),
@@ -2852,7 +3156,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     let preferred = provider
         .update_preferences(
             managed_id.into(),
-            3,
+            5,
             "editable".into(),
             serde_json::from_value(json!({
                 "reasoningEffort":{"action":"clear"}
@@ -2871,7 +3175,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         provider
             .update_preferences(
                 managed_id.into(),
-                4,
+                6,
                 "editable".into(),
                 serde_json::from_value(json!({
                     "reasoningEffort":{"action":"set","value":"unsupported"}
@@ -2885,14 +3189,14 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     let disconnected = provider
         .update(
             managed_id.into(),
-            4,
+            6,
             serde_json::from_value(json!({"credential":{"action":"clear"},"enabled":false}))
                 .unwrap(),
             &cancel,
         )
         .await
         .unwrap();
-    assert_eq!(disconnected.version, Some(5));
+    assert_eq!(disconnected.version, Some(7));
     assert!(
         !disconnected
             .connection
@@ -2904,7 +3208,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         provider
             .update(
                 managed_id.into(),
-                5,
+                7,
                 serde_json::from_value(json!({"enabled":true})).unwrap(),
                 &cancel
             )
@@ -2918,7 +3222,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(management_snapshot["providers"][0]["version"], 5);
+    assert_eq!(management_snapshot["providers"][0]["version"], 7);
     assert_eq!(
         management_snapshot["providers"][0]["preferences"]["editable"],
         json!({"serviceTier":"priority"})

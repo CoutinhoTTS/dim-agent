@@ -171,6 +171,32 @@ impl ConnectionInput {
 }
 
 impl ProviderPatch {
+    fn is_empty(&self) -> bool {
+        self.display_name.is_none()
+            && self.base_url.is_none()
+            && self.enabled.is_none()
+            && self.credential.is_none()
+            && self.headers.as_ref().is_none_or(Vec::is_empty)
+            && self
+                .network
+                .as_ref()
+                .is_none_or(|network| network.proxy.is_none() && network.timeout_ms.is_none())
+    }
+
+    /// Whether the patch rewrites where or how the connection is reached.
+    fn changes_connection(&self) -> bool {
+        self.base_url.is_some()
+            || self.credential.is_some()
+            || self
+                .headers
+                .as_ref()
+                .is_some_and(|headers| !headers.is_empty())
+            || self
+                .network
+                .as_ref()
+                .is_some_and(|network| network.proxy.is_some() || network.timeout_ms.is_some())
+    }
+
     pub(super) fn apply(self, record: &mut StaticProviderRecord) -> Result<(), ProviderError> {
         if let Some(name) = self.display_name {
             if record.kind != StaticRecordKind::Custom {
@@ -330,28 +356,130 @@ impl ProviderService {
                 "Managed Provider configuration belongs to its account owner".into(),
             ));
         }
-        if patch.display_name.is_none()
-            && patch.base_url.is_none()
-            && patch.enabled.is_none()
-            && patch.credential.is_none()
-            && patch.headers.as_ref().is_none_or(Vec::is_empty)
-            && patch
-                .network
-                .as_ref()
-                .is_none_or(|network| network.proxy.is_none() && network.timeout_ms.is_none())
-        {
+        if patch.is_empty() {
             return Err(ProviderError::InvalidConfig(
                 "Provider patch must not be empty".into(),
             ));
         }
-        let record = self
-            .mutate_static(
-                provider_id.clone(),
-                expected_version,
-                move |record, _| patch.apply(record),
-                cancel,
-            )
-            .await?;
-        self.static_management(provider_id, record, cancel).await
+        let (record, models_listed) = if patch.changes_connection() {
+            self.update_connection(provider_id.clone(), expected_version, patch, cancel)
+                .await?
+        } else {
+            let record = self
+                .mutate_static(
+                    provider_id.clone(),
+                    expected_version,
+                    move |record, _| patch.apply(record),
+                    cancel,
+                )
+                .await?;
+            (record, None)
+        };
+        let mut provider = self.static_management(provider_id, record, cancel).await?;
+        provider.models_listed = models_listed;
+        Ok(provider)
+    }
+
+    /// Applies a connection patch and, when the record's models are its own,
+    /// replaces them with the new connection's listing in the same
+    /// compare-and-set write. A failed listing fails the update, so a
+    /// re-pointing never leaves the old endpoint's models on the new one.
+    async fn update_connection(
+        self: &Arc<Self>,
+        provider_id: String,
+        expected_version: u32,
+        patch: ProviderPatch,
+        cancel: &CancellationToken,
+    ) -> Result<(StaticProviderRecord, Option<ModelsListed>), ProviderError> {
+        let owner = self.clone();
+        self.owned(cancel, move |cancel| {
+            Box::pin(async move {
+                let id = provider_id.clone();
+                let record = owner
+                    .db
+                    .run(move |db| read_static(db, &id))
+                    .await
+                    .map_err(ProviderError::from)?
+                    .ok_or(ProviderError::NotFound)?;
+                if record.version != expected_version {
+                    return Err(ProviderError::Conflict(
+                        "Provider version changed; reread before retrying".into(),
+                    ));
+                }
+                let expected = serde_json::to_value(&record).map_err(ProviderError::from)?;
+                let mut admitted = record.clone();
+                patch.apply(&mut admitted)?;
+                if admitted.enabled
+                    && admitted.credential_authority == CredentialAuthority::Static
+                    && admitted.auth != StaticAuth::Anonymous
+                    && admitted.credential.is_none()
+                {
+                    return Err(ProviderError::AuthRequired);
+                }
+                validate_static_record(&provider_id, &mut admitted)?;
+                let (models, models_listed) = if !admitted.enabled {
+                    (None, ModelsListed::Disabled)
+                } else if owner.bundled.provider(&provider_id).is_some() && !admitted.remote_models
+                {
+                    // The bundled catalog defines these models; a later
+                    // bundled update must still reach the record.
+                    (None, ModelsListed::Bundled)
+                } else if !owner.remote_model_list(&provider_id, &admitted) {
+                    (None, ModelsListed::Unsupported)
+                } else {
+                    let models = owner.discover(&provider_id, &admitted, &cancel).await?;
+                    (Some(models), ModelsListed::Listed)
+                };
+                if let Some(models) = &models
+                    && models.iter().any(|model| {
+                        admitted
+                            .user_models
+                            .iter()
+                            .any(|user| user.model_id == model.model_id)
+                    })
+                {
+                    return Err(ProviderError::Conflict(
+                        "Discovered models conflict with user-added model IDs".into(),
+                    ));
+                }
+                if let Some(models) = models {
+                    admitted.models = models;
+                    admitted.remote_models = true;
+                }
+                admitted.version = admitted
+                    .version
+                    .checked_add(1)
+                    .ok_or_else(|| failure("Provider version overflow"))?;
+                validate_static_record(&provider_id, &mut admitted)?;
+                owner.check(&cancel)?;
+                owner
+                    .db
+                    .run(move |db| {
+                        Ok((|| -> Result<_, ProviderError> {
+                            let tx = db.transaction()?;
+                            let current = read_static(&tx, &provider_id)?
+                                .map(serde_json::to_value)
+                                .transpose()?;
+                            if current.as_ref() != Some(&expected) {
+                                return Err(ProviderError::Conflict(
+                                    "Provider version or admitted configuration changed".into(),
+                                ));
+                            }
+                            tx.execute(
+                                "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
+                                params![
+                                    provider_id,
+                                    admitted.version,
+                                    serde_json::to_string(&admitted)?
+                                ],
+                            )?;
+                            tx.commit()?;
+                            Ok((admitted, Some(models_listed)))
+                        })())
+                    })
+                    .await?
+            })
+        })
+        .await
     }
 }

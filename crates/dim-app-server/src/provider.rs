@@ -17,7 +17,7 @@ pub use models::PreferencesPatch;
 pub use preferences::ModelPreferences;
 use secrets::StaticCredential;
 pub use secrets::{ProviderSecret, ProviderSecretHost, ResolveProviderSecret};
-pub use view::{ManagementProvider, ManagementView};
+pub use view::{ManagementProvider, ManagementView, ModelsListed};
 
 use crate::{
     codex_oauth::OpenAICodexOAuthService,
