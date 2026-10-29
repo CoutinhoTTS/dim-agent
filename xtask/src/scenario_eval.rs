@@ -1497,17 +1497,19 @@ fn verdicts(scenario: &Scenario, reply: &str) -> std::result::Result<Vec<ProbeRe
         .probes
         .iter()
         .map(|probe| {
-            let (verdict, quote) = match judged.get(&probe.id) {
-                Some((Verdict::Present, quote)) => (ProbeVerdict::Present, quote.clone()),
-                Some((Verdict::Absent, quote)) => (ProbeVerdict::Absent, quote.clone()),
-                Some((Verdict::Contradicted, quote)) => (ProbeVerdict::Contradicted, quote.clone()),
-                None => (ProbeVerdict::Unparsed, None),
+            let (verdict, quote) = judged
+                .get(&probe.id)
+                .expect("every probe has a verdict: a missing one was rejected above");
+            let verdict = match verdict {
+                Verdict::Present => ProbeVerdict::Present,
+                Verdict::Absent => ProbeVerdict::Absent,
+                Verdict::Contradicted => ProbeVerdict::Contradicted,
             };
             ProbeRecord {
                 id: probe.id.clone(),
                 kind: probe.kind.name(),
                 verdict,
-                quote,
+                quote: quote.clone(),
             }
         })
         .collect())
