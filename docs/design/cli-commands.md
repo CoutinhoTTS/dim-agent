@@ -29,6 +29,7 @@ contract records the native platform acceptance evidence and outstanding checks.
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
+| `/approval` | In the terminal UI, choose Ask (`workspace-write`) or full access for this session and later ones ([permission controls](#permission-controls)). |
 | `/approvals` (alias `/permissions`) | Show, switch and manage the preset and command rules while the interactive client is idle. |
 
 Global home, workspace, server and model-profile options retain their current
@@ -336,10 +337,10 @@ Sessions with `workspace-write`; that default is unchanged.
 `exec resume`, before or after the command. Another value, a repeated flag or the flag on any
 other command is an argument error before the daemon starts.
 
-The terminal UI remembers the preset chosen in its `/approvals` panel as `permissionPreset` in
-the product home's `config.json`: without the flag, the sessions it creates get it in
-`session.create`, and a resumed one has `main` switched to it before attach. The flag wins for
-one run; choosing another preset in the panel replaces the remembered one.
+The terminal UI remembers the preset chosen in `/approval` or its `/approvals` panel as
+`permissionPreset` in the product home's `config.json`: without the flag, the sessions it creates
+get it in `session.create`, and a resumed one has `main` switched to it before attach. The flag
+wins for one run; choosing another preset in either menu replaces the remembered one.
 
 ```text
 $ dimcode exec --permission full-access -p 'Run the tests'
@@ -406,7 +407,7 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
         v                                         v  copied when a member is created
  main: permission/changed (CAS on version)    agent member Sessions (Collaboration)
    ^  written by --permission on resume
-   |  and /approvals
+   |  and /approval or /approvals
    +-- branch point --> child branch (branch tool): main's policy at the branch point,
                          then its own changes
 ```
@@ -418,6 +419,30 @@ session.create {permissionPolicy}  -->  SessionConfig.permissionPolicy
   reaches them; a later change on `main` does not. The confirmation of a switch says so, and
   requirement R2 below asks Collaboration to copy the leader branch's current policy.
 - A fork copies the source's facts, so it starts with the source's current `main` policy (#26).
+
+### `/approval`
+
+`/approval` in the terminal UI opens a menu of two choices for the `main` preset. It writes the
+same `session.permission.update` as `/approvals` and remembers the preset the same way. It does
+not list or edit command rules. At the line prompt the command is refused: that client keeps
+`/approvals`.
+
+```text
+Approval
+> Ask            current
+  Full access
+↑↓/Tab move · Enter apply · Esc back
+```
+
+| Choice | Preset | What runs |
+| --- | --- | --- |
+| Ask | `workspace-write` | Reads and workspace writes run; commands, network, outside writes and unclassified tools ask |
+| Full access | `full-access` | Every tool call runs without asking |
+
+Ask is the product default. Enter on the choice already in force closes the menu. Full access
+still asks for the same confirmation as `/approvals`. A session on `read-only` shows neither
+choice as current; Ask switches it to `workspace-write`. `read-only` stays available from
+`/approvals` and `--permission`. The notice names Ask for `workspace-write`.
 
 ### `/approvals`
 

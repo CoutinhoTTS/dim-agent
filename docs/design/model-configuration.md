@@ -79,6 +79,9 @@ daemon rejects the new request form normally; the client does not retry with a
 guessed complete selection.
 
 `/effort VALUE`, alias `/reasoning VALUE`, sends `reasoningEffort` without a target.
+The `/models` picker cycles a model's advertised efforts with ←/→. Enter saves a
+cycled effort as that model's `reasoningEffort`, then adopts the model with its
+saved preferences.
 Values come from declared `effortOptions` and the existing reasoning-off declaration.
 The CLI reads the adopted provider/model identity from the public
 `context/configured` view, then reads choices from the existing `provider.catalog`

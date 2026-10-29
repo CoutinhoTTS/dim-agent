@@ -433,7 +433,7 @@ The panel is separate from the tasks panel, which lists background commands, mem
 └────────── Enter show the line · x end it · Esc close ───────────┘
 ```
 
-**Web** shows `main` only today, and lines come later. Desktop gets the protocol: `session.branch_end` and the two events in v3 history.
+**Web** keeps `main` in the center and follows lines in a right-side detail panel: a Lines tree, one tab per opened line, and line-scoped submit, stop, approvals and end ([Web workspace §4.1](web-workspace.md#41-lines-and-branch)). Desktop gets the protocol: `session.branch_end` and the two events in v3 history.
 
 ## 15. Changes
 

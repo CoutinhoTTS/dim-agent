@@ -5,6 +5,8 @@
  */
 import type {
   ApprovalRequest,
+  BranchCreateResult,
+  BranchSource,
   CreateResult,
   EventContent,
   HelloResult,
@@ -112,6 +114,18 @@ export function readCreate(value: unknown): CreateResult {
   }
 }
 
+export function readBranchCreate(value: unknown): BranchCreateResult {
+  const source = obj(value, "session.branch_create")
+  const branch = obj(source.branch, "session.branch_create.branch")
+  const at = "session.branch_create.branch"
+  return {
+    branchId: str(branch, "branchId", at),
+    ...(branch.parentBranchId === undefined || branch.parentBranchId === null ? {} : { parentBranchId: str(branch, "parentBranchId", at) }),
+    ...(branch.branchPoint === undefined || branch.branchPoint === null ? {} : { branchPoint: num(branch, "branchPoint", at) }),
+    ...(branch.createEvent === undefined || branch.createEvent === null ? {} : { createEvent: num(branch, "createEvent", at) }),
+  }
+}
+
 export function readHistory(value: unknown): HistoryPage {
   const source = obj(value, "session.history")
   return {
@@ -187,12 +201,83 @@ function toolResult(value: unknown, at: string): ToolResult {
   return { text, isError: source.isError === true, ...(diff === undefined ? {} : { diff }) }
 }
 
+function rawText(blocks: unknown, at: string): string[] {
+  if (blocks === undefined || blocks === null) return []
+  return arr(blocks, at).flatMap((item, index) => {
+    const block = obj(item, `${at}[${index}]`)
+    return block.type === "raw" ? [str(block, "text", `${at}[${index}]`)] : []
+  })
+}
+
+function branchSource(value: unknown, at: string): BranchSource {
+  const source = obj(value, at)
+  const kind = str(source, "kind", at)
+  if (kind === "tool") {
+    return {
+      kind,
+      turnId: str(source, "turn_id", at),
+      requestId: str(source, "request_id", at),
+      callId: str(source, "call_id", at),
+    }
+  }
+  if (kind === "host") return { kind, operationId: str(source, "operation_id", at) }
+  return fail(at, "a branch source")
+}
+
+function branchCut(value: unknown, at: string): number | undefined {
+  const source = obj(value, at)
+  switch (str(source, "kind", at)) {
+    case "sequence": return num(source, "sequence", at)
+    case "create": return undefined
+    default: return fail(at, "a branch cut")
+  }
+}
+
 function content(type: string, name: string, data: Json, at: string): EventContent {
   switch (`${type}/${name}`) {
     case "input/message": {
-      if (data.user === undefined || data.user === null) return { kind: "input" }
+      if (data.user === undefined || data.user === null) {
+        const raw = rawText(data.blocks, `${at}.blocks`)
+        if (raw.length === 0) return { kind: "input" }
+        const mode = optStr(data, "mode", at)
+        const text = raw.find((value) => value.startsWith("<dim-branch-")) ?? raw[0]!
+        return { kind: "source-input", text, ...(mode === undefined ? {} : { mode }) }
+      }
       return { kind: "input", text: textOf(obj(data.user, `${at}.user`).content, `${at}.user.content`) }
     }
+    case "input/deleted":
+      return { kind: "input-deleted", inputId: str(data, "input_id", at) }
+    case "branch/create":
+      return {
+        kind: "branch-create",
+        branchId: str(data, "branch", at),
+        at: branchCut(data.at, `${at}.at`),
+        prompt: str(data, "prompt", at),
+        source: branchSource(data.source, `${at}.source`),
+      }
+    case "branch/create-failed": {
+      const status = str(data, "status", at)
+      if (status !== "failed" && status !== "cancelled") fail(`${at}.status`, "a creation outcome")
+      return {
+        kind: "branch-create-failed",
+        branchId: str(data, "branch", at),
+        status,
+        error: str(data, status === "failed" ? "error" : "reason", at),
+      }
+    }
+    case "branch/end":
+      return {
+        kind: "branch-end",
+        source: branchSource(data.source, `${at}.source`),
+        ...(data.ancestor === undefined || data.ancestor === null ? {} : { ancestor: str(data, "ancestor", at) }),
+      }
+    case "branch/ended":
+      return {
+        kind: "branch-ended",
+        branchId: str(data, "branch", at),
+        source: branchSource(data.source, `${at}.source`),
+        ...(data.ancestor === undefined || data.ancestor === null ? {} : { ancestor: str(data, "ancestor", at) }),
+      }
     case "turn/end": {
       const status = str(data, "status", at)
       if (status !== "completed" && status !== "failed" && status !== "cancelled") fail(`${at}.status`, "a turn outcome")
@@ -241,6 +326,7 @@ function readEvent(value: unknown, at: string): SessionEvent {
   const type = str(source, "type", at)
   const name = str(source, "name", at)
   return {
+    id: str(source, "id", at),
     sequence: num(source, "sequence", at),
     createAt: num(source, "create_at", at),
     content: content(type, name, obj(source.data, `${at}.data`), `${at}.data`),

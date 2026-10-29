@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n"
 import { Check, ChevronDown, Folder } from "lucide-vue-next"
 import BrandMark from "../../components/BrandMark.vue"
 import ComposerPanel from "./ComposerPanel.vue"
-import type { ModelId } from "../../rpc/protocol"
+import { MAIN_BRANCH, type ModelId } from "../../rpc/protocol"
 import { useChatStore } from "../../stores/chat"
 import { useModelsStore } from "../../stores/models"
 import { useSessionsStore, workspaceName } from "../../stores/sessions"
@@ -57,7 +57,7 @@ async function send(text: string): Promise<void> {
   if (cwd.value === "") throw new Error(t("newThread.workspaceRequired"))
   const sessionId = await sessions.create(cwd.value, picked.value)
   chat.open(sessionId)
-  await chat.submit(sessionId, text)
+  await chat.submit(sessionId, MAIN_BRANCH, text)
   await router.push({ name: "chat-session", params: { sessionId } })
 }
 </script>

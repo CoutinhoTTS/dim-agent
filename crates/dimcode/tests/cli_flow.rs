@@ -5953,6 +5953,83 @@ fn tui_approvals_switch_the_preset_and_always_saves_a_command_rule() {
     daemon.join().unwrap();
 }
 
+/// `/approval` offers ask and full access, writes that preset, and remembers
+/// it for sessions the terminal UI creates later.
+#[test]
+fn tui_approval_menu_sets_ask_or_full_access_and_remembers_it() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&["session.permission.get", "session.permission.update"]);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        let read = wire.read("session.permission.get");
+        assert_eq!(
+            read["params"],
+            json!({"sessionId":"session","branchId":"main"})
+        );
+        wire.reply(
+            &read,
+            json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}),
+        );
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let read = wire.read("session.permission.get");
+        wire.reply(
+            &read,
+            json!({"version":1,"policy":{"preset":"workspace-write","allowedTools":[],"disallowedTools":[]}}),
+        );
+        let update = wire.read("session.permission.update");
+        assert_eq!(
+            update["params"],
+            json!({"sessionId":"session","branchId":"main","expectedVersion":1,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}})
+        );
+        wire.reply(&update, json!({"version":2}));
+        wire.notice(
+            "session.event",
+            json!({"sessionId":"session","branchId":"main","event":{"id":"perm-1","sequence":9,"create_at":1,"type":"permission","name":"changed","data":{"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}}}),
+        );
+        let read = wire.read("session.permission.get");
+        wire.reply(
+            &read,
+            json!({"version":2,"policy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}),
+        );
+        let update = wire.read("session.permission.update");
+        assert_eq!(
+            update["params"]["policy"]["preset"],
+            json!("workspace-write")
+        );
+        wire.reply(&update, json!({"version":3}));
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            line.clear();
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/approval\r");
+    terminal.until("Ask before commands");
+    terminal.write(b"\x1b[B\r");
+    terminal.until("Confirm Full Access");
+    terminal.write(b"y");
+    terminal.until("Tool approvals: Full access");
+    terminal.write(b"/approval\r");
+    terminal.until("Ask before commands");
+    terminal.write(b"\x1b[A\r");
+    terminal.until("Tool approvals: Ask");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
+    assert_eq!(config["permissionPreset"], "workspace-write");
+}
+
 /// The terminal's program status (OSC 7501) follows a run through a
 /// permission request and a question to its result, and the record is
 /// cleared on `/exit`, in both interface modes. So does the progress bar (OSC 9;4) where it is
@@ -6844,6 +6921,86 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
             &json!({"expectedRevision":"2","policy":{"mode":"inherit"}}),
             &json!({"expectedRevision":"3","policy":{"mode":"fixed","model":{"providerId":"test","modelId":"other"}}}),
         ]
+    );
+}
+
+/// ←/→ in `/models` cycles advertised reasoning efforts, including `none`
+/// when the model can turn reasoning off. Enter saves the cycled effort and
+/// adopts the model with that effort plus the other saved preferences.
+#[test]
+fn tui_models_picker_cycles_reasoning_effort() {
+    let home = Home::new();
+    let (calls, observed) = std::sync::mpsc::channel::<Value>();
+    let daemon = home.daemon(move |wire| {
+        let mut capabilities =
+            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        capabilities["reasoning"] = json!(true);
+        let catalog = json!({"catalog":{"version":4,"disabledModelIds":[],"models":[{
+            "id":"model","name":"Model","capabilities":capabilities,
+            "metadata":{"reasoning":{"supported":true,"effort":"low",
+                "effortOptions":["low","high"],
+                "off":{"kind":"thinking_type","value":"disabled"}}}
+        }]}});
+        let mut version = 4;
+        let mut preferences = json!({"reasoningEffort":"low","serviceTier":"priority"});
+        let mut line = String::new();
+        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            line.clear();
+            calls.send(request.clone()).unwrap();
+            let result = match request["method"].as_str().unwrap() {
+                "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "provider.list","provider.catalog","provider.management","provider.selection","provider.select"]}),
+                "session.create" => json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
+                "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                "session.idle" => json!({"sequence":8}),
+                "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.catalog" => catalog.clone(),
+                "account.providers" => json!([]),
+                "provider.management" => json!({"providers":[{"providerId":"test","source":"custom","displayName":"Test","enabled":true,"version":version,"connection":null,"preferences":{"model":preferences.clone()}}],"errors":[]}),
+                "provider.preferences.update" => {
+                    version += 1;
+                    preferences = json!({"reasoningEffort":request["params"]["patch"]["reasoningEffort"]["value"],"serviceTier":"priority"});
+                    json!({})
+                }
+                "session.model.update" => json!({"outcome":"adopted","model":{"providerId":"test","modelId":"model"}}),
+                "provider.selection" => json!({"selection":{"version":1}}),
+                "provider.select" => json!({}),
+                _ => json!({}),
+            };
+            wire.reply(&request, result);
+        }
+    });
+    let mut terminal = Terminal::launch_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/models\r");
+    terminal.until("‹ low ›");
+    terminal.raw(b"\x1b[D");
+    terminal.until("‹ none ›");
+    terminal.write(b"\r");
+    terminal.until("Ask anything...");
+    terminal.signal(libc::SIGKILL);
+    terminal.wait();
+    daemon.join().unwrap();
+    let calls: Vec<Value> = observed.try_iter().collect();
+    let update = calls
+        .iter()
+        .find(|call| call["method"] == "provider.preferences.update")
+        .expect("reasoning effort was saved");
+    assert_eq!(
+        update["params"],
+        json!({"providerId":"test","modelId":"model","expectedVersion":4,
+            "patch":{"reasoningEffort":{"action":"set","value":"none"}}})
+    );
+    let adopted = calls
+        .iter()
+        .find(|call| call["method"] == "session.model.update")
+        .expect("the model was adopted");
+    assert_eq!(
+        adopted["params"],
+        json!({"sessionId":"session","branchId":"main","providerId":"test","modelId":"model",
+            "modelPreferences":{"reasoningEffort":"none","serviceTier":"priority"}})
     );
 }
 

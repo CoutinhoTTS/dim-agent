@@ -270,13 +270,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "sign in to DimAgent" => "登入 DimAgent",
         "DimAgent account · usage · sign out" => "DimAgent 帳號 · 用量 · 登出",
         "configure tool approvals" => "設定工具核准",
+        "choose ask or full access" => "選擇詢問或完整存取",
         "open settings" => "開啟設定",
         "suspend to the shell" => "暫停到 Shell",
         "exit" => "離開",
 
         // composer/palette.rs
-        "Enter select · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 選擇 · Ctrl+X 清除已儲存 · Esc 清除/關閉"
+        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 選擇 · ←/→ 推理強度 · Ctrl+X 清除已儲存 · Esc 清除/關閉"
         }
         "Enter select · Esc clear/close" => "Enter 選擇 · Esc 清除/關閉",
         "esc close" => "esc 關閉",

@@ -259,11 +259,13 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 与 serviceTier；列表保持打开，Enter 另行显式采用默认值。冲突则刷新列表，由用户重试。
 非交互入口为 `dimcode models PROVIDER --clear-preferences MODEL`，先重读版本再同样更新。
 两者都不改当前 Session 已采用的模型；发现和采用失败不会自动删除历史偏好。
+`←` 与 `→` 在选中模型上循环其声明的推理强度。Enter 采用该模型；若强度被切换过，
+先把它存成该模型的 `reasoningEffort`，再连同其余已保存偏好一起发送。
 
 ```text
 Select a model
-> Provider / model
-Enter select · Ctrl+X clear saved · Esc clear/close
+> Provider / model          ‹ high ›
+Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 ```
 
 ```text

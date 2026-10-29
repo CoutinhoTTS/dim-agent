@@ -1,6 +1,16 @@
-//! The `/approvals` panel: the permission preset of the session's `main`
-//! branch (`session.permission.get/update`), with a confirmation before
-//! full access.
+//! The permission preset of the session's `main` branch
+//! (`session.permission.get/update`), with a confirmation before full access.
+//!
+//! `/approvals` lists the three presets. `/approval` lists two choices over
+//! the same presets: Ask is `workspace-write`, and Full access is
+//! `full-access`.
+//!
+//! ```text
+//! Approval
+//! > Ask            current
+//!   Full access
+//! ↑↓/Tab move · Enter apply · Esc back
+//! ```
 
 use crate::ui::i18n::t;
 use crate::ui::prompts::{CONFIRM_BODY, CONFIRM_HINT, Effect};
@@ -11,10 +21,12 @@ use crate::ui::text::truncate_cells;
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::{Paint, fg, paint};
 
-/// `(preset, title, status label, description)` in display order, the
-/// presets of `permission::PRESETS` by what each decides. The texts are
-/// English keys: draw them through [`t`].
-pub const MODES: [(&str, &str, &str, &str); 3] = [
+/// `(preset, title, status label, description)`. The texts are English keys:
+/// draw them through [`t`].
+type Mode = (&'static str, &'static str, &'static str, &'static str);
+
+/// The presets of `permission::PRESETS` in display order, by what each decides.
+pub const MODES: [Mode; 3] = [
     (
         "full-access",
         "Full access",
@@ -35,6 +47,23 @@ pub const MODES: [(&str, &str, &str, &str); 3] = [
     ),
 ];
 
+/// `/approval`: Ask is the product default (`workspace-write`); Full access
+/// is `full-access`. `read-only` stays on `/approvals` and `--permission`.
+const CHOICES: [Mode; 2] = [
+    (
+        "workspace-write",
+        "Ask",
+        "workspace write",
+        "Ask before commands, network, outside writes and unclassified tools",
+    ),
+    (
+        "full-access",
+        "Full access",
+        "full access",
+        "Every tool call runs without asking",
+    ),
+];
+
 const HINT: &str = "↑↓/Tab move · Enter apply · Esc back";
 
 /// The status-line label of a mode.
@@ -45,7 +74,23 @@ pub fn status_label(mode: &str) -> &'static str {
         .map_or(t("default"), |(_, _, status, _)| t(status))
 }
 
+/// The name a settled preset is announced with. Ask is the name of
+/// `workspace-write` in `/approval`; the other presets keep their row titles.
+pub fn announced_title(mode: &str) -> &'static str {
+    let key = if mode == "workspace-write" {
+        "Ask"
+    } else {
+        MODES
+            .iter()
+            .find(|(preset, ..)| *preset == mode)
+            .map_or("", |(_, title, ..)| *title)
+    };
+    t(key)
+}
+
 pub struct ApprovalsPanel {
+    modes: &'static [Mode],
+    title: &'static str,
     current: String,
     selected: usize,
     /// `Some(focused button)` while full access awaits confirmation:
@@ -54,9 +99,26 @@ pub struct ApprovalsPanel {
 }
 
 impl ApprovalsPanel {
+    /// `/approvals`: the three presets. An unknown current mode lands on
+    /// workspace-write.
     pub fn new(current: &str) -> Self {
-        let selected = MODES.iter().position(|(m, ..)| *m == current).unwrap_or(1);
+        Self::open(current, &MODES, "Tool Approvals", 1)
+    }
+
+    /// `/approval`: Ask or Full access. An unknown current mode, including
+    /// read-only, lands on Ask without marking it current.
+    pub fn choice(current: &str) -> Self {
+        Self::open(current, &CHOICES, "Approval", 0)
+    }
+
+    fn open(current: &str, modes: &'static [Mode], title: &'static str, fallback: usize) -> Self {
+        let selected = modes
+            .iter()
+            .position(|(mode, ..)| *mode == current)
+            .unwrap_or(fallback);
         Self {
+            modes,
+            title,
             current: current.to_owned(),
             selected,
             confirming: None,
@@ -97,11 +159,11 @@ impl ApprovalsPanel {
                 Effect::None
             }
             KeyCode::Down | KeyCode::Tab => {
-                self.selected = (self.selected + 1).min(MODES.len() - 1);
+                self.selected = (self.selected + 1).min(self.modes.len() - 1);
                 Effect::None
             }
             KeyCode::Enter => {
-                let mode = MODES[self.selected].0;
+                let mode = self.modes[self.selected].0;
                 if mode == self.current {
                     Effect::Close
                 } else if mode == "full-access" {
@@ -133,7 +195,7 @@ impl ApprovalsPanel {
             if roomy {
                 content.push(String::new());
             }
-            for (index, (mode, name, _, description)) in MODES.iter().enumerate() {
+            for (index, (mode, name, _, description)) in self.modes.iter().enumerate() {
                 let selected = index == self.selected;
                 let marker = if selected {
                     paint(
@@ -191,8 +253,95 @@ impl ApprovalsPanel {
             width,
             None,
             &p.border,
-            Some(&title_plain(t("Tool Approvals"), inner, p)),
+            Some(&title_plain(t(self.title), inner, p)),
             Some(&key_hints(t(HINT), p)),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
+    use crate::ui::theme::{Appearance, ColorMode};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, Modifiers::NONE)
+    }
+
+    fn screen(panel: &ApprovalsPanel) -> String {
+        let palette =
+            crate::ui::theme::palette::terminal_palette(ColorMode::TrueColor, Appearance::Dark);
+        panel.render(80, 24, &palette).join("\n")
+    }
+
+    #[test]
+    fn approval_offers_ask_and_full_access() {
+        crate::ui::i18n::set(crate::ui::i18n::Locale::En);
+        let mut panel = ApprovalsPanel::choice("workspace-write");
+        let shown = screen(&panel);
+        assert!(shown.contains("Ask"));
+        assert!(shown.contains("Full access"));
+        assert!(shown.contains("Ask before commands"));
+        assert!(shown.contains("current"));
+        assert!(!shown.contains("Read only"));
+        assert!(!shown.contains("Workspace write"));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::Close
+        ));
+
+        let mut panel = ApprovalsPanel::choice("workspace-write");
+        assert!(matches!(panel.handle_key(key(KeyCode::Down)), Effect::None));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::None
+        ));
+        assert!(screen(&panel).contains("Confirm Full Access"));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Char('n'))),
+            Effect::None
+        ));
+        assert!(!screen(&panel).contains("Confirm Full Access"));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::None
+        ));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Char('y'))),
+            Effect::SetApprovals(mode) if mode == "full-access"
+        ));
+
+        let mut panel = ApprovalsPanel::choice("read-only");
+        let shown = screen(&panel);
+        assert!(!shown.contains("current"));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::SetApprovals(mode) if mode == "workspace-write"
+        ));
+
+        let mut panel = ApprovalsPanel::choice("full-access");
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::Close
+        ));
+        assert!(matches!(panel.handle_key(key(KeyCode::Up)), Effect::None));
+        assert!(matches!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::SetApprovals(mode) if mode == "workspace-write"
+        ));
+        assert_eq!(announced_title("workspace-write"), "Ask");
+        assert_eq!(announced_title("full-access"), "Full access");
+        assert_eq!(announced_title("read-only"), "Read only");
+    }
+
+    #[test]
+    fn the_preset_panel_still_lists_read_only() {
+        crate::ui::i18n::set(crate::ui::i18n::Locale::En);
+        let shown = screen(&ApprovalsPanel::new("workspace-write"));
+        assert!(shown.contains("Workspace write"));
+        assert!(shown.contains("Read only"));
+        assert!(shown.contains("Full access"));
+        assert!(shown.contains("current"));
     }
 }

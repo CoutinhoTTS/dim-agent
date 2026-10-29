@@ -38,5 +38,7 @@ npm run typecheck  # type check only
 | `src/rpc/client.ts` | WebSocket JSON-RPC client: `hello` v3, timeouts, `daemon.ping` heartbeat, reconnect with backoff, bootstrap exchange |
 | `src/rpc/protocol.ts`, `src/rpc/read.ts` | Protocol types and the strict readers that decode every reply and notification |
 | `src/projection.ts` | Folds history pages, `session.event` and `session.model.progress` into timeline rows (as `crates/dim-cli/src/projection.rs`) |
-| `src/stores/` | Connection, session directory, attached sessions, models, layout |
+| `src/lines.ts` | Folds branch facts into the Session's line tree, line states and cut message counts |
+| `src/stores/` | Connection, session directory, attached sessions and their per-line streams, models, layout and line tabs |
 | `src/features/chat/` | Chat page, new-session page, timeline, composer, model menu, approval prompt |
+| `src/features/lines/` | Right-side Lines panel, tree, line conversation, new-line and end-line dialogs |

@@ -280,6 +280,13 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash(
+        "approval",
+        "model",
+        "choose ask or full access",
+        &[],
+        Needs::Nothing,
+    ),
+    slash(
         "approvals",
         "model",
         "set the session's permission preset",
