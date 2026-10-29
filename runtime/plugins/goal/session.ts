@@ -1,5 +1,5 @@
 import { definePlugin } from '@arcships/rutis'
-import { type InputMessage, changes } from './goal.ts'
+import { type InputMessage, type Texts, changes } from './goal.ts'
 import type { SessionMethods, ToolRegistry } from '../../../npm/plugin.js'
 
 type TreeCommands = { input(id: string, input: InputMessage): Promise<{ sequence: number | bigint }> }
@@ -21,7 +21,7 @@ export default definePlugin({
   name: 'GoalSession',
   provides: {},
   inject: ['treeCommands', 'toolRegistry', 'sessionMethods'],
-  async apply(ctx) {
+  async apply(ctx, texts: Texts) {
     const tree = ctx.use<TreeCommands>('treeCommands')
     await ctx.use<ToolRegistry>('toolRegistry').register(
       {
@@ -67,7 +67,7 @@ export default definePlugin({
           } else {
             const judge = call.params.judge ?? 'model'
             if (judge !== 'model' && judge !== 'evaluator') return invalid('judge must be "model" or "evaluator"')
-            input = changes.set(branchId, objective, judge)
+            input = changes.set(branchId, objective, texts, judge)
           }
         } else if (op === 'pause' || op === 'resume' || op === 'clear') {
           input = changes[op](branchId)
