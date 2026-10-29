@@ -1094,6 +1094,7 @@ fn product_builder() -> AgentBuilder {
         dim_agent_capabilities::workspace_tools::WorkspaceToolsConfig {
             output_root: std::env::temp_dir().join("dm-pm-outputs"),
         },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
     );
     dim_app_server::permission_rules::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);

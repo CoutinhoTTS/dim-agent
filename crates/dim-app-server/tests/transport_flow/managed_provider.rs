@@ -201,6 +201,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         WorkspaceToolsConfig {
             output_root: home.join("output"),
         },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
     );
     dim_app_server::permission_rules::install(&mut builder);
     builder

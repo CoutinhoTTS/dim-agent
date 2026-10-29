@@ -412,6 +412,7 @@ impl Shell {
             WorkspaceToolsConfig {
                 output_root: target.join("outputs"),
             },
+            dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
         );
         dim_app_server::permission_rules::install(&mut builder);
         defaults::mock_model_hosts(&mut builder);

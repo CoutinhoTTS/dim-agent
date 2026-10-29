@@ -7302,10 +7302,13 @@
       "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::timeline_tree",
       "references": [
+        "path BranchToolConfig",
+        "path BranchToolConfig::default",
         "path TimelineTreePlugin::new",
         "path TreeTimelinePlugin::new",
         "path crate::timeline_tree::BranchLinePlugin::new",
-        "path crate::timeline_tree::BranchToolPlugin::new",
+        "path crate::timeline_tree::BranchToolPlugin::with_config",
+        "use crate::timeline_tree::BranchToolConfig",
         "use crate::timeline_tree::TimelineTreePlugin",
         "use crate::timeline_tree::TreeTimelinePlugin"
       ]
@@ -10109,6 +10112,7 @@
         "path GuideEntries",
         "path GuideEntry",
         "path GuideScope::Branch",
+        "path GuideScope::Session",
         "use crate::prompt_guide::GuideEntries",
         "use crate::prompt_guide::GuideEntry",
         "use crate::prompt_guide::GuideScope"
@@ -14714,6 +14718,13 @@
       "references": [
         "path ProductSummaryStrategyConfig::default",
         "use dim_agent_capabilities::summary_strategy::ProductSummaryStrategyConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path dim_agent_capabilities::timeline_tree::BranchToolConfig::default"
       ]
     },
     {

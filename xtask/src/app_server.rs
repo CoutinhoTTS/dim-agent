@@ -31,6 +31,9 @@ pub struct Overrides {
     /// The summary strategy's system prompt in place of its built-in
     /// `SYSTEM` (ContextCompaction §13.5).
     pub summary_prompt: Option<Arc<str>>,
+    /// The `branch` tool's description in place of its built-in text
+    /// (timeline branches §12.4).
+    pub branch_description: Option<Arc<str>>,
 }
 
 /// What one run adds to the product assembly: the overrides above, the model
@@ -115,6 +118,9 @@ pub async fn serve_home(
         &mut builder,
         ModelProviderPlugin::process,
         WorkspaceToolsConfig { output_root },
+        dim_agent_capabilities::timeline_tree::BranchToolConfig {
+            description: run.overrides.branch_description.clone(),
+        },
     );
     dim_app_server::permission_rules::install(&mut builder);
     builder

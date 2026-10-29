@@ -98,6 +98,7 @@ flowchart LR
   p21 -->|"dim_agent_runtime::config::SessionConfig@session"| p31
   p21 -->|"dim_agent_runtime::config::SessionIdentity@session"| p31
   p21 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p31
+  p27 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p30
   p21 -->|"dim_agent_runtime::assembly::TimelineFactory@session"| p30
   p21 -->|"dim_agent_runtime::config::SessionIdentity@session"| p30
   p21 -->|"dyn dim_agent_runtime::timeline_store::TimelineStore@session"| p30
