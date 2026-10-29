@@ -386,18 +386,20 @@ ProjectionCheckpoint = {
 
 [客户端 Session 目录](session-catalog.md#31-sessioncatalog)（#556）的格式决定：升级到 **v21 之后的下一个格式**，从 v21 原地升级。[#527](https://github.com/arcships/dim/issues/527) 的 v21 先合入时它就是 v22；编号在实现时按当时的当前格式确定，本节其余内容不随编号改变。这是本文件第一个读取已有行的升级。
 
-- **新增一张表与一个索引**：`session_catalog(session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)`，索引 `session_catalog_by_activity(updated_at_ms DESC, session_id)`。`agent_store_format` 的约束改为新版本的编号。
-  - 每个 Session 至多一行，与 `agent_sessions` 一一对应。
+- **新增一张表与两个索引**：`session_catalog(session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)`，索引 `session_catalog_by_activity(updated_at_ms DESC, session_id)` 与局部索引 `session_catalog_with_preview(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL`。`agent_store_format` 的约束改为新版本的编号。
+  - 每个 Session 至多一行，从创建起与 `agent_sessions` 一一对应；写入、回滚与删除见下面的规则。
   - `updated_at_ms` 是该 Session `main` 上最后一次提交的最后一个事件的 `create_at`。
-  - `preview` 是该 Session 上第一条用户输入的文字，按现有预览长度截断；没有用户输入时为 NULL。它一旦写入不再改变。
+  - `preview` 是该 Session `main` 上前 256 个事件里第一条带用户部分的 `input/message` 的文字：各文本块以换行连接，超过 120 个字符时截到 120 个字符并以 `…` 结尾。该消息的文字为空（例如只有图片）时为 NULL，之后的消息不再填它；前 256 个事件里没有这样的消息时也为 NULL。决定一旦做出，包括决定为 NULL，就不再改变。
   - `cwd` 是 `agent_sessions.config` 的工作目录。目录查询按工作区过滤并回复它，所以不必为每个 Session 解码配置 JSON。
-- **同一事务写入**：SessionStore 在提交 `main` 每个批次的同一个写入事务里写这一行，写下该批次的最后一个事件，因此这一行与事件不会有一半可见。带第一条用户输入的批次写入 `preview` 一次，之后的批次只更新 `updated_at_ms`；`preview` 保持 NULL 的行在出现第一条用户输入时才写入。
-- **删除与分叉**：删除在 S5c 的同一删除事务里、在 `agent_sessions` 之前删除这一行；分叉在分叉事务内按它复制的事件写新行：`updated_at_ms` 是被复制的最后一个事件的 `create_at`，`preview` 是被复制事件里的第一条用户输入，在 `0` 处分叉时为创建时间与 NULL。
+  - `session_catalog_by_activity` 服务按活动时间的键集分页；`session_catalog_with_preview` 服务只要非空预览的读取，因此前面有多少没有预览的行都不影响那条读取的代价。
+- **创建即写行**：`session.create` 在写 `agent_sessions` 的同一事务里写下这一行：`updated_at_ms` 为 `created_at_ms`，`preview` 为 NULL，`cwd` 取自创建的配置。因此新 Session 从创建那一刻起就按目录列出，与今天的 `session.summaries` 相同：创建时间、没有预览。
+- **同一事务写入**：SessionStore 在提交 `main` 每个批次的同一个写入事务里写这一行，写下该批次的最后一个事件，因此这一行与事件不会有一半可见。`updated_at_ms` 跟着批次走；`preview` 只在仍未决定时按上面的规则写入，之后的批次只更新 `updated_at_ms`。实时写入没有单独的规则：一个批次带用户消息、该消息的 `main` 序号在前 256 个事件内、且窗口里没有更早的带用户部分的 `input/message` 时，它写入 `preview`（文字为空时写 NULL）。这个判断用与回填相同的窗口读一次已提交事件，读取不超过 256 个事件，且只在 `preview` 仍为 NULL 时发生；因此回填行与实时行逐列相同。
+- **删除、回滚与分叉**：删除与创建回滚在 S5c 的同一事务里、在 `agent_sessions` 之前删除这一行；分叉在分叉事务内按它复制的事件写新行，写出的值与按同一规则回填这些事件相同：`updated_at_ms` 是被复制的最后一个事件的 `create_at`，`preview` 是被复制事件（同样限于前 256 个事件）里第一条用户输入的文字或 NULL，在 `0` 处分叉时为创建时间与 NULL。
 - **不记分类**：本步不记录子 Session 或创建来源。[#557](https://github.com/arcships/dim/issues/557) 的分类字段连同它自己的格式决定一起加入，与上文不记分叉来源相同。
 - **不能留在 v21**：启动要求精确的 SQL 结构，v21 的守护进程会拒绝多出表和索引的库，不满足"旧读取器能正确解释新值"的保持条件。
 - **读取或转换路径**：在现有的启动准入事务（`IMMEDIATE`，写入型 PRAGMA 之前）内处理：
   - 空库直接建新格式，`session_catalog` 为空。
-  - 结构恰为 v21 且标记相符的库，在同一事务内建新表和新索引，并从已存事件为每个 Session 回填一行。
+  - 结构恰为 v21 且标记相符的库，在同一事务内建新表与两个索引，并从已存事件为每个 Session 回填一行。
   - 标记相符的 v20、v19、v18、v17、v16、v15 或 v13 库，在同一事务内先走已有各步，再走本步，直接成为新格式。
   - 恰为新格式的库直接打开。
   - 其他库（标记不符的 v21 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
@@ -409,7 +411,10 @@ ProjectionCheckpoint = {
   - v20、v19、v18、v17、v16、v15、v13 库一次升级到位。
   - 标记不符或升级到一半的结构被拒绝并保留。
   - 回填写出与继续提交写出的行逐列相同：升级后同一批事件再提交，`updated_at_ms` 跟着最后一个事件走，`preview` 不被覆盖。
-  - 删除与分叉在各自的事务内维护这一行。
+  - 预览的上限与最终性：第一条用户消息在 256 个 `main` 事件之后才到达的 Session 升级后没有预览，此后的批次也不写它；第一条用户消息只有图片的 Session 保持 NULL，之后的消息不填它。
+  - `session.create` 写下的一行有创建时间与 NULL 预览，创建回滚后没有这一行。
+  - 删除与分叉在各自的事务内维护这一行，`0` 处分叉的一行为创建时间与 NULL。
+  - `withPreview` 的读取按 `EXPLAIN QUERY PLAN` 使用 `session_catalog_with_preview`，前面有多少无预览的行都不改变它的代价。
   - 从不打开用户已有的库。
 
   对应 `storage_flow.rs` 中本步的 `a_v21_store_upgrades_in_place_once`（编号随实现确定）及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与本期新增的目录流程测试。
