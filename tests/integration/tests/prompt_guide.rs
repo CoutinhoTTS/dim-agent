@@ -42,6 +42,11 @@ const CHANNEL_RULE: &str = "The operator is the person running this session. The
 /// The entry the probe registers between adoptions.
 const PROBE_ENTRY: &str = r#"<dim-probe source="test">: an entry a contributor registered for this flow; the composition places it between the state and the rule entries."#;
 
+/// #552: TimelineTree writes `<dim-branch-line>` and registers its entry.
+const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
+/// #552: BranchLine writes `<dim-branch-lines>` and registers its entry.
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="C">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
+
 fn configuration(model: &str) -> ModelSelection {
     ModelSelection {
         provider_id: "test".into(),
@@ -265,6 +270,16 @@ async fn both_paths_carry_one_composition() {
             "<dim-state source=\"dim/environment/date\">",
             "<dim-rule source=\"dim/instructions/project\"",
         ],
+    );
+    assert_eq!(
+        adopted.matches(IDENTITY_ENTRY).count(),
+        1,
+        "the entry of the identity block is the one its writer registers: {adopted:?}"
+    );
+    assert_eq!(
+        adopted.matches(ROSTER_ENTRY).count(),
+        1,
+        "the entry of the roster is the one its writer registers: {adopted:?}"
     );
 }
 
