@@ -10,6 +10,10 @@ import { settings } from './settings.ts'
 import { RunStore, type Run } from './store.ts'
 import { windowAfter } from './windows.ts'
 
+/// The plugin's factory configuration: the tool description and the
+/// report's guidance sentence, each one whole text.
+const options = z.strictObject({ description: z.string().min(1).optional(), report_guidance: z.string().min(1).optional() })
+
 function jobPreview(job: Job) {
   return { ...job, name: bounded(job.name, 256), prompt: bounded(job.prompt, 4 * 1024),
     prompt_truncated: Buffer.byteLength(job.prompt) > 4 * 1024 }
@@ -18,14 +22,14 @@ function jobPreview(job: Job) {
 function runPreview(run: Run) { return { ...run, detail: bounded(run.detail, 512) } }
 
 export default definePlugin({
-  name: 'Scheduler', config: z.toJSONSchema(z.strictObject({})),
+  name: 'Scheduler', config: z.toJSONSchema(options),
   inject: ['sessions', 'sessionPermissions', 'settings', 'pluginFiles', 'managementMethods', 'partRegistry'],
   provides: { scheduleJobs: { call: 'async' } },
-  async apply(ctx) {
+  async apply(ctx, config: z.infer<typeof options>) {
     await ctx.use<Settings>('settings').register(settings)
     const jobs = new Jobs(ctx.use<Settings>('settings'), ctx.use<SessionPermissions>('sessionPermissions'))
     const scope = await ctx.use<PluginFiles>('pluginFiles').open()
-    const scheduler = new Scheduler(jobs, ctx.use<Sessions>('sessions'), new RunStore(scope))
+    const scheduler = new Scheduler(jobs, ctx.use<Sessions>('sessions'), new RunStore(scope), config.report_guidance)
     ctx.effect(() => scheduler.close())
 
     async function list() {
@@ -144,7 +148,7 @@ export default definePlugin({
     )
     if (scheduler.fault) throw scheduler.fault
     ctx.provide('scheduleJobs', owner)
-    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'SchedulerSession', session)
+    await ctx.use<PartRegistry>('partRegistry').registerDefinition('session', 'SchedulerSession', session(config.description))
     ctx.on('settings/schedule', () => scheduler.changed())
     scheduler.startTimer()
   },

@@ -3849,3 +3849,125 @@ async fn node_scheduler_invalid_inner_records_preserve_bytes_and_do_not_block_na
         std::fs::remove_dir_all(home).unwrap();
     }
 }
+
+/// The tool description and the report's guidance sentence as the factory
+/// configuration: a candidate replaces each built-in text in the request, and
+/// unset keeps the built-ins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_scheduler_factory_texts_reach_the_declaration_and_the_report() {
+    const DESCRIPTION: &str = "A candidate schedule description.";
+    const GUIDANCE: &str = "Read the run history before deciding.";
+    for configured in [true, false] {
+        let home = home();
+        let mut parts = rows();
+        if configured {
+            parts.rows[0]["config"] =
+                json!({"description": DESCRIPTION, "report_guidance": GUIDANCE});
+        }
+        let mut config = config(&home);
+        config.session_typescript = Some(parts);
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        process_typescript::select_model(&mut client).await;
+        process_typescript::files_available(&mut client, "schedule.list", json!({})).await;
+        let created = client
+            .rpc(
+                "session.create",
+                json!({"cwd":home,"interactive":true,"tools":["echo","schedule"]}),
+            )
+            .await;
+        assert_ok(&created);
+        let starter = agent
+            .get_session(created["result"]["sessionId"].as_str().unwrap())
+            .unwrap();
+        let saved = tool(
+            &mut client,
+            &starter,
+            json!({"action":"create","job":{"name":"factory",
+                "schedule":{"at":"2030-01-01T00:00:00Z"},"prompt":"Review the project"}}),
+        )
+        .await;
+        assert_ne!(saved.is_error, Some(true), "{saved:?}");
+        let dim_agent_types::ToolContent::Text(content) = saved.content else {
+            panic!("schedule returns text")
+        };
+        let saved: Value = serde_json::from_str(&content).unwrap();
+
+        // The declaration the model request carries.
+        let history = starter.local("main", ..).await.unwrap();
+        let description = history
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => data.request.tools.as_deref().and_then(|tools| {
+                    tools
+                        .iter()
+                        .find(|tool| tool.name == "schedule")
+                        .map(|tool| tool.description.clone())
+                }),
+                _ => None,
+            })
+            .expect("the schedule declaration");
+        if configured {
+            assert_eq!(description, DESCRIPTION);
+        } else {
+            assert!(
+                description.starts_with("Manage scheduled jobs across this host"),
+                "{description}"
+            );
+        }
+
+        // The report the saving branch receives.
+        let started = client
+            .rpc("schedule.run_now", json!({"job_id":saved["job"]["id"]}))
+            .await;
+        assert_ok(&started);
+        let run = settled(
+            &mut client,
+            &saved["job"]["id"],
+            &started["result"]["run_id"],
+        )
+        .await;
+        assert_eq!(run["state"], "completed", "{run}");
+        let submission = format!("scheduler-report:{}", run["run_id"].as_str().unwrap());
+        let text = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let history = starter.local("main", ..).await.unwrap();
+                if let Some(text) = history.iter().find_map(|event| match &event.kind {
+                    EventKind::InputMessage(data)
+                        if data.submission_id.as_deref() == Some(&submission) =>
+                    {
+                        data.blocks
+                            .first()
+                            .map(|dim_agent_types::InputBlock::Raw { text, .. }| text.clone())
+                    }
+                    _ => None,
+                }) {
+                    break text;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the report reaches the saving branch");
+        if configured {
+            assert!(
+                text.ends_with(&format!("{GUIDANCE}</dim-scheduler>")),
+                "{text}"
+            );
+            assert!(
+                !text.contains("Inspect schedule.history for this job."),
+                "{text}"
+            );
+        } else {
+            assert!(
+                text.ends_with("Inspect schedule.history for this job.</dim-scheduler>"),
+                "{text}"
+            );
+        }
+        server.shutdown();
+        server.join().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}

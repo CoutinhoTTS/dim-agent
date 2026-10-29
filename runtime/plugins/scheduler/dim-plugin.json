@@ -15,6 +15,7 @@
       "scheduleJobs": {
         "call": "async"
       }
-    }
+    },
+    "config": {}
   }
 }

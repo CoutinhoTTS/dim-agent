@@ -21,9 +21,12 @@ export class Scheduler {
   private retryPruneAt: number | undefined
   private nextWindowAt: number | undefined
   private rewake = false
+  /// The report's guidance sentence: the factory configuration's text or
+  /// the built-in one.
+  private readonly reportGuidance: string
 
-  constructor(jobs: Jobs, sessions: Sessions, store: RunStore) {
-    this.jobs = jobs; this.sessions = sessions; this.store = store
+  constructor(jobs: Jobs, sessions: Sessions, store: RunStore, reportGuidance = 'Inspect schedule.history for this job.') {
+    this.jobs = jobs; this.sessions = sessions; this.store = store; this.reportGuidance = reportGuidance
   }
 
   async track<T>(operation: () => Promise<T>, key: string = randomUUID()): Promise<T> {
@@ -366,7 +369,7 @@ export class Scheduler {
     if (!run?.report_to || !['completed', 'failed', 'cancelled', 'timed_out', 'lost'].includes(run.state)) return
     let failure: string | undefined
     try {
-      const body = `Scheduled job ${run.job_id}, run ${run.run_id}: ${run.state} (${run.detail}).${run.session_id ? ` Session ${run.session_id}.` : ''} Inspect schedule.history for this job.`
+      const body = `Scheduled job ${run.job_id}, run ${run.run_id}: ${run.state} (${run.detail}).${run.session_id ? ` Session ${run.session_id}.` : ''} ${this.reportGuidance}`
       const reply = await this.sessions.input({ sessionId: run.report_to.session_id, branchId: run.report_to.branch_id,
         mode: 'steer', submissionId: `scheduler-report:${run.run_id}`, rawBlocks: [{ text:
           `<dim-scheduler kind="report" job="${escaped(run.job_id)}" run="${escaped(run.run_id)}">${escaped(body)}</dim-scheduler>`,
