@@ -28441,6 +28441,7 @@
         "path InputEvent::Key",
         "path KeyCode",
         "path KeyCode::BackTab",
+        "path KeyCode::Backspace",
         "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::Enter",

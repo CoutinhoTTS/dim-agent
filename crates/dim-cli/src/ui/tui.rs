@@ -815,8 +815,12 @@ struct App {
     /// The session's runs as the terminal's program status follows them.
     runs: Runs,
     /// The draft set aside while Ctrl+O/Ctrl+P has the palette open; it
-    /// comes back when the palette closes.
+    /// comes back when command entry ends.
     palette_stash: Option<String>,
+    /// Command entry over a pending question: the composer has the keys
+    /// from the palette through the command's argument until it runs
+    /// ([`Self::command_entry_open`]).
+    command_entry: bool,
     /// The workspace's git branch for the banner, read once.
     branch: String,
     /// The shell-mode command running, at most one.
@@ -978,6 +982,7 @@ impl App {
             notified_request: None,
             runs: Runs::default(),
             palette_stash: None,
+            command_entry: false,
             branch: git_branch().unwrap_or_else(|| t("Not available").into()),
             shell: None,
             clipboard: None,
@@ -1044,16 +1049,19 @@ impl App {
         self.prompt.is_none() && !self.composer.palette_open() && !self.composer.mention_open()
     }
 
-    /// The command palette is open over a pending question that is not
-    /// being edited: it owns the keys and takes the panel's place until it
-    /// closes.
-    fn question_palette(&self) -> bool {
-        self.composer.palette_open()
+    /// Command entry is open over a pending question that is not being
+    /// edited: the composer owns the keys and takes the panel's place until
+    /// the command runs, Esc, or a draft that stops being a command. It
+    /// starts with `/`, Ctrl+O or Ctrl+P, or with a command draft the
+    /// question arrived under, and lasts past the palette through the
+    /// command's argument.
+    fn command_entry_open(&self) -> bool {
+        (self.command_entry || self.composer.palette_open())
             && matches!(&self.prompt, Some(Prompt::Ask(prompt)) if !prompt.typing)
     }
 
     /// Opens the command palette on the draft it replaces; the draft comes
-    /// back when the palette closes ([`Self::handle`]).
+    /// back when command entry ends ([`Self::handle`]).
     fn open_palette(&mut self) {
         if !self.composer.is_empty() {
             self.palette_stash = Some(self.composer.text().to_owned());
@@ -1568,9 +1576,10 @@ impl App {
     fn handle(&mut self, event: InputEvent) -> Outcome {
         let outcome = self.handle_input(event);
         self.restore_question();
-        if !self.composer.palette_open()
-            && let Some(draft) = self.palette_stash.take()
+        self.command_entry = self.command_entry_open() && self.composer.text().starts_with('/');
+        if !self.command_entry
             && self.composer.is_empty()
+            && let Some(draft) = self.palette_stash.take()
         {
             self.composer.set_draft(&draft);
         }
@@ -1580,7 +1589,7 @@ impl App {
     fn handle_input(&mut self, event: InputEvent) -> Outcome {
         let key = match event {
             InputEvent::Paste(text) => {
-                if self.question_palette() {
+                if self.command_entry_open() {
                     self.paste(text);
                     return Outcome::Continue;
                 }
@@ -1643,21 +1652,26 @@ impl App {
             }
             return Outcome::Continue;
         }
-        // A question keeps the keys, but while its free-text answer is not
-        // being edited `/`, Ctrl+O and Ctrl+P open the command palette over
-        // it, and the palette then owns them.
+        // A question keeps the keys, but a command entered over it keeps
+        // them from `/`, Ctrl+O or Ctrl+P through its argument: only Enter,
+        // Esc or a draft that stops being a command gives them back.
         if matches!(&self.prompt, Some(Prompt::Ask(prompt)) if !prompt.typing) {
-            if self.composer.palette_open() {
-                let outcome = self.composer_key(key);
-                if !self.composer.palette_open() && !self.composer.is_empty() {
+            if self.command_entry_open() {
+                self.command_entry = true;
+                if key.code == KeyCode::Esc
+                    && !self.composer.palette_open()
+                    && !self.composer.mention_open()
+                {
                     self.composer.clear();
+                    return Outcome::Continue;
                 }
-                return outcome;
+                return self.composer_key(key);
             }
             if (key.code == KeyCode::Char('/') && key.mods.0 & !Modifiers::SHIFT.0 == 0)
                 || (ctrl && matches!(key.code, KeyCode::Char('o' | 'p')))
             {
                 self.open_palette();
+                self.command_entry = true;
                 return Outcome::Continue;
             }
         }
@@ -3085,10 +3099,10 @@ impl App {
         } else {
             &p.accent
         };
-        let question_palette = self.question_palette();
+        let command_entry = self.command_entry_open();
         let palette_overlay = self.fullscreen
             && self.composer.palette_open()
-            && (self.prompt.is_none() || question_palette);
+            && (self.prompt.is_none() || command_entry);
         let (cursor_row, cursor_col) = if self.composer.is_empty() || palette_overlay {
             let placeholder = match shell {
                 Some(_) => t(SHELL_PLACEHOLDER),
@@ -3165,7 +3179,7 @@ impl App {
                 border_line(("╰", "╯"), None, Some(&place), outer, &edge)
             );
         }
-        let replaced = !question_palette
+        let replaced = !command_entry
             && matches!(
                 self.prompt,
                 Some(Prompt::Permission(_) | Prompt::Ask(_) | Prompt::Exit(_) | Prompt::Upgrade(_))
@@ -3187,7 +3201,7 @@ impl App {
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Login(prompt)) => Some(prompt.cursor(width)),
-            Some(Prompt::Ask(_)) if question_palette => None,
+            Some(Prompt::Ask(_)) if command_entry => None,
             Some(Prompt::Ask(prompt)) => Some(prompt.cursor(width, panel_rows)),
             Some(_) => Some(None),
             None => None,
@@ -3238,7 +3252,7 @@ impl App {
         }
         let panel = match &self.prompt {
             _ if frame.overlay.is_some() => None,
-            Some(Prompt::Ask(_)) if question_palette => self.composer.palette_panel(outer, p),
+            Some(Prompt::Ask(_)) if command_entry => self.composer.palette_panel(outer, p),
             Some(Prompt::Sessions(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Tasks(prompt)) => {
                 Some(prompt.render(outer, panel_rows, p, &self.markdown))
@@ -5825,6 +5839,17 @@ mod tests {
         std::rc::Rc<std::cell::RefCell<Vec<Command>>>,
         tempfile::TempDir,
     ) {
+        asked_over(ViewSnapshot::default())
+    }
+
+    /// [`asked`] over a snapshot whose other fields are `snapshot`'s.
+    fn asked_over(
+        mut snapshot: ViewSnapshot,
+    ) -> (
+        App,
+        std::rc::Rc<std::cell::RefCell<Vec<Command>>>,
+        tempfile::TempDir,
+    ) {
         let home = tempfile::tempdir().unwrap();
         let theme = test_theme();
         let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -5837,13 +5862,11 @@ mod tests {
         );
         let mut call = questions();
         call.questions.truncate(1);
-        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
-            session_id: "s1".into(),
-            projection_id: 7,
-            focus: "main".into(),
-            questions: vec![call],
-            ..ViewSnapshot::default()
-        })));
+        snapshot.session_id = "s1".into();
+        snapshot.projection_id = 7;
+        snapshot.focus = "main".into();
+        snapshot.questions = vec![call];
+        app.apply(Update::Snapshot(Box::new(snapshot)));
         (app, sent, home)
     }
 
@@ -5950,6 +5973,166 @@ mod tests {
         assert!(
             matches!(sent.borrow().last(), Some(Command::AskCancel { .. })),
             "Esc on the question still declines"
+        );
+    }
+
+    /// `/branch` needs its prompt: choosing it fills `/branch `, the
+    /// composer keeps the keys through the prompt, and Enter runs the
+    /// command with the question still pending and its panel hidden.
+    #[test]
+    fn an_argument_command_takes_its_argument_over_the_question() {
+        use crate::model::view::TurnEnd;
+        let (mut app, sent, _home) = asked_over(ViewSnapshot {
+            ended: Some((8, TurnEnd::Completed)),
+            ..ViewSnapshot::default()
+        });
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "branch");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.composer.text(),
+            "/branch ",
+            "the row filled the command"
+        );
+        assert!(
+            !app.composer.palette_open(),
+            "the argument is not a palette"
+        );
+
+        typed(&mut app, "review the patch");
+        assert_eq!(app.composer.text(), "/branch review the patch");
+        let live = app.frame((80, 40)).live.join("\n");
+        assert!(
+            live.contains("/branch review the patch"),
+            "the composer shows the argument where the palette was"
+        );
+        assert!(
+            !live.contains("Which tall?"),
+            "the question's panel stays hidden"
+        );
+
+        press(&mut app, KeyCode::Enter);
+        assert!(app.composer.is_empty(), "the command ran");
+        assert!(
+            matches!(
+                sent.borrow().last(),
+                Some(Command::OpenLine { at: 8, prompt, .. })
+                    if prompt == "review the patch"
+            ),
+            "Enter ran the branch command with its prompt"
+        );
+        assert!(
+            matches!(&app.prompt, Some(Prompt::Ask(_))),
+            "the question is still pending"
+        );
+        assert_eq!(
+            selection(&app).as_deref(),
+            Some(&["option 0".to_owned()][..]),
+            "it keeps its selection"
+        );
+    }
+
+    /// A space after `/mcp` starts its argument form rather than ending
+    /// command entry, so the argument reaches the command.
+    #[test]
+    fn a_space_after_a_command_keeps_its_argument_over_the_question() {
+        let (mut app, sent, _home) = asked();
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "mcp");
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.composer.text(), "/mcp ");
+        typed(&mut app, "list");
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::Mcp(args)) if args == "list"),
+            "the argument form ran /mcp with its argument"
+        );
+        assert!(matches!(&app.prompt, Some(Prompt::Ask(_))));
+    }
+
+    /// Esc while an argument is typed cancels command entry: the keys go
+    /// back to the question with its selection, and neither the question
+    /// nor a running turn is stopped.
+    #[test]
+    fn esc_in_the_argument_phase_returns_to_the_question() {
+        let (mut app, sent, _home) = asked_over(ViewSnapshot {
+            running: true,
+            ..ViewSnapshot::default()
+        });
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "branch");
+        press(&mut app, KeyCode::Enter);
+        typed(&mut app, "half typed");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.composer.is_empty(), "the command draft is cleared");
+        assert!(
+            matches!(&app.prompt, Some(Prompt::Ask(_))),
+            "the question is still open"
+        );
+        assert_eq!(
+            selection(&app).as_deref(),
+            Some(&["option 0".to_owned()][..]),
+            "it keeps its selection"
+        );
+        assert!(
+            !sent
+                .borrow()
+                .iter()
+                .any(|c| matches!(c, Command::AskCancel { .. } | Command::StopQuestion { .. })),
+            "Esc did not decline the question or interrupt the turn"
+        );
+
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::AskAnswers { .. })),
+            "the keys are back with the question"
+        );
+    }
+
+    /// Backspacing the command away ends command entry and gives the keys
+    /// back to the question.
+    #[test]
+    fn backspacing_the_command_away_returns_to_the_question() {
+        let (mut app, sent, _home) = asked();
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "mcp");
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Backspace);
+        }
+        assert!(app.composer.is_empty());
+        press(&mut app, KeyCode::Esc);
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::AskCancel { .. })),
+            "Esc on the question declines it again"
+        );
+    }
+
+    /// A question the Session drops while its argument is typed ends
+    /// command entry: the draft stays and the composer runs it as usual.
+    #[test]
+    fn a_question_dropped_while_typing_keeps_the_command_draft() {
+        let (mut app, sent, _home) = asked();
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "mcp");
+        press(&mut app, KeyCode::Char(' '));
+        typed(&mut app, "list");
+        assert_eq!(app.composer.text(), "/mcp list");
+
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            projection_id: 7,
+            focus: "main".into(),
+            ..ViewSnapshot::default()
+        })));
+        assert!(app.prompt.is_none(), "the question is gone");
+        assert_eq!(app.composer.text(), "/mcp list", "the draft stays");
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            matches!(sent.borrow().last(), Some(Command::Mcp(args)) if args == "list"),
+            "the composer runs the command it kept"
         );
     }
 
