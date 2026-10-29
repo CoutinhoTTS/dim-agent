@@ -487,9 +487,9 @@ carry user configuration; missing maps/lists mean no corresponding user data:
 
 The two model limits carry their own, later format decision: the
 [#522 storage decision](native-storage-format.md#522-格式决定) makes an
-undeclared limit an absent key, which no v22 reader can parse either way, and
+undeclared limit an absent key, which no v23 reader can parse either way, and
 upgrades stored records in place instead of reusing a version. The decision
-states the next version after v22, the rewrite the startup transaction performs,
+states the next version after v23, the rewrite the startup transaction performs,
 and the old binary's startup refusal. §3.5 states how the effective catalog then
 supplies what a source declares.
 

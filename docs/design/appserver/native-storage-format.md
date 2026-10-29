@@ -484,6 +484,28 @@ ProjectionCheckpoint = {
 
   对应 `storage_flow.rs` 中本步的 `a_v22_store_upgrades_in_place_once` 及其他各步的同名测试、`unsupported_legacy_or_changed_schema_is_rejected_without_migration` 与本期新增的目录流程测试。
 
+### #522 格式决定
+
+[Provider 管理 §3.5](provider-management.md#35-declared-model-limits)（#522）的格式决定：升级到 **v23 之后的下一版**，从 v23 原地升级。本节不写死编号：[#556 v23 格式决定](#556-v23-格式决定) 先占用 v23，本步在其基础上顺延，其余内容不随编号改变。
+
+- **改变的已存值**：`providers.record` 内每个模型描述的两项上限 `contextWindow`、`maxOutputTokens` 变成可选。没有来源声明时该键缺省，不再存假定值。这是 [Provider 管理 §3.5](provider-management.md#35-declared-model-limits) 的缺失语义在存储上的表示。
+- **为什么不能沿用 v23**：v23 读取器要求两项上限都是正整数，遇到缺键的 Provider 记录会解析失败；那是升级后到读取某个 Provider 才失败，违反本文件的启动拒绝规则。启动门禁比较精确的 SQL 结构，所以格式号必须改变。
+- **升级路径**：沿用 `IMMEDIATE` 启动准入事务，在改写标记的同一事务内改写 Provider 记录：
+  - 空库直接建新版本。
+  - 结构恰为 v23 且标记相符的库，在同一事务内处理；标记相符的更旧库先走既有各步，再走本步。
+  - 对每条 `providers.record`，删除两项上限中既未在 `metadata.capabilityOverrideFields` 中列出、也未被该条目的 `metadata.raw` 声明的值：静态记录（`kind` 为 `builtin` 或 `custom`）处理 `models`、`modelConfigOverrides` 与 `userModels` 的每个条目，托管记录（`kind` 为 `managed`）处理 `models[].entry`。`metadata.raw` 保留清单项目的原文，升级与投影用同一组键和同一函数读取它（`context_window`/`contextWindow`/`inputTokenLimit`、`max_output_tokens`/`maxOutputTokens`/`outputTokenLimit`，以及 `limit.context`/`limit.output` 与 `capabilities.contextWindow`/`capabilities.maxOutputTokens`），不另列清单。来源声明某个值就保留，只删除没有任何来源声明的上限；不比较数值，也不补齐替代值。
+  - 其余字节不变：`capabilityOverrideFields`、其他能力位、metadata、凭据、偏好、路由与选择都不改写；任何一步失败则回滚，原库保持不变。
+  - 恰为新版本的库直接打开；其他库（标记不符、升级到一半、更旧格式、分支专用 v14、未知结构）照旧拒绝并保留。
+- **改写的位置**：`providers.record` 的 JSON 由 Provider 拥有的记录转换函数改写，存储层只负责在准入事务内对每条记录调用它，不解析 Provider 的字段。
+- **升级后从哪里取得值**：缺省键的上限由有效目录按来源补齐，不写回记录——默认项与用户模型走既有捆绑匹配，托管目录模型走同一 `BundledCatalog::fallback`，描述覆盖未自行声明的上限取自其基础项（[Provider 管理 §3.5](provider-management.md#35-declared-model-limits)）。因此命中捆绑目录的模型升级前后取到同一个声明值；扫描不到的私有模型变为未声明，由管理面报告原因。
+- **单向**：旧二进制按既有精确 SQL 结构检查拒绝整个新库，报现有的 "unsupported SQLite schema … preserved" 错误；不会到读取某个 Provider 时才失败。不做降级或备份。
+- **升级日志**：沿用 S5a 的那一行：`Upgraded native store <path> from format v23 to v<N>; earlier dimcode versions cannot open it.`
+- **验证**：
+  - 在一次性 v23 库中写入 Provider 记录，覆盖命中捆绑目录的默认项、扫描不到的私有默认项、清单声明了上限的条目（两项、仅窗口、两项皆无）、命中与未命中捆绑目录的两类描述覆盖、用户模型和一条托管记录；升级后核对只删除没有任何来源声明的上限（未列入标记且 `metadata.raw` 未声明）、其余字节逐字节不变、标记与结构为新版本，再次打开不再升级。
+  - 有效目录中命中捆绑目录的模型取值与升级前相同；扫描不到的模型带 `missingLimits` 且不可选；两者都由 Provider 流程测试保护。
+  - 用本决定之前的基线构建的旧二进制打开升级后的库，在启动时以 "unsupported SQLite schema … preserved" 拒绝并保留，不读取任何 Provider。
+  - 对应 `storage_flow.rs` 的 `a_v23_provider_record_loses_only_undeclared_model_limits` 与 `unsupported_legacy_or_changed_schema_is_rejected_without_migration`，以及 `provider_flow.rs` 的目录流程。
+
 ## 索引与实际查询
 
 | 版本与索引 | 精确列序/条件 | 服务的查询 |
