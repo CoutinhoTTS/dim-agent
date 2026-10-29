@@ -438,6 +438,7 @@
         "assert",
         "assert_eq",
         "format",
+        "matches",
         "unreachable"
       ]
     },
@@ -7411,7 +7412,7 @@
         "path native::open_root",
         "path native::parent",
         "path native::permissions",
-        "path native::process_alive",
+        "path native::process_owns_marker",
         "path native::read_account_file",
         "path native::read_user_file",
         "path native::remove",
@@ -7448,7 +7449,7 @@
         "path native::open_root",
         "path native::parent",
         "path native::permissions",
-        "path native::process_alive",
+        "path native::process_owns_marker",
         "path native::read_account_file",
         "path native::read_user_file",
         "path native::remove",
@@ -7486,7 +7487,7 @@
         "path native::open_root",
         "path native::parent",
         "path native::permissions",
-        "path native::process_alive",
+        "path native::process_owns_marker",
         "path native::read_account_file",
         "path native::read_user_file",
         "path native::remove",
@@ -7521,7 +7522,8 @@
         "path Tree",
         "path Tree::Business",
         "path Tree::Leftover",
-        "path account_lock"
+        "path account_lock",
+        "path read"
       ]
     },
     {
@@ -7552,7 +7554,8 @@
         "path TEMPORARY_DIRECTORY",
         "path Tree",
         "path Tree::Business",
-        "path Tree::Leftover"
+        "path Tree::Leftover",
+        "path read"
       ]
     },
     {

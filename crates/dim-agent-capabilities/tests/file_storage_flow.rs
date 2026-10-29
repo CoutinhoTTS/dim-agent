@@ -920,10 +920,26 @@ fn file_storage_flow() {
 
             let account_lock = root_path.join("auth.json.lock");
             let old = SystemTime::now() - Duration::from_secs(60);
-            fs::write(&account_lock, format!("{}\n1\nexternal-live-owner\n", std::process::id())).unwrap();
+            let created_at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+            fs::write(&account_lock, format!("{}\n{created_at}\nexternal-live-owner\n", std::process::id())).unwrap();
             fs::OpenOptions::new().write(true).open(&account_lock).unwrap().set_times(FileTimes::new().set_modified(old)).unwrap();
             assert!(matches!(storage.lock(&auth, &cancel).await, Err(FileStorageError::Locked)));
             fs::remove_file(&account_lock).unwrap();
+            fs::write(&account_lock, format!("{}\n1\nreused-pid-owner\n", std::process::id())).unwrap();
+            fs::OpenOptions::new().write(true).open(&account_lock).unwrap().set_times(FileTimes::new().set_modified(old)).unwrap();
+            let recovered = storage.lock(&auth, &cancel).await.unwrap();
+            drop(recovered);
+            assert!(!account_lock.exists());
+            #[cfg(unix)]
+            if unsafe { libc::kill(1, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            {
+                fs::write(&account_lock, format!("1\n{created_at}\nforeign-owner\n")).unwrap();
+                fs::OpenOptions::new().write(true).open(&account_lock).unwrap().set_times(FileTimes::new().set_modified(old)).unwrap();
+                let recovered = storage.lock(&auth, &cancel).await.unwrap();
+                drop(recovered);
+                assert!(!account_lock.exists());
+            }
             fs::write(&account_lock, format!("{dead_pid}\n1\nexternal-dead-owner\n")).unwrap();
             fs::OpenOptions::new().write(true).open(&account_lock).unwrap().set_times(FileTimes::new().set_modified(old)).unwrap();
             let recovered = storage.lock(&auth, &cancel).await.unwrap();

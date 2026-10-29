@@ -66,8 +66,10 @@ replacement is discarded by the next replacement of that name.
 
 `auth.json` also takes the TypeScript-compatible `auth.json.lock` marker, which
 is reclaimed only while holding the `auth.json` key. A marker is stale once it
-is older than 30 seconds and names a process that is no longer running; a
-marker naming this process counts as live. The exception is a marker this
+is older than 30 seconds and has no verified owner: its recorded PID must still
+be running and have started no later than the marker's recorded creation time.
+A reused PID, a permission-denied process probe or a missing PID or creation
+time does not establish ownership. The exception is a marker this
 process failed to release: it keeps the owner record, whose nonce only that
 marker carries, and reclaims the marker at once, so removal and locking need
 not wait for the process to exit. The marker is the external TypeScript wire
