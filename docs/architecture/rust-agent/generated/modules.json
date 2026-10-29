@@ -2347,6 +2347,7 @@
         "assert_eq",
         "format",
         "matches",
+        "panic",
         "params",
         "tracing::error",
         "vec"
@@ -20415,7 +20416,8 @@
         "path AgentError::Storage",
         "path Result",
         "use dim_agent_runtime::AgentError",
-        "use dim_agent_runtime::Result"
+        "use dim_agent_runtime::Result",
+        "use dim_agent_runtime::panic_message"
       ]
     },
     {
@@ -20468,7 +20470,8 @@
         "path AgentError::InvalidInput",
         "path Result",
         "use dim_agent_runtime::AgentError",
-        "use dim_agent_runtime::Result"
+        "use dim_agent_runtime::Result",
+        "use dim_agent_runtime::panic_message"
       ]
     },
     {
@@ -31693,6 +31696,18 @@
     {
       "module": "dim_app_server::storage::metadata",
       "path": "D::Error"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "EventDraft::new"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "InputMessageData::text"
+    },
+    {
+      "module": "dim_app_server::storage::timeline",
+      "path": "Timeline::new"
     },
     {
       "module": "dim_app_server::transport",

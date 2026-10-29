@@ -1,9 +1,10 @@
-use dim_agent_runtime::{AgentError, Result};
+use dim_agent_runtime::{AgentError, Result, panic_message};
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
 use std::{
     fs::File,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -428,11 +429,29 @@ impl SqliteStorage {
         }
         let admitted = Operation(self.clone());
         tokio::task::spawn_blocking(move || {
-            let mut guard = admitted.0.connection.lock().unwrap();
+            let mut guard = admitted
+                .0
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| storage("SQLite storage is closed"))?;
-            operation(connection)
+            match catch_unwind(AssertUnwindSafe(|| operation(connection))) {
+                Ok(result) => result,
+                Err(panic) => {
+                    let failure = storage(format!(
+                        "SQLite operation panicked: {}",
+                        panic_message(panic)
+                    ));
+                    if !connection.is_autocommit()
+                        && let Err(cleanup) = connection.execute_batch("ROLLBACK")
+                    {
+                        return Err(failure.with_cleanup(storage(cleanup)));
+                    }
+                    Err(failure)
+                }
+            }
         })
         .await
         .map_err(storage)?
@@ -451,7 +470,10 @@ impl SqliteStorage {
                 idle.await;
             }
             tokio::task::spawn_blocking(move || {
-                let mut guard = db.connection.lock().unwrap();
+                let mut guard = db
+                    .connection
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(connection) = guard.take()
                     && let Err((connection, failure)) = connection.close()
                 {
