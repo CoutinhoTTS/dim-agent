@@ -8189,6 +8189,7 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path EventDraft::new",
         "path EventKind",
         "path EventKind::ModelContent",
         "path EventKind::ModelUsage",
