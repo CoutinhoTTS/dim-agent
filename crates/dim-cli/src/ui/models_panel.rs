@@ -29,7 +29,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::session::{ModelItem, ModelList, ModelPolicyUpdate, SubagentModelPolicy};
+use crate::model::session::{
+    EmptyProvider, ModelItem, ModelList, ModelPolicyUpdate, SubagentModelPolicy,
+};
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
@@ -171,6 +173,7 @@ impl ModelsPanel {
                         show_effort.then_some(focus.as_deref()).flatten(),
                         show_effort.then_some(&self.chosen),
                     );
+                    items.extend(empty_rows(&list.empty));
                     if self.view == View::Models {
                         items.push(Item::new(EDIT_MODELS, t("Edit models"), ""));
                         if let Some(policy) = &self.policy {
@@ -441,6 +444,33 @@ fn effort_detail(model: &ModelItem, chosen: Option<&str>, focused: bool, current
         (false, false) => effort,
         (true, false) => String::new(),
     }
+}
+
+/// A provider with models but nothing selectable keeps a muted row, after
+/// the models, naming it and the command that shows the reasons.
+fn empty_rows(providers: &[EmptyProvider]) -> Vec<Item> {
+    providers
+        .iter()
+        .map(|provider| {
+            let name = ("provider", provider.provider_name.as_str());
+            let id = ("id", provider.provider_id.as_str());
+            let text = if provider.unavailable == 1 {
+                tf(
+                    "{provider}: 1 model unavailable · dimcode models {id}",
+                    &[name, id],
+                )
+            } else {
+                let count = provider.unavailable.to_string();
+                tf(
+                    "{provider}: {count} models unavailable · dimcode models {id}",
+                    &[name, ("count", &count), id],
+                )
+            };
+            let mut row = Item::heading(text);
+            row.sticky = true;
+            row
+        })
+        .collect()
 }
 
 fn provider_name(model: &ModelItem) -> &str {

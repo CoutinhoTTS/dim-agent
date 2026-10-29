@@ -985,6 +985,16 @@ fn apply_capabilities(c: &mut ModelCapabilities, m: &Map<String, Value>) {
     }
 }
 
+/// The kind a model descriptor declares in its raw `type`, lowercased with
+/// `_` read as `-`. `model` names the object (`"object": "model"`) rather
+/// than a kind, so it reads as none.
+pub(crate) fn model_kind(metadata: &ModelMetadata) -> Option<String> {
+    let kind = string(metadata.raw.get("type"))?
+        .to_lowercase()
+        .replace('_', "-");
+    (kind != "model").then_some(kind)
+}
+
 fn media_signature(model: &ModelEntry) -> Option<Value> {
     let raw = model.metadata.as_ref().map(|m| &m.raw);
     let get = |name: &str| raw.and_then(|r| r.get(name));
@@ -1004,7 +1014,7 @@ fn media_signature(model: &ModelEntry) -> Option<Value> {
             .map(|v| strings(v))
             .unwrap_or_default()
     };
-    let kind = string(get("type")).map(|s| s.to_lowercase().replace('_', "-"));
+    let kind = model.metadata.as_ref().and_then(model_kind);
     let hints = sorted(list(get("typeHints").or_else(|| get("type_hints"))));
     let actions = sorted(list(
         get("modalityCapabilities").or_else(|| get("modality_capabilities")),

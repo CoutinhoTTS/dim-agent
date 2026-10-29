@@ -374,6 +374,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "current" => "現在",
         "Edit models" => "モデルを編集",
         "Editing models is not available yet" => "モデル編集はまだ利用不可",
+        "{provider}: 1 model unavailable · dimcode models {id}" => {
+            "{provider}：1 モデル利用不可 · dimcode models {id}"
+        }
+        "{provider}: {count} models unavailable · dimcode models {id}" => {
+            "{provider}：{count} モデル利用不可 · dimcode models {id}"
+        }
         "Enter select · Esc back" => "Enter 選択 · Esc 戻る",
         "Subagent models" => "サブエージェントモデル",
         "Subagent models: {policy}" => "サブエージェントモデル：{policy}",

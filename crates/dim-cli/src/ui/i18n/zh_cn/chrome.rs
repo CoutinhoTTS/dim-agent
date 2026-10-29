@@ -334,6 +334,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "current" => "当前",
         "Edit models" => "编辑模型",
         "Editing models is not available yet" => "暂不支持编辑模型",
+        "{provider}: 1 model unavailable · dimcode models {id}" => {
+            "{provider}：1 个模型不可用 · dimcode models {id}"
+        }
+        "{provider}: {count} models unavailable · dimcode models {id}" => {
+            "{provider}：{count} 个模型不可用 · dimcode models {id}"
+        }
         "Enter select · Esc back" => "Enter 选择 · Esc 返回",
         "Subagent models" => "子代理模型",
         "Subagent models: {policy}" => "子代理模型：{policy}",

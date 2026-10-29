@@ -265,6 +265,33 @@ mod tests {
         }
     }
 
+    /// A provider whose models are all unavailable keeps a row in the models
+    /// picker, in every locale; a table that drops a placeholder would print
+    /// the provider, its count or the explaining command nowhere.
+    #[test]
+    fn every_locale_translates_the_models_picker_provider_notice() {
+        for (code, lookup) in tables() {
+            for (key, placeholders) in [
+                (
+                    "{provider}: 1 model unavailable · dimcode models {id}",
+                    &["{provider}", "{id}"][..],
+                ),
+                (
+                    "{provider}: {count} models unavailable · dimcode models {id}",
+                    &["{provider}", "{count}", "{id}"][..],
+                ),
+            ] {
+                let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+                for placeholder in placeholders {
+                    assert!(
+                        text.contains(placeholder),
+                        "{code} drops {placeholder} in {key:?}: {text:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn environment_values_map_as_the_ts_build_does() {
         let of = Locale::from_env_value;

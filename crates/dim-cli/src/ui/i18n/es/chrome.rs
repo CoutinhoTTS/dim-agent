@@ -410,6 +410,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "current" => "actual",
         "Edit models" => "Editar modelos",
         "Editing models is not available yet" => "Editar modelos aún no disponible",
+        "{provider}: 1 model unavailable · dimcode models {id}" => {
+            "{provider}: 1 modelo no disponible · dimcode models {id}"
+        }
+        "{provider}: {count} models unavailable · dimcode models {id}" => {
+            "{provider}: {count} modelos no disponibles · dimcode models {id}"
+        }
         "Enter select · Esc back" => "Enter elegir · Esc volver",
         "Subagent models" => "Modelos de subagentes",
         "Subagent models: {policy}" => "Modelos de subagentes: {policy}",
