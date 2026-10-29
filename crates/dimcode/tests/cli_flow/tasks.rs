@@ -1711,7 +1711,7 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
     let home = Home::new();
     let (opened, wait_opened) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
-        wire.hello(&["agent.list"]);
+        wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
@@ -1807,10 +1807,15 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
         events.push(delivered(9, "req-6", "running", "member-running"));
         wire.reply(&history, json!({"events":events,"through":9,"nextAfter":9,"done":true}));
         wire.no_context();
-        let attach = wire.read("session.attach");
+        let mut requests = [wire.read_any(), wire.read_any(), wire.read_any()];
+        requests.sort_by_key(|request| request["method"].to_string());
+        let [providers, names, attach] = requests;
+        assert_eq!(providers["method"], "account.providers");
+        assert_eq!(names["method"], "agent.list");
+        assert_eq!(attach["method"], "session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"member-running"}));
-        let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
+        wire.reply(&names, json!([]));
         wire.send(json!({"jsonrpc":"2.0","id":attach["id"],"error":{"code":-32000,"message":"member unavailable"}}));
         let mut line = String::new();
         assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected observation: {line}");
@@ -1832,7 +1837,7 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
 fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
-        wire.hello(&["agent.list"]);
+        wire.hello(&[]);
         wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
@@ -1951,8 +1956,13 @@ fn tui_rejected_delegations_are_not_agents_the_leader_worked_with() {
             json!({"events":events,"through":34,"nextAfter":34,"done":true}),
         );
         wire.no_context();
-        let providers = wire.read("account.providers");
+        let mut requests = [wire.read_any(), wire.read_any()];
+        requests.sort_by_key(|request| request["method"].to_string());
+        let [providers, names] = requests;
+        assert_eq!(providers["method"], "account.providers");
+        assert_eq!(names["method"], "agent.list");
         wire.reply(&providers, json!([]));
+        wire.reply(&names, json!([]));
         wire.quiet(Duration::from_millis(1000));
     });
     let mut command = home.command();
