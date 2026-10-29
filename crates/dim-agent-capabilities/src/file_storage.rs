@@ -1478,6 +1478,7 @@ mod native {
         }
         match process_started_at(pid) {
             Ok(started) => Ok(started <= created_at),
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(true),
             Err(error)
                 if matches!(
                     error.kind(),
@@ -1512,7 +1513,8 @@ mod native {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn process_started_at(pid: libc::pid_t) -> io::Result<u64> {
         let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid process start time");
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+        let stat = std::fs::read(format!("/proc/{pid}/stat"))?;
+        let stat = String::from_utf8_lossy(&stat);
         let ticks = stat
             .rsplit_once(')')
             .and_then(|(_, fields)| fields.split_whitespace().nth(19))

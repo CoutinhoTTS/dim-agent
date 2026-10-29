@@ -73,8 +73,14 @@ time does not establish ownership. The exception is a marker this
 process failed to release: it keeps the owner record, whose nonce only that
 marker carries, and reclaims the marker at once, so removal and locking need
 not wait for the process to exit. The marker is the external TypeScript wire
-format: PID, wall-clock milliseconds, nonce and a trailing newline, with no
-other fields.
+format: PID, milliseconds since the Unix epoch (`Date.now()` in TypeScript),
+nonce and a trailing newline, with no other fields. Writers must use
+milliseconds, not seconds.
+
+The start-time comparison on macOS, Linux, Android and Windows assumes wall-clock
+adjustments do not make the reported process start later than marker creation;
+otherwise a live owner's marker can be reclaimed after the grace period. Other
+Unix targets retain the marker conservatively while its PID probe succeeds.
 
 On Windows, releasing a `PhysicalLock` unlocks its byte range explicitly before
 release completes, because `CloseHandle` may defer the implicit unlock; a later
