@@ -220,7 +220,7 @@ async fn reports(session: &dim_agent_runtime::Session, id: &str) -> usize {
             if let EventKind::InputMessage(data) = &event.kind
                 && data.blocks.iter().any(|block| {
                     matches!(block, dim_agent_types::InputBlock::Raw { text, .. }
-                        if text.starts_with("Scheduled job ") && text.contains(id))
+                        if text.starts_with("<dim-scheduler kind=\"report\"") && text.contains(id))
                 })
             {
                 assert!(
@@ -2099,6 +2099,18 @@ async fn node_scheduler_reports_only_selected_tool_outcomes_with_model_visible_i
                         }
                     })
                     .unwrap();
+                assert!(
+                    text.starts_with(&format!(
+                        "<dim-scheduler kind=\"report\" job=\"{}\" run=\"{}\">",
+                        job.as_str().unwrap(),
+                        id.as_str().unwrap()
+                    )),
+                    "{text}"
+                );
+                assert!(
+                    text.ends_with("Inspect schedule.history for this job.</dim-scheduler>"),
+                    "{text}"
+                );
                 assert!(text.contains(job.as_str().unwrap()));
                 assert!(text.contains(id.as_str().unwrap()));
                 assert!(text.contains(outcome));
