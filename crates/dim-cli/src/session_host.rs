@@ -1142,6 +1142,8 @@ impl Worker {
                     expected_version,
                 )
                 .await;
+                let models = self.models().await.map_err(|error| error.to_string());
+                self.send(Update::Models(models));
                 self.send(Update::Notice(match result {
                     Ok(()) => {
                         "Saved model preferences cleared; select the model to adopt its defaults"
@@ -1149,8 +1151,6 @@ impl Worker {
                     }
                     Err(error) => error.to_string(),
                 }));
-                let models = self.models().await.map_err(|error| error.to_string());
-                self.send(Update::Models(models));
             }
             Command::SetApprovals(mode) => {
                 let result = match permission::parse_preset(&mode) {

@@ -3,6 +3,9 @@
 
 mod local_support;
 
+#[path = "local_support/compaction.rs"]
+mod compaction_support;
+
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel},
     defaults,
@@ -13,6 +16,9 @@ use dim_agent_capabilities::{
     permission::{CommandRulesHost, NoCommandRules},
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_sources,
+    tool_registry::{
+        ToolContribution, ToolHandler, ToolProvider, ToolRegistry, ToolSourceSet, definition,
+    },
     workspace_tools::{self, WorkspaceToolsConfig},
 };
 use dim_agent_runtime::*;
@@ -110,19 +116,42 @@ fn work_config(dirs: &Dirs) -> SessionConfig {
     }
 }
 
-/// The system text of the last request on `branch`.
-async fn last_system(session: &Session, branch: &str) -> String {
-    let events = session.history(branch, None).await.unwrap();
-    let call = events
-        .iter()
+/// The last model call on `branch`.
+async fn last_call(session: &Session, branch: &str) -> ModelCallData {
+    session
+        .history(branch, None)
+        .await
+        .unwrap()
+        .into_iter()
         .rev()
         .find_map(|event| match &event.kind {
-            EventKind::ModelCall(data) => Some(&data.request),
+            EventKind::ModelCall(data) => Some(data.clone()),
             _ => None,
         })
-        .unwrap_or_else(|| panic!("no model call on {branch}"));
+        .unwrap_or_else(|| panic!("no model call on {branch}"))
+}
+
+/// The last adopted configuration on `branch`.
+async fn last_configured(session: &Session, branch: &str) -> ContextConfiguredData {
+    session
+        .history(branch, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextConfigured(data) => Some(data.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no adopted configuration on {branch}"))
+}
+
+/// The system text of the last request on `branch`.
+async fn last_system(session: &Session, branch: &str) -> String {
+    let call = last_call(session, branch).await;
     system_text(
-        call.system
+        call.request
+            .system
             .as_deref()
             .unwrap_or_else(|| panic!("no system on {branch}")),
     )
@@ -281,6 +310,107 @@ async fn both_paths_carry_one_composition() {
         1,
         "the entry of the roster is the one its writer registers: {adopted:?}"
     );
+}
+
+/// The request built from an adopted configuration carries the System Prompt
+/// composed, with nothing added at the request, and the summarizer's request
+/// carries the same System.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_adopted_request_and_the_summarizers_request_carry_one_system() {
+    let dirs = Dirs::new();
+    let root = platform_root(&dirs);
+    let (strategy, requests) = compaction_support::Window::recording();
+    let strategy = Arc::new(strategy);
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(Some(
+            strategy.clone() as Arc<dyn ResolveContextModel>
+        ))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(
+            strategy as Arc<dyn CompactionStrategy>,
+        ))))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    builder.session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
+    defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
+    prompt_sources::install_with_clock(
+        &mut builder,
+        Arc::new(|| "2026-09-30".into()),
+        Duration::from_secs(60),
+    );
+    workspace(&mut builder, &dirs);
+    let agent = builder.build_in(&root);
+    let session = agent
+        .create_session(SessionConfig {
+            system_prompt: "configured rules".into(),
+            ..work_config(&dirs)
+        })
+        .await
+        .unwrap();
+    session
+        .configure(
+            ConfigureUpdate {
+                sources: Vec::new(),
+                model: Some(configuration("configured")),
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    let text = "work: ".to_owned() + &"the quick brown fox jumps over the lazy dog. ".repeat(30);
+    run(&session, &text).await;
+
+    let published = last_configured(&session, "main").await;
+    let call = last_call(&session, "main").await;
+    assert_eq!(
+        call.request.system.as_deref(),
+        published.system.as_ref(),
+        "the request carries the adopted System with nothing added"
+    );
+    let system = system_text(call.request.system.as_deref().unwrap());
+    let markers = [
+        "<dim-notification",
+        "<dim-branch-line",
+        "<dim-branch-message",
+        "<dim-state source=\"dim/environment/date\">",
+        "<dim-rule source=\"dim/instructions/project\"",
+        "<dim-digest",
+    ];
+    assert_guide_shape(guide_of(&system), &markers);
+
+    // The summarizer's request is built from the adopted configuration, so it
+    // carries the same System.
+    compaction_support::compact_now(&session).await;
+    let summarizer = requests
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("the summarizer's request");
+    assert_eq!(
+        summarizer.system.as_deref(),
+        call.request.system.as_deref(),
+        "the summarizer's request carries the same System"
+    );
+    assert_guide_shape(
+        guide_of(&system_text(summarizer.system.as_deref().unwrap())),
+        &markers,
+    );
+
+    // The request after the compaction carries the same System too.
+    run(&session, &text).await;
+    let after = last_call(&session, "main").await;
+    assert_eq!(
+        after.request.system, call.request.system,
+        "a compaction moves no System text"
+    );
+    agent.close().await.unwrap();
 }
 
 /// A registration made between adoptions waits for the next adoption that
@@ -618,6 +748,208 @@ async fn each_branch_keeps_its_own_entries() {
     assert_eq!(
         after, main,
         "ending another line leaves this line's guide unchanged"
+    );
+    agent.close().await.unwrap();
+}
+
+/// The provider source the probe registers: one `probe` tool per generation,
+/// so a reload of the probe is a tools-only adoption.
+struct ProbeSource {
+    version: String,
+}
+impl ToolProvider for ProbeSource {
+    fn sets(&self) -> Vec<Arc<ToolSourceSet>> {
+        vec![Arc::new(ToolSourceSet {
+            key: "probe".into(),
+            version: self.version.clone(),
+            tools: vec![Arc::new(ToolContribution {
+                definition: definition(
+                    "probe",
+                    "Probe a flow",
+                    serde_json::json!({"type": "object"}),
+                ),
+                handler: Arc::new(ProbeCall),
+            })],
+        })]
+    }
+}
+
+struct ProbeCall;
+impl ToolHandler for ProbeCall {
+    fn execute(
+        &self,
+        _: ToolCall,
+        _: ToolExecutionContext,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async { Ok(ToolResult::text("probed")) })
+    }
+}
+
+/// A contributor whose `apply`, with the flag set, registers a tool source
+/// and a guide entry: the tools-only adoption that loads it carries the
+/// entry. Without the flag it registers neither, so loading it out of turn
+/// never races the Session's opening.
+struct GuideToolProbe {
+    flag: Arc<AtomicBool>,
+    tools: Key<ToolRegistry>,
+    guide: Key<GuideEntries>,
+}
+impl DynPlugin for GuideToolProbe {
+    fn name(&self) -> &str {
+        "GuideToolProbe"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.tools.erase(), self.guide.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let tools = ctx.require_at(&self.tools)?;
+            if !self.flag.load(Ordering::SeqCst) {
+                return Ok(Effect::Done);
+            }
+            let guide = ctx.require_at(&self.guide)?;
+            guide.register(
+                ctx,
+                GuideScope::Session,
+                GuideEntry {
+                    markers: vec!["dim-probe".into()],
+                    order: 65,
+                    text: PROBE_ENTRY.into(),
+                },
+            )?;
+            tools.register_source(
+                ctx,
+                "probe",
+                Arc::new(ProbeSource {
+                    version: uuid::Uuid::new_v4().to_string(),
+                }),
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+struct GuideToolProbeOwner {
+    flag: Arc<AtomicBool>,
+    views: Arc<Mutex<Vec<FiberView>>>,
+    tools: Key<ToolRegistry>,
+    guide: Key<GuideEntries>,
+}
+impl Plugin for GuideToolProbeOwner {
+    type Deps = ();
+    async fn apply(&self, ctx: &Ctx, _: ()) -> rutis::Result {
+        let view = ctx.plugin(GuideToolProbe {
+            flag: self.flag.clone(),
+            tools: self.tools.clone(),
+            guide: self.guide.clone(),
+        });
+        (&view).await.map_err(|error| {
+            rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                format!("guide tool probe failed: {error}").into(),
+            ))
+        })?;
+        self.views.lock().unwrap().push(view);
+        Ok(())
+    }
+}
+
+/// A tools-only adoption that changes the entries in force re-renders the
+/// guide and keeps the adopted source text: two requests between adoptions
+/// share a prefix, and the request after the adoption differs only by the
+/// entry that adoption carried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tools_only_adoption_carries_the_entry_its_writer_registers() {
+    let dirs = Dirs::new();
+    let root = platform_root(&dirs);
+    let flag = Arc::new(AtomicBool::new(false));
+    let views = Arc::new(Mutex::new(Vec::new()));
+    let (flag_owner, views_owner) = (flag.clone(), views.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    mock_model_hosts(&mut builder);
+    workspace(&mut builder, &dirs);
+    defaults::install_with_prompt(&mut builder, Arc::new(EmptyPromptHost), None);
+    builder.require_feature(Feature::new("GuideToolProbeOwner").session(
+        "GuideToolProbeOwner",
+        move |names| {
+            Ok(Box::new(GuideToolProbeOwner {
+                flag: flag_owner.clone(),
+                views: views_owner.clone(),
+                tools: names.key()?,
+                guide: names.key()?,
+            }))
+        },
+    ));
+    let agent = builder.build_in(&root);
+    let session = agent.create_session(work_config(&dirs)).await.unwrap();
+    assert_eq!(
+        session
+            .configure(
+                ConfigureUpdate {
+                    sources: Vec::new(),
+                    model: Some(configuration("configured")),
+                },
+                "main",
+            )
+            .await
+            .unwrap(),
+        ConfigureOutcome::Adopted
+    );
+    run(&session, "first").await;
+    let first = last_system(&session, "main").await;
+    run(&session, "second").await;
+    let second = last_system(&session, "main").await;
+    assert_eq!(
+        first, second,
+        "two requests between adoptions share a prefix"
+    );
+    assert!(!second.contains(PROBE_ENTRY), "{second:?}");
+
+    // The writer loads with a tool of its own: the tools-only adoption that
+    // loads it carries the entry it registered.
+    flag.store(true, Ordering::SeqCst);
+    let view = views.lock().unwrap().last().cloned().expect("a probe");
+    view.restart().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let adopted = last_configured(&session, "main").await;
+            if adopted
+                .settings
+                .tool_sources
+                .iter()
+                .any(|source| source.key == "probe")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the tools-only adoption");
+    run(&session, "third").await;
+    let call = last_call(&session, "main").await;
+    let third = system_text(call.request.system.as_deref().unwrap());
+    assert!(
+        third.contains(PROBE_ENTRY),
+        "the adoption carries the entry: {third:?}"
+    );
+    assert_eq!(
+        third.replacen(&format!("{PROBE_ENTRY}\n\n"), "", 1),
+        second,
+        "the new System differs from the last only by the registered entry"
+    );
+    let published = last_configured(&session, "main").await;
+    assert_eq!(
+        call.request.system.as_deref(),
+        published.system.as_ref(),
+        "the request carries the adopted System with nothing added"
+    );
+    assert!(
+        call.request
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.iter().any(|tool| tool.name == "probe")),
+        "the request declares the tool the adoption carried"
     );
     agent.close().await.unwrap();
 }
