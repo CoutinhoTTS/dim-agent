@@ -154,6 +154,27 @@ Timeline 的点就是它的用户消息。Tab 从最新一条起逐条走；`/ti
 4. fullscreen 下面板把 transcript 顶上去，关闭后 transcript 回到 composer 上方贴底。scrollback 不会抬起 composer，所以面板开在 composer 下方，和菜单同一个位置，关闭时 composer 上方不会留空。
 5. 无法开线的 `/branch`（还没有结束的回合、当前线已结束）把草稿留在 composer 里，并说明原因。
 
+### 4.8 模型还没读到的消息
+
+用户消息先写入、再由 InputQueue 采用、最后由 Loop 消费。客户端从 `input/applied` 起画出它，行显示模型是否已经读到：
+
+| 状态 | 事实 | 模型读到了吗 | 画成 |
+| --- | --- | --- | --- |
+| queue | `input/message`，InputQueue 还压着 | 否 | composer 上方的队列条 |
+| applied | `input/applied`，等 Loop 的下一个请求 | 否 | 虚化的消息行 |
+| consumed | `input/consumed`，已进入携带它的那次请求 | 是 | 正常的用户消息行 |
+
+虚化的行保留文本和切点，用 faint 颜色画、不加底色条。scrollback 只能追加，所以还会变的行留在 live tail 里（与流式回答、运行中的工具组同一规则），直到 `input/consumed` 结算时才以用户色进入 scrollback。于是排在下一个请求里的消息，读起来永远不会像模型已经回答过：
+
+```
+ › how do we fix this deadlock                       模型已读到
+ › add the missing test too                          仍是虚化：还没读到
+```
+
+applied 的输入可以跨过一次 stop 继续待消费，正是下一个 turn 要消费的状态（[中断](../../architecture/rust-agent/interrupt.md)）。
+
+行按 input id 从写下它的 `input/message` 跟到结算它的 `input/consumed`，所以重连后折叠同一批事件时，画出的就是它已经到达的状态，而不是写入那一刻的状态。
+
 ## 5. 切线
 
 与 #427 §14 相同：切换时写一行 `⑂ 名字 · id` 边界，等该线的历史加载完后接着是它的 transcript，只含它自己的事件（每个分支各自编号，[sessions service D11](appserver/sessions-service.md)）。它继承的历史属于父线，离它只有一个标记的距离。
@@ -178,7 +199,7 @@ fork 是别的 Session，归 `/resume`。按键保持 #427 §14 的定义。
 | # | 需求 | 归属 | 说明 |
 | --- | --- | --- | --- |
 | R1 | `LineView.cut`：父线序号及该处的消息数 | CLI projection | 由 `branch/create.at` 与父线的用户输入折叠而来；无格式变化 |
-| R2 | 用户消息行的切点（`ViewRow.cut`）与标记行的线（`ViewRow.line`） | CLI projection | 来自客户端已有的序号 |
+| R2 | 用户消息行的切点（`ViewRow.cut`）、模型是否已消费（`ViewRow.pending`）与标记行的线（`ViewRow.line`） | CLI projection | 来自客户端已有的序号与输入状态 |
 | R3 | `session.branch_create` 与 `session.fork` 调用 | CLI session host | 已有方法；从过期 attachment 发出的请求在本地拒绝 |
 | R4 | 后续、可选：显示 fork 的来源（源上的 `↗ forked`，fork 里的 `forked from S`） | App Server，需格式决定 | `session/forked` 不带数据，fork 设计也不加来源列 |
 
@@ -194,6 +215,7 @@ fork 是别的 Session，归 `/resume`。按键保持 #427 §14 的定义。
 - 新增的交互：选取上的 `b`/`f`、composer 的分支草稿与 fork 询问、路径式底边、`/branch` 与 `/fork`，各自对应 §2 的一条规则。
 - 侧面板（§4.7）是唯一新增的界面：不离开父线就跟随一条线，需要一个父线 Timeline 装不下的视图。它不折叠新数据，CLI 本来就为每条打开的线保留 transcript。它收起后的形态就是已有的 `⑂` 标记，所以关闭时不写任何东西。
 - 考虑过但去掉的：lines 面板里的 `b`（需要每条线的末尾；当前线上的 `/branch` 已覆盖）、按点置灰的提示（按键时的 notice 说的是同一件事，状态更少）、结束标记（§4.4）、继承前缀的一行摘要与 `Esc Esc` 回父线（§5 和标记已经通向那里）。
+- 待消费消息（§4.8）不新增一份列表：还是同一行，按 input id 关联，队列条就是这一行的前一态。虚化行复用流式回答与运行中工具组已有的 live tail 规则，三个状态都来自客户端已收到的事件——没有计时器、没有新事件、没有第二份 transcript。
 
 ## 10. 决定
 

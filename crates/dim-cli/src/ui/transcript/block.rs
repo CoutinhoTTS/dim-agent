@@ -25,10 +25,12 @@ pub enum Tone {
 pub enum Block {
     /// The startup banner. Drawn at the terminal's full width, not from a row.
     Banner,
-    /// A user message; `cut` is where a line or fork opened from it cuts.
+    /// A user message; `cut` is where a line or fork opened from it cuts, and
+    /// `pending` is that the model has not consumed it yet (timeline UI §4.8).
     User {
         text: String,
         cut: Option<u64>,
+        pending: bool,
     },
     /// A shell-mode run: recorded (`!`) from the transcript, private (`!!`)
     /// from the terminal alone.
@@ -89,11 +91,13 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
         RowKind::UserMessage => Block::User {
             text: row.text.clone(),
             cut: row.cut,
+            pending: row.pending,
         },
         RowKind::Shell => ShellRun::parse(&row.text).map_or_else(
             || Block::User {
                 text: row.text.clone(),
                 cut: row.cut,
+                pending: row.pending,
             },
             Block::Shell,
         ),
@@ -501,5 +505,35 @@ mod tests {
                 out
             })
             .collect()
+    }
+
+    #[test]
+    fn a_pending_user_message_draws_faint_and_a_consumed_one_in_the_user_colour() {
+        use crate::ui::theme::ansi::{Paint, paint};
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
+        let markdown = MarkdownRenderer::new(&theme);
+        let drawn = |pending: bool| {
+            let mut message = row(RowKind::UserMessage, "find the leak");
+            message.pending = pending;
+            let block = project_row(&shared(&[message]), 0, Detail::Collapsed);
+            render_block(&block, 40, &theme.palette, &markdown)
+        };
+        let lead = |color: &str| {
+            paint(
+                "┃ ",
+                Paint {
+                    fg: Some(color),
+                    ..Paint::default()
+                },
+            )
+        };
+        assert!(
+            drawn(true)[0].starts_with(&lead(&theme.palette.faint)),
+            "a message the model has not read draws faint"
+        );
+        assert!(
+            drawn(false)[0].starts_with(&lead(&theme.palette.user)),
+            "a consumed message draws in the user colour"
+        );
     }
 }

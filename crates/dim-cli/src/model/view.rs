@@ -57,7 +57,8 @@ pub struct ViewRow {
     /// The model request a tool call came from: the calls of one request are
     /// drawn as one group.
     pub batch: Option<String>,
-    /// A tool call that has not produced its result yet.
+    /// Work this row stands for that has not settled yet: a tool call
+    /// without its result, or a user message the model has not consumed.
     pub pending: bool,
     /// A call that waits on the user (an approval names it, or it is the
     /// question tool itself): it is part of the transcript at once, and the

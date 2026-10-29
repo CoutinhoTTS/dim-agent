@@ -3397,7 +3397,7 @@ impl App {
             Text(String),
             Thinking(String),
             Tool(usize),
-            Compaction(usize),
+            Row(usize),
         }
         let mut live_text: Vec<TextBlock> = Vec::new();
         let mut live_items: Vec<LiveItem> = Vec::new();
@@ -3436,8 +3436,9 @@ impl App {
                         .as_ref()
                         .is_some_and(|c| c.state == CompactionState::Running) =>
                 {
-                    live_items.push(LiveItem::Compaction(index));
+                    live_items.push(LiveItem::Row(index));
                 }
+                RowKind::UserMessage if row.pending => live_items.push(LiveItem::Row(index)),
                 RowKind::AssistantMessage => match self.revealed.get(&row.row_id) {
                     Some(&(_, shown)) if shown < text.len() => {
                         live_text.push(TextBlock {
@@ -3608,7 +3609,7 @@ impl App {
                         "·",
                     )
                 }
-                LiveItem::Compaction(index) => render_block(
+                LiveItem::Row(index) => render_block(
                     &project_row(&snapshot.rows, *index, detail_of(*index)),
                     width,
                     p,
@@ -3808,7 +3809,7 @@ impl App {
         self.history
             .iter()
             .rposition(|block| {
-                matches!(block, Block::User { text, cut } if *cut == row.cut && *text == row.text)
+                matches!(block, Block::User { text, cut, .. } if *cut == row.cut && *text == row.text)
             })
             .map(|index| self.dropped + index)
     }
@@ -5577,6 +5578,66 @@ mod tests {
             ..ViewSnapshot::default()
         })));
         drawn.draw();
+    }
+
+    #[test]
+    fn a_message_waits_in_the_live_tail_until_the_model_consumes_it() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn
+            .app
+            .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
+        let show = |drawn: &mut Drawn, pending: bool| {
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                rows: vec![std::sync::Arc::new(ViewRow {
+                    row_id: "u1".into(),
+                    kind: RowKind::UserMessage,
+                    text: "find the leak".into(),
+                    streaming: false,
+                    elapsed_ms: None,
+                    tone: None,
+                    tool_name: None,
+                    tool_input: None,
+                    batch: None,
+                    pending,
+                    parked: false,
+                    result_text: None,
+                    result_is_error: false,
+                    diff: None,
+                    exit_code: None,
+                    member: None,
+                    cut: None,
+                    line: None,
+                    compaction: None,
+                })],
+                focus: "main".into(),
+                history_complete: true,
+                ..ViewSnapshot::default()
+            })));
+            drawn.draw();
+        };
+        show(&mut drawn, true);
+        assert!(
+            drawn.transcript().contains("find the leak"),
+            "a pending message is drawn"
+        );
+        assert!(
+            !drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { .. })),
+            "a pending message has no settled appearance to commit"
+        );
+        show(&mut drawn, false);
+        assert!(
+            drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::User { text, .. } if text == "find the leak")),
+            "a consumed message settles into scrollback"
+        );
     }
 
     #[test]
