@@ -403,12 +403,17 @@ pub struct ModelItem {
 /// Why a usable provider contributes no selectable model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EmptyReason {
-    /// It lists no models: none discovered yet, or none at all.
-    NoModels,
+    /// It lists no models: none discovered yet, or none at all. `listable`
+    /// is whether `provider.refresh` can ask it for a listing.
+    NoModels { listable: bool },
+    /// Some models are unavailable and some are disabled.
+    Mixed { unavailable: usize, disabled: usize },
     /// Every model it lists is unavailable.
     Unavailable { count: usize },
     /// Every model it lists is disabled.
     Disabled { count: usize },
+    /// Its catalog could not be read, so nothing is known about its models.
+    Unreadable,
 }
 
 /// A usable provider with no selectable model.

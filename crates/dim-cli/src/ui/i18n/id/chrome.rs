@@ -402,6 +402,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}: tanpa model · dimcode models {id} --refresh"
         }
+        "{provider}: no models · add a model with provider.models.create" => {
+            "{provider}: tanpa model · tambahkan model dengan provider.models.create"
+        }
+        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}" => {
+            "{provider}: {unavailable} tidak tersedia dan {disabled} dinonaktifkan · dimcode models {id}"
+        }
+        "{provider}: catalog unreadable · dimcode models {id}" => {
+            "{provider}: katalog tidak terbaca · dimcode models {id}"
+        }
+        "No cached catalog. Sign in and run models PROVIDER --refresh." => {
+            "Tidak ada katalog tersimpan. Masuk dan jalankan models PROVIDER --refresh."
+        }
+        "Saved model preferences cleared" => "Preferensi model tersimpan dihapus",
         "{provider}: 1 model disabled · dimcode models {id}" => {
             "{provider}: 1 model dinonaktifkan · dimcode models {id}"
         }

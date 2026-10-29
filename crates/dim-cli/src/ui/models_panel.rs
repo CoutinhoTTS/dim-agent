@@ -19,8 +19,8 @@
 //! ```
 //!
 //! ←/→ cycles the highlighted model's advertised reasoning efforts and wraps.
-//! The choice stays on that row while the list keeps it: a replaced list — a
-//! re-read after a finished refill included — keeps the choices whose model is
+//! The choice stays on that row while the list keeps it: a replaced list — one
+//! read after the catalog changed included — keeps the choices whose model is
 //! still listed and still advertises that effort, and drops the others; Ctrl+X
 //! drops the highlighted row's choice with its saved preferences. Enter adopts
 //! the model; a cycled effort is saved as its `reasoningEffort` and sent with
@@ -90,8 +90,8 @@ impl ModelsPanel {
 
     pub fn set_models(&mut self, models: Result<ModelList, String>) {
         // A replaced list keeps the choices its rows still offer: a cycled
-        // effort survives the re-read a finished refill triggers, while a row
-        // that is gone, or no longer advertises it, drops it.
+        // effort survives a later read, while a row that is gone, or no longer
+        // advertises it, drops it.
         self.chosen.retain(|id, effort| {
             models.as_ref().is_ok_and(|list| {
                 list.models.iter().any(|model| {
@@ -473,10 +473,25 @@ fn empty_rows(providers: &[EmptyProvider]) -> Vec<Item> {
             let name = ("provider", provider.provider_name.as_str());
             let id = ("id", provider.provider_id.as_str());
             let text = match provider.reason {
-                EmptyReason::NoModels => tf(
+                EmptyReason::NoModels { listable: true } => tf(
                     "{provider}: no models · dimcode models {id} --refresh",
                     &[name, id],
                 ),
+                EmptyReason::NoModels { listable: false } => tf(
+                    "{provider}: no models · add a model with provider.models.create",
+                    &[name],
+                ),
+                EmptyReason::Mixed {
+                    unavailable,
+                    disabled,
+                } => {
+                    let unavailable = unavailable.to_string();
+                    let disabled = disabled.to_string();
+                    tf(
+                        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}",
+                        &[name, ("unavailable", &unavailable), ("disabled", &disabled), id],
+                    )
+                }
                 EmptyReason::Unavailable { count: 1 } => tf(
                     "{provider}: 1 model unavailable · dimcode models {id}",
                     &[name, id],
@@ -499,6 +514,10 @@ fn empty_rows(providers: &[EmptyProvider]) -> Vec<Item> {
                         &[name, ("count", &count), id],
                     )
                 }
+                EmptyReason::Unreadable => tf(
+                    "{provider}: catalog unreadable · dimcode models {id}",
+                    &[name, id],
+                ),
             };
             let mut row = Item::heading(text);
             row.sticky = true;

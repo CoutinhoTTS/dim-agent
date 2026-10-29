@@ -570,7 +570,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             );
             if let Some(model) = &options.clear_preferences {
                 session_host::clear_saved_model_preferences(&mut client, provider, model).await?;
-                println!("Saved model preferences cleared");
+                println!("{}", crate::ui::i18n::t("Saved model preferences cleared"));
                 return Ok(0);
             }
             #[derive(serde::Deserialize)]
@@ -626,7 +626,12 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                     );
                 }
             } else {
-                eprintln!("No cached catalog. Sign in and run models PROVIDER --refresh.");
+                eprintln!(
+                    "{}",
+                    crate::ui::i18n::t(
+                        "No cached catalog. Sign in and run models PROVIDER --refresh."
+                    )
+                );
             }
             Ok(0)
         }

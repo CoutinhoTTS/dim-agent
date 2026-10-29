@@ -410,6 +410,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}: keine Modelle · dimcode models {id} --refresh"
         }
+        "{provider}: no models · add a model with provider.models.create" => {
+            "{provider}: keine Modelle · mit provider.models.create ein Modell hinzufügen"
+        }
+        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}" => {
+            "{provider}: {unavailable} nicht verfügbar und {disabled} deaktiviert · dimcode models {id}"
+        }
+        "{provider}: catalog unreadable · dimcode models {id}" => {
+            "{provider}: Katalog nicht lesbar · dimcode models {id}"
+        }
+        "No cached catalog. Sign in and run models PROVIDER --refresh." => {
+            "Kein zwischengespeicherter Katalog. Melde dich an und führe models PROVIDER --refresh aus."
+        }
+        "Saved model preferences cleared" => "Gespeicherte Modellpräferenzen gelöscht",
         "{provider}: 1 model disabled · dimcode models {id}" => {
             "{provider}: 1 Modell deaktiviert · dimcode models {id}"
         }

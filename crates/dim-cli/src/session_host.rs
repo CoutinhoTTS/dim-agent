@@ -73,6 +73,19 @@ struct ManagementEntry {
     version: Option<u32>,
     connection: Option<ManagementConnection>,
     preferences: std::collections::BTreeMap<String, serde_json::Value>,
+    /// What the update did with the record's models; absent from the reads.
+    #[serde(default)]
+    models_listed: Option<ModelsListed>,
+}
+/// `provider.update`'s answer to what it did with the record's models when
+/// the patch changed its connection.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ModelsListed {
+    Listed,
+    Bundled,
+    Unsupported,
+    Disabled,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -248,15 +261,6 @@ struct Worker {
     context_stale: bool,
     /// The outstanding `session.context.compact` requests (`/compact`).
     compact_requests: Vec<u64>,
-    /// Providers whose catalog this connection already tried to refill, so a
-    /// provider that cannot be listed costs one request, not one per open.
-    refilled_catalogs: std::collections::HashSet<String>,
-    /// The outstanding `provider.refresh` requests `models()` sent for those
-    /// catalogs; a reply schedules one re-read of the list.
-    refill_requests: Vec<u64>,
-    /// Set when a refill succeeded: the next loop pass reads the list again,
-    /// so no reply waits on the listing it answers.
-    models_at: Option<tokio::time::Instant>,
 }
 
 struct OutputWatch {
@@ -345,9 +349,6 @@ async fn run(
         login_callbacks: unbounded_channel(),
         context_stale: false,
         compact_requests: Vec::new(),
-        refilled_catalogs: Default::default(),
-        refill_requests: Vec::new(),
-        models_at: None,
     };
     if let Err(error) = worker.open().await {
         if worker.options.resume.is_some() {
@@ -412,13 +413,6 @@ async fn run(
                 if login_poll.is_some() => worker.poll_login().await,
             _ = tokio::time::sleep_until(workflow_poll.unwrap_or_else(tokio::time::Instant::now)),
                 if workflow_poll.is_some() => {},
-            _ = tokio::time::sleep_until(worker.models_at.unwrap_or_else(tokio::time::Instant::now)),
-                if worker.models_at.is_some() => {
-                    worker.models_at = None;
-                    if let Ok(models) = worker.models().await {
-                        worker.send(Update::Models(Ok(models)));
-                    }
-                },
             _ = tokio::time::sleep_until(worker.publish_at.unwrap_or_else(tokio::time::Instant::now)),
                 if worker.publish_at.is_some() => worker.publish(),
         }
@@ -2103,14 +2097,13 @@ impl Worker {
             }
             let updated: ManagementEntry = self.client.typed("provider.update", json!({"providerId":provider_id,"expectedVersion":expected_version,"patch":patch})).await?;
             let mut message = format!("{notice} {}", updated.display_name);
+            match updated.models_listed {
+                Some(ModelsListed::Listed) => message.push_str("; listed its models"),
+                Some(ModelsListed::Unsupported) => listing_unsupported = true,
+                Some(ModelsListed::Bundled | ModelsListed::Disabled) | None => {}
+            }
             if listing_unsupported {
                 message.push_str("; saved without testing the key because model listing is unsupported");
-            } else if probe
-                && let Err(error) = self.client.rpc("provider.refresh", json!({"providerId": provider_id})).await
-            {
-                // The probe listed the connection that was just committed;
-                // applying the connection applies that listing too.
-                message.push_str(&format!("; listing its models failed: {error}"));
             }
             Ok(message)
         }.await;
@@ -2121,14 +2114,11 @@ impl Worker {
     /// credentials and every signed-in managed provider (`provider.list`
     /// lists static ones only), less unavailable and disabled models.
     ///
-    /// A provider whose catalog is missing or lists no models is asked to
-    /// refill it once per connection through `provider.refresh` when
-    /// `provider.list` says its models can be listed. The request is sent, not
-    /// awaited: the picker opens with what the catalogs hold, a provider
-    /// still listing none shows its `no models` row meanwhile, and a reply
-    /// makes the worker read the list again. Every usable provider that
-    /// offers no selectable model is reported for its picker row, with the
-    /// reason.
+    /// The picker reads; it never lists a provider's models. The Provider
+    /// owner decides what a catalog holds, so every client sees the same
+    /// catalogs. Every usable provider that offers no selectable model is
+    /// reported for its picker row, with the reason and whether
+    /// `provider.refresh` can list it.
     async fn models(&mut self) -> crate::Result<ModelList> {
         #[derive(Deserialize)]
         struct Providers {
@@ -2183,17 +2173,17 @@ impl Worker {
             reasoning: Option<dim_agent_types::ModelReasoning>,
         }
         let listed: Providers = self.client.typed("provider.list", json!({})).await?;
-        let mut usable: Vec<(String, String)> = Vec::new();
-        let mut listable = std::collections::HashSet::new();
+        let mut usable: Vec<(String, String, bool)> = Vec::new();
         for provider in listed
             .providers
             .into_iter()
             .filter(|provider| provider.enabled)
         {
-            if provider.remote_model_list {
-                listable.insert(provider.provider_id.clone());
-            }
-            usable.push((provider.provider_id, provider.display_name));
+            usable.push((
+                provider.provider_id,
+                provider.display_name,
+                provider.remote_model_list,
+            ));
         }
         let managed: Vec<Managed> = self
             .client
@@ -2209,35 +2199,33 @@ impl Worker {
                 )
                 .await;
             if status.is_ok_and(|status| status.account.is_some()) {
-                usable.push((provider.provider_id, provider.display_name));
+                // A managed catalog is refreshed from its account owner.
+                usable.push((provider.provider_id, provider.display_name, true));
             }
         }
         let mut models = Vec::new();
         let mut empty = Vec::new();
-        for (provider_id, provider_name) in usable {
+        for (provider_id, provider_name, listable) in usable {
             let snapshot = self
                 .client
                 .typed::<Snapshot>("provider.catalog", json!({"providerId": provider_id}))
                 .await;
-            let catalog = snapshot.ok().and_then(|snapshot| snapshot.catalog);
-            let missing = catalog
-                .as_ref()
-                .is_none_or(|catalog| catalog.models.is_empty());
-            if missing
-                && listable.contains(&provider_id)
-                && self.refilled_catalogs.insert(provider_id.clone())
-                && let Ok(request) = self
-                    .client
-                    .send("provider.refresh", json!({"providerId": provider_id}))
-                    .await
-            {
-                self.refill_requests.push(request);
-            }
+            let catalog = match snapshot {
+                Ok(Snapshot { catalog }) => catalog,
+                Err(_) => {
+                    empty.push(EmptyProvider {
+                        provider_id,
+                        provider_name,
+                        reason: EmptyReason::Unreadable,
+                    });
+                    continue;
+                }
+            };
             let Some(catalog) = catalog else {
                 empty.push(EmptyProvider {
                     provider_id,
                     provider_name,
-                    reason: EmptyReason::NoModels,
+                    reason: EmptyReason::NoModels { listable },
                 });
                 continue;
             };
@@ -2251,7 +2239,10 @@ impl Worker {
             let disabled = catalog
                 .models
                 .iter()
-                .filter(|model| catalog.disabled_model_ids.contains(&model.id))
+                .filter(|model| {
+                    model.unavailable_reason.is_none()
+                        && catalog.disabled_model_ids.contains(&model.id)
+                })
                 .count();
             let before = models.len();
             models.extend(
@@ -2291,7 +2282,12 @@ impl Worker {
             );
             if models.len() == before {
                 let reason = if total == 0 {
-                    EmptyReason::NoModels
+                    EmptyReason::NoModels { listable }
+                } else if unavailable > 0 && disabled > 0 {
+                    EmptyReason::Mixed {
+                        unavailable,
+                        disabled,
+                    }
                 } else if unavailable > 0 {
                     EmptyReason::Unavailable { count: unavailable }
                 } else {
@@ -2894,21 +2890,6 @@ impl Worker {
         {
             self.compact_requests.remove(index);
             self.send(Update::Compacted(compact_reply(result)));
-            return Ok(());
-        }
-        if let Some(index) = self
-            .refill_requests
-            .iter()
-            .position(|request| *request == id)
-        {
-            self.refill_requests.remove(index);
-            if result.is_ok() {
-                // The refresh stored the catalog; reading the list again
-                // shows it, and `refilled_catalogs` keeps the read from
-                // asking a second time. The loop runs the read, so this
-                // reply never waits on a listing.
-                self.models_at.get_or_insert_with(tokio::time::Instant::now);
-            }
             return Ok(());
         }
         if let Some(index) = self.shell_stops.iter().position(|stop| *stop == id) {

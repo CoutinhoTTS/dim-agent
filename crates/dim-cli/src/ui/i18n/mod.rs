@@ -288,6 +288,18 @@ mod tests {
                     &["{provider}", "{id}"][..],
                 ),
                 (
+                    "{provider}: no models · add a model with provider.models.create",
+                    &["{provider}"][..],
+                ),
+                (
+                    "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}",
+                    &["{provider}", "{unavailable}", "{disabled}", "{id}"][..],
+                ),
+                (
+                    "{provider}: catalog unreadable · dimcode models {id}",
+                    &["{provider}", "{id}"][..],
+                ),
+                (
                     "{provider}: 1 model unavailable · dimcode models {id}",
                     &["{provider}", "{id}"][..],
                 ),
@@ -329,6 +341,18 @@ mod tests {
                 "{code} drops {{id}} in {key:?}: {text:?}"
             );
             let key = "No models. The provider listed none.";
+            let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+            assert!(
+                !text.contains('{'),
+                "{code} keeps a placeholder in {key:?}: {text:?}"
+            );
+            let key = "No cached catalog. Sign in and run models PROVIDER --refresh.";
+            let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
+            assert!(
+                !text.contains('{'),
+                "{code} keeps a placeholder in {key:?}: {text:?}"
+            );
+            let key = "Saved model preferences cleared";
             let text = lookup(key).unwrap_or_else(|| panic!("{code} lacks {key:?}"));
             assert!(
                 !text.contains('{'),

@@ -356,6 +356,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "{provider}: no models · dimcode models {id} --refresh" => {
             "{provider}：沒有模型 · dimcode models {id} --refresh"
         }
+        "{provider}: no models · add a model with provider.models.create" => {
+            "{provider}：沒有模型 · 用 provider.models.create 新增模型"
+        }
+        "{provider}: {unavailable} unavailable and {disabled} disabled · dimcode models {id}" => {
+            "{provider}：{unavailable} 個不可用、{disabled} 個已停用 · dimcode models {id}"
+        }
+        "{provider}: catalog unreadable · dimcode models {id}" => {
+            "{provider}：無法讀取 catalog · dimcode models {id}"
+        }
+        "No cached catalog. Sign in and run models PROVIDER --refresh." => {
+            "沒有快取的 catalog。請登入並執行 models PROVIDER --refresh。"
+        }
+        "Saved model preferences cleared" => "已清除儲存的模型偏好",
         "{provider}: 1 model disabled · dimcode models {id}" => {
             "{provider}：1 個模型已停用 · dimcode models {id}"
         }
