@@ -228,6 +228,8 @@ bounded completion notices on the calling branch.
 | --- | --- |
 | `B:Dispatcher` | Replay commands, then consume command ends and interrupts in dispatch order. |
 | `B:Timeline` | Commit ends/notices, recovered ones included. |
+| `B:TimelineIdentity` | The branch whose entry this part registers. |
+| `S:GuideEntries` | Register the exec notification's entry for this branch, until this part unloads. |
 | `S:SessionLifecycle` | `hold()`: each running task holds the Session, so an idle unload waits for it. |
 
 ### Events and lifetime
@@ -266,7 +268,7 @@ this finite read through its existing Session methods contribution.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`S:SessionLifecycle` |
+| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:GuideEntries`、`S:SessionLifecycle` |
 | 提供 | `B:BackgroundExec` |
 | 被注入于 | — |
 <!-- /generated -->

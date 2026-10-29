@@ -23,7 +23,12 @@ Consumes `context/prepare`, `stop/interrupt`, `step/model-start`, `input/applied
 turn start/end. Produces `model/call` on success or `step/model-output-end` on
 failure, with `context/compaction-start` and one `context/compaction` around
 each strategy call. `usage` reads the head's budget without writing. Its publisher commits prompt changes, adopted inputs and
-`context/configured` atomically. Preparation is single-flight, tracked,
+`context/configured` atomically; it renders the guide Prompt composes into the
+system it publishes, at each adoption that renders the System — the first
+configuration or a change of sources. A model- or tool-only update keeps the
+previously adopted System and its guide, so a writer that loads with one has its
+entry in force at the next adoption that renders the System
+([Prompt §6.3](../../../design/plugins/Prompt.md#63-contextpreparation-the-entries-and-the-published-system)). Preparation is single-flight, tracked,
 cancelled by stop/steer and joined during cleanup; cleanup aggregates failures.
 Replay settles unmatched handoffs and automatic compaction starts without
 rerunning host work. The mock profile

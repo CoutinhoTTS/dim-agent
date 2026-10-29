@@ -128,6 +128,11 @@ fn install_with_prompt_capability_and_branch(
         )
         .require_feature(
             Feature::new("Prompt")
+                .session("PromptGuide", |names| {
+                    Ok(Box::new(crate::prompt_guide::PromptGuidePlugin::new(
+                        names,
+                    )?))
+                })
                 .branch("Prompt", |names| Ok(Box::new(PromptPlugin::new(names)?))),
         )
         .require_feature(

@@ -46,6 +46,7 @@ impl ConfigurationPublisher {
         changes: Vec<PromptChange>,
         model: Option<ModelSelection>,
         tools: Option<ToolSetAdoption>,
+        guide: &str,
         inputs: impl FnOnce(&PromptSnapshot, &PromptSnapshot) -> Vec<InputBlock> + Send,
         register: impl FnOnce(&[Arc<AgentEvent>]) -> dim_agent_runtime::Result<()> + Send,
     ) -> dim_agent_runtime::Result<Option<u64>> {
@@ -158,7 +159,10 @@ impl ConfigurationPublisher {
                         }),
                         prompt: after.system_revision.clone(),
                         settings: Box::new(settings),
-                        system: Some(with_input_guide(Some(SystemPrompt::Text(after.system)))),
+                        system: Some(with_input_guide(
+                            Some(SystemPrompt::Text(after.system)),
+                            guide,
+                        )),
                     })
                     .into(),
                 );
@@ -186,9 +190,10 @@ impl ConfigurationPublisher {
                         .as_ref()
                         .and_then(|data| data.system.clone())
                         .or_else(|| {
-                            Some(with_input_guide(Some(SystemPrompt::Text(
-                                before.system.clone(),
-                            ))))
+                            Some(with_input_guide(
+                                Some(SystemPrompt::Text(before.system.clone())),
+                                guide,
+                            ))
                         }),
                 })
                 .into(),

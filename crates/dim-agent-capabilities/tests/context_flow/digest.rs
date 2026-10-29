@@ -401,8 +401,8 @@ async fn the_digest_message_and_its_record_hold_the_declared_effects() {
         panic!("the request carries the guide as its system prompt")
     };
     assert!(
-        system.contains("<dim-digest>"),
-        "the guide names the marker"
+        system.contains("# How to read your input"),
+        "the request carries the composed guide"
     );
     agent.close().await.unwrap();
 }
