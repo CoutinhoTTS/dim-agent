@@ -356,7 +356,7 @@ WorkspaceTools 不变。
 | 结束通知 | `P`，无 key，与名册在同一条输入里；工具线除自己的 `end` 之外的任何结束 | Steer | `<dim-branch-ended branch="C">` / `Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages; read it if you need what it did.` / `</dim-branch-ended>` |
 | 工具描述 | 每条线 | — | `Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed while you work.` / `- create (main only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.` / `- message: send content to a line you opened, or to the line that opened you. Mode "append" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use "steer" when the receiver must act now or is idle.` / `- read: show the recent activity of a line you opened, also after it ended. Pass nextCursor as after to continue.` / `- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.` / `Lines talk only with the line that opened them and the lines they opened.` |
 
-这些文本取代代码里现有的委派措辞：`first_input` 里的 `dim-branch-task` 块（"That branch delegated this task to you"）和工具描述（"works on prompt as a task you delegate"）。
+这些文本取代代码里现有的委派措辞：`first_input` 里的 `dim-branch-task` 块（"That branch delegated this task to you"）和工具描述（"works on prompt as a task you delegate"）。各段文本的类别见 [§12.4](#124-文本及其类别)。
 
 ### 12.2 交给提示词层的事项（[#429](https://github.com/arcships/dim/issues/429)）
 
@@ -388,6 +388,28 @@ WorkspaceTools 不变。
 | 压缩后的身份 | `main` 和某条线各自压缩之后，仍知道自己是哪条线、哪些线是自己的 |
 | 来回空转 | 不推进工作的 steer 往复 |
 | 问用户 | 该问用户时，线直接问用户，而不是绕道 `main` |
+
+### 12.4 文本及其类别
+
+机制中每一段面向模型的文本及其类别（[面向模型的提示词 §4](model-prompts.md#4-协议与策略)）。确切文本见 [§12.1](#121-上下文映射)；这里按开头几个词指认每一句，混合文本逐句标注。
+
+**协议。**
+
+- **标记名与属性。** `dim-branch-line` 带 `branch`、`parent` 和 `source`，key 为 `branch:line`；`dim-branch-lines` 带 `branch`；`dim-branch-message` 带 `from`、`to`，最终消息再带 `final`；`dim-branch-idle` 带 `branch` 和 `status`（`completed`、`failed` 或 `cancelled`）；`dim-branch-ended` 带 `branch`。模式用的是 InputQueue 的：身份是 Queue，名册是 Append，通知和最终消息是 Steer。
+- **身份块的事实句。** 工具线里，"You are line C of this session" 到 "are P's, not yours."，以及标签 "Your purpose, as P wrote it:"；host 线里，整句。标签后的 purpose 是创建者自己的话，按内容承载。
+- **名册的事实句。** "Lines you opened that are still open. Each is you …" 与 "All lines you opened have ended."；列出的每一条带线的 id 和目的的第一行。
+- **通知的事实句。** "Line C's turn ended (<status>) without a message to you, and C is waiting." 与 "Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages"。
+- **branch 工具的动作与模式。** 动作 `create`、`message`、`read`、`end` 及各自做什么；`mode` 为 `append` 或 `steer` 及它对接收方的作用；每个动作接收的字段，`action` 必填且不接受别的字段；以及陈述保证的句子："Returns the line's id"、"Pass nextCursor as after to continue"、"It is your last action"、"Lines talk only with the line that opened them and the lines they opened."。
+- **结果与拒绝。** `Line created: C`、`Sent to C.`、页 `{items, nextCursor, done}`、`Line C is ending; your final message was sent to P.` 与 `Line C ends with this message.`；拒绝码 `branch_not_main`、`branch_not_kin`、`branch_not_tool_line`、`branch_ended`、`branch_cannot_end` 及各自的文本；以及 `Invalid branch arguments: …`。
+- **指南条目。** 每个条目标明它的标记是什么、承载谁的话或哪些事实，以及它是状态或信息、绝不是请求。`<dim-branch-line>` 的条目说明后出现的同名块会取代它，它归 TimelineTree——每段身份块都由它写——所以在任何执行配置下都在位。`<dim-branch-lines>`、`<dim-branch-idle>` 和 `<dim-branch-ended>` 的条目归 BranchLine，名册和两条通知都由它写；`<dim-branch-message>` 的条目与它们一起注册，因为 BranchLine 恰好在写消息的 BranchTool 所在之处加载。
+
+**策略。**
+
+- **`main` 的协调文字。** `branch` 工具描述的指引：说明一条线是什么的开头段、`create` 关于何时开线与 brief 带什么的规则、`message` 关于选模式与不重复接收方已知内容的规则，以及名册的收尾句 "They message you when they find something, need you, or end. Use the branch tool to message or read them, and wait to wait for them."。它覆盖 [§12.2](#122-交给提示词层的事项429) 的第一项：`main` 怎样给一条线写说明、分配区域、回应 steer、结束自己的等待，以及不重做线上的工作。
+- **线的工作规则。** "How you work with P:" 的五条要点——目的、消息、工作区、用户和结束——除了点明机制的从句："You cannot open lines"、动作名与模式名、`file_modified_since_read` 码是协议，见上。
+- **通知的指引。** "Read it if you need its state; message it with mode \"steer\" to give it more work, or leave it." 与 "read it if you need what it did."。
+
+`main` 的协调文字用 [§12.3](#123-评估场景) 的场景判定——重复劳动、过度拆分、刷屏、不结束、兄弟中转、来回空转、压缩后的身份和问用户——当前对照候选（[面向模型的提示词 §8](model-prompts.md#8-一次改动怎样判定)）。
 
 ## 13. 相互影响
 
