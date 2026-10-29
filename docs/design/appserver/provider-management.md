@@ -559,8 +559,10 @@ Legacy TypeScript import stays explicit, read-only and per-entry:
 `imported`/`already_imported`/`rejected`. Map connections, defaults, user overrides,
 user models, disables, preferences and scoped selections explicitly. `activeModelId`
 is only a hint and cannot overwrite an existing scoped choice. Nonempty static
-usage settings, unsupported `retryConfig`/`capabilityDefaults` and other unmapped
-fields reject the entry and preserve its source; use the frozen mapping below.
+usage settings, `retryConfig` and `capabilityDefaults` have no native counterpart:
+the entry still imports without them and reports them as omitted. Other unmapped
+fields, such as unknown metadata keys or descriptor fields, reject the entry and
+preserve its source; use the frozen mapping below.
 Never overwrite an existing target, copy OAuth grants or resurrect deletion on
 repeated import. Drafts, templates, usage replies and resolved credentials are not
 persisted. Register cleanup at acquisition, close admission, cancel owned I/O,
@@ -579,8 +581,9 @@ The frozen legacy schema uses `modelsSource` to distinguish model origins:
 | `provider_selections` | Explicit scoped choices, subject to existing target and import-ledger checks |
 
 Null or empty objects/arrays in unsupported usage/retry/capability settings carry
-no configuration; nonempty values reject the entry. Other metadata keys and
-unknown descriptor fields also reject it. Source bytes remain unchanged.
+no configuration, and a nonempty value is dropped and reported as omitted. Other
+metadata keys and unknown descriptor fields reject the entry. Source bytes remain
+unchanged.
 
 ## 7. Acceptance and delivery
 

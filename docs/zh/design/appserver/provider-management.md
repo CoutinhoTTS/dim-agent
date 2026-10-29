@@ -420,7 +420,8 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 
 旧 TS 配置继续显式只读导入，逐条 imported/already_imported/rejected。明确映射连接、默认、
 用户覆盖/新增、禁用、偏好及 scoped 选择。activeModelId 仅作提示，不覆盖已有选择。
-非空静态用量设置、未支持 retryConfig/capabilityDefaults 或其他未映射字段拒绝并保留源，
+非空静态用量设置、retryConfig 与 capabilityDefaults 没有原生对应：条目仍导入，只是不带这些
+字段，并在 omitted 中报告。其他未映射字段（如未知 metadata 键或描述字段）拒绝该项并保留源，
 按以下冻结映射处理。不覆盖已有目标、不复制 OAuth grants、不因重复导入复活删除项。
 草稿、模板、用量回复、已解析凭据不持久化。资源取得即登记清理；关准入、取消自有 I/O、
 释放租约并结算已接受调用后移除服务。
@@ -437,8 +438,8 @@ inherit 复制已经采用的选择，不在创建时重新解析。标记存在
 | `activeModelId` | 单个 Provider 的提示，无权创建或覆盖 scoped 选择 |
 | `provider_selections` | 沿既有目标校验和导入账本导入明确的 scoped 选择 |
 
-不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带配置；非空值拒绝该项。
-其他 metadata 键、未知描述字段同样拒绝，源文件字节不变。
+不支持的用量/retry/capability 设置为 null 或空对象/数组时不携带配置；非空值被丢弃并在
+omitted 中报告。其他 metadata 键、未知描述字段拒绝该项，源文件字节不变。
 
 ## 7. 验收与交付
 
