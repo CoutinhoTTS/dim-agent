@@ -16527,6 +16527,7 @@
       "references": [
         "path MAX_MODEL_TOKENS",
         "path ModelEntry",
+        "path crate::model_catalog::limits_valid",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEntry"
       ]
@@ -17825,10 +17826,12 @@
       "from": "dim_app_server::model_catalog",
       "to": "dim_agent_types::model",
       "references": [
-        "path ModelCapabilities",
+        "path CatalogCapabilities",
+        "path CatalogCapabilities::default",
         "path ModelReasoning",
         "path ModelServiceTier",
         "path ReasoningOff",
+        "use dim_agent_types::CatalogCapabilities",
         "use dim_agent_types::ModelCapabilities",
         "use dim_agent_types::ModelReasoning",
         "use dim_agent_types::ModelServiceTier",
@@ -18443,13 +18446,13 @@
       "from": "dim_app_server::provider",
       "to": "dim_agent_types::model",
       "references": [
-        "path ModelCapabilities",
+        "path CatalogCapabilities",
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
         "path ModelRequest",
         "path dim_agent_types::RequestMetadata",
         "path model",
-        "use crate::model_catalog::ModelCapabilities",
+        "use crate::model_catalog::CatalogCapabilities",
         "use dim_agent_types::ModelCapabilitySnapshot",
         "use dim_agent_types::ModelConfig",
         "use dim_agent_types::ModelRequest"
@@ -18525,7 +18528,6 @@
       "references": [
         "path BundledCatalog",
         "path BundledCatalog::load",
-        "path MAX_MODEL_TOKENS",
         "path ModelEntry",
         "path ModelMetadata",
         "path ModelSource::Builtin",
@@ -18533,6 +18535,9 @@
         "path NewApiEndpoint",
         "path ProviderProjection",
         "path crate::model_catalog::model_kind",
+        "path declarations_hold",
+        "path inherit_limits",
+        "path limits_valid",
         "use crate::model_catalog::BundledCatalog",
         "use crate::model_catalog::MAX_MODEL_TOKENS",
         "use crate::model_catalog::ModelEdit",
@@ -18540,7 +18545,11 @@
         "use crate::model_catalog::ModelMetadata",
         "use crate::model_catalog::ModelSource",
         "use crate::model_catalog::NewApiEndpoint",
-        "use crate::model_catalog::ProviderProjection"
+        "use crate::model_catalog::ProviderProjection",
+        "use crate::model_catalog::declarations_hold",
+        "use crate::model_catalog::declare",
+        "use crate::model_catalog::inherit_limits",
+        "use crate::model_catalog::limits_valid"
       ]
     },
     {
@@ -18792,6 +18801,7 @@
         "path FieldUpdate::Clear",
         "path FieldUpdate::Set",
         "path ModelEntry",
+        "path declare",
         "use crate::model_catalog::FieldUpdate"
       ]
     },
@@ -18889,7 +18899,8 @@
       "from": "dim_app_server::provider::legacy",
       "to": "dim_app_server::model_catalog",
       "references": [
-        "path ModelEntry"
+        "path ModelEntry",
+        "path declare"
       ]
     },
     {
@@ -19044,6 +19055,7 @@
         "path MAX_MODEL_TOKENS",
         "path ModelEdit",
         "path ModelEntry",
+        "path declare",
         "use crate::model_catalog::FieldUpdate"
       ]
     },
@@ -19292,8 +19304,10 @@
       "from": "dim_app_server::provider::view",
       "to": "dim_app_server::model_catalog",
       "references": [
+        "path BundledCatalog",
         "path ModelEntry",
-        "path NewApiEndpoint"
+        "path NewApiEndpoint",
+        "path inherit_limits"
       ]
     },
     {
@@ -21857,10 +21871,10 @@
       "from": "dim_cli::configure",
       "to": "dim_agent_types::model",
       "references": [
-        "path ModelCapabilities",
+        "path CatalogCapabilities",
         "path ModelReasoning",
         "path ModelServiceTier",
-        "use dim_agent_types::ModelCapabilities",
+        "use dim_agent_types::CatalogCapabilities",
         "use dim_agent_types::ModelReasoning",
         "use dim_agent_types::ModelServiceTier"
       ]
@@ -23302,7 +23316,7 @@
       "from": "dim_cli::session_host",
       "to": "dim_agent_types::model",
       "references": [
-        "path dim_agent_types::ModelCapabilities",
+        "path dim_agent_types::CatalogCapabilities",
         "path dim_agent_types::ModelReasoning",
         "path dim_agent_types::ModelServiceTier"
       ]
@@ -30855,7 +30869,6 @@
       "to": "dim_app_server::model_catalog",
       "references": [
         "path BundledCatalog::load",
-        "path MAX_MODEL_TOKENS",
         "path ModelEntry",
         "path ModelSource::Builtin",
         "path ModelSource::Custom",
@@ -30866,13 +30879,18 @@
         "path NewApiEndpoint::Openai",
         "path NewApiEndpoint::OpenaiResponse",
         "path ProviderProjection",
+        "path declarations_hold",
+        "path declare",
+        "path limits_valid",
         "use dim_app_server::model_catalog::BundledCatalog",
-        "use dim_app_server::model_catalog::MAX_MODEL_TOKENS",
         "use dim_app_server::model_catalog::ModelEntry",
         "use dim_app_server::model_catalog::ModelSource",
         "use dim_app_server::model_catalog::ModelStatus",
         "use dim_app_server::model_catalog::NewApiEndpoint",
-        "use dim_app_server::model_catalog::ProviderProjection"
+        "use dim_app_server::model_catalog::ProviderProjection",
+        "use dim_app_server::model_catalog::declarations_hold",
+        "use dim_app_server::model_catalog::declare",
+        "use dim_app_server::model_catalog::limits_valid"
       ]
     },
     {

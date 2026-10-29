@@ -62,11 +62,7 @@ fn configuration(model: &str) -> ModelSelection {
                 provider_id: "test".into(),
                 model_id: model.into(),
             },
-            capabilities: ModelCapabilities {
-                context_window: 135791,
-                max_output_tokens: 6789,
-                ..Default::default()
-            },
+            capabilities: ModelCapabilities::with_limits(135791, 6789),
             reasoning: None,
             service_tier: None,
         }),

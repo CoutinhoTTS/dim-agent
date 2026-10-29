@@ -898,6 +898,150 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
 }
 
 #[tokio::test]
+async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
+    use axum::{
+        http::{StatusCode, Uri},
+        routing::get,
+    };
+    use tokio::sync::{mpsc, oneshot};
+    type Exchange = (Uri, HeaderMap, oneshot::Sender<(StatusCode, Json<Value>)>);
+    let (send, mut requests) = mpsc::channel::<Exchange>(8);
+    let app = Router::new().route(
+        "/{*path}",
+        get(move |uri: Uri, headers: HeaderMap| {
+            let send = send.clone();
+            async move {
+                let (reply, response) = oneshot::channel();
+                send.send((uri, headers, reply)).await.unwrap();
+                response
+                    .await
+                    .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-limits-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    const NARROW: &str = "00000000-0000-4000-8000-000000000021";
+    let config = input(
+        NARROW,
+        &format!("{base}/v1"),
+        StaticAuth::Bearer,
+        Some("catalog-key"),
+        "limits",
+        1,
+    );
+    provider.create(config, &cancel).await.unwrap();
+    let refresh = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move { provider.refresh_for(NARROW.into(), &cancel).await })
+    };
+    let (uri, _, reply) = requests.recv().await.unwrap();
+    assert_eq!(uri.path(), "/v1/models");
+    reply
+        .send((StatusCode::OK, Json(json!({"data":[{"id":"narrow"}]}))))
+        .unwrap();
+    let catalog = refresh.await.unwrap().unwrap();
+    assert_eq!(catalog.models[0].id, "narrow");
+    assert_eq!(
+        catalog.models[0].missing_limits,
+        ["contextWindow", "maxOutputTokens"]
+    );
+    assert_eq!(
+        catalog.models[0].unavailable_reason.as_deref(),
+        Some("limits_undeclared")
+    );
+    assert_eq!(catalog.models[0].config.max_tokens, None);
+    let narrow = || ModelId {
+        provider_id: NARROW.into(),
+        model_id: "narrow".into(),
+    };
+    // Selecting it fails, and the message names the missing limits.
+    let error = provider
+        .select(None, narrow(), None, &cancel)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, ProviderError::InvalidConfig(message)
+            if message.contains("contextWindow") && message.contains("maxOutputTokens")),
+        "{error:?}"
+    );
+    // An explicit adoption target is unavailable.
+    let error = provider
+        .configuration(Some(narrow()), None, ModelPreferences::default(), &cancel)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.to_string(), "Explicit model is unavailable");
+    // A preference patch is refused at the conversion, before it is saved.
+    let error = provider
+        .update_preferences(
+            NARROW.into(),
+            catalog.version,
+            "narrow".into(),
+            serde_json::from_value(json!({"reasoningEffort":{"action":"set","value":"high"}}))
+                .unwrap(),
+            &cancel,
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&error, ProviderError::InvalidConfig(message)
+            if message.contains("contextWindow") && message.contains("maxOutputTokens")),
+        "{error:?}"
+    );
+    // Declaring both limits makes the model selectable, and the adopted
+    // snapshot carries exactly those values.
+    let declared = provider
+        .update_model_config(
+            NARROW.into(),
+            catalog.version,
+            "narrow".into(),
+            serde_json::from_value(json!({"contextWindow":64000,"maxOutputTokens":8000})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(declared.models[0].missing_limits.is_empty());
+    assert_eq!(declared.models[0].unavailable_reason, None);
+    assert_eq!(declared.models[0].config.max_tokens, Some(8000.0));
+    let selection = provider
+        .configuration(Some(narrow()), None, ModelPreferences::default(), &cancel)
+        .await
+        .unwrap();
+    let snapshot = selection.capability_snapshot.unwrap();
+    assert_eq!(snapshot.capabilities.context_window, 64000);
+    assert_eq!(snapshot.capabilities.max_output_tokens, 8000);
+    assert_eq!(selection.config.unwrap().max_tokens, Some(8000.0));
+    root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
 async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_results() {
     use axum::{
         http::{StatusCode, Uri},
@@ -963,7 +1107,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         .unwrap();
     let probed = probe.await.unwrap().unwrap();
     assert_eq!(probed.models[0].model_id, "unsaved");
-    assert_eq!(probed.models[0].capabilities.max_output_tokens, 123);
+    assert_eq!(probed.models[0].capabilities.max_output_tokens, Some(123));
     assert_eq!(
         serde_json::to_value(provider.list(&cancel).await.unwrap()).unwrap(),
         before_probe
@@ -1067,7 +1211,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     assert_eq!(result.disabled_model_ids, ["same"]);
     assert_eq!(result.models[0].name, "My model");
     assert_eq!(result.models[0].config.max_tokens, Some(91.0));
-    assert_eq!(result.models[1].capabilities.context_window, 83003);
+    assert_eq!(result.models[1].capabilities.context_window, Some(83003));
     assert_eq!(result.models[1].config.max_tokens, Some(509.0));
     let refresh = spawn(REMOTE, cancel.clone());
     requests.recv().await.unwrap().2.send((StatusCode::OK,
@@ -1243,9 +1387,9 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             "x-api-key",
             "/tenant/v1/",
             "/tenant/v1/models",
-            json!({"data":[{"id":"first","type":"model"}],"has_more":true,"last_id":"a+b"}),
+            json!({"data":[{"id":"first","type":"model","context_window":17003,"max_output_tokens":103}],"has_more":true,"last_id":"a+b"}),
             "after_id=a%2Bb",
-            json!({"data":[{"id":"last"}],"has_more":false}),
+            json!({"data":[{"id":"last","context_window":19009,"max_output_tokens":109}],"has_more":false}),
         ),
         (
             PAGED_ANTHROPIC_UNVERSIONED,
@@ -1253,9 +1397,9 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             "x-api-key",
             "/tenant",
             "/tenant/v1/models",
-            json!({"data":[{"id":"first","type":"model"}],"has_more":true,"last_id":"a+b"}),
+            json!({"data":[{"id":"first","type":"model","context_window":17003,"max_output_tokens":103}],"has_more":true,"last_id":"a+b"}),
             "after_id=a%2Bb",
-            json!({"data":[{"id":"last"}],"has_more":false}),
+            json!({"data":[{"id":"last","context_window":19009,"max_output_tokens":109}],"has_more":false}),
         ),
     ] {
         let mut config = input(
@@ -4501,7 +4645,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
     let models = entry.models.as_ref().unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].source, "override");
-    assert_eq!(models[0].model.capabilities.max_output_tokens, 202);
+    assert_eq!(models[0].model.capabilities.max_output_tokens, Some(202));
     assert_eq!(
         entry.preferences["default"].reasoning_effort.as_deref(),
         Some("high")
@@ -4513,7 +4657,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
     let models = users.providers[0].models.as_ref().unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].source, "user");
-    assert_eq!(models[0].model.capabilities.max_output_tokens, 402);
+    assert_eq!(models[0].model.capabilities.max_output_tokens, Some(402));
     assert!(!models[0].enabled);
     assert_eq!(
         provider
@@ -4556,7 +4700,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
             .model
             .capabilities
             .max_output_tokens,
-        202
+        Some(202)
     );
     assert!(matches!(
         provider

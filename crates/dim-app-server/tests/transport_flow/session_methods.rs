@@ -167,7 +167,7 @@ async fn session_methods_does_not_list_a_name_management_holds() {
                         "auth":{"type":"anonymous"}
                     },
                     "models":[{"modelId":"fixture","displayName":"fixture","status":"active",
-                        "capabilities":dim_agent_types::ModelCapabilities::default()}],
+                        "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],
                     "enabled":true
                 }),
             )

@@ -305,11 +305,7 @@ async fn web_entry_admits_token_holders_to_session_methods_only() {
     .await
     .unwrap();
     let mut local = Client::new_version(&server, false, 3).await;
-    let caps = dim_agent_types::ModelCapabilities {
-        context_window: 32000,
-        max_output_tokens: 2048,
-        ..Default::default()
-    };
+    let caps = dim_agent_types::CatalogCapabilities::with_limits(32000, 2048);
     assert_ok(&local.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"bearer"},"credential":{"action":"set","value":"fixture-secret"}},"models":[{"modelId":"alpha","displayName":"alpha","status":"active","capabilities":caps}],"enabled":true})).await);
     let opened = local.rpc("web.open", json!({"port":0})).await["result"].clone();
     let address = opened["address"].as_str().unwrap().to_owned();

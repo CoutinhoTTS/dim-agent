@@ -6,7 +6,8 @@ use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 
 pub use dim_agent_types::{
-    ModelCapabilities, ModelReasoning, ModelServiceTier, ReasoningBudget, ReasoningOff,
+    CatalogCapabilities, ModelCapabilities, ModelReasoning, ModelServiceTier, ReasoningBudget,
+    ReasoningOff,
 };
 
 const CATALOG: &str = include_str!("../resources/default-catalog.json");
@@ -40,7 +41,7 @@ pub struct ModelEntry {
     pub model_id: String,
     pub display_name: String,
     pub status: ModelStatus,
-    pub capabilities: ModelCapabilities,
+    pub capabilities: CatalogCapabilities,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_guide_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,7 +138,6 @@ pub struct RateLimit {
 pub struct ProviderProjection {
     pub provider_id: String,
     pub source: Option<ModelSource>,
-    pub capability_defaults: Option<ModelCapabilities>,
     pub models: Vec<ModelEntry>,
     pub context_window_override: Option<u64>,
 }
@@ -302,12 +302,7 @@ impl BundledCatalog {
         let input = value
             .as_object()
             .ok_or(ProjectionError::InvalidDescriptor)?;
-        let mut entry = descriptor_entry(
-            &provider.provider_id,
-            &id,
-            input,
-            provider.capability_defaults.clone().unwrap_or_default(),
-        )?;
+        let mut entry = descriptor_entry(&provider.provider_id, &id, input)?;
         let explicit = entry
             .metadata
             .as_ref()
@@ -315,12 +310,7 @@ impl BundledCatalog {
             .unwrap_or_default();
         let lookup = self.lookup(provider, &id);
         if let Some((pid, found, strategy, score)) = lookup {
-            entry = merge_entry(
-                entry,
-                &found,
-                &explicit,
-                &provider.capability_defaults.clone().unwrap_or_default(),
-            );
+            entry = merge_entry(entry, &found, &explicit);
             let declared = input.get("capabilities").and_then(Value::as_object);
             if input.get("modalities").is_none()
                 && input.get("vision") != Some(&Value::Bool(true))
@@ -355,13 +345,7 @@ impl BundledCatalog {
             metadata.metadata_match_reason = Some("no_unique_match".into());
         }
         self.apply_provider_rules(provider, &mut entry);
-        if [
-            entry.capabilities.context_window,
-            entry.capabilities.max_output_tokens,
-        ]
-        .into_iter()
-        .any(|limit| limit == 0 || limit > MAX_MODEL_TOKENS)
-        {
+        if !limits_valid(&entry.capabilities) {
             return Err(ProjectionError::InvalidLimits);
         }
         Ok(entry)
@@ -373,7 +357,6 @@ impl BundledCatalog {
         defaults: &[ModelEntry],
         overrides: &[ModelEntry],
     ) -> Vec<ModelEntry> {
-        let capabilities = provider.capability_defaults.clone().unwrap_or_default();
         let mut models = defaults
             .iter()
             .map(|model| {
@@ -386,7 +369,7 @@ impl BundledCatalog {
                         .as_ref()
                         .map(|m| m.capability_override_fields.clone())
                         .unwrap_or_default();
-                    model = merge_entry(model, &fallback, &explicit, &capabilities);
+                    model = merge_entry(model, &fallback, &explicit);
                     let metadata = model.metadata.get_or_insert_default();
                     metadata.metadata_source = Some(provider_id.clone());
                     metadata.matched_provider_id = Some(provider_id);
@@ -401,14 +384,14 @@ impl BundledCatalog {
             .collect::<Vec<_>>();
         for item in overrides {
             if let Some(pos) = models.iter().position(|m| m.model_id == item.model_id) {
-                models[pos] = item.clone()
+                models[pos] = inherit_limits(item.clone(), &models[pos])
             } else {
                 models.push(item.clone())
             }
         }
         if let Some(window) = provider.context_window_override {
             for model in &mut models {
-                model.capabilities.context_window = window;
+                model.capabilities.context_window = Some(window);
             }
         }
         models
@@ -438,15 +421,21 @@ impl BundledCatalog {
                 &mut model.capabilities.max_output_tokens,
             ),
         ] {
-            if let Some(value) = value {
-                *target = value.get();
-                let fields = &mut model
-                    .metadata
-                    .get_or_insert_default()
-                    .capability_override_fields;
-                if !fields.iter().any(|name| name == field) {
-                    fields.push(field.into());
+            let fields = &mut model
+                .metadata
+                .get_or_insert_default()
+                .capability_override_fields;
+            match value {
+                Some(value) => {
+                    *target = Some(value.get());
+                    if !fields.iter().any(|name| name == field) {
+                        fields.push(field.into());
+                    }
                 }
+                // A limit this entry does not declare is dropped, so an
+                // override never captures a value inherited from a bundle.
+                None if !fields.iter().any(|name| name == field) => *target = None,
+                None => {}
             }
         }
         if let Some(reasoning) = edit.reasoning {
@@ -490,9 +479,16 @@ impl BundledCatalog {
         if provider.source != Some(ModelSource::Custom)
             && let Some(m) = provider.models.iter().find(|m| m.model_id == id)
         {
+            // The bundled entry is the declaration for a builtin provider's
+            // model, so a stored copy that lacks a limit is supplied from it.
+            let found = self
+                .bundled_models(&provider.provider_id)
+                .and_then(|models| models.iter().find(|entry| entry.model_id == id))
+                .cloned()
+                .unwrap_or_else(|| m.clone());
             return Some((
                 provider.provider_id.clone(),
-                m.clone(),
+                found,
                 "provider-exact".into(),
                 1.,
             ));
@@ -580,7 +576,7 @@ impl BundledCatalog {
             .context_window_override
             .or_else(|| metadata.and_then(|m| m.context_window_override));
         if let Some(window) = override_window {
-            entry.capabilities.context_window = window;
+            entry.capabilities.context_window = Some(window);
         }
         let fallback = metadata.and_then(|m| m.context_window_fallback.as_ref());
         if let Some(fallback) = fallback
@@ -590,7 +586,7 @@ impl BundledCatalog {
                 .iter()
                 .any(|r| variants(&entry.model_id).iter().any(|id| r.is_match(id)))
         {
-            entry.capabilities.context_window = fallback.window;
+            entry.capabilities.context_window = Some(fallback.window);
         }
         let enabled = metadata.is_some_and(|m| m.reasoning_off_overrides);
         if enabled
@@ -620,7 +616,6 @@ fn descriptor_entry(
     provider_id: &str,
     id: &str,
     input: &Map<String, Value>,
-    defaults: ModelCapabilities,
 ) -> Result<ModelEntry, ProjectionError> {
     let limit = input.get("limit").and_then(Value::as_object);
     let capabilities = input.get("capabilities").and_then(Value::as_object);
@@ -637,7 +632,7 @@ fn descriptor_entry(
             .and_then(|raw| raw.get("reasoning_options"))
     });
     let reasoning = project_reasoning(reasoning_value, reasoning_options)?;
-    let mut caps = defaults;
+    let mut caps = CatalogCapabilities::default();
     if let Some(v) = capabilities {
         apply_capabilities(&mut caps, v);
     }
@@ -659,10 +654,10 @@ fn descriptor_entry(
         caps.reasoning = r.supported;
     }
     if let Some(v) = context {
-        caps.context_window = v;
+        caps.context_window = Some(v);
     }
     if let Some(v) = output {
-        caps.max_output_tokens = v;
+        caps.max_output_tokens = Some(v);
     }
     let mut raw = input
         .get("raw")
@@ -736,23 +731,14 @@ fn descriptor_entry(
     })
 }
 
-fn merge_entry(
-    mut current: ModelEntry,
-    fallback: &ModelEntry,
-    explicit: &[String],
-    default: &ModelCapabilities,
-) -> ModelEntry {
+fn merge_entry(mut current: ModelEntry, fallback: &ModelEntry, explicit: &[String]) -> ModelEntry {
     if current.display_name == current.model_id {
         current.display_name = fallback.display_name.clone();
     }
-    if current.capabilities.context_window == default.context_window
-        && !explicit.iter().any(|x| x == "contextWindow")
-    {
+    if !explicit.iter().any(|x| x == "contextWindow") {
         current.capabilities.context_window = fallback.capabilities.context_window;
     }
-    if current.capabilities.max_output_tokens == default.max_output_tokens
-        && !explicit.iter().any(|x| x == "maxOutputTokens")
-    {
+    if !explicit.iter().any(|x| x == "maxOutputTokens") {
         current.capabilities.max_output_tokens = fallback.capabilities.max_output_tokens;
     }
     let cm = current.metadata.get_or_insert_default();
@@ -817,6 +803,51 @@ fn merge_entry(
         }
     }
     current
+}
+
+/// Every limit that is present is a positive safe JSON integer; an absent one
+/// is the undeclared value.
+pub fn limits_valid(capabilities: &CatalogCapabilities) -> bool {
+    [capabilities.context_window, capabilities.max_output_tokens]
+        .into_iter()
+        .flatten()
+        .all(|limit| (1..=MAX_MODEL_TOKENS).contains(&limit))
+}
+
+/// A limit the entry does not declare is inherited from the entry it replaces.
+pub fn inherit_limits(mut entry: ModelEntry, base: &ModelEntry) -> ModelEntry {
+    if entry.capabilities.context_window.is_none() {
+        entry.capabilities.context_window = base.capabilities.context_window;
+    }
+    if entry.capabilities.max_output_tokens.is_none() {
+        entry.capabilities.max_output_tokens = base.capabilities.max_output_tokens;
+    }
+    entry
+}
+
+/// A field named in `capabilityOverrideFields` is a declaration and must be
+/// present; an unmarked absent field is the undeclared value.
+pub fn declarations_hold(entry: &ModelEntry) -> bool {
+    let marked = entry
+        .metadata
+        .as_ref()
+        .map(|metadata| metadata.capability_override_fields.as_slice())
+        .unwrap_or_default();
+    (entry.capabilities.context_window.is_some()
+        || !marked.iter().any(|name| name == "contextWindow"))
+        && (entry.capabilities.max_output_tokens.is_some()
+            || !marked.iter().any(|name| name == "maxOutputTokens"))
+}
+
+/// Records `field` as a declaration on `entry` unless it is marked already.
+pub fn declare(entry: &mut ModelEntry, field: &str) {
+    let fields = &mut entry
+        .metadata
+        .get_or_insert_default()
+        .capability_override_fields;
+    if !fields.iter().any(|name| name == field) {
+        fields.push(field.into());
+    }
 }
 
 fn inherit_reasoning(current: &mut ModelReasoning, fallback: &ModelReasoning) {
@@ -961,7 +992,7 @@ fn pricing(raw: &Map<String, Value>) -> Option<ModelPricing> {
         currency: None,
     })
 }
-fn apply_capabilities(c: &mut ModelCapabilities, m: &Map<String, Value>) {
+fn apply_capabilities(c: &mut CatalogCapabilities, m: &Map<String, Value>) {
     if let Some(a) = m.get("modalities").and_then(Value::as_array) {
         c.modalities = strings(a)
     }

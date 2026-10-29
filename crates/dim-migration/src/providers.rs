@@ -5,8 +5,8 @@ use crate::{
 use dim_agent_capabilities::host::{AwsCredentials, ModelNetwork};
 use dim_app_server::{
     model_catalog::{
-        BundledCatalog, MAX_MODEL_TOKENS, ModelEntry, ModelSource, ModelStatus, NewApiEndpoint,
-        ProviderProjection,
+        BundledCatalog, ModelEntry, ModelSource, ModelStatus, NewApiEndpoint, ProviderProjection,
+        declarations_hold, declare, limits_valid,
     },
     provider::{CredentialAuthority, ModelPreferences, ProviderSecret, StaticAuth},
 };
@@ -525,6 +525,20 @@ fn convert_provider(
             }
         });
     }
+    // A legacy descriptor that states a limit declared it, so the value is
+    // not captured as an inherited default.
+    for model in models
+        .iter_mut()
+        .chain(&mut user_models)
+        .chain(&mut overrides)
+    {
+        if model.capabilities.context_window.is_some() {
+            declare(model, "contextWindow");
+        }
+        if model.capabilities.max_output_tokens.is_some() {
+            declare(model, "maxOutputTokens");
+        }
+    }
     let metadata =
         json_field::<Option<Map<String, Value>>>(fields, "metadata")?.unwrap_or_default();
     let model_preferences: BTreeMap<String, ModelPreferences> = metadata
@@ -745,10 +759,8 @@ fn validate_static_record(
             model.model_id.trim().is_empty()
                 || model.display_name.trim().is_empty()
                 || !ids.insert(&model.model_id)
-                || model.capabilities.context_window == 0
-                || model.capabilities.max_output_tokens == 0
-                || model.capabilities.context_window > MAX_MODEL_TOKENS
-                || model.capabilities.max_output_tokens > MAX_MODEL_TOKENS
+                || !limits_valid(&model.capabilities)
+                || !declarations_hold(model)
         }) {
             return Err(failure(
                 "Provider contains invalid or duplicate model descriptors",

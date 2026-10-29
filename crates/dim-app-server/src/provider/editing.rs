@@ -333,10 +333,20 @@ impl ProviderService {
         if self.oauth.contains(&input.provider_id, cancel).await? {
             return Err(ProviderError::Conflict("Provider ID already exists".into()));
         }
-        let mut record =
-            input
-                .connection
-                .record(input.display_name, input.models, input.enabled)?;
+        let mut models = input.models;
+        // A created Provider's models are the user's own descriptors, so the
+        // limits they state are declarations, not inherited defaults.
+        for model in &mut models {
+            if model.capabilities.context_window.is_some() {
+                declare(model, "contextWindow");
+            }
+            if model.capabilities.max_output_tokens.is_some() {
+                declare(model, "maxOutputTokens");
+            }
+        }
+        let mut record = input
+            .connection
+            .record(input.display_name, models, input.enabled)?;
         validate_static_record(&input.provider_id, &mut record)
             .map_err(|error| ProviderError::InvalidConfig(error.to_string()))?;
         let provider_id = input.provider_id;

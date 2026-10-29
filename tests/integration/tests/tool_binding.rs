@@ -188,10 +188,10 @@ fn selection(model_id: &str) -> ModelSelection {
                 provider_id: "mock".into(),
                 model_id: model_id.into(),
             },
-            capabilities: ModelCapabilities {
-                context_window: if model_id == "second" { 98765 } else { 135791 },
-                ..Default::default()
-            },
+            capabilities: ModelCapabilities::with_limits(
+                if model_id == "second" { 98765 } else { 135791 },
+                16_384,
+            ),
             reasoning: None,
             service_tier: None,
         }),

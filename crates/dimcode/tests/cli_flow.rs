@@ -2648,8 +2648,10 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     fn catalog(wire: &mut Wire) {
         let request = wire.read("provider.catalog");
         assert_eq!(request["params"], json!({"providerId":"test"}));
-        let mut capabilities =
-            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        let mut capabilities = serde_json::to_value(
+            dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+        )
+        .unwrap();
         capabilities["reasoning"] = json!(true);
         wire.reply(
             &request,
@@ -2902,7 +2904,7 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
         wire.reply(&complete, json!({}));
         let request = wire.read("provider.catalog");
         assert_eq!(request["params"], json!({"providerId":"test"}));
-        let mut capabilities = serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+        let mut capabilities = serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
         capabilities["reasoning"] = json!(true);
         wire.reply(&request, json!({"catalog":{"models":[{"id":"model","capabilities":capabilities,
             "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]}}}]}}));
@@ -5630,7 +5632,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     let created = rpc(
         &mut wire,
         "provider.create",
-        json!({"providerId":anonymous_id,"displayName":"Anonymous fixture","connection":{"driverKind":"openai-compatible","auth":{"type":"anonymous"},"baseUrl":format!("http://{address}/v1")},"models":[{"modelId":"anonymous-fixture-model","displayName":"Anonymous fixture model","status":"active","capabilities":dim_agent_types::ModelCapabilities::default()}],"enabled":true}),
+        json!({"providerId":anonymous_id,"displayName":"Anonymous fixture","connection":{"driverKind":"openai-compatible","auth":{"type":"anonymous"},"baseUrl":format!("http://{address}/v1")},"models":[{"modelId":"anonymous-fixture-model","displayName":"Anonymous fixture model","status":"active","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true}),
     );
     assert!(created.get("result").is_some(), "{created}");
     let mut terminal = Terminal::launch_tui(command());
@@ -7186,8 +7188,8 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
                 "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
-                    {"id":"model","name":"Model","capabilities":dim_agent_types::ModelCapabilities::default()},
-                    {"id":"other","name":"Other","capabilities":dim_agent_types::ModelCapabilities::default()}]}}),
+                    {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
+                    {"id":"other","name":"Other","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "account.providers" => json!([]),
                 "collaboration.model_policy" => json!({"revision":revision.to_string(),"policy":policy}),
                 "collaboration.set_model_policy" => {
@@ -7276,7 +7278,7 @@ fn tui_models_picker_cycles_reasoning_effort() {
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
     let daemon = home.daemon(move |wire| {
         let mut capabilities =
-            serde_json::to_value(dim_agent_types::ModelCapabilities::default()).unwrap();
+            serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
         capabilities["reasoning"] = json!(true);
         let catalog = json!({"catalog":{"version":4,"disabledModelIds":[],"models":[{
             "id":"model","name":"Model","capabilities":capabilities,
@@ -7416,9 +7418,9 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
                             wait.recv_timeout(PATIENCE).unwrap();
                             let catalog = json!({"version":2,"disabledModelIds":[],"models":[
                                 {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
-                                    "capabilities":dim_agent_types::ModelCapabilities::default()},
+                                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
                                 {"id":"vendor/model-b","name":"Model B","unavailableReason":null,
-                                    "capabilities":dim_agent_types::ModelCapabilities::default()}]});
+                                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]});
                             stored.lock().unwrap().insert(provider, catalog.clone());
                             let _guard = writes.lock().unwrap();
                             writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
@@ -7519,7 +7521,7 @@ fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
                         wait.recv_timeout(PATIENCE).unwrap();
                         let catalog = json!({"version":2,"disabledModelIds":[],"models":[
                             {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
-                                "capabilities":dim_agent_types::ModelCapabilities::default()}]});
+                                "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]});
                         *stored.lock().unwrap() = catalog.clone();
                         writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
                             .unwrap();
@@ -7586,7 +7588,7 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
                     Value::Null
                 };
                 json!({"id":id,"name":id,"unavailableReason":reason,
-                    "capabilities":dim_agent_types::ModelCapabilities::default()})
+                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)})
             };
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,

@@ -845,11 +845,9 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         );
     }
     let entry = |id: &str, max: u64| {
-        let caps = dim_agent_types::ModelCapabilities {
+        let caps = dim_agent_types::CatalogCapabilities {
             reasoning: true,
-            context_window: 32000,
-            max_output_tokens: max,
-            ..Default::default()
+            ..dim_agent_types::CatalogCapabilities::with_limits(32000, max)
         };
         json!({"modelId":id,"displayName":id,"status":"active","capabilities":caps,
             "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"],"off":{"kind":"thinking_type","value":"disabled"}},

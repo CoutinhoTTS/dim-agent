@@ -203,11 +203,7 @@ async fn product_compaction_runs_automatically_on_request_and_settles_after_a_cr
         .unwrap();
         let mut server = launch_binary(&directory).await;
         let mut client = connect(&server).await;
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 4_000,
-            max_output_tokens: 200,
-            ..Default::default()
-        };
+        let capabilities = dim_agent_types::CatalogCapabilities::with_limits(4_000, 200);
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000004","displayName":"Window","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"small","displayName":"small","status":"active","capabilities":capabilities}],"enabled":true})).await);
         assert_ok(
             &client
@@ -611,11 +607,9 @@ async fn summary_reasoning_comes_from_factory_configuration() {
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut server = launch_binary(&directory).await;
         let mut client = connect(&server).await;
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 4_000,
-            max_output_tokens: 200,
+        let capabilities = dim_agent_types::CatalogCapabilities {
             reasoning: true,
-            ..Default::default()
+            ..dim_agent_types::CatalogCapabilities::with_limits(4_000, 200)
         };
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000005","displayName":"Reasoning","connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{endpoint}/v1"),"auth":{"type":"anonymous"}},"models":[{"modelId":"thinking","displayName":"thinking","status":"active","capabilities":capabilities,"metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"],"off":{"kind":"thinking_type","value":"disabled"}}}}],"enabled":true})).await);
         assert_ok(

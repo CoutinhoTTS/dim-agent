@@ -203,11 +203,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             ));
         }).await;
         let mut client = Client::new_version(&server, false, 3).await;
-        let capabilities = dim_agent_types::ModelCapabilities {
-            context_window: 32000,
-            max_output_tokens: 128,
-            ..Default::default()
-        };
+        let capabilities = dim_agent_types::CatalogCapabilities::with_limits(32000, 128);
         let models = ["alpha", "beta"].map(|id| json!({"modelId":id,"displayName":id,"status":"active",
             "capabilities":capabilities}));
         assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000003","displayName":"Team fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":models,"enabled":true})).await);

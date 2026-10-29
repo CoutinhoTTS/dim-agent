@@ -25,8 +25,9 @@ use crate::{
     managed_oauth,
     managed_provider::{AccountSnapshot, CredentialLease, ManagedModel, ManagedProviders},
     model_catalog::{
-        BundledCatalog, MAX_MODEL_TOKENS, ModelCapabilities, ModelEdit, ModelEntry, ModelMetadata,
-        ModelSource, NewApiEndpoint, ProviderProjection,
+        BundledCatalog, CatalogCapabilities, MAX_MODEL_TOKENS, ModelEdit, ModelEntry,
+        ModelMetadata, ModelSource, NewApiEndpoint, ProviderProjection, declarations_hold, declare,
+        inherit_limits, limits_valid,
     },
     storage::SqliteStorage,
 };
@@ -155,22 +156,40 @@ pub struct ProviderModel {
     pub name: String,
     pub endpoint: Option<ModelProtocol>,
     pub config: ModelConfig,
-    pub capabilities: ModelCapabilities,
+    pub capabilities: CatalogCapabilities,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_limits: Vec<String>,
     pub unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub zdr: bool,
     pub metadata: Option<ModelMetadata>,
 }
 
+/// The error text for a model no source declares limits for.
+fn undeclared_limits(capabilities: &CatalogCapabilities) -> String {
+    format!(
+        "Model has no declared {}",
+        capabilities.missing_limits().join(" or ")
+    )
+}
+
 /// The adopted capability snapshot of `model`: exactly the catalog fields a
-/// selection carries (ContextCompaction §13.2).
-fn capability_snapshot(model: &ProviderModel, target: ModelId) -> ModelCapabilitySnapshot {
-    ModelCapabilitySnapshot {
+/// selection carries (ContextCompaction §13.2). A model with an undeclared
+/// limit cannot be converted, which is where adoption refuses it.
+fn capability_snapshot(
+    model: &ProviderModel,
+    target: ModelId,
+) -> Result<ModelCapabilitySnapshot, ProviderError> {
+    let capabilities = model
+        .capabilities
+        .declared()
+        .ok_or_else(|| ProviderError::InvalidConfig(undeclared_limits(&model.capabilities)))?;
+    Ok(ModelCapabilitySnapshot {
         target,
-        capabilities: model.capabilities.clone(),
+        capabilities,
         reasoning: model.metadata.as_ref().and_then(|m| m.reasoning.clone()),
         service_tier: model.metadata.as_ref().and_then(|m| m.service_tier.clone()),
-    }
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -369,7 +388,7 @@ pub struct ProviderRecordError {
 }
 
 impl ProviderRecord {
-    fn catalog(&self, _bundled: &BundledCatalog) -> ProviderCatalog {
+    fn catalog(&self, bundled: &BundledCatalog) -> ProviderCatalog {
         let defaults: Vec<_> = self
             .models
             .iter()
@@ -381,7 +400,7 @@ impl ProviderRecord {
                 self.model_config_overrides
                     .iter()
                     .find(|m| m.model_id == entry.model_id)
-                    .cloned()
+                    .map(|replacement| inherit_limits(replacement.clone(), &entry))
                     .unwrap_or(entry)
             })
             .collect();
@@ -396,16 +415,36 @@ impl ProviderRecord {
                         .models
                         .iter()
                         .find(|model| model.entry.model_id == entry.model_id)?;
+                    let mut capabilities = entry.capabilities;
+                    if let Some(found) = bundled.fallback(&entry.model_id) {
+                        capabilities.context_window = capabilities
+                            .context_window
+                            .or(found.capabilities.context_window);
+                        capabilities.max_output_tokens = capabilities
+                            .max_output_tokens
+                            .or(found.capabilities.max_output_tokens);
+                    }
+                    let missing_limits = capabilities.missing_limits();
+                    // `limits_undeclared` is derived from the effective limits,
+                    // so a supplied limit makes the model available again.
+                    let unavailable_reason = source
+                        .unavailable_reason
+                        .clone()
+                        .filter(|reason| reason != "limits_undeclared")
+                        .or_else(|| {
+                            (!missing_limits.is_empty()).then(|| "limits_undeclared".into())
+                        });
                     Some(ProviderModel {
                         id: entry.model_id,
                         name: entry.display_name,
                         endpoint: Some(source.protocol),
                         config: ModelConfig {
-                            max_tokens: Some(entry.capabilities.max_output_tokens as f64),
+                            max_tokens: capabilities.max_output_tokens.map(|n| n as f64),
                             ..Default::default()
                         },
-                        capabilities: entry.capabilities,
-                        unavailable_reason: source.unavailable_reason.clone(),
+                        capabilities,
+                        missing_limits,
+                        unavailable_reason,
                         zdr: source.zdr,
                         metadata: entry.metadata,
                     })
@@ -594,10 +633,8 @@ fn validate_static_record(
             model.model_id.trim().is_empty()
                 || model.display_name.trim().is_empty()
                 || !ids.insert(&model.model_id)
-                || model.capabilities.context_window == 0
-                || model.capabilities.max_output_tokens == 0
-                || model.capabilities.context_window > MAX_MODEL_TOKENS
-                || model.capabilities.max_output_tokens > MAX_MODEL_TOKENS
+                || !limits_valid(&model.capabilities)
+                || !declarations_hold(model)
         }) {
             return Err(failure(
                 "Provider contains invalid or duplicate model descriptors",
@@ -745,6 +782,7 @@ fn static_models(
     static_entries(bundled, provider_id, record)
         .into_iter()
         .map(|entry| {
+            let missing_limits = entry.capabilities.missing_limits();
             let unavailable =
                 matches!(entry.status, crate::model_catalog::ModelStatus::Unavailable)
                     || !entry.capabilities.modalities.iter().any(|m| m == "text")
@@ -766,11 +804,18 @@ fn static_models(
                 name: entry.display_name,
                 endpoint,
                 config: ModelConfig {
-                    max_tokens: Some(entry.capabilities.max_output_tokens as f64),
+                    max_tokens: entry.capabilities.max_output_tokens.map(|n| n as f64),
                     ..Default::default()
                 },
                 capabilities: entry.capabilities,
-                unavailable_reason: unavailable.then(|| "provider_unavailable".into()),
+                unavailable_reason: if unavailable {
+                    Some("provider_unavailable".into())
+                } else if !missing_limits.is_empty() {
+                    Some("limits_undeclared".into())
+                } else {
+                    None
+                },
+                missing_limits,
                 zdr: false,
                 metadata: entry.metadata,
             }
@@ -982,11 +1027,9 @@ fn validate_catalog(version: u32, catalog: &ProviderRecord) -> dim_agent_runtime
         || catalog.models.iter().any(|model| {
             model.entry.model_id.trim().is_empty()
                 || !ids.insert(&model.entry.model_id)
-                || model.entry.capabilities.context_window > MAX_MODEL_TOKENS
-                || model.entry.capabilities.max_output_tokens > MAX_MODEL_TOKENS
+                || !limits_valid(&model.entry.capabilities)
                 || (model.unavailable_reason.is_none()
-                    && (model.entry.capabilities.max_output_tokens == 0
-                        || model.entry.capabilities.context_window == 0))
+                    && !model.entry.capabilities.missing_limits().is_empty())
         })
     {
         return Err(storage("Invalid persisted provider catalog"));
@@ -995,10 +1038,8 @@ fn validate_catalog(version: u32, catalog: &ProviderRecord) -> dim_agent_runtime
     if catalog.model_config_overrides.iter().any(|model| {
         model.model_id.trim().is_empty()
             || !overrides.insert(&model.model_id)
-            || model.capabilities.context_window == 0
-            || model.capabilities.max_output_tokens == 0
-            || model.capabilities.context_window > MAX_MODEL_TOKENS
-            || model.capabilities.max_output_tokens > MAX_MODEL_TOKENS
+            || !limits_valid(&model.capabilities)
+            || !declarations_hold(model)
     }) {
         return Err(storage("Invalid persisted model override"));
     }
@@ -1479,7 +1520,18 @@ impl ProviderService {
             return Err(ProviderError::NotFound);
         }
         if catalog.selectable(&target.model_id).is_none() {
-            return Err(ProviderError::InvalidConfig("Model is unavailable".into()));
+            let model = catalog
+                .models
+                .iter()
+                .find(|model| model.id == target.model_id)
+                .ok_or(ProviderError::NotFound)?;
+            return Err(ProviderError::InvalidConfig(
+                if model.missing_limits.is_empty() {
+                    "Model is unavailable".into()
+                } else {
+                    undeclared_limits(&model.capabilities)
+                },
+            ));
         }
         let db = self.db.clone();
         self.owned(cancel, move |_| Box::pin(async move {
@@ -1552,7 +1604,8 @@ impl ProviderService {
                     provider_id: id.clone(),
                     model_id: model.id.clone(),
                 },
-            );
+            )
+            .map_err(|error| failure(error.to_string()))?;
             let config = preferences
                 .configure(&snapshot, protocol, &model.config)
                 .map_err(failure)?;
@@ -1613,7 +1666,8 @@ impl ProviderService {
                 provider_id: current.provider_id.clone(),
                 model_id: current.model_id.clone(),
             },
-        );
+        )
+        .map_err(|error| failure(error.to_string()))?;
         let config = preferences
             .configure(&snapshot, protocol, &base)
             .map_err(failure)?;
@@ -1672,11 +1726,16 @@ impl ResolveModelConnection for ProductResolver {
                     .await?
                     .ok_or_else(|| failure("Provider not found"))?;
                 self.0.check(&cancel)?;
-                if static_catalog(&self.0.bundled, &request.provider_id, &record, true)
-                    .selectable(&model_id)
-                    .is_none()
-                {
-                    return Err(failure("Model is unavailable"));
+                let catalog = static_catalog(&self.0.bundled, &request.provider_id, &record, true);
+                if catalog.selectable(&model_id).is_none() {
+                    let message = catalog
+                        .models
+                        .iter()
+                        .find(|model| model.id == model_id)
+                        .filter(|model| !model.missing_limits.is_empty())
+                        .map(|model| undeclared_limits(&model.capabilities))
+                        .unwrap_or_else(|| "Model is unavailable".into());
+                    return Err(failure(message));
                 }
                 let protocol = record.routes[&model_id];
                 if record.driver_kind == "new-api-router"
@@ -1810,9 +1869,16 @@ impl ResolveModelConnection for ProductResolver {
                 .catalog(request.provider_id.clone(), &cancel)
                 .await?
                 .ok_or_else(|| failure("No current managed catalog"))?;
-            let model = catalog
-                .selectable(&request.model_id)
-                .ok_or_else(|| failure("Model is unavailable"))?;
+            let model = catalog.selectable(&request.model_id).ok_or_else(|| {
+                let message = catalog
+                    .models
+                    .iter()
+                    .find(|model| model.id == request.model_id)
+                    .filter(|model| !model.missing_limits.is_empty())
+                    .map(|model| undeclared_limits(&model.capabilities))
+                    .unwrap_or_else(|| "Model is unavailable".into());
+                failure(message)
+            })?;
             let lease = self
                 .0
                 .oauth

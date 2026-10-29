@@ -2180,7 +2180,7 @@ impl Worker {
             name: String,
             unavailable_reason: Option<String>,
             #[serde(default)]
-            capabilities: dim_agent_types::ModelCapabilities,
+            capabilities: dim_agent_types::CatalogCapabilities,
             #[serde(default)]
             metadata: Option<CatalogReasoning>,
         }
@@ -3235,7 +3235,7 @@ fn group(n: u64) -> String {
 #[derive(Deserialize)]
 struct CatalogModel {
     id: String,
-    capabilities: dim_agent_types::ModelCapabilities,
+    capabilities: dim_agent_types::CatalogCapabilities,
     metadata: Option<CatalogPreferences>,
 }
 #[derive(Deserialize)]
@@ -3245,7 +3245,7 @@ struct CatalogPreferences {
 }
 
 fn effort_choices(
-    capabilities: &dim_agent_types::ModelCapabilities,
+    capabilities: &dim_agent_types::CatalogCapabilities,
     reasoning: Option<&dim_agent_types::ModelReasoning>,
 ) -> (Vec<String>, Option<String>) {
     let Some(reasoning) = reasoning else {
