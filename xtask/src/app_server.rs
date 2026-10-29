@@ -105,6 +105,7 @@ pub async fn serve_home(
         ..Default::default()
     };
     config.session_defaults.cwd = cwd.to_string_lossy().into_owned();
+    dim_app_server::cli::product_session_defaults(&mut config.session_defaults);
     let summary = ProductSummaryStrategyConfig {
         system_prompt: run.overrides.summary_prompt.clone(),
         ..Default::default()

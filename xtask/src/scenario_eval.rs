@@ -1866,11 +1866,21 @@ mod tests {
         assert!(!other.contains("own family"), "{other}");
     }
 
-    /// One OpenAI-compatible provider that answers the summarizer and the
-    /// judge in their own shapes and records every request it receives.
-    #[derive(Default)]
+    /// The candidate text every fixture's candidate arm carries.
+    const CANDIDATE: &str = "CANDIDATE SUMMARY PROMPT. Summarize the transcript briefly.";
+    /// The text the workspace file `notes.txt` holds; a run's request carries
+    /// it only once the `read` tool has returned it.
+    const FILE_TEXT: &str = "The notes file says the read tool carried this line back.";
+
+    /// The provider's answer to one request: the stream event to send, or
+    /// `None` for a plain text reply.
+    type Reply = fn(&str) -> Option<Value>;
+
+    /// One loopback OpenAI-compatible provider that answers by `reply` and
+    /// records every request it receives.
     struct Provider {
         requests: Mutex<Vec<String>>,
+        reply: Reply,
     }
     async fn completion(
         axum::extract::State(provider): axum::extract::State<Arc<Provider>>,
@@ -1878,19 +1888,174 @@ mod tests {
     ) -> String {
         let text = body.to_string();
         provider.requests.lock().unwrap().push(text.clone());
-        let reply = if text.contains("You check statements") {
-            r#"[{"id":"ran","verdict":"present","quote":"turn/end"}]"#.to_owned()
-        } else if text.contains("You summarize a coding session")
-            || text.contains("CANDIDATE SUMMARY PROMPT")
-        {
-            "SUMMARY OF EARLIER TURNS".to_owned()
-        } else {
-            "ok".to_owned()
-        };
-        format!(
-            "data: {}\n\ndata: [DONE]\n\n",
-            json!({"id":"fixture","choices":[{"index":0,"delta":{"content":reply},"finish_reason":"stop"}]})
-        )
+        let event = (provider.reply)(&text).unwrap_or_else(|| content("ok"));
+        format!("data: {event}\n\ndata: [DONE]\n\n")
+    }
+    /// A text answer in the stream shape the provider speaks.
+    fn content(text: &str) -> Value {
+        json!({"id":"fixture","choices":[{"index":0,"delta":{"content":text},"finish_reason":"stop"}]})
+    }
+    /// A tool call in the stream shape the provider speaks.
+    fn tool_call(name: &str, arguments: &str) -> Value {
+        json!({"id":"fixture","choices":[{"index":0,"delta":{"tool_calls":[{
+            "index":0,"id":"call-1","type":"function",
+            "function":{"name":name,"arguments":arguments}
+        }]},"finish_reason":"tool_calls"}]})
+    }
+    /// The judge's answer to a judge request, and `None` for any other.
+    fn judged(text: &str) -> Option<Value> {
+        text.contains("You check statements")
+            .then(|| content(r#"[{"id":"ran","verdict":"present","quote":"turn/end"}]"#))
+    }
+    /// The judge's verdict, the summarizer's two texts, and plain text for
+    /// everything else.
+    fn summaries_and_judgements(text: &str) -> Option<Value> {
+        judged(text).or_else(|| {
+            (text.contains("You summarize a coding session")
+                || text.contains("CANDIDATE SUMMARY PROMPT"))
+            .then(|| content("SUMMARY OF EARLIER TURNS"))
+        })
+    }
+    /// The judge's verdict, and a `read` of the workspace's file for a run
+    /// request that does not carry the file's text yet.
+    fn reads_the_workspace_file(text: &str) -> Option<Value> {
+        judged(text).or_else(|| {
+            (!text.contains(FILE_TEXT)).then(|| tool_call("read", r#"{"path":"notes.txt"}"#))
+        })
+    }
+
+    /// One disposable product home, one scenario and one loopback provider:
+    /// the fixture of the end-to-end runs. It stops the provider and removes
+    /// its directory when it drops.
+    struct Fixture {
+        directory: PathBuf,
+        provider: Arc<Provider>,
+        http: tokio::task::JoinHandle<()>,
+        home: PathBuf,
+        models: PathBuf,
+        scenarios: PathBuf,
+    }
+    impl Fixture {
+        /// `scenario` is the scenario file's content and `workspace` the
+        /// starting files beside it.
+        async fn start(
+            label: &str,
+            reply: Reply,
+            scenario: Value,
+            workspace: &[(&str, &str)],
+        ) -> Self {
+            let provider = Arc::new(Provider {
+                requests: Mutex::default(),
+                reply,
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = listener.local_addr().unwrap();
+            let app = axum::Router::new()
+                .route("/v1/chat/completions", axum::routing::post(completion))
+                .with_state(provider.clone());
+            let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let directory = std::env::temp_dir()
+                .join(format!("dim-scenario-eval-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&directory);
+            let home = directory.join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            let models = directory.join("models.json");
+            std::fs::write(
+                &models,
+                serde_json::to_string_pretty(&json!({
+                    "defaultModel": {"providerId": "gateway", "modelId": "mock"},
+                    "providers": [{
+                        "id": "gateway",
+                        "kind": "openai-chat",
+                        "baseUrl": format!("http://{endpoint}/v1"),
+                        "models": [{
+                            "id": "mock",
+                            "contextWindow": 24000,
+                            "maxOutputTokens": 200,
+                            "config": {"maxTokens": 200}
+                        }]
+                    }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let scenarios = directory.join("scenarios");
+            let case = scenarios.join("case");
+            std::fs::create_dir_all(case.join("workspace")).unwrap();
+            for (name, text) in workspace {
+                std::fs::write(case.join("workspace").join(name), text).unwrap();
+            }
+            std::fs::write(
+                case.join("scenario.json"),
+                serde_json::to_string_pretty(&scenario).unwrap(),
+            )
+            .unwrap();
+            Self {
+                directory,
+                provider,
+                http,
+                home,
+                models,
+                scenarios,
+            }
+        }
+        /// The options of one run per arm over this fixture, with `out`.
+        fn options(&self, out: PathBuf) -> Options {
+            Options {
+                scenarios: self.scenarios.clone(),
+                text: "context-compaction/summary".into(),
+                candidate: Arc::from(CANDIDATE),
+                model: self.target(),
+                judge: self.target(),
+                runs: 1,
+                out,
+                home: self.home.clone(),
+                model_config: Some(self.models.clone()),
+            }
+        }
+        fn target(&self) -> ModelId {
+            ModelId {
+                provider_id: "gateway".into(),
+                model_id: "mock".into(),
+            }
+        }
+        /// The requests one arm made of its own run, in arrival order: each
+        /// carries the run's directory, `<out>/<arm>/<scenario>/run-<n>`, and
+        /// the judge's requests are left out.
+        fn arm(&self, arm: &str) -> Vec<String> {
+            self.provider
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.contains(&format!("/{arm}/")))
+                .filter(|request| !request.contains("You check statements"))
+                .cloned()
+                .collect()
+        }
+        /// The records the evaluation wrote under `out`.
+        fn records(&self, out: &Path) -> Vec<Value> {
+            std::fs::read_to_string(out.join("runs.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.http.abort();
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    /// A message that crosses the fixture's compaction threshold: the system
+    /// prompt and the product's tool catalog take about 7,200 tokens of the
+    /// 24,000-token window, compaction triggers at 80% of it (19,040), and
+    /// 56,000 bytes count as 14,000 tokens at the product's 4 bytes per
+    /// token, so the request fits the window and still crosses the trigger.
+    fn compaction_message() -> String {
+        format!("first {}", "x".repeat(56_000))
     }
 
     /// Both arms run the shipped assembly on the same scenario, and the
@@ -1898,93 +2063,30 @@ mod tests {
     /// that arm's.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn only_the_candidate_arm_carries_the_candidate_text() {
-        let provider = Arc::new(Provider::default());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = listener.local_addr().unwrap();
-        let app = axum::Router::new()
-            .route("/v1/chat/completions", axum::routing::post(completion))
-            .with_state(provider.clone());
-        let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let directory =
-            std::env::temp_dir().join(format!("dim-scenario-eval-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        let home = directory.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        let models = directory.join("models.json");
-        std::fs::write(
-            &models,
-            serde_json::to_string_pretty(&json!({
-                "defaultModel": {"providerId": "gateway", "modelId": "mock"},
-                "providers": [{
-                    "id": "gateway",
-                    "kind": "openai-chat",
-                    "baseUrl": format!("http://{endpoint}/v1"),
-                    "models": [{
-                        "id": "mock",
-                        "contextWindow": 8000,
-                        "maxOutputTokens": 200,
-                        "config": {"maxTokens": 200}
-                    }]
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let scenario_directory = directory.join("scenarios").join("compacting");
-        std::fs::create_dir_all(scenario_directory.join("workspace")).unwrap();
-        let long = |marker: &str| format!("{marker} {}", "x".repeat(16_000));
-        std::fs::write(
-            scenario_directory.join("scenario.json"),
-            serde_json::to_string_pretty(&json!({
-                "message": long("first"),
-                "steers": [{"afterSeconds": 1.0, "text": long("second")}],
-                "budget": {"turns": 6, "seconds": 120, "window": 8000},
+        let fixture = Fixture::start(
+            "candidate",
+            summaries_and_judgements,
+            json!({
+                "message": compaction_message(),
+                "steers": [{"afterSeconds": 1.0, "text": "second"}],
+                "budget": {"turns": 6, "seconds": 120, "window": 24000},
                 "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
-            }))
-            .unwrap(),
+            }),
+            &[],
         )
-        .unwrap();
-        let options = Options {
-            scenarios: directory.join("scenarios"),
-            text: "context-compaction/summary".into(),
-            candidate: Arc::from("CANDIDATE SUMMARY PROMPT. Summarize the transcript briefly."),
-            model: ModelId {
-                provider_id: "gateway".into(),
-                model_id: "mock".into(),
-            },
-            judge: ModelId {
-                provider_id: "gateway".into(),
-                model_id: "mock".into(),
-            },
-            runs: 1,
-            out: directory.join("out"),
-            home: home.clone(),
-            model_config: Some(models),
-        };
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
         let report = evaluate(&options).await.unwrap();
-        http.abort();
         assert!(report.contains("candidate passes"), "{report}");
-        let records: Vec<Value> = std::fs::read_to_string(directory.join("out/runs.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
         for record in &records {
             assert_eq!(record["stop"], "idle", "{record}");
             assert_eq!(record["turns"], 2, "the steer's turn ran: {record}");
             assert_eq!(record["failed"], false, "{record}");
         }
-        let requests = provider.requests.lock().unwrap().clone();
-        let arm_requests = |arm: &str| -> Vec<String> {
-            requests
-                .iter()
-                .filter(|request| request.contains(&format!("/{arm}/")))
-                .cloned()
-                .collect()
-        };
-        let current = arm_requests("current");
-        let candidate = arm_requests("candidate");
+        let current = fixture.arm("current");
+        let candidate = fixture.arm("candidate");
         assert!(
             current
                 .iter()
@@ -2009,6 +2111,115 @@ mod tests {
                 .all(|request| !request.contains("You summarize a coding session")),
             "the candidate arm never carries the product prompt"
         );
-        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A run offers the shipped assembly's whole tool catalog — the workspace
+    /// tools and Questions, not only the mock profile's three — carries a
+    /// workspace tool's result into its next request (model-prompts §8.1), and
+    /// fires a steer on that tool's call.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_offers_the_product_tools_and_carries_a_tool_result() {
+        const STEER: &str = "STEER: name the file you just read.";
+        let fixture = Fixture::start(
+            "tools",
+            reads_the_workspace_file,
+            json!({
+                "message": "Read notes.txt in the workspace and tell me what it says.",
+                "steers": [{"whenToolCall": "read", "text": STEER}],
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["turns"], 2, "the steer's turn ran: {record}");
+            assert_eq!(record["failed"], false, "{record}");
+        }
+        for arm in ["current", "candidate"] {
+            let requests = fixture.arm(arm);
+            assert_eq!(
+                requests.len(),
+                3,
+                "{arm}: the tool call, the answer after it, and the steer's turn"
+            );
+            let body: Value = serde_json::from_str(&requests[0]).unwrap();
+            let offered: Vec<&str> = body["tools"]
+                .as_array()
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .filter_map(|tool| tool["function"]["name"].as_str())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for tool in ["read", "write", "edit", "glob", "grep", "exec", "ask_user"] {
+                assert!(
+                    offered.contains(&tool),
+                    "{arm}: {tool} is offered: {offered:?}"
+                );
+            }
+            assert!(
+                requests[1].contains(FILE_TEXT),
+                "{arm}: the read result reaches the next request"
+            );
+            assert!(
+                requests[2].contains(STEER),
+                "{arm}: the steer's text reaches the next turn"
+            );
+        }
+    }
+
+    /// A question is declined rather than awaited: the run's next request
+    /// carries the refusal, and the run ends its turn instead of sitting on
+    /// its wall-clock budget.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_question_is_declined_and_the_run_ends() {
+        /// The judge's verdict, and an `ask_user` call for a run request that
+        /// does not carry the refusal yet.
+        fn asks_a_question(text: &str) -> Option<Value> {
+            judged(text).or_else(|| {
+                (!text.contains("User declined to answer")).then(|| {
+                    tool_call(
+                        "ask_user",
+                        r#"{"questions":[{"question":"Where to deploy?","options":[{"label":"production"},{"label":"staging"}]}]}"#,
+                    )
+                })
+            })
+        }
+        let fixture = Fixture::start(
+            "question",
+            asks_a_question,
+            json!({
+                "message": "Ask me where to deploy.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate passes"), "{report}");
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+        }
+        for arm in ["current", "candidate"] {
+            let requests = fixture.arm(arm);
+            assert_eq!(requests.len(), 2, "{arm}: the question and the answer");
+            assert!(
+                requests[1].contains("User declined to answer. Proceed without these answers."),
+                "{arm}: the model reads the refusal"
+            );
+        }
     }
 }
