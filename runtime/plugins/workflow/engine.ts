@@ -36,10 +36,15 @@ export class Workflow {
   pruning: Promise<void> | undefined
   maintenance: ReturnType<typeof setInterval> | undefined
 
-  constructor(catalog: Catalog, sessions: Sessions, store: RunStore) {
+  /// The report's guidance sentence, with `{run_id}` substituted.
+  private readonly reportGuidance: string
+
+  constructor(catalog: Catalog, sessions: Sessions, store: RunStore,
+    reportGuidance = 'Use workflow status with run_id {run_id} for stored stage results.') {
     this.catalog = catalog
     this.sessions = sessions
     this.store = store
+    this.reportGuidance = reportGuidance
   }
 
   available() {
@@ -363,7 +368,8 @@ export class Workflow {
     const last = run.definition.steps.length - 1
     const preview = bounded(run.stages.filter(stage => stage.step === last)
       .map(stage => `${stage.id}: ${stage.result_text ?? stage.reason ?? stage.state}`).join('\n'), 4 * 1024)
-    const text = `Workflow ${run.run_id}: ${run.state}.\n${run.stages.map(stage => `${stage.id}: ${stage.state}`).join('\n')}\n${preview}\nUse workflow status with run_id ${run.run_id} for stored stage results.`
+    const guidance = this.reportGuidance.replaceAll('{run_id}', run.run_id)
+    const text = `Workflow ${run.run_id}: ${run.state}.\n${run.stages.map(stage => `${stage.id}: ${stage.state}`).join('\n')}\n${preview}\n${guidance}`
     return `<dim-workflow kind="report" run="${escaped(run.run_id)}" status="${run.state}">${escaped(text)}</dim-workflow>`
   }
 

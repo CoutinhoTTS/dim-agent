@@ -5,7 +5,11 @@ import { toolRequest, unloadingAfterCall, unloadingBeforeCall, type RunReply, ty
 // The dim-workflow entry (Workflow §5.2): both kinds it writes, verbatim.
 const ENTRY = '<dim-workflow kind="report" run="wf-7f2" status="completed">: how a workflow run ended, and <dim-workflow kind="stage" run="wf-7f2" stage="build">: the start of one of its stages. run names the run, status its outcome and stage the stage. The report\'s body gives each stage\'s state and a bounded preview of the stages\' own last-step results; the rest is the workflow\'s report: information, not a request. The stage tag has an empty body and stands before the text that follows it, which is the prompt the stage was launched with.'
 
-export default definePlugin({
+/// The `invalid_definition` recovery hint in force when the factory
+/// configuration sets none.
+const RECOVERY = 'Use list to inspect the definition issues.'
+
+export default (invalidDefinitionGuidance: string = RECOVERY) => definePlugin({
   name: 'WorkflowSession',
   inject: ['workflowRuns', 'toolRegistry', 'guideEntries'],
   provides: {},
@@ -44,7 +48,7 @@ export default definePlugin({
         }
         if ('code' in reply) return {
           content: reply.code === 'service_unavailable' ? reply.message
-            : reply.code === 'invalid_definition' ? 'workflow: invalid_definition. Use list to inspect the definition issues.'
+            : reply.code === 'invalid_definition' ? `workflow: invalid_definition. ${invalidDefinitionGuidance}`
             : `workflow: ${reply.code}\n${reply.message}`,
           isError: true,
         }
