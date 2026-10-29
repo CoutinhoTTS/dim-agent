@@ -2944,7 +2944,7 @@ async fn main_lists_its_open_tool_lines_under_one_key() {
 /// even where no branch part is loaded. `<dim-branch-lines>` stays with
 /// BranchLine, which writes the roster.
 const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
-const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="C">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="main">: on main, the runtime lists the lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 
 fn system_text(prompt: &SystemPrompt) -> String {
     match prompt {
